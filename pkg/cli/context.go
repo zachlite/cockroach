@@ -12,23 +12,21 @@ package cli
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/ccl/sqlproxyccl"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/server/pgurl"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	isatty "github.com/mattn/go-isatty"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -49,15 +47,13 @@ func initCLIDefaults() {
 	setStartContextDefaults()
 	setQuitContextDefaults()
 	setNodeContextDefaults()
+	setSystemBenchContextDefaults()
+	setNetworkBenchContextDefaults()
 	setSqlfmtContextDefaults()
-	setConvContextDefaults()
 	setDemoContextDefaults()
 	setStmtDiagContextDefaults()
 	setAuthContextDefaults()
 	setImportContextDefaults()
-	setProxyContextDefaults()
-	setTestDirectorySvrContextDefaults()
-	setUserfileContextDefaults()
 
 	initPreFlagsDefaults()
 
@@ -146,11 +142,6 @@ type cliContext struct {
 	// tableDisplayFormat indicates how to format result tables.
 	tableDisplayFormat tableDisplayFormat
 
-	// tableBorderMode indicates how to format tables when the display
-	// format is 'table'. This exists for compatibility
-	// with psql: https://www.postgresql.org/docs/12/app-psql.html
-	tableBorderMode int
-
 	// cmdTimeout sets the maximum run time for the command.
 	// Commands that wish to use this must use cmdTimeoutContext().
 	cmdTimeout time.Duration
@@ -166,11 +157,14 @@ type cliContext struct {
 
 	// for CLI commands that use the SQL interface, these parameters
 	// determine how to connect to the server.
-	sqlConnUser, sqlConnDBName string
+	sqlConnURL, sqlConnUser, sqlConnDBName string
 
-	// sqlConnURL contains any additional query URL options
+	// The client password to use. This can be set via the --url flag.
+	sqlConnPasswd string
+
+	// extraConnURLOptions contains any additional query URL options
 	// specified in --url that do not have discrete equivalents.
-	sqlConnURL *pgurl.URL
+	extraConnURLOptions url.Values
 
 	// allowUnencryptedClientPassword enables the CLI commands to use
 	// password authentication over non-TLS TCP connections. This is
@@ -217,7 +211,6 @@ func setCliContextDefaults() {
 	// See also setCLIDefaultForTests() in cli_test.go.
 	cliCtx.terminalOutput = isatty.IsTerminal(os.Stdout.Fd())
 	cliCtx.tableDisplayFormat = tableDisplayTSV
-	cliCtx.tableBorderMode = 0 /* no outer lines + no inside row lines */
 	if cliCtx.terminalOutput {
 		// See also setCLIDefaultForTests() in cli_test.go.
 		cliCtx.tableDisplayFormat = tableDisplayTable
@@ -226,9 +219,11 @@ func setCliContextDefaults() {
 	cliCtx.clientConnHost = ""
 	cliCtx.clientConnPort = base.DefaultPort
 	cliCtx.certPrincipalMap = nil
-	cliCtx.sqlConnURL = nil
-	cliCtx.sqlConnUser = security.RootUser
+	cliCtx.sqlConnURL = ""
+	cliCtx.sqlConnUser = ""
+	cliCtx.sqlConnPasswd = ""
 	cliCtx.sqlConnDBName = ""
+	cliCtx.extraConnURLOptions = nil
 	cliCtx.allowUnencryptedClientPassword = false
 	cliCtx.logConfigInput = settableString{s: ""}
 	cliCtx.logConfig = logconfig.Config{}
@@ -372,21 +367,13 @@ func setZipContextDefaults() {
 var dumpCtx struct {
 	// dumpMode determines which part of the database should be dumped.
 	dumpMode dumpMode
-
-	// asOf determines the time stamp at which the dump should be taken.
-	asOf string
-
-	// dumpAll determines whenever we going to dump all databases
-	dumpAll bool
 }
 
 // setDumpContextDefaults set the default values in dumpCtx.  This
 // function is called by initCLIDefaults() and thus re-called in every
 // test that exercises command-line parsing.
 func setDumpContextDefaults() {
-	dumpCtx.dumpMode = dumpBoth
-	dumpCtx.asOf = ""
-	dumpCtx.dumpAll = false
+	dumpCtx.dumpMode = dumpNone
 }
 
 // authCtx captures the command-line parameters of the `auth-session`
@@ -417,7 +404,6 @@ var debugCtx struct {
 	maxResults        int
 	decodeAsTableDesc string
 	verbose           bool
-	keyTypes          keyTypeFilter
 }
 
 // setDebugContextDefaults set the default values in debugCtx.  This
@@ -425,7 +411,7 @@ var debugCtx struct {
 // test that exercises command-line parsing.
 func setDebugContextDefaults() {
 	debugCtx.startKey = storage.NilKey
-	debugCtx.endKey = storage.NilKey
+	debugCtx.endKey = storage.MVCCKeyMax
 	debugCtx.values = false
 	debugCtx.sizes = false
 	debugCtx.replicated = false
@@ -435,7 +421,6 @@ func setDebugContextDefaults() {
 	debugCtx.printSystemConfig = false
 	debugCtx.decodeAsTableDesc = ""
 	debugCtx.verbose = false
-	debugCtx.keyTypes = showAll
 }
 
 // startCtx captures the command-line arguments for the `start` command.
@@ -537,6 +522,46 @@ func setNodeContextDefaults() {
 	nodeCtx.statusShowDecommission = false
 }
 
+// systemBenchCtx captures the command-line parameters of the `systembench` command.
+// See below for defaults.
+var systemBenchCtx struct {
+	concurrency  int
+	duration     time.Duration
+	tempDir      string
+	writeSize    int64
+	syncInterval int64
+}
+
+// setSystemBenchContextDefaults set the default values in
+// systemBenchCtx. This function is called by initCLIDefaults() and
+// thus re-called in every test that exercises command-line parsing.
+func setSystemBenchContextDefaults() {
+	systemBenchCtx.concurrency = 1
+	systemBenchCtx.duration = 60 * time.Second
+	systemBenchCtx.tempDir = "."
+	systemBenchCtx.writeSize = 32 << 10
+	systemBenchCtx.syncInterval = 512 << 10
+}
+
+// systemBenchCtx captures the command-line parameters of the
+// `networkbench` command. See below for defaults.
+var networkBenchCtx struct {
+	server    bool
+	port      int
+	addresses []string
+	latency   bool
+}
+
+// setNetworkBenchContextDefaults set the default values in
+// networkBenchCtx. This function is called by initCLIDefaults() and
+// thus re-called in every test that exercises command-line parsing.
+func setNetworkBenchContextDefaults() {
+	networkBenchCtx.server = true
+	networkBenchCtx.port = 8081
+	networkBenchCtx.addresses = []string{"localhost:8081"}
+	networkBenchCtx.latency = false
+}
+
 // sqlfmtCtx captures the command-line parameters of the `sqlfmt` command.
 // See below for defaults.
 var sqlfmtCtx struct {
@@ -559,17 +584,6 @@ func setSqlfmtContextDefaults() {
 	sqlfmtCtx.noSimplify = !cfg.Simplify
 	sqlfmtCtx.align = (cfg.Align != tree.PrettyNoAlign)
 	sqlfmtCtx.execStmts = nil
-}
-
-var convertCtx struct {
-	url string
-}
-
-// setConvContextDefaults set the default values in convertCtx.  This
-// function is called by initCLIDefaults() and thus re-called in every
-// test that exercises command-line parsing.
-func setConvContextDefaults() {
-	convertCtx.url = ""
 }
 
 // demoCtx captures the command-line parameters of the `demo` command.
@@ -636,49 +650,6 @@ func setImportContextDefaults() {
 	importCtx.ignoreUnsupported = false
 	importCtx.ignoreUnsupportedLog = ""
 	importCtx.rowLimit = 0
-}
-
-// proxyContext captures the command-line parameters of the `mt start-proxy` command.
-var proxyContext sqlproxyccl.ProxyOptions
-
-func setProxyContextDefaults() {
-	proxyContext.Denylist = ""
-	proxyContext.ListenAddr = "127.0.0.1:46257"
-	proxyContext.ListenCert = ""
-	proxyContext.ListenKey = ""
-	proxyContext.MetricsAddress = "0.0.0.0:8080"
-	proxyContext.RoutingRule = ""
-	proxyContext.DirectoryAddr = ""
-	proxyContext.SkipVerify = false
-	proxyContext.Insecure = false
-	proxyContext.RatelimitBaseDelay = 50 * time.Millisecond
-	proxyContext.ValidateAccessInterval = 30 * time.Second
-	proxyContext.PollConfigInterval = 30 * time.Second
-	proxyContext.DrainTimeout = 0
-}
-
-var testDirectorySvrContext struct {
-	port int
-}
-
-func setTestDirectorySvrContextDefaults() {
-	testDirectorySvrContext.port = 36257
-}
-
-// userfileCtx captures the command-line parameters of the
-// `userfile` command.
-// See below for defaults.
-var userfileCtx struct {
-	// When set, the entire subtree rooted at the source directory will be
-	// uploaded to the destination.
-	recursive bool
-}
-
-// setUserfileContextDefaults sets the default values in userfileCtx.
-// This function is called by initCLIDefaults() and thus re-called in
-// every test that exercises command-line parsing.
-func setUserfileContextDefaults() {
-	userfileCtx.recursive = false
 }
 
 // GetServerCfgStores provides direct public access to the StoreSpecList inside

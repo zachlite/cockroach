@@ -49,10 +49,7 @@ type Batch struct {
 	// The Header which will be used to send the resulting BatchRequest.
 	// To be modified directly.
 	Header roachpb.Header
-	// The AdmissionHeader which will be used when sending the resulting
-	// BatchRequest. To be modified directly.
-	AdmissionHeader roachpb.AdmissionHeader
-	reqs            []roachpb.RequestUnion
+	reqs   []roachpb.RequestUnion
 	// Set when AddRawRequest is used, in which case using the "other"
 	// operations renders the batch unusable.
 	raw bool
@@ -256,6 +253,8 @@ func (b *Batch) fillResults(ctx context.Context) {
 			case *roachpb.TruncateLogRequest:
 			case *roachpb.RequestLeaseRequest:
 			case *roachpb.CheckConsistencyRequest:
+			case *roachpb.WriteBatchRequest:
+			case *roachpb.ImportRequest:
 			case *roachpb.AdminScatterRequest:
 			case *roachpb.AddSSTableRequest:
 			case *roachpb.MigrateRequest:
@@ -746,6 +745,28 @@ func (b *Batch) adminRelocateRange(
 		},
 		VoterTargets:    voterTargets,
 		NonVoterTargets: nonVoterTargets,
+	}
+	b.appendReqs(req)
+	b.initResult(1, 0, notRaw, nil)
+}
+
+// writeBatch is only exported on DB.
+func (b *Batch) writeBatch(s, e interface{}, data []byte) {
+	begin, err := marshalKey(s)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	end, err := marshalKey(e)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	span := roachpb.Span{Key: begin, EndKey: end}
+	req := &roachpb.WriteBatchRequest{
+		RequestHeader: roachpb.RequestHeaderFromSpan(span),
+		DataSpan:      span,
+		Data:          data,
 	}
 	b.appendReqs(req)
 	b.initResult(1, 0, notRaw, nil)

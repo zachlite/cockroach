@@ -33,9 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -227,7 +225,7 @@ var varGen = map[string]sessionVar{
 
 			if len(dbName) != 0 {
 				// Verify database descriptor exists.
-				if _, err := evalCtx.Descs.GetImmutableDatabaseByName(
+				if _, _, err := evalCtx.Descs.GetImmutableDatabaseByName(
 					ctx, evalCtx.Txn, dbName, tree.DatabaseLookupFlags{Required: true},
 				); err != nil {
 					return "", err
@@ -416,27 +414,6 @@ var varGen = map[string]sessionVar{
 	},
 
 	// CockroachDB extension.
-	`distsql_workmem`: {
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			limit, err := humanizeutil.ParseBytes(s)
-			if err != nil {
-				return err
-			}
-			if limit <= 0 {
-				return errors.New("distsql_workmem can only be set to a positive value")
-			}
-			m.SetDistSQLWorkMem(limit)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return humanizeutil.IBytes(evalCtx.SessionData.WorkMemLimit)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return humanizeutil.IBytes(settingWorkMemBytes.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
 	`experimental_distsql_planning`: {
 		GetStringVal: makePostgresBoolGetStringValFn(`experimental_distsql_planning`),
 		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
@@ -553,6 +530,29 @@ var varGen = map[string]sessionVar{
 		GlobalDefault: func(sv *settings.Values) string {
 			return sessiondatapb.VectorizeExecMode(
 				VectorizeClusterMode.Get(sv)).String()
+		},
+	},
+
+	// CockroachDB extension.
+	`vectorize_row_count_threshold`: {
+		GetStringVal: makeIntGetStringValFn(`vectorize_row_count_threshold`),
+		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
+			b, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return err
+			}
+			if b < 0 {
+				return pgerror.Newf(pgcode.InvalidParameterValue,
+					"cannot set vectorize_row_count_threshold to a negative value: %d", b)
+			}
+			m.SetVectorizeRowCountThreshold(uint64(b))
+			return nil
+		},
+		Get: func(evalCtx *extendedEvalContext) string {
+			return strconv.FormatInt(int64(evalCtx.SessionData.VectorizeRowCountThreshold), 10)
+		},
+		GlobalDefault: func(sv *settings.Values) string {
+			return strconv.FormatInt(VectorizeRowCountThresholdClusterValue.Get(sv), 10)
 		},
 	},
 
@@ -800,26 +800,7 @@ var varGen = map[string]sessionVar{
 	`integer_datetimes`: makeReadOnlyVar("on"),
 
 	// See https://www.postgresql.org/docs/10/static/runtime-config-client.html#GUC-INTERVALSTYLE
-	`intervalstyle`: {
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			style, ok := duration.IntervalStyle_value[strings.ToUpper(s)]
-			if !ok {
-				validIntervalStyles := make([]string, 0, len(duration.IntervalStyle_value))
-				for k := range duration.IntervalStyle_value {
-					validIntervalStyles = append(validIntervalStyles, strings.ToLower(k))
-				}
-				return newVarValueError(`IntervalStyle`, s, validIntervalStyles...)
-			}
-			m.SetIntervalStyle(duration.IntervalStyle(style))
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return strings.ToLower(evalCtx.SessionData.DataConversionConfig.IntervalStyle.String())
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return strings.ToLower(duration.IntervalStyle_name[int32(intervalStyle.Get(sv))])
-		},
-	},
+	`intervalstyle`: makeCompatStringVar(`IntervalStyle`, "postgres"),
 
 	// CockroachDB extension.
 	`locality`: {
@@ -1276,26 +1257,6 @@ var varGen = map[string]sessionVar{
 		},
 		GlobalDefault: func(sv *settings.Values) string {
 			return formatBoolAsPostgresSetting(experimentalAlterColumnTypeGeneralMode.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
-	// TODO(mgartner): remove this once expression indexes are fully supported.
-	`experimental_enable_expression_indexes`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`experimental_enable_expression_indexes`),
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			b, err := paramparse.ParseBoolVar(`experimental_enable_expression_indexes`, s)
-			if err != nil {
-				return err
-			}
-			m.SetExpressionIndexes(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData.EnableExpressionIndexes)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(experimentalExpressionIndexesMode.Get(sv))
 		},
 	},
 

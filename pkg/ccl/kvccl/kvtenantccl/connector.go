@@ -365,20 +365,12 @@ func (c *Connector) getClient(ctx context.Context) (roachpb.InternalClient, erro
 		dialCtx := c.AnnotateCtx(context.Background())
 		dialCtx, cancel := c.rpcContext.Stopper.WithCancelOnQuiesce(dialCtx)
 		defer cancel()
-		var client roachpb.InternalClient
-		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial",
-			func(ctx context.Context) error {
-				var err error
-				client, err = c.dialAddrs(ctx)
-				return err
-			})
+		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial", c.dialAddrs)
 		if err != nil {
 			return nil, err
 		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.mu.client = client
-		return client, nil
+		// NB: read lock not needed.
+		return c.mu.client, nil
 	})
 	c.mu.RUnlock()
 
@@ -395,7 +387,7 @@ func (c *Connector) getClient(ctx context.Context) (roachpb.InternalClient, erro
 
 // dialAddrs attempts to dial each of the configured addresses in a retry loop.
 // The method will only return a non-nil error on context cancellation.
-func (c *Connector) dialAddrs(ctx context.Context) (roachpb.InternalClient, error) {
+func (c *Connector) dialAddrs(ctx context.Context) error {
 	for r := retry.StartWithCtx(ctx, c.rpcRetryOptions); r.Next(); {
 		// Try each address on each retry iteration.
 		randStart := rand.Intn(len(c.addrs))
@@ -406,10 +398,14 @@ func (c *Connector) dialAddrs(ctx context.Context) (roachpb.InternalClient, erro
 				log.Warningf(ctx, "error dialing tenant KV address %s: %v", addr, err)
 				continue
 			}
-			return roachpb.NewInternalClient(conn), nil
+			client := roachpb.NewInternalClient(conn)
+			c.mu.Lock()
+			c.mu.client = client
+			c.mu.Unlock()
+			return nil
 		}
 	}
-	return nil, ctx.Err()
+	return ctx.Err()
 }
 
 func (c *Connector) dialAddr(ctx context.Context, addr string) (conn *grpc.ClientConn, err error) {

@@ -14,16 +14,11 @@ import (
 	"context"
 	"database/sql/driver"
 	"io"
-	"net/url"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/blobs"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
-	"github.com/cockroachdb/errors"
 )
 
 // This file is for interfaces only and should not contain any implementation
@@ -56,8 +51,6 @@ type ExternalStorage interface {
 	Settings() *cluster.Settings
 
 	// ReadFile is shorthand for ReadFileAt with offset 0.
-	// ErrFileDoesNotExist is raised if `basename` cannot be located in storage.
-	// This can be leveraged for an existence check.
 	ReadFile(ctx context.Context, basename string) (io.ReadCloser, error)
 
 	// ReadFileAt returns a Reader for requested name reading at offset.
@@ -65,23 +58,8 @@ type ExternalStorage interface {
 	// This can be leveraged for an existence check.
 	ReadFileAt(ctx context.Context, basename string, offset int64) (io.ReadCloser, int64, error)
 
-	// Writer returns a writer for the requested name.
-	//
-	// A Writer *must* be closed via either Close, and if closing returns a
-	// non-nil error, that error should be handled or reported to the user -- an
-	// implementation may buffer written data until Close and only then return
-	// an error, or Write may retrun an opaque io.EOF with the underlying cause
-	// returned by the subsequent Close().
-	Writer(ctx context.Context, basename string) (io.WriteCloser, error)
-
-	// List enumerates files within the supplied prefix, calling the passed
-	// function with the name of each file found, relative to the external storage
-	// destination's configured prefix. If the passed function returns a non-nil
-	// error, iteration is stopped it is returned. If delimiter is non-empty names
-	// which have the same prefix, prior to the delimiter, are grouped into a
-	// single result which is that prefix. The order that results are passed to
-	// the callback is undefined.
-	List(ctx context.Context, prefix, delimiter string, fn ListingFn) error
+	// WriteFile should write the content to requested name.
+	WriteFile(ctx context.Context, basename string, content io.ReadSeeker) error
 
 	// ListFiles returns files that match a globs-style pattern. The returned
 	// results are usually relative to the base path, meaning an ExternalStorage
@@ -103,9 +81,6 @@ type ExternalStorage interface {
 	Size(ctx context.Context, basename string) (int64, error)
 }
 
-// ListingFn describes functions passed to ExternalStorage.ListFiles.
-type ListingFn func(string) error
-
 // ExternalStorageFactory describes a factory function for ExternalStorage.
 type ExternalStorageFactory func(ctx context.Context, dest roachpb.ExternalStorage) (ExternalStorage, error)
 
@@ -120,48 +95,6 @@ type SQLConnI interface {
 	driver.ExecerContext
 }
 
-// ErrFileDoesNotExist is a sentinel error for indicating that a specified
-// bucket/object/key/file (depending on storage terminology) does not exist.
-// This error is raised by the ReadFile method.
-var ErrFileDoesNotExist = errors.New("external_storage: file doesn't exist")
-
-// ErrListingUnsupported is a marker for indicating listing is unsupported.
-var ErrListingUnsupported = errors.New("listing is not supported")
-
-// RedactedParams is a helper for making a set of param names to redact in URIs.
-func RedactedParams(strs ...string) map[string]struct{} {
-	if len(strs) == 0 {
-		return nil
-	}
-	m := make(map[string]struct{}, len(strs))
-	for i := range strs {
-		m[strs[i]] = struct{}{}
-	}
-	return m
-}
-
-// ExternalStorageURIContext contains arguments needed to parse external storage
-// URIs.
-type ExternalStorageURIContext struct {
-	CurrentUser security.SQLUsername
-}
-
-// ExternalStorageURIParser functions parses a URL into a structured
-// ExternalStorage configuration.
-type ExternalStorageURIParser func(ExternalStorageURIContext, *url.URL) (roachpb.ExternalStorage, error)
-
-// ExternalStorageContext contains the dependencies passed to external storage
-// implementations during creation.
-type ExternalStorageContext struct {
-	IOConf            base.ExternalIODirConfig
-	Settings          *cluster.Settings
-	BlobClientFactory blobs.BlobClientFactory
-	InternalExecutor  sqlutil.InternalExecutor
-	DB                *kv.DB
-}
-
-// ExternalStorageConstructor is a function registered to create instances
-// of a given external storage implamentation.
-type ExternalStorageConstructor func(
-	context.Context, ExternalStorageContext, roachpb.ExternalStorage,
-) (ExternalStorage, error)
+// AccessIsWithExplicitAuth is used to check if the provided path has explicit
+// authentication.
+var AccessIsWithExplicitAuth func(path string) (bool, string, error)

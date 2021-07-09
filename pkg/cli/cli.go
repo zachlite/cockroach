@@ -21,7 +21,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
-	_ "github.com/cockroachdb/cockroach/pkg/storage/cloudimpl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -100,18 +99,14 @@ func doMain(cmd *cobra.Command, cmdName string) error {
 			// and PersistentPreRun in `(*cobra.Command) execute()`.)
 			wrapped := cmd.PreRunE
 			cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-				// We call setupLogging before the PreRunE function since
-				// that function may perform logging.
-				err := setupLogging(context.Background(), cmd,
-					false /* isServerCmd */, true /* applyConfig */)
-
 				if wrapped != nil {
 					if err := wrapped(cmd, args); err != nil {
 						return err
 					}
 				}
 
-				return err
+				return setupLogging(context.Background(), cmd,
+					false /* isServerCmd */, true /* applyConfig */)
 			}
 		}
 	}
@@ -267,12 +262,15 @@ func init() {
 		connectCmd,
 		initCmd,
 		certCmd,
+		// TODO(bilal): Uncomment this when the connect command does something useful.
+		// connectCmd,
 		quitCmd,
 
 		sqlShellCmd,
 		stmtDiagCmd,
 		authCmd,
 		nodeCmd,
+		dumpCmd,
 		nodeLocalCmd,
 		userFileCmd,
 		importCmd,
@@ -280,12 +278,12 @@ func init() {
 		// Miscellaneous commands.
 		// TODO(pmattis): stats
 		demoCmd,
-		convertURLCmd,
 		genCmd,
 		versionCmd,
 		DebugCmd,
 		sqlfmtCmd,
 		workloadCmd,
+		systemBenchCmd,
 	)
 }
 
@@ -311,6 +309,11 @@ func hasParentCmd(cmd, refParent *cobra.Command) bool {
 		}
 	})
 	return hasParent
+}
+
+// AddCmd adds a command to the cli.
+func AddCmd(c *cobra.Command) {
+	cockroachCmd.AddCommand(c)
 }
 
 // Run ...

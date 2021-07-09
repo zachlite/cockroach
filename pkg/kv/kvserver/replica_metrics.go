@@ -175,17 +175,12 @@ func calcRangeCounter(
 	// We also compute an estimated per-range count of under-replicated and
 	// unavailable ranges for each range based on the liveness table.
 	if rangeCounter {
-		neededVoters := GetNeededVoters(numVoters, clusterNodes)
-		neededNonVoters := GetNeededNonVoters(int(numVoters), int(numReplicas-numVoters), clusterNodes)
-		status := desc.Replicas().ReplicationStatus(func(rDesc roachpb.ReplicaDescriptor) bool {
+		unavailable = !desc.Replicas().CanMakeProgress(func(rDesc roachpb.ReplicaDescriptor) bool {
 			return livenessMap[rDesc.NodeID].IsLive
-		},
-			// neededVoters - we don't care about the under/over-replication
-			// determinations from the report because it's too magic. We'll do our own
-			// determination below.
-			0)
-		unavailable = !status.Available
+		})
+		neededVoters := GetNeededVoters(numVoters, clusterNodes)
 		liveVoters := calcLiveVoterReplicas(desc, livenessMap)
+		neededNonVoters := GetNeededNonVoters(int(numVoters), int(numReplicas-numVoters), clusterNodes)
 		liveNonVoters := calcLiveNonVoterReplicas(desc, livenessMap)
 		if neededVoters > liveVoters || neededNonVoters > liveNonVoters {
 			underreplicated = true

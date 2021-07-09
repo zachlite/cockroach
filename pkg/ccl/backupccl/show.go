@@ -22,17 +22,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
-	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -41,11 +41,13 @@ import (
 )
 
 func checkShowBackupURIPrivileges(ctx context.Context, p sql.PlanHookState, uri string) error {
-	conf, err := cloud.ExternalStorageConfFromURI(uri, p.User())
+	// Check if the user issuing the SHOW BACKUP needs to be of the admin role
+	// depending on the URI destination.
+	hasExplicitAuth, uriScheme, err := cloud.AccessIsWithExplicitAuth(uri)
 	if err != nil {
 		return err
 	}
-	if conf.AccessIsWithExplicitAuth() {
+	if hasExplicitAuth {
 		return nil
 	}
 	hasAdmin, err := p.HasAdminRole(ctx)
@@ -56,7 +58,7 @@ func checkShowBackupURIPrivileges(ctx context.Context, p sql.PlanHookState, uri 
 		return pgerror.Newf(
 			pgcode.InsufficientPrivilege,
 			"only users with the admin role are allowed to SHOW BACKUP from the specified %s URI",
-			conf.Provider.String())
+			uriScheme)
 	}
 	return nil
 }
@@ -91,7 +93,6 @@ func showBackupPlanHook(
 		backupOptEncPassphrase:  sql.KVStringOptRequireValue,
 		backupOptEncKMS:         sql.KVStringOptRequireValue,
 		backupOptWithPrivileges: sql.KVStringOptRequireNoValue,
-		backupOptAsJSON:         sql.KVStringOptRequireNoValue,
 	}
 	optsFn, err := p.TypeAsStringOpts(ctx, backup.Options, expected)
 	if err != nil {
@@ -102,18 +103,12 @@ func showBackupPlanHook(
 		return nil, nil, nil, false, err
 	}
 
-	if _, asJSON := opts[backupOptAsJSON]; asJSON {
-		backup.Details = tree.BackupManifestAsJSON
-	}
-
 	var shower backupShower
 	switch backup.Details {
 	case tree.BackupRangeDetails:
 		shower = backupShowerRanges
 	case tree.BackupFileDetails:
 		shower = backupShowerFiles
-	case tree.BackupManifestAsJSON:
-		shower = jsonShower
 	default:
 		shower = backupShowerDefault(ctx, p, backup.ShouldIncludeSchemas, opts)
 	}
@@ -128,6 +123,10 @@ func showBackupPlanHook(
 			return err
 		}
 
+		if err := checkShowBackupURIPrivileges(ctx, p, str); err != nil {
+			return err
+		}
+
 		if inColFn != nil {
 			collection, err := inColFn()
 			if err != nil {
@@ -139,10 +138,6 @@ func showBackupPlanHook(
 			}
 			parsed.Path = path.Join(parsed.Path, str)
 			str = parsed.String()
-		}
-
-		if err := checkShowBackupURIPrivileges(ctx, p, str); err != nil {
-			return err
 		}
 
 		store, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, str, p.User())
@@ -177,9 +172,9 @@ func showBackupPlanHook(
 				KMSInfo: defaultKMSInfo}
 		}
 
-		incPaths, err := FindPriorBackups(ctx, store, IncludeManifest)
+		incPaths, err := findPriorBackupNames(ctx, store)
 		if err != nil {
-			if errors.Is(err, cloud.ErrListingUnsupported) {
+			if errors.Is(err, cloudimpl.ErrListingUnsupported) {
 				// If we do not support listing, we have to just assume there are none
 				// and show the specified base.
 				log.Warningf(ctx, "storage sink %T does not support listing, only resolving the base backup", store)
@@ -190,7 +185,7 @@ func showBackupPlanHook(
 		}
 
 		manifests := make([]BackupManifest, len(incPaths)+1)
-		manifests[0], err = ReadBackupManifestFromStore(ctx, store, encryption)
+		manifests[0], err = readBackupManifestFromStore(ctx, store, encryption)
 		if err != nil {
 			return err
 		}
@@ -246,7 +241,6 @@ func backupShowerHeaders(showSchemas bool, opts map[string]string) colinfo.Resul
 		{Name: "parent_schema_name", Typ: types.String},
 		{Name: "object_name", Typ: types.String},
 		{Name: "object_type", Typ: types.String},
-		{Name: "backup_type", Typ: types.String},
 		{Name: "start_time", Typ: types.Timestamp},
 		{Name: "end_time", Typ: types.Timestamp},
 		{Name: "size_bytes", Typ: types.Int},
@@ -274,7 +268,7 @@ func backupShowerDefault(
 				// Map database ID to descriptor name.
 				dbIDToName := make(map[descpb.ID]string)
 				schemaIDToName := make(map[descpb.ID]string)
-				schemaIDToName[keys.PublicSchemaID] = catconstants.PublicSchemaName
+				schemaIDToName[keys.PublicSchemaID] = sessiondata.PublicSchemaName
 				for i := range manifest.Descriptors {
 					_, db, _, schema := descpb.FromDescriptor(&manifest.Descriptors[i])
 					if db != nil {
@@ -301,10 +295,6 @@ func backupShowerDefault(
 					s := descSizes[descpb.ID(tableID)]
 					s.add(file.EntryCounts)
 					descSizes[descpb.ID(tableID)] = s
-				}
-				backupType := tree.NewDString("full")
-				if manifest.isIncremental() {
-					backupType = tree.NewDString("incremental")
 				}
 				start := tree.DNull
 				end, err := tree.MakeDTimestamp(timeutil.Unix(0, manifest.EndTime.WallTime), time.Nanosecond)
@@ -371,7 +361,6 @@ func backupShowerDefault(
 						nullIfEmpty(parentSchemaName),
 						tree.NewDString(descriptorName),
 						tree.NewDString(descriptorType),
-						backupType,
 						start,
 						end,
 						dataSizeDatum,
@@ -394,7 +383,6 @@ func backupShowerDefault(
 						tree.DNull, // Schema
 						tree.NewDString(roachpb.MakeTenantID(t.ID).String()), // Object Name
 						tree.NewDString("TENANT"),                            // Object Type
-						backupType,
 						start,
 						end,
 						tree.DNull, // DataSize
@@ -521,24 +509,6 @@ var backupShowerFiles = backupShower{
 	},
 }
 
-var jsonShower = backupShower{
-	header: colinfo.ResultColumns{
-		{Name: "manifest", Typ: types.Jsonb},
-	},
-
-	fn: func(manifests []BackupManifest) ([]tree.Datums, error) {
-		rows := make([]tree.Datums, len(manifests))
-		for i, manifest := range manifests {
-			j, err := protoreflect.MessageToJSON(&manifest, true)
-			if err != nil {
-				return nil, err
-			}
-			rows[i] = tree.Datums{tree.NewDJSON(j)}
-		}
-		return rows, nil
-	},
-}
-
 // showBackupPlanHook implements PlanHookFn.
 func showBackupsInCollectionPlanHook(
 	ctx context.Context, backup *tree.ShowBackup, p sql.PlanHookState,
@@ -567,12 +537,12 @@ func showBackupsInCollectionPlanHook(
 			return errors.Wrapf(err, "connect to external storage")
 		}
 		defer store.Close()
-		res, err := ListFullBackupsInCollection(ctx, store)
+		res, err := store.ListFiles(ctx, "/*/*/*/"+backupManifestName)
 		if err != nil {
 			return err
 		}
 		for _, i := range res {
-			resultsCh <- tree.Datums{tree.NewDString(i)}
+			resultsCh <- tree.Datums{tree.NewDString(strings.TrimSuffix(i, "/"+backupManifestName))}
 		}
 		return nil
 	}

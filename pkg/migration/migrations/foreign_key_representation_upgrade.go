@@ -21,6 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/errors"
 )
 
 // TODO(ajwerner): Add assertions in descriptor validation that is active once
@@ -75,9 +77,16 @@ SELECT id, descriptor, crdb_internal_mvcc_timestamp FROM system.descriptor WHERE
 	ok, err := rows.Next(ctx)
 	for ; ok; ok, err = rows.Next(ctx) {
 		row := rows.Cur()
-		id, desc, ts, err := unmarshalDescFromDescriptorRow(row)
+		id := descpb.ID(*row[0].(*tree.DInt))
+		ts, err := tree.DecimalToHLC(&row[2].(*tree.DDecimal).Decimal)
 		if err != nil {
-			return false, id, err
+			return false, 0, errors.Wrapf(err,
+				"failed to convert MVCC timestamp decimal to HLC for ID %d", id)
+		}
+		var desc descpb.Descriptor
+		if err := protoutil.Unmarshal(([]byte)(*row[1].(*tree.DBytes)), &desc); err != nil {
+			return false, 0, errors.Wrapf(err,
+				"failed to unmarshal descriptor with ID %d", id)
 		}
 		t, _, _, _ := descpb.FromDescriptorWithMVCCTimestamp(&desc, ts)
 		if t != nil && !t.Dropped() && tableNeedsFKUpgrade(t) {

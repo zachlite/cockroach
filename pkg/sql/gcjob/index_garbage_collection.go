@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -61,8 +60,9 @@ func gcIndexes(
 			continue
 		}
 
-		if err := clearIndex(ctx, execCfg, parentTable, index.IndexID); err != nil {
-			return errors.Wrapf(err, "clearing index %d from table %d", index.IndexID, parentTable.GetID())
+		indexDesc := descpb.IndexDescriptor{ID: index.IndexID}
+		if err := clearIndex(ctx, execCfg, parentTable, indexDesc); err != nil {
+			return errors.Wrapf(err, "clearing index %d", indexDesc.ID)
 		}
 
 		// All the data chunks have been removed. Now also removed the
@@ -82,15 +82,16 @@ func gcIndexes(
 			if err != nil {
 				return err
 			}
+			toRemove := []descpb.IndexDescriptor{indexDesc}
 			return sql.RemoveIndexZoneConfigs(
-				ctx, txn, execCfg, freshParentTableDesc, []uint32{uint32(index.IndexID)},
+				ctx, txn, execCfg, freshParentTableDesc, toRemove,
 			)
 		}
 		lm, ie, db := execCfg.LeaseManager, execCfg.InternalExecutor, execCfg.DB
 		if err := descs.Txn(
 			ctx, execCfg.Settings, lm, ie, db, removeIndexZoneConfigs,
 		); err != nil {
-			return errors.Wrapf(err, "removing index %d zone configs", index.IndexID)
+			return errors.Wrapf(err, "removing index %d zone configs", indexDesc.ID)
 		}
 
 		if err := completeDroppedIndex(
@@ -107,21 +108,25 @@ func clearIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
 	tableDesc catalog.TableDescriptor,
-	indexID descpb.IndexID,
+	index descpb.IndexDescriptor,
 ) error {
-	log.Infof(ctx, "clearing index %d from table %d", indexID, tableDesc.GetID())
+	log.Infof(ctx, "clearing index %d from table %d", index.ID, tableDesc.GetID())
+	if index.IsInterleaved() {
+		return errors.Errorf("unexpected interleaved index %d", index.ID)
+	}
 
-	sp := tableDesc.IndexSpan(execCfg.Codec, indexID)
-	start, err := keys.Addr(sp.Key)
-	if err != nil {
-		return errors.Errorf("failed to addr index start: %v", err)
-	}
-	end, err := keys.Addr(sp.EndKey)
-	if err != nil {
-		return errors.Errorf("failed to addr index end: %v", err)
-	}
-	rSpan := roachpb.RSpan{Key: start, EndKey: end}
-	return clearSpanData(ctx, execCfg.DB, execCfg.DistSender, rSpan)
+	sp := tableDesc.IndexSpan(execCfg.Codec, index.ID)
+
+	// ClearRange cannot be run in a transaction, so create a
+	// non-transactional batch to send the request.
+	b := &kv.Batch{}
+	b.AddRawRequest(&roachpb.ClearRangeRequest{
+		RequestHeader: roachpb.RequestHeader{
+			Key:    sp.Key,
+			EndKey: sp.EndKey,
+		},
+	})
+	return execCfg.DB.Run(ctx, b)
 }
 
 // completeDroppedIndexes updates the mutations of the table descriptor to

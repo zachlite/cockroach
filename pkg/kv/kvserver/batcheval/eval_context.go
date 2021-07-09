@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
@@ -22,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -33,6 +35,7 @@ import (
 // Limiters is the collection of per-store limits used during cmd evaluation.
 type Limiters struct {
 	BulkIOWriteRate              *rate.Limiter
+	ConcurrentImportRequests     limit.ConcurrentRequestLimiter
 	ConcurrentExportRequests     limit.ConcurrentRequestLimiter
 	ConcurrentAddSSTableRequests limit.ConcurrentRequestLimiter
 	// concurrentRangefeedIters is a semaphore used to limit the number of
@@ -49,7 +52,9 @@ type EvalContext interface {
 	ClusterSettings() *cluster.Settings
 	EvalKnobs() kvserverbase.BatchEvalTestingKnobs
 
+	Engine() storage.Engine
 	Clock() *hlc.Clock
+	DB() *kv.DB
 	AbortSpan() *abortspan.AbortSpan
 	GetConcurrencyManager() concurrency.Manager
 
@@ -81,20 +86,11 @@ type EvalContext interface {
 	// results due to concurrent writes.
 	GetMVCCStats() enginepb.MVCCStats
 
-	// GetMaxSplitQPS returns the Replicas maximum queries/s request rate over a
-	// configured retention period.
+	// GetSplitQPS returns the queries/s request rate for this range.
 	//
-	// NOTE: This should not be used when the load based splitting cluster setting
-	// is disabled.
-	GetMaxSplitQPS() (float64, bool)
-
-	// GetLastSplitQPS returns the Replica's most recent queries/s request rate.
-	//
-	// NOTE: This should not be used when the load based splitting cluster setting
-	// is disabled.
-	//
-	// TODO(nvanbenschoten): remove this method in v22.1.
-	GetLastSplitQPS() float64
+	// NOTE: This should not be used when the load based splitting cluster
+	// setting is disabled.
+	GetSplitQPS() float64
 
 	GetGCThreshold() hlc.Timestamp
 	GetLastReplicaGCTimestamp(context.Context) (hlc.Timestamp, error)
@@ -168,8 +164,14 @@ func (m *mockEvalCtxImpl) ClusterSettings() *cluster.Settings {
 func (m *mockEvalCtxImpl) EvalKnobs() kvserverbase.BatchEvalTestingKnobs {
 	return kvserverbase.BatchEvalTestingKnobs{}
 }
+func (m *mockEvalCtxImpl) Engine() storage.Engine {
+	panic("unimplemented")
+}
 func (m *mockEvalCtxImpl) Clock() *hlc.Clock {
 	return m.MockEvalCtx.Clock
+}
+func (m *mockEvalCtxImpl) DB() *kv.DB {
+	panic("unimplemented")
 }
 func (m *mockEvalCtxImpl) AbortSpan() *abortspan.AbortSpan {
 	return m.MockEvalCtx.AbortSpan
@@ -213,10 +215,7 @@ func (m *mockEvalCtxImpl) ContainsKey(key roachpb.Key) bool {
 func (m *mockEvalCtxImpl) GetMVCCStats() enginepb.MVCCStats {
 	return m.Stats
 }
-func (m *mockEvalCtxImpl) GetMaxSplitQPS() (float64, bool) {
-	return m.QPS, true
-}
-func (m *mockEvalCtxImpl) GetLastSplitQPS() float64 {
+func (m *mockEvalCtxImpl) GetSplitQPS() float64 {
 	return m.QPS
 }
 func (m *mockEvalCtxImpl) CanCreateTxnRecord(

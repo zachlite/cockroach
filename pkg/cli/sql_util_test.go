@@ -30,9 +30,9 @@ import (
 func TestConnRecover(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	p := TestCLIParams{T: t}
-	c := NewCLITest(p)
-	defer c.Cleanup()
+	p := cliTestParams{t: t}
+	c := newCLITest(p)
+	defer c.cleanup()
 
 	url, cleanup := sqlutils.PGUrl(t, c.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer cleanup()
@@ -96,7 +96,7 @@ func TestConnRecover(t *testing.T) {
 // simulateServerRestart restarts the test server and reconfigures the connection
 // to use the new test server's port number. This is necessary because the port
 // number is selected randomly.
-func simulateServerRestart(c *TestCLI, p TestCLIParams, conn *sqlConn) func() {
+func simulateServerRestart(c *cliTest, p cliTestParams, conn *sqlConn) func() {
 	c.restartServer(p)
 	url2, cleanup2 := sqlutils.PGUrl(c.t, c.ServingSQLAddr(), c.t.Name(), url.User(security.RootUser))
 	conn.url = url2.String()
@@ -106,8 +106,8 @@ func simulateServerRestart(c *TestCLI, p TestCLIParams, conn *sqlConn) func() {
 func TestRunQuery(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	c := NewCLITest(TestCLIParams{T: t})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{t: t})
+	defer c.cleanup()
 
 	url, cleanup := sqlutils.PGUrl(t, c.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer cleanup()
@@ -153,9 +153,8 @@ SET
 
 	expectedRows := [][]string{
 		{`parentID`, `INT8`, `false`, `NULL`, ``, `{primary}`, `false`},
-		{`parentSchemaID`, `INT8`, `false`, `NULL`, ``, `{primary}`, `false`},
 		{`name`, `STRING`, `false`, `NULL`, ``, `{primary}`, `false`},
-		{`id`, `INT8`, `true`, `NULL`, ``, `{primary}`, `false`},
+		{`id`, `INT8`, `true`, `NULL`, ``, `{}`, `false`},
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
 		t.Fatalf("expected:\n%v\ngot:\n%v", expectedRows, rows)
@@ -167,13 +166,12 @@ SET
 	}
 
 	expected = `
-   column_name   | data_type | is_nullable | column_default | generation_expression |  indices  | is_hidden
------------------+-----------+-------------+----------------+-----------------------+-----------+------------
-  parentID       | INT8      |    false    | NULL           |                       | {primary} |   false
-  parentSchemaID | INT8      |    false    | NULL           |                       | {primary} |   false
-  name           | STRING    |    false    | NULL           |                       | {primary} |   false
-  id             | INT8      |    true     | NULL           |                       | {primary} |   false
-(4 rows)
+  column_name | data_type | is_nullable | column_default | generation_expression |  indices  | is_hidden
+--------------+-----------+-------------+----------------+-----------------------+-----------+------------
+  parentID    | INT8      |    false    | NULL           |                       | {primary} |   false
+  name        | STRING    |    false    | NULL           |                       | {primary} |   false
+  id          | INT8      |    true     | NULL           |                       | {}        |   false
+(3 rows)
 `
 
 	if a, e := b.String(), expected[1:]; a != e {
@@ -228,8 +226,8 @@ SET
 func TestUtfName(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	c := NewCLITest(TestCLIParams{T: t})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{t: t})
+	defer c.cleanup()
 
 	url, cleanup := sqlutils.PGUrl(t, c.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer cleanup()
@@ -284,9 +282,9 @@ ALTER TABLE test_utf.żółw ADD CONSTRAINT żó UNIQUE (value)`)); err != nil {
 func TestTransactionRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	p := TestCLIParams{T: t}
-	c := NewCLITest(p)
-	defer c.Cleanup()
+	p := cliTestParams{t: t}
+	c := newCLITest(p)
+	defer c.cleanup()
 
 	url, cleanup := sqlutils.PGUrl(t, c.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer cleanup()

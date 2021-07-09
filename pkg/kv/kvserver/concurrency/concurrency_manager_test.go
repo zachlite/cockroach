@@ -56,13 +56,11 @@ import (
 // new-txn      name=<txn-name> ts=<int>[,<int>] epoch=<int> [uncertainty-limit=<int>[,<int>]]
 // new-request  name=<req-name> txn=<txn-name>|none ts=<int>[,<int>] [priority] [inconsistent] [wait-policy=<policy>]
 //   <proto-name> [<field-name>=<field-value>...] (hint: see scanSingleRequest)
-// sequence     req=<req-name> [eval-kind=<pess|opt|pess-after-opt]
+// sequence     req=<req-name>
 // finish       req=<req-name>
 //
 // handle-write-intent-error  req=<req-name> txn=<txn-name> key=<key> lease-seq=<seq>
 // handle-txn-push-error      req=<req-name> txn=<txn-name> key=<key>  TODO(nvanbenschoten): implement this
-//
-// check-opt-no-conflicts req=<req-name>
 //
 // on-lock-acquired  req=<req-name> key=<key> [seq=<seq>] [dur=r|u]
 // on-lock-updated   req=<req-name> txn=<txn-name> key=<key> status=[committed|aborted|pending] [ts=<int>[,<int>]]
@@ -77,7 +75,6 @@ import (
 // debug-lock-table
 // debug-disable-txn-pushes
 // debug-set-clock           ts=<secs>
-// debug-set-discovered-locks-threshold-to-consult-finalized-txn-cache n=<count>
 // reset
 //
 func TestConcurrencyManagerBasic(t *testing.T) {
@@ -156,19 +153,29 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 				waitPolicy := scanWaitPolicy(t, d, false /* required */)
 
 				// Each roachpb.Request is provided on an indented line.
-				reqs, reqUnions := scanRequests(t, d, c)
+				var reqs []roachpb.Request
+				singleReqLines := strings.Split(d.Input, "\n")
+				for _, line := range singleReqLines {
+					req := scanSingleRequest(t, d, line, c.txnsByName)
+					reqs = append(reqs, req)
+				}
+				reqUnions := make([]roachpb.RequestUnion, len(reqs))
+				for i, req := range reqs {
+					reqUnions[i].MustSetInner(req)
+				}
 				latchSpans, lockSpans := c.collectSpans(t, txn, ts, reqs)
 
-				c.requestsByName[reqName] = concurrency.Request{
-					Txn:       txn,
-					Timestamp: ts,
-					// TODO(nvanbenschoten): test Priority
-					ReadConsistency: readConsistency,
-					WaitPolicy:      waitPolicy,
-					Requests:        reqUnions,
-					LatchSpans:      latchSpans,
-					LockSpans:       lockSpans,
-				}
+				c.requestsByName[reqName] = testReq{
+					Request: concurrency.Request{
+						Txn:       txn,
+						Timestamp: ts,
+						// TODO(nvanbenschoten): test Priority
+						ReadConsistency: readConsistency,
+						WaitPolicy:      waitPolicy,
+						Requests:        reqUnions,
+						LatchSpans:      latchSpans,
+						LockSpans:       lockSpans,
+					}}
 				return ""
 
 			case "sequence":
@@ -178,27 +185,6 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 				if !ok {
 					d.Fatalf(t, "unknown request: %s", reqName)
 				}
-				evalKind := concurrency.PessimisticEval
-				if d.HasArg("eval-kind") {
-					var kind string
-					d.ScanArgs(t, "eval-kind", &kind)
-					switch kind {
-					case "pess":
-						evalKind = concurrency.PessimisticEval
-					case "opt":
-						evalKind = concurrency.OptimisticEval
-					case "pess-after-opt":
-						evalKind = concurrency.PessimisticAfterFailedOptimisticEval
-					default:
-						d.Fatalf(t, "unknown eval-kind: %s", kind)
-					}
-				}
-
-				// Copy the request's latch and lock spans before handing them to
-				// SequenceReq, because they may be destroyed once handed to the
-				// concurrency manager.
-				req.LatchSpans = req.LatchSpans.Copy()
-				req.LockSpans = req.LockSpans.Copy()
 
 				c.mu.Lock()
 				prev := c.guardsByReqName[reqName]
@@ -206,8 +192,8 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 				c.mu.Unlock()
 
 				opName := fmt.Sprintf("sequence %s", reqName)
-				mon.runAsync(opName, func(ctx context.Context) {
-					guard, resp, err := m.SequenceReq(ctx, prev, req, evalKind)
+				cancel := mon.runAsync(opName, func(ctx context.Context) {
+					guard, resp, err := m.SequenceReq(ctx, prev, req.Request)
 					if err != nil {
 						log.Eventf(ctx, "sequencing complete, returned error: %v", err)
 					} else if resp != nil {
@@ -221,6 +207,8 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 						log.Event(ctx, "sequencing complete, returned no guard")
 					}
 				})
+				req.cancel = cancel
+				c.requestsByName[reqName] = req
 				return c.waitAndCollect(t, mon)
 
 			case "finish":
@@ -296,17 +284,6 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 					}
 				})
 				return c.waitAndCollect(t, mon)
-
-			case "check-opt-no-conflicts":
-				var reqName string
-				d.ScanArgs(t, "req", &reqName)
-				g, ok := c.guardsByReqName[reqName]
-				if !ok {
-					d.Fatalf(t, "unknown request: %s", reqName)
-				}
-				reqs, _ := scanRequests(t, d, c)
-				latchSpans, lockSpans := c.collectSpans(t, g.Req.Txn, g.Req.Timestamp, reqs)
-				return fmt.Sprintf("no-conflicts: %t", g.CheckOptimisticNoConflicts(latchSpans, lockSpans))
 
 			case "on-lock-acquired":
 				var reqName string
@@ -494,12 +471,6 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 				c.manual.Set(nanos)
 				return ""
 
-			case "debug-set-discovered-locks-threshold-to-consult-finalized-txn-cache":
-				var n int
-				d.ScanArgs(t, "n", &n)
-				c.setDiscoveredLocksThresholdToConsultFinalizedTxnCache(n)
-				return ""
-
 			case "reset":
 				if n := mon.numMonitored(); n > 0 {
 					d.Fatalf(t, "%d requests still in flight", n)
@@ -521,21 +492,9 @@ func TestConcurrencyManagerBasic(t *testing.T) {
 	})
 }
 
-func scanRequests(
-	t *testing.T, d *datadriven.TestData, c *cluster,
-) ([]roachpb.Request, []roachpb.RequestUnion) {
-	// Each roachpb.Request is provided on an indented line.
-	var reqs []roachpb.Request
-	singleReqLines := strings.Split(d.Input, "\n")
-	for _, line := range singleReqLines {
-		req := scanSingleRequest(t, d, line, c.txnsByName)
-		reqs = append(reqs, req)
-	}
-	reqUnions := make([]roachpb.RequestUnion, len(reqs))
-	for i, req := range reqs {
-		reqUnions[i].MustSetInner(req)
-	}
-	return reqs, reqUnions
+type testReq struct {
+	cancel func()
+	concurrency.Request
 }
 
 // cluster encapsulates the state of a running cluster and a set of requests.
@@ -554,7 +513,7 @@ type cluster struct {
 	// Definitions.
 	txnCounter     uint32
 	txnsByName     map[string]*roachpb.Transaction
-	requestsByName map[string]concurrency.Request
+	requestsByName map[string]testReq
 
 	// Request state. Cleared on reset.
 	mu              syncutil.Mutex
@@ -587,7 +546,7 @@ func newCluster() *cluster {
 		clock:     hlc.NewClock(manual.UnixNano, time.Nanosecond),
 
 		txnsByName:      make(map[string]*roachpb.Transaction),
-		requestsByName:  make(map[string]concurrency.Request),
+		requestsByName:  make(map[string]testReq),
 		guardsByReqName: make(map[string]*concurrency.Guard),
 		txnRecords:      make(map[uuid.UUID]*txnRecord),
 		txnPushes:       make(map[uuid.UUID]*txnPush),
@@ -835,17 +794,13 @@ func (c *cluster) detectDeadlocks() {
 }
 
 func (c *cluster) enableTxnPushes() {
-	concurrency.LockTableLivenessPushDelay.Override(context.Background(), &c.st.SV, 0*time.Millisecond)
-	concurrency.LockTableDeadlockDetectionPushDelay.Override(context.Background(), &c.st.SV, 0*time.Millisecond)
+	concurrency.LockTableLivenessPushDelay.Override(&c.st.SV, 0*time.Millisecond)
+	concurrency.LockTableDeadlockDetectionPushDelay.Override(&c.st.SV, 0*time.Millisecond)
 }
 
 func (c *cluster) disableTxnPushes() {
-	concurrency.LockTableLivenessPushDelay.Override(context.Background(), &c.st.SV, time.Hour)
-	concurrency.LockTableDeadlockDetectionPushDelay.Override(context.Background(), &c.st.SV, time.Hour)
-}
-
-func (c *cluster) setDiscoveredLocksThresholdToConsultFinalizedTxnCache(n int) {
-	concurrency.DiscoveredLocksThresholdToConsultFinalizedTxnCache.Override(context.Background(), &c.st.SV, int64(n))
+	concurrency.LockTableLivenessPushDelay.Override(&c.st.SV, time.Hour)
+	concurrency.LockTableDeadlockDetectionPushDelay.Override(&c.st.SV, time.Hour)
 }
 
 // reset clears all request state in the cluster. This avoids portions of tests
@@ -885,7 +840,7 @@ func (c *cluster) resetNamespace() {
 	defer c.mu.Unlock()
 	c.txnCounter = 0
 	c.txnsByName = make(map[string]*roachpb.Transaction)
-	c.requestsByName = make(map[string]concurrency.Request)
+	c.requestsByName = make(map[string]testReq)
 	c.txnRecords = make(map[uuid.UUID]*txnRecord)
 }
 

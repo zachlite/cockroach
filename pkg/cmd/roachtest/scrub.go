@@ -15,29 +15,23 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func registerScrubIndexOnlyTPCC(r *testRegistry) {
 	// numScrubRuns is set assuming a single SCRUB run (index only) takes ~1 min
-	r.Add(makeScrubTPCCTest(r, 5, 100, 30*time.Minute, "index-only", 20))
+	r.Add(makeScrubTPCCTest(5, 100, 30*time.Minute, "index-only", 20))
 }
 
 func registerScrubAllChecksTPCC(r *testRegistry) {
 	// numScrubRuns is set assuming a single SCRUB run (all checks) takes ~2 min
-	r.Add(makeScrubTPCCTest(r, 5, 100, 30*time.Minute, "all-checks", 10))
+	r.Add(makeScrubTPCCTest(5, 100, 30*time.Minute, "all-checks", 10))
 }
 
 func makeScrubTPCCTest(
-	r *testRegistry,
-	numNodes, warehouses int,
-	length time.Duration,
-	optionName string,
-	numScrubRuns int,
-) TestSpec {
+	numNodes, warehouses int, length time.Duration, optionName string, numScrubRuns int,
+) testSpec {
 	var stmtOptions string
 	// SCRUB checks are run at -1m to avoid contention with TPCC traffic.
 	// By the time the SCRUB queries start, the tables will have been loaded for
@@ -52,16 +46,16 @@ func makeScrubTPCCTest(
 		panic(fmt.Sprintf("Not a valid option: %s", optionName))
 	}
 
-	return TestSpec{
+	return testSpec{
 		Name:    fmt.Sprintf("scrub/%s/tpcc/w=%d", optionName, warehouses),
 		Owner:   OwnerSQLQueries,
-		Cluster: r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses:   warehouses,
 				ExtraRunArgs: "--wait=false --tolerate-errors",
 				During: func(ctx context.Context) error {
-					if !c.IsLocal() {
+					if !c.isLocal() {
 						// Wait until tpcc has been running for a few minutes to start SCRUB checks
 						sleepInterval := time.Minute * 10
 						maxSleep := length / 2
@@ -74,12 +68,12 @@ func makeScrubTPCCTest(
 					conn := c.Conn(ctx, 1)
 					defer conn.Close()
 
-					t.L().Printf("Starting %d SCRUB checks", numScrubRuns)
+					c.l.Printf("Starting %d SCRUB checks", numScrubRuns)
 					for i := 0; i < numScrubRuns; i++ {
-						t.L().Printf("Running SCRUB check %d\n", i+1)
+						c.l.Printf("Running SCRUB check %d\n", i+1)
 						before := timeutil.Now()
 						err := sqlutils.RunScrubWithOptions(conn, "tpcc", "order", stmtOptions)
-						t.L().Printf("SCRUB check %d took %v\n", i+1, timeutil.Since(before))
+						c.l.Printf("SCRUB check %d took %v\n", i+1, timeutil.Since(before))
 
 						if err != nil {
 							t.Fatal(err)

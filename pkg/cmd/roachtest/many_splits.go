@@ -13,19 +13,16 @@ package main
 import (
 	"context"
 	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 // runManySplits attempts to create 2000 tiny ranges on a 4-node cluster using
 // left-to-right splits and check the cluster is still live afterwards.
-func runManySplits(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runManySplits(ctx context.Context, t *test, c *cluster) {
 	// Randomize starting with encryption-at-rest enabled.
-	c.EncryptAtRandom(true)
+	c.encryptAtRandom = true
 	args := startArgs("--env=COCKROACH_SCAN_MAX_IDLE_TIME=5ms")
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx, args)
+	c.Start(ctx, t, args)
 
 	db := c.Conn(ctx, 1)
 	defer db.Close()
@@ -36,7 +33,7 @@ func runManySplits(ctx context.Context, t test.Test, c cluster.Cluster) {
 	m := newMonitor(ctx, c, c.All())
 	m.Go(func(ctx context.Context) error {
 		const numRanges = 2000
-		t.L().Printf("creating %d ranges...", numRanges)
+		t.l.Printf("creating %d ranges...", numRanges)
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(`
 			CREATE TABLE t(x, PRIMARY KEY(x)) AS TABLE generate_series(1,%[1]d);
             ALTER TABLE t SPLIT AT TABLE generate_series(1,%[1]d);

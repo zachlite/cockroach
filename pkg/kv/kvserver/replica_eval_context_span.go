@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
@@ -69,6 +70,11 @@ func (rec *SpanSetReplicaEvalContext) ClusterSettings() *cluster.Settings {
 // Clock returns the Replica's clock.
 func (rec *SpanSetReplicaEvalContext) Clock() *hlc.Clock {
 	return rec.i.Clock()
+}
+
+// DB returns the Replica's client DB.
+func (rec *SpanSetReplicaEvalContext) DB() *kv.DB {
+	return rec.i.DB()
 }
 
 // GetConcurrencyManager returns the concurrency.Manager.
@@ -143,16 +149,9 @@ func (rec SpanSetReplicaEvalContext) GetMVCCStats() enginepb.MVCCStats {
 	return rec.i.GetMVCCStats()
 }
 
-// GetMaxSplitQPS returns the Replica's maximum queries/s rate for splitting and
-// merging purposes.
-func (rec SpanSetReplicaEvalContext) GetMaxSplitQPS() (float64, bool) {
-	return rec.i.GetMaxSplitQPS()
-}
-
-// GetLastSplitQPS returns the Replica's most recent queries/s rate for
-// splitting and merging purposes.
-func (rec SpanSetReplicaEvalContext) GetLastSplitQPS() float64 {
-	return rec.i.GetLastSplitQPS()
+// GetSplitQPS returns the Replica's queries/s rate for splitting purposes.
+func (rec SpanSetReplicaEvalContext) GetSplitQPS() float64 {
+	return rec.i.GetSplitQPS()
 }
 
 // CanCreateTxnRecord determines whether a transaction record can be created

@@ -16,33 +16,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func registerQueue(r *testRegistry) {
 	// One node runs the workload generator, all other nodes host CockroachDB.
 	const numNodes = 2
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Skip:    "https://github.com/cockroachdb/cockroach/issues/17229",
 		Name:    fmt.Sprintf("queue/nodes=%d", numNodes-1),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runQueue(ctx, t, c)
 		},
 	})
 }
 
-func runQueue(ctx context.Context, t test.Test, c cluster.Cluster) {
-	dbNodeCount := c.Spec().NodeCount - 1
-	workloadNode := c.Spec().NodeCount
+func runQueue(ctx context.Context, t *test, c *cluster) {
+	dbNodeCount := c.spec.NodeCount - 1
+	workloadNode := c.spec.NodeCount
 
 	// Distribute programs to the correct nodes and start CockroachDB.
 	c.Put(ctx, cockroach, "./cockroach", c.Range(1, dbNodeCount))
 	c.Put(ctx, workload, "./workload", c.Node(workloadNode))
-	c.Start(ctx, c.Range(1, dbNodeCount))
+	c.Start(ctx, t, c.Range(1, dbNodeCount))
 
 	runQueueWorkload := func(duration time.Duration, initTables bool) {
 		m := newMonitor(ctx, c, c.Range(1, dbNodeCount))

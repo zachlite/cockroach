@@ -362,7 +362,7 @@ func processReplicatedKeyRange(
 			}
 			batchGCKeys = nil
 			batchGCKeysBytes = 0
-			alloc = bufalloc.ByteAllocator{}
+			alloc = nil
 		}
 	}
 	if len(batchGCKeys) > 0 {

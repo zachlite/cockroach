@@ -35,8 +35,4 @@ type TestTenantInterface interface {
 	// interface{}. The DiagnosticsReporter periodically phones home to report
 	// diagnostics and usage.
 	DiagnosticsReporter() interface{}
-
-	// StatusServer returns the tenant's *server.SQLStatusServer as an
-	// interface{}.
-	StatusServer() interface{}
 }

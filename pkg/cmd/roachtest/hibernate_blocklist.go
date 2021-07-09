@@ -16,40 +16,10 @@ var hibernateBlocklists = blocklistsForVersion{
 	{"v21.2", "hibernateBlockList21_2", hibernateBlockList21_2, "hibernateIgnoreList21_2", hibernateIgnoreList21_2},
 }
 
-var hibernateSpatialBlocklists = blocklistsForVersion{
-	{"v21.1", "hibernateSpatialBlockList21_1", hibernateSpatialBlockList21_1, "", nil},
-	{"v21.2", "hibernateSpatialBlockList21_2", hibernateSpatialBlockList21_2, "", nil},
-}
-
 // Please keep these lists alphabetized for easy diffing.
 // After a failed run, an updated version of this blocklist should be available
 // in the test log.
-var hibernateSpatialBlockList21_2 = blocklist{}
-
-var hibernateSpatialBlockList21_1 = blocklist{}
-
 var hibernateBlockList21_2 = blocklist{
-	"org.hibernate.jpa.test.graphs.FetchGraphTest.testCollectionEntityGraph":                                                "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testConfiguration":                                          "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testDefaultPar":                                             "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testDefaultParForPersistence_1_0":                           "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExcludeHbmPar":                                          "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExplodedPar":                                            "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExtendedEntityManager":                                  "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExternalJar":                                            "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testListeners":                                              "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testListenersDefaultPar":                                    "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testORMFileOnMainAndExplicitJars":                           "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testRelativeJarReferences":                                  "unknown",
-	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testSpacePar":                                               "unknown",
-	"org.hibernate.jpa.test.packaging.ScannerTest.testCustomScanner":                                                        "unknown",
-	"org.hibernate.test.annotations.onetomany.OrderByTest.testOrderByNoElement":                                             "unknown",
-	"org.hibernate.test.annotations.onetomany.OrderByTest.testOrderByOneToManyWithJoinTable":                                "unknown",
-	"org.hibernate.test.bytecode.enhancement.lazy.proxy.inlinedirtychecking.DirtyCheckPrivateUnMappedCollectionTest.testIt": "unknown",
-	"org.hibernate.test.hql.BulkManipulationTest.testUpdateWithSubquery":                                                    "unknown",
-}
-
-var hibernateBlockList21_1 = blocklist{
 	"org.hibernate.jpa.test.graphs.FetchGraphTest.testCollectionEntityGraph":                                                                                                                     "unknown",
 	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testConfiguration":                                                                                                               "unknown",
 	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testDefaultPar":                                                                                                                  "unknown",
@@ -127,6 +97,27 @@ var hibernateBlockList21_1 = blocklist{
 	"org.hibernate.test.legacy.FumTest.testDeleteOwner":                                                                                                                                          "unknown",
 	"org.hibernate.test.naturalid.inheritance.cache.InheritedNaturalIdNoCacheTest.testLoadExtendedByNormal":                                                                                      "unknown",
 	"org.hibernate.test.where.annotations.EagerManyToOneFetchModeSelectWhereTest.testAssociatedWhereClause":                                                                                      "unknown",
+}
+
+var hibernateBlockList21_1 = blocklist{
+	"org.hibernate.jpa.test.graphs.FetchGraphTest.testCollectionEntityGraph":                                                "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testConfiguration":                                          "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testDefaultPar":                                             "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testDefaultParForPersistence_1_0":                           "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExcludeHbmPar":                                          "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExplodedPar":                                            "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExtendedEntityManager":                                  "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testExternalJar":                                            "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testListeners":                                              "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testListenersDefaultPar":                                    "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testORMFileOnMainAndExplicitJars":                           "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testRelativeJarReferences":                                  "unknown",
+	"org.hibernate.jpa.test.packaging.PackagedEntityManagerTest.testSpacePar":                                               "unknown",
+	"org.hibernate.jpa.test.packaging.ScannerTest.testCustomScanner":                                                        "unknown",
+	"org.hibernate.test.annotations.onetomany.OrderByTest.testOrderByNoElement":                                             "unknown",
+	"org.hibernate.test.annotations.onetomany.OrderByTest.testOrderByOneToManyWithJoinTable":                                "unknown",
+	"org.hibernate.test.bytecode.enhancement.lazy.proxy.inlinedirtychecking.DirtyCheckPrivateUnMappedCollectionTest.testIt": "unknown",
+	"org.hibernate.test.hql.BulkManipulationTest.testUpdateWithSubquery":                                                    "unknown",
 }
 
 var hibernateBlockList20_2 = blocklist{

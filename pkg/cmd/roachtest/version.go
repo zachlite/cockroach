@@ -16,8 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 	_ "github.com/lib/pq"
@@ -26,10 +24,10 @@ import (
 // TODO(tbg): remove this test. Use the harness in versionupgrade.go
 // to make a much better one, much more easily.
 func registerVersion(r *testRegistry) {
-	runVersion := func(ctx context.Context, t test.Test, c cluster.Cluster, binaryVersion string) {
-		nodes := c.Spec().NodeCount - 1
+	runVersion := func(ctx context.Context, t *test, c *cluster, binaryVersion string) {
+		nodes := c.spec.NodeCount - 1
 
-		if err := c.Stage(ctx, t.L(), "release", "v"+binaryVersion, "", c.Range(1, nodes)); err != nil {
+		if err := c.Stage(ctx, c.l, "release", "v"+binaryVersion, "", c.Range(1, nodes)); err != nil {
 			t.Fatal(err)
 		}
 
@@ -37,12 +35,12 @@ func registerVersion(r *testRegistry) {
 
 		// Force disable encryption.
 		// TODO(mberhault): allow it once version >= 2.1.
-		c.Start(ctx, c.Range(1, nodes), startArgsDontEncrypt)
+		c.Start(ctx, t, c.Range(1, nodes), startArgsDontEncrypt)
 
 		stageDuration := 10 * time.Minute
 		buffer := 10 * time.Minute
 		if local {
-			t.L().Printf("local mode: speeding up test\n")
+			t.l.Printf("local mode: speeding up test\n")
 			stageDuration = 10 * time.Second
 			buffer = time.Minute
 		}
@@ -50,7 +48,7 @@ func registerVersion(r *testRegistry) {
 		loadDuration := " --duration=" + (time.Duration(3*nodes+2)*stageDuration + buffer).String()
 
 		var deprecatedWorkloadsStr string
-		if !t.BuildVersion().AtLeast(version.MustParse("v20.2.0")) {
+		if !t.buildVersion.AtLeast(version.MustParse("v20.2.0")) {
 			deprecatedWorkloadsStr += " --deprecated-fk-indexes"
 		}
 
@@ -69,7 +67,7 @@ func registerVersion(r *testRegistry) {
 		}
 
 		m.Go(func(ctx context.Context) error {
-			l, err := t.L().ChildLogger("upgrader")
+			l, err := t.l.ChildLogger("upgrader")
 			if err != nil {
 				return err
 			}
@@ -100,7 +98,7 @@ func registerVersion(r *testRegistry) {
 					//
 					// https://github.com/cockroachdb/cockroach/issues/37737#issuecomment-496026918
 					if !strings.HasPrefix(binaryVersion, "2.") {
-						if err := c.CheckReplicaDivergenceOnDB(ctx, t.L(), db); err != nil {
+						if err := c.CheckReplicaDivergenceOnDB(ctx, db); err != nil {
 							return errors.Wrapf(err, "node %d", i)
 						}
 					}
@@ -138,7 +136,7 @@ func registerVersion(r *testRegistry) {
 					return err
 				}
 				c.Put(ctx, cockroach, "./cockroach", c.Node(i))
-				c.Start(ctx, c.Node(i), startArgsDontEncrypt)
+				c.Start(ctx, t, c.Node(i), startArgsDontEncrypt)
 				if err := sleepAndCheck(); err != nil {
 					return err
 				}
@@ -162,7 +160,7 @@ func registerVersion(r *testRegistry) {
 			// Do upgrade for the last node.
 			l.Printf("upgrading last node\n")
 			c.Put(ctx, cockroach, "./cockroach", c.Node(nodes))
-			c.Start(ctx, c.Node(nodes), startArgsDontEncrypt)
+			c.Start(ctx, t, c.Node(nodes), startArgsDontEncrypt)
 			if err := sleepAndCheck(); err != nil {
 				return err
 			}
@@ -174,10 +172,10 @@ func registerVersion(r *testRegistry) {
 				if err := stop(i); err != nil {
 					return err
 				}
-				if err := c.Stage(ctx, t.L(), "release", "v"+binaryVersion, "", c.Node(i)); err != nil {
+				if err := c.Stage(ctx, c.l, "release", "v"+binaryVersion, "", c.Node(i)); err != nil {
 					t.Fatal(err)
 				}
-				c.Start(ctx, c.Node(i), startArgsDontEncrypt)
+				c.Start(ctx, t, c.Node(i), startArgsDontEncrypt)
 				if err := sleepAndCheck(); err != nil {
 					return err
 				}
@@ -191,7 +189,7 @@ func registerVersion(r *testRegistry) {
 					return err
 				}
 				c.Put(ctx, cockroach, "./cockroach", c.Node(i))
-				c.Start(ctx, c.Node(i), startArgsDontEncrypt)
+				c.Start(ctx, t, c.Node(i), startArgsDontEncrypt)
 				if err := sleepAndCheck(); err != nil {
 					return err
 				}
@@ -211,13 +209,13 @@ func registerVersion(r *testRegistry) {
 	}
 
 	for _, n := range []int{3, 5} {
-		r.Add(TestSpec{
+		r.Add(testSpec{
 			Name:       fmt.Sprintf("version/mixed/nodes=%d", n),
 			Owner:      OwnerKV,
 			MinVersion: "v2.1.0",
-			Cluster:    r.makeClusterSpec(n + 1),
-			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-				pred, err := PredecessorVersion(*t.BuildVersion())
+			Cluster:    makeClusterSpec(n + 1),
+			Run: func(ctx context.Context, t *test, c *cluster) {
+				pred, err := PredecessorVersion(r.buildVersion)
 				if err != nil {
 					t.Fatal(err)
 				}

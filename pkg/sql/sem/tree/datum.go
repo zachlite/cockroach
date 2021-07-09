@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -456,19 +455,14 @@ func (d *DBool) Max(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DBool) AmbiguousFormat() bool { return false }
 
-// PgwireFormatBool returns a single byte representing a boolean according to
-// pgwire encoding.
-func PgwireFormatBool(d bool) byte {
-	if d {
-		return 't'
-	}
-	return 'f'
-}
-
 // Format implements the NodeFormatter interface.
 func (d *DBool) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(fmtPgwireFormat) {
-		ctx.WriteByte(PgwireFormatBool(bool(*d)))
+		if bool(*d) {
+			ctx.WriteByte('t')
+		} else {
+			ctx.WriteByte('f')
+		}
 		return
 	}
 	ctx.WriteString(strconv.FormatBool(bool(*d)))
@@ -1893,22 +1887,17 @@ func (d *DDate) Min(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DDate) AmbiguousFormat() bool { return true }
 
-// FormatDate writes d into ctx according to the format flags.
-func FormatDate(d pgdate.Date, ctx *FmtCtx) {
+// Format implements the NodeFormatter interface.
+func (d *DDate) Format(ctx *FmtCtx) {
 	f := ctx.flags
 	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	d.Format(&ctx.Buffer)
+	d.Date.Format(&ctx.Buffer)
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-}
-
-// Format implements the NodeFormatter interface.
-func (d *DDate) Format(ctx *FmtCtx) {
-	FormatDate(d.Date, ctx)
 }
 
 // Size implements the Datum interface.
@@ -2203,7 +2192,7 @@ func ParseDTimestamp(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestamp, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, pgdate.ParseModeMDY, s)
+	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2477,7 +2466,7 @@ func ParseDTimestampTZ(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestampTZ, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeMDY, s)
+	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2774,25 +2763,25 @@ func (d *DInterval) Min(_ *EvalContext) (Datum, bool) {
 	return dMinInterval, true
 }
 
+// ValueAsString returns the interval as a string (e.g. "1h2m").
+func (d *DInterval) ValueAsString() string {
+	return d.Duration.String()
+}
+
 // AmbiguousFormat implements the Datum interface.
 func (*DInterval) AmbiguousFormat() bool { return true }
 
-// FormatDuration writes d into ctx according to the format flags.
-func FormatDuration(d duration.Duration, ctx *FmtCtx) {
+// Format implements the NodeFormatter interface.
+func (d *DInterval) Format(ctx *FmtCtx) {
 	f := ctx.flags
 	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	d.FormatWithStyle(&ctx.Buffer, ctx.dataConversionConfig.IntervalStyle)
+	d.Duration.Format(&ctx.Buffer)
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-}
-
-// Format implements the NodeFormatter interface.
-func (d *DInterval) Format(ctx *FmtCtx) {
-	FormatDuration(d.Duration, ctx)
 }
 
 // Size implements the Datum interface.
@@ -3185,9 +3174,7 @@ func MustBeDJSON(e Expr) DJSON {
 }
 
 // AsJSON converts a datum into our standard json representation.
-func AsJSON(
-	d Datum, dcc sessiondatapb.DataConversionConfig, loc *time.Location,
-) (json.JSON, error) {
+func AsJSON(d Datum, loc *time.Location) (json.JSON, error) {
 	d = UnwrapDatum(nil /* evalCtx */, d)
 	switch t := d.(type) {
 	case *DBool:
@@ -3209,7 +3196,7 @@ func AsJSON(
 	case *DArray:
 		builder := json.NewArrayBuilder(t.Len())
 		for _, e := range t.Array {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3224,7 +3211,7 @@ func AsJSON(
 		t.maybePopulateType()
 		labels := t.typ.TupleLabels()
 		for i, e := range t.D {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3247,7 +3234,7 @@ func AsJSON(
 		// This is RFC3339Nano, but without the TZ fields.
 		return json.FromString(t.UTC().Format("2006-01-02T15:04:05.999999999")), nil
 	case *DDate, *DUuid, *DOid, *DInterval, *DBytes, *DIPAddr, *DTime, *DTimeTZ, *DBitArray, *DBox2D:
-		return json.FromString(AsStringWithFlags(t, FmtBareStrings, FmtDataConversionConfig(dcc))), nil
+		return json.FromString(AsStringWithFlags(t, FmtBareStrings)), nil
 	case *DGeometry:
 		return json.FromSpatialObject(t.Geometry.SpatialObject(), geo.DefaultGeoJSONDecimalDigits)
 	case *DGeography:
@@ -4295,7 +4282,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 	// If it is an integer in string form, convert it as an int.
 	if val, err := ParseDInt(strings.TrimSpace(s)); err == nil {
 		tmpOid := NewDOid(*val)
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, tmpOid)
+		oid, err := queryOid(ctx, t, tmpOid)
 		if err != nil {
 			oid = tmpOid
 			oid.semanticType = t
@@ -4366,7 +4353,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 		// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
 		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
 
-		dOid, missingTypeErr := ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(Name(s).Normalize()))
+		dOid, missingTypeErr := queryOid(ctx, t, NewDString(Name(s).Normalize()))
 		if missingTypeErr == nil {
 			return dOid, missingTypeErr
 		}
@@ -4405,7 +4392,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 			name:         tn.ObjectName.String(),
 		}, nil
 	default:
-		return ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(s))
+		return queryOid(ctx, t, NewDString(s))
 	}
 }
 

@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/server/pgurl"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -207,14 +206,8 @@ func runImport(
 		return errors.New("unsupported import format")
 	}
 
-	purl, err := pgurl.Parse(conn.url)
-	if err != nil {
-		return err
-	}
-
 	if importCLIKnobs.returnQuery {
-		fmt.Print(importQuery + "\n")
-		fmt.Print(purl.GetDatabase())
+		fmt.Print(importQuery)
 		return nil
 	}
 

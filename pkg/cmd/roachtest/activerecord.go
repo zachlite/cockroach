@@ -16,9 +16,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var activerecordResultRegex = regexp.MustCompile(`^(?P<test>[^\s]+#[^\s]+) = (?P<timing>\d+\.\d+ s) = (?P<result>.)$`)
@@ -31,10 +28,10 @@ var activerecordAdapterVersion = "v6.1.2"
 func registerActiveRecord(r *testRegistry) {
 	runActiveRecord := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
@@ -43,16 +40,14 @@ func registerActiveRecord(r *testRegistry) {
 		if err := c.PutLibraries(ctx, "./lib"); err != nil {
 			t.Fatal(err)
 		}
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+		version, err := fetchCockroachVersion(ctx, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if err := alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		); err != nil {
+		if err := alterZoneConfigAndClusterSettings(ctx, version, c, node[0]); err != nil {
 			t.Fatal(err)
 		}
 
@@ -79,24 +74,23 @@ func registerActiveRecord(r *testRegistry) {
 		// Report the latest tag, but do not use it. The newest versions produces output that breaks our xml parser,
 		// and we want to pin to the working version for now.
 		latestTag, err := repeatGetLatestTag(
-			ctx, t, "rails", "rails", railsReleaseTagRegex,
+			ctx, c, "rails", "rails", railsReleaseTagRegex,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest rails release is %s.", latestTag)
-		t.L().Printf("Supported rails release is %s.", supportedRailsVersion)
-		t.L().Printf("Supported adapter version is %s.", activerecordAdapterVersion)
+		c.l.Printf("Latest rails release is %s.", latestTag)
+		c.l.Printf("Supported rails release is %s.", supportedRailsVersion)
+		c.l.Printf("Supported adapter version is %s.", activerecordAdapterVersion)
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update apt-get", `sudo apt-get -qq update`,
+			ctx, c, node, "update apt-get", `sudo apt-get -qq update`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install dependencies",
@@ -107,7 +101,6 @@ func registerActiveRecord(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install ruby 2.7",
@@ -121,14 +114,14 @@ func registerActiveRecord(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "remove old activerecord adapter", `rm -rf /mnt/data1/activerecord-cockroachdb-adapter`,
+			ctx, c, node, "remove old activerecord adapter", `rm -rf /mnt/data1/activerecord-cockroachdb-adapter`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/cockroachdb/activerecord-cockroachdb-adapter.git",
 			"/mnt/data1/activerecord-cockroachdb-adapter",
@@ -141,7 +134,6 @@ func registerActiveRecord(r *testRegistry) {
 		t.Status("installing bundler")
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"installing bundler",
@@ -153,7 +145,6 @@ func registerActiveRecord(r *testRegistry) {
 		t.Status("installing gems")
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"installing gems",
@@ -173,17 +164,17 @@ func registerActiveRecord(r *testRegistry) {
 			status = fmt.Sprintf("Running cockroach version %s, using blocklist %s, using ignorelist %s",
 				version, blocklistName, ignorelistName)
 		}
-		t.L().Printf("%s", status)
+		c.l.Printf("%s", status)
 
 		t.Status("running activerecord test suite")
 		// Note that this is expected to return an error, since the test suite
 		// will fail. And it is safe to swallow it here.
-		rawResults, _ := c.RunWithBuffer(ctx, t.L(), node,
+		rawResults, _ := c.RunWithBuffer(ctx, t.l, node,
 			`cd /mnt/data1/activerecord-cockroachdb-adapter/ && `+
 				`sudo RUBYOPT="-W0" TESTOPTS="-v" bundle exec rake test`,
 		)
 
-		t.L().Printf("Test Results:\n%s", rawResults)
+		c.l.Printf("Test Results:\n%s", rawResults)
 
 		// Find all the failed and errored tests.
 		results := newORMTestsResults()
@@ -238,12 +229,14 @@ func registerActiveRecord(r *testRegistry) {
 		)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		MinVersion: "v20.2.0",
 		Name:       "activerecord",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		Tags:       []string{`default`, `orm`},
-		Run:        runActiveRecord,
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			runActiveRecord(ctx, t, c)
+		},
 	})
 }

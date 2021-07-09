@@ -15,19 +15,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-func runRestart(ctx context.Context, t test.Test, c cluster.Cluster, downDuration time.Duration) {
-	crdbNodes := c.Range(1, c.Spec().NodeCount)
+func runRestart(ctx context.Context, t *test, c *cluster, downDuration time.Duration) {
+	crdbNodes := c.Range(1, c.spec.NodeCount)
 	workloadNode := c.Node(1)
 	const restartNode = 3
 
 	t.Status("installing cockroach")
 	c.Put(ctx, cockroach, "./cockroach", crdbNodes)
-	c.Start(ctx, crdbNodes, startArgs(`--args=--vmodule=raft_log_queue=3`))
+	c.Start(ctx, t, crdbNodes, startArgs(`--args=--vmodule=raft_log_queue=3`))
 
 	// We don't really need tpcc, we just need a good amount of traffic and a good
 	// amount of data.
@@ -62,7 +60,7 @@ func runRestart(ctx context.Context, t test.Test, c cluster.Cluster, downDuratio
 
 	// Bring it back up and make sure it can serve a query within a reasonable
 	// time limit. For now, less time than it was down for.
-	c.Start(ctx, c.Node(restartNode))
+	c.Start(ctx, t, c.Node(restartNode))
 
 	// Dialing the formerly down node may still be prevented by the circuit breaker
 	// for a short moment (seconds) after n3 restarts. If it happens, the COUNT(*)
@@ -80,18 +78,18 @@ func runRestart(ctx context.Context, t test.Test, c cluster.Cluster, downDuratio
 	if took := timeutil.Since(start); took > downDuration {
 		t.Fatalf(`expected to recover within %s took %s`, downDuration, took)
 	} else {
-		t.L().Printf(`connecting and query finished in %s`, took)
+		c.l.Printf(`connecting and query finished in %s`, took)
 	}
 }
 
 func registerRestart(r *testRegistry) {
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    "restart/down-for-2m",
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(3),
+		Cluster: makeClusterSpec(3),
 		// "cockroach workload is only in 19.1+"
 		MinVersion: "v19.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runRestart(ctx, t, c, 2*time.Minute)
 		},
 	})

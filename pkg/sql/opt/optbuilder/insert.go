@@ -615,7 +615,7 @@ func (mb *mutationBuilder) buildInputForInsert(inScope *scope, inputRows *tree.S
 		checkDatumTypeFitsColumnType(mb.tab.Column(ord), inCol.typ)
 
 		// Assign name of input column.
-		inCol.name = scopeColName(tree.Name(mb.md.ColumnMeta(mb.targetColList[i]).Alias))
+		inCol.name = tree.Name(mb.md.ColumnMeta(mb.targetColList[i]).Alias)
 
 		// Record the ID of the column that contains the value to be inserted
 		// into the corresponding target table column.
@@ -652,11 +652,16 @@ func (mb *mutationBuilder) buildInsert(returning tree.ReturningExprs) {
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
+	// Keep a reference to the scope before the check constraint columns are
+	// projected. We use this scope when projecting the partial index put
+	// columns because the check columns are not in-scope for those expressions.
+	preCheckScope := mb.outScope
+
 	// Add any check constraint boolean columns to the input.
 	mb.addCheckConstraintCols()
 
 	// Project partial index PUT boolean columns.
-	mb.projectPartialIndexPutCols()
+	mb.projectPartialIndexPutCols(preCheckScope)
 
 	mb.buildUniqueChecksForInsert()
 
@@ -864,6 +869,11 @@ func (mb *mutationBuilder) buildUpsert(returning tree.ReturningExprs) {
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
+	// Keep a reference to the scope before the check constraint columns are
+	// projected. We use this scope when projecting the partial index put
+	// columns because the check columns are not in-scope for those expressions.
+	preCheckScope := mb.outScope
+
 	// Add any check constraint boolean columns to the input.
 	mb.addCheckConstraintCols()
 
@@ -880,9 +890,9 @@ func (mb *mutationBuilder) buildUpsert(returning tree.ReturningExprs) {
 	// mb.fetchScope will be nil. Therefore, we only project partial index
 	// PUT columns.
 	if mb.needExistingRows() {
-		mb.projectPartialIndexPutAndDelCols()
+		mb.projectPartialIndexPutAndDelCols(preCheckScope, mb.fetchScope)
 	} else {
-		mb.projectPartialIndexPutCols()
+		mb.projectPartialIndexPutCols(preCheckScope)
 	}
 
 	mb.buildUniqueChecksForUpsert()
@@ -960,11 +970,12 @@ func (mb *mutationBuilder) projectUpsertColumns() {
 			mb.b.factory.ConstructVariable(updateColID),
 		)
 
-		name := scopeColName(col.ColName()).WithMetadataName(
-			fmt.Sprintf("upsert_%s", mb.tab.Column(i).ColName()),
-		)
+		alias := fmt.Sprintf("upsert_%s", mb.tab.Column(i).ColName())
 		typ := mb.md.ColumnMeta(insertColID).Type
-		scopeCol := mb.b.synthesizeColumn(projectionsScope, name, typ, nil /* expr */, caseExpr)
+		scopeCol := mb.b.synthesizeColumn(projectionsScope, alias, typ, nil /* expr */, caseExpr)
+
+		// Assign name to synthesized column.
+		scopeCol.name = col.ColName()
 
 		// Update the scope ordinals for the update columns that are involved in
 		// the Upsert. The new columns will be used by the Upsert operator in place

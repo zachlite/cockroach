@@ -154,6 +154,20 @@ type Key int
 const (
 	_ Key = iota - 1 // want first named one to start at zero
 
+	// v20.1 versions.
+	//
+	// NamespaceTableWithSchemas is
+	// https://github.com/cockroachdb/cockroach/pull/41977
+	//
+	// It represents the migration to a new system.namespace table that has an
+	// added parentSchemaID column. In addition to the new column, the table is
+	// no longer in the system config range -- implying it is no longer gossiped.
+	NamespaceTableWithSchemas
+
+	// TODO(irfansharif): The versions above can/should all be removed. They
+	// were orinally introduced in v20.1. There are inflight PRs to do so
+	// (#57155, #57156, #57158).
+
 	// v20.2 versions.
 	//
 	// Start20_2 demarcates work towards CockroachDB v20.2.
@@ -165,9 +179,22 @@ const (
 	Start20_2
 	// GeospatialType enables the use of Geospatial features.
 	GeospatialType
+	// Enums enables the use of ENUM types.
+	Enums
+	// RangefeedLeases is the enablement of leases uses rangefeeds. All nodes
+	// with this versions will have rangefeeds enabled on all system ranges.
+	// Once this version is finalized, gossip is not needed in the schema lease
+	// subsystem. Nodes which start with this version finalized will not pass
+	// gossip to the SQL layer.
+	RangefeedLeases
 	// AlterColumnTypeGeneral enables the use of alter column type for
 	// conversions that require the column data to be rewritten.
 	AlterColumnTypeGeneral
+	// AlterSystemJobsTable is a version which modified system.jobs table.
+	AlterSystemJobsAddCreatedByColumns
+	// AddScheduledJobsTable is a version which adds system.scheduled_jobs
+	// table.
+	AddScheduledJobsTable
 	// UserDefinedSchemas enables the creation of user defined schemas.
 	UserDefinedSchemas
 	// NoOriginFKIndexes allows for foreign keys to no longer need indexes on
@@ -181,10 +208,16 @@ const (
 	// AbortSpanBytes adds a field to MVCCStats
 	// (MVCCStats.AbortSpanBytes) that tracks the size of a range's abort span.
 	AbortSpanBytes
+	// AlterSystemJobsTableAddLeaseColumn is a version which modified
+	// system.jobs table.
+	AlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable
 	// MaterializedViews enables the use of materialized views.
 	MaterializedViews
 	// Box2DType enables the use of the box2d type.
 	Box2DType
+	// UpdateScheduledJobsSchema drops schedule_changes and adds
+	// schedule_status.
+	UpdateScheduledJobsSchema
 	// CreateLoginPrivilege is when CREATELOGIN/NOCREATELOGIN are introduced.
 	//
 	// It represents adding authn principal management via CREATELOGIN role
@@ -267,6 +300,11 @@ const (
 	// ChangefeedsSupportPrimaryIndexChanges is used to indicate that all
 	// nodes support detecting and restarting on primary index changes.
 	ChangefeedsSupportPrimaryIndexChanges
+	// NamespaceTableWithSchemasMigration is for the migration which copies
+	// entries from the old namespace table to the new one (with schema IDs).
+	// Previously this was implemented as an async task with no guarantees about
+	// completion.
+	NamespaceTableWithSchemasMigration
 	// ForeignKeyRepresentationMigration is used to ensure that all no table
 	// descriptors use the pre-19.2 foreign key migration.
 	ForeignKeyRepresentationMigration
@@ -281,31 +319,6 @@ const (
 	ProtectedTsMetaPrivilegesMigration
 	// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
 	V21_1
-
-	// v21.1PLUS release. This is a special v21.1.x release with extra changes,
-	// used internally for the 2021 serverless offering.
-	Start21_1PLUS
-
-	// v21.2 versions.
-	//
-	// Start21_2 demarcates work towards CockroachDB v21.2.
-	Start21_2
-	// JoinTokensTable adds the system table for storing ephemeral generated
-	// join tokens.
-	JoinTokensTable
-	// AcquisitionTypeInLeaseHistory augments the per-replica lease history to
-	// include the type of lease acquisition event that resulted in that replica's
-	// current lease.
-	AcquisitionTypeInLeaseHistory
-	// SerializeViewUDTs serializes user defined types used in views to allow
-	// for renaming of the referenced types.
-	SerializeViewUDTs
-	// ExpressionIndexes is when expression indexes are supported.
-	ExpressionIndexes
-	// DeleteDeprecatedNamespaceTableDescriptorMigration deletes the descriptor at ID=2.
-	DeleteDeprecatedNamespaceTableDescriptorMigration
-	// FixDescriptors is for the migration to fix all descriptors.
-	FixDescriptors
 
 	// Step (1): Add new versions here.
 )
@@ -327,7 +340,11 @@ const (
 // Such clusters would need to be wiped. As a result, do not bump the major or
 // minor version until we are absolutely sure that no new migrations will need
 // to be added (i.e., when cutting the final release candidate).
-var versionsSingleton = keyedVersions{
+var versionsSingleton = keyedVersions([]keyedVersion{
+	{
+		Key:     NamespaceTableWithSchemas,
+		Version: roachpb.Version{Major: 19, Minor: 2, Internal: 5},
+	},
 
 	// v20.2 versions.
 	{
@@ -339,8 +356,24 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 2},
 	},
 	{
+		Key:     Enums,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 3},
+	},
+	{
+		Key:     RangefeedLeases,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 4},
+	},
+	{
 		Key:     AlterColumnTypeGeneral,
 		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 5},
+	},
+	{
+		Key:     AlterSystemJobsAddCreatedByColumns,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 6},
+	},
+	{
+		Key:     AddScheduledJobsTable,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 7},
 	},
 	{
 		Key:     UserDefinedSchemas,
@@ -363,12 +396,20 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 14},
 	},
 	{
+		Key:     AlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 15},
+	},
+	{
 		Key:     MaterializedViews,
 		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 16},
 	},
 	{
 		Key:     Box2DType,
 		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 17},
+	},
+	{
+		Key:     UpdateScheduledJobsSchema,
+		Version: roachpb.Version{Major: 20, Minor: 1, Internal: 19},
 	},
 	{
 		Key:     CreateLoginPrivilege,
@@ -461,6 +502,10 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 38},
 	},
 	{
+		Key:     NamespaceTableWithSchemasMigration,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 40},
+	},
+	{
 		Key:     ForeignKeyRepresentationMigration,
 		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 42},
 	},
@@ -477,55 +522,11 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 48},
 	},
 	{
-		// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
 		Key:     V21_1,
 		Version: roachpb.Version{Major: 21, Minor: 1},
 	},
-
-	// v21.1PLUS version. This is a special v21.1.x release with extra changes,
-	// used internally for the 2021 Serverless offering.
-	//
-	// Any v21.1PLUS change that needs a migration will have a v21.2 version on
-	// master but a v21.1PLUS version on the v21.1PLUS branch.
-	{
-		Key: Start21_1PLUS,
-		// The Internal version starts out at 14 for historic reasons: at the time
-		// this was added, v21.2 versions were already defined up to 12.
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 14},
-	},
-
-	// v21.2 versions.
-	{
-		Key:     Start21_2,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 102},
-	},
-	{
-		Key:     JoinTokensTable,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 104},
-	},
-	{
-		Key:     AcquisitionTypeInLeaseHistory,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 106},
-	},
-	{
-		Key:     SerializeViewUDTs,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 108},
-	},
-	{
-		Key:     ExpressionIndexes,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 110},
-	},
-	{
-		Key:     DeleteDeprecatedNamespaceTableDescriptorMigration,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 112},
-	},
-	{
-		Key:     FixDescriptors,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 114},
-	},
-
 	// Step (2): Add new versions here.
-}
+})
 
 // TODO(irfansharif): clusterversion.binary{,MinimumSupported}Version
 // feels out of place. A "cluster version" and a "binary version" are two

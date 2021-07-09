@@ -14,9 +14,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var pgxReleaseTagRegex = regexp.MustCompile(`^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
@@ -27,25 +24,23 @@ var supportedPGXTag = "v4.11.0"
 func registerPgx(r *testRegistry) {
 	runPgx := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+		version, err := fetchCockroachVersion(ctx, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if err := alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		); err != nil {
+		if err := alterZoneConfigAndClusterSettings(ctx, version, c, node[0]); err != nil {
 			t.Fatal(err)
 		}
 
@@ -55,7 +50,7 @@ func registerPgx(r *testRegistry) {
 		t.Status("getting pgx")
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/jackc/pgx.git",
 			"/mnt/data1/pgx",
@@ -65,16 +60,16 @@ func registerPgx(r *testRegistry) {
 			t.Fatal(err)
 		}
 
-		latestTag, err := repeatGetLatestTag(ctx, t, "jackc", "pgx", pgxReleaseTagRegex)
+		latestTag, err := repeatGetLatestTag(ctx, c, "jackc", "pgx", pgxReleaseTagRegex)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest jackc/pgx release is %s.", latestTag)
-		t.L().Printf("Supported release is %s.", supportedPGXTag)
+		c.l.Printf("Latest jackc/pgx release is %s.", latestTag)
+		c.l.Printf("Supported release is %s.", supportedPGXTag)
 
 		t.Status("installing go-junit-report")
 		if err := repeatRunE(
-			ctx, t, c, node, "install go-junit-report", "go get -u github.com/jstemmer/go-junit-report",
+			ctx, c, node, "install go-junit-report", "go get -u github.com/jstemmer/go-junit-report",
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +84,7 @@ func registerPgx(r *testRegistry) {
 			status = fmt.Sprintf("Running cockroach version %s, using blocklist %s, using ignorelist %s",
 				version, blocklistName, ignorelistName)
 		}
-		t.L().Printf("%s", status)
+		c.l.Printf("%s", status)
 
 		t.Status("setting up test db")
 		db, err := c.ConnE(ctx, node[0])
@@ -112,7 +107,7 @@ func registerPgx(r *testRegistry) {
 		t.Status("running pgx test suite")
 		// Running the test suite is expected to error out, so swallow the error.
 		xmlResults, _ := repeatRunWithBuffer(
-			ctx, c, t, node,
+			ctx, c, t.l, node,
 			"run pgx test suite",
 			"cd /mnt/data1/pgx && "+
 				"PGX_TEST_DATABASE='postgresql://root:@localhost:26257/pgx_test' go test -v 2>&1 | "+
@@ -126,13 +121,13 @@ func registerPgx(r *testRegistry) {
 		)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "pgx",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		MinVersion: "v20.2.0",
 		Tags:       []string{`default`, `driver`},
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runPgx(ctx, t, c)
 		},
 	})

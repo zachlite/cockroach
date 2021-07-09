@@ -385,7 +385,7 @@ injected error
 
 rollback x
 ----
-(*pgerror.withCandidateCode) unimplemented: cannot rollback to savepoint after error
+(*telemetrykeys.withTelemetry) unimplemented: cannot rollback to savepoint after error
 
 subtest end
 

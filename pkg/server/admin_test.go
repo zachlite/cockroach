@@ -562,6 +562,10 @@ func TestRangeCount(t *testing.T) {
 		}
 
 		sysDBMap["public.descriptor"] = 1
+		// public.namespace resolves to public.namespace2, which means that we
+		// double count public.namespace2's range in this test. Set it to 0 to remove
+		// this double counting.
+		sysDBMap["public.namespace"] = 0
 	}
 	var systemTableRangeCount int64
 	for _, n := range sysDBMap {
@@ -733,10 +737,6 @@ func TestAdminAPITableDetails(t *testing.T) {
 
 			// Verify indexes.
 			expIndexes := []serverpb.TableDetailsResponse_Index{
-				{Name: "primary", Column: "string_default", Direction: "N/A", Unique: true, Seq: 5, Storing: true},
-				{Name: "primary", Column: "default2", Direction: "N/A", Unique: true, Seq: 4, Storing: true},
-				{Name: "primary", Column: "nulls_not_allowed", Direction: "N/A", Unique: true, Seq: 3, Storing: true},
-				{Name: "primary", Column: "nulls_allowed", Direction: "N/A", Unique: true, Seq: 2, Storing: true},
 				{Name: "primary", Column: "rowid", Direction: "ASC", Unique: true, Seq: 1},
 				{Name: "descidx", Column: "rowid", Direction: "ASC", Unique: false, Seq: 2, Implicit: true},
 				{Name: "descidx", Column: "default2", Direction: "DESC", Unique: false, Seq: 1},

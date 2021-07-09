@@ -16,16 +16,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/stretchr/testify/require"
 )
 
-func runResetQuorum(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runResetQuorum(ctx context.Context, t *test, c *cluster) {
 	skip.WithIssue(t, 58165)
-	args := func(attr string) option.Option {
+	args := func(attr string) option {
 		return startArgs(
 			"-a=--attrs="+attr,
 			"--env=COCKROACH_SCAN_MAX_IDLE_TIME=5ms", // speed up replication
@@ -34,7 +31,7 @@ func runResetQuorum(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// n1-n5 will be in locality A, n6-n8 in B. We'll pin a single table to B and
 	// let the the nodes in B fail permanently.
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx, c.Range(1, 5), args("A"))
+	c.Start(ctx, t, c.Range(1, 5), args("A"))
 	db := c.Conn(ctx, 1)
 	defer db.Close()
 
@@ -48,7 +45,7 @@ func runResetQuorum(ctx context.Context, t test.Test, c cluster.Cluster) {
 	}
 	require.NoError(t, rows.Err())
 
-	c.Start(ctx, c.Range(6, 8), args("B"))
+	c.Start(ctx, t, c.Range(6, 8), args("B"))
 	_, err = db.Exec(`CREATE TABLE lostrange (id INT PRIMARY KEY, v STRING)`)
 	require.NoError(t, err)
 
@@ -93,7 +90,7 @@ OR
 		if buf.Len() == 0 {
 			break
 		}
-		t.L().Printf("still waiting:\n" + buf.String())
+		c.l.Printf("still waiting:\n" + buf.String())
 		time.Sleep(5 * time.Second)
 	}
 
@@ -108,7 +105,7 @@ OR
 	// Should not be able to read from it even (generously) after a lease timeout.
 	_, err = db.QueryContext(ctx, `SET statement_timeout = '15s'; SELECT * FROM lostrange;`)
 	require.Error(t, err)
-	t.L().Printf("table is now unavailable, as planned")
+	c.l.Printf("table is now unavailable, as planned")
 
 	const nodeID = 1 // where to put the replica, matches node number in roachtest
 	for rangeID := range lostRangeIDs {

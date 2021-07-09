@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var typeORMReleaseTagRegex = regexp.MustCompile(`^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
@@ -27,49 +24,46 @@ var supportedTypeORMRelease = "0.2.32"
 func registerTypeORM(r *testRegistry) {
 	runTypeORM := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+		version, err := fetchCockroachVersion(ctx, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if err := alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		); err != nil {
+		if err := alterZoneConfigAndClusterSettings(ctx, version, c, node[0]); err != nil {
 			t.Fatal(err)
 		}
 
 		t.Status("cloning TypeORM and installing prerequisites")
-		latestTag, err := repeatGetLatestTag(ctx, t, "typeorm", "typeorm", typeORMReleaseTagRegex)
+		latestTag, err := repeatGetLatestTag(ctx, c, "typeorm", "typeorm", typeORMReleaseTagRegex)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest TypeORM release is %s.", latestTag)
-		t.L().Printf("Supported TypeORM release is %s.", supportedTypeORMRelease)
+		c.l.Printf("Latest TypeORM release is %s.", latestTag)
+		c.l.Printf("Supported TypeORM release is %s.", supportedTypeORMRelease)
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update apt-get", `sudo apt-get update`,
+			ctx, c, node, "update apt-get", `sudo apt-get -qq update`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install dependencies",
-			`sudo apt-get install make python3 libpq-dev python-dev gcc g++ `+
+			`sudo apt-get -qq install make python3 libpq-dev python-dev gcc g++ `+
 				`software-properties-common build-essential`,
 		); err != nil {
 			t.Fatal(err)
@@ -77,7 +71,6 @@ func registerTypeORM(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"add nodesource repository",
@@ -87,26 +80,26 @@ func registerTypeORM(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "install nodejs and npm", `sudo apt-get install nodejs`,
+			ctx, c, node, "install nodejs and npm", `sudo apt-get -qq install nodejs`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update npm", `sudo npm i -g npm`,
+			ctx, c, node, "update npm", `sudo npm i -g npm`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "remove old TypeORM", `sudo rm -rf /mnt/data1/typeorm`,
+			ctx, c, node, "remove old TypeORM", `sudo rm -rf /mnt/data1/typeorm`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/typeorm/typeorm.git",
 			"/mnt/data1/typeorm",
@@ -120,7 +113,6 @@ func registerTypeORM(r *testRegistry) {
 		// it will return a file not found error.
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"configuring tests for cockroach only",
@@ -131,7 +123,6 @@ func registerTypeORM(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"patch TypeORM test script to run all tests even on failure",
@@ -142,7 +133,6 @@ func registerTypeORM(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"building TypeORM",
@@ -152,11 +142,11 @@ func registerTypeORM(r *testRegistry) {
 		}
 
 		t.Status("running TypeORM test suite - approx 12 mins")
-		rawResults, err := c.RunWithBuffer(ctx, t.L(), node,
+		rawResults, err := c.RunWithBuffer(ctx, t.l, node,
 			`cd /mnt/data1/typeorm/ && sudo npm test --unsafe-perm=true --allow-root`,
 		)
 		rawResultsStr := string(rawResults)
-		t.L().Printf("Test Results: %s", rawResultsStr)
+		c.l.Printf("Test Results: %s", rawResultsStr)
 		if err != nil {
 			// Ignore the failure discussed in #38180 and in
 			// https://github.com/typeorm/typeorm/pull/4298.
@@ -172,13 +162,13 @@ func registerTypeORM(r *testRegistry) {
 		}
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "typeorm",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		MinVersion: "v20.2.0",
 		Tags:       []string{`default`, `orm`},
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTypeORM(ctx, t, c)
 		},
 	})

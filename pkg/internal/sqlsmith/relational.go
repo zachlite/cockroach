@@ -11,7 +11,6 @@
 package sqlsmith
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -288,12 +287,6 @@ func makeMergeJoinExpr(s *Smither, _ colRefs, forJoin bool) (tree.TableExpr, col
 					leftColElem := leftIdx.Columns[len(cols)]
 					leftCol := s.columns[leftTableName.Table][leftColElem.Column]
 					if rightColElem.Direction != leftColElem.Direction {
-						break
-					}
-					if leftCol == nil || rightCol == nil {
-						// TODO(yuzefovich): there are some cases here where
-						// column references are nil, but we aren't yet sure
-						// why. Rather than panicking, just break.
 						break
 					}
 					if !tree.MustBeStaticallyKnownType(rightCol.Type).Equivalent(tree.MustBeStaticallyKnownType(leftCol.Type)) {
@@ -898,10 +891,8 @@ func makeBegin(s *Smither) (tree.Statement, bool) {
 	return &tree.BeginTransaction{}, true
 }
 
-const letters = "abcdefghijklmnopqrstuvwxyz"
-
 func makeSavepoint(s *Smither) (tree.Statement, bool) {
-	savepointName := randgen.RandString(s.rnd, s.d9(), letters)
+	savepointName := s.randString(s.d9(), letters)
 	s.activeSavepoints = append(s.activeSavepoints, savepointName)
 	return &tree.Savepoint{Name: tree.Name(savepointName)}, true
 }
@@ -953,14 +944,13 @@ func (s *Smither) makeInsert(refs colRefs) (*tree.Insert, *tableRef, bool) {
 
 	// Use DEFAULT VALUES only sometimes. A nil insert.Rows.Select indicates
 	// DEFAULT VALUES.
-	if s.d9() == 1 {
-		return insert, tableRef, true
-	}
-
-	// Use a simple INSERT...VALUES statement some of the time.
-	if s.coin() {
+	if s.d9() != 1 {
+		var desiredTypes []*types.T
 		var names tree.NameList
-		var row tree.Exprs
+
+		unnamed := s.coin()
+
+		// Grab some subset of the columns of the table to attempt to insert into.
 		for _, c := range tableRef.Columns {
 			// We *must* write a column if it's writable and non-nullable.
 			// We *can* write a column if it's writable and nullable.
@@ -968,60 +958,22 @@ func (s *Smither) makeInsert(refs colRefs) (*tree.Insert, *tableRef, bool) {
 			if c.Computed.Computed || c.Hidden {
 				continue
 			}
-			notNull := c.Nullable.Nullability == tree.NotNull
-			if notNull || s.coin() {
+			if unnamed || c.Nullable.Nullability == tree.NotNull || s.coin() {
+				desiredTypes = append(desiredTypes, tree.MustBeStaticallyKnownType(c.Type))
 				names = append(names, c.Name)
-				row = append(row, randgen.RandDatum(s.rnd, tree.MustBeStaticallyKnownType(c.Type), !notNull))
 			}
 		}
-
-		if len(names) == 0 {
+		if len(desiredTypes) == 0 {
 			return nil, nil, false
 		}
-
-		insert.Columns = names
-		insert.Rows = &tree.Select{
-			Select: &tree.ValuesClause{
-				Rows: []tree.Exprs{row},
-			},
+		if !unnamed {
+			insert.Columns = names
 		}
-		return insert, tableRef, true
-	}
 
-	// Otherwise, build a more complex INSERT with a SELECT.
-	// Grab some subset of the columns of the table to attempt to insert into.
-	var desiredTypes []*types.T
-	var names tree.NameList
-	unnamed := s.coin()
-	for _, c := range tableRef.Columns {
-		// We *must* write a column if it's writable and non-nullable.
-		// We *can* write a column if it's writable and nullable.
-		// We *cannot* write a column if it's computed or hidden.
-		//
-		// We include all non-computed, non-hidden columns if we are building an
-		// unnamed insert. If a column is omitted in an unnamed insert, it would
-		// be unlikely that column types of the insert values match the column
-		// types of the table.
-		if c.Computed.Computed || c.Hidden {
-			continue
+		insert.Rows, _, ok = s.makeSelect(desiredTypes, refs)
+		if !ok {
+			return nil, nil, false
 		}
-		if unnamed || c.Nullable.Nullability == tree.NotNull || s.coin() {
-			names = append(names, c.Name)
-			desiredTypes = append(desiredTypes, tree.MustBeStaticallyKnownType(c.Type))
-		}
-	}
-
-	if len(desiredTypes) == 0 {
-		return nil, nil, false
-	}
-
-	if !unnamed {
-		insert.Columns = names
-	}
-
-	insert.Rows, _, ok = s.makeSelect(desiredTypes, refs)
-	if !ok {
-		return nil, nil, false
 	}
 
 	return insert, tableRef, true

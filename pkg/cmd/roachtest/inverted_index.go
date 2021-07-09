@@ -15,17 +15,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func registerSchemaChangeInvertedIndex(r *testRegistry) {
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    "schemachange/invertedindex",
 		Owner:   OwnerSQLSchema,
-		Cluster: r.makeClusterSpec(5),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(5),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runSchemaChangeInvertedIndex(ctx, t, c)
 		},
 	})
@@ -33,13 +31,13 @@ func registerSchemaChangeInvertedIndex(r *testRegistry) {
 
 // runInvertedIndex tests the correctness and performance of building an
 // inverted index on randomly generated JSON data (from the JSON workload).
-func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cluster) {
-	crdbNodes := c.Range(1, c.Spec().NodeCount-1)
-	workloadNode := c.Node(c.Spec().NodeCount)
+func runSchemaChangeInvertedIndex(ctx context.Context, t *test, c *cluster) {
+	crdbNodes := c.Range(1, c.spec.NodeCount-1)
+	workloadNode := c.Node(c.spec.NodeCount)
 
 	c.Put(ctx, cockroach, "./cockroach", crdbNodes)
 	c.Put(ctx, workload, "./workload", workloadNode)
-	c.Start(ctx, crdbNodes)
+	c.Start(ctx, t, crdbNodes)
 
 	cmdInit := "./workload init json {pgurl:1}"
 	c.Run(ctx, workloadNode, cmdInit)
@@ -47,7 +45,7 @@ func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cl
 	// On a 4-node GCE cluster with the standard configuration, this generates ~10 million rows
 	initialDataDuration := time.Minute * 20
 	indexDuration := time.Hour
-	if c.IsLocal() {
+	if c.isLocal() {
 		initialDataDuration = time.Minute
 		indexDuration = time.Minute
 	}
@@ -58,7 +56,7 @@ func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cl
 
 	cmdWrite := fmt.Sprintf(
 		"./workload run json --read-percent=0 --duration %s {pgurl:1-%d} --batch 1000 --sequential",
-		initialDataDuration.String(), c.Spec().NodeCount-1,
+		initialDataDuration.String(), c.spec.NodeCount-1,
 	)
 	m.Go(func(ctx context.Context) error {
 		c.Run(ctx, workloadNode, cmdWrite)
@@ -70,7 +68,7 @@ func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cl
 		if err := db.QueryRow(`SELECT count(*) FROM json.j`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("finished writing %d rows to table", count)
+		t.l.Printf("finished writing %d rows to table", count)
 
 		return nil
 	})
@@ -82,7 +80,7 @@ func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cl
 
 	cmdWriteAndRead := fmt.Sprintf(
 		"./workload run json --read-percent=50 --duration %s {pgurl:1-%d} --sequential",
-		indexDuration.String(), c.Spec().NodeCount-1,
+		indexDuration.String(), c.spec.NodeCount-1,
 	)
 	m.Go(func(ctx context.Context) error {
 		c.Run(ctx, workloadNode, cmdWriteAndRead)
@@ -93,12 +91,12 @@ func runSchemaChangeInvertedIndex(ctx context.Context, t test.Test, c cluster.Cl
 		db := c.Conn(ctx, 1)
 		defer db.Close()
 
-		t.L().Printf("creating index")
+		t.l.Printf("creating index")
 		start := timeutil.Now()
 		if _, err := db.Exec(`CREATE INVERTED INDEX ON json.j (v)`); err != nil {
 			return err
 		}
-		t.L().Printf("index was created, took %v", timeutil.Since(start))
+		t.l.Printf("index was created, took %v", timeutil.Since(start))
 
 		return nil
 	})

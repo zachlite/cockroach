@@ -14,8 +14,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -42,7 +40,7 @@ type Chaos struct {
 	Timer ChaosTimer
 	// Target is consulted before each chaos event to determine the node(s) which
 	// should be killed.
-	Target func() option.NodeListOption
+	Target func() nodeListOption
 	// Stopper is a channel that the chaos agent listens on. The agent will
 	// terminate cleanly once it receives on the channel.
 	Stopper <-chan time.Time
@@ -54,9 +52,9 @@ type Chaos struct {
 // Runner returns a closure that runs chaos against the given cluster without
 // setting off the monitor. The process returns without an error after the chaos
 // duration.
-func (ch *Chaos) Runner(c cluster.Cluster, m *monitor) func(context.Context) error {
+func (ch *Chaos) Runner(c *cluster, m *monitor) func(context.Context) error {
 	return func(ctx context.Context) (err error) {
-		l, err := m.l.ChildLogger("CHAOS")
+		l, err := c.l.ChildLogger("CHAOS")
 		if err != nil {
 			return err
 		}
@@ -81,16 +79,16 @@ func (ch *Chaos) Runner(c cluster.Cluster, m *monitor) func(context.Context) err
 			period, downTime := ch.Timer.Timing()
 
 			target := ch.Target()
-			m.ExpectDeaths(int32(len(target)))
+			m.ExpectDeath()
 
 			if ch.DrainAndQuit {
 				l.Printf("stopping and draining %v\n", target)
-				if err := c.StopE(ctx, target, stopArgs("--sig=15"), withWorkerAction()); err != nil {
+				if err := c.StopE(ctx, target, stopArgs("--sig=15")); err != nil {
 					return errors.Wrapf(err, "could not stop node %s", target)
 				}
 			} else {
 				l.Printf("killing %v\n", target)
-				if err := c.StopE(ctx, target, withWorkerAction()); err != nil {
+				if err := c.StopE(ctx, target); err != nil {
 					return errors.Wrapf(err, "could not stop node %s", target)
 				}
 			}
@@ -100,7 +98,7 @@ func (ch *Chaos) Runner(c cluster.Cluster, m *monitor) func(context.Context) err
 				// NB: the roachtest harness checks that at the end of the test,
 				// all nodes that have data also have a running process.
 				l.Printf("restarting %v (chaos is done)\n", target)
-				if err := c.StartE(ctx, target, withWorkerAction()); err != nil {
+				if err := c.StartE(ctx, target); err != nil {
 					return errors.Wrapf(err, "could not restart node %s", target)
 				}
 				return nil
@@ -112,7 +110,7 @@ func (ch *Chaos) Runner(c cluster.Cluster, m *monitor) func(context.Context) err
 				// already canceled.
 				tCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				if err := c.StartE(tCtx, target, withWorkerAction()); err != nil {
+				if err := c.StartE(tCtx, target); err != nil {
 					return errors.Wrapf(err, "could not restart node %s", target)
 				}
 				return ctx.Err()
@@ -120,7 +118,7 @@ func (ch *Chaos) Runner(c cluster.Cluster, m *monitor) func(context.Context) err
 			}
 			l.Printf("restarting %v after %s of downtime\n", target, downTime)
 			t.Reset(period)
-			if err := c.StartE(ctx, target, withWorkerAction()); err != nil {
+			if err := c.StartE(ctx, target); err != nil {
 				return errors.Wrapf(err, "could not restart node %s", target)
 			}
 		}

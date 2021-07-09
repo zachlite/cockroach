@@ -13,29 +13,23 @@ package main
 import (
 	"context"
 	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 func registerLedger(r *testRegistry) {
 	const nodes = 6
-	// NB: us-central1-a has been causing issues, see:
-	// https://github.com/cockroachdb/cockroach/issues/66184
-	const azs = "us-central1-f,us-central1-b,us-central1-c"
-	r.Add(TestSpec{
+	const azs = "us-central1-a,us-central1-b,us-central1-c"
+	r.Add(testSpec{
 		Name:    fmt.Sprintf("ledger/nodes=%d/multi-az", nodes),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(nodes+1, spec.CPU(16), spec.Geo(), spec.Zones(azs)),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(nodes+1, cpu(16), geo(), zones(azs)),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			roachNodes := c.Range(1, nodes)
 			gatewayNodes := c.Range(1, nodes/3)
 			loadNode := c.Node(nodes + 1)
 
 			c.Put(ctx, cockroach, "./cockroach", roachNodes)
 			c.Put(ctx, workload, "./workload", loadNode)
-			c.Start(ctx, roachNodes)
+			c.Start(ctx, t, roachNodes)
 
 			t.Status("running workload")
 			m := newMonitor(ctx, c, roachNodes)

@@ -21,9 +21,6 @@ import (
 	"time"
 
 	toxiproxy "github.com/Shopify/toxiproxy/client"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/errors"
 )
 
@@ -75,8 +72,7 @@ until nc -z localhost $1; do sleep 0.1; echo "waiting for toxiproxy-server..."; 
 // A ToxiCluster wraps a cluster and sets it up for use with toxiproxy.
 // See Toxify() for details.
 type ToxiCluster struct {
-	t test.Test
-	cluster.Cluster
+	*cluster
 	toxClients map[int]*toxiproxy.Client
 	toxProxies map[int]*toxiproxy.Proxy
 }
@@ -87,9 +83,7 @@ type ToxiCluster struct {
 // wraps the original cluster, whose returned addresses will all go through
 // toxiproxy. The upstream (i.e. non-intercepted) addresses are accessible via
 // getters prefixed with "External".
-func Toxify(
-	ctx context.Context, t test.Test, c cluster.Cluster, node option.NodeListOption,
-) (*ToxiCluster, error) {
+func Toxify(ctx context.Context, c *cluster, node nodeListOption) (*ToxiCluster, error) {
 	toxiURL := "https://github.com/Shopify/toxiproxy/releases/download/v2.1.4/toxiproxy-server-linux-amd64"
 	if local && runtime.GOOS == "darwin" {
 		toxiURL = "https://github.com/Shopify/toxiproxy/releases/download/v2.1.4/toxiproxy-server-darwin-amd64"
@@ -114,8 +108,7 @@ func Toxify(
 	}
 
 	tc := &ToxiCluster{
-		t:          t,
-		Cluster:    c,
+		cluster:    c,
 		toxClients: make(map[int]*toxiproxy.Client),
 		toxProxies: make(map[int]*toxiproxy.Proxy),
 	}
@@ -128,14 +121,7 @@ func Toxify(
 			return nil, errors.Wrap(err, "toxify")
 		}
 
-		externalAddrs, err := c.ExternalAddr(ctx, n)
-		if err != nil {
-			return nil, err
-		}
-		externalAddr, port, err := addrToHostPort(externalAddrs[0])
-		if err != nil {
-			return nil, err
-		}
+		externalAddr, port := addrToHostPort(c, c.ExternalAddr(ctx, n)[0])
 		tc.toxClients[i] = toxiproxy.NewClient(fmt.Sprintf("http://%s:%d", externalAddr, toxPort))
 		proxy, err := tc.toxClients[i].CreateProxy("cockroach", fmt.Sprintf(":%d", tc.poisonedPort(port)), fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
@@ -157,74 +143,53 @@ func (tc *ToxiCluster) poisonedPort(port int) int {
 func (tc *ToxiCluster) Proxy(i int) *toxiproxy.Proxy {
 	proxy, found := tc.toxProxies[i]
 	if !found {
-		tc.t.Fatalf("proxy for node %d not found", i)
+		tc.cluster.t.Fatalf("proxy for node %d not found", i)
 	}
 	return proxy
 }
 
 // ExternalAddr gives the external host:port of the node(s), bypassing the
 // toxiproxy interception.
-func (tc *ToxiCluster) ExternalAddr(
-	ctx context.Context, node option.NodeListOption,
-) ([]string, error) {
-	return tc.Cluster.ExternalAddr(ctx, node)
+func (tc *ToxiCluster) ExternalAddr(ctx context.Context, node nodeListOption) []string {
+	return tc.cluster.ExternalAddr(ctx, node)
 }
 
 // PoisonedExternalAddr gives the external host:port of the toxiproxy process
 // for the given nodes (i.e. the connection will be affected by toxics).
-func (tc *ToxiCluster) PoisonedExternalAddr(
-	ctx context.Context, node option.NodeListOption,
-) ([]string, error) {
+func (tc *ToxiCluster) PoisonedExternalAddr(ctx context.Context, node nodeListOption) []string {
 	var out []string
 
-	extAddrs, err := tc.ExternalAddr(ctx, node)
-	if err != nil {
-		return nil, err
-	}
+	extAddrs := tc.ExternalAddr(ctx, node)
 	for _, addr := range extAddrs {
-		host, port, err := addrToHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
+		host, port := addrToHostPort(tc.cluster, addr)
 		out = append(out, fmt.Sprintf("%s:%d", host, tc.poisonedPort(port)))
 	}
-	return out, nil
+	return out
 }
 
 // PoisonedPGAddr gives a connection to the given node that passes through toxiproxy.
-func (tc *ToxiCluster) PoisonedPGAddr(
-	ctx context.Context, node option.NodeListOption,
-) ([]string, error) {
+func (tc *ToxiCluster) PoisonedPGAddr(ctx context.Context, node nodeListOption) []string {
 	var out []string
 
-	urls, err := tc.ExternalPGUrl(ctx, node)
-	if err != nil {
-		return nil, err
-	}
-	exts, err := tc.PoisonedExternalAddr(ctx, node)
-	if err != nil {
-		return nil, err
-	}
+	urls := tc.ExternalPGUrl(ctx, node)
+	exts := tc.PoisonedExternalAddr(ctx, node)
 	for i, s := range urls {
 		u, err := url.Parse(s)
 		if err != nil {
-			tc.t.Fatal(err)
+			tc.cluster.t.Fatal(err)
 		}
 		u.Host = exts[i]
 		out = append(out, u.String())
 	}
-	return out, nil
+	return out
 }
 
 // PoisonedConn returns an SQL connection to the specified node through toxiproxy.
 func (tc *ToxiCluster) PoisonedConn(ctx context.Context, node int) *gosql.DB {
-	urls, err := tc.PoisonedPGAddr(ctx, tc.Cluster.Node(node))
+	url := tc.PoisonedPGAddr(ctx, tc.cluster.Node(node))[0]
+	db, err := gosql.Open("postgres", url)
 	if err != nil {
-		tc.t.Fatal(err)
-	}
-	db, err := gosql.Open("postgres", urls[0])
-	if err != nil {
-		tc.t.Fatal(err)
+		tc.cluster.t.Fatal(err)
 	}
 	return db
 }
@@ -240,26 +205,19 @@ var measureRE = regexp.MustCompile(`real[^0-9]+([0-9.]+)`)
 // of `./cockroach sql`. This is simplistic and does not perform proper
 // escaping. It's not useful for anything but simple sanity checks.
 func (tc *ToxiCluster) Measure(ctx context.Context, fromNode int, stmt string) time.Duration {
-	externalAddrs, err := tc.ExternalAddr(ctx, tc.Node(fromNode))
+	_, port := addrToHostPort(tc.cluster, tc.ExternalAddr(ctx, tc.Node(fromNode))[0])
+	b, err := tc.cluster.RunWithBuffer(ctx, tc.cluster.l, tc.cluster.Node(fromNode), "time", "-p", "./cockroach", "sql", "--insecure", "--port", strconv.Itoa(port), "-e", "'"+stmt+"'")
+	tc.cluster.l.Printf("%s\n", b)
 	if err != nil {
-		tc.t.Fatal(err)
-	}
-	_, port, err := addrToHostPort(externalAddrs[0])
-	if err != nil {
-		tc.t.Fatal(err)
-	}
-	b, err := tc.Cluster.RunWithBuffer(ctx, tc.t.L(), tc.Cluster.Node(fromNode), "time", "-p", "./cockroach", "sql", "--insecure", "--port", strconv.Itoa(port), "-e", "'"+stmt+"'")
-	tc.t.L().Printf("%s\n", b)
-	if err != nil {
-		tc.t.Fatal(err)
+		tc.cluster.t.Fatal(err)
 	}
 	matches := measureRE.FindSubmatch(b)
 	if len(matches) != 2 {
-		tc.t.Fatalf("unable to extract duration from output: %s", b)
+		tc.cluster.t.Fatalf("unable to extract duration from output: %s", b)
 	}
 	f, err := strconv.ParseFloat(string(matches[1]), 64)
 	if err != nil {
-		tc.t.Fatalf("unable to parse %s as float: %s", b, err)
+		tc.cluster.t.Fatalf("unable to parse %s as float: %s", b, err)
 	}
 	return time.Duration(f * 1e9)
 }

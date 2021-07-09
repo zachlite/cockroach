@@ -17,9 +17,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var sqlAlchemyResultRegex = regexp.MustCompile(`^(?P<test>test.*::.*::[^ \[\]]*(?:\[.*])?) (?P<result>\w+)\s+\[.+]$`)
@@ -40,54 +37,54 @@ var alembicReleaseTagRegex = regexp.MustCompile(`^rel_(?P<major>\d+)_(?P<minor>\
 // node.
 
 func registerSQLAlchemy(r *testRegistry) {
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "sqlalchemy",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		MinVersion: "v20.2.0",
 		Tags:       []string{`default`, `orm`},
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runSQLAlchemy(ctx, t, c)
 		},
 	})
 }
 
-func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
-	if c.IsLocal() {
+func runSQLAlchemy(ctx context.Context, t *test, c *cluster) {
+	if c.isLocal() {
 		t.Fatal("cannot be run in local mode")
 	}
 
 	node := c.Node(1)
 
 	t.Status("cloning sqlalchemy and installing prerequisites")
-	latestTag, err := repeatGetLatestTag(ctx, t, "sqlalchemy", "sqlalchemy", sqlAlchemyReleaseTagRegex)
+	latestTag, err := repeatGetLatestTag(ctx, c, "sqlalchemy", "sqlalchemy", sqlAlchemyReleaseTagRegex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.L().Printf("Latest sqlalchemy release is %s.", latestTag)
-	t.L().Printf("Supported sqlalchemy release is %s.", supportedSQLAlchemyTag)
+	c.l.Printf("Latest sqlalchemy release is %s.", latestTag)
+	c.l.Printf("Supported sqlalchemy release is %s.", supportedSQLAlchemyTag)
 
-	latestAlembicTag, err := repeatGetLatestTag(ctx, t, "sqlalchemy", "alembic", alembicReleaseTagRegex)
+	latestAlembicTag, err := repeatGetLatestTag(ctx, c, "sqlalchemy", "alembic", alembicReleaseTagRegex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.L().Printf("Latest alembic release is %s.", latestAlembicTag)
-	t.L().Printf("Supported alembic release is %s.", supportedAlembicTag)
+	t.l.Printf("Latest alembic release is %s.", latestAlembicTag)
+	t.l.Printf("Supported alembic release is %s.", supportedAlembicTag)
 
-	if err := repeatRunE(ctx, t, c, node, "update apt-get", `
+	if err := repeatRunE(ctx, c, node, "update apt-get", `
 		sudo add-apt-repository ppa:deadsnakes/ppa &&
 		sudo apt-get -qq update
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "install dependencies", `
+	if err := repeatRunE(ctx, c, node, "install dependencies", `
 		sudo apt-get -qq install make python3.7 libpq-dev python3.7-dev gcc python3-setuptools python-setuptools build-essential
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "set python3.7 as default", `
+	if err := repeatRunE(ctx, c, node, "set python3.7 as default", `
 		sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.5 1
 		sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 2
 		sudo update-alternatives --config python3
@@ -95,70 +92,70 @@ func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "install pip", `
+	if err := repeatRunE(ctx, c, node, "install pip", `
 		curl https://bootstrap.pypa.io/get-pip.py | sudo -H python3.7
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "install pytest", `
+	if err := repeatRunE(ctx, c, node, "install pytest", `
 		sudo pip3 install --upgrade --force-reinstall setuptools pytest==6.0.1 pytest-xdist psycopg2
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "remove old sqlalchemy-cockroachdb", `
+	if err := repeatRunE(ctx, c, node, "remove old sqlalchemy-cockroachdb", `
 		sudo rm -rf /mnt/data1/sqlalchemy-cockroachdb
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatGitCloneE(ctx, t, c,
+	if err := repeatGitCloneE(ctx, t.l, c,
 		"https://github.com/cockroachdb/sqlalchemy-cockroachdb.git", "/mnt/data1/sqlalchemy-cockroachdb",
 		"master", node); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Status("installing sqlalchemy-cockroachdb")
-	if err := repeatRunE(ctx, t, c, node, "installing sqlalchemy=cockroachdb", `
+	if err := repeatRunE(ctx, c, node, "installing sqlalchemy=cockroachdb", `
 		cd /mnt/data1/sqlalchemy-cockroachdb && sudo pip3 install .
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "remove old sqlalchemy-alembic", `
+	if err := repeatRunE(ctx, c, node, "remove old sqlalchemy-alembic", `
 		sudo rm -rf /mnt/data1/sqlalchemy-alembic
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatGitCloneE(ctx, t, c,
+	if err := repeatGitCloneE(ctx, t.l, c,
 		"https://github.com/sqlalchemy/alembic", "/mnt/data1/sqlalchemy-alembic",
 		"master", node); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Status("installing alembic from github")
-	if err := repeatRunE(ctx, t, c, node, "installing sqlalchemy-alembic", `
+	if err := repeatRunE(ctx, c, node, "installing sqlalchemy-alembic", `
 		cd /mnt/data1/sqlalchemy-alembic && sudo pip3 install .
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatRunE(ctx, t, c, node, "remove old sqlalchemy", `
+	if err := repeatRunE(ctx, c, node, "remove old sqlalchemy", `
 		sudo rm -rf /mnt/data1/sqlalchemy
 	`); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := repeatGitCloneE(ctx, t, c,
+	if err := repeatGitCloneE(ctx, t.l, c,
 		"https://github.com/sqlalchemy/sqlalchemy.git", "/mnt/data1/sqlalchemy",
 		supportedSQLAlchemyTag, node); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Status("building sqlalchemy")
-	if err := repeatRunE(ctx, t, c, node, "building sqlalchemy", `
+	if err := repeatRunE(ctx, c, node, "building sqlalchemy", `
 		cd /mnt/data1/sqlalchemy && python3 setup.py build
 	`); err != nil {
 		t.Fatal(err)
@@ -168,16 +165,14 @@ func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	t.Status("setting up cockroach")
 	c.Put(ctx, cockroach, "./cockroach", c.All())
-	c.Start(ctx, c.All())
+	c.Start(ctx, t, c.All())
 
-	version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+	version, err := fetchCockroachVersion(ctx, c, node[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := alterZoneConfigAndClusterSettings(
-		ctx, version, c, node[0], nil,
-	); err != nil {
+	if err := alterZoneConfigAndClusterSettings(ctx, version, c, node[0]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,20 +180,20 @@ func runSQLAlchemy(ctx context.Context, t test.Test, c cluster.Cluster) {
 	if expectedFailures == nil {
 		t.Fatalf("No sqlalchemy blocklist defined for cockroach version %s", version)
 	}
-	t.L().Printf("Running cockroach version %s, using blocklist %s, using ignoredlist %s",
+	c.l.Printf("Running cockroach version %s, using blocklist %s, using ignoredlist %s",
 		version, blocklistName, ignoredlistName)
 
 	t.Status("running sqlalchemy test suite")
 	// Note that this is expected to return an error, since the test suite
 	// will fail. And it is safe to swallow it here.
-	rawResults, _ := c.RunWithBuffer(ctx, t.L(), node,
+	rawResults, _ := c.RunWithBuffer(ctx, t.l, node,
 		`cd /mnt/data1/sqlalchemy-cockroachdb/ && pytest --maxfail=0 \
 		--dburi=cockroachdb://root@localhost:26257/defaultdb?sslmode=disable \
 		test/test_suite_sqlalchemy.py
 	`)
 
 	t.Status("collating the test results")
-	t.L().Printf("Test Results: %s", rawResults)
+	c.l.Printf("Test Results: %s", rawResults)
 
 	// Find all the failed and errored tests.
 	results := newORMTestsResults()

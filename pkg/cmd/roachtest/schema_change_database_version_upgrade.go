@@ -15,9 +15,6 @@ import (
 	gosql "database/sql"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
@@ -32,39 +29,19 @@ func registerSchemaChangeDatabaseVersionUpgrade(r *testRegistry) {
 	// 2. Ability to use ALTER DATABASE ... CONVERT TO SCHEMA WITH PARENT on
 	//    databases created in 20.1.
 	// TODO (lucy): Remove this test in 21.1.
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "schemachange/database-version-upgrade",
 		Owner:      OwnerSQLSchema,
 		MinVersion: "v20.2.0",
-		Cluster:    r.makeClusterSpec(3),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			runSchemaChangeDatabaseVersionUpgrade(ctx, t, c, *t.BuildVersion())
+		Cluster:    makeClusterSpec(3),
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			runSchemaChangeDatabaseVersionUpgrade(ctx, t, c, r.buildVersion)
 		},
 	})
 }
 
-func createDBStep(node int, name string) versionStep {
-	return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-		db := u.conn(ctx, t, node)
-		_, err := db.ExecContext(ctx,
-			fmt.Sprintf(`CREATE DATABASE %s`, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func uploadAndStart(nodes option.NodeListOption, v string) versionStep {
-	return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-		// Put and start the binary.
-		args := u.uploadVersion(ctx, t, nodes, v)
-		// NB: can't start sequentially since cluster already bootstrapped.
-		u.c.Start(ctx, nodes, args, startArgsDontEncrypt, roachprodArgOption{"--sequential=false"})
-	}
-}
-
 func runSchemaChangeDatabaseVersionUpgrade(
-	ctx context.Context, t test.Test, c cluster.Cluster, buildVersion version.Version,
+	ctx context.Context, t *test, c *cluster, buildVersion version.Version,
 ) {
 	// An empty string means that the cockroach binary specified by flag
 	// `cockroach` will be used.
@@ -75,8 +52,8 @@ func runSchemaChangeDatabaseVersionUpgrade(
 	}
 
 	createDatabaseWithTableStep := func(dbName string) versionStep {
-		t.L().Printf("creating database %s", dbName)
-		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+		t.l.Printf("creating database %s", dbName)
+		return func(ctx context.Context, t *test, u *versionUpgradeTest) {
 			db := u.conn(ctx, t, 1)
 			_, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE DATABASE %s; CREATE TABLE %s.t(a INT)`, dbName, dbName))
 			require.NoError(t, err)
@@ -106,8 +83,8 @@ func runSchemaChangeDatabaseVersionUpgrade(
 	// Rename the database, drop it, and create a new database with the original
 	// name.
 	runSchemaChangesStep := func(dbName string) versionStep {
-		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-			t.L().Printf("running schema changes on %s", dbName)
+		return func(ctx context.Context, t *test, u *versionUpgradeTest) {
+			t.l.Printf("running schema changes on %s", dbName)
 			newDbName := dbName + "_new_name"
 			dbNode1 := u.conn(ctx, t, 1)
 			dbNode2 := u.conn(ctx, t, 2)
@@ -164,33 +141,33 @@ func runSchemaChangeDatabaseVersionUpgrade(
 		}
 	}
 
-	createParentDatabaseStep := func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-		t.L().Printf("creating parent database")
+	createParentDatabaseStep := func(ctx context.Context, t *test, u *versionUpgradeTest) {
+		t.l.Printf("creating parent database")
 		db := u.conn(ctx, t, 1)
 		_, err := db.ExecContext(ctx, `CREATE DATABASE new_parent_db`)
 		require.NoError(t, err)
 	}
 
 	reparentDatabaseStep := func(dbName string) versionStep {
-		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+		return func(ctx context.Context, t *test, u *versionUpgradeTest) {
 			db := u.conn(ctx, t, 1)
-			t.L().Printf("reparenting database %s", dbName)
+			t.l.Printf("reparenting database %s", dbName)
 			_, err = db.ExecContext(ctx, fmt.Sprintf(`ALTER DATABASE %s CONVERT TO SCHEMA WITH PARENT new_parent_db;`, dbName))
 			require.NoError(t, err)
 		}
 	}
 
-	validationStep := func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-		t.L().Printf("validating")
-		buf, err := c.RunWithBuffer(ctx, t.L(), c.Node(1),
+	validationStep := func(ctx context.Context, t *test, u *versionUpgradeTest) {
+		t.l.Printf("validating")
+		buf, err := c.RunWithBuffer(ctx, t.l, c.Node(1),
 			[]string{"./cockroach debug doctor cluster", "--url {pgurl:1}"}...)
 		require.NoError(t, err)
-		t.L().Printf("%s", buf)
+		t.l.Printf("%s", buf)
 	}
 
 	interactWithReparentedSchemaStep := func(schemaName string) versionStep {
-		return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-			t.L().Printf("running schema changes on %s", schemaName)
+		return func(ctx context.Context, t *test, u *versionUpgradeTest) {
+			t.l.Printf("running schema changes on %s", schemaName)
 			db := u.conn(ctx, t, 1)
 
 			_, err = db.ExecContext(ctx, `USE new_parent_db`)
@@ -211,8 +188,8 @@ func runSchemaChangeDatabaseVersionUpgrade(
 		}
 	}
 
-	dropDatabaseCascadeStep := func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-		t.L().Printf("dropping parent database")
+	dropDatabaseCascadeStep := func(ctx context.Context, t *test, u *versionUpgradeTest) {
+		t.l.Printf("dropping parent database")
 		db := u.conn(ctx, t, 1)
 		_, err = db.ExecContext(ctx, `
 USE defaultdb;

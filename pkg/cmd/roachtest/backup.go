@@ -12,23 +12,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
-	cloudstorage "github.com/cockroachdb/cockroach/pkg/storage/cloud"
-	"github.com/cockroachdb/cockroach/pkg/storage/cloud/amazon"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
-	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/errors"
 )
 
@@ -51,12 +43,10 @@ const (
 	rows3GiB   = rows30GiB / 10
 )
 
-func importBankDataSplit(
-	ctx context.Context, rows, ranges int, _ test.Test, c cluster.Cluster,
-) string {
-	dest := c.Name()
+func importBankDataSplit(ctx context.Context, rows, ranges int, t *test, c *cluster) string {
+	dest := c.name
 	// Randomize starting with encryption-at-rest enabled.
-	c.EncryptAtRandom(true)
+	c.encryptAtRandom = true
 
 	if local {
 		dest += fmt.Sprintf("%d", timeutil.Now().UnixNano())
@@ -67,7 +57,7 @@ func importBankDataSplit(
 
 	// NB: starting the cluster creates the logs dir as a side effect,
 	// needed below.
-	c.Start(ctx)
+	c.Start(ctx, t)
 	c.Run(ctx, c.All(), `./workload csv-server --port=8081 &> logs/workload-csv-server.log < /dev/null &`)
 	time.Sleep(time.Second) // wait for csv server to open listener
 
@@ -81,15 +71,15 @@ func importBankDataSplit(
 	return dest
 }
 
-func importBankData(ctx context.Context, rows int, t test.Test, c cluster.Cluster) string {
+func importBankData(ctx context.Context, rows int, t *test, c *cluster) string {
 	return importBankDataSplit(ctx, rows, 0 /* ranges */, t, c)
 }
 
 func registerBackupNodeShutdown(r *testRegistry) {
 	// backupNodeRestartSpec runs a backup and randomly shuts down a node during
 	// the backup.
-	backupNodeRestartSpec := r.makeClusterSpec(4)
-	loadBackupData := func(ctx context.Context, t test.Test, c cluster.Cluster) string {
+	backupNodeRestartSpec := makeClusterSpec(4)
+	loadBackupData := func(ctx context.Context, t *test, c *cluster) string {
 		// This aught to be enough since this isn't a performance test.
 		rows := rows15GiB
 		if local {
@@ -100,17 +90,17 @@ func registerBackupNodeShutdown(r *testRegistry) {
 		return importBankData(ctx, rows, t, c)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("backup/nodeShutdown/worker/%s", backupNodeRestartSpec),
 		Owner:      OwnerBulkIO,
 		Cluster:    backupNodeRestartSpec,
 		MinVersion: "v21.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 3
 			dest := loadBackupData(ctx, t, c)
 			backupQuery := `BACKUP bank.bank TO 'nodelocal://1/` + dest + `' WITH DETACHED`
-			startBackup := func(c cluster.Cluster) (jobID string, err error) {
+			startBackup := func(c *cluster) (jobID string, err error) {
 				gatewayDB := c.Conn(ctx, gatewayNode)
 				defer gatewayDB.Close()
 
@@ -121,17 +111,17 @@ func registerBackupNodeShutdown(r *testRegistry) {
 			jobSurvivesNodeShutdown(ctx, t, c, nodeToShutdown, startBackup)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("backup/nodeShutdown/coordinator/%s", backupNodeRestartSpec),
 		Owner:      OwnerBulkIO,
 		Cluster:    backupNodeRestartSpec,
 		MinVersion: "v21.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 2
 			dest := loadBackupData(ctx, t, c)
 			backupQuery := `BACKUP bank.bank TO 'nodelocal://1/` + dest + `' WITH DETACHED`
-			startBackup := func(c cluster.Cluster) (jobID string, err error) {
+			startBackup := func(c *cluster) (jobID string, err error) {
 				gatewayDB := c.Conn(ctx, gatewayNode)
 				defer gatewayDB.Close()
 
@@ -145,87 +135,39 @@ func registerBackupNodeShutdown(r *testRegistry) {
 
 }
 
-// initBulkJobPerfArtifacts registers a histogram, creates a performance
-// artifact directory and returns a method that when invoked records a tick.
-func initBulkJobPerfArtifacts(ctx context.Context, testName string, timeout time.Duration) func() {
-	// Register a named histogram to track the total time the bulk job took.
-	// Roachperf uses this information to display information about this
-	// roachtest.
-	reg := histogram.NewRegistry(
-		timeout,
-		histogram.MockWorkloadName,
-	)
-	reg.GetHandle().Get(testName)
-
-	// Create the stats file where the roachtest will write perf artifacts.
-	// We probably don't want to fail the roachtest if we are unable to
-	// collect perf stats.
-	statsFile := perfArtifactsDir + "/stats.json"
-	err := os.MkdirAll(filepath.Dir(statsFile), 0755)
-	if err != nil {
-		log.Errorf(ctx, "%s failed to create perf artifacts directory %s: %s", testName,
-			statsFile, err.Error())
-	}
-	jsonF, err := os.Create(statsFile)
-	if err != nil {
-		log.Errorf(ctx, "%s failed to create perf artifacts directory %s: %s", testName,
-			statsFile, err.Error())
-	}
-	jsonEnc := json.NewEncoder(jsonF)
-	tick := func() {
-		reg.Tick(func(tick histogram.Tick) {
-			_ = jsonEnc.Encode(tick.Snapshot())
-		})
-	}
-	return tick
-}
-
 func registerBackup(r *testRegistry) {
 
-	backup2TBSpec := r.makeClusterSpec(10)
-	r.Add(TestSpec{
+	backup2TBSpec := makeClusterSpec(10)
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("backup/2TB/%s", backup2TBSpec),
 		Owner:      OwnerBulkIO,
 		Cluster:    backup2TBSpec,
 		MinVersion: "v2.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			rows := rows2TiB
 			if local {
 				rows = 100
 			}
 			dest := importBankData(ctx, rows, t, c)
-			tick := initBulkJobPerfArtifacts(ctx, "backup/2TB", 2*time.Hour)
-
 			m := newMonitor(ctx, c)
 			m.Go(func(ctx context.Context) error {
 				t.Status(`running backup`)
-				// Tick once before starting the backup, and once after to capture the
-				// total elapsed time. This is used by roachperf to compute and display
-				// the average MB/sec per node.
-				tick()
 				c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "
-				BACKUP bank.bank TO 'gs://cockroachdb-backup-testing/`+dest+`?AUTH=implicit'"`)
-				tick()
-
-				// Upload the perf artifacts to any one of the nodes so that the test
-				// runner copies it into an appropriate directory path.
-				if err := c.PutE(ctx, t.L(), perfArtifactsDir, perfArtifactsDir, c.Node(1)); err != nil {
-					log.Errorf(ctx, "failed to upload perf artifacts to node: %s", err.Error())
-				}
+				BACKUP bank.bank TO 'gs://cockroachdb-backup-testing/`+dest+`'"`)
 				return nil
 			})
 			m.Wait()
 		},
 	})
 
-	KMSSpec := r.makeClusterSpec(3)
-	r.Add(TestSpec{
+	KMSSpec := makeClusterSpec(3)
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("backup/KMS/%s", KMSSpec.String()),
 		Owner:      OwnerBulkIO,
 		Cluster:    KMSSpec,
 		MinVersion: "v20.2.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if cloud == spec.GCE {
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			if cloud == gce {
 				t.Skip("backupKMS roachtest is only configured to run on AWS", "")
 			}
 
@@ -338,17 +280,17 @@ func registerBackup(r *testRegistry) {
 	// backupTPCC continuously runs TPCC, takes a full backup after some time,
 	// and incremental after more time. It then restores the two backups and
 	// verifies them with a fingerprint.
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    `backupTPCC`,
 		Owner:   OwnerBulkIO,
-		Cluster: r.makeClusterSpec(3),
+		Cluster: makeClusterSpec(3),
 		Timeout: 1 * time.Hour,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			// Randomize starting with encryption-at-rest enabled.
-			c.EncryptAtRandom(true)
+			c.encryptAtRandom = true
 			c.Put(ctx, cockroach, "./cockroach")
 			c.Put(ctx, workload, "./workload")
-			c.Start(ctx)
+			c.Start(ctx, t)
 			conn := c.Conn(ctx, 1)
 
 			duration := 5 * time.Minute
@@ -357,10 +299,10 @@ func registerBackup(r *testRegistry) {
 			}
 			warehouses := 10
 
-			backupDir := "gs://cockroachdb-backup-testing/" + c.Name() + "?AUTH=implicit"
+			backupDir := "gs://cockroachdb-backup-testing/" + c.name
 			// Use inter-node file sharing on 20.1+.
-			if t.BuildVersion().AtLeast(version.MustParse(`v20.1.0-0`)) {
-				backupDir = "nodelocal://1/" + c.Name()
+			if r.buildVersion.AtLeast(version.MustParse(`v20.1.0-0`)) {
+				backupDir = "nodelocal://1/" + c.name
 			}
 			fullDir := backupDir + "/full"
 			incDir := backupDir + "/inc"
@@ -368,9 +310,9 @@ func registerBackup(r *testRegistry) {
 			t.Status(`workload initialization`)
 			cmd := []string{fmt.Sprintf(
 				"./workload init tpcc --warehouses=%d {pgurl:1-%d}",
-				warehouses, c.Spec().NodeCount,
+				warehouses, c.spec.NodeCount,
 			)}
-			if !t.BuildVersion().AtLeast(version.MustParse("v20.2.0")) {
+			if !t.buildVersion.AtLeast(version.MustParse("v20.2.0")) {
 				cmd = append(cmd, "--deprecated-fk-indexes")
 			}
 			c.Run(ctx, c.Node(1), cmd...)
@@ -393,7 +335,7 @@ func registerBackup(r *testRegistry) {
 			go func() {
 				cmd := fmt.Sprintf(
 					"./workload run tpcc --warehouses=%d {pgurl:1-%d}",
-					warehouses, c.Spec().NodeCount,
+					warehouses, c.spec.NodeCount,
 				)
 
 				cmdDone <- c.RunE(ctx, c.Node(1), cmd)
@@ -549,9 +491,9 @@ func registerBackup(r *testRegistry) {
 func getAWSKMSURI(regionEnvVariable, keyIDEnvVariable string) (string, error) {
 	q := make(url.Values)
 	expect := map[string]string{
-		"AWS_ACCESS_KEY_ID":     amazon.AWSAccessKeyParam,
-		"AWS_SECRET_ACCESS_KEY": amazon.AWSSecretParam,
-		regionEnvVariable:       amazon.KMSRegionParam,
+		"AWS_ACCESS_KEY_ID":     cloudimpl.AWSAccessKeyParam,
+		"AWS_SECRET_ACCESS_KEY": cloudimpl.AWSSecretParam,
+		regionEnvVariable:       cloudimpl.KMSRegionParam,
 	}
 	for env, param := range expect {
 		v := os.Getenv(env)
@@ -568,7 +510,7 @@ func getAWSKMSURI(regionEnvVariable, keyIDEnvVariable string) (string, error) {
 	}
 
 	// Set AUTH to implicit
-	q.Add(cloudstorage.AuthParam, cloudstorage.AuthParamSpecified)
+	q.Add(cloudimpl.AuthParam, cloudimpl.AuthParamSpecified)
 	correctURI := fmt.Sprintf("aws:///%s?%s", keyARN, q.Encode())
 
 	return correctURI, nil

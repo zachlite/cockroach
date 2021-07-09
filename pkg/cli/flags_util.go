@@ -26,8 +26,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/keysutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble/vfs"
 	humanize "github.com/dustin/go-humanize"
+	"github.com/elastic/gosigar"
 	"github.com/spf13/pflag"
 )
 
@@ -132,9 +132,9 @@ func (s *statementsValue) Set(value string) error {
 type dumpMode int
 
 const (
-	dumpBoth dumpMode = iota
+	//dumpNone is set by default and will error if it is set.
+	dumpNone dumpMode = iota
 	dumpSchemaOnly
-	dumpDataOnly
 )
 
 // Type implements the pflag.Value interface.
@@ -143,12 +143,8 @@ func (m *dumpMode) Type() string { return "string" }
 // String implements the pflag.Value interface.
 func (m *dumpMode) String() string {
 	switch *m {
-	case dumpBoth:
-		return "both"
 	case dumpSchemaOnly:
 		return "schema"
-	case dumpDataOnly:
-		return "data"
 	}
 	return ""
 }
@@ -156,12 +152,9 @@ func (m *dumpMode) String() string {
 // Set implements the pflag.Value interface.
 func (m *dumpMode) Set(s string) error {
 	switch s {
-	case "both":
-		*m = dumpBoth
 	case "schema":
 		*m = dumpSchemaOnly
-	case "data":
-		*m = dumpDataOnly
+
 	default:
 		return fmt.Errorf("invalid value for --dump-mode: %s", s)
 	}
@@ -423,15 +416,15 @@ func memoryPercentResolver(percent int) (int64, error) {
 //
 // An error is returned if dir does not exist.
 func diskPercentResolverFactory(dir string) (percentResolverFunc, error) {
-	du, err := vfs.Default.GetDiskUsage(dir)
-	if err != nil {
+	fileSystemUsage := gosigar.FileSystemUsage{}
+	if err := fileSystemUsage.Get(dir); err != nil {
 		return nil, err
 	}
-	if du.TotalBytes > math.MaxInt64 {
+	if fileSystemUsage.Total > math.MaxInt64 {
 		return nil, fmt.Errorf("unsupported disk size %s, max supported size is %s",
-			humanize.IBytes(du.TotalBytes), humanizeutil.IBytes(math.MaxInt64))
+			humanize.IBytes(fileSystemUsage.Total), humanizeutil.IBytes(math.MaxInt64))
 	}
-	deviceCapacity := int64(du.TotalBytes)
+	deviceCapacity := int64(fileSystemUsage.Total)
 
 	return func(percent int) (int64, error) {
 		return (deviceCapacity * int64(percent)) / 100, nil

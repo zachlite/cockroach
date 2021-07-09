@@ -15,10 +15,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 )
@@ -26,38 +22,38 @@ import (
 func registerClearRange(r *testRegistry) {
 	for _, checks := range []bool{true, false} {
 		checks := checks
-		r.Add(TestSpec{
+		r.Add(testSpec{
 			Name:  fmt.Sprintf(`clearrange/checks=%t`, checks),
 			Owner: OwnerStorage,
 			// 5h for import, 90 for the test. The import should take closer
 			// to <3:30h but it varies.
 			Timeout:    5*time.Hour + 90*time.Minute,
 			MinVersion: "v19.1.0",
-			Cluster:    r.makeClusterSpec(10, spec.CPU(16)),
-			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			Cluster:    makeClusterSpec(10, cpu(16)),
+			Run: func(ctx context.Context, t *test, c *cluster) {
 				runClearRange(ctx, t, c, checks)
 			},
 		})
 	}
 }
 
-func runClearRange(ctx context.Context, t test.Test, c cluster.Cluster, aggressiveChecks bool) {
+func runClearRange(ctx context.Context, t *test, c *cluster, aggressiveChecks bool) {
 	// Randomize starting with encryption-at-rest enabled.
-	c.EncryptAtRandom(true)
+	c.encryptAtRandom = true
 	c.Put(ctx, cockroach, "./cockroach")
 
 	t.Status("restoring fixture")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	// NB: on a 10 node cluster, this should take well below 3h.
 	tBegin := timeutil.Now()
 	c.Run(ctx, c.Node(1), "./cockroach", "workload", "fixtures", "import", "bank",
 		"--payload-bytes=10240", "--ranges=10", "--rows=65104166", "--seed=4", "--db=bigbank")
-	t.L().Printf("import took %.2fs", timeutil.Since(tBegin).Seconds())
+	c.l.Printf("import took %.2fs", timeutil.Since(tBegin).Seconds())
 	c.Stop(ctx)
 	t.Status()
 
-	var opts []option.Option
+	var opts []option
 	if aggressiveChecks {
 		// Run with an env var that runs a synchronous consistency check after each rebalance and merge.
 		// This slows down merges, so it might hide some races.
@@ -67,7 +63,7 @@ func runClearRange(ctx context.Context, t test.Test, c cluster.Cluster, aggressi
 			"--env", "COCKROACH_CONSISTENCY_AGGRESSIVE=true COCKROACH_ENFORCE_CONSISTENT_STATS=true",
 		))
 	}
-	c.Start(ctx, opts...)
+	c.Start(ctx, t, opts...)
 
 	// Also restore a much smaller table. We'll use it to run queries against
 	// the cluster after having dropped the large table above, verifying that
@@ -75,9 +71,9 @@ func runClearRange(ctx context.Context, t test.Test, c cluster.Cluster, aggressi
 	t.Status(`restoring tiny table`)
 	defer t.WorkerStatus()
 
-	if t.BuildVersion().AtLeast(version.MustParse("v19.2.0")) {
+	if t.buildVersion.AtLeast(version.MustParse("v19.2.0")) {
 		conn := c.Conn(ctx, 1)
-		if _, err := conn.ExecContext(ctx, `SET CLUSTER SETTING kv.bulk_io_write.concurrent_addsstable_requests = 8`); err != nil {
+		if _, err := conn.ExecContext(ctx, `SET CLUSTER SETTING kv.bulk_io_write.concurrent_addsstable_requests = $1`, c.spec.NodeCount); err != nil {
 			t.Fatal(err)
 		}
 		conn.Close()
@@ -119,11 +115,6 @@ func runClearRange(ctx context.Context, t test.Test, c cluster.Cluster, aggressi
 
 	m := newMonitor(ctx, c)
 	m.Go(func(ctx context.Context) error {
-		c.Run(ctx, c.Node(1), `./cockroach workload init kv`)
-		c.Run(ctx, c.All(), `./cockroach workload run kv --concurrency=32 --duration=1h`)
-		return nil
-	})
-	m.Go(func(ctx context.Context) error {
 		conn := c.Conn(ctx, 1)
 		defer conn.Close()
 
@@ -141,7 +132,7 @@ func runClearRange(ctx context.Context, t test.Test, c cluster.Cluster, aggressi
 
 		// Set a low TTL so that the ClearRange-based cleanup mechanism can kick in earlier.
 		// This could also be done after dropping the table.
-		if _, err := conn.ExecContext(ctx, `ALTER TABLE bigbank.bank CONFIGURE ZONE USING gc.ttlseconds = 1200`); err != nil {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE bigbank.bank CONFIGURE ZONE USING gc.ttlseconds = 30`); err != nil {
 			return err
 		}
 

@@ -11,7 +11,7 @@
 package sqlsmith
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -158,9 +158,9 @@ func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
 	if s.vectorizable {
 		nullChance = 0
 	}
-	datum = randgen.RandDatumWithNullChance(s.rnd, typ, nullChance)
+	datum = rowenc.RandDatumWithNullChance(s.rnd, typ, nullChance)
 	if f := datum.ResolvedType().Family(); f != types.UnknownFamily && s.simpleDatums {
-		datum = randgen.RandDatumSimple(s.rnd, typ)
+		datum = rowenc.RandDatumSimple(s.rnd, typ)
 	}
 	s.lock.Unlock()
 
@@ -270,7 +270,7 @@ func makeCompareOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool
 	return typedParen(tree.NewTypedComparisonExpr(op, left, right), typ), true
 }
 
-var vecBinOps = map[tree.BinaryOperatorSymbol]bool{
+var vecBinOps = map[tree.BinaryOperator]bool{
 	tree.Plus:  true,
 	tree.Minus: true,
 	tree.Mult:  true,
@@ -285,13 +285,13 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	}
 	n := s.rnd.Intn(len(ops))
 	op := ops[n]
-	if s.vectorizable && !vecBinOps[op.Operator.Symbol] {
+	if s.vectorizable && !vecBinOps[op.Operator] {
 		return nil, false
 	}
 	if s.postgres {
 		if ignorePostgresBinOps[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}] {
 			return nil, false
@@ -300,7 +300,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	if s.postgres {
 		if transform, needTransform := postgresBinOpTransformations[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}]; needTransform {
 			op.LeftType = transform.leftType
@@ -320,7 +320,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 
 type binOpTriple struct {
 	left  types.Family
-	op    tree.BinaryOperatorSymbol
+	op    tree.BinaryOperator
 	right types.Family
 }
 

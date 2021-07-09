@@ -17,14 +17,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
@@ -34,17 +31,13 @@ import (
 )
 
 func registerGossip(r *testRegistry) {
-	runGossipChaos := func(ctx context.Context, t test.Test, c cluster.Cluster) {
+	runGossipChaos := func(ctx context.Context, t *test, c *cluster) {
 		args := startArgs("--args=--vmodule=*=1")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All(), args)
+		c.Start(ctx, t, c.All(), args)
 		waitForFullReplication(t, c.Conn(ctx, 1))
 
-		// TODO(irfansharif): We could also look at gossip_liveness to determine
-		// cluster membership as seen by each gossip module, and ensure each
-		// node's gossip excludes the dead node and includes all other live
-		// ones.
-		gossipNetworkAccordingTo := func(node int) (network string) {
+		gossipNetwork := func(node int) string {
 			const query = `
 SELECT string_agg(source_id::TEXT || ':' || target_id::TEXT, ',')
   FROM (SELECT * FROM crdb_internal.gossip_network ORDER BY source_id, target_id)
@@ -62,100 +55,72 @@ SELECT string_agg(source_id::TEXT || ':' || target_id::TEXT, ',')
 			return ""
 		}
 
-		nodesInNetworkAccordingTo := func(node int) (nodes []int, network string) {
-			split := func(c rune) bool {
-				return !unicode.IsNumber(c)
-			}
-
-			uniqueNodes := make(map[int]struct{})
-			network = gossipNetworkAccordingTo(node)
-			for _, idStr := range strings.FieldsFunc(network, split) {
-				nodeID, err := strconv.Atoi(idStr)
-				if err != nil {
-					t.Fatal(err)
-				}
-				uniqueNodes[nodeID] = struct{}{}
-			}
-			for node := range uniqueNodes {
-				nodes = append(nodes, node)
-			}
-			sort.Ints(nodes)
-			return nodes, network
-		}
-
-		gossipOK := func(start time.Time, deadNode int) bool {
-			var expLiveNodes []int
-			var expGossipNetwork string
-
-			for i := 1; i <= c.Spec().NodeCount; i++ {
+		var deadNode int
+		gossipOK := func(start time.Time) bool {
+			var expected string
+			var initialized bool
+			for i := 1; i <= c.spec.NodeCount; i++ {
 				if elapsed := timeutil.Since(start); elapsed >= 20*time.Second {
-					t.Fatalf("gossip did not stabilize in %.1fs", deadNode, elapsed.Seconds())
+					t.Fatalf("gossip did not stabilize in %.1fs", elapsed.Seconds())
 				}
 
 				if i == deadNode {
 					continue
 				}
-
-				t.L().Printf("%d: checking gossip\n", i)
-				liveNodes, gossipNetwork := nodesInNetworkAccordingTo(i)
-				for _, id := range liveNodes {
-					if id == deadNode {
-						t.L().Printf("%d: gossip not ok (dead node %d present): %s (%.0fs)\n",
-							i, deadNode, gossipNetwork, timeutil.Since(start).Seconds())
-						return false
+				c.l.Printf("%d: checking gossip\n", i)
+				s := gossipNetwork(i)
+				if !initialized {
+					deadNodeStr := fmt.Sprint(deadNode)
+					split := func(c rune) bool {
+						return !unicode.IsNumber(c)
 					}
-				}
-
-				if len(expLiveNodes) == 0 {
-					expLiveNodes = liveNodes
-					expGossipNetwork = gossipNetwork
+					for _, id := range strings.FieldsFunc(s, split) {
+						if id == deadNodeStr {
+							c.l.Printf("%d: gossip not ok (dead node %d present): %s (%.0fs)\n",
+								i, deadNode, s, timeutil.Since(start).Seconds())
+							return false
+						}
+					}
+					initialized = true
+					expected = s
 					continue
 				}
-
-				if len(liveNodes) != len(expLiveNodes) {
-					t.L().Printf("%d: gossip not ok (mismatched size of network: %s); expected %d, got %d (%.0fs)\n",
-						i, gossipNetwork, len(expLiveNodes), len(liveNodes), timeutil.Since(start).Seconds())
+				if expected != s {
+					c.l.Printf("%d: gossip not ok: %s != %s (%.0fs)\n",
+						i, expected, s, timeutil.Since(start).Seconds())
 					return false
 				}
-
-				for i := range liveNodes {
-					if liveNodes[i] != expLiveNodes[i] {
-						t.L().Printf("%d: gossip not ok (mismatched view of live nodes); expected %s, got %s (%.0fs)\n",
-							i, gossipNetwork, expLiveNodes, liveNodes, timeutil.Since(start).Seconds())
-						return false
-					}
-				}
 			}
-			t.L().Printf("gossip ok: %s (size: %d) (%0.0fs)\n", expGossipNetwork, len(expLiveNodes), timeutil.Since(start).Seconds())
+			c.l.Printf("gossip ok: %s (%0.0fs)\n", expected, timeutil.Since(start).Seconds())
 			return true
 		}
 
-		waitForGossip := func(deadNode int) {
-			t.Status("waiting for gossip to exclude dead node")
+		waitForGossip := func() {
+			t.Status("waiting for gossip to stabilize")
 			start := timeutil.Now()
 			for {
-				if gossipOK(start, deadNode) {
+				if gossipOK(start) {
 					return
 				}
 				time.Sleep(time.Second)
 			}
 		}
 
-		waitForGossip(0)
+		waitForGossip()
 		nodes := c.All()
-		for j := 0; j < 10; j++ {
-			deadNode := nodes.RandNode()[0]
+		for j := 0; j < 100; j++ {
+			deadNode = nodes.randNode()[0]
 			c.Stop(ctx, c.Node(deadNode))
-			waitForGossip(deadNode)
-			c.Start(ctx, c.Node(deadNode), args)
+			waitForGossip()
+			c.Start(ctx, t, c.Node(deadNode), args)
 		}
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    "gossip/chaos/nodes=9",
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(9),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(9),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runGossipChaos(ctx, t, c)
 		},
 	})
@@ -167,13 +132,9 @@ type gossipUtil struct {
 	conn     func(ctx context.Context, i int) *gosql.DB
 }
 
-func newGossipUtil(ctx context.Context, t test.Test, c cluster.Cluster) *gossipUtil {
+func newGossipUtil(ctx context.Context, c *cluster) *gossipUtil {
 	urlMap := make(map[int]string)
-	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, c.All())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, addr := range adminUIAddrs {
+	for i, addr := range c.ExternalAdminUIAddr(ctx, c.All()) {
 		urlMap[i+1] = `http://` + addr
 	}
 	return &gossipUtil{
@@ -188,10 +149,10 @@ type checkGossipFunc func(map[string]gossip.Info) error
 // checkGossip fetches the gossip infoStore from each node and invokes the
 // given function. The test passes if the function returns 0 for every node,
 // retrying for up to the given duration.
-func (g *gossipUtil) check(ctx context.Context, c cluster.Cluster, f checkGossipFunc) error {
+func (g *gossipUtil) check(ctx context.Context, c *cluster, f checkGossipFunc) error {
 	return retry.ForDuration(g.waitTime, func() error {
 		var infoStatus gossip.InfoStatus
-		for i := 1; i <= c.Spec().NodeCount; i++ {
+		for i := 1; i <= c.spec.NodeCount; i++ {
 			url := g.urlMap[i] + `/_status/gossip/local`
 			if err := httputil.GetJSON(http.Client{}, url, &infoStatus); err != nil {
 				return errors.Wrapf(err, "failed to get gossip status from node %d", i)
@@ -238,11 +199,9 @@ func (gossipUtil) hasClusterID(infos map[string]gossip.Info) error {
 	return nil
 }
 
-func (g *gossipUtil) checkConnectedAndFunctional(
-	ctx context.Context, t test.Test, c cluster.Cluster,
-) {
-	t.L().Printf("waiting for gossip to be connected\n")
-	if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount)); err != nil {
+func (g *gossipUtil) checkConnectedAndFunctional(ctx context.Context, t *test, c *cluster) {
+	t.l.Printf("waiting for gossip to be connected\n")
+	if err := g.check(ctx, c, g.hasPeers(c.spec.NodeCount)); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.check(ctx, c, g.hasClusterID); err != nil {
@@ -252,7 +211,7 @@ func (g *gossipUtil) checkConnectedAndFunctional(
 		t.Fatal(err)
 	}
 
-	for i := 1; i <= c.Spec().NodeCount; i++ {
+	for i := 1; i <= c.spec.NodeCount; i++ {
 		db := g.conn(ctx, i)
 		defer db.Close()
 		if i == 1 {
@@ -285,18 +244,18 @@ func (g *gossipUtil) checkConnectedAndFunctional(
 	}
 }
 
-func runGossipPeerings(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runGossipPeerings(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	// Repeatedly restart a random node and verify that all of the nodes are
 	// seeing the gossiped values.
 
-	g := newGossipUtil(ctx, t, c)
+	g := newGossipUtil(ctx, c)
 	deadline := timeutil.Now().Add(time.Minute)
 
 	for i := 1; timeutil.Now().Before(deadline); i++ {
-		if err := g.check(ctx, c, g.hasPeers(c.Spec().NodeCount)); err != nil {
+		if err := g.check(ctx, c, g.hasPeers(c.spec.NodeCount)); err != nil {
 			t.Fatal(err)
 		}
 		if err := g.check(ctx, c, g.hasClusterID); err != nil {
@@ -305,63 +264,63 @@ func runGossipPeerings(ctx context.Context, t test.Test, c cluster.Cluster) {
 		if err := g.check(ctx, c, g.hasSentinel); err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("%d: OK\n", i)
+		t.l.Printf("%d: OK\n", i)
 
 		// Restart a random node.
-		node := c.All().RandNode()
-		t.L().Printf("%d: restarting node %d\n", i, node[0])
+		node := c.All().randNode()
+		t.l.Printf("%d: restarting node %d\n", i, node[0])
 		c.Stop(ctx, node)
-		c.Start(ctx, node)
+		c.Start(ctx, t, node)
 		// Sleep a bit to avoid hitting:
 		// https://github.com/cockroachdb/cockroach/issues/48005
 		time.Sleep(3 * time.Second)
 	}
 }
 
-func runGossipRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runGossipRestart(ctx context.Context, t *test, c *cluster) {
 	t.Skip("skipping flaky acceptance/gossip/restart", "https://github.com/cockroachdb/cockroach/issues/48423")
 
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	// Repeatedly stop and restart a cluster and verify that we can perform basic
 	// operations. This is stressing the gossiping of the first range descriptor
 	// which is required for any node to be able do even the most basic
 	// operations on a cluster.
 
-	g := newGossipUtil(ctx, t, c)
+	g := newGossipUtil(ctx, c)
 	deadline := timeutil.Now().Add(time.Minute)
 
 	for i := 1; timeutil.Now().Before(deadline); i++ {
 		g.checkConnectedAndFunctional(ctx, t, c)
-		t.L().Printf("%d: OK\n", i)
+		t.l.Printf("%d: OK\n", i)
 
-		t.L().Printf("%d: killing all nodes\n", i)
+		t.l.Printf("%d: killing all nodes\n", i)
 		c.Stop(ctx)
 
-		t.L().Printf("%d: restarting all nodes\n", i)
-		c.Start(ctx)
+		t.l.Printf("%d: restarting all nodes\n", i)
+		c.Start(ctx, t)
 	}
 }
 
-func runGossipRestartNodeOne(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runGossipRestartNodeOne(ctx context.Context, t *test, c *cluster) {
 	args := startArgs("--env=COCKROACH_SCAN_MAX_IDLE_TIME=5ms", "--encrypt=false")
 	c.Put(ctx, cockroach, "./cockroach")
 	// Reduce the scan max idle time to speed up evacuation of node 1.
-	c.Start(ctx, racks(c.Spec().NodeCount), args)
+	c.Start(ctx, t, racks(c.spec.NodeCount), args)
 
 	db := c.Conn(ctx, 1)
 	defer db.Close()
 
 	run := func(stmtStr string) {
 		stmt := fmt.Sprintf(stmtStr, "", "=")
-		t.L().Printf("%s\n", stmt)
+		t.l.Printf("%s\n", stmt)
 		_, err := db.ExecContext(ctx, stmt)
 		if err != nil && strings.Contains(err.Error(), "syntax error") {
 			// Pre-2.1 was EXPERIMENTAL.
 			// TODO(knz): Remove this in 2.2.
 			stmt = fmt.Sprintf(stmtStr, "EXPERIMENTAL", "")
-			t.L().Printf("%s\n", stmt)
+			t.l.Printf("%s\n", stmt)
 			_, err = db.ExecContext(ctx, stmt)
 		}
 		if err != nil {
@@ -384,7 +343,7 @@ func runGossipRestartNodeOne(ctx context.Context, t test.Test, c cluster.Cluster
 				count, util.Pluralize(int64(count)))
 			if count != lastNodeCount {
 				lastNodeCount = count
-				t.L().Printf("%s\n", err)
+				t.l.Printf("%s\n", err)
 			}
 			return err
 		}
@@ -424,7 +383,7 @@ SELECT count(replicas)
 			err := errors.Errorf("node 1 still has %d replicas", count)
 			if count != lastReplCount {
 				lastReplCount = count
-				t.L().Printf("%s\n", err)
+				t.l.Printf("%s\n", err)
 			}
 			return err
 		}
@@ -433,7 +392,7 @@ SELECT count(replicas)
 		t.Fatal(err)
 	}
 
-	t.L().Printf("killing all nodes\n")
+	t.l.Printf("killing all nodes\n")
 	c.Stop(ctx)
 
 	// Restart node 1, but have it listen on a different port for internal
@@ -452,22 +411,18 @@ SELECT count(replicas)
 	// Restart the other nodes. These nodes won't be able to talk to node 1 until
 	// node 1 talks to it (they have out of date address info). Node 1 needs
 	// incoming gossip info in order to determine where range 1 is.
-	c.Start(ctx, c.Range(2, c.Spec().NodeCount), args)
+	c.Start(ctx, t, c.Range(2, c.spec.NodeCount), args)
 
 	// We need to override DB connection creation to use the correct port for
 	// node 1. This is more complicated than it should be and a limitation of the
 	// current infrastructure which doesn't know about cockroach nodes started on
 	// non-standard ports.
-	g := newGossipUtil(ctx, t, c)
+	g := newGossipUtil(ctx, c)
 	g.conn = func(ctx context.Context, i int) *gosql.DB {
 		if i != 1 {
 			return c.Conn(ctx, i)
 		}
-		urls, err := c.ExternalPGUrl(ctx, c.Node(1))
-		if err != nil {
-			t.Fatal(err)
-		}
-		url, err := url.Parse(urls[0])
+		url, err := url.Parse(c.ExternalPGUrl(ctx, c.Node(1))[0])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -492,30 +447,27 @@ SELECT count(replicas)
 	// Stop our special snowflake process which won't be recognized by the test
 	// harness, and start it again on the regular.
 	c.Stop(ctx, c.Node(1))
-	c.Start(ctx, c.Node(1))
+	c.Start(ctx, t, c.Node(1))
 }
 
-func runCheckLocalityIPAddress(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runCheckLocalityIPAddress(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
 
-	externalIP, err := c.ExternalIP(ctx, c.Range(1, c.Spec().NodeCount))
-	if err != nil {
-		t.Fatal(err)
-	}
+	externalIP := c.ExternalIP(ctx, c.Range(1, c.spec.NodeCount))
 
-	for i := 1; i <= c.Spec().NodeCount; i++ {
+	for i := 1; i <= c.spec.NodeCount; i++ {
 		if local {
 			externalIP[i-1] = "localhost"
 		}
 		extAddr := externalIP[i-1]
 
-		c.Start(ctx, c.Node(i), startArgs("--racks=1",
+		c.Start(ctx, t, c.Node(i), startArgs("--racks=1",
 			fmt.Sprintf("--args=--locality-advertise-addr=rack=0@%s", extAddr)))
 	}
 
 	rowCount := 0
 
-	for i := 1; i <= c.Spec().NodeCount; i++ {
+	for i := 1; i <= c.spec.NodeCount; i++ {
 		db := c.Conn(ctx, 1)
 		defer db.Close()
 
@@ -538,14 +490,8 @@ func runCheckLocalityIPAddress(ctx context.Context, t test.Test, c cluster.Clust
 				if !strings.Contains(advertiseAddress, "localhost") {
 					t.Fatal("Expected connect address to contain localhost")
 				}
-			} else {
-				exps, err := c.ExternalAddr(ctx, c.Node(nodeID))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if exps[0] != advertiseAddress {
-					t.Fatalf("Connection address is %s but expected %s", advertiseAddress, exps[0])
-				}
+			} else if exp := c.ExternalAddr(ctx, c.Node(nodeID))[0]; exp != advertiseAddress {
+				t.Fatalf("Connection address is %s but expected %s", advertiseAddress, exp)
 			}
 		}
 	}

@@ -17,19 +17,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
-func runEventLog(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runEventLog(ctx context.Context, t *test, c *cluster) {
 	type nodeEventInfo struct {
 		NodeID roachpb.NodeID
 	}
 
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	// Verify that "node joined" and "node restart" events are recorded whenever
 	// a node starts and contacts the cluster.
@@ -73,9 +71,9 @@ func runEventLog(ctx context.Context, t test.Test, c cluster.Cluster) {
 		if err := rows.Err(); err != nil {
 			t.Fatal(err)
 		}
-		if c.Spec().NodeCount != len(seenIds) {
+		if c.spec.NodeCount != len(seenIds) {
 			return fmt.Errorf("expected %d node join messages, found %d: %v",
-				c.Spec().NodeCount, len(seenIds), seenIds)
+				c.spec.NodeCount, len(seenIds), seenIds)
 		}
 		return nil
 	})
@@ -85,7 +83,7 @@ func runEventLog(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	// Stop and Start Node 3, and verify the node restart message.
 	c.Stop(ctx, c.Node(3))
-	c.Start(ctx, c.Node(3))
+	c.Start(ctx, t, c.Node(3))
 
 	err = retry.ForDuration(10*time.Second, func() error {
 		// Query all node restart events. There should only be one.

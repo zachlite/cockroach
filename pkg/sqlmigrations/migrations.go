@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -244,14 +245,28 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		name: "create system.protected_ts_records table",
 	},
 	{
-		// Introduced in v20.1, baked into v21.2.
-		name: "create new system.namespace table v2",
+		// Introduced in v20.1. Note that this migration
+		// has v2 appended to it because in 20.1 betas, the migration edited the old
+		// system.namespace descriptor to change its Name. This wrought havoc,
+		// causing #47167, which caused 19.2 nodes to fail to be able to read
+		// system.namespace from SQL queries. However, without changing the old
+		// descriptor's Name, backup would fail, since backup requires that no two
+		// descriptors have the same Name. So, in v2 of this migration, we edit
+		// the name of the new table's Descriptor, calling it
+		// namespace2, and re-edit the old descriptor's Name to
+		// be just "namespace" again, to try to help clusters that might have
+		// upgraded to the 20.1 betas with the problem.
+		name:                "create new system.namespace table v2",
+		workFn:              createNewSystemNamespaceDescriptor,
+		includedInBootstrap: clusterversion.ByKey(clusterversion.NamespaceTableWithSchemas),
+		newDescriptorIDs:    staticIDs(keys.NamespaceTableID),
 	},
 	{
 		// Introduced in v20.10. Replaced in v20.1.1 and v20.2 by the
 		// StartSystemNamespaceMigration post-finalization-style migration.
 		name: "migrate system.namespace_deprecated entries into system.namespace",
 		// workFn:              migrateSystemNamespace,
+		includedInBootstrap: clusterversion.ByKey(clusterversion.NamespaceTableWithSchemas),
 	},
 	{
 		// Introduced in v20.1, baked into v20.2.
@@ -268,17 +283,25 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		workFn: nil,
 	},
 	{
-		// Introduced in v20.2. Baked into v21.1.
-		name: "add created_by columns to system.jobs",
+		// Introduced in v20.2.
+		name:   "add created_by columns to system.jobs",
+		workFn: alterSystemJobsAddCreatedByColumns,
+		includedInBootstrap: clusterversion.ByKey(
+			clusterversion.AlterSystemJobsAddCreatedByColumns),
 	},
 	{
-		// Introduced in v20.2. Baked into v21.1.
-		name:             "create new system.scheduled_jobs table",
-		newDescriptorIDs: staticIDs(keys.ScheduledJobsTableID),
+		// Introduced in v20.2.
+		name:                "create new system.scheduled_jobs table",
+		workFn:              createScheduledJobsTable,
+		includedInBootstrap: clusterversion.ByKey(clusterversion.AddScheduledJobsTable),
+		newDescriptorIDs:    staticIDs(keys.ScheduledJobsTableID),
 	},
 	{
-		// Introduced in v20.2. Baked into v21.1.
-		name: "add new sqlliveness table and claim columns to system.jobs",
+		// Introduced in v20.2.
+		name:   "add new sqlliveness table and claim columns to system.jobs",
+		workFn: alterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable,
+		includedInBootstrap: clusterversion.ByKey(
+			clusterversion.AlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable),
 	},
 	{
 		// Introduced in v20.2.
@@ -291,8 +314,10 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		newDescriptorIDs:    staticIDs(keys.TenantsTableID),
 	},
 	{
-		// Introduced in v20.2. Baked into v21.1.
-		name: "alter scheduled jobs",
+		// Introduced in v20.2.
+		name:                "alter scheduled jobs",
+		workFn:              alterSystemScheduledJobsFixTableSchema,
+		includedInBootstrap: clusterversion.ByKey(clusterversion.UpdateScheduledJobsSchema),
 	},
 	{
 		// Introduced in v20.2.
@@ -317,7 +342,10 @@ func databaseIDs(
 	return func(ctx context.Context, db DB, codec keys.SQLCodec) ([]descpb.ID, error) {
 		var ids []descpb.ID
 		for _, name := range names {
-			kv, err := db.Get(ctx, catalogkeys.MakeDatabaseNameKey(codec, name))
+			// This runs as part of an older migration (introduced in 2.1). We use
+			// the DeprecatedDatabaseKey, and let the 20.1 migration handle moving
+			// from the old namespace table into the new one.
+			kv, err := db.Get(ctx, catalogkeys.NewDeprecatedDatabaseKey(name).Key(codec))
 			if err != nil {
 				return nil, err
 			}
@@ -705,8 +733,8 @@ func CreateSystemTable(
 	// the reserved ID space. (The SQL layer doesn't allow this.)
 	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		b := txn.NewBatch()
-		tKey := catalogkeys.MakePublicObjectNameKey(codec, desc.GetParentID(), desc.GetName())
-		b.CPut(tKey, desc.GetID(), nil)
+		tKey := catalogkv.MakePublicTableNameKey(ctx, settings, desc.GetParentID(), desc.GetName())
+		b.CPut(tKey.Key(codec), desc.GetID(), nil)
 		b.CPut(catalogkeys.MakeDescMetadataKey(codec, desc.GetID()), desc.DescriptorProto(), nil)
 		if err := txn.SetSystemConfigTrigger(codec.ForSystemTenant()); err != nil {
 			return err
@@ -719,6 +747,44 @@ func CreateSystemTable(
 		return nil
 	}
 	return err
+}
+
+func createNewSystemNamespaceDescriptor(ctx context.Context, r runner) error {
+	return r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		b := txn.NewBatch()
+
+		// Retrieve the existing namespace table's descriptor and change its name to
+		// "namespace". This corrects the behavior of this migration as it existed
+		// in 20.1 betas. The old namespace table cannot be edited without breaking
+		// explicit selects from system.namespace in 19.2.
+		deprecatedKey := catalogkeys.MakeDescMetadataKey(r.codec, keys.DeprecatedNamespaceTableID)
+		deprecatedDesc := &descpb.Descriptor{}
+		ts, err := txn.GetProtoTs(ctx, deprecatedKey, deprecatedDesc)
+		if err != nil {
+			return err
+		}
+		deprecatedTable, _, _, _ := descpb.FromDescriptorWithMVCCTimestamp(deprecatedDesc, ts)
+		deprecatedTable.Name = systemschema.DeprecatedNamespaceTable.GetName()
+		b.Put(deprecatedKey, deprecatedDesc)
+
+		// The 19.2 namespace table contains an entry for "namespace" which maps to
+		// the deprecated namespace tables ID. Even though the cluster version at
+		// this point is 19.2, we construct a metadata name key in the 20.1 format.
+		// This is for two reasons:
+		// 1. We do not want to change the mapping in namespace_deprecated for
+		//    "namespace", as for the purpose of namespace_deprecated, namespace
+		//    refers to the correct ID.
+		// 2. By adding the ID mapping in the new system.namespace table, the
+		//    idempotent semantics of the migration ensure that "namespace" maps to
+		//    the correct ID in the new system.namespace table after all tables are
+		//    copied over.
+		nameKey := catalogkeys.NewPublicTableKey(
+			systemschema.NamespaceTable.GetParentID(), systemschema.NamespaceTableName)
+		b.Put(nameKey.Key(r.codec), systemschema.NamespaceTable.GetID())
+		b.Put(catalogkeys.MakeDescMetadataKey(
+			r.codec, systemschema.NamespaceTable.GetID()), systemschema.NamespaceTable.DescriptorProto())
+		return txn.Run(ctx, b)
+	})
 }
 
 func extendCreateRoleWithCreateLogin(ctx context.Context, r runner) error {
@@ -966,7 +1032,71 @@ func updateSystemLocationData(ctx context.Context, r runner) error {
 	}
 	return nil
 }
+func alterSystemJobsAddCreatedByColumns(ctx context.Context, r runner) error {
+	// NB: we use family name as it existed in the original system.jobs schema to
+	// minimize migration work needed (avoid renames).
+	addColsStmt := `
+ALTER TABLE system.jobs
+ADD COLUMN IF NOT EXISTS created_by_type STRING FAMILY fam_0_id_status_created_payload,
+ADD COLUMN IF NOT EXISTS created_by_id INT FAMILY fam_0_id_status_created_payload
+`
+	addIdxStmt := `
+CREATE INDEX IF NOT EXISTS jobs_created_by_type_created_by_id_idx
+ON system.jobs (created_by_type, created_by_id)
+STORING (status)
+`
+	asNode := sessiondata.InternalExecutorOverride{
+		User: security.NodeUserName(),
+	}
+
+	if _, err := r.sqlExecutor.ExecEx(
+		ctx, "add-jobs-cols", nil, asNode, addColsStmt); err != nil {
+		return err
+	}
+
+	_, err := r.sqlExecutor.ExecEx(ctx, "add-jobs-idx", nil, asNode, addIdxStmt)
+	return err
+}
+
+func createScheduledJobsTable(ctx context.Context, r runner) error {
+	return createSystemTable(ctx, r, systemschema.ScheduledJobsTable)
+}
+
+func alterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable(
+	ctx context.Context, r runner,
+) error {
+	addColsStmt := `
+ALTER TABLE system.jobs
+ADD COLUMN IF NOT EXISTS claim_session_id BYTES CREATE FAMILY claim,
+ADD COLUMN IF NOT EXISTS claim_instance_id INT8 FAMILY claim
+`
+	asNode := sessiondata.InternalExecutorOverride{
+		User: security.NodeUserName(),
+	}
+	if _, err := r.sqlExecutor.ExecEx(ctx, "add-jobs-claim-cols", nil, asNode, addColsStmt); err != nil {
+		return err
+	}
+	return createSystemTable(ctx, r, systemschema.SqllivenessTable)
+}
 
 func createTenantsTable(ctx context.Context, r runner) error {
 	return createSystemTable(ctx, r, systemschema.TenantsTable)
+}
+
+func alterSystemScheduledJobsFixTableSchema(ctx context.Context, r runner) error {
+	setOwner := "UPDATE system.scheduled_jobs SET owner='root' WHERE owner IS NULL"
+	asNode := sessiondata.InternalExecutorOverride{User: security.NodeUserName()}
+
+	if _, err := r.sqlExecutor.ExecEx(ctx, "set-schedule-owner", nil, asNode, setOwner); err != nil {
+		return err
+	}
+
+	alterSchedules := `
+ALTER TABLE system.scheduled_jobs
+ADD COLUMN IF NOT EXISTS schedule_state BYTES FAMILY sched,
+ALTER COLUMN owner SET NOT NULL,
+DROP COLUMN IF EXISTS schedule_changes
+`
+	_, err := r.sqlExecutor.ExecEx(ctx, "alter-scheduled-jobs", nil, asNode, alterSchedules)
+	return err
 }

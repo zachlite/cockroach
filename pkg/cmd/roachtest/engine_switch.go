@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
@@ -26,17 +23,17 @@ import (
 )
 
 func registerEngineSwitch(r *testRegistry) {
-	runEngineSwitch := func(ctx context.Context, t test.Test, c cluster.Cluster, additionalArgs ...string) {
-		roachNodes := c.Range(1, c.Spec().NodeCount-1)
-		loadNode := c.Node(c.Spec().NodeCount)
+	runEngineSwitch := func(ctx context.Context, t *test, c *cluster, additionalArgs ...string) {
+		roachNodes := c.Range(1, c.spec.NodeCount-1)
+		loadNode := c.Node(c.spec.NodeCount)
 		c.Put(ctx, workload, "./workload", loadNode)
 		c.Put(ctx, cockroach, "./cockroach", roachNodes)
 		pebbleArgs := startArgs(append(additionalArgs, "--args=--storage-engine=pebble")...)
 		rocksdbArgs := startArgs(append(additionalArgs, "--args=--storage-engine=rocksdb")...)
-		c.Start(ctx, roachNodes, rocksdbArgs)
+		c.Start(ctx, t, roachNodes, rocksdbArgs)
 		stageDuration := 1 * time.Minute
 		if local {
-			t.L().Printf("local mode: speeding up test\n")
+			t.l.Printf("local mode: speeding up test\n")
 			stageDuration = 10 * time.Second
 		}
 		numIters := 5 * len(roachNodes)
@@ -44,7 +41,7 @@ func registerEngineSwitch(r *testRegistry) {
 		loadDuration := " --duration=" + (time.Duration(numIters) * stageDuration).String()
 
 		var deprecatedWorkloadsStr string
-		if !t.BuildVersion().AtLeast(version.MustParse("v20.2.0")) {
+		if !t.buildVersion.AtLeast(version.MustParse("v20.2.0")) {
 			deprecatedWorkloadsStr += " --deprecated-fk-indexes"
 		}
 
@@ -67,7 +64,7 @@ func registerEngineSwitch(r *testRegistry) {
 		usingPebble := make([]bool, len(roachNodes))
 		rng := rand.New(rand.NewSource(uint64(timeutil.Now().UnixNano())))
 		m.Go(func(ctx context.Context) error {
-			l, err := t.L().ChildLogger("engine-switcher")
+			l, err := t.l.ChildLogger("engine-switcher")
 			if err != nil {
 				return err
 			}
@@ -91,7 +88,7 @@ func registerEngineSwitch(r *testRegistry) {
 					if err := rows.Close(); err != nil {
 						return err
 					}
-					if err := c.CheckReplicaDivergenceOnDB(ctx, t.L(), db); err != nil {
+					if err := c.CheckReplicaDivergenceOnDB(ctx, db); err != nil {
 						return errors.Wrapf(err, "node %d", i)
 					}
 				}
@@ -116,7 +113,7 @@ func registerEngineSwitch(r *testRegistry) {
 				}
 
 				i := rng.Intn(len(roachNodes))
-				var args option.Option
+				var args option
 				usingPebble[i] = !usingPebble[i]
 				if usingPebble[i] {
 					args = pebbleArgs
@@ -128,7 +125,7 @@ func registerEngineSwitch(r *testRegistry) {
 				if err := stop(i + 1); err != nil {
 					return err
 				}
-				c.Start(ctx, c.Node(i+1), args)
+				c.Start(ctx, t, c.Node(i+1), args)
 			}
 			return sleepAndCheck()
 		})
@@ -140,23 +137,23 @@ func registerEngineSwitch(r *testRegistry) {
 	}
 
 	n := 3
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("engine/switch/nodes=%d", n),
 		Owner:      OwnerStorage,
 		Skip:       "rocksdb removed in 21.1",
 		MinVersion: "v20.1.0",
-		Cluster:    r.makeClusterSpec(n + 1),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(n + 1),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runEngineSwitch(ctx, t, c)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("engine/switch/encrypted/nodes=%d", n),
 		Owner:      OwnerStorage,
 		Skip:       "rocksdb removed in 21.1",
 		MinVersion: "v20.1.0",
-		Cluster:    r.makeClusterSpec(n + 1),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(n + 1),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runEngineSwitch(ctx, t, c, "--encrypt=true")
 		},
 	})

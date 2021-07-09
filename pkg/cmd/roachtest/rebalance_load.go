@@ -18,9 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/sync/errgroup"
@@ -44,20 +41,20 @@ func registerRebalanceLoad(r *testRegistry) {
 	// usually (but not always fail) with it set to false.
 	rebalanceLoadRun := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 		rebalanceMode string,
 		maxDuration time.Duration,
 		concurrency int,
 	) {
-		roachNodes := c.Range(1, c.Spec().NodeCount-1)
-		appNode := c.Node(c.Spec().NodeCount)
+		roachNodes := c.Range(1, c.spec.NodeCount-1)
+		appNode := c.Node(c.spec.NodeCount)
 		splits := len(roachNodes) - 1 // n-1 splits => n ranges => 1 lease per node
 
 		c.Put(ctx, cockroach, "./cockroach", roachNodes)
 		args := startArgs(
 			"--args=--vmodule=store_rebalancer=5,allocator=5,allocator_scorer=5,replicate_queue=5")
-		c.Start(ctx, roachNodes, args)
+		c.Start(ctx, t, roachNodes, args)
 
 		c.Put(ctx, workload, "./workload", appNode)
 		c.Run(ctx, appNode, fmt.Sprintf("./workload init kv --drop --splits=%d {pgurl:1}", splits))
@@ -71,7 +68,7 @@ func registerRebalanceLoad(r *testRegistry) {
 		ctx, cancel := context.WithCancel(ctx)
 
 		m.Go(func() error {
-			t.L().Printf("starting load generator\n")
+			t.l.Printf("starting load generator\n")
 
 			err := c.RunE(ctx, appNode, fmt.Sprintf(
 				"./workload run kv --read-percent=95 --tolerate-errors --concurrency=%d "+
@@ -104,7 +101,7 @@ func registerRebalanceLoad(r *testRegistry) {
 			}
 
 			for tBegin := timeutil.Now(); timeutil.Since(tBegin) <= maxDuration; {
-				if done, err := isLoadEvenlyDistributed(t.L(), db, len(roachNodes)); err != nil {
+				if done, err := isLoadEvenlyDistributed(t.l, db, len(roachNodes)); err != nil {
 					return err
 				} else if done {
 					t.Status("successfully achieved lease balance; waiting for kv to finish running")
@@ -128,12 +125,12 @@ func registerRebalanceLoad(r *testRegistry) {
 
 	concurrency := 128
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       `rebalance/by-load/leases`,
 		Owner:      OwnerKV,
-		Cluster:    r.makeClusterSpec(4), // the last node is just used to generate load
+		Cluster:    makeClusterSpec(4), // the last node is just used to generate load
 		MinVersion: "v2.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			if local {
 				concurrency = 32
 				fmt.Printf("lowering concurrency to %d in local testing\n", concurrency)
@@ -141,12 +138,12 @@ func registerRebalanceLoad(r *testRegistry) {
 			rebalanceLoadRun(ctx, t, c, "leases", 3*time.Minute, concurrency)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       `rebalance/by-load/replicas`,
 		Owner:      OwnerKV,
-		Cluster:    r.makeClusterSpec(7), // the last node is just used to generate load
+		Cluster:    makeClusterSpec(7), // the last node is just used to generate load
 		MinVersion: "v2.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			if local {
 				concurrency = 32
 				fmt.Printf("lowering concurrency to %d in local testing\n", concurrency)
@@ -156,7 +153,7 @@ func registerRebalanceLoad(r *testRegistry) {
 	})
 }
 
-func isLoadEvenlyDistributed(l *logger.Logger, db *gosql.DB, numNodes int) (bool, error) {
+func isLoadEvenlyDistributed(l *logger, db *gosql.DB, numNodes int) (bool, error) {
 	rows, err := db.Query(
 		`select lease_holder, count(*) ` +
 			`from [show ranges from table kv.kv] ` +

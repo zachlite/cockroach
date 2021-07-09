@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
@@ -28,13 +26,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runClusterInit(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
 
-	addrs, err := c.InternalAddr(ctx, c.All())
-	if err != nil {
-		t.Fatal(err)
-	}
+	addrs := c.InternalAddr(ctx, c.All())
 
 	// TODO(tbg): this should never happen, but I saw it locally. The result
 	// is the test hanging forever, because all nodes will create their own
@@ -50,7 +45,7 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 		func() {
 			var g errgroup.Group
-			for i := 1; i <= c.Spec().NodeCount; i++ {
+			for i := 1; i <= c.spec.NodeCount; i++ {
 				i := i
 				g.Go(func() error {
 					return c.RunE(ctx, c.Node(i),
@@ -65,17 +60,13 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 			}
 
 			urlMap := make(map[int]string)
-			adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, c.All())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i, addr := range adminUIAddrs {
+			for i, addr := range c.ExternalAdminUIAddr(ctx, c.All()) {
 				urlMap[i+1] = `http://` + addr
 			}
 
 			// Wait for the servers to bind their ports.
 			if err := retry.ForDuration(10*time.Second, func() error {
-				for i := 1; i <= c.Spec().NodeCount; i++ {
+				for i := 1; i <= c.spec.NodeCount; i++ {
 					resp, err := httputil.Get(ctx, urlMap[i]+"/health")
 					if err != nil {
 						return err
@@ -88,7 +79,7 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 			}
 
 			var dbs []*gosql.DB
-			for i := 1; i <= c.Spec().NodeCount; i++ {
+			for i := 1; i <= c.spec.NodeCount; i++ {
 				db := c.Conn(ctx, i)
 				defer db.Close()
 				dbs = append(dbs, db)
@@ -171,8 +162,8 @@ func runClusterInit(ctx context.Context, t test.Test, c cluster.Cluster) {
 				args = append(args, extraArgs...)
 				args = append(args, "--insecure")
 				args = append(args, fmt.Sprintf("--port={pgport:%d}", runNode))
-				buf, err := c.RunWithBuffer(ctx, t.L(), c.Node(runNode), args...)
-				t.L().Printf("%s\n", buf)
+				buf, err := c.RunWithBuffer(ctx, c.l, c.Node(runNode), args...)
+				t.l.Printf("%s\n", buf)
 				return string(buf), err
 			}
 

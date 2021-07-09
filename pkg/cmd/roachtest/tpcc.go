@@ -21,11 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/prometheus"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/search"
@@ -47,19 +42,13 @@ const (
 )
 
 type tpccOptions struct {
-	Warehouses       int
-	ExtraRunArgs     string
-	ExtraSetupArgs   string
-	Chaos            func() Chaos                // for late binding of stopper
-	During           func(context.Context) error // for running a function during the test
-	Duration         time.Duration               // if zero, TPCC is not invoked
-	SetupType        tpccSetupType
-	PrometheusConfig *prometheus.Config
-	// WorkloadInstances contains a list of instances for
-	// workloads to run against.
-	// If unset, it will run one workload which talks to
-	// all cluster nodes.
-	WorkloadInstances []workloadInstance
+	Warehouses     int
+	ExtraRunArgs   string
+	ExtraSetupArgs string
+	Chaos          func() Chaos                // for late binding of stopper
+	During         func(context.Context) error // for running a function during the test
+	Duration       time.Duration               // if zero, TPCC is not invoked
+	SetupType      tpccSetupType
 	// If specified, called to stage+start cockroach. If not
 	// specified, defaults to uploading the default binary to
 	// all nodes, and starting it on all but the last node.
@@ -67,21 +56,8 @@ type tpccOptions struct {
 	// TODO(tbg): for better coverage at scale of the migration process, we should
 	// also be doing a rolling-restart into the new binary while the cluster
 	// is running, but that feels like jamming too much into the tpcc setup.
-	Start func(context.Context, test.Test, cluster.Cluster)
+	Start func(context.Context, *test, *cluster)
 }
-
-type workloadInstance struct {
-	// nodes dictates the nodes workload should run against.
-	nodes option.NodeListOption
-	// prometheusPort is the port on the workload which runs
-	// prometheus.
-	prometheusPort int
-	// extraRunArgs dictates unique arguments to use for the workload.
-	extraRunArgs string
-}
-
-const workloadPProfStartPort = 33333
-const workloadPrometheusPort = 2112
 
 // tpccImportCmd generates the command string to load tpcc data for the
 // specified warehouse count into a cluster.
@@ -103,25 +79,25 @@ func tpccImportCmdWithCockroachBinary(
 }
 
 func setupTPCC(
-	ctx context.Context, t test.Test, c cluster.Cluster, opts tpccOptions,
-) (crdbNodes, workloadNode option.NodeListOption) {
+	ctx context.Context, t *test, c *cluster, opts tpccOptions,
+) (crdbNodes, workloadNode nodeListOption) {
 	// Randomize starting with encryption-at-rest enabled.
-	c.EncryptAtRandom(true)
-	crdbNodes = c.Range(1, c.Spec().NodeCount-1)
-	workloadNode = c.Node(c.Spec().NodeCount)
-	if c.IsLocal() {
+	c.encryptAtRandom = true
+	crdbNodes = c.Range(1, c.spec.NodeCount-1)
+	workloadNode = c.Node(c.spec.NodeCount)
+	if c.isLocal() {
 		opts.Warehouses = 1
 	}
 
 	if opts.Start == nil {
-		opts.Start = func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		opts.Start = func(ctx context.Context, t *test, c *cluster) {
 			// NB: workloadNode also needs ./cockroach because
 			// of `./cockroach workload` for usingImport.
 			c.Put(ctx, cockroach, "./cockroach", c.All())
 			// We still use bare workload, though we could likely replace
 			// those with ./cockroach workload as well.
 			c.Put(ctx, workload, "./workload", workloadNode)
-			c.Start(ctx, crdbNodes)
+			c.Start(ctx, t, crdbNodes)
 		}
 	}
 
@@ -139,7 +115,7 @@ func setupTPCC(
 		case usingInit:
 			t.Status("initializing tables")
 			extraArgs := opts.ExtraSetupArgs
-			if !t.BuildVersion().AtLeast(version.MustParse("v20.2.0")) {
+			if !t.buildVersion.AtLeast(version.MustParse("v20.2.0")) {
 				extraArgs += " --deprecated-fk-indexes"
 			}
 			cmd := fmt.Sprintf(
@@ -155,59 +131,9 @@ func setupTPCC(
 	return crdbNodes, workloadNode
 }
 
-func runTPCC(ctx context.Context, t test.Test, c cluster.Cluster, opts tpccOptions) {
-	workloadInstances := opts.WorkloadInstances
-	if len(workloadInstances) == 0 {
-		workloadInstances = append(
-			workloadInstances,
-			workloadInstance{
-				nodes:          c.Range(1, c.Spec().NodeCount-1),
-				prometheusPort: workloadPrometheusPort,
-			},
-		)
-	}
-	var pgURLs []string
-	for _, workloadInstance := range workloadInstances {
-		pgURLs = append(pgURLs, fmt.Sprintf("{pgurl%s}", workloadInstance.nodes.String()))
-	}
-
-	if cfg := opts.PrometheusConfig; cfg != nil {
-		if c.IsLocal() {
-			t.Skip("skipping test as prometheus is needed, but prometheus does not yet work locally")
-			return
-		}
-		p, err := prometheus.Init(
-			ctx,
-			*cfg,
-			c,
-			func(ctx context.Context, nodes option.NodeListOption, operation string, args ...string) error {
-				return repeatRunE(
-					ctx,
-					t,
-					c,
-					nodes,
-					operation,
-					args...,
-				)
-			},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			if err := p.Snapshot(
-				ctx,
-				c,
-				t.L(),
-				filepath.Join(t.ArtifactsDir(), "prometheus-snapshot.tar.gz"),
-			); err != nil {
-				shout(ctx, t.L(), os.Stderr, "failed to get prometheus snapshot: %v", err)
-			}
-		}()
-	}
-
+func runTPCC(ctx context.Context, t *test, c *cluster, opts tpccOptions) {
 	rampDuration := 5 * time.Minute
-	if c.IsLocal() {
+	if c.isLocal() {
 		opts.Warehouses = 1
 		if opts.Duration > time.Minute {
 			opts.Duration = time.Minute
@@ -217,26 +143,15 @@ func runTPCC(ctx context.Context, t test.Test, c cluster.Cluster, opts tpccOptio
 	crdbNodes, workloadNode := setupTPCC(ctx, t, c, opts)
 	t.Status("waiting")
 	m := newMonitor(ctx, c, crdbNodes)
-	for i := range workloadInstances {
-		// Make a copy of i for the goroutine.
-		i := i
-		m.Go(func(ctx context.Context) error {
-			t.WorkerStatus(fmt.Sprintf("running tpcc idx %d on %s", i, pgURLs[i]))
-			cmd := fmt.Sprintf(
-				"./cockroach workload run tpcc --warehouses=%d --histograms="+perfArtifactsDir+"/stats.json "+
-					opts.ExtraRunArgs+" --ramp=%s --duration=%s --prometheus-port=%d --pprofport=%d %s %s",
-				opts.Warehouses,
-				rampDuration,
-				opts.Duration,
-				workloadInstances[i].prometheusPort,
-				workloadPProfStartPort+i,
-				workloadInstances[i].extraRunArgs,
-				pgURLs[i],
-			)
-			c.Run(ctx, workloadNode, cmd)
-			return nil
-		})
-	}
+	m.Go(func(ctx context.Context) error {
+		t.WorkerStatus("running tpcc")
+		cmd := fmt.Sprintf(
+			"./cockroach workload run tpcc --warehouses=%d --histograms="+perfArtifactsDir+"/stats.json "+
+				opts.ExtraRunArgs+" --ramp=%s --duration=%s {pgurl:1-%d}",
+			opts.Warehouses, rampDuration, opts.Duration, c.spec.NodeCount-1)
+		c.Run(ctx, workloadNode, cmd)
+		return nil
+	})
 	if opts.Chaos != nil {
 		chaos := opts.Chaos()
 		m.Go(chaos.Runner(c, m))
@@ -274,9 +189,7 @@ var tpccSupportedWarehouses = []struct {
 	{hardware: "gce-n5cpu16", v: version.MustParse(`v2.1.0-0`), warehouses: 1300},
 }
 
-func maxSupportedTPCCWarehouses(
-	buildVersion version.Version, cloud string, nodes spec.ClusterSpec,
-) int {
+func maxSupportedTPCCWarehouses(buildVersion version.Version, cloud string, nodes clusterSpec) int {
 	var v *version.Version
 	var warehouses int
 	hardware := fmt.Sprintf(`%s-%s`, cloud, &nodes)
@@ -296,8 +209,8 @@ func maxSupportedTPCCWarehouses(
 }
 
 func registerTPCC(r *testRegistry) {
-	headroomSpec := r.makeClusterSpec(4, spec.CPU(16))
-	r.Add(TestSpec{
+	headroomSpec := makeClusterSpec(4, cpu(16))
+	r.Add(testSpec{
 		// w=headroom runs tpcc for a semi-extended period with some amount of
 		// headroom, more closely mirroring a real production deployment than
 		// running with the max supported warehouses.
@@ -306,10 +219,10 @@ func registerTPCC(r *testRegistry) {
 		MinVersion: "v19.1.0",
 		Tags:       []string{`default`, `release_qualification`},
 		Cluster:    headroomSpec,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			maxWarehouses := maxSupportedTPCCWarehouses(*t.BuildVersion(), cloud, t.Spec().(*TestSpec).Cluster)
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			maxWarehouses := maxSupportedTPCCWarehouses(r.buildVersion, cloud, t.spec.Cluster)
 			headroomWarehouses := int(float64(maxWarehouses) * 0.7)
-			t.L().Printf("computed headroom warehouses of %d\n", headroomWarehouses)
+			t.l.Printf("computed headroom warehouses of %d\n", headroomWarehouses)
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: headroomWarehouses,
 				Duration:   120 * time.Minute,
@@ -317,9 +230,9 @@ func registerTPCC(r *testRegistry) {
 			})
 		},
 	})
-	mixedHeadroomSpec := r.makeClusterSpec(5, spec.CPU(16))
+	mixedHeadroomSpec := makeClusterSpec(5, cpu(16))
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		// mixed-headroom is similar to w=headroom, but with an additional
 		// node and on a mixed version cluster which runs its long-running
 		// migrations while TPCC runs. It simulates a real production
@@ -330,11 +243,11 @@ func registerTPCC(r *testRegistry) {
 		// buggy.
 		Tags:    []string{`default`},
 		Cluster: mixedHeadroomSpec,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			crdbNodes := c.Range(1, 4)
 			workloadNode := c.Node(5)
 
-			maxWarehouses := maxSupportedTPCCWarehouses(*t.BuildVersion(), cloud, t.Spec().(*TestSpec).Cluster)
+			maxWarehouses := maxSupportedTPCCWarehouses(r.buildVersion, cloud, t.spec.Cluster)
 			headroomWarehouses := int(float64(maxWarehouses) * 0.7)
 			if local {
 				headroomWarehouses = 10
@@ -345,12 +258,12 @@ func registerTPCC(r *testRegistry) {
 				nodes: crdbNodes,
 				run: func(ctx context.Context, u *versionUpgradeTest) error {
 					const duration = 120 * time.Minute
-					t.L().Printf("running background TPCC workload")
+					c.l.Printf("running background TPCC workload")
 					runTPCC(ctx, t, c, tpccOptions{
 						Warehouses: headroomWarehouses,
 						Duration:   duration,
 						SetupType:  usingExistingData,
-						Start: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+						Start: func(ctx context.Context, t *test, c *cluster) {
 							// Noop - we don't let tpcc upload or start binaries in this test.
 						},
 					})
@@ -370,7 +283,7 @@ func registerTPCC(r *testRegistry) {
 				bankRows = 1000
 			}
 
-			oldV, err := PredecessorVersion(*t.BuildVersion())
+			oldV, err := PredecessorVersion(r.buildVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -405,12 +318,12 @@ func registerTPCC(r *testRegistry) {
 			).run(ctx, t)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "tpcc-nowait/nodes=3/w=1",
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(4, spec.CPU(16)),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(4, cpu(16)),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses:   1,
 				Duration:     10 * time.Minute,
@@ -419,194 +332,29 @@ func registerTPCC(r *testRegistry) {
 			})
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "weekly/tpcc/headroom",
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
 		Tags:       []string{`weekly`},
-		Cluster:    r.makeClusterSpec(4, spec.CPU(16)),
-		// Give the test a generous extra 10 hours to load the dataset and
-		// slowly ramp up the load.
-		Timeout: 4*24*time.Hour + 10*time.Hour,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(4, cpu(16)),
+		Timeout:    time.Duration(6*24)*time.Hour + time.Duration(10)*time.Minute,
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			warehouses := 1000
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: warehouses,
-				Duration:   4 * 24 * time.Hour,
+				Duration:   6 * 24 * time.Hour,
 				SetupType:  usingImport,
 			})
 		},
 	})
 
-	// Setup multi-region tests.
-	{
-		mrSetup := []struct {
-			region string
-			zones  string
-		}{
-			{region: "us-east1", zones: "us-east1-b"},
-			{region: "us-west1", zones: "us-west1-b"},
-			{region: "europe-west2", zones: "europe-west2-b"},
-		}
-		zs := []string{}
-		// NOTE: region is currently only used for number of regions.
-		regions := []string{}
-		for _, s := range mrSetup {
-			regions = append(regions, s.region)
-			zs = append(zs, s.zones)
-		}
-		const nodesPerRegion = 3
-
-		multiRegionTests := []struct {
-			desc              string
-			name              string
-			survivalGoal      string
-			chaosTarget       func(iter int) option.NodeListOption
-			workloadInstances []workloadInstance
-		}{
-			{
-				desc:         "test zone survivability works when single nodes are down",
-				name:         "tpcc/multiregion/survive=zone/chaos=true",
-				survivalGoal: "zone",
-				chaosTarget: func(iter int) option.NodeListOption {
-					return option.NodeListOption{(iter % (len(regions) * nodesPerRegion)) + 1}
-				},
-				workloadInstances: func() []workloadInstance {
-					const prometheusPortStart = 2110
-					ret := []workloadInstance{}
-					for i := 0; i < len(regions)*nodesPerRegion; i++ {
-						ret = append(
-							ret,
-							workloadInstance{
-								nodes:          option.NodeListOption{i + 1}, // 1-indexed
-								prometheusPort: prometheusPortStart + i,
-								extraRunArgs:   fmt.Sprintf("--partition-affinity=%d", i/nodesPerRegion), // 0-indexed
-							},
-						)
-					}
-					return ret
-				}(),
-			},
-			{
-				desc:         "test region survivability works when regions going down",
-				name:         "tpcc/multiregion/survive=region/chaos=true",
-				survivalGoal: "region",
-				chaosTarget: func(iter int) option.NodeListOption {
-					regionIdx := iter % len(regions)
-					return option.NewNodeListOptionRange(
-						(nodesPerRegion*regionIdx)+1,
-						(nodesPerRegion * (regionIdx + 1)),
-					)
-				},
-				workloadInstances: func() []workloadInstance {
-					// We run two sets of workloads:
-					// * for each region, have a workload that speaks SQL which only affects data
-					//   that is partitioned in the same region.
-					// * for each region, have a workload that speaks SQL which affects data
-					//   that is partitioned into a different region.
-					const prometheusLocalPortStart = 2110
-					const prometheusRemotePortStart = 2120
-					ret := []workloadInstance{}
-					for i := 0; i < len(regions); i++ {
-						// Data partitioned in the same region.
-						// e.g. nodes 1-3, partition-affinity=0, prometheus port 2111 means
-						// we talk to nodes 1-3, with nodes partitioned in nodes 1-3 (affinity 0).
-						ret = append(
-							ret,
-							workloadInstance{
-								nodes:          option.NewNodeListOptionRange((i*nodesPerRegion)+1, ((i + 1) * nodesPerRegion)), // 1-indexed
-								prometheusPort: prometheusLocalPortStart + i,
-								extraRunArgs:   fmt.Sprintf("--partition-affinity=%d", i-1), // 0-indexed
-							},
-						)
-						// Data partitioned in a different region.
-						// e.g. nodes 1-3, partition-affinity=1, prometheus port 2121 means
-						// we talk to nodes 1-3, with nodes partitioned in nodes 3-6 (affinity 1).
-						ret = append(
-							ret,
-							workloadInstance{
-								nodes:          option.NewNodeListOptionRange((i*nodesPerRegion)+1, ((i + 1) * nodesPerRegion)), // 1-indexed
-								prometheusPort: prometheusRemotePortStart + i,
-								extraRunArgs:   fmt.Sprintf("--partition-affinity=%d", i%len(regions)), // 0-indexed
-							},
-						)
-					}
-					return ret
-				}(),
-			},
-		}
-
-		for i := range multiRegionTests {
-			tc := multiRegionTests[i]
-			r.Add(TestSpec{
-				Name:       tc.name,
-				Owner:      OwnerMultiRegion,
-				MinVersion: "v21.1.0",
-				// Add an extra node which serves as the workload nodes.
-				Cluster: r.makeClusterSpec(len(regions)*nodesPerRegion+1, spec.Geo(), spec.Zones(strings.Join(zs, ","))),
-				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-					t.Status(tc.desc)
-					duration := 90 * time.Minute
-					partitionArgs := fmt.Sprintf(
-						`--survival-goal=%s --regions=%s --partitions=%d`,
-						tc.survivalGoal,
-						strings.Join(regions, ","),
-						len(regions),
-					)
-					workloadNode := c.Node(c.Spec().NodeCount)
-					workloadScrapeNodes := make([]prometheus.ScrapeNode, len(tc.workloadInstances))
-					for i, workloadInstance := range tc.workloadInstances {
-						workloadScrapeNodes[i] = prometheus.ScrapeNode{
-							Nodes: workloadNode,
-							Port:  workloadInstance.prometheusPort,
-						}
-					}
-
-					iter := 0
-					runTPCC(ctx, t, c, tpccOptions{
-						Warehouses:     len(regions) * 5,
-						Duration:       duration,
-						ExtraSetupArgs: partitionArgs,
-						ExtraRunArgs:   `--method=simple --wait=false --tolerate-errors ` + partitionArgs,
-						Chaos: func() Chaos {
-							return Chaos{
-								Timer: Periodic{
-									Period:   300 * time.Second,
-									DownTime: 300 * time.Second,
-								},
-								Target: func() option.NodeListOption {
-									ret := tc.chaosTarget(iter)
-									iter++
-									return ret
-								},
-								Stopper:      time.After(duration),
-								DrainAndQuit: false,
-							}
-						},
-						SetupType:         usingInit,
-						WorkloadInstances: tc.workloadInstances,
-						PrometheusConfig: &prometheus.Config{
-							PrometheusNode: workloadNode,
-							ScrapeConfigs: []prometheus.ScrapeConfig{
-								prometheus.MakeInsecureCockroachScrapeConfig(
-									"cockroach",
-									c.Range(1, c.Spec().NodeCount-1),
-								),
-								prometheus.MakeWorkloadScrapeConfig("workload", workloadScrapeNodes),
-							},
-						},
-					})
-				},
-			})
-		}
-	}
-
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "tpcc/w=100/nodes=3/chaos=true",
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(4),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(4),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			duration := 30 * time.Minute
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: 100,
@@ -620,7 +368,7 @@ func registerTPCC(r *testRegistry) {
 							Period:   45 * time.Second,
 							DownTime: 10 * time.Second,
 						},
-						Target:       func() option.NodeListOption { return c.Node(1 + rand.Intn(c.Spec().NodeCount-1)) },
+						Target:       func() nodeListOption { return c.Node(1 + rand.Intn(c.spec.NodeCount-1)) },
 						Stopper:      time.After(duration),
 						DrainAndQuit: false,
 					}
@@ -629,13 +377,13 @@ func registerTPCC(r *testRegistry) {
 			})
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "tpcc/interleaved/nodes=3/cpu=16/w=500",
 		Owner:      OwnerSQLQueries,
 		MinVersion: "v20.1.0",
-		Cluster:    r.makeClusterSpec(4, spec.CPU(16)),
+		Cluster:    makeClusterSpec(4, cpu(16)),
 		Timeout:    6 * time.Hour,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			skip.WithIssue(t, 53886)
 			runTPCC(ctx, t, c, tpccOptions{
 				// Currently, we do not support import on interleaved tables which
@@ -663,7 +411,7 @@ func registerTPCC(r *testRegistry) {
 		CPUs:  16,
 
 		LoadWarehouses: gceOrAws(cloud, 2500, 3000),
-		EstimatedMax:   gceOrAws(cloud, 2100, 2500),
+		EstimatedMax:   gceOrAws(cloud, 2200, 2500),
 	})
 	registerTPCCBenchSpec(r, tpccBenchSpec{
 		Nodes: 12,
@@ -727,9 +475,7 @@ func (d tpccBenchDistribution) zones() []string {
 	case singleZone:
 		return []string{"us-central1-b"}
 	case multiZone:
-		// NB: us-central1-a has been causing issues, see:
-		// https://github.com/cockroachdb/cockroach/issues/66184
-		return []string{"us-central1-f", "us-central1-b", "us-central1-c"}
+		return []string{"us-central1-a", "us-central1-b", "us-central1-c"}
 	case multiRegion:
 		return []string{"us-east1-b", "us-west1-b", "europe-west2-b"}
 	default:
@@ -804,8 +550,8 @@ func (s tpccBenchSpec) partitions() int {
 }
 
 // startOpts returns any extra start options that the spec requires.
-func (s tpccBenchSpec) startOpts() []option.Option {
-	opts := []option.Option{startArgsDontEncrypt}
+func (s tpccBenchSpec) startOpts() []option {
+	opts := []option{startArgsDontEncrypt}
 	if s.LoadConfig == singlePartitionedLoadgen {
 		opts = append(opts, racks(s.partitions()))
 	}
@@ -822,16 +568,16 @@ func registerTPCCBenchSpec(r *testRegistry, b tpccBenchSpec) {
 		nameParts = append(nameParts, "chaos")
 	}
 
-	opts := []spec.Option{spec.CPU(b.CPUs)}
+	opts := []createOption{cpu(b.CPUs)}
 	switch b.Distribution {
 	case singleZone:
 		// No specifier.
 	case multiZone:
 		nameParts = append(nameParts, "multi-az")
-		opts = append(opts, spec.Geo(), spec.Zones(strings.Join(b.Distribution.zones(), ",")))
+		opts = append(opts, geo(), zones(strings.Join(b.Distribution.zones(), ",")))
 	case multiRegion:
 		nameParts = append(nameParts, "multi-region")
-		opts = append(opts, spec.Geo(), spec.Zones(strings.Join(b.Distribution.zones(), ",")))
+		opts = append(opts, geo(), zones(strings.Join(b.Distribution.zones(), ",")))
 	default:
 		panic("unexpected")
 	}
@@ -850,20 +596,20 @@ func registerTPCCBenchSpec(r *testRegistry, b tpccBenchSpec) {
 	name := strings.Join(nameParts, "/")
 
 	numNodes := b.Nodes + b.LoadConfig.numLoadNodes(b.Distribution)
-	nodes := r.makeClusterSpec(numNodes, opts...)
+	nodes := makeClusterSpec(numNodes, opts...)
 
 	minVersion := b.MinVersion
 	if minVersion == "" {
 		minVersion = "v19.1.0" // needed for import
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       name,
 		Owner:      OwnerKV,
 		Cluster:    nodes,
 		MinVersion: minVersion,
 		Tags:       b.Tags,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCCBench(ctx, t, c, b)
 		},
 	})
@@ -873,11 +619,7 @@ func registerTPCCBenchSpec(r *testRegistry, b tpccBenchSpec) {
 // function is idempotent and first checks whether a compatible dataset exists,
 // performing an expensive dataset restore only if it doesn't.
 func loadTPCCBench(
-	ctx context.Context,
-	t test.Test,
-	c cluster.Cluster,
-	b tpccBenchSpec,
-	roachNodes, loadNode option.NodeListOption,
+	ctx context.Context, t *test, c *cluster, b tpccBenchSpec, roachNodes, loadNode nodeListOption,
 ) error {
 	db := c.Conn(ctx, 1)
 	defer db.Close()
@@ -885,7 +627,7 @@ func loadTPCCBench(
 	// Check if the dataset already exists and is already large enough to
 	// accommodate this benchmarking. If so, we can skip the fixture RESTORE.
 	if _, err := db.ExecContext(ctx, `USE tpcc`); err == nil {
-		t.L().Printf("found existing tpcc database\n")
+		t.l.Printf("found existing tpcc database\n")
 
 		var curWarehouses int
 		if err := db.QueryRowContext(ctx,
@@ -901,10 +643,17 @@ func loadTPCCBench(
 		// If the dataset exists but is not large enough, wipe the cluster
 		// before restoring.
 		c.Wipe(ctx, roachNodes)
-		c.Start(ctx, append(b.startOpts(), roachNodes)...)
+		c.Start(ctx, t, append(b.startOpts(), roachNodes)...)
 	} else if pqErr := (*pq.Error)(nil); !(errors.As(err, &pqErr) &&
 		pgcode.MakeCode(string(pqErr.Code)) == pgcode.InvalidCatalogName) {
 		return err
+	}
+
+	// Increase job leniency to prevent restarts due to node liveness.
+	if _, err := db.Exec(`
+		SET CLUSTER SETTING jobs.registry.leniency = '5m';
+	`); err != nil {
+		t.Fatal(err)
 	}
 
 	var loadArgs string
@@ -925,7 +674,7 @@ func loadTPCCBench(
 	}
 
 	// Load the corresponding fixture.
-	t.L().Printf("restoring tpcc fixture\n")
+	t.l.Printf("restoring tpcc fixture\n")
 	waitForFullReplication(t, db)
 	cmd := tpccImportCmd(b.LoadWarehouses, loadArgs)
 	if err := c.RunE(ctx, roachNodes[:1], cmd); err != nil {
@@ -935,7 +684,7 @@ func loadTPCCBench(
 		return nil
 	}
 
-	t.L().Printf("waiting %v for rebalancing\n", rebalanceWait)
+	t.l.Printf("waiting %v for rebalancing\n", rebalanceWait)
 	_, err := db.ExecContext(ctx, `SET CLUSTER SETTING kv.snapshot_rebalance.max_rate='128MiB'`)
 	if err != nil {
 		return err
@@ -953,7 +702,7 @@ func loadTPCCBench(
 	cmd = fmt.Sprintf("./cockroach workload run tpcc --warehouses=%d --workers=%d --max-rate=%d "+
 		"--wait=false --ramp=%s --duration=%s --scatter --tolerate-errors {pgurl%s}",
 		b.LoadWarehouses, b.LoadWarehouses, maxRate, rampTime, loadTime, roachNodes)
-	if out, err := c.RunWithBuffer(ctx, t.L(), loadNode, cmd); err != nil {
+	if out, err := c.RunWithBuffer(ctx, c.l, loadNode, cmd); err != nil {
 		return errors.Wrapf(err, "failed with output %q", string(out))
 	}
 
@@ -979,7 +728,7 @@ func loadTPCCBench(
 // the tool to allow roachtest to create the correct set of VMs required by the
 // test. The `--wipe` flag will prevent this cluster from being destroyed, so it
 // can then be used during future runs.
-func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBenchSpec) {
+func runTPCCBench(ctx context.Context, t *test, c *cluster, b tpccBenchSpec) {
 	// Determine the nodes in each load group. A load group consists of a set of
 	// Cockroach nodes and a single load generator.
 	numLoadGroups := b.LoadConfig.numLoadNodes(b.Distribution)
@@ -988,14 +737,15 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 	roachNodes := loadGroups.roachNodes()
 	loadNodes := loadGroups.loadNodes()
 	c.Put(ctx, cockroach, "./cockroach", roachNodes)
-	// Fixture import needs './cockroach workload' on loadNodes[0],
+	// Fixture import needs ./cockroach workload on loadNodes[0],
 	// and if we use haproxy (see below) we need it on the others
 	// as well.
 	c.Put(ctx, cockroach, "./cockroach", loadNodes)
+	c.Put(ctx, workload, "./workload", loadNodes)
 	// Don't encrypt in tpccbench tests.
-	c.EncryptDefault(false)
-	c.EncryptAtRandom(false)
-	c.Start(ctx, append(b.startOpts(), roachNodes)...)
+	c.encryptDefault = false
+	c.encryptAtRandom = false
+	c.Start(ctx, t, append(b.startOpts(), roachNodes)...)
 
 	useHAProxy := b.Chaos
 	const restartWait = 15 * time.Second
@@ -1008,7 +758,7 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 				t.Fatal("distributed chaos benchmarking not supported")
 			}
 			t.Status("installing haproxy")
-			if err := c.Install(ctx, t.L(), loadNodes, "haproxy"); err != nil {
+			if err := c.Install(ctx, t.l, loadNodes, "haproxy"); err != nil {
 				t.Fatal(err)
 			}
 			c.Run(ctx, loadNodes, "./cockroach gen haproxy --insecure --url {pgurl:1}")
@@ -1054,7 +804,7 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 		if err := c.Reset(ctx); err != nil {
 			// Reset() can flake sometimes, see for example:
 			// https://github.com/cockroachdb/cockroach/issues/61981#issuecomment-826838740
-			t.L().Printf("failed to reset VMs, proceeding anyway: %s", err)
+			c.l.Printf("failed to reset VMs, proceeding anyway: %s", err)
 			_ = err // intentionally continuing
 		}
 		var ok bool
@@ -1065,7 +815,7 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 			shortCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			if err := c.StopE(shortCtx, roachNodes); err != nil {
 				cancel()
-				t.L().Printf("unable to stop cluster; retrying to allow vm to recover: %s", err)
+				t.l.Printf("unable to stop cluster; retrying to allow vm to recover: %s", err)
 				// We usually spend a long time blocking in StopE anyway, but just in case
 				// of a fast-failure mode, we still want to spend a little bit of time over
 				// the course of 10 retries to maximize the chances of things going back to
@@ -1084,14 +834,14 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 			t.Fatalf("VM is hosed; giving up")
 		}
 
-		c.Start(ctx, append(b.startOpts(), roachNodes)...)
+		c.Start(ctx, t, append(b.startOpts(), roachNodes)...)
 	}
 
 	s := search.NewLineSearcher(1, b.LoadWarehouses, b.EstimatedMax, initStepSize, precision)
 	iteration := 0
 	if res, err := s.Search(func(warehouses int) (bool, error) {
 		iteration++
-		t.L().Printf("initializing cluster for %d warehouses (search attempt: %d)", warehouses, iteration)
+		t.l.Printf("initializing cluster for %d warehouses (search attempt: %d)", warehouses, iteration)
 
 		restart()
 
@@ -1110,10 +860,13 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 
 		// If we're running chaos in this configuration, modify this config.
 		if b.Chaos {
+			// Increase the load generation duration.
+			loadDur = 10 * time.Minute
+
 			// Kill one node at a time.
 			ch := Chaos{
 				Timer:   Periodic{Period: 90 * time.Second, DownTime: 5 * time.Second},
-				Target:  roachNodes.RandNode,
+				Target:  roachNodes.randNode,
 				Stopper: loadDone,
 			}
 			m.Go(ch.Runner(c, m))
@@ -1171,7 +924,7 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 				}
 				roachtestHistogramsPath := filepath.Join(resultsDir, fmt.Sprintf("%d.%d-stats.json", warehouses, groupIdx))
 				if err := c.Get(
-					ctx, t.L(), histogramsPath, roachtestHistogramsPath, group.loadNodes,
+					ctx, t.l, histogramsPath, roachtestHistogramsPath, group.loadNodes,
 				); err != nil {
 					// NB: this will let the line search continue. The reason we do this
 					// is because it's conceivable that we made it here, but a VM just
@@ -1229,11 +982,11 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 		// Print the result.
 		if failErr == nil {
 			ttycolor.Stdout(ttycolor.Green)
-			t.L().Printf("--- SEARCH ITER PASS: TPCC %d resulted in %.1f tpmC (%.1f%% of max tpmC)\n\n",
+			t.l.Printf("--- SEARCH ITER PASS: TPCC %d resulted in %.1f tpmC (%.1f%% of max tpmC)\n\n",
 				warehouses, res.TpmC(), res.Efficiency())
 		} else {
 			ttycolor.Stdout(ttycolor.Red)
-			t.L().Printf("--- SEARCH ITER FAIL: TPCC %d resulted in %.1f tpmC and failed due to %v",
+			t.l.Printf("--- SEARCH ITER FAIL: TPCC %d resulted in %.1f tpmC and failed due to %v",
 				warehouses, res.TpmC(), failErr)
 		}
 		ttycolor.Stdout(ttycolor.Reset)
@@ -1246,7 +999,7 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 		// restarting the cluster so that it can run consistency checks.
 		restart()
 		ttycolor.Stdout(ttycolor.Green)
-		t.L().Printf("------\nMAX WAREHOUSES = %d\n------\n\n", res)
+		t.l.Printf("------\nMAX WAREHOUSES = %d\n------\n\n", res)
 		ttycolor.Stdout(ttycolor.Reset)
 	}
 }

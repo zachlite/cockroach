@@ -11,7 +11,6 @@
 package systemschema
 
 import (
-	"context"
 	"math"
 	"time"
 
@@ -19,13 +18,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
 
@@ -62,7 +59,7 @@ func ShouldSplitAtDesc(rawDesc *roachpb.Value) bool {
 // These system tables are part of the system config.
 const (
 	NamespaceTableSchema = `
-CREATE TABLE system.namespace (
+CREATE TABLE system.namespace2 (
   "parentID" INT8,
   "parentSchemaID" INT8,
   name       STRING,
@@ -360,24 +357,17 @@ CREATE TABLE system.migrations (
     FAMILY "primary" (major, minor, patch, internal, completed_at),
     PRIMARY KEY (major, minor, patch, internal)
 )`
-
-	JoinTokensTableSchema = `
-CREATE TABLE system.join_tokens (
-    id           UUID NOT NULL PRIMARY KEY,
-    secret       BYTES NOT NULL,
-    expiration   TIMESTAMPTZ NOT NULL,
-    FAMILY "primary" (id, secret, expiration)
-)`
 )
 
 func pk(name string) descpb.IndexDescriptor {
 	return descpb.IndexDescriptor{
-		Name:                tabledesc.PrimaryKeyIndexName,
-		ID:                  1,
-		Unique:              true,
-		KeyColumnNames:      []string{name},
-		KeyColumnDirections: singleASC,
-		KeyColumnIDs:        singleID1,
+		Name:             tabledesc.PrimaryKeyIndexName,
+		ID:               1,
+		Unique:           true,
+		ColumnNames:      []string{name},
+		ColumnDirections: singleASC,
+		ColumnIDs:        singleID1,
+		Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 	}
 }
 
@@ -404,13 +394,7 @@ func MakeSystemDatabaseDesc() catalog.DatabaseDescriptor {
 }
 
 func makeTable(desc descpb.TableDescriptor) catalog.TableDescriptor {
-	ctx := context.Background()
-	b := tabledesc.NewBuilder(&desc)
-	err := b.RunPostDeserializationChanges(ctx, nil /* DescGetter */)
-	if err != nil {
-		log.Fatalf(ctx, "Error when building descriptor of system table %q: %s", desc.Name, err)
-	}
-	return b.BuildImmutableTable()
+	return tabledesc.NewBuilder(&desc).BuildImmutableTable()
 }
 
 // These system config descpb.TableDescriptor literals should match the descriptor
@@ -421,12 +405,59 @@ var (
 	// SystemDB is the descriptor for the system database.
 	SystemDB = MakeSystemDatabaseDesc()
 
+	// NamespaceTableName is "namespace", which is always and forever the
+	// user-visible name of the system.namespace table. Tautological, but
+	// important.
+	NamespaceTableName = "namespace"
+
+	// DeprecatedNamespaceTable is the descriptor for the deprecated namespace table.
+	DeprecatedNamespaceTable = makeTable(descpb.TableDescriptor{
+		Name:                    NamespaceTableName,
+		ID:                      keys.DeprecatedNamespaceTableID,
+		ParentID:                keys.SystemDatabaseID,
+		UnexposedParentSchemaID: keys.PublicSchemaID,
+		Version:                 1,
+		Columns: []descpb.ColumnDescriptor{
+			{Name: "parentID", ID: 1, Type: types.Int},
+			{Name: "name", ID: 2, Type: types.String},
+			{Name: "id", ID: 3, Type: types.Int, Nullable: true},
+		},
+		NextColumnID: 4,
+		Families: []descpb.ColumnFamilyDescriptor{
+			{Name: "primary", ID: 0, ColumnNames: []string{"parentID", "name"}, ColumnIDs: []descpb.ColumnID{1, 2}},
+			{Name: "fam_3_id", ID: 3, ColumnNames: []string{"id"}, ColumnIDs: []descpb.ColumnID{3}, DefaultColumnID: 3},
+		},
+		NextFamilyID: 4,
+		PrimaryIndex: descpb.IndexDescriptor{
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"parentID", "name"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
+		},
+		NextIndexID: 2,
+		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
+			descpb.SystemAllowedPrivileges[keys.DeprecatedNamespaceTableID], security.NodeUserName()),
+		FormatVersion:  descpb.InterleavedFormatVersion,
+		NextMutationID: 1,
+	})
+
 	// NamespaceTable is the descriptor for the namespace table. Note that this
 	// table should only be written to via KV puts, not via the SQL layer. Some
 	// code assumes that it only has KV entries for column family 4, not the
 	// "sentinel" column family 0 which would be written by SQL.
+	//
+	// Note that the Descriptor.Name of this table is not "namespace", but
+	// something else. This is because, in 20.1, we moved the representation of
+	// namespaces to a new place, and for various reasons, we can't have two
+	// descriptors with the same Name at once.
+	//
+	// TODO(solon): in 20.2, we should change the Name of this descriptor
+	// back to "namespace".
 	NamespaceTable = makeTable(descpb.TableDescriptor{
-		Name:                    catconstants.NamespaceTableName,
+		Name:                    "namespace2",
 		ID:                      keys.NamespaceTableID,
 		ParentID:                keys.SystemDatabaseID,
 		UnexposedParentSchemaID: keys.PublicSchemaID,
@@ -440,20 +471,21 @@ var (
 		NextColumnID: 5,
 		Families: []descpb.ColumnFamilyDescriptor{
 			{Name: "primary", ID: 0, ColumnNames: []string{"parentID", "parentSchemaID", "name"}, ColumnIDs: []descpb.ColumnID{1, 2, 3}},
-			{Name: "fam_4_id", ID: catconstants.NamespaceTableFamilyID, ColumnNames: []string{"id"}, ColumnIDs: []descpb.ColumnID{4}, DefaultColumnID: 4},
+			{Name: "fam_4_id", ID: 4, ColumnNames: []string{"id"}, ColumnIDs: []descpb.ColumnID{4}, DefaultColumnID: 4},
 		},
 		NextFamilyID: 5,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  catconstants.NamespaceTablePrimaryIndexID,
-			Unique:              true,
-			KeyColumnNames:      []string{"parentID", "parentSchemaID", "name"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2, 3},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"parentID", "parentSchemaID", "name"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2, 3},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
-			descpb.SystemAllowedPrivileges[keys.NamespaceTableID], security.NodeUserName(),
+			descpb.SystemAllowedPrivileges[keys.DeprecatedNamespaceTableID], security.NodeUserName(),
 		),
 		FormatVersion:  descpb.InterleavedFormatVersion,
 		NextMutationID: 1,
@@ -538,12 +570,13 @@ var (
 				ColumnIDs: []descpb.ColumnID{keys.ZonesTableConfigColumnID}, DefaultColumnID: keys.ZonesTableConfigColumnID},
 		},
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  keys.ZonesTablePrimaryIndexID,
-			Unique:              true,
-			KeyColumnNames:      []string{"id"},
-			KeyColumnDirections: singleASC,
-			KeyColumnIDs:        []descpb.ColumnID{keys.ZonesTablePrimaryIndexID},
+			Name:             "primary",
+			ID:               keys.ZonesTablePrimaryIndexID,
+			Unique:           true,
+			ColumnNames:      []string{"id"},
+			ColumnDirections: singleASC,
+			ColumnIDs:        []descpb.ColumnID{keys.ZonesTablePrimaryIndexID},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextFamilyID: 3,
 		NextIndexID:  2,
@@ -603,11 +636,11 @@ var (
 			DefaultColumnID: tabledesc.SequenceColumnID,
 		}},
 		PrimaryIndex: descpb.IndexDescriptor{
-			ID:                  keys.SequenceIndexID,
-			Name:                tabledesc.PrimaryKeyIndexName,
-			KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
-			KeyColumnNames:      []string{tabledesc.SequenceColumnName},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+			ID:               keys.SequenceIndexID,
+			Name:             tabledesc.PrimaryKeyIndexName,
+			ColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
+			ColumnNames:      []string{tabledesc.SequenceColumnName},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 		},
 		SequenceOpts: &descpb.TableDescriptor_SequenceOpts{
 			Increment: 1,
@@ -678,12 +711,13 @@ var (
 			{Name: "primary", ID: 0, ColumnNames: []string{"descID", "version", "nodeID", "expiration"}, ColumnIDs: []descpb.ColumnID{1, 2, 3, 4}},
 		},
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"descID", "version", "expiration", "nodeID"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2, 4, 3},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"descID", "version", "expiration", "nodeID"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2, 4, 3},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextFamilyID: 1,
 		NextIndexID:  2,
@@ -722,12 +756,13 @@ var (
 			{Name: "fam_5_info", ID: 5, ColumnNames: []string{"info"}, ColumnIDs: []descpb.ColumnID{5}, DefaultColumnID: 5},
 		},
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"timestamp", "uniqueID"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 6},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"timestamp", "uniqueID"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 6},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextFamilyID: 6,
 		NextIndexID:  2,
@@ -765,12 +800,13 @@ var (
 			{Name: "fam_6_info", ID: 6, ColumnNames: []string{"info"}, ColumnIDs: []descpb.ColumnID{6}, DefaultColumnID: 6},
 		},
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"timestamp", "uniqueID"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 7},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"timestamp", "uniqueID"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 7},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextFamilyID: 7,
 		NextIndexID:  2,
@@ -857,26 +893,26 @@ var (
 		PrimaryIndex: pk("id"),
 		Indexes: []descpb.IndexDescriptor{
 			{
-				Name:                "jobs_status_created_idx",
-				ID:                  2,
-				Unique:              false,
-				KeyColumnNames:      []string{"status", "created"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{2, 3},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "jobs_status_created_idx",
+				ID:               2,
+				Unique:           false,
+				ColumnNames:      []string{"status", "created"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{2, 3},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			{
-				Name:                "jobs_created_by_type_created_by_id_idx",
-				ID:                  3,
-				Unique:              false,
-				KeyColumnNames:      []string{"created_by_type", "created_by_id"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{6, 7},
-				StoreColumnIDs:      []descpb.ColumnID{2},
-				StoreColumnNames:    []string{"status"},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "jobs_created_by_type_created_by_id_idx",
+				ID:               3,
+				Unique:           false,
+				ColumnNames:      []string{"created_by_type", "created_by_id"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{6, 7},
+				StoreColumnIDs:   []descpb.ColumnID{2},
+				StoreColumnNames: []string{"status"},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		},
 		NextIndexID: 4,
@@ -925,24 +961,24 @@ var (
 		PrimaryIndex: pk("id"),
 		Indexes: []descpb.IndexDescriptor{
 			{
-				Name:                "web_sessions_expiresAt_idx",
-				ID:                  2,
-				Unique:              false,
-				KeyColumnNames:      []string{"expiresAt"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{5},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "web_sessions_expiresAt_idx",
+				ID:               2,
+				Unique:           false,
+				ColumnNames:      []string{"expiresAt"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{5},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			{
-				Name:                "web_sessions_createdAt_idx",
-				ID:                  3,
-				Unique:              false,
-				KeyColumnNames:      []string{"createdAt"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{4},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "web_sessions_createdAt_idx",
+				ID:               3,
+				Unique:           false,
+				ColumnNames:      []string{"createdAt"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{4},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		},
 		NextIndexID: 4,
@@ -991,12 +1027,13 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"tableID", "statisticID"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"tableID", "statisticID"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1031,12 +1068,13 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"localityKey", "localityValue"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"localityKey", "localityValue"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1075,33 +1113,34 @@ var (
 		},
 		NextFamilyID: 4,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"role", "member"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"role", "member"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		Indexes: []descpb.IndexDescriptor{
 			{
-				Name:                "role_members_role_idx",
-				ID:                  2,
-				Unique:              false,
-				KeyColumnNames:      []string{"role"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{1},
-				KeySuffixColumnIDs:  []descpb.ColumnID{2},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "role_members_role_idx",
+				ID:               2,
+				Unique:           false,
+				ColumnNames:      []string{"role"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{1},
+				ExtraColumnIDs:   []descpb.ColumnID{2},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			{
-				Name:                "role_members_member_idx",
-				ID:                  3,
-				Unique:              false,
-				KeyColumnNames:      []string{"member"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{2},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "role_members_member_idx",
+				ID:               3,
+				Unique:           false,
+				ColumnNames:      []string{"member"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{2},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		},
 		NextIndexID: 4,
@@ -1131,12 +1170,13 @@ var (
 		},
 		NextFamilyID: 5,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"type", "object_id", "sub_id"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2, 3},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"type", "object_id", "sub_id"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2, 3},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: newCommentPrivilegeDescriptor(
@@ -1166,14 +1206,15 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           "primary",
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"id"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"id"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC,
 			},
-			KeyColumnIDs: []descpb.ColumnID{1},
+			ColumnIDs: []descpb.ColumnID{1},
+			Version:   descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1220,14 +1261,15 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           "primary",
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"zone_id", "subzone_id", "type", "config"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"zone_id", "subzone_id", "type", "config"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC,
 			},
-			KeyColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
+			ColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
+			Version:   descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1269,14 +1311,15 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           "primary",
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"zone_id", "subzone_id", "locality"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"zone_id", "subzone_id", "locality"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC,
 			},
-			KeyColumnIDs: []descpb.ColumnID{1, 2, 3},
+			ColumnIDs: []descpb.ColumnID{1, 2, 3},
+			Version:   descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1323,12 +1366,13 @@ var (
 		},
 		NextFamilyID: 2,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"zone_id", "subzone_id"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"zone_id", "subzone_id"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1372,12 +1416,13 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           "primary",
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"singleton"},
-			KeyColumnIDs:   []descpb.ColumnID{1},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        "primary",
+			ID:          1,
+			Version:     descpb.StrictIndexColumnIDGuaranteesVersion,
+			Unique:      true,
+			ColumnNames: []string{"singleton"},
+			ColumnIDs:   []descpb.ColumnID{1},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC,
 			},
 		},
@@ -1413,12 +1458,13 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           "primary",
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"id"},
-			KeyColumnIDs:   []descpb.ColumnID{1},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        "primary",
+			ID:          1,
+			Version:     descpb.StrictIndexColumnIDGuaranteesVersion,
+			Unique:      true,
+			ColumnNames: []string{"id"},
+			ColumnIDs:   []descpb.ColumnID{1},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC,
 			},
 		},
@@ -1452,12 +1498,13 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                "primary",
-			ID:                  1,
-			Unique:              true,
-			KeyColumnNames:      []string{"username", "option"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-			KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			Name:             "primary",
+			ID:               1,
+			Unique:           true,
+			ColumnNames:      []string{"username", "option"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+			ColumnIDs:        []descpb.ColumnID{1, 2},
+			Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
@@ -1522,15 +1569,15 @@ var (
 		// Index for the polling query.
 		Indexes: []descpb.IndexDescriptor{
 			{
-				Name:                "completed_idx",
-				ID:                  2,
-				Unique:              false,
-				KeyColumnNames:      []string{"completed", "id"},
-				StoreColumnNames:    []string{"statement_fingerprint"},
-				KeyColumnIDs:        []descpb.ColumnID{2, 1},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				StoreColumnIDs:      []descpb.ColumnID{3},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "completed_idx",
+				ID:               2,
+				Unique:           false,
+				ColumnNames:      []string{"completed", "id"},
+				StoreColumnNames: []string{"statement_fingerprint"},
+				ColumnIDs:        []descpb.ColumnID{2, 1},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				StoreColumnIDs:   []descpb.ColumnID{3},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		},
 		NextIndexID: 3,
@@ -1615,14 +1662,14 @@ var (
 		PrimaryIndex: pk("schedule_id"),
 		Indexes: []descpb.IndexDescriptor{
 			{
-				Name:                "next_run_idx",
-				ID:                  2,
-				Unique:              false,
-				KeyColumnNames:      []string{"next_run"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{5},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Name:             "next_run_idx",
+				ID:               2,
+				Unique:           false,
+				ColumnNames:      []string{"next_run"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ColumnIDs:        []descpb.ColumnID{5},
+				ExtraColumnIDs:   []descpb.ColumnID{1},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		},
 		NextIndexID: 3,
@@ -1690,63 +1737,22 @@ var (
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           tabledesc.PrimaryKeyIndexName,
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"major", "minor", "patch", "internal"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+			Name:        tabledesc.PrimaryKeyIndexName,
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"major", "minor", "patch", "internal"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{
 				descpb.IndexDescriptor_ASC,
 				descpb.IndexDescriptor_ASC,
 				descpb.IndexDescriptor_ASC,
 				descpb.IndexDescriptor_ASC,
 			},
-			KeyColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
+			ColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
+			Version:   descpb.StrictIndexColumnIDGuaranteesVersion,
 		},
 		NextIndexID: 2,
 		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
 			descpb.SystemAllowedPrivileges[keys.JobsTableID], security.NodeUserName()),
-		FormatVersion:  descpb.InterleavedFormatVersion,
-		NextMutationID: 1,
-	})
-
-	// MigrationsTable is the descriptor for the migrations table. It stores facts
-	// about the completion state of long-running migrations. It is used to
-	// prevent migrations from running again after they have been completed.
-	JoinTokensTable = makeTable(descpb.TableDescriptor{
-		Name:                    "join_tokens",
-		ID:                      keys.JoinTokensTableID,
-		ParentID:                keys.SystemDatabaseID,
-		UnexposedParentSchemaID: keys.PublicSchemaID,
-		Version:                 1,
-		Columns: []descpb.ColumnDescriptor{
-			{Name: "id", ID: 1, Type: types.Uuid, Nullable: false},
-			{Name: "secret", ID: 2, Type: types.Bytes, Nullable: false},
-			{Name: "expiration", ID: 3, Type: types.TimestampTZ, Nullable: false},
-		},
-		NextColumnID: 4,
-		Families: []descpb.ColumnFamilyDescriptor{
-			{
-				Name:            "primary",
-				ID:              0,
-				ColumnNames:     []string{"id", "secret", "expiration"},
-				ColumnIDs:       []descpb.ColumnID{1, 2, 3},
-				DefaultColumnID: 0,
-			},
-		},
-		NextFamilyID: 1,
-		PrimaryIndex: descpb.IndexDescriptor{
-			Name:           tabledesc.PrimaryKeyIndexName,
-			ID:             1,
-			Unique:         true,
-			KeyColumnNames: []string{"id"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{
-				descpb.IndexDescriptor_ASC,
-			},
-			KeyColumnIDs: []descpb.ColumnID{1},
-		},
-		NextIndexID: 2,
-		Privileges: descpb.NewCustomSuperuserPrivilegeDescriptor(
-			descpb.SystemAllowedPrivileges[keys.JoinTokensTableID], security.NodeUserName()),
 		FormatVersion:  descpb.InterleavedFormatVersion,
 		NextMutationID: 1,
 	})
@@ -1773,6 +1779,6 @@ func newCommentPrivilegeDescriptor(
 				Privileges: priv.ToBitField(),
 			},
 		},
-		Version: descpb.Version21_2,
+		Version: descpb.OwnerVersion,
 	}
 }

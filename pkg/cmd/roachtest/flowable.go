@@ -13,9 +13,6 @@ package main
 import (
 	"context"
 	"regexp"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var flowableReleaseTagRegex = regexp.MustCompile(`^flowable-(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
@@ -25,35 +22,34 @@ var flowableReleaseTagRegex = regexp.MustCompile(`^flowable-(?P<major>\d+)\.(?P<
 func registerFlowable(r *testRegistry) {
 	runFlowable := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
 		t.Status("cloning flowable and installing prerequisites")
 		latestTag, err := repeatGetLatestTag(
-			ctx, t, "flowable", "flowable-engine", flowableReleaseTagRegex,
+			ctx, c, "flowable", "flowable-engine", flowableReleaseTagRegex,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest Flowable release is %s.", latestTag)
+		t.l.Printf("Latest Flowable release is %s.", latestTag)
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update apt-get", `sudo apt-get -qq update`,
+			ctx, c, node, "update apt-get", `sudo apt-get -qq update`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install dependencies",
@@ -63,14 +59,14 @@ func registerFlowable(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "remove old Flowable", `rm -rf /mnt/data1/flowable-engine`,
+			ctx, c, node, "remove old Flowable", `rm -rf /mnt/data1/flowable-engine`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/flowable/flowable-engine.git",
 			"/mnt/data1/flowable-engine",
@@ -83,7 +79,6 @@ func registerFlowable(r *testRegistry) {
 		t.Status("building Flowable")
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"building Flowable",
@@ -99,12 +94,12 @@ func registerFlowable(r *testRegistry) {
 		}
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "flowable",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		MinVersion: "v19.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runFlowable(ctx, t, c)
 		},
 	})

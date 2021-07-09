@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -299,7 +300,7 @@ func (expr *AndExpr) TypeCheck(
 func (expr *BinaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := BinOps[expr.Operator.Symbol]
+	ops := BinOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, true, expr.Left, expr.Right)
 	if err != nil {
@@ -484,8 +485,7 @@ func (expr *CastExpr) TypeCheck(
 			// is in its resolvable type set), we desire the cast's type for the
 			// Constant. In many cases, the CastExpr will then become a no-op and will
 			// be elided below. In other cases, the types may be equivalent but not
-			// Identical (e.g. string::char(2) or oid::regclass) and the CastExpr is
-			// still needed.
+			// Identical (e.g. string vs char(2)) and the CastExpr is still needed.
 			desired = exprType
 		}
 	case semaCtx.isUnresolvedPlaceholder(expr.Expr):
@@ -1344,7 +1344,7 @@ func (expr *Subquery) TypeCheck(_ context.Context, sc *SemaContext, _ *types.T) 
 func (expr *UnaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := UnaryOps[expr.Operator.Symbol]
+	ops := UnaryOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, false, expr.Expr)
 	if err != nil {
@@ -1459,7 +1459,9 @@ func (expr *Tuple) TypeCheck(
 	// Copy the labels if there are any.
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
-		copy(labels, expr.Labels)
+		for i := range expr.Labels {
+			labels[i] = lexbase.NormalizeName(expr.Labels[i])
+		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)
 	return expr, nil
@@ -1750,25 +1752,6 @@ func typeCheckAndRequireTupleElems(
 		}
 		tuple.Exprs[i] = rightTyped
 		tuple.typ.TupleContents()[i] = rightTyped.ResolvedType()
-	}
-	if len(tuple.typ.TupleContents()) > 0 && tuple.typ.TupleContents()[0].Family() == types.CollatedStringFamily {
-		// Make sure that all elements of the tuple have the correct locale set
-		// for collated strings. Note that if the locales were different, an
-		// error would have been already emitted, so here we are only upgrading
-		// an empty locale (which might be set for NULLs) to a non-empty (if
-		// such is found).
-		var typWithLocale *types.T
-		for _, typ := range tuple.typ.TupleContents() {
-			if typ.Locale() != "" {
-				typWithLocale = typ
-				break
-			}
-		}
-		if typWithLocale != nil {
-			for i := range tuple.typ.TupleContents() {
-				tuple.typ.TupleContents()[i] = typWithLocale
-			}
-		}
 	}
 	return tuple, nil
 }

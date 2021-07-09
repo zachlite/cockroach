@@ -17,26 +17,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
 func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 	const nodes = 6
 	geoZones := []string{"us-east1-b", "us-west1-b", "europe-west2-b"}
-	if cloud == spec.AWS {
+	if cloud == aws {
 		geoZones = []string{"us-east-2b", "us-west-1a", "eu-west-1a"}
 	}
 	geoZonesStr := strings.Join(geoZones, ",")
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    fmt.Sprintf("indexes/%d/nodes=%d/multi-region", secondaryIndexes, nodes),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(nodes+1, spec.CPU(16), spec.Geo(), spec.Zones(geoZonesStr)),
+		Cluster: makeClusterSpec(nodes+1, cpu(16), geo(), zones(geoZonesStr)),
 		// Uses CONFIGURE ZONE USING ... COPY FROM PARENT syntax.
 		MinVersion: `v19.1.0`,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			firstAZ := geoZones[0]
 			roachNodes := c.Range(1, nodes)
 			gatewayNodes := c.Range(1, nodes/3)
@@ -44,7 +41,7 @@ func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 
 			c.Put(ctx, cockroach, "./cockroach", roachNodes)
 			c.Put(ctx, workload, "./workload", loadNode)
-			c.Start(ctx, roachNodes)
+			c.Start(ctx, t, roachNodes)
 			conn := c.Conn(ctx, 1)
 
 			t.Status("running workload")
@@ -57,7 +54,7 @@ func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 				// Set lease preferences so that all leases for the table are
 				// located in the availability zone with the load generator.
 				if !local {
-					t.L().Printf("setting lease preferences")
+					t.l.Printf("setting lease preferences")
 					if _, err := conn.ExecContext(ctx, fmt.Sprintf(`
 						ALTER TABLE indexes.indexes
 						CONFIGURE ZONE USING
@@ -69,7 +66,7 @@ func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 					}
 
 					// Wait for ranges to rebalance across all three regions.
-					t.L().Printf("checking replica balance")
+					t.l.Printf("checking replica balance")
 					retryOpts := retry.Options{MaxBackoff: 15 * time.Second}
 					for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
 						waitForUpdatedReplicationReport(ctx, t, conn)
@@ -86,12 +83,12 @@ func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 							break
 						}
 
-						t.L().Printf("replicas still rebalancing...")
+						t.l.Printf("replicas still rebalancing...")
 					}
 
 					// Wait for leases to adhere to preferences, if they aren't
 					// already.
-					t.L().Printf("checking lease preferences")
+					t.l.Printf("checking lease preferences")
 					for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
 						var ok bool
 						if err := conn.QueryRowContext(ctx, `
@@ -105,7 +102,7 @@ func registerNIndexes(r *testRegistry, secondaryIndexes int) {
 							break
 						}
 
-						t.L().Printf("leases still rebalancing...")
+						t.l.Printf("leases still rebalancing...")
 					}
 				}
 

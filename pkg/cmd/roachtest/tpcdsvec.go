@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/cmpconn"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload/tpcds"
 	"github.com/cockroachdb/errors"
@@ -53,15 +51,16 @@ func registerTPCDSVec(r *testRegistry) {
 		`web_sales`, `web_site`,
 	}
 
-	runTPCDSVec := func(ctx context.Context, t test.Test, c cluster.Cluster) {
+	runTPCDSVec := func(ctx context.Context, t *test, c *cluster) {
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx)
+		c.Start(ctx, t)
 
 		clusterConn := c.Conn(ctx, 1)
 		disableAutoStats(t, clusterConn)
+		disableVectorizeRowCountThresholdHeuristic(t, clusterConn)
 		t.Status("restoring TPCDS dataset for Scale Factor 1")
 		if _, err := clusterConn.Exec(
-			`RESTORE DATABASE tpcds FROM 'gs://cockroach-fixtures/workload/tpcds/scalefactor=1/backup?AUTH=implicit';`,
+			`RESTORE DATABASE tpcds FROM 'gs://cockroach-fixtures/workload/tpcds/scalefactor=1/backup';`,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -81,11 +80,7 @@ func registerTPCDSVec(r *testRegistry) {
 		// We additionally open fresh connections for each query.
 		setStmtTimeout := fmt.Sprintf("SET statement_timeout='%s';", timeout)
 		firstNode := c.Node(1)
-		urls, err := c.ExternalPGUrl(ctx, firstNode)
-		if err != nil {
-			t.Fatal(err)
-		}
-		firstNodeURL := urls[0]
+		firstNodeURL := c.ExternalPGUrl(ctx, firstNode)[0]
 		openNewConnections := func() (map[string]cmpconn.Conn, func()) {
 			conns := map[string]cmpconn.Conn{}
 			vecOffConn, err := cmpconn.NewConn(
@@ -171,12 +166,12 @@ func registerTPCDSVec(r *testRegistry) {
 		}
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "tpcdsvec",
 		Owner:      OwnerSQLQueries,
-		Cluster:    r.makeClusterSpec(3),
+		Cluster:    makeClusterSpec(3),
 		MinVersion: "v20.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCDSVec(ctx, t, c)
 		},
 	})

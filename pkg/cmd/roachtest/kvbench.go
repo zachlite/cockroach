@@ -19,9 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/search"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/errors"
@@ -64,7 +61,7 @@ func registerKVBenchSpec(r *testRegistry, b kvBenchSpec) {
 	if b.NumShards > 0 {
 		nameParts = append(nameParts, fmt.Sprintf("shards=%d", b.NumShards))
 	}
-	opts := []spec.Option{spec.CPU(b.CPUs)}
+	opts := []createOption{cpu(b.CPUs)}
 	switch b.KeyDistribution {
 	case sequential:
 		nameParts = append(nameParts, "sequential")
@@ -81,8 +78,8 @@ func registerKVBenchSpec(r *testRegistry, b kvBenchSpec) {
 	}
 
 	name := strings.Join(nameParts, "/")
-	nodes := r.makeClusterSpec(b.Nodes+1, opts...)
-	r.Add(TestSpec{
+	nodes := makeClusterSpec(b.Nodes+1, opts...)
+	r.Add(testSpec{
 		Name: name,
 		// These tests don't have pass/fail conditions so we don't want to run them
 		// nightly. Currently they're only good for printing the results of a search
@@ -92,7 +89,7 @@ func registerKVBenchSpec(r *testRegistry, b kvBenchSpec) {
 		Tags:    []string{"manual"},
 		Owner:   OwnerKV,
 		Cluster: nodes,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runKVBench(ctx, t, c, b)
 		},
 	})
@@ -179,7 +176,7 @@ func registerKVBench(r *testRegistry) {
 	}
 }
 
-func makeKVLoadGroup(c cluster.Cluster, numRoachNodes, numLoadNodes int) loadGroup {
+func makeKVLoadGroup(c *cluster, numRoachNodes, numLoadNodes int) loadGroup {
 	return loadGroup{
 		roachNodes: c.Range(1, numRoachNodes),
 		loadNodes:  c.Range(numRoachNodes+1, numRoachNodes+numLoadNodes),
@@ -194,15 +191,15 @@ func makeKVLoadGroup(c cluster.Cluster, numRoachNodes, numLoadNodes int) loadGro
 // This tool was primarily written with the objective of demonstrating the write
 // performance characteristics of using hash sharded indexes, for sequential workloads
 // which would've otherwise created a single-range hotspot.
-func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSpec) {
+func runKVBench(ctx context.Context, t *test, c *cluster, b kvBenchSpec) {
 	loadGroup := makeKVLoadGroup(c, b.Nodes, 1)
 	roachNodes := loadGroup.roachNodes
 	loadNodes := loadGroup.loadNodes
 
-	if err := c.PutE(ctx, t.L(), cockroach, "./cockroach", roachNodes); err != nil {
+	if err := c.PutE(ctx, t.l, cockroach, "./cockroach", roachNodes); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.PutE(ctx, t.L(), workload, "./workload", loadNodes); err != nil {
+	if err := c.PutE(ctx, t.l, workload, "./workload", loadNodes); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,7 +224,7 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 		// splitting can significantly change the underlying layout of the table and
 		// affect benchmark results.
 		c.Wipe(ctx, roachNodes)
-		c.Start(ctx, roachNodes)
+		c.Start(ctx, t, roachNodes)
 		time.Sleep(restartWait)
 
 		// We currently only support one loadGroup.
@@ -260,7 +257,7 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 				splitCmd.WriteString(`;`)
 			}
 			if _, err := db.Exec(splitCmd.String()); err != nil {
-				t.L().Printf(splitCmd.String())
+				t.l.Printf(splitCmd.String())
 				return err
 			}
 
@@ -304,7 +301,7 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 			}
 
 			localHistPath := filepath.Join(resultsDir, fmt.Sprintf(`kvbench-%d-stats.json`, maxrate))
-			if err := c.Get(ctx, t.L(), clusterHistPath, localHistPath, loadNodes); err != nil {
+			if err := c.Get(ctx, t.l, clusterHistPath, localHistPath, loadNodes); err != nil {
 				t.Fatal(err)
 			}
 
@@ -335,7 +332,7 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 			msg = "FAIL"
 		}
 		ttycolor.Stdout(color)
-		t.L().Printf(`--- SEARCH ITER %s: kv workload avg latency: %0.1fms (threshold: %0.1fms), avg throughput: %d`,
+		t.l.Printf(`--- SEARCH ITER %s: kv workload avg latency: %0.1fms (threshold: %0.1fms), avg throughput: %d`,
 			msg, res.latency(), b.LatencyThresholdMs, res.throughput())
 		ttycolor.Stdout(ttycolor.Reset)
 		return pass, nil
@@ -344,7 +341,7 @@ func runKVBench(ctx context.Context, t test.Test, c cluster.Cluster, b kvBenchSp
 		t.Fatal(err)
 	} else {
 		ttycolor.Stdout(ttycolor.Green)
-		t.L().Printf("-------\nMAX THROUGHPUT = %d\n--------\n\n", res)
+		t.l.Printf("-------\nMAX THROUGHPUT = %d\n--------\n\n", res)
 		ttycolor.Stdout(ttycolor.Reset)
 	}
 }

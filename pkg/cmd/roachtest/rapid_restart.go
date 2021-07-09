@@ -17,15 +17,13 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
-func runRapidRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runRapidRestart(ctx context.Context, t *test, c *cluster) {
 	// Use a single-node cluster which speeds the stop/start cycle.
 	nodes := c.Node(1)
 	c.Put(ctx, cockroach, "./cockroach", nodes)
@@ -74,7 +72,7 @@ func runRapidRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
 				case <-time.After(10 * time.Second):
 					// We likely ended up killing before the process spawned.
 					// Loop around.
-					t.L().Printf("no exit status yet, killing again")
+					t.l.Printf("no exit status yet, killing again")
 				}
 			}
 			if exitErr := (*exec.ExitError)(nil); errors.As(err, &exitErr) {
@@ -99,11 +97,7 @@ func runRapidRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
 		// Verify the cluster is ok by torturing the prometheus endpoint until it
 		// returns success. A side-effect is to prevent regression of #19559.
 		for !done() {
-			adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, nodes)
-			if err != nil {
-				t.Fatal(err)
-			}
-			base := `http://` + adminUIAddrs[0]
+			base := `http://` + c.ExternalAdminUIAddr(ctx, nodes)[0]
 			// Torture the prometheus endpoint to prevent regression of #19559.
 			url := base + `/_status/vars`
 			resp, err := httpClient.Get(ctx, url)
@@ -115,7 +109,7 @@ func runRapidRestart(ctx context.Context, t test.Test, c cluster.Cluster) {
 			}
 		}
 
-		t.L().Printf("%d OK\n", j)
+		t.l.Printf("%d OK\n", j)
 	}
 
 	// Clean up for the test harness. Usually we want to leave nodes running so

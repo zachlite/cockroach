@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
@@ -47,7 +46,6 @@ func main() {
 	var debugEnabled bool
 	var clusterID string
 	var count = 1
-	var versionsBinaryOverride map[string]string
 
 	cobra.EnableCommandSorting = false
 
@@ -119,7 +117,7 @@ Examples:
    roachtest list tag:weekly
 `,
 		RunE: func(_ *cobra.Command, args []string) error {
-			r, err := makeTestRegistry(cloud, instanceType, zonesF, localSSDArg)
+			r, err := makeTestRegistry()
 			if err != nil {
 				return err
 			}
@@ -160,16 +158,15 @@ runner itself.
 `,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return runTests(registerTests, cliCfg{
-				args:                   args,
-				count:                  count,
-				cpuQuota:               cpuQuota,
-				debugEnabled:           debugEnabled,
-				httpPort:               httpPort,
-				parallelism:            parallelism,
-				artifactsDir:           artifacts,
-				user:                   username,
-				clusterID:              clusterID,
-				versionsBinaryOverride: versionsBinaryOverride,
+				args:         args,
+				count:        count,
+				cpuQuota:     cpuQuota,
+				debugEnabled: debugEnabled,
+				httpPort:     httpPort,
+				parallelism:  parallelism,
+				artifactsDir: artifacts,
+				user:         username,
+				clusterID:    clusterID,
 			})
 		},
 	}
@@ -193,16 +190,15 @@ runner itself.
 		Long:         `Run automated benchmarks on existing or ephemeral cockroach clusters.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return runTests(registerBenchmarks, cliCfg{
-				args:                   args,
-				count:                  count,
-				cpuQuota:               cpuQuota,
-				debugEnabled:           debugEnabled,
-				httpPort:               httpPort,
-				parallelism:            parallelism,
-				artifactsDir:           artifacts,
-				user:                   username,
-				clusterID:              clusterID,
-				versionsBinaryOverride: versionsBinaryOverride,
+				args:         args,
+				count:        count,
+				cpuQuota:     cpuQuota,
+				debugEnabled: debugEnabled,
+				httpPort:     httpPort,
+				parallelism:  parallelism,
+				artifactsDir: artifacts,
+				user:         username,
+				clusterID:    clusterID,
 			})
 		},
 	}
@@ -239,15 +235,9 @@ runner itself.
 		cmd.Flags().IntVar(
 			&httpPort, "port", 8080, "the port on which to serve the HTTP interface")
 		cmd.Flags().BoolVar(
-			&localSSDArg, "local-ssd", true, "Use a local SSD instead of an EBS volume (only for use with AWS) (defaults to true if instance type supports local SSDs)")
+			&localSSD, "local-ssd", true, "Use a local SSD instead of an EBS volume (only for use with AWS) (defaults to true if instance type supports local SSDs)")
 		cmd.Flags().StringSliceVar(
 			&createArgs, "create-args", []string{}, "extra args to pass onto the roachprod create command")
-		cmd.Flags().StringToStringVar(
-			&versionsBinaryOverride, "versions-binary-override", nil,
-			"List of <version>=<path to cockroach binary>. If a certain version <ver> "+
-				"is present in the list,"+"the respective binary will be used when a "+
-				"multi-version test asks for the respective binary, instead of "+
-				"`roachprod stage <ver>`. Example: 20.1.4=cockroach-20.1,20.2.0=cockroach-20.2.")
 	}
 
 	rootCmd.AddCommand(listCmd)
@@ -265,23 +255,22 @@ runner itself.
 }
 
 type cliCfg struct {
-	args                   []string
-	count                  int
-	cpuQuota               int
-	debugEnabled           bool
-	httpPort               int
-	parallelism            int
-	artifactsDir           string
-	user                   string
-	clusterID              string
-	versionsBinaryOverride map[string]string
+	args         []string
+	count        int
+	cpuQuota     int
+	debugEnabled bool
+	httpPort     int
+	parallelism  int
+	artifactsDir string
+	user         string
+	clusterID    string
 }
 
 func runTests(register func(*testRegistry), cfg cliCfg) error {
 	if cfg.count <= 0 {
 		return fmt.Errorf("--count (%d) must by greater than 0", cfg.count)
 	}
-	r, err := makeTestRegistry(cloud, instanceType, zonesF, localSSDArg)
+	r, err := makeTestRegistry()
 	if err != nil {
 		return err
 	}
@@ -337,10 +326,7 @@ func runTests(register func(*testRegistry), cfg cliCfg) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	CtrlC(ctx, l, cancel, cr)
-	err = runner.Run(
-		ctx, tests, cfg.count, cfg.parallelism, opt,
-		testOpts{versionsBinaryOverride: cfg.versionsBinaryOverride},
-		lopt)
+	err = runner.Run(ctx, tests, cfg.count, cfg.parallelism, opt, cfg.artifactsDir, lopt)
 
 	// Make sure we attempt to clean up. We run with a non-canceled ctx; the
 	// ctx above might be canceled in case a signal was received. If that's
@@ -375,7 +361,7 @@ func getUser(userFlag string) string {
 // respond to the cancelation and return, and so the process will be dead by the
 // time the 5s elapse.
 // If a 2nd signal is received, it calls os.Exit(2).
-func CtrlC(ctx context.Context, l *logger.Logger, cancel func(), cr *clusterRegistry) {
+func CtrlC(ctx context.Context, l *logger, cancel func(), cr *clusterRegistry) {
 	// Shut down test clusters when interrupted (for example CTRL-C).
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -415,24 +401,24 @@ func CtrlC(ctx context.Context, l *logger.Logger, cancel func(), cr *clusterRegi
 // runnerLogPath is the path to the file that will contain the runner's log.
 func testRunnerLogger(
 	ctx context.Context, parallelism int, runnerLogPath string,
-) (*logger.Logger, logger.TeeOptType) {
-	teeOpt := logger.NoTee
+) (*logger, teeOptType) {
+	teeOpt := noTee
 	if parallelism == 1 {
-		teeOpt = logger.TeeToStdout
+		teeOpt = teeToStdout
 	}
 
-	var l *logger.Logger
-	if teeOpt == logger.TeeToStdout {
-		verboseCfg := logger.Config{Stdout: os.Stdout, Stderr: os.Stderr}
+	var l *logger
+	if teeOpt == teeToStdout {
+		verboseCfg := loggerConfig{stdout: os.Stdout, stderr: os.Stderr}
 		var err error
-		l, err = verboseCfg.NewLogger(runnerLogPath)
+		l, err = verboseCfg.newLogger(runnerLogPath)
 		if err != nil {
 			panic(err)
 		}
 	} else {
-		verboseCfg := logger.Config{}
+		verboseCfg := loggerConfig{}
 		var err error
-		l, err = verboseCfg.NewLogger(runnerLogPath)
+		l, err = verboseCfg.newLogger(runnerLogPath)
 		if err != nil {
 			panic(err)
 		}
@@ -441,10 +427,10 @@ func testRunnerLogger(
 	return l, teeOpt
 }
 
-func testsToRun(ctx context.Context, r testRegistry, filter *testFilter) []TestSpec {
+func testsToRun(ctx context.Context, r testRegistry, filter *testFilter) []testSpec {
 	tests := r.GetTests(ctx, filter)
 
-	var notSkipped []TestSpec
+	var notSkipped []testSpec
 	for _, s := range tests {
 		if s.Skip == "" {
 			notSkipped = append(notSkipped, s)

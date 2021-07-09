@@ -71,75 +71,6 @@ func unimplementedWithIssueDetail(sqllex sqlLexer, issue int, detail string) int
     return 1
 }
 
-func processBinaryQualOp(
-  sqllex sqlLexer,
-  op tree.Operator,
-  lhs tree.Expr,
-  rhs tree.Expr,
-) (tree.Expr, int) {
-  switch op := op.(type) {
-  case tree.BinaryOperator:
-    op.IsOperator = true
-    return &tree.BinaryExpr{Operator: op, Left: lhs, Right: rhs}, 0
-  case tree.ComparisonOperator:
-    return &tree.ComparisonExpr{Operator: op, Left: lhs, Right: rhs}, 0
-  case tree.UnaryOperator:
-    // We have a unary operator which have the same symbol as the binary
-    // operator, so adjust accordingly.
-    switch op.Symbol {
-    case tree.UnaryComplement:
-      return &tree.ComparisonExpr{Operator: tree.RegMatch, Left: lhs, Right: rhs}, 0
-    default:
-      sqllex.Error(fmt.Sprintf("unknown binary operator %s", op))
-      return nil, -1
-    }
-  default:
-    sqllex.Error(fmt.Sprintf("unknown binary operator %s", op))
-    return nil, 1
-  }
-}
-
-func processUnaryQualOp(
-  sqllex sqlLexer,
-  op tree.Operator,
-  expr tree.Expr,
-) (tree.Expr, int) {
-  e, code := processUnaryQualOpInternal(sqllex, op, expr)
-  if code != 0 {
-    return e, code
-  }
-  if e, ok := e.(*tree.UnaryExpr); ok {
-    e.Operator.IsOperator = true
-  }
-  return e, code
-}
-
-func processUnaryQualOpInternal(
-  sqllex sqlLexer,
-  op tree.Operator,
-  expr tree.Expr,
-) (tree.Expr, int) {
-  switch op := op.(type) {
-  case tree.UnaryOperator:
-    return &tree.UnaryExpr{Operator: op, Expr: expr}, 0
-  case tree.BinaryOperator:
-    // We have some binary operators which have the same symbol as the unary
-    // operator, so adjust accordingly.
-    switch op.Symbol {
-    case tree.Plus:
-      return expr, 0
-    case tree.Minus:
-      return unaryNegation(expr), 0
-    }
-  case tree.ComparisonOperator:
-    switch op {
-    case tree.RegMatch:
-      return &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(tree.UnaryComplement), Expr: expr}, 0
-    }
-  }
-  sqllex.Error(fmt.Sprintf("unknown unary operator %s", op))
-  return nil, 1
-}
 
 %}
 
@@ -755,7 +686,7 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 
 %token <str> SAVEPOINT SCANS SCATTER SCHEDULE SCHEDULES SCHEMA SCHEMAS SCRUB SEARCH SECOND SELECT SEQUENCE SEQUENCES
 %token <str> SERIALIZABLE SERVER SESSION SESSIONS SESSION_USER SET SETS SETTING SETTINGS
-%token <str> SHARE SHOW SIMILAR SIMPLE SKIP SKIP_LOCALITIES_CHECK SKIP_MISSING_FOREIGN_KEYS
+%token <str> SHARE SHOW SIMILAR SIMPLE SKIP SKIP_MISSING_FOREIGN_KEYS
 %token <str> SKIP_MISSING_SEQUENCES SKIP_MISSING_SEQUENCE_OWNERS SKIP_MISSING_VIEWS SMALLINT SMALLSERIAL SNAPSHOT SOME SPLIT SQL
 
 %token <str> START STATISTICS STATUS STDIN STREAM STRICT STRING STORAGE STORE STORED STORING SUBSTRING
@@ -923,7 +854,6 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %type <tree.Statement> explain_stmt
 %type <tree.Statement> prepare_stmt
 %type <tree.Statement> preparable_stmt
-%type <tree.Statement> explainable_stmt
 %type <tree.Statement> row_source_extension_stmt
 %type <tree.Statement> export_stmt
 %type <tree.Statement> execute_stmt
@@ -1068,7 +998,7 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %type <str> cursor_name database_name index_name opt_index_name column_name insert_column_item statistics_name window_name
 %type <str> family_name opt_family_name table_alias_name constraint_name target_name zone_name partition_name collation_name
 %type <str> db_object_name_component
-%type <*tree.UnresolvedObjectName> table_name db_name standalone_index_name sequence_name type_name view_name db_object_name simple_db_object_name complex_db_object_name
+%type <*tree.UnresolvedObjectName> table_name standalone_index_name sequence_name type_name view_name db_object_name simple_db_object_name complex_db_object_name
 %type <[]*tree.UnresolvedObjectName> type_name_list
 %type <str> schema_name
 %type <tree.ObjectNamePrefix>  qualifiable_schema_name opt_schema_name
@@ -1080,7 +1010,7 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %type <*tree.TableIndexName> table_index_name
 %type <tree.TableIndexNames> table_index_name_list
 
-%type <tree.Operator> all_op qual_op operator_op
+%type <tree.Operator> math_op
 
 %type <tree.IsolationLevel> iso_level
 %type <tree.UserPriority> user_priority
@@ -1347,7 +1277,6 @@ func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
 %left      '#'
 %left      '&'
 %left      LSHIFT RSHIFT INET_CONTAINS_OR_EQUALS INET_CONTAINED_BY_OR_EQUALS AND_AND SQRT CBRT
-%left      OPERATOR // if changing the last token before OPERATOR, change all instances of %prec <last token>
 %left      '+' '-'
 %left      '*' '/' FLOORDIV '%'
 %left      '^'
@@ -1633,6 +1562,7 @@ alter_database_primary_region_stmt:
   }
 | ALTER DATABASE database_name SET primary_region_clause
   {
+    /* SKIP DOC */
     $$.val = &tree.AlterDatabasePrimaryRegion{
       Name: tree.Name($3),
       PrimaryRegion: tree.Name($5),
@@ -2382,7 +2312,7 @@ username_or_sconst:
   {
     // We use UsernameValidation because username_or_sconst and role_spec
     // are only used for usernames of existing accounts, not when
-    // creating new users or roles.
+    // creating new users or roles.	
     $$.val, _ = security.MakeSQLUsernameFromUserInput($1, security.UsernameValidation)
   }
 
@@ -2731,7 +2661,6 @@ opt_with_schedule_options:
 //    encryption_passphrase=passphrase: decrypt BACKUP with specified passphrase
 //    kms="[kms_provider]://[kms_host]/[master_key_identifier]?[parameters]" : decrypt backups using KMS
 //    detached: execute restore job asynchronously, without waiting for its completion
-//    skip_localities_check: ignore difference of zone configuration between restore cluster and backup cluster
 // %SeeAlso: BACKUP, WEBDOCS/restore.html
 restore_stmt:
   RESTORE FROM list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
@@ -2863,10 +2792,6 @@ restore_options:
 | DETACHED
   {
     $$.val = &tree.RestoreOptions{Detached: true}
-  }
-| SKIP_LOCALITIES_CHECK
-  {
-    $$.val = &tree.RestoreOptions{SkipLocalitiesCheck: true}
   }
 
 import_format:
@@ -3322,7 +3247,7 @@ create_unsupported:
 | CREATE FUNCTION error { return unimplementedWithIssueDetail(sqllex, 17511, "create function") }
 | CREATE OR REPLACE FUNCTION error { return unimplementedWithIssueDetail(sqllex, 17511, "create function") }
 | CREATE opt_or_replace opt_trusted opt_procedural LANGUAGE name error { return unimplementedWithIssueDetail(sqllex, 17511, "create language " + $6) }
-| CREATE OPERATOR error { return unimplementedWithIssue(sqllex, 65017) }
+| CREATE OPERATOR error { return unimplemented(sqllex, "create operator") }
 | CREATE PUBLICATION error { return unimplemented(sqllex, "create publication") }
 | CREATE opt_or_replace RULE error { return unimplemented(sqllex, "create rule") }
 | CREATE SERVER error { return unimplemented(sqllex, "create server") }
@@ -3892,7 +3817,7 @@ analyze_target:
 //
 // %SeeAlso: WEBDOCS/explain.html
 explain_stmt:
-  EXPLAIN explainable_stmt
+  EXPLAIN preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain(nil /* options */, $2.stmt())
@@ -3901,7 +3826,7 @@ explain_stmt:
     }
   }
 | EXPLAIN error // SHOW HELP: EXPLAIN
-| EXPLAIN '(' explain_option_list ')' explainable_stmt
+| EXPLAIN '(' explain_option_list ')' preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain($3.strs(), $5.stmt())
@@ -3909,7 +3834,7 @@ explain_stmt:
       return setErr(sqllex, err)
     }
   }
-| EXPLAIN ANALYZE explainable_stmt
+| EXPLAIN ANALYZE preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain([]string{"ANALYZE"}, $3.stmt())
@@ -3917,7 +3842,7 @@ explain_stmt:
       return setErr(sqllex, err)
     }
   }
-| EXPLAIN ANALYSE explainable_stmt
+| EXPLAIN ANALYSE preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain([]string{"ANALYZE"}, $3.stmt())
@@ -3925,7 +3850,7 @@ explain_stmt:
       return setErr(sqllex, err)
     }
   }
-| EXPLAIN ANALYZE '(' explain_option_list ')' explainable_stmt
+| EXPLAIN ANALYZE '(' explain_option_list ')' preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain(append($4.strs(), "ANALYZE"), $6.stmt())
@@ -3933,7 +3858,7 @@ explain_stmt:
       return setErr(sqllex, err)
     }
   }
-| EXPLAIN ANALYSE '(' explain_option_list ')' explainable_stmt
+| EXPLAIN ANALYSE '(' explain_option_list ')' preparable_stmt
   {
     var err error
     $$.val, err = tree.MakeExplain(append($4.strs(), "ANALYZE"), $6.stmt())
@@ -3946,10 +3871,6 @@ explain_stmt:
 // cause a help text for the select clause, which will be confusing in
 // the context of EXPLAIN.
 | EXPLAIN '(' error // SHOW HELP: EXPLAIN
-
-explainable_stmt:
-  preparable_stmt
-| execute_stmt
 
 preparable_stmt:
   alter_stmt     // help texts in sub-rule
@@ -5069,9 +4990,9 @@ statements_or_queries:
 // %Help: SHOW JOBS - list background jobs
 // %Category: Misc
 // %Text:
-// SHOW [AUTOMATIC | CHANGEFEED] JOBS [select clause]
+// SHOW [AUTOMATIC] JOBS [select clause]
 // SHOW JOBS FOR SCHEDULES [select clause]
-// SHOW [CHANGEFEED] JOB <jobid>
+// SHOW JOB <jobid>
 // %SeeAlso: CANCEL JOBS, PAUSE JOBS, RESUME JOBS
 show_jobs_stmt:
   SHOW AUTOMATIC JOBS
@@ -5082,13 +5003,8 @@ show_jobs_stmt:
   {
     $$.val = &tree.ShowJobs{Automatic: false}
   }
-| SHOW CHANGEFEED JOBS
-  {
-    $$.val = &tree.ShowChangefeedJobs{}
-  }
 | SHOW AUTOMATIC JOBS error // SHOW HELP: SHOW JOBS
 | SHOW JOBS error // SHOW HELP: SHOW JOBS
-| SHOW CHANGEFEED JOBS error // SHOW HELP: SHOW JOBS
 | SHOW JOBS select_stmt
   {
     $$.val = &tree.ShowJobs{Jobs: $3.slct()}
@@ -5101,24 +5017,12 @@ show_jobs_stmt:
   {
     $$.val = &tree.ShowJobs{Schedules: $3.slct()}
   }
-| SHOW CHANGEFEED JOBS select_stmt
-  {
-    $$.val = &tree.ShowChangefeedJobs{Jobs: $4.slct()}
-  }
 | SHOW JOBS select_stmt error // SHOW HELP: SHOW JOBS
 | SHOW JOB a_expr
   {
     $$.val = &tree.ShowJobs{
       Jobs: &tree.Select{
         Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$3.expr()}}},
-      },
-    }
-  }
-| SHOW CHANGEFEED JOB a_expr
-  {
-    $$.val = &tree.ShowChangefeedJobs{
-      Jobs: &tree.Select{
-        Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$4.expr()}}},
       },
     }
   }
@@ -5132,7 +5036,6 @@ show_jobs_stmt:
     }
   }
 | SHOW JOB error // SHOW HELP: SHOW JOBS
-| SHOW CHANGEFEED JOB error // SHOW HELP: SHOW JOBS
 
 // %Help: SHOW SCHEDULES - list periodic schedules
 // %Category: Misc
@@ -5357,10 +5260,10 @@ show_transaction_stmt:
   }
 | SHOW TRANSACTION error // SHOW HELP: SHOW TRANSACTION
 
-// %Help: SHOW CREATE - display the CREATE statement for a table, sequence, view, or database
+// %Help: SHOW CREATE - display the CREATE statement for a table, sequence or view
 // %Category: DDL
 // %Text:
-// SHOW CREATE [ TABLE | SEQUENCE | VIEW | DATABASE ] <object_name>
+// SHOW CREATE [ TABLE | SEQUENCE | VIEW ] <tablename>
 // SHOW CREATE ALL TABLES
 // %SeeAlso: WEBDOCS/show-create-table.html
 show_create_stmt:
@@ -5368,31 +5271,21 @@ show_create_stmt:
   {
     $$.val = &tree.ShowCreate{Name: $3.unresolvedObjectName()}
   }
-| SHOW CREATE TABLE table_name
-	{
+| SHOW CREATE create_kw table_name
+  {
     /* SKIP DOC */
-    $$.val = &tree.ShowCreate{Mode: tree.ShowCreateModeTable, Name: $4.unresolvedObjectName()}
-	}
-| SHOW CREATE VIEW table_name
-	{
-    /* SKIP DOC */
-    $$.val = &tree.ShowCreate{Mode: tree.ShowCreateModeView, Name: $4.unresolvedObjectName()}
-	}
-| SHOW CREATE SEQUENCE table_name
-	{
-    /* SKIP DOC */
-    $$.val = &tree.ShowCreate{Mode: tree.ShowCreateModeSequence, Name: $4.unresolvedObjectName()}
-	}
-| SHOW CREATE DATABASE db_name
-	{
-    /* SKIP DOC */
-    $$.val = &tree.ShowCreate{Mode: tree.ShowCreateModeDatabase, Name: $4.unresolvedObjectName()}
-	}
+    $$.val = &tree.ShowCreate{Name: $4.unresolvedObjectName()}
+  }
 | SHOW CREATE ALL TABLES
   {
     $$.val = &tree.ShowCreateAllTables{}
   }
 | SHOW CREATE error // SHOW HELP: SHOW CREATE
+
+create_kw:
+  TABLE
+| VIEW
+| SEQUENCE
 
 // %Help: SHOW USERS - list defined users
 // %Category: Priv
@@ -6993,7 +6886,8 @@ sequence_option_elem:
                                              return 1
                                      }
                                  $$.val = tree.SequenceOption{Name: tree.SeqOptOwnedBy, ColumnItemVal: columnItem} }
-| CACHE signed_iconst64        { x := $2.int64()
+| CACHE signed_iconst64        { /* SKIP DOC */
+                                 x := $2.int64()
                                  $$.val = tree.SequenceOption{Name: tree.SeqOptCache, IntVal: &x} }
 | INCREMENT signed_iconst64    { x := $2.int64()
                                  $$.val = tree.SequenceOption{Name: tree.SeqOptIncrement, IntVal: &x} }
@@ -9004,6 +8898,9 @@ opt_nulls_order:
     $$.val = tree.DefaultNullsOrder
   }
 
+// TODO(pmattis): Support ordering using arbitrary math ops?
+// | a_expr USING math_op {}
+
 select_limit:
   limit_clause offset_clause
   {
@@ -10356,7 +10253,7 @@ a_expr:
   // operators will have the same precedence.
   //
   // If you add more explicitly-known operators, be sure to add them also to
-  // b_expr and to the all_op list below.
+  // b_expr and to the math_op list below.
 | '+' a_expr %prec UMINUS
   {
     // Unary plus is a no-op. Desugar immediately.
@@ -10368,55 +10265,55 @@ a_expr:
   }
 | '~' a_expr %prec UMINUS
   {
-    $$.val = &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(tree.UnaryComplement), Expr: $2.expr()}
+    $$.val = &tree.UnaryExpr{Operator: tree.UnaryComplement, Expr: $2.expr()}
   }
 | SQRT a_expr
   {
-    $$.val = &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(tree.UnarySqrt), Expr: $2.expr()}
+    $$.val = &tree.UnaryExpr{Operator: tree.UnarySqrt, Expr: $2.expr()}
   }
 | CBRT a_expr
   {
-    $$.val = &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(tree.UnaryCbrt), Expr: $2.expr()}
+    $$.val = &tree.UnaryExpr{Operator: tree.UnaryCbrt, Expr: $2.expr()}
   }
 | a_expr '+' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Plus), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Plus, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '-' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Minus), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Minus, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '*' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Mult), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Mult, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '/' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Div), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Div, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr FLOORDIV a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.FloorDiv), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.FloorDiv, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '%' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Mod), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Mod, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '^' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Pow), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Pow, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '#' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitxor), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitxor, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '&' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitand), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitand, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '|' a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitor), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitor, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr '<' a_expr
   {
@@ -10452,31 +10349,31 @@ a_expr:
   }
 | a_expr CONCAT a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Concat), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Concat, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr LSHIFT a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.LShift), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.LShift, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr RSHIFT a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.RShift), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.RShift, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr FETCHVAL a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.JSONFetchVal), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.JSONFetchVal, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr FETCHTEXT a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.JSONFetchText), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.JSONFetchText, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr FETCHVAL_PATH a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.JSONFetchValPath), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.JSONFetchValPath, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr FETCHTEXT_PATH a_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.JSONFetchTextPath), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.JSONFetchTextPath, Left: $1.expr(), Right: $3.expr()}
   }
 | a_expr REMOVE_PATH a_expr
   {
@@ -10505,24 +10402,6 @@ a_expr:
 | a_expr NOT_EQUALS a_expr
   {
     $$.val = &tree.ComparisonExpr{Operator: tree.NE, Left: $1.expr(), Right: $3.expr()}
-  }
-| qual_op a_expr %prec CBRT
-  {
-    var retCode int
-    $$.val, retCode = processUnaryQualOp(sqllex, $1.op(), $2.expr())
-    if retCode != 0 {
-      return retCode
-    }
-  }
-| a_expr qual_op a_expr %prec CBRT
-  {
-    {
-      var retCode int
-      $$.val, retCode = processBinaryQualOp(sqllex, $2.op(), $1.expr(), $3.expr())
-      if retCode != 0 {
-        return retCode
-      }
-    }
   }
 | a_expr AND a_expr
   {
@@ -10745,47 +10624,47 @@ b_expr:
   }
 | '~' b_expr %prec UMINUS
   {
-    $$.val = &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(tree.UnaryComplement), Expr: $2.expr()}
+    $$.val = &tree.UnaryExpr{Operator: tree.UnaryComplement, Expr: $2.expr()}
   }
 | b_expr '+' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Plus), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Plus, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '-' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Minus), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Minus, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '*' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Mult), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Mult, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '/' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Div), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Div, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr FLOORDIV b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.FloorDiv), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.FloorDiv, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '%' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Mod), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Mod, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '^' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Pow), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Pow, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '#' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitxor), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitxor, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '&' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitand), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitand, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '|' b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Bitor), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Bitor, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr '<' b_expr
   {
@@ -10801,15 +10680,15 @@ b_expr:
   }
 | b_expr CONCAT b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Concat), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.Concat, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr LSHIFT b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.LShift), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.LShift, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr RSHIFT b_expr
   {
-    $$.val = &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.RShift), Left: $1.expr(), Right: $3.expr()}
+    $$.val = &tree.BinaryExpr{Operator: tree.RShift, Left: $1.expr(), Right: $3.expr()}
   }
 | b_expr LESS_EQUALS b_expr
   {
@@ -10822,24 +10701,6 @@ b_expr:
 | b_expr NOT_EQUALS b_expr
   {
     $$.val = &tree.ComparisonExpr{Operator: tree.NE, Left: $1.expr(), Right: $3.expr()}
-  }
-| qual_op b_expr %prec CBRT
-  {
-    var retCode int
-    $$.val, retCode = processUnaryQualOp(sqllex, $1.op(), $2.expr())
-    if retCode != 0 {
-      return retCode
-    }
-  }
-| b_expr qual_op b_expr %prec CBRT
-  {
-    {
-      var retCode int
-      $$.val, retCode = processBinaryQualOp(sqllex, $2.op(), $1.expr(), $3.expr())
-      if retCode != 0 {
-        return retCode
-      }
-    }
   }
 | b_expr IS DISTINCT FROM b_expr %prec IS
   {
@@ -11607,81 +11468,26 @@ sub_type:
     $$.val = tree.All
   }
 
-// We combine mathOp and Op from PostgreSQL's gram.y there.
-// In PostgreSQL, mathOp have an order of operations as defined by the
-// assoc rules.
-//
-// In CockroachDB, we have defined further operations that have a defined
-// order of operations (e.g. <@, |, &, ~, #, FLOORDIV) which is broken
-// if we split them up to math_ops and ops, which breaks compatibility
-// with PostgreSQL's qual_op.
-//
-// Ensure you also update process.*QualOp above when adding to this.
-all_op:
-  // exactly from MathOp
-  '+' { $$.val = tree.MakeBinaryOperator(tree.Plus)  }
-| '-' { $$.val = tree.MakeBinaryOperator(tree.Minus) }
-| '*' { $$.val = tree.MakeBinaryOperator(tree.Mult)  }
-| '/' { $$.val = tree.MakeBinaryOperator(tree.Div)   }
-| '%' { $$.val = tree.MakeBinaryOperator(tree.Mod)   }
-| '^' { $$.val = tree.MakeBinaryOperator(tree.Pow) }
+math_op:
+  '+' { $$.val = tree.Plus  }
+| '-' { $$.val = tree.Minus }
+| '*' { $$.val = tree.Mult  }
+| '/' { $$.val = tree.Div   }
+| FLOORDIV { $$.val = tree.FloorDiv }
+| '%' { $$.val = tree.Mod    }
+| '&' { $$.val = tree.Bitand }
+| '|' { $$.val = tree.Bitor  }
+| '^' { $$.val = tree.Pow }
+| '#' { $$.val = tree.Bitxor }
 | '<' { $$.val = tree.LT }
 | '>' { $$.val = tree.GT }
 | '=' { $$.val = tree.EQ }
 | LESS_EQUALS    { $$.val = tree.LE }
 | GREATER_EQUALS { $$.val = tree.GE }
 | NOT_EQUALS     { $$.val = tree.NE }
-  // partial set of operators from from Op
-| '?' { $$.val = tree.JSONExists }
-| '&' { $$.val = tree.MakeBinaryOperator(tree.Bitand) }
-| '|' { $$.val = tree.MakeBinaryOperator(tree.Bitor)  }
-| '#' { $$.val = tree.MakeBinaryOperator(tree.Bitxor) }
-| FLOORDIV { $$.val = tree.MakeBinaryOperator(tree.FloorDiv) }
-| CONTAINS { $$.val = tree.Contains }
-| CONTAINED_BY { $$.val = tree.ContainedBy }
-| LSHIFT { $$.val = tree.MakeBinaryOperator(tree.LShift) }
-| RSHIFT { $$.val = tree.MakeBinaryOperator(tree.RShift) }
-| CONCAT { $$.val = tree.MakeBinaryOperator(tree.Concat) }
-| FETCHVAL { $$.val = tree.MakeBinaryOperator(tree.JSONFetchVal) }
-| FETCHTEXT { $$.val = tree.MakeBinaryOperator(tree.JSONFetchText) }
-| FETCHVAL_PATH { $$.val = tree.MakeBinaryOperator(tree.JSONFetchValPath) }
-| FETCHTEXT_PATH { $$.val = tree.MakeBinaryOperator(tree.JSONFetchTextPath) }
-| JSON_SOME_EXISTS { $$.val = tree.JSONSomeExists }
-| JSON_ALL_EXISTS { $$.val = tree.JSONAllExists }
-| NOT_REGMATCH { $$.val = tree.NotRegMatch }
-| REGIMATCH { $$.val = tree.RegIMatch }
-| NOT_REGIMATCH { $$.val = tree.NotRegIMatch }
-| AND_AND { $$.val = tree.Overlaps }
-| '~' { $$.val = tree.MakeUnaryOperator(tree.UnaryComplement) }
-| SQRT { $$.val = tree.MakeUnaryOperator(tree.UnarySqrt) }
-| CBRT { $$.val = tree.MakeUnaryOperator(tree.UnaryCbrt) }
-
-operator_op:
-  all_op
-| name '.' all_op
-  {
-    // Only support operators on pg_catalog.
-    if $1 != "pg_catalog" {
-      return unimplementedWithIssue(sqllex, 65017)
-    }
-    $$ = $3
-  }
-
-// qual_op partially matches qualOp PostgreSQL's gram.y.
-// In an ideal circumstance, we also include non math_ops in this
-// definition. However, this would break cross compatibility as we
-// need %prec (keyword before OPERATOR) in a_expr/b_expr, which
-// breaks order of operations for older versions of CockroachDB.
-// See #64699 for the attempt.
-qual_op:
-  OPERATOR '(' operator_op ')'
-  {
-    $$ = $3
-  }
 
 subquery_op:
-  all_op
-| qual_op
+  math_op
 | LIKE         { $$.val = tree.Like     }
 | NOT_LA LIKE  { $$.val = tree.NotLike  }
 | ILIKE        { $$.val = tree.ILike    }
@@ -12335,8 +12141,6 @@ opt_schema_name:
 
 table_name:            db_object_name
 
-db_name:               db_object_name
-
 standalone_index_name: db_object_name
 
 explain_option_name:   non_reserved_word
@@ -12823,7 +12627,6 @@ unreserved_keyword:
 | SHOW
 | SIMPLE
 | SKIP
-| SKIP_LOCALITIES_CHECK
 | SKIP_MISSING_FOREIGN_KEYS
 | SKIP_MISSING_SEQUENCES
 | SKIP_MISSING_SEQUENCE_OWNERS

@@ -16,8 +16,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,31 +23,25 @@ var libPQReleaseTagRegex = regexp.MustCompile(`^v(?P<major>\d+)\.(?P<minor>\d+)\
 var libPQSupportedTag = "v1.10.0"
 
 func registerLibPQ(r *testRegistry) {
-	runLibPQ := func(ctx context.Context, t test.Test, c cluster.Cluster) {
-		if c.IsLocal() {
+	runLibPQ := func(ctx context.Context, t *test, c *cluster) {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
-
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		); err != nil {
-			t.Fatal(err)
-		}
+		c.Start(ctx, t, c.All())
+		version, err := fetchCockroachVersion(ctx, c, node[0])
+		require.NoError(t, err)
+		err = alterZoneConfigAndClusterSettings(ctx, version, c, node[0])
+		require.NoError(t, err)
 
 		t.Status("cloning lib/pq and installing prerequisites")
 		latestTag, err := repeatGetLatestTag(
-			ctx, t, "lib", "pq", libPQReleaseTagRegex)
+			ctx, c, "lib", "pq", libPQReleaseTagRegex)
 		require.NoError(t, err)
-		t.L().Printf("Latest lib/pq release is %s.", latestTag)
-		t.L().Printf("Supported lib/pq release is %s.", libPQSupportedTag)
+		c.l.Printf("Latest lib/pq release is %s.", latestTag)
+		c.l.Printf("Supported lib/pq release is %s.", libPQSupportedTag)
 
 		installGolang(ctx, t, c, node)
 
@@ -62,20 +54,20 @@ func registerLibPQ(r *testRegistry) {
 
 		// Remove any old lib/pq installations
 		err = repeatRunE(
-			ctx, t, c, node, "remove old lib/pq", fmt.Sprintf("rm -rf %s", libPQPath),
+			ctx, c, node, "remove old lib/pq", fmt.Sprintf("rm -rf %s", libPQPath),
 		)
 		require.NoError(t, err)
 
 		// Install go-junit-report to convert test results to .xml format we know
 		// how to work with.
-		err = repeatRunE(ctx, t, c, node, "install go-junit-report",
+		err = repeatRunE(ctx, c, node, "install go-junit-report",
 			fmt.Sprintf("GOPATH=%s go get -u github.com/jstemmer/go-junit-report", goPath),
 		)
 		require.NoError(t, err)
 
 		err = repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			fmt.Sprintf("https://%s.git", libPQRepo),
 			libPQPath,
@@ -83,15 +75,13 @@ func registerLibPQ(r *testRegistry) {
 			node,
 		)
 		require.NoError(t, err)
-		if err := c.RunE(ctx, node, fmt.Sprintf("mkdir -p %s", resultsDir)); err != nil {
-			t.Fatal(err)
-		}
+		_ = c.RunE(ctx, node, fmt.Sprintf("mkdir -p %s", resultsDir))
 
 		blocklistName, expectedFailures, ignorelistName, ignoreList := libPQBlocklists.getLists(version)
 		if expectedFailures == nil {
 			t.Fatalf("No lib/pq blocklist defined for cockroach version %s", version)
 		}
-		t.L().Printf("Running cockroach version %s, using blocklist %s, using ignorelist %s", version, blocklistName, ignorelistName)
+		c.l.Printf("Running cockroach version %s, using blocklist %s, using ignorelist %s", version, blocklistName, ignorelistName)
 
 		t.Status("running lib/pq test suite and collecting results")
 
@@ -99,7 +89,7 @@ func registerLibPQ(r *testRegistry) {
 		testListRegex := "^(Test|Example)"
 		buf, err := c.RunWithBuffer(
 			ctx,
-			t.L(),
+			t.l,
 			node,
 			fmt.Sprintf(`cd %s && PGPORT=26257 PGUSER=root PGSSLMODE=disable PGDATABASE=postgres go test -list "%s"`, libPQPath, testListRegex),
 		)
@@ -138,11 +128,11 @@ func registerLibPQ(r *testRegistry) {
 		)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "lib/pq",
 		Owner:      OwnerSQLExperience,
 		MinVersion: "v20.2.0",
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		Tags:       []string{`default`, `driver`},
 		Run:        runLibPQ,
 	})

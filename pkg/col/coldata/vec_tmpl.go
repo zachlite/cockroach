@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 )
 
 // Workaround for bazel auto-generated code. goimports does not automatically
@@ -36,7 +35,6 @@ var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
 )
 
 // {{/*
@@ -69,9 +67,9 @@ func (m *memColumn) Append(args SliceArgs) {
 				execgen.APPENDSLICE(toCol, fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				// {{if .IsBytesLike }}
-				// We need to truncate toCol before appending to it, so in case of
-				// bytes-like columns, we append an empty slice.
+				// {{if eq .VecMethod "Bytes"}}
+				// We need to truncate toCol before appending to it, so in case of Bytes,
+				// we append an empty slice.
 				execgen.APPENDSLICE(toCol, toCol, args.DestIdx, 0, 0)
 				// {{else}}
 				// {{/* Here WINDOW means slicing which allows us to use APPENDVAL below. */}}
@@ -99,7 +97,7 @@ func _COPY_WITH_SEL(
 	// {{define "copyWithSel" -}}
 	sel = sel[args.SrcStartIdx:args.SrcEndIdx]
 	n := len(sel)
-	// {{if and (.Sliceable) (not .SelOnDest)}}
+	// {{if and (.Global.Sliceable) (not .SelOnDest)}}
 	toCol = toCol[args.DestIdx:]
 	_ = toCol[n-1]
 	// {{end}}
@@ -115,25 +113,31 @@ func _COPY_WITH_SEL(
 				m.nulls.SetNull(i + args.DestIdx)
 				// {{end}}
 			} else {
+				// {{with .Global}}
 				v := fromCol.Get(selIdx)
+				// {{end}}
 				// {{if .SelOnDest}}
 				m.nulls.UnsetNull(selIdx)
-				toCol.Set(selIdx, v)
+				// {{with .Global}}
+				execgen.SET(toCol, selIdx, v)
+				// {{end}}
 				// {{else}}
+				// {{with .Global}}
 				// {{if .Sliceable}}
 				// {{/*
 				//     For the sliceable types, we sliced toCol to start at
 				//     args.DestIdx, so we use index i directly.
 				// */}}
 				//gcassert:bce
-				toCol.Set(i, v)
+				execgen.SET(toCol, i, v)
 				// {{else}}
 				// {{/*
 				//     For the non-sliceable types, toCol vector is the original
 				//     one (i.e. without an adjustment), so we need to add
 				//     args.DestIdx to set the element at the correct index.
 				// */}}
-				toCol.Set(i+args.DestIdx, v)
+				execgen.SET(toCol, i+args.DestIdx, v)
+				// {{end}}
 				// {{end}}
 				// {{end}}
 			}
@@ -144,24 +148,30 @@ func _COPY_WITH_SEL(
 	for i := 0; i < n; i++ {
 		//gcassert:bce
 		selIdx := sel[i]
+		// {{with .Global}}
 		v := fromCol.Get(selIdx)
+		// {{end}}
 		// {{if .SelOnDest}}
-		toCol.Set(selIdx, v)
+		// {{with .Global}}
+		execgen.SET(toCol, selIdx, v)
+		// {{end}}
 		// {{else}}
+		// {{with .Global}}
 		// {{if .Sliceable}}
 		// {{/*
 		//     For the sliceable types, we sliced toCol to start at
 		//     args.DestIdx, so we use index i directly.
 		// */}}
 		//gcassert:bce
-		toCol.Set(i, v)
+		execgen.SET(toCol, i, v)
 		// {{else}}
 		// {{/*
 		//     For the non-sliceable types, toCol vector is the original one
 		//     (i.e. without an adjustment), so we need to add args.DestIdx to
 		//     set the element at the correct index.
 		// */}}
-		toCol.Set(i+args.DestIdx, v)
+		execgen.SET(toCol, i+args.DestIdx, v)
+		// {{end}}
 		// {{end}}
 		// {{end}}
 	}
@@ -245,7 +255,7 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		case _TYPE_WIDTH:
 			target := v.TemplateType()
 			newVal := elem.(_GOTYPE)
-			target.Set(rowIdx, newVal)
+			execgen.SET(target, rowIdx, newVal)
 			// {{end}}
 		}
 		// {{end}}

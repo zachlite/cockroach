@@ -14,9 +14,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var pgjdbcReleaseTagRegex = regexp.MustCompile(`^REL(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
@@ -27,25 +24,23 @@ var supportedPGJDBCTag = "REL42.2.19"
 func registerPgjdbc(r *testRegistry) {
 	runPgjdbc := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+		version, err := fetchCockroachVersion(ctx, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if err := alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		); err != nil {
+		if err := alterZoneConfigAndClusterSettings(ctx, version, c, node[0]); err != nil {
 			t.Fatal(err)
 		}
 
@@ -53,16 +48,16 @@ func registerPgjdbc(r *testRegistry) {
 		// Report the latest tag, but do not use it. The newest versions produces output that breaks our xml parser,
 		// and we want to pin to the working version for now.
 		latestTag, err := repeatGetLatestTag(
-			ctx, t, "pgjdbc", "pgjdbc", pgjdbcReleaseTagRegex,
+			ctx, c, "pgjdbc", "pgjdbc", pgjdbcReleaseTagRegex,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest pgjdbc release is %s.", latestTag)
-		t.L().Printf("Supported pgjdbc release is %s.", supportedPGJDBCTag)
+		c.l.Printf("Latest pgjdbc release is %s.", latestTag)
+		c.l.Printf("Supported pgjdbc release is %s.", supportedPGJDBCTag)
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update apt-get", `sudo apt-get -qq update`,
+			ctx, c, node, "update apt-get", `sudo apt-get -qq update`,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -70,7 +65,6 @@ func registerPgjdbc(r *testRegistry) {
 		// TODO(rafi): use openjdk-11-jdk-headless once we are off of Ubuntu 16.
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install dependencies",
@@ -80,14 +74,14 @@ func registerPgjdbc(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "remove old pgjdbc", `rm -rf /mnt/data1/pgjdbc`,
+			ctx, c, node, "remove old pgjdbc", `rm -rf /mnt/data1/pgjdbc`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/pgjdbc/pgjdbc.git",
 			"/mnt/data1/pgjdbc",
@@ -101,7 +95,6 @@ func registerPgjdbc(r *testRegistry) {
 		// to override settings in build.local.properties
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"configuring tests for cockroach only",
@@ -119,7 +112,6 @@ func registerPgjdbc(r *testRegistry) {
 		// single test is invoked.
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"building pgjdbc (without tests)",
@@ -137,7 +129,7 @@ func registerPgjdbc(r *testRegistry) {
 			status = fmt.Sprintf("Running cockroach version %s, using blocklist %s, using ignorelist %s",
 				version, blocklistName, ignorelistName)
 		}
-		t.L().Printf("%s", status)
+		c.l.Printf("%s", status)
 
 		t.Status("running pgjdbc test suite")
 		// Note that this is expected to return an error, since the test suite
@@ -157,7 +149,6 @@ func registerPgjdbc(r *testRegistry) {
 		// Copy the individual test result files.
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"copy test result files",
@@ -171,7 +162,7 @@ func registerPgjdbc(r *testRegistry) {
 		output, err := repeatRunWithBuffer(
 			ctx,
 			c,
-			t,
+			t.l,
 			node,
 			"get list of test files",
 			`ls /mnt/data1/pgjdbc/pgjdbc/build/test-results/test/*.xml`,
@@ -189,13 +180,13 @@ func registerPgjdbc(r *testRegistry) {
 		)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		MinVersion: "v20.2.0",
 		Name:       "pgjdbc",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1),
+		Cluster:    makeClusterSpec(1),
 		Tags:       []string{`default`, `driver`},
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runPgjdbc(ctx, t, c)
 		},
 	})

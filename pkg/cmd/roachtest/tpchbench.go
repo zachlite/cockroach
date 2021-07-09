@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/workload/querybench"
 )
@@ -50,9 +48,9 @@ type tpchBenchSpec struct {
 //
 // This benchmark runs with a single load generator node running a single
 // worker.
-func runTPCHBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpchBenchSpec) {
-	roachNodes := c.Range(1, c.Spec().NodeCount-1)
-	loadNode := c.Node(c.Spec().NodeCount)
+func runTPCHBench(ctx context.Context, t *test, c *cluster, b tpchBenchSpec) {
+	roachNodes := c.Range(1, c.spec.NodeCount-1)
+	loadNode := c.Node(c.spec.NodeCount)
 
 	t.Status("copying binaries")
 	c.Put(ctx, cockroach, "./cockroach", roachNodes)
@@ -65,7 +63,7 @@ func runTPCHBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpchBen
 	}
 
 	t.Status("starting nodes")
-	c.Start(ctx, roachNodes)
+	c.Start(ctx, t, roachNodes)
 
 	m := newMonitor(ctx, c, roachNodes)
 	m.Go(func(ctx context.Context) error {
@@ -75,7 +73,7 @@ func runTPCHBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpchBen
 			return err
 		}
 
-		t.L().Printf("running %s benchmark on tpch scale-factor=%d", filename, b.ScaleFactor)
+		t.l.Printf("running %s benchmark on tpch scale-factor=%d", filename, b.ScaleFactor)
 
 		numQueries, err := getNumQueriesInFile(filename, b.url)
 		if err != nil {
@@ -164,12 +162,12 @@ func registerTPCHBenchSpec(r *testRegistry, b tpchBenchSpec) {
 		minVersion = "v19.1.0" // needed for import
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       strings.Join(nameParts, "/"),
 		Owner:      OwnerSQLQueries,
-		Cluster:    r.makeClusterSpec(numNodes),
+		Cluster:    makeClusterSpec(numNodes),
 		MinVersion: minVersion,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCHBench(ctx, t, c, b)
 		},
 	})

@@ -18,8 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	humanize "github.com/dustin/go-humanize"
@@ -41,12 +39,12 @@ type splitParams struct {
 func registerLoadSplits(r *testRegistry) {
 	const numNodes = 3
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("splits/load/uniform/nodes=%d", numNodes),
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			// This number was determined experimentally. Often, but not always,
 			// more splits will happen.
 			expSplits := 10
@@ -85,12 +83,12 @@ func registerLoadSplits(r *testRegistry) {
 			})
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("splits/load/sequential/nodes=%d", numNodes),
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runLoadSplits(ctx, t, c, splitParams{
 				maxSize:       10 << 30, // 10 GB
 				concurrency:   64,       // 64 concurrent workers
@@ -106,12 +104,12 @@ func registerLoadSplits(r *testRegistry) {
 			})
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       fmt.Sprintf("splits/load/spanning/nodes=%d", numNodes),
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster:    makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runLoadSplits(ctx, t, c, splitParams{
 				maxSize:       10 << 30, // 10 GB
 				concurrency:   64,       // 64 concurrent workers
@@ -129,10 +127,10 @@ func registerLoadSplits(r *testRegistry) {
 // runLoadSplits tests behavior of load based splitting under
 // conditions defined by the params. It checks whether certain number of
 // splits occur in different workload scenarios.
-func runLoadSplits(ctx context.Context, t test.Test, c cluster.Cluster, params splitParams) {
+func runLoadSplits(ctx context.Context, t *test, c *cluster, params splitParams) {
 	c.Put(ctx, cockroach, "./cockroach", c.All())
 	c.Put(ctx, workload, "./workload", c.Node(1))
-	c.Start(ctx, c.All())
+	c.Start(ctx, t, c.All())
 
 	m := newMonitor(ctx, c, c.All())
 	m.Go(func(ctx context.Context) error {
@@ -160,7 +158,7 @@ func runLoadSplits(ctx context.Context, t test.Test, c cluster.Cluster, params s
 		setRangeMaxBytes(params.maxSize)
 
 		t.Status("running uniform kv workload")
-		c.Run(ctx, c.Node(1), fmt.Sprintf("./workload init kv {pgurl:1-%d}", c.Spec().NodeCount))
+		c.Run(ctx, c.Node(1), fmt.Sprintf("./workload init kv {pgurl:1-%d}", c.spec.NodeCount))
 
 		t.Status("checking initial range count")
 		rangeCount := func() int {
@@ -197,7 +195,7 @@ func runLoadSplits(ctx context.Context, t test.Test, c cluster.Cluster, params s
 		}
 		c.Run(ctx, c.Node(1), fmt.Sprintf("./workload run kv "+
 			"--init --concurrency=%d --read-percent=%d --span-percent=%d %s {pgurl:1-%d} --duration='%s'",
-			params.concurrency, params.readPercent, params.spanPercent, extraFlags, c.Spec().NodeCount,
+			params.concurrency, params.readPercent, params.spanPercent, extraFlags, c.spec.NodeCount,
 			params.waitDuration.String()))
 
 		t.Status("waiting for splits")
@@ -213,12 +211,12 @@ func runLoadSplits(ctx context.Context, t test.Test, c cluster.Cluster, params s
 func registerLargeRange(r *testRegistry) {
 	const size = 32 << 30 // 32 GB
 	const numNodes = 6
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    fmt.Sprintf("splits/largerange/size=%s,nodes=%d", bytesStr(size), numNodes),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(numNodes),
+		Cluster: makeClusterSpec(numNodes),
 		Timeout: 5 * time.Hour,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runLargeRangeSplits(ctx, t, c, size)
 		},
 	})
@@ -232,7 +230,7 @@ func bytesStr(size uint64) string {
 // so by setting the max range size to a huge number before populating the
 // table. It then drops the range size back down to normal and watches as
 // the large range splits apart.
-func runLargeRangeSplits(ctx context.Context, t test.Test, c cluster.Cluster, size int) {
+func runLargeRangeSplits(ctx context.Context, t *test, c *cluster, size int) {
 	// payload is the size of the payload column for each row in the Bank
 	// table.
 	const payload = 100
@@ -248,7 +246,7 @@ func runLargeRangeSplits(ctx context.Context, t test.Test, c cluster.Cluster, si
 
 	c.Put(ctx, cockroach, "./cockroach", c.All())
 	c.Put(ctx, workload, "./workload", c.All())
-	c.Start(ctx, c.All())
+	c.Start(ctx, t, c.All())
 
 	m := newMonitor(ctx, c, c.All())
 	m.Go(func(ctx context.Context) error {
@@ -292,7 +290,7 @@ func runLargeRangeSplits(ctx context.Context, t test.Test, c cluster.Cluster, si
 		// schema but before populating it. This is ok because upreplication
 		// occurs much faster than we can actually create a large range.
 		c.Run(ctx, c.Node(1), fmt.Sprintf("./workload init bank "+
-			"--rows=%d --payload-bytes=%d --ranges=1 {pgurl:1-%d}", rows, payload, c.Spec().NodeCount))
+			"--rows=%d --payload-bytes=%d --ranges=1 {pgurl:1-%d}", rows, payload, c.spec.NodeCount))
 
 		t.Status("checking for single range")
 		rangeCount := func() int {
@@ -301,7 +299,7 @@ func runLargeRangeSplits(ctx context.Context, t test.Test, c cluster.Cluster, si
 			if err := db.QueryRow(q).Scan(&ranges); err != nil {
 				t.Fatalf("failed to get range count: %v", err)
 			}
-			t.L().Printf("%d ranges in bank table", ranges)
+			t.l.Printf("%d ranges in bank table", ranges)
 			return ranges
 		}
 		if rc := rangeCount(); rc != 1 {
@@ -347,7 +345,7 @@ func runLargeRangeSplits(ctx context.Context, t test.Test, c cluster.Cluster, si
 			if err := db.QueryRow(q).Scan(&minRangeCount, &maxRangeCount); err != nil {
 				t.Fatalf("failed to get per-store range count: %v", err)
 			}
-			t.L().Printf("min_range_count=%d, max_range_count=%d", minRangeCount, maxRangeCount)
+			t.l.Printf("min_range_count=%d, max_range_count=%d", minRangeCount, maxRangeCount)
 			if float64(minRangeCount) < 0.8*float64(maxRangeCount) {
 				return errors.Errorf("rebalancing incomplete: min_range_count=%d, max_range_count=%d",
 					minRangeCount, minRangeCount)

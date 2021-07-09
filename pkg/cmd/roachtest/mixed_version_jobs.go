@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -42,15 +39,15 @@ type backgroundStepper struct {
 	run backgroundFn
 	// When not nil, called with the error within `.stop()`. The interceptor
 	// gets a chance to ignore the error or produce a different one (via t.Fatal).
-	onStop func(context.Context, test.Test, *versionUpgradeTest, error)
-	nodes  option.NodeListOption // nodes to monitor, defaults to c.All()
+	onStop func(context.Context, *test, *versionUpgradeTest, error)
+	nodes  nodeListOption // nodes to monitor, defaults to c.All()
 
 	// Internal.
 	m *monitor
 }
 
 // launch spawns the function the background step was initialized with.
-func (s *backgroundStepper) launch(ctx context.Context, _ test.Test, u *versionUpgradeTest) {
+func (s *backgroundStepper) launch(ctx context.Context, _ *test, u *versionUpgradeTest) {
 	nodes := s.nodes
 	if nodes == nil {
 		nodes = u.c.All()
@@ -62,7 +59,7 @@ func (s *backgroundStepper) launch(ctx context.Context, _ test.Test, u *versionU
 	})
 }
 
-func (s *backgroundStepper) wait(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+func (s *backgroundStepper) wait(ctx context.Context, t *test, u *versionUpgradeTest) {
 	s.m.cancel()
 	// We don't care about the workload failing since we only use it to produce a
 	// few `RESTORE` jobs. And indeed workload will fail because it does not
@@ -75,9 +72,9 @@ func (s *backgroundStepper) wait(ctx context.Context, t test.Test, u *versionUpg
 	}
 }
 
-func overrideErrorFromJobsTable(ctx context.Context, t test.Test, u *versionUpgradeTest, _ error) {
+func overrideErrorFromJobsTable(ctx context.Context, t *test, u *versionUpgradeTest, _ error) {
 	db := u.conn(ctx, t, 1)
-	t.L().Printf("Resuming any paused jobs left")
+	t.l.Printf("Resuming any paused jobs left")
 	for {
 		_, err := db.ExecContext(
 			ctx,
@@ -100,16 +97,16 @@ func overrideErrorFromJobsTable(ctx context.Context, t test.Test, u *versionUpgr
 		}
 		// Sleep a bit not to DOS the jobs table.
 		time.Sleep(10 * time.Second)
-		t.L().Printf("Waiting for %d jobs to pause", nNotYetPaused)
+		t.l.Printf("Waiting for %d jobs to pause", nNotYetPaused)
 	}
 
-	t.L().Printf("Waiting for jobs to complete...")
+	t.l.Printf("Waiting for jobs to complete...")
 	var err error
 	for {
 		q := "SHOW JOBS WHEN COMPLETE (SELECT job_id FROM [SHOW JOBS]);"
 		_, err = db.ExecContext(ctx, q)
 		if testutils.IsError(err, "pq: restart transaction:.*") {
-			t.L().Printf("SHOW JOBS WHEN COMPLETE returned %s, retrying", err.Error())
+			t.l.Printf("SHOW JOBS WHEN COMPLETE returned %s, retrying", err.Error())
 			time.Sleep(10 * time.Second)
 			continue
 		}
@@ -120,7 +117,7 @@ func overrideErrorFromJobsTable(ctx context.Context, t test.Test, u *versionUpgr
 	}
 }
 
-func backgroundJobsTestTPCCImport(t test.Test, warehouses int) backgroundStepper {
+func backgroundJobsTestTPCCImport(t *test, warehouses int) backgroundStepper {
 	return backgroundStepper{run: func(ctx context.Context, u *versionUpgradeTest) error {
 		// The workload has to run on one of the nodes of the cluster.
 		err := u.c.RunE(ctx, u.c.Node(1), tpccImportCmd(warehouses))
@@ -137,7 +134,7 @@ func backgroundJobsTestTPCCImport(t test.Test, warehouses int) backgroundStepper
 }
 
 func pauseAllJobsStep() versionStep {
-	return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+	return func(ctx context.Context, t *test, u *versionUpgradeTest) {
 		db := u.conn(ctx, t, 1)
 		_, err := db.ExecContext(
 			ctx,
@@ -153,16 +150,16 @@ func pauseAllJobsStep() versionStep {
 		if err := row.Scan(&nPaused); err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Paused %d jobs", nPaused)
+		t.l.Printf("Paused %d jobs", nPaused)
 		time.Sleep(time.Second)
 	}
 }
 
 func makeResumeAllJobsAndWaitStep(d time.Duration) versionStep {
 	var numResumes int
-	return func(ctx context.Context, t test.Test, u *versionUpgradeTest) {
+	return func(ctx context.Context, t *test, u *versionUpgradeTest) {
 		numResumes++
-		t.L().Printf("Resume all jobs number: %d", numResumes)
+		t.l.Printf("Resume all jobs number: %d", numResumes)
 		db := u.conn(ctx, t, 1)
 		_, err := db.ExecContext(
 			ctx,
@@ -181,13 +178,13 @@ func makeResumeAllJobsAndWaitStep(d time.Duration) versionStep {
 		if err := row.Scan(&nRunning); err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Resumed %d jobs", nRunning)
+		t.l.Printf("Resumed %d jobs", nRunning)
 		time.Sleep(d)
 	}
 }
 
-func checkForFailedJobsStep(ctx context.Context, t test.Test, u *versionUpgradeTest) {
-	t.L().Printf("Checking for failed jobs.")
+func checkForFailedJobsStep(ctx context.Context, t *test, u *versionUpgradeTest) {
+	t.l.Printf("Checking for failed jobs.")
 
 	db := u.conn(ctx, t, 1)
 	// The ifnull is because the move to session-based job claims in 20.2 has left
@@ -227,7 +224,7 @@ FROM [SHOW JOBS] WHERE status = $1 OR status = $2`,
 }
 
 func runJobsMixedVersions(
-	ctx context.Context, t test.Test, c cluster.Cluster, warehouses int, predecessorVersion string,
+	ctx context.Context, t *test, c *cluster, warehouses int, predecessorVersion string,
 ) {
 	// An empty string means that the cockroach binary specified by flag
 	// `cockroach` will be used.
@@ -243,7 +240,7 @@ func runJobsMixedVersions(
 		preventAutoUpgradeStep(1),
 
 		backgroundTPCC.launch,
-		func(ctx context.Context, _ test.Test, u *versionUpgradeTest) {
+		func(ctx context.Context, _ *test, u *versionUpgradeTest) {
 			time.Sleep(10 * time.Second)
 		},
 		checkForFailedJobsStep,
@@ -324,7 +321,7 @@ func runJobsMixedVersions(
 }
 
 func registerJobsMixedVersions(r *testRegistry) {
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:  "jobs/mixed-versions",
 		Owner: OwnerBulkIO,
 		// Jobs infrastructure was unstable prior to 20.1 in terms of the behavior
@@ -335,9 +332,9 @@ func registerJobsMixedVersions(r *testRegistry) {
 		// vice versa in order to detect regressions in the work done for 20.1.
 		MinVersion: "v20.1.0",
 		Skip:       "https://github.com/cockroachdb/cockroach/issues/57230",
-		Cluster:    r.makeClusterSpec(4),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			predV, err := PredecessorVersion(*t.BuildVersion())
+		Cluster:    makeClusterSpec(4),
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			predV, err := PredecessorVersion(r.buildVersion)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -21,10 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -32,8 +28,7 @@ import (
 	"github.com/petermattis/goid"
 )
 
-// TestSpec is a spec for a roachtest.
-type TestSpec struct {
+type testSpec struct {
 	Skip string // if non-empty, test will be skipped
 	// When Skip is set, this can contain more text to be printed in the logs
 	// after the "--- SKIP" line.
@@ -60,7 +55,7 @@ type TestSpec struct {
 	// given.
 	Tags []string
 	// Cluster provides the specification for the cluster to use for the test.
-	Cluster spec.ClusterSpec
+	Cluster clusterSpec
 
 	// UseIOBarrier controls the local-ssd-no-ext4-barrier flag passed to
 	// roachprod when creating a cluster. If set, the flag is not passed, and so
@@ -79,14 +74,8 @@ type TestSpec struct {
 	// still be run regularly.
 	NonReleaseBlocker bool
 
-	// RequiresLicense indicates that the test requires an
-	// enterprise license to run correctly. Use this to ensure
-	// tests will fail-early if COCKROACH_DEV_LICENSE is not set
-	// in the environment.
-	RequiresLicense bool
-
 	// Run is the test function.
-	Run func(ctx context.Context, t test.Test, c cluster.Cluster)
+	Run func(ctx context.Context, t *test, c *cluster)
 }
 
 // perfArtifactsDir is the directory on cluster nodes in which perf artifacts
@@ -97,7 +86,7 @@ const perfArtifactsDir = "perf"
 // matchOrSkip returns true if the filter matches the test. If the filter does
 // not match the test because the tag filter does not match, the test is
 // matched, but marked as skipped.
-func (t *TestSpec) matchOrSkip(filter *testFilter) bool {
+func (t *testSpec) matchOrSkip(filter *testFilter) bool {
 	if !filter.name.MatchString(t.Name) {
 		return false
 	}
@@ -122,18 +111,17 @@ type testStatus struct {
 	progress float64
 }
 
-type testImpl struct {
-	spec *TestSpec
+type test struct {
+	spec *testSpec
 
 	// buildVersion is the version of the Cockroach binary that the test will run
 	// against.
 	buildVersion version.Version
 
 	// l is the logger that the test will use for its output.
-	l *logger.Logger
+	l *logger
 
-	runner string
-	// runnerID is the test's main goroutine ID.
+	runner   string
 	runnerID int64
 	start    time.Time
 	end      time.Time
@@ -160,54 +148,22 @@ type testImpl struct {
 			line int
 		}
 		failureMsg string
-		// status is a map from goroutine id to status set by that goroutine. A
-		// special goroutine is indicated by runnerID; that one provides the test's
-		// "main status".
-		status map[int64]testStatus
-		output []byte
+		status     map[int64]testStatus
+		output     []byte
 	}
-	// Map from version to path to the cockroach binary to be used when
-	// mixed-version test wants a binary for that binary. If a particular version
-	// <ver> is found in this map, it is used instead of the binary coming from
-	// `roachprod stage release <ver>`. See the --version-binary-override flags.
-	//
-	// Version strings look like "20.1.4".
-	versionsBinaryOverride map[string]string
 }
 
-// BuildVersion exposes the build version of the cluster
-// in this test.
-func (t *testImpl) BuildVersion() *version.Version {
-	return &t.buildVersion
-}
+func (t *test) Helper() {}
 
-func (t *testImpl) VersionsBinaryOverride() map[string]string {
-	return t.versionsBinaryOverride
-}
-
-// Spec returns the TestSpec.
-func (t *testImpl) Spec() interface{} {
-	return t.spec
-}
-
-func (t *testImpl) Helper() {}
-
-func (t *testImpl) Name() string {
+func (t *test) Name() string {
 	return t.spec.Name
 }
 
-// L returns the test's logger.
-func (t *testImpl) L() *logger.Logger {
+func (t *test) logger() *logger {
 	return t.l
 }
 
-// ReplaceL replaces the test's logger.
-func (t *testImpl) ReplaceL(l *logger.Logger) {
-	// TODO(tbg): get rid of this, this is racy & hacky.
-	t.l = l
-}
-
-func (t *testImpl) status(ctx context.Context, id int64, args ...interface{}) {
+func (t *test) status(ctx context.Context, id int64, args ...interface{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -223,25 +179,25 @@ func (t *testImpl) status(ctx context.Context, id int64, args ...interface{}) {
 		msg:  msg,
 		time: timeutil.Now(),
 	}
-	if !t.L().Closed() {
+	if !t.l.closed() {
 		if id == t.runnerID {
-			t.L().PrintfCtxDepth(ctx, 3, "test status: %s", msg)
+			t.l.PrintfCtxDepth(ctx, 3, "test status: %s", msg)
 		} else {
-			t.L().PrintfCtxDepth(ctx, 3, "test worker status: %s", msg)
+			t.l.PrintfCtxDepth(ctx, 3, "test worker status: %s", msg)
 		}
 	}
 }
 
 // Status sets the main status message for the test. When called from the main
-// test goroutine (i.e. the goroutine on which TestSpec.Run is invoked), this
+// test goroutine (i.e. the goroutine on which testSpec.Run is invoked), this
 // is equivalent to calling WorkerStatus. If no arguments are specified, the
 // status message is erased.
-func (t *testImpl) Status(args ...interface{}) {
+func (t *test) Status(args ...interface{}) {
 	t.status(context.TODO(), t.runnerID, args...)
 }
 
 // GetStatus returns the status of the tests's main goroutine.
-func (t *testImpl) GetStatus() string {
+func (t *test) GetStatus() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	status, ok := t.mu.status[t.runnerID]
@@ -254,11 +210,11 @@ func (t *testImpl) GetStatus() string {
 // WorkerStatus sets the status message for a worker goroutine associated with
 // the test. The status message should be cleared before the goroutine exits by
 // calling WorkerStatus with no arguments.
-func (t *testImpl) WorkerStatus(args ...interface{}) {
+func (t *test) WorkerStatus(args ...interface{}) {
 	t.status(context.TODO(), goid.Get(), args...)
 }
 
-func (t *testImpl) progress(id int64, frac float64) {
+func (t *test) progress(id int64, frac float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -272,24 +228,24 @@ func (t *testImpl) progress(id int64, frac float64) {
 
 // Progress sets the progress (a fraction in the range [0,1]) associated with
 // the main test status messasge. When called from the main test goroutine
-// (i.e. the goroutine on which TestSpec.Run is invoked), this is equivalent to
+// (i.e. the goroutine on which testSpec.Run is invoked), this is equivalent to
 // calling WorkerProgress.
-func (t *testImpl) Progress(frac float64) {
+func (t *test) Progress(frac float64) {
 	t.progress(t.runnerID, frac)
 }
 
 // WorkerProgress sets the progress (a fraction in the range [0,1]) associated
 // with the a worker status messasge.
-func (t *testImpl) WorkerProgress(frac float64) {
+func (t *test) WorkerProgress(frac float64) {
 	t.progress(goid.Get(), frac)
 }
 
-var _ skip.SkippableTest = (*testImpl)(nil)
+var _ skip.SkippableTest = (*test)(nil)
 
 // Skip skips the test. The first argument if any is the main message.
 // The remaining argument, if any, form the details.
 // This implements the skip.SkippableTest interface.
-func (t *testImpl) Skip(args ...interface{}) {
+func (t *test) Skip(args ...interface{}) {
 	if len(args) > 0 {
 		t.spec.Skip = fmt.Sprint(args[0])
 		args = args[1:]
@@ -300,12 +256,12 @@ func (t *testImpl) Skip(args ...interface{}) {
 
 // Skipf skips the test. The formatted message becomes the skip reason.
 // This implements the skip.SkippableTest interface.
-func (t *testImpl) Skipf(format string, args ...interface{}) {
+func (t *test) Skipf(format string, args ...interface{}) {
 	t.spec.Skip = fmt.Sprintf(format, args...)
 	panic(errTestFatal)
 }
 
-// Fatal marks the test as failed, prints the args to t.L(), and calls
+// Fatal marks the test as failed, prints the args to t.l, and calls
 // panic(errTestFatal). It can be called multiple times.
 //
 // If the only argument is an error, it is formatted by "%+v", so it will show
@@ -313,26 +269,26 @@ func (t *testImpl) Skipf(format string, args ...interface{}) {
 //
 // ATTENTION: Since this calls panic(errTestFatal), it should only be called
 // from a test's closure. The test runner itself should never call this.
-func (t *testImpl) Fatal(args ...interface{}) {
+func (t *test) Fatal(args ...interface{}) {
 	t.fatalfInner("" /* format */, args...)
 }
 
 // Fatalf is like Fatal, but takes a format string.
-func (t *testImpl) Fatalf(format string, args ...interface{}) {
+func (t *test) Fatalf(format string, args ...interface{}) {
 	t.fatalfInner(format, args...)
 }
 
 // FailNow implements the TestingT interface.
-func (t *testImpl) FailNow() {
+func (t *test) FailNow() {
 	t.Fatal()
 }
 
 // Errorf implements the TestingT interface.
-func (t *testImpl) Errorf(format string, args ...interface{}) {
+func (t *test) Errorf(format string, args ...interface{}) {
 	t.Fatalf(format, args...)
 }
 
-func (t *testImpl) fatalfInner(format string, args ...interface{}) {
+func (t *test) fatalfInner(format string, args ...interface{}) {
 	// Skip two frames: our own and the caller.
 	if format != "" {
 		t.printfAndFail(2 /* skip */, format, args...)
@@ -342,7 +298,14 @@ func (t *testImpl) fatalfInner(format string, args ...interface{}) {
 	panic(errTestFatal)
 }
 
-func (t *testImpl) printAndFail(skip int, args ...interface{}) {
+// FatalIfErr calls t.Fatal() if err != nil.
+func FatalIfErr(t *test, err error) {
+	if err != nil {
+		t.fatalfInner("" /* format */, err)
+	}
+}
+
+func (t *test) printAndFail(skip int, args ...interface{}) {
 	var msg string
 	if len(args) == 1 {
 		// If we were passed only an error, then format it with "%+v" in order to
@@ -357,14 +320,14 @@ func (t *testImpl) printAndFail(skip int, args ...interface{}) {
 	t.failWithMsg(t.decorate(skip+1, msg))
 }
 
-func (t *testImpl) printfAndFail(skip int, format string, args ...interface{}) {
+func (t *test) printfAndFail(skip int, format string, args ...interface{}) {
 	if format == "" {
 		panic(fmt.Sprintf("invalid empty format. args: %s", args))
 	}
 	t.failWithMsg(t.decorate(skip+1, fmt.Sprintf(format, args...)))
 }
 
-func (t *testImpl) failWithMsg(msg string) {
+func (t *test) failWithMsg(msg string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -378,7 +341,7 @@ func (t *testImpl) failWithMsg(msg string) {
 		// them.
 		msg = "\n" + msg
 	}
-	t.L().Printf("%stest failure: %s", prefix, msg)
+	t.l.Printf("%stest failure: %s", prefix, msg)
 
 	t.mu.failed = true
 	t.mu.failureMsg += msg
@@ -392,7 +355,7 @@ func (t *testImpl) failWithMsg(msg string) {
 // skip: The number of stack frames to exclude from the result. 0 means that
 //   the caller will be the first frame identified. 1 means the caller's caller
 //   will be the first, etc.
-func (t *testImpl) decorate(skip int, s string) string {
+func (t *test) decorate(skip int, s string) string {
 	// Skip two extra frames to account for this function and runtime.Callers
 	// itself.
 	var pc [50]uintptr
@@ -454,23 +417,23 @@ func (t *testImpl) decorate(skip int, s string) string {
 	return buf.String()
 }
 
-func (t *testImpl) duration() time.Duration {
+func (t *test) duration() time.Duration {
 	return t.end.Sub(t.start)
 }
 
-func (t *testImpl) Failed() bool {
+func (t *test) Failed() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.mu.failed
 }
 
-func (t *testImpl) FailureMsg() string {
+func (t *test) FailureMsg() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.mu.failureMsg
 }
 
-func (t *testImpl) ArtifactsDir() string {
+func (t *test) ArtifactsDir() string {
 	return t.artifactsDir
 }
 
@@ -479,7 +442,7 @@ func (t *testImpl) ArtifactsDir() string {
 // depending on the cockroach version it is running against. Note that the
 // versions are Cockroach build tag version numbers, not the internal cluster
 // version number.
-func (t *testImpl) IsBuildVersion(minVersion string) bool {
+func (t *test) IsBuildVersion(minVersion string) bool {
 	vers, err := version.Parse(minVersion)
 	if err != nil {
 		t.Fatal(err)
@@ -491,7 +454,7 @@ func (t *testImpl) IsBuildVersion(minVersion string) bool {
 	// prereleases of the specified version. Otherwise, "v2.1.0" would compare
 	// greater than "v2.1.0-alpha.x".
 	vers = version.MustParse(minVersion + "-0")
-	return t.BuildVersion().AtLeast(vers)
+	return t.buildVersion.AtLeast(vers)
 }
 
 // teamCityEscape escapes a string for use as <value> in a key='<value>' attribute
@@ -513,7 +476,7 @@ func teamCityNameEscape(name string) string {
 }
 
 type testWithCount struct {
-	spec TestSpec
+	spec testSpec
 	// count maintains the number of runs remaining for a test.
 	count int
 }
@@ -528,10 +491,10 @@ const (
 type loggingOpt struct {
 	// l is the test runner logger.
 	// Note that individual test runs will use a different logger.
-	l *logger.Logger
+	l *logger
 	// tee controls whether test logs (not test runner logs) also go to stdout or
 	// not.
-	tee            logger.TeeOptType
+	tee            teeOptType
 	stdout, stderr io.Writer
 	// artifactsDir is that path to the dir that will contain the artifacts for
 	// all the tests.
@@ -550,8 +513,8 @@ type workerStatus struct {
 		status string
 
 		ttr testToRunRes
-		t   *testImpl
-		c   *clusterImpl
+		t   *test
+		c   *cluster
 	}
 }
 
@@ -567,13 +530,13 @@ func (w *workerStatus) SetStatus(status string) {
 	w.mu.Unlock()
 }
 
-func (w *workerStatus) Cluster() *clusterImpl {
+func (w *workerStatus) Cluster() *cluster {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.mu.c
 }
 
-func (w *workerStatus) SetCluster(c *clusterImpl) {
+func (w *workerStatus) SetCluster(c *cluster) {
 	w.mu.Lock()
 	w.mu.c = c
 	w.mu.Unlock()
@@ -585,13 +548,13 @@ func (w *workerStatus) TestToRun() testToRunRes {
 	return w.mu.ttr
 }
 
-func (w *workerStatus) Test() *testImpl {
+func (w *workerStatus) Test() *test {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.mu.t
 }
 
-func (w *workerStatus) SetTest(t *testImpl, ttr testToRunRes) {
+func (w *workerStatus) SetTest(t *test, ttr testToRunRes) {
 	w.mu.Lock()
 	w.mu.t = t
 	w.mu.ttr = ttr
@@ -600,9 +563,7 @@ func (w *workerStatus) SetTest(t *testImpl, ttr testToRunRes) {
 
 // shout logs a message both to a logger and to an io.Writer.
 // If format doesn't end with a new line, one will be automatically added.
-func shout(
-	ctx context.Context, l *logger.Logger, stdout io.Writer, format string, args ...interface{},
-) {
+func shout(ctx context.Context, l *logger, stdout io.Writer, format string, args ...interface{}) {
 	if len(format) == 0 || format[len(format)-1] != '\n' {
 		format += "\n"
 	}

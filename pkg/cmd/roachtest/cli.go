@@ -15,15 +15,11 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/cli"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
-func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runCLINodeStatus(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx, c.Range(1, 3))
+	c.Start(ctx, t, c.Range(1, 3))
 
 	db := c.Conn(ctx, 1)
 	defer db.Close()
@@ -32,7 +28,7 @@ func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	lastWords := func(s string) []string {
 		var result []string
-		s = cli.ElideInsecureDeprecationNotice(s)
+		s = elideInsecureDeprecationNotice(s)
 		lines := strings.Split(s, "\n")
 		for _, line := range lines {
 			words := strings.Fields(line)
@@ -44,7 +40,7 @@ func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
 	}
 
 	nodeStatus := func() (raw string, _ []string) {
-		out, err := c.RunWithBuffer(ctx, t.L(), c.Node(1),
+		out, err := c.RunWithBuffer(ctx, t.l, c.Node(1),
 			"./cockroach node status --insecure -p {pgport:1}")
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
@@ -75,7 +71,7 @@ func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
 			if reflect.DeepEqual(expected, actual) {
 				break
 			}
-			t.L().Printf("not done: %s vs %s\n", expected, actual)
+			t.l.Printf("not done: %s vs %s\n", expected, actual)
 			time.Sleep(time.Second)
 		}
 		if !reflect.DeepEqual(expected, actual) {
@@ -108,7 +104,7 @@ func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// Stop the cluster and restart only 2 of the nodes. Verify that three nodes
 	// show up in the node status output.
 	c.Stop(ctx, c.Range(1, 3))
-	c.Start(ctx, c.Range(1, 2))
+	c.Start(ctx, t, c.Range(1, 2))
 
 	// Wait for the cluster to come back up.
 	waitForFullReplication(t, db)
@@ -121,5 +117,5 @@ func runCLINodeStatus(ctx context.Context, t test.Test, c cluster.Cluster) {
 	})
 
 	// Start node again to satisfy roachtest.
-	c.Start(ctx, c.Node(3))
+	c.Start(ctx, t, c.Node(3))
 }

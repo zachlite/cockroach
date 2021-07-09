@@ -43,16 +43,11 @@ type DatumVec interface {
 	// Cap returns the underlying capacity of the vector.
 	Cap() int
 	// MarshalAt returns the marshaled representation of datum at index i.
-	MarshalAt(appendTo []byte, i int) ([]byte, error)
+	MarshalAt(i int) ([]byte, error)
 	// UnmarshalTo unmarshals the byte representation of a datum and sets it at
 	// index i.
 	UnmarshalTo(i int, b []byte) error
 	// Size returns the total memory footprint of the vector (including the
-	// internal memory used by tree.Datums) in bytes. It only accounts for the
-	// size of the datum objects starting from the given index. So, Size is
-	// relatively cheap when startIdx >= length, and expensive when
-	// startIdx < length (with a maximum at zero). A nonzero startIdx should only
-	// be used when elements before startIdx are guaranteed not to have been
-	// modified.
-	Size(startIdx int) uintptr
+	// internal memory used by tree.Datums) in bytes.
+	Size() uintptr
 }

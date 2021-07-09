@@ -64,24 +64,27 @@ func newAvg_AGGKINDAggAlloc(
 ) (aggregateFuncAlloc, error) {
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch t.Family() {
-	// {{range .}}
-	case _TYPE_FAMILY:
+	case types.IntFamily:
 		switch t.Width() {
-		// {{range .WidthOverloads}}
-		case _TYPE_WIDTH:
-			// {{with .Overload}}
-			return &avg_TYPE_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
-			// {{end}}
-			// {{end}}
+		case 16:
+			return &avgInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		case 32:
+			return &avgInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		default:
+			return &avgInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
 		}
-		// {{end}}
+	case types.DecimalFamily:
+		return &avgDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.FloatFamily:
+		return &avgFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.IntervalFamily:
+		return &avgInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	default:
+		return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 	}
-	return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 }
 
 // {{range .}}
-// {{range .WidthOverloads}}
-// {{with .Overload}}
 
 type avg_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
@@ -230,8 +233,6 @@ func (a *avg_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-// {{end}}
-// {{end}}
 // {{end}}
 
 // {{/*

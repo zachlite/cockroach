@@ -15,23 +15,17 @@ import (
 	"net/http"
 	"os/exec"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 )
 
-func runBuildInfo(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runBuildInfo(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	var details serverpb.DetailsResponse
-	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, c.Node(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	url := `http://` + adminUIAddrs[0] + `/_status/details/local`
-	err = httputil.GetJSON(http.Client{}, url, &details)
+	url := `http://` + c.ExternalAdminUIAddr(ctx, c.Node(1))[0] + `/_status/details/local`
+	err := httputil.GetJSON(http.Client{}, url, &details)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,12 +46,13 @@ func runBuildInfo(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 // runBuildAnalyze performs static analysis on the built binary to
 // ensure it's built as expected.
-func runBuildAnalyze(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runBuildAnalyze(ctx context.Context, t *test, c *cluster) {
 
-	if c.IsLocal() {
+	if c.isLocal() {
 		// This test is linux-specific and needs to be able to install apt
 		// packages, so only run it on dedicated remote VMs.
-		t.Skip("local execution not supported")
+		t.spec.Skip = "local execution not supported"
+		return
 	}
 
 	c.Put(ctx, cockroach, "./cockroach")
@@ -86,7 +81,7 @@ func runBuildAnalyze(ctx context.Context, t test.Test, c cluster.Cluster) {
 	c.Run(ctx, c.Node(1), "sudo apt-get update")
 	c.Run(ctx, c.Node(1), "sudo apt-get -qqy install pax-utils")
 
-	cmd := exec.CommandContext(ctx, roachprod, "run", c.MakeNodes(c.Node(1)), "scanelf -qe cockroach")
+	cmd := exec.CommandContext(ctx, roachprod, "run", c.makeNodes(c.Node(1)), "scanelf -qe cockroach")
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("scanelf failed: %s", err)

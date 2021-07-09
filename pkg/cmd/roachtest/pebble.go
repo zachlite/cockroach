@@ -16,10 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 func registerPebble(r *testRegistry) {
@@ -28,7 +24,7 @@ func registerPebble(r *testRegistry) {
 		pebble = "./pebble.linux"
 	}
 
-	run := func(ctx context.Context, t test.Test, c cluster.Cluster, size int) {
+	run := func(ctx context.Context, t *test, c *cluster, size int) {
 		c.Put(ctx, pebble, "./pebble")
 
 		const initialKeys = 10_000_000
@@ -39,11 +35,11 @@ func registerPebble(r *testRegistry) {
 		const benchDir = dataDir + "/bench"
 
 		runCmd := func(cmd string) {
-			t.L().PrintfCtx(ctx, "> %s", cmd)
-			err := c.RunL(ctx, t.L(), c.All(), cmd)
-			t.L().Printf("> result: %+v", err)
+			c.l.PrintfCtx(ctx, "> %s", cmd)
+			err := c.RunL(ctx, c.l, c.All(), cmd)
+			c.l.Printf("> result: %+v", err)
 			if err := ctx.Err(); err != nil {
-				t.L().Printf("(note: incoming context was canceled: %s", err)
+				c.l.Printf("(note: incoming context was canceled: %s", err)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -87,14 +83,14 @@ func registerPebble(r *testRegistry) {
 
 			runCmd(fmt.Sprintf("tar cvPf profiles_%s.tar *.prof", workload))
 
-			dest := filepath.Join(t.ArtifactsDir(), fmt.Sprintf("ycsb_%s.log", workload))
-			if err := c.Get(ctx, t.L(), "ycsb.log", dest, c.All()); err != nil {
+			dest := filepath.Join(t.artifactsDir, fmt.Sprintf("ycsb_%s.log", workload))
+			if err := c.Get(ctx, c.l, "ycsb.log", dest, c.All()); err != nil {
 				t.Fatal(err)
 			}
 
 			profilesName := fmt.Sprintf("profiles_%s.tar", workload)
-			dest = filepath.Join(t.ArtifactsDir(), profilesName)
-			if err := c.Get(ctx, t.L(), profilesName, dest, c.All()); err != nil {
+			dest = filepath.Join(t.artifactsDir, profilesName)
+			if err := c.Get(ctx, c.l, profilesName, dest, c.All()); err != nil {
 				t.Fatal(err)
 			}
 
@@ -104,14 +100,14 @@ func registerPebble(r *testRegistry) {
 
 	for _, size := range []int{64, 1024} {
 		size := size
-		r.Add(TestSpec{
+		r.Add(testSpec{
 			Name:       fmt.Sprintf("pebble/ycsb/size=%d", size),
 			Owner:      OwnerStorage,
 			Timeout:    2 * time.Hour,
 			MinVersion: "v20.1.0",
-			Cluster:    r.makeClusterSpec(5, spec.CPU(16)),
+			Cluster:    makeClusterSpec(5, cpu(16)),
 			Tags:       []string{"pebble"},
-			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			Run: func(ctx context.Context, t *test, c *cluster) {
 				run(ctx, t, c, size)
 			},
 		})

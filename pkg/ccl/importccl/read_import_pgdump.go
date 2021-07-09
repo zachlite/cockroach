@@ -24,8 +24,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -238,61 +238,43 @@ type schemaParsingObjects struct {
 func createPostgresSchemas(
 	ctx context.Context,
 	parentID descpb.ID,
-	schemasToCreate map[string]*tree.CreateSchema,
+	createSchema map[string]*tree.CreateSchema,
 	execCfg *sql.ExecutorConfig,
 	user security.SQLUsername,
 ) ([]*schemadesc.Mutable, error) {
-	createSchema := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-		dbDesc catalog.DatabaseDescriptor, schema *tree.CreateSchema,
-	) (*schemadesc.Mutable, error) {
-		desc, _, err := sql.CreateUserDefinedSchemaDescriptor(
-			ctx, user, schema, txn, descriptors, execCfg, dbDesc, false, /* allocateID */
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// This is true when the schema exists and we are processing a
-		// CREATE SCHEMA IF NOT EXISTS statement.
-		if desc == nil {
-			return nil, nil
-		}
-
-		// We didn't allocate an ID above, so we must assign it a mock ID until it
-		// is assigned an actual ID later in the import.
-		desc.ID = getNextPlaceholderDescID()
-		desc.SetOffline("importing")
-		return desc, nil
+	var dbDesc *dbdesc.Immutable
+	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		var err error
+		dbDesc, err = catalogkv.MustGetDatabaseDescByID(ctx, txn, execCfg.Codec, parentID)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	var schemaDescs []*schemadesc.Mutable
-	createSchemaDescs := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-	) error {
-		schemaDescs = nil // reset for retries
-		_, dbDesc, err := descriptors.GetImmutableDatabaseByID(ctx, txn, parentID, tree.DatabaseLookupFlags{
-			Required:    true,
-			AvoidCached: true,
-		})
-		if err != nil {
-			return err
-		}
-		for _, schema := range schemasToCreate {
-			scDesc, err := createSchema(ctx, txn, descriptors, dbDesc, schema)
+	schemaDescs := make([]*schemadesc.Mutable, 0)
+	for _, schema := range createSchema {
+		if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			desc, _, err := sql.CreateUserDefinedSchemaDescriptor(ctx, user, schema, txn, execCfg,
+				dbDesc, false /* allocateID */)
 			if err != nil {
 				return err
 			}
-			if scDesc != nil {
-				schemaDescs = append(schemaDescs, scDesc)
+
+			// This is true when the schema exists and we are processing a
+			// CREATE SCHEMA IF NOT EXISTS statement.
+			if desc == nil {
+				return nil
 			}
+
+			// We didn't allocate an ID above, so we must assign it a mock ID until it
+			// is assigned an actual ID later in the import.
+			desc.ID = getNextPlaceholderDescID()
+			desc.State = descpb.DescriptorState_OFFLINE
+			desc.OfflineReason = "importing"
+			schemaDescs = append(schemaDescs, desc)
+			return err
+		}); err != nil {
+			return nil, err
 		}
-		return nil
-	}
-	if err := descs.Txn(
-		ctx, execCfg.Settings, execCfg.LeaseManager, execCfg.InternalExecutor,
-		execCfg.DB, createSchemaDescs,
-	); err != nil {
-		return nil, err
 	}
 	return schemaDescs, nil
 }
@@ -368,7 +350,7 @@ func createPostgresTables(
 			schemaID = desc.ID
 		}
 		removeDefaultRegclass(create)
-		desc, err := MakeTestingSimpleTableDescriptor(evalCtx.Ctx(), p.SemaCtx(), p.ExecCfg().Settings,
+		desc, err := MakeSimpleTableDescriptor(evalCtx.Ctx(), p.SemaCtx(), p.ExecCfg().Settings,
 			create, parentID, schemaID, getNextPlaceholderDescID(), fks, walltime)
 		if err != nil {
 			return nil, err
@@ -1168,7 +1150,7 @@ func (m *pgDumpReader) readFile(
 							if err != nil {
 								col := conv.VisibleCols[idx]
 								return wrapRowErr(err, "", count, pgcode.Syntax,
-									"parse %q as %s", col.GetName(), col.GetType().SQLString())
+									"parse %q as %s", col.Name, col.Type.SQLString())
 							}
 						}
 					}

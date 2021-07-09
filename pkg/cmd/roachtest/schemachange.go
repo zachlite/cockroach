@@ -16,26 +16,22 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
 func registerSchemaChangeDuringKV(r *testRegistry) {
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    `schemachange/during/kv`,
 		Owner:   OwnerSQLSchema,
-		Cluster: r.makeClusterSpec(5),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			const fixturePath = `gs://cockroach-fixtures/workload/tpch/scalefactor=10/backup?AUTH=implicit`
+		Cluster: makeClusterSpec(5),
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			const fixturePath = `gs://cockroach-fixtures/workload/tpch/scalefactor=10/backup`
 
 			c.Put(ctx, cockroach, "./cockroach")
 			c.Put(ctx, workload, "./workload")
 
-			c.Start(ctx, c.All())
+			c.Start(ctx, t, c.All())
 			db := c.Conn(ctx, 1)
 			defer db.Close()
 
@@ -50,32 +46,32 @@ func registerSchemaChangeDuringKV(r *testRegistry) {
 			m.Wait()
 
 			c.Run(ctx, c.Node(1), `./workload init kv --drop --db=test`)
-			for node := 1; node <= c.Spec().NodeCount; node++ {
+			for node := 1; node <= c.spec.NodeCount; node++ {
 				node := node
 				// TODO(dan): Ideally, the test would fail if this queryload failed,
 				// but we can't put it in monitor as-is because the test deadlocks.
 				go func() {
 					const cmd = `./workload run kv --tolerate-errors --min-block-bytes=8 --max-block-bytes=127 --db=test`
-					l, err := t.L().ChildLogger(fmt.Sprintf(`kv-%d`, node))
+					l, err := t.l.ChildLogger(fmt.Sprintf(`kv-%d`, node))
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer l.Close()
-					_ = execCmd(ctx, t.L(), roachprod, "ssh", c.MakeNodes(c.Node(node)), "--", cmd)
+					defer l.close()
+					_ = execCmd(ctx, t.l, roachprod, "ssh", c.makeNodes(c.Node(node)), "--", cmd)
 				}()
 			}
 
 			m = newMonitor(ctx, c, c.All())
 			m.Go(func(ctx context.Context) error {
 				t.Status("running schema change tests")
-				return waitForSchemaChanges(ctx, t.L(), db)
+				return waitForSchemaChanges(ctx, t.l, db)
 			})
 			m.Wait()
 		},
 	})
 }
 
-func waitForSchemaChanges(ctx context.Context, l *logger.Logger, db *gosql.DB) error {
+func waitForSchemaChanges(ctx context.Context, l *logger, db *gosql.DB) error {
 	start := timeutil.Now()
 
 	// These schema changes are over a table that is not actively
@@ -137,9 +133,7 @@ func waitForSchemaChanges(ctx context.Context, l *logger.Logger, db *gosql.DB) e
 	return runValidationQueries(ctx, l, db, start, validationQueries, indexValidationQueries)
 }
 
-func runSchemaChanges(
-	ctx context.Context, l *logger.Logger, db *gosql.DB, schemaChanges []string,
-) error {
+func runSchemaChanges(ctx context.Context, l *logger, db *gosql.DB, schemaChanges []string) error {
 	for _, cmd := range schemaChanges {
 		start := timeutil.Now()
 		l.Printf("starting schema change: %s\n", cmd)
@@ -157,7 +151,7 @@ func runSchemaChanges(
 // The validationQueries all return the same result.
 func runValidationQueries(
 	ctx context.Context,
-	l *logger.Logger,
+	l *logger,
 	db *gosql.DB,
 	start time.Time,
 	validationQueries []string,
@@ -221,7 +215,7 @@ type timeSpan struct {
 // problems are seen.
 func checkIndexOverTimeSpan(
 	ctx context.Context,
-	l *logger.Logger,
+	l *logger,
 	db *gosql.DB,
 	s timeSpan,
 	nowString string,
@@ -245,7 +239,7 @@ func checkIndexOverTimeSpan(
 // inconsistencies are seen.
 func findIndexProblem(
 	ctx context.Context,
-	l *logger.Logger,
+	l *logger,
 	db *gosql.DB,
 	s timeSpan,
 	nowString string,
@@ -291,20 +285,20 @@ func findIndexProblem(
 }
 
 func registerSchemaChangeIndexTPCC1000(r *testRegistry) {
-	r.Add(makeIndexAddTpccTest(r.makeClusterSpec(5, spec.CPU(16)), 1000, time.Hour*2))
+	r.Add(makeIndexAddTpccTest(makeClusterSpec(5, cpu(16)), 1000, time.Hour*2))
 }
 
 func registerSchemaChangeIndexTPCC100(r *testRegistry) {
-	r.Add(makeIndexAddTpccTest(r.makeClusterSpec(5), 100, time.Minute*15))
+	r.Add(makeIndexAddTpccTest(makeClusterSpec(5), 100, time.Minute*15))
 }
 
-func makeIndexAddTpccTest(spec spec.ClusterSpec, warehouses int, length time.Duration) TestSpec {
-	return TestSpec{
+func makeIndexAddTpccTest(spec clusterSpec, warehouses int, length time.Duration) testSpec {
+	return testSpec{
 		Name:    fmt.Sprintf("schemachange/index/tpcc/w=%d", warehouses),
 		Owner:   OwnerSQLSchema,
 		Cluster: spec,
 		Timeout: length * 3,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: warehouses,
 				// We limit the number of workers because the default results in a lot
@@ -326,37 +320,35 @@ func makeIndexAddTpccTest(spec spec.ClusterSpec, warehouses int, length time.Dur
 }
 
 func registerSchemaChangeBulkIngest(r *testRegistry) {
-	r.Add(makeSchemaChangeBulkIngestTest(r, 5, 100000000, time.Minute*20))
+	r.Add(makeSchemaChangeBulkIngestTest(5, 100000000, time.Minute*20))
 }
 
-func makeSchemaChangeBulkIngestTest(
-	r *testRegistry, numNodes, numRows int, length time.Duration,
-) TestSpec {
-	return TestSpec{
+func makeSchemaChangeBulkIngestTest(numNodes, numRows int, length time.Duration) testSpec {
+	return testSpec{
 		Name:    "schemachange/bulkingest",
 		Owner:   OwnerSQLSchema,
-		Cluster: r.makeClusterSpec(numNodes),
+		Cluster: makeClusterSpec(numNodes),
 		Timeout: length * 2,
 		// `fixtures import` (with the workload paths) is not supported in 2.1
 		MinVersion: "v19.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			// Configure column a to have sequential ascending values, and columns b and c to be constant.
 			// The payload column will be randomized and thus uncorrelated with the primary key (a, b, c).
 			aNum := numRows
-			if c.IsLocal() {
+			if c.isLocal() {
 				aNum = 100000
 			}
 			bNum := 1
 			cNum := 1
 			payloadBytes := 4
 
-			crdbNodes := c.Range(1, c.Spec().NodeCount-1)
-			workloadNode := c.Node(c.Spec().NodeCount)
+			crdbNodes := c.Range(1, c.spec.NodeCount-1)
+			workloadNode := c.Node(c.spec.NodeCount)
 
 			c.Put(ctx, cockroach, "./cockroach")
 			c.Put(ctx, workload, "./workload", workloadNode)
 			// TODO (lucy): Remove flag once the faster import is enabled by default
-			c.Start(ctx, crdbNodes, startArgs("--env=COCKROACH_IMPORT_WORKLOAD_FASTER=true"))
+			c.Start(ctx, t, crdbNodes, startArgs("--env=COCKROACH_IMPORT_WORKLOAD_FASTER=true"))
 
 			// Don't add another index when importing.
 			cmdWrite := fmt.Sprintf(
@@ -371,12 +363,12 @@ func makeSchemaChangeBulkIngestTest(
 			m := newMonitor(ctx, c, crdbNodes)
 
 			indexDuration := length
-			if c.IsLocal() {
+			if c.isLocal() {
 				indexDuration = time.Second * 30
 			}
 			cmdWriteAndRead := fmt.Sprintf(
 				"./workload run bulkingest --duration %s {pgurl:1-%d} --a %d --b %d --c %d --payload-bytes %d",
-				indexDuration.String(), c.Spec().NodeCount-1, aNum, bNum, cNum, payloadBytes,
+				indexDuration.String(), c.spec.NodeCount-1, aNum, bNum, cNum, payloadBytes,
 			)
 			m.Go(func(ctx context.Context) error {
 				c.Run(ctx, workloadNode, cmdWriteAndRead)
@@ -387,7 +379,7 @@ func makeSchemaChangeBulkIngestTest(
 				db := c.Conn(ctx, 1)
 				defer db.Close()
 
-				if !c.IsLocal() {
+				if !c.isLocal() {
 					// Wait for the load generator to run for a few minutes before creating the index.
 					sleepInterval := time.Minute * 5
 					maxSleep := length / 2
@@ -397,12 +389,12 @@ func makeSchemaChangeBulkIngestTest(
 					time.Sleep(sleepInterval)
 				}
 
-				t.L().Printf("Creating index")
+				c.l.Printf("Creating index")
 				before := timeutil.Now()
 				if _, err := db.Exec(`CREATE INDEX payload_a ON bulkingest.bulkingest (payload, a)`); err != nil {
 					t.Fatal(err)
 				}
-				t.L().Printf("CREATE INDEX took %v\n", timeutil.Since(before))
+				c.l.Printf("CREATE INDEX took %v\n", timeutil.Since(before))
 				return nil
 			})
 
@@ -412,18 +404,16 @@ func makeSchemaChangeBulkIngestTest(
 }
 
 func registerSchemaChangeDuringTPCC1000(r *testRegistry) {
-	r.Add(makeSchemaChangeDuringTPCC(r.makeClusterSpec(5, spec.CPU(16)), 1000, time.Hour*3))
+	r.Add(makeSchemaChangeDuringTPCC(makeClusterSpec(5, cpu(16)), 1000, time.Hour*3))
 }
 
-func makeSchemaChangeDuringTPCC(
-	spec spec.ClusterSpec, warehouses int, length time.Duration,
-) TestSpec {
-	return TestSpec{
+func makeSchemaChangeDuringTPCC(spec clusterSpec, warehouses int, length time.Duration) testSpec {
+	return testSpec{
 		Name:    "schemachange/during/tpcc",
 		Owner:   OwnerSQLSchema,
 		Cluster: spec,
 		Timeout: length * 3,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: warehouses,
 				// We limit the number of workers because the default results in a lot
@@ -474,23 +464,21 @@ func makeSchemaChangeDuringTPCC(
 	}
 }
 
-func runAndLogStmts(
-	ctx context.Context, t test.Test, c cluster.Cluster, prefix string, stmts []string,
-) error {
+func runAndLogStmts(ctx context.Context, t *test, c *cluster, prefix string, stmts []string) error {
 	db := c.Conn(ctx, 1)
 	defer db.Close()
-	t.L().Printf("%s: running %d statements\n", prefix, len(stmts))
+	c.l.Printf("%s: running %d statements\n", prefix, len(stmts))
 	start := timeutil.Now()
 	for i, stmt := range stmts {
 		// Let some traffic run before the schema change.
 		time.Sleep(time.Minute)
-		t.L().Printf("%s: running statement %d...\n", prefix, i+1)
+		c.l.Printf("%s: running statement %d...\n", prefix, i+1)
 		before := timeutil.Now()
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("%s: statement %d: %q took %v\n", prefix, i+1, stmt, timeutil.Since(before))
+		c.l.Printf("%s: statement %d: %q took %v\n", prefix, i+1, stmt, timeutil.Since(before))
 	}
-	t.L().Printf("%s: ran %d statements in %v\n", prefix, len(stmts), timeutil.Since(start))
+	c.l.Printf("%s: ran %d statements in %v\n", prefix, len(stmts), timeutil.Since(start))
 	return nil
 }

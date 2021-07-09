@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/errors"
 )
@@ -31,14 +29,14 @@ import (
 // You want to look at versionupgrade.go, which has a test harness you
 // can use.
 func registerAutoUpgrade(r *testRegistry) {
-	runAutoUpgrade := func(ctx context.Context, t test.Test, c cluster.Cluster, oldVersion string) {
-		nodes := c.Spec().NodeCount
+	runAutoUpgrade := func(ctx context.Context, t *test, c *cluster, oldVersion string) {
+		nodes := c.spec.NodeCount
 
-		if err := c.Stage(ctx, t.L(), "release", "v"+oldVersion, "", c.Range(1, nodes)); err != nil {
+		if err := c.Stage(ctx, c.l, "release", "v"+oldVersion, "", c.Range(1, nodes)); err != nil {
 			t.Fatal(err)
 		}
 
-		c.Start(ctx, c.Range(1, nodes))
+		c.Start(ctx, t, c.Range(1, nodes))
 
 		const stageDuration = 30 * time.Second
 		const timeUntilStoreDead = 90 * time.Second
@@ -122,7 +120,7 @@ func registerAutoUpgrade(r *testRegistry) {
 				t.Fatal(err)
 			}
 			c.Put(ctx, cockroach, "./cockroach", c.Node(i))
-			c.Start(ctx, c.Node(i), startArgsDontEncrypt)
+			c.Start(ctx, t, c.Node(i), startArgsDontEncrypt)
 			if err := sleep(stageDuration); err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +142,7 @@ func registerAutoUpgrade(r *testRegistry) {
 			t.Fatal(err)
 		}
 		c.Put(ctx, cockroach, "./cockroach", c.Node(nodes))
-		c.Start(ctx, c.Node(nodes), startArgsDontEncrypt)
+		c.Start(ctx, t, c.Node(nodes), startArgsDontEncrypt)
 		if err := sleep(stageDuration); err != nil {
 			t.Fatal(err)
 		}
@@ -187,7 +185,7 @@ func registerAutoUpgrade(r *testRegistry) {
 		}
 
 		// Restart the previously stopped node.
-		c.Start(ctx, c.Node(nodes-1), startArgsDontEncrypt)
+		c.Start(ctx, t, c.Node(nodes-1), startArgsDontEncrypt)
 		if err := sleep(stageDuration); err != nil {
 			t.Fatal(err)
 		}
@@ -240,16 +238,16 @@ func registerAutoUpgrade(r *testRegistry) {
 		}
 
 		// Start n3 again to satisfy the dead node detector.
-		c.Start(ctx, c.Node(nodeDecommissioned))
+		c.Start(ctx, t, c.Node(nodeDecommissioned))
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       `autoupgrade`,
 		Owner:      OwnerKV,
 		MinVersion: "v19.1.0",
-		Cluster:    r.makeClusterSpec(5),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			pred, err := PredecessorVersion(*t.BuildVersion())
+		Cluster:    makeClusterSpec(5),
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			pred, err := PredecessorVersion(r.buildVersion)
 			if err != nil {
 				t.Fatal(err)
 			}

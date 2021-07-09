@@ -15,14 +15,10 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 // isAlive returns whether the node queried by db is alive.
-func isAlive(db *gosql.DB, l *logger.Logger) bool {
+func isAlive(db *gosql.DB, l *logger) bool {
 	// The cluster might have just restarted, in which case the first call to db
 	// might return an error. In fact, the first db.Ping() reliably returns an
 	// error (but a db.Exec() only seldom returns an error). So, we're gonna
@@ -47,8 +43,7 @@ func dbUnixEpoch(db *gosql.DB) (float64, error) {
 
 // offsetInjector is used to inject clock offsets in roachtests.
 type offsetInjector struct {
-	t        test.Test
-	c        cluster.Cluster
+	c        *cluster
 	deployed bool
 }
 
@@ -59,16 +54,16 @@ func (oi *offsetInjector) deploy(ctx context.Context) error {
 		return nil
 	}
 
-	if err := oi.c.Install(ctx, oi.t.L(), oi.c.All(), "ntp"); err != nil {
+	if err := oi.c.Install(ctx, oi.c.l, oi.c.All(), "ntp"); err != nil {
 		return err
 	}
-	if err := oi.c.Install(ctx, oi.t.L(), oi.c.All(), "gcc"); err != nil {
+	if err := oi.c.Install(ctx, oi.c.l, oi.c.All(), "gcc"); err != nil {
 		return err
 	}
-	if err := oi.c.RunL(ctx, oi.t.L(), oi.c.All(), "sudo", "service", "ntp", "stop"); err != nil {
+	if err := oi.c.RunL(ctx, oi.c.l, oi.c.All(), "sudo", "service", "ntp", "stop"); err != nil {
 		return err
 	}
-	if err := oi.c.RunL(ctx, oi.t.L(),
+	if err := oi.c.RunL(ctx, oi.c.l,
 		oi.c.All(),
 		"curl",
 		"--retry", "3",
@@ -79,7 +74,7 @@ func (oi *offsetInjector) deploy(ctx context.Context) error {
 	); err != nil {
 		return err
 	}
-	if err := oi.c.RunL(ctx, oi.t.L(),
+	if err := oi.c.RunL(ctx, oi.c.l,
 		oi.c.All(), "gcc", "bumptime.c", "-o", "bumptime", "&&", "rm bumptime.c",
 	); err != nil {
 		return err
@@ -91,7 +86,7 @@ func (oi *offsetInjector) deploy(ctx context.Context) error {
 // offset injects a offset of s into the node with the given nodeID.
 func (oi *offsetInjector) offset(ctx context.Context, nodeID int, s time.Duration) {
 	if !oi.deployed {
-		oi.t.Fatal("Offset injector must be deployed before injecting a clock offset")
+		oi.c.t.Fatal("Offset injector must be deployed before injecting a clock offset")
 	}
 
 	oi.c.Run(
@@ -105,7 +100,7 @@ func (oi *offsetInjector) offset(ctx context.Context, nodeID int, s time.Duratio
 // from any offsets.
 func (oi *offsetInjector) recover(ctx context.Context, nodeID int) {
 	if !oi.deployed {
-		oi.t.Fatal("Offset injector must be deployed before recovering from clock offsets")
+		oi.c.t.Fatal("Offset injector must be deployed before recovering from clock offsets")
 	}
 
 	syncCmds := [][]string{
@@ -124,6 +119,6 @@ func (oi *offsetInjector) recover(ctx context.Context, nodeID int) {
 
 // newOffsetInjector creates a offsetInjector which can be used to inject
 // and recover from clock offsets.
-func newOffsetInjector(t test.Test, c cluster.Cluster) *offsetInjector {
-	return &offsetInjector{t: t, c: c}
+func newOffsetInjector(c *cluster) *offsetInjector {
+	return &offsetInjector{c: c}
 }

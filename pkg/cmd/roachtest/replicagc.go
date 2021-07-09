@@ -17,19 +17,16 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func registerReplicaGC(r *testRegistry) {
 	for _, restart := range []bool{true, false} {
-		r.Add(TestSpec{
+		r.Add(testSpec{
 			Name:    fmt.Sprintf("replicagc-changed-peers/restart=%t", restart),
 			Owner:   OwnerKV,
-			Cluster: r.makeClusterSpec(6),
-			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			Cluster: makeClusterSpec(6),
+			Run: func(ctx context.Context, t *test, c *cluster) {
 				runReplicaGCChangedPeers(ctx, t, c, restart)
 			},
 		})
@@ -49,17 +46,15 @@ var deadNodeAttr = "deadnode"
 // replicas off of them, and after having done so, it recommissions the downed
 // node. It expects the downed node to discover the new replica placement and gc
 // its replicas.
-func runReplicaGCChangedPeers(
-	ctx context.Context, t test.Test, c cluster.Cluster, withRestart bool,
-) {
-	if c.Spec().NodeCount != 6 {
+func runReplicaGCChangedPeers(ctx context.Context, t *test, c *cluster, withRestart bool) {
+	if c.spec.NodeCount != 6 {
 		t.Fatal("test needs to be run with 6 nodes")
 	}
 
 	args := startArgs("--env=COCKROACH_SCAN_MAX_IDLE_TIME=5ms")
 	c.Put(ctx, cockroach, "./cockroach")
 	c.Put(ctx, workload, "./workload", c.Node(1))
-	c.Start(ctx, args, c.Range(1, 3))
+	c.Start(ctx, t, args, c.Range(1, 3))
 
 	h := &replicagcTestHelper{c: c, t: t}
 
@@ -75,7 +70,7 @@ func runReplicaGCChangedPeers(
 	c.Stop(ctx, c.Node(3))
 
 	// Start three new nodes that will take over all data.
-	c.Start(ctx, args, c.Range(4, 6))
+	c.Start(ctx, t, args, c.Range(4, 6))
 
 	// Recommission n1-3, with n3 in absentia, moving the replicas to n4-6.
 	if err := h.decommission(ctx, c.Range(1, 3), 2, "--wait=none"); err != nil {
@@ -115,19 +110,15 @@ func runReplicaGCChangedPeers(
 		// do that within the store dead interval (5m, i.e. too long for this
 		// test).
 		c.Stop(ctx, c.Range(4, 6))
-		c.Start(ctx, args, c.Range(4, 6))
+		c.Start(ctx, t, args, c.Range(4, 6))
 	}
 
 	// Restart n3. We have to manually tell it where to find a new node or it
 	// won't be able to connect. Give it the deadNodeAttr attribute that we've
 	// used as a negative constraint for "everything", which should prevent new
 	// replicas from being added to it.
-	internalAddrs, err := c.InternalAddr(ctx, c.Node(4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Start(ctx, c.Node(3), startArgs(
-		"--args=--join="+internalAddrs[0],
+	c.Start(ctx, t, c.Node(3), startArgs(
+		"--args=--join="+c.InternalAddr(ctx, c.Node(4))[0],
 		"--args=--attrs="+deadNodeAttr,
 		"--args=--vmodule=raft=5,replicate_queue=5,allocator=5",
 		"--env=COCKROACH_SCAN_MAX_IDLE_TIME=5ms",
@@ -138,12 +129,12 @@ func runReplicaGCChangedPeers(
 	h.waitForZeroReplicas(ctx, 3)
 
 	// Restart the remaining nodes to satisfy the dead node detector.
-	c.Start(ctx, c.Range(1, 2))
+	c.Start(ctx, t, c.Range(1, 2))
 }
 
 type replicagcTestHelper struct {
-	t test.Test
-	c cluster.Cluster
+	t *test
+	c *cluster
 }
 
 func (h *replicagcTestHelper) waitForFullReplication(ctx context.Context) {
@@ -195,14 +186,14 @@ func (h *replicagcTestHelper) numReplicas(ctx context.Context, db *gosql.DB, tar
 	).Scan(&n); err != nil {
 		h.t.Fatal(err)
 	}
-	h.t.L().Printf("found %d replicas found on n%d\n", n, targetNode)
+	h.c.l.Printf("found %d replicas found on n%d\n", n, targetNode)
 	return n
 }
 
 // decommission decommissions the given targetNodes, running the process
 // through the specified runNode.
 func (h *replicagcTestHelper) decommission(
-	ctx context.Context, targetNodes option.NodeListOption, runNode int, verbs ...string,
+	ctx context.Context, targetNodes nodeListOption, runNode int, verbs ...string,
 ) error {
 	args := []string{"node", "decommission"}
 	args = append(args, verbs...)
@@ -217,7 +208,7 @@ func (h *replicagcTestHelper) decommission(
 // recommission recommissions the given targetNodes, running the process
 // through the specified runNode.
 func (h *replicagcTestHelper) recommission(
-	ctx context.Context, targetNodes option.NodeListOption, runNode int, verbs ...string,
+	ctx context.Context, targetNodes nodeListOption, runNode int, verbs ...string,
 ) error {
 	args := []string{"node", "recommission"}
 	args = append(args, verbs...)
@@ -241,7 +232,7 @@ func (h *replicagcTestHelper) isolateDeadNodes(ctx context.Context, runNode int)
 		"RANGE default", "RANGE meta", "RANGE system", "RANGE liveness", "DATABASE system", "TABLE system.jobs",
 	} {
 		stmt := `ALTER ` + change + ` CONFIGURE ZONE = 'constraints: {"-` + deadNodeAttr + `"}'`
-		h.t.L().Printf(stmt + "\n")
+		h.c.l.Printf(stmt + "\n")
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			h.t.Fatal(err)
 		}

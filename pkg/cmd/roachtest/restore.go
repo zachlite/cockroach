@@ -22,15 +22,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -41,16 +35,14 @@ import (
 // proposals, liveness problems, or whatever else might get added in the
 // future.
 type HealthChecker struct {
-	t      test.Test
-	c      cluster.Cluster
-	nodes  option.NodeListOption
+	c      *cluster
+	nodes  nodeListOption
 	doneCh chan struct{}
 }
 
 // NewHealthChecker returns a populated HealthChecker.
-func NewHealthChecker(t test.Test, c cluster.Cluster, nodes option.NodeListOption) *HealthChecker {
+func NewHealthChecker(c *cluster, nodes nodeListOption) *HealthChecker {
 	return &HealthChecker{
-		t:      t,
 		c:      c,
 		nodes:  nodes,
 		doneCh: make(chan struct{}),
@@ -85,7 +77,7 @@ func (g gossipAlerts) String() string {
 //
 // TODO(tschottdorf): actually let this fail the test instead of logging complaints.
 func (hc *HealthChecker) Runner(ctx context.Context) (err error) {
-	logger, err := hc.t.L().ChildLogger("health")
+	logger, err := hc.c.l.ChildLogger("health")
 	if err != nil {
 		return err
 	}
@@ -148,15 +140,13 @@ func (hc *HealthChecker) Runner(ctx context.Context) (err error) {
 
 // DiskUsageLogger regularly logs the disk spaced used by the nodes in the cluster.
 type DiskUsageLogger struct {
-	t      test.Test
-	c      cluster.Cluster
+	c      *cluster
 	doneCh chan struct{}
 }
 
 // NewDiskUsageLogger populates a DiskUsageLogger.
-func NewDiskUsageLogger(t test.Test, c cluster.Cluster) *DiskUsageLogger {
+func NewDiskUsageLogger(c *cluster) *DiskUsageLogger {
 	return &DiskUsageLogger{
-		t:      t,
 		c:      c,
 		doneCh: make(chan struct{}),
 	}
@@ -170,11 +160,11 @@ func (dul *DiskUsageLogger) Done() {
 // Runner runs in a loop until Done() is called and prints the cluster-wide per
 // node disk usage in descending order.
 func (dul *DiskUsageLogger) Runner(ctx context.Context) error {
-	l, err := dul.t.L().ChildLogger("diskusage")
+	logger, err := dul.c.l.ChildLogger("diskusage")
 	if err != nil {
 		return err
 	}
-	quietLogger, err := dul.t.L().ChildLogger("diskusage-exec", logger.QuietStdout, logger.QuietStderr)
+	quietLogger, err := dul.c.l.ChildLogger("diskusage-exec", quietStdout, quietStderr)
 	if err != nil {
 		return err
 	}
@@ -197,11 +187,11 @@ func (dul *DiskUsageLogger) Runner(ctx context.Context) error {
 		}
 
 		var bytesUsed []usage
-		for i := 1; i <= dul.c.Spec().NodeCount; i++ {
+		for i := 1; i <= dul.c.spec.NodeCount; i++ {
 			cur, err := getDiskUsageInBytes(ctx, dul.c, quietLogger, i)
 			if err != nil {
 				// This can trigger spuriously as compactions remove files out from under `du`.
-				l.Printf("%s", errors.Wrapf(err, "node #%d", i))
+				logger.Printf("%s", errors.Wrapf(err, "node #%d", i))
 				cur = -1
 			}
 			bytesUsed = append(bytesUsed, usage{
@@ -216,17 +206,17 @@ func (dul *DiskUsageLogger) Runner(ctx context.Context) error {
 			s = append(s, fmt.Sprintf("n#%d: %s", usage.nodeNum, humanizeutil.IBytes(int64(usage.bytes))))
 		}
 
-		l.Printf("%s\n", strings.Join(s, ", "))
+		logger.Printf("%s\n", strings.Join(s, ", "))
 	}
 }
 func registerRestoreNodeShutdown(r *testRegistry) {
-	makeRestoreStarter := func(ctx context.Context, t test.Test, c cluster.Cluster, gatewayNode int) jobStarter {
-		return func(c cluster.Cluster) (string, error) {
-			t.L().Printf("connecting to gateway")
+	makeRestoreStarter := func(ctx context.Context, t *test, c *cluster, gatewayNode int) jobStarter {
+		return func(c *cluster) (string, error) {
+			t.l.Printf("connecting to gateway")
 			gatewayDB := c.Conn(ctx, gatewayNode)
 			defer gatewayDB.Close()
 
-			t.L().Printf("creating bank database")
+			t.l.Printf("creating bank database")
 			if _, err := gatewayDB.Exec("CREATE DATABASE bank"); err != nil {
 				return "", err
 			}
@@ -237,13 +227,13 @@ func registerRestoreNodeShutdown(r *testRegistry) {
 
 				// 10 GiB restore.
 				restoreQuery := `RESTORE bank.bank FROM
-					'gs://cockroach-fixtures/workload/bank/version=1.0.0,payload-bytes=100,ranges=10,rows=10000000,seed=1/bank?AUTH=implicit'`
+					'gs://cockroach-fixtures/workload/bank/version=1.0.0,payload-bytes=100,ranges=10,rows=10000000,seed=1/bank'`
 
-				t.L().Printf("starting to run the restore job")
+				t.l.Printf("starting to run the restore job")
 				if _, err := gatewayDB.Exec(restoreQuery); err != nil {
 					errCh <- err
 				}
-				t.L().Printf("done running restore job")
+				t.l.Printf("done running restore job")
 			}()
 
 			// Wait for the job.
@@ -266,12 +256,12 @@ func registerRestoreNodeShutdown(r *testRegistry) {
 				}
 
 				if jobCount == 0 {
-					t.L().Printf("waiting for restore job")
+					t.l.Printf("waiting for restore job")
 				} else if jobCount == 1 {
-					t.L().Printf("found restore job")
+					t.l.Printf("found restore job")
 					break
 				} else {
-					t.L().Printf("found multiple restore jobs -- erroring")
+					t.l.Printf("found multiple restore jobs -- erroring")
 					return "", errors.New("unexpectedly found multiple restore jobs")
 				}
 			}
@@ -284,121 +274,62 @@ func registerRestoreNodeShutdown(r *testRegistry) {
 		}
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "restore/nodeShutdown/worker",
 		Owner:      OwnerBulkIO,
-		Cluster:    r.makeClusterSpec(4),
+		Cluster:    makeClusterSpec(4),
 		MinVersion: "v21.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 3
 			c.Put(ctx, cockroach, "./cockroach")
-			c.Start(ctx)
+			c.Start(ctx, t)
 
 			jobSurvivesNodeShutdown(ctx, t, c, nodeToShutdown, makeRestoreStarter(ctx, t, c, gatewayNode))
 		},
 	})
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       "restore/nodeShutdown/coordinator",
 		Owner:      OwnerBulkIO,
-		Cluster:    r.makeClusterSpec(4),
+		Cluster:    makeClusterSpec(4),
 		MinVersion: "v21.1.0",
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			gatewayNode := 2
 			nodeToShutdown := 2
 			c.Put(ctx, cockroach, "./cockroach")
-			c.Start(ctx)
+			c.Start(ctx, t)
 
 			jobSurvivesNodeShutdown(ctx, t, c, nodeToShutdown, makeRestoreStarter(ctx, t, c, gatewayNode))
 		},
 	})
 }
 
-type testDataSet interface {
-	name() string
-	// runRestore does any setup that's required and restores the dataset into
-	// the given cluster. Any setup shouldn't take a long amount of time since
-	// perf artifacts are based on how long this takes.
-	runRestore(ctx context.Context, c cluster.Cluster)
-}
-
-type dataBank2TB struct{}
-
-func (dataBank2TB) name() string {
-	return "2TB"
-}
-
-func (dataBank2TB) runRestore(ctx context.Context, c cluster.Cluster) {
-	c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "CREATE DATABASE restore2tb"`)
-	c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "
-				RESTORE csv.bank FROM
-				'gs://cockroach-fixtures/workload/bank/version=1.0.0,payload-bytes=10240,ranges=0,rows=65104166,seed=1/bank?AUTH=implicit'
-				WITH into_db = 'restore2tb'"`)
-}
-
-type tpccIncData struct{}
-
-func (tpccIncData) name() string {
-	return "TPCCInc"
-}
-
-func (tpccIncData) runRestore(ctx context.Context, c cluster.Cluster) {
-	// This data set restores a 1.80TB (replicated) backup consisting of 50
-	// incremental backup layers taken every 15 minutes. 8000 warehouses
-	// were imported and then a workload of 1000 warehouses was run against
-	// the cluster while the incremental backups were being taken.
-	c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "
-				RESTORE FROM '2021/05/21-020411.00' IN
-				'gs://cockroach-fixtures/tpcc-incrementals?AUTH=implicit'
-				AS OF SYSTEM TIME '2021-05-21 14:40:22'"`)
-}
-
 func registerRestore(r *testRegistry) {
-	largeVolumeSize := 2500 // the size in GB of disks in large volume configs
-
 	for _, item := range []struct {
-		nodes        int
-		cpus         int
-		largeVolumes bool
-		dataSet      testDataSet
-
+		nodes   int
 		timeout time.Duration
 	}{
-		{dataSet: dataBank2TB{}, nodes: 10, timeout: 6 * time.Hour},
-		{dataSet: dataBank2TB{}, nodes: 32, timeout: 3 * time.Hour},
-		{dataSet: dataBank2TB{}, nodes: 6, timeout: 4 * time.Hour, cpus: 8, largeVolumes: true},
-		{dataSet: tpccIncData{}, nodes: 10, timeout: 6 * time.Hour},
+		{10, 6 * time.Hour},
+		{32, 3 * time.Hour},
 	} {
-		item := item
-		clusterOpts := make([]spec.Option, 0)
-		testName := fmt.Sprintf("restore%s/nodes=%d", item.dataSet.name(), item.nodes)
-		if item.cpus != 0 {
-			clusterOpts = append(clusterOpts, spec.CPU(item.cpus))
-			testName += fmt.Sprintf("/cpus=%d", item.cpus)
-		}
-		if item.largeVolumes {
-			clusterOpts = append(clusterOpts, spec.VolumeSize(largeVolumeSize))
-			testName += fmt.Sprintf("/pd-volume=%dGB", largeVolumeSize)
-		}
-
-		r.Add(TestSpec{
-			Name:    testName,
+		r.Add(testSpec{
+			Name:    fmt.Sprintf("restore2TB/nodes=%d", item.nodes),
 			Owner:   OwnerBulkIO,
-			Cluster: r.makeClusterSpec(item.nodes, clusterOpts...),
+			Cluster: makeClusterSpec(item.nodes),
 			Timeout: item.timeout,
-			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			Run: func(ctx context.Context, t *test, c *cluster) {
 				// Randomize starting with encryption-at-rest enabled.
-				c.EncryptAtRandom(true)
+				c.encryptAtRandom = true
 				c.Put(ctx, cockroach, "./cockroach")
-				c.Start(ctx)
+				c.Start(ctx, t)
 				m := newMonitor(ctx, c)
 
 				// Run the disk usage logger in the monitor to guarantee its
 				// having terminated when the test ends.
-				dul := NewDiskUsageLogger(t, c)
+				dul := NewDiskUsageLogger(c)
 				m.Go(dul.Runner)
-				hc := NewHealthChecker(t, c, c.All())
+				hc := NewHealthChecker(c, c.All())
 				m.Go(hc.Runner)
 
 				// TODO(peter): This currently causes the test to fail because we see a
@@ -412,34 +343,18 @@ func registerRestore(r *testRegistry) {
 				// 	})
 				// })
 
-				tick := initBulkJobPerfArtifacts(ctx, testName, item.timeout)
 				m.Go(func(ctx context.Context) error {
 					defer dul.Done()
 					defer hc.Done()
 					t.Status(`running restore`)
-					// Tick once before starting the restore, and once after to
-					// capture the total elapsed time. This is used by
-					// roachperf to compute and display the average MB/sec per
-					// node.
-					if item.cpus >= 8 {
-						// If the nodes are large enough (specifically, if they
-						// have enough memory we can increase the parallelism
-						// of restore). Machines with 16 vCPUs typically have
-						// enough memory to supoprt 3 concurrent workers.
-						c.Run(ctx, c.Node(1),
-							`./cockroach sql --insecure -e "SET CLUSTER SETTING kv.bulk_io_write.restore_node_concurrency = 5"`)
-						c.Run(ctx, c.Node(1),
-							`./cockroach sql --insecure -e "SET CLUSTER SETTING kv.bulk_io_write.concurrent_addsstable_requests = 5"`)
-					}
-					tick()
-					item.dataSet.runRestore(ctx, c)
-					tick()
+					c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "CREATE DATABASE restore2tb"`)
+					// TODO(dan): It'd be nice if we could keep track over time of how
+					// long this next line took.
+					c.Run(ctx, c.Node(1), `./cockroach sql --insecure -e "
+				RESTORE csv.bank FROM
+				'gs://cockroach-fixtures/workload/bank/version=1.0.0,payload-bytes=10240,ranges=0,rows=65104166,seed=1/bank'
+				WITH into_db = 'restore2tb'"`)
 
-					// Upload the perf artifacts to any one of the nodes so that the test
-					// runner copies it into an appropriate directory path.
-					if err := c.PutE(ctx, t.L(), perfArtifactsDir, perfArtifactsDir, c.Node(1)); err != nil {
-						log.Errorf(ctx, "failed to upload perf artifacts to node: %s", err.Error())
-					}
 					return nil
 				})
 				m.Wait()
@@ -453,14 +368,10 @@ func registerRestore(r *testRegistry) {
 // specified in m. This is particularly useful for verifying that a counter
 // metric does not exceed some threshold during a test. For example, the
 // restore and import tests verify that the range merge queue is inactive.
-func verifyMetrics(ctx context.Context, c cluster.Cluster, m map[string]float64) error {
+func verifyMetrics(ctx context.Context, c *cluster, m map[string]float64) error {
 	const sample = 10 * time.Second
 	// Query needed information over the timespan of the query.
-	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, c.Node(1))
-	if err != nil {
-		return err
-	}
-	url := "http://" + adminUIAddrs[0] + "/ts/query"
+	url := "http://" + c.ExternalAdminUIAddr(ctx, c.Node(1))[0] + "/ts/query"
 
 	request := tspb.TimeSeriesQueryRequest{
 		// Ask for one minute intervals. We can't just ask for the whole hour

@@ -14,10 +14,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var djangoReleaseTagRegex = regexp.MustCompile(`^(?P<major>\d+)\.(?P<minor>\d+)(\.(?P<point>\d+))?$`)
@@ -29,25 +25,23 @@ var djangoCockroachDBSupportedTag = "3.2.1"
 func registerDjango(r *testRegistry) {
 	runDjango := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 	) {
-		if c.IsLocal() {
+		if c.isLocal() {
 			t.Fatal("cannot be run in local mode")
 		}
 		node := c.Node(1)
 		t.Status("setting up cockroach")
 		c.Put(ctx, cockroach, "./cockroach", c.All())
-		c.Start(ctx, c.All())
+		c.Start(ctx, t, c.All())
 
-		version, err := fetchCockroachVersion(ctx, c, node[0], nil)
+		version, err := fetchCockroachVersion(ctx, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		err = alterZoneConfigAndClusterSettings(
-			ctx, version, c, node[0], nil,
-		)
+		err = alterZoneConfigAndClusterSettings(ctx, version, c, node[0])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,7 +49,7 @@ func registerDjango(r *testRegistry) {
 		t.Status("cloning django and installing prerequisites")
 
 		if err := repeatRunE(
-			ctx, t, c, node, "update apt-get",
+			ctx, c, node, "update apt-get",
 			`
 				sudo add-apt-repository ppa:deadsnakes/ppa &&
 				sudo apt-get -qq update`,
@@ -65,7 +59,6 @@ func registerDjango(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install dependencies",
@@ -75,7 +68,7 @@ func registerDjango(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "set python3.7 as default", `
+			ctx, c, node, "set python3.7 as default", `
     		sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.5 1
     		sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 2
     		sudo update-alternatives --config python3`,
@@ -84,7 +77,7 @@ func registerDjango(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "install pip",
+			ctx, c, node, "install pip",
 			`curl https://bootstrap.pypa.io/get-pip.py | sudo -H python3.7`,
 		); err != nil {
 			t.Fatal(err)
@@ -92,7 +85,6 @@ func registerDjango(r *testRegistry) {
 
 		if err := repeatRunE(
 			ctx,
-			t,
 			c,
 			node,
 			"install pytest",
@@ -102,23 +94,23 @@ func registerDjango(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "remove old django", `rm -rf /mnt/data1/django`,
+			ctx, c, node, "remove old django", `rm -rf /mnt/data1/django`,
 		); err != nil {
 			t.Fatal(err)
 		}
 
 		djangoLatestTag, err := repeatGetLatestTag(
-			ctx, t, "django", "django", djangoReleaseTagRegex,
+			ctx, c, "django", "django", djangoReleaseTagRegex,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest Django release is %s.", djangoLatestTag)
-		t.L().Printf("Supported Django release is %s.", djangoSupportedTag)
+		c.l.Printf("Latest Django release is %s.", djangoLatestTag)
+		c.l.Printf("Supported Django release is %s.", djangoSupportedTag)
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/timgraham/django/",
 			"/mnt/data1/django",
@@ -129,17 +121,17 @@ func registerDjango(r *testRegistry) {
 		}
 
 		djangoCockroachDBLatestTag, err := repeatGetLatestTag(
-			ctx, t, "cockroachdb", "django-cockroachdb", djangoCockroachDBReleaseTagRegex,
+			ctx, c, "cockroachdb", "django-cockroachdb", djangoCockroachDBReleaseTagRegex,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.L().Printf("Latest django-cockroachdb release is %s.", djangoCockroachDBLatestTag)
-		t.L().Printf("Supported django-cockroachdb release is %s.", djangoCockroachDBSupportedTag)
+		c.l.Printf("Latest django-cockroachdb release is %s.", djangoCockroachDBLatestTag)
+		c.l.Printf("Supported django-cockroachdb release is %s.", djangoCockroachDBSupportedTag)
 
 		if err := repeatGitCloneE(
 			ctx,
-			t,
+			t.l,
 			c,
 			"https://github.com/cockroachdb/django-cockroachdb",
 			"/mnt/data1/django/tests/django-cockroachdb",
@@ -150,7 +142,7 @@ func registerDjango(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "install django's dependencies", `
+			ctx, c, node, "install django's dependencies", `
 				cd /mnt/data1/django/tests &&
 				sudo pip3 install -e .. &&
 				sudo pip3 install -r requirements/py3.txt &&
@@ -160,7 +152,7 @@ func registerDjango(r *testRegistry) {
 		}
 
 		if err := repeatRunE(
-			ctx, t, c, node, "install django-cockroachdb", `
+			ctx, c, node, "install django-cockroachdb", `
 					cd /mnt/data1/django/tests/django-cockroachdb/ &&
 					sudo pip3 install .`,
 		); err != nil {
@@ -169,7 +161,7 @@ func registerDjango(r *testRegistry) {
 
 		// Write the cockroach config into the test suite to use.
 		if err := repeatRunE(
-			ctx, t, c, node, "configuring tests to use cockroach",
+			ctx, c, node, "configuring tests to use cockroach",
 			fmt.Sprintf(
 				"echo \"%s\" > /mnt/data1/django/tests/cockroach_settings.py",
 				cockroachDjangoSettings,
@@ -185,7 +177,7 @@ func registerDjango(r *testRegistry) {
 		if ignoredlist == nil {
 			t.Fatalf("No django ignorelist defined for cockroach version %s", version)
 		}
-		t.L().Printf("Running cockroach version %s, using blocklist %s, using ignoredlist %s",
+		c.l.Printf("Running cockroach version %s, using blocklist %s, using ignoredlist %s",
 			version, blocklistName, ignoredlistName)
 
 		// TODO (rohany): move this to a file backed buffer if the output becomes
@@ -195,12 +187,12 @@ func registerDjango(r *testRegistry) {
 			t.Status("Running django test app ", testName)
 			// Running the test suite is expected to error out, so swallow the error.
 			rawResults, _ := c.RunWithBuffer(
-				ctx, t.L(), node, fmt.Sprintf(djangoRunTestCmd, testName))
+				ctx, t.l, node, fmt.Sprintf(djangoRunTestCmd, testName))
 			fullTestResults = append(fullTestResults, rawResults...)
-			t.L().Printf("Test results for app %s: %s", testName, rawResults)
-			t.L().Printf("Test stdout for app %s:", testName)
+			c.l.Printf("Test results for app %s: %s", testName, rawResults)
+			c.l.Printf("Test stdout for app %s:", testName)
 			if err := c.RunL(
-				ctx, t.L(), node, fmt.Sprintf("cd /mnt/data1/django/tests && cat %s.stdout", testName),
+				ctx, t.l, node, fmt.Sprintf("cd /mnt/data1/django/tests && cat %s.stdout", testName),
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -214,13 +206,13 @@ func registerDjango(r *testRegistry) {
 		)
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		MinVersion: "v20.2.0",
 		Name:       "django",
 		Owner:      OwnerSQLExperience,
-		Cluster:    r.makeClusterSpec(1, spec.CPU(16)),
+		Cluster:    makeClusterSpec(1, cpu(16)),
 		Tags:       []string{`default`, `orm`},
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runDjango(ctx, t, c)
 		},
 	})

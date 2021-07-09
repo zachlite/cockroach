@@ -17,21 +17,17 @@ import (
 	"math"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
 func registerAllocator(r *testRegistry) {
-	runAllocator := func(ctx context.Context, t test.Test, c cluster.Cluster, start int, maxStdDev float64) {
+	runAllocator := func(ctx context.Context, t *test, c *cluster, start int, maxStdDev float64) {
 		c.Put(ctx, cockroach, "./cockroach")
 
 		// Start the first `start` nodes and restore a tpch fixture.
 		args := startArgs("--args=--vmodule=store_rebalancer=5,allocator=5,allocator_scorer=5,replicate_queue=5")
-		c.Start(ctx, c.Range(1, start), args)
+		c.Start(ctx, t, c.Range(1, start), args)
 		db := c.Conn(ctx, 1)
 		defer db.Close()
 
@@ -48,53 +44,53 @@ func registerAllocator(r *testRegistry) {
 		m.Wait()
 
 		// Start the remaining nodes to kick off upreplication/rebalancing.
-		c.Start(ctx, c.Range(start+1, c.Spec().NodeCount), args)
+		c.Start(ctx, t, c.Range(start+1, c.spec.NodeCount), args)
 
 		c.Run(ctx, c.Node(1), `./cockroach workload init kv --drop`)
-		for node := 1; node <= c.Spec().NodeCount; node++ {
+		for node := 1; node <= c.spec.NodeCount; node++ {
 			node := node
 			// TODO(dan): Ideally, the test would fail if this queryload failed,
 			// but we can't put it in monitor as-is because the test deadlocks.
 			go func() {
 				const cmd = `./cockroach workload run kv --tolerate-errors --min-block-bytes=8 --max-block-bytes=127`
-				l, err := t.L().ChildLogger(fmt.Sprintf(`kv-%d`, node))
+				l, err := t.l.ChildLogger(fmt.Sprintf(`kv-%d`, node))
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer l.Close()
-				_ = execCmd(ctx, t.L(), roachprod, "ssh", c.MakeNodes(c.Node(node)), "--", cmd)
+				defer l.close()
+				_ = execCmd(ctx, t.l, roachprod, "ssh", c.makeNodes(c.Node(node)), "--", cmd)
 			}()
 		}
 
 		m = newMonitor(ctx, c, c.All())
 		m.Go(func(ctx context.Context) error {
 			t.Status("waiting for reblance")
-			return waitForRebalance(ctx, t.L(), db, maxStdDev)
+			return waitForRebalance(ctx, t.l, db, maxStdDev)
 		})
 		m.Wait()
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    `replicate/up/1to3`,
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(3),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(3),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runAllocator(ctx, t, c, 1, 10.0)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    `replicate/rebalance/3to5`,
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(5),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(5),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runAllocator(ctx, t, c, 3, 42.0)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:       `replicate/wide`,
 		Owner:      OwnerKV,
 		Timeout:    10 * time.Minute,
-		Cluster:    r.makeClusterSpec(9, spec.CPU(1)),
+		Cluster:    makeClusterSpec(9, cpu(1)),
 		MinVersion: "v19.2.0",
 		Run:        runWideReplication,
 	})
@@ -102,7 +98,7 @@ func registerAllocator(r *testRegistry) {
 
 // printRebalanceStats prints the time it took for rebalancing to finish and the
 // final standard deviation of replica counts across stores.
-func printRebalanceStats(l *logger.Logger, db *gosql.DB) error {
+func printRebalanceStats(l *logger, db *gosql.DB) error {
 	// TODO(cuongdo): Output these in a machine-friendly way and graph.
 
 	// Output time it took to rebalance.
@@ -218,9 +214,7 @@ func allocatorStats(db *gosql.DB) (s replicationStats, err error) {
 //
 // This method is crude but necessary. If we were to wait until range counts
 // were just about even, we'd miss potential post-rebalance thrashing.
-func waitForRebalance(
-	ctx context.Context, l *logger.Logger, db *gosql.DB, maxStdDev float64,
-) error {
+func waitForRebalance(ctx context.Context, l *logger, db *gosql.DB, maxStdDev float64) error {
 	// const statsInterval = 20 * time.Second
 	const statsInterval = 2 * time.Second
 	const stableSeconds = 3 * 60
@@ -256,8 +250,8 @@ func waitForRebalance(
 	}
 }
 
-func runWideReplication(ctx context.Context, t test.Test, c cluster.Cluster) {
-	nodes := c.Spec().NodeCount
+func runWideReplication(ctx context.Context, t *test, c *cluster) {
+	nodes := c.spec.NodeCount
 	if nodes != 9 {
 		t.Fatalf("9-node cluster required")
 	}
@@ -267,7 +261,7 @@ func runWideReplication(ctx context.Context, t test.Test, c cluster.Cluster) {
 		"--args=--vmodule=replicate_queue=6",
 	)
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx, c.All(), args)
+	c.Start(ctx, t, c.All(), args)
 
 	db := c.Conn(ctx, 1)
 	defer db.Close()
@@ -290,7 +284,7 @@ func runWideReplication(ctx context.Context, t test.Test, c cluster.Cluster) {
 	}
 
 	run := func(stmt string) {
-		t.L().Printf("%s\n", stmt)
+		t.l.Printf("%s\n", stmt)
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +313,7 @@ func runWideReplication(ctx context.Context, t test.Test, c cluster.Cluster) {
 	waitForReplication := func(width int) {
 		for count := -1; count != 0; time.Sleep(time.Second) {
 			count = countMisreplicated(width)
-			t.L().Printf("%d mis-replicated ranges\n", count)
+			t.l.Printf("%d mis-replicated ranges\n", count)
 		}
 	}
 
@@ -336,7 +330,7 @@ func runWideReplication(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// Stop the cluster and restart 2/3 of the nodes.
 	c.Stop(ctx)
 	tBeginDown := timeutil.Now()
-	c.Start(ctx, c.Range(1, 6), args)
+	c.Start(ctx, t, c.Range(1, 6), args)
 
 	waitForUnderReplicated := func(count int) {
 		for start := timeutil.Now(); ; time.Sleep(time.Second) {
@@ -349,7 +343,7 @@ FROM crdb_internal.kv_store_status
 			if err := db.QueryRow(query).Scan(&unavailable, &underReplicated); err != nil {
 				t.Fatal(err)
 			}
-			t.L().Printf("%d unavailable, %d under-replicated ranges\n", unavailable, underReplicated)
+			t.l.Printf("%d unavailable, %d under-replicated ranges\n", unavailable, underReplicated)
 			if unavailable != 0 {
 				// A freshly started cluster might show unavailable ranges for a brief
 				// period of time due to the way that metric is calculated. Only
@@ -392,5 +386,5 @@ FROM crdb_internal.kv_store_status
 	waitForReplication(5)
 
 	// Restart the down nodes to prevent the dead node detector from complaining.
-	c.Start(ctx, c.Range(7, 9))
+	c.Start(ctx, t, c.Range(7, 9))
 }

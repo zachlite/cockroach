@@ -18,8 +18,6 @@ import (
 	"time"
 
 	toxiproxy "github.com/Shopify/toxiproxy/client"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	_ "github.com/lib/pq"
 )
@@ -27,14 +25,14 @@ import (
 // runNetworkSanity is just a sanity check to make sure we're setting up toxiproxy
 // correctly. It injects latency between the nodes and verifies that we're not
 // seeing the latency on the client connection running `SELECT 1` on each node.
-func runNetworkSanity(ctx context.Context, t test.Test, origC cluster.Cluster, nodes int) {
+func runNetworkSanity(ctx context.Context, t *test, origC *cluster, nodes int) {
 	origC.Put(ctx, cockroach, "./cockroach", origC.All())
-	c, err := Toxify(ctx, t, origC, origC.All())
+	c, err := Toxify(ctx, origC, origC.All())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c.Start(ctx, c.All())
+	c.Start(ctx, t, c.All())
 
 	db := c.Conn(ctx, 1) // unaffected by toxiproxy
 	defer db.Close()
@@ -65,7 +63,7 @@ func runNetworkSanity(ctx context.Context, t test.Test, origC cluster.Cluster, n
 		}
 	}
 
-	m := newMonitor(ctx, c.Cluster, c.All())
+	m := newMonitor(ctx, c.cluster, c.All())
 	m.Go(func(ctx context.Context) error {
 		c.Measure(ctx, 1, `SET CLUSTER SETTING trace.debug.enable = true`)
 		c.Measure(ctx, 1, "CREATE DATABASE test")
@@ -76,7 +74,7 @@ func runNetworkSanity(ctx context.Context, t test.Test, origC cluster.Cluster, n
 				"BEGIN; INSERT INTO test.commit VALUES (2, %[1]d), (1, %[1]d), (3, %[1]d); COMMIT",
 				i,
 			))
-			t.L().Printf("%s\n", duration)
+			c.l.Printf("%s\n", duration)
 		}
 
 		c.Measure(ctx, 1, `
@@ -85,7 +83,7 @@ insert into test.commit values(3,1000), (1,1000), (2,1000);
 select age, message from [ show trace for session ];
 `)
 
-		for i := 1; i <= origC.Spec().NodeCount; i++ {
+		for i := 1; i <= origC.spec.NodeCount; i++ {
 			if dur := c.Measure(ctx, i, `SELECT 1`); dur > latency {
 				t.Fatalf("node %d unexpectedly affected by latency: select 1 took %.2fs", i, dur.Seconds())
 			}
@@ -97,19 +95,19 @@ select age, message from [ show trace for session ];
 	m.Wait()
 }
 
-func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nodes int) {
-	n := origC.Spec().NodeCount
+func runNetworkTPCC(ctx context.Context, t *test, origC *cluster, nodes int) {
+	n := origC.spec.NodeCount
 	serverNodes, workerNode := origC.Range(1, n-1), origC.Node(n)
 	origC.Put(ctx, cockroach, "./cockroach", origC.All())
 	origC.Put(ctx, workload, "./workload", origC.All())
 
-	c, err := Toxify(ctx, t, origC, serverNodes)
+	c, err := Toxify(ctx, origC, serverNodes)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	const warehouses = 1
-	c.Start(ctx, serverNodes)
+	c.Start(ctx, t, serverNodes)
 	c.Run(ctx, c.Node(1), tpccImportCmd(warehouses))
 
 	db := c.Conn(ctx, 1)
@@ -124,7 +122,7 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 	}
 
 	// Run TPCC, but don't give it the first node (or it basically won't do anything).
-	m := newMonitor(ctx, c.Cluster, serverNodes)
+	m := newMonitor(ctx, c.cluster, serverNodes)
 
 	m.Go(func(ctx context.Context) error {
 		t.WorkerStatus("running tpcc")
@@ -133,7 +131,7 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 			"./workload run tpcc --warehouses=%d --wait=false"+
 				" --histograms="+perfArtifactsDir+"/stats.json"+
 				" --duration=%s {pgurl:2-%d}",
-			warehouses, duration, c.Spec().NodeCount-1)
+			warehouses, duration, c.spec.NodeCount-1)
 		return c.RunE(ctx, workerNode, cmd)
 	})
 
@@ -146,10 +144,7 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 		// us over the threshold.
 		const thresh = 350
 
-		uiAddrs, err := c.ExternalAdminUIAddr(ctx, serverNodes)
-		if err != nil {
-			t.Fatal(err)
-		}
+		uiAddrs := c.ExternalAdminUIAddr(ctx, serverNodes)
 		var maxSeen int
 		// The goroutine dump may take a while to generate, maybe more
 		// than the 3 second timeout of the default http client.
@@ -182,7 +177,7 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 		// both the "upstream" and "downstream" directions, this is in fact an asymmetric partition since
 		// it only affects connections *to* the node. n1 itself can connect to the cluster just fine.
 		proxy := c.Proxy(1)
-		t.L().Printf("letting inbound traffic to first node time out")
+		c.l.Printf("letting inbound traffic to first node time out")
 		for _, direction := range []string{"upstream", "downstream"} {
 			if _, err := proxy.AddToxic("", "timeout", direction, 1, toxiproxy.Attributes{
 				"timeout": 0, // forever
@@ -197,13 +192,13 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 		for {
 			cur := checkGoroutines(ctx)
 			if maxSeen < cur {
-				t.L().Printf("new goroutine peak: %d", cur)
+				c.l.Printf("new goroutine peak: %d", cur)
 				maxSeen = cur
 			}
 
 			select {
 			case <-done:
-				t.L().Printf("done checking goroutines, repairing network")
+				c.l.Printf("done checking goroutines, repairing network")
 				// Repair the network. Note that the TPCC workload would never
 				// finish (despite the duration) without this. In particular,
 				// we don't want to m.Wait() before we do this.
@@ -216,12 +211,12 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 						t.Fatal(err)
 					}
 				}
-				t.L().Printf("network is repaired")
+				c.l.Printf("network is repaired")
 
 				// Verify that goroutine count doesn't spike.
 				for i := 0; i < 20; i++ {
 					nowGoroutines := checkGoroutines(ctx)
-					t.L().Printf("currently at most %d goroutines per node", nowGoroutines)
+					c.l.Printf("currently at most %d goroutines per node", nowGoroutines)
 					time.Sleep(time.Second)
 				}
 
@@ -238,18 +233,18 @@ func runNetworkTPCC(ctx context.Context, t test.Test, origC cluster.Cluster, nod
 func registerNetwork(r *testRegistry) {
 	const numNodes = 4
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    fmt.Sprintf("network/sanity/nodes=%d", numNodes),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(numNodes),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(numNodes),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runNetworkSanity(ctx, t, c, numNodes)
 		},
 	})
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    fmt.Sprintf("network/tpcc/nodes=%d", numNodes),
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(numNodes),
+		Cluster: makeClusterSpec(numNodes),
 		Skip:    "https://github.com/cockroachdb/cockroach/issues/49901#issuecomment-640666646",
 		SkipDetails: `The ordering of steps in the test is:
 
@@ -272,7 +267,7 @@ there to resolve the partition when the test aborts prematurely. (And the
 command to resolve the partition should not be sensitive to the test
 context's Done() channel, because during a tear-down that is closed already)
 `,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runNetworkTPCC(ctx, t, c, numNodes)
 		},
 	})

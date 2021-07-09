@@ -13,15 +13,12 @@ package main
 import (
 	"context"
 	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 func registerAcceptance(r *testRegistry) {
 	testCases := map[Owner][]struct {
 		name       string
-		fn         func(ctx context.Context, t test.Test, c cluster.Cluster)
+		fn         func(ctx context.Context, t *test, c *cluster)
 		skip       string
 		minVersion string
 		numNodes   int
@@ -46,8 +43,8 @@ func registerAcceptance(r *testRegistry) {
 			},
 			{
 				name: "version-upgrade",
-				fn: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-					runVersionUpgrade(ctx, t, c)
+				fn: func(ctx context.Context, t *test, c *cluster) {
+					runVersionUpgrade(ctx, t, c, r.buildVersion)
 				},
 				// This test doesn't like running on old versions because it upgrades to
 				// the latest released version and then it tries to "head", where head is
@@ -65,13 +62,13 @@ func registerAcceptance(r *testRegistry) {
 			{name: "cluster-init", fn: runClusterInit},
 			{
 				name: "rapid-restart", fn: runRapidRestart,
-				skip: "https://github.com/cockroachdb/cockroach/issues/63795",
+				skip: "https://github.com/cockroachdb/cockroach/issues/65295",
 			},
 			{name: "status-server", fn: runStatusServer},
 		},
 	}
 	tags := []string{"default", "quick"}
-	specTemplate := TestSpec{
+	specTemplate := testSpec{
 		// NB: teamcity-post-failures.py relies on the acceptance tests
 		// being named acceptance/<testname> and will avoid posting a
 		// blank issue for the "acceptance" parent test. Make sure to
@@ -93,14 +90,14 @@ func registerAcceptance(r *testRegistry) {
 
 			spec := specTemplate
 			spec.Owner = owner
-			spec.Cluster = r.makeClusterSpec(numNodes)
+			spec.Cluster = makeClusterSpec(numNodes)
 			spec.Skip = tc.skip
 			spec.Name = specTemplate.Name + "/" + tc.name
 			spec.MinVersion = tc.minVersion
 			if tc.timeout != 0 {
 				spec.Timeout = tc.timeout
 			}
-			spec.Run = func(ctx context.Context, t test.Test, c cluster.Cluster) {
+			spec.Run = func(ctx context.Context, t *test, c *cluster) {
 				tc.fn(ctx, t, c)
 			}
 			r.Add(spec)

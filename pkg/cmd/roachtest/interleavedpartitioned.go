@@ -13,11 +13,6 @@ package main
 import (
 	"context"
 	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 func registerInterleaved(r *testRegistry) {
@@ -35,8 +30,8 @@ func registerInterleaved(r *testRegistry) {
 
 	runInterleaved := func(
 		ctx context.Context,
-		t test.Test,
-		c cluster.Cluster,
+		t *test,
+		c *cluster,
 		config config,
 	) {
 		numZones, numRoachNodes, numLoadNodes := 3, 9, 3
@@ -50,12 +45,12 @@ func registerInterleaved(r *testRegistry) {
 		cockroachNodes := loadGroups.roachNodes()
 		workloadNodes := loadGroups.loadNodes()
 
-		t.L().Printf("cockroach nodes: %s", cockroachNodes.String()[1:])
-		t.L().Printf("workload nodes: %s", workloadNodes.String()[1:])
+		c.l.Printf("cockroach nodes: %s", cockroachNodes.String()[1:])
+		c.l.Printf("workload nodes: %s", workloadNodes.String()[1:])
 
 		c.Put(ctx, cockroach, "./cockroach", c.All())
 		c.Put(ctx, workload, "./workload", c.All())
-		c.Start(ctx, cockroachNodes)
+		c.Start(ctx, t, cockroachNodes)
 
 		zones := fmt.Sprintf("--east-zone-name %s --west-zone-name %s --central-zone-name %s",
 			config.eastName, config.westName, config.centralName)
@@ -69,12 +64,12 @@ func registerInterleaved(r *testRegistry) {
 		t.Status("initializing workload")
 
 		// Always init on an east node.
-		c.Run(ctx, cockroachEast.RandNode(), cmdInit)
+		c.Run(ctx, cockroachEast.randNode(), cmdInit)
 
 		duration := " --duration " + ifLocal("10s", "10m")
 		histograms := " --histograms=" + perfArtifactsDir + "/stats.json"
 
-		createCmd := func(locality string, cockroachNodes option.NodeListOption) string {
+		createCmd := func(locality string, cockroachNodes nodeListOption) string {
 			return fmt.Sprintf(
 				"./workload run interleavedpartitioned %s --locality %s "+
 					"--insert-percent %d --insert-local-percent %d "+
@@ -109,7 +104,7 @@ func registerInterleaved(r *testRegistry) {
 		t.Status("running workload")
 		m := newMonitor(ctx, c, cockroachNodes)
 
-		runLocality := func(node option.NodeListOption, cmd string) {
+		runLocality := func(node nodeListOption, cmd string) {
 			m.Go(func(ctx context.Context) error {
 				return c.RunE(ctx, node, cmd)
 			})
@@ -122,11 +117,11 @@ func registerInterleaved(r *testRegistry) {
 		m.Wait()
 	}
 
-	r.Add(TestSpec{
+	r.Add(testSpec{
 		Name:    "interleavedpartitioned",
 		Owner:   OwnerKV,
-		Cluster: r.makeClusterSpec(12, spec.Geo(), spec.Zones("us-east1-b,us-west1-b,europe-west2-b")),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Cluster: makeClusterSpec(12, geo(), zones("us-east1-b,us-west1-b,europe-west2-b")),
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			runInterleaved(ctx, t, c,
 				config{
 					eastName:        `europe-west2-b`,

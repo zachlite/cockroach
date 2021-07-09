@@ -16,10 +16,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 )
 
 var issueRegexp = regexp.MustCompile(`See: https://[^\s]+issues?/(\d+)`)
@@ -118,7 +114,7 @@ func extractFailureFromJUnitXML(contents []byte) ([]string, []status, map[string
 // parseJUnitXML parses testOutputInJUnitXMLFormat and updates the receiver
 // accordingly.
 func (r *ormTestsResults) parseJUnitXML(
-	t test.Test, expectedFailures, ignorelist blocklist, testOutputInJUnitXMLFormat []byte,
+	t *test, expectedFailures, ignorelist blocklist, testOutputInJUnitXMLFormat []byte,
 ) {
 	tests, statuses, issueHints, err := extractFailureFromJUnitXML(testOutputInJUnitXMLFormat)
 	if err != nil {
@@ -177,9 +173,9 @@ func (r *ormTestsResults) parseJUnitXML(
 // passed), a new blocklist is populated.
 func parseAndSummarizeJavaORMTestsResults(
 	ctx context.Context,
-	t test.Test,
-	c cluster.Cluster,
-	node option.NodeListOption,
+	t *test,
+	c *cluster,
+	node nodeListOption,
 	ormName string,
 	testOutput []byte,
 	blocklistName string,
@@ -201,11 +197,11 @@ func parseAndSummarizeJavaORMTestsResults(
 		}
 	}
 	for i, file := range files {
-		t.L().Printf("Parsing %d of %d: %s\n", i+1, len(files), file)
+		t.l.Printf("Parsing %d of %d: %s\n", i+1, len(files), file)
 		fileOutput, err := repeatRunWithBuffer(
 			ctx,
 			c,
-			t,
+			t.l,
 			node,
 			fmt.Sprintf("fetching results file %s", file),
 			fmt.Sprintf("cat %s", file),

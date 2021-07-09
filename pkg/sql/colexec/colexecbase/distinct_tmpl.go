@@ -22,23 +22,27 @@ package colexecbase
 import (
 	"context"
 
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
 )
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                                WARNING                                     //
-//                                                                            //
-//  Adding a fake usage of a package here as a workaround for bazel           //
-//  auto-generated code doesn't work - distinct_gen.go needs to be modified.  //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ apd.Context
+	_ coldataext.Datum
+	_ duration.Duration
+	_ tree.AggType
+)
 
 // {{/*
 
@@ -67,7 +71,7 @@ const _TYPE_WIDTH = 0
 // {{define "distinctOpConstructor"}}
 
 func newSingleDistinct(
-	input colexecop.Operator, distinctColIdx int, outputCol []bool, t *types.T, nullsAreDistinct bool,
+	input colexecop.Operator, distinctColIdx int, outputCol []bool, t *types.T,
 ) (colexecop.Operator, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
@@ -76,10 +80,9 @@ func newSingleDistinct(
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
 			return &distinct_TYPEOp{
-				OneInputHelper:   colexecop.MakeOneInputHelper(input),
-				distinctColIdx:   distinctColIdx,
-				outputCol:        outputCol,
-				nullsAreDistinct: nullsAreDistinct,
+				OneInputNode:   colexecop.NewOneInputNode(input),
+				distinctColIdx: distinctColIdx,
+				outputCol:      outputCol,
 			}, nil
 			// {{end}}
 		}
@@ -110,14 +113,14 @@ type partitioner interface {
 }
 
 // newPartitioner returns a new partitioner on type t.
-func newPartitioner(t *types.T, nullsAreDistinct bool) (partitioner, error) {
+func newPartitioner(t *types.T) (partitioner, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
 		switch t.Width() {
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
-			return partitioner_TYPE{nullsAreDistinct: nullsAreDistinct}, nil
+			return partitioner_TYPE{}, nil
 			// {{end}}
 		}
 		// {{end}}
@@ -141,7 +144,7 @@ type distinct_TYPEOp struct {
 	// still works across batch boundaries.
 	lastVal _GOTYPE
 
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	// distinctColIdx is the index of the column to distinct upon.
 	distinctColIdx int
@@ -151,11 +154,13 @@ type distinct_TYPEOp struct {
 	foundFirstRow bool
 
 	lastValNull bool
-
-	nullsAreDistinct bool
 }
 
 var _ colexecop.ResettableOperator = &distinct_TYPEOp{}
+
+func (p *distinct_TYPEOp) Init() {
+	p.Input.Init()
+}
 
 func (p *distinct_TYPEOp) Reset(ctx context.Context) {
 	p.foundFirstRow = false
@@ -165,8 +170,8 @@ func (p *distinct_TYPEOp) Reset(ctx context.Context) {
 	}
 }
 
-func (p *distinct_TYPEOp) Next() coldata.Batch {
-	batch := p.Input.Next()
+func (p *distinct_TYPEOp) Next(ctx context.Context) coldata.Batch {
+	batch := p.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return batch
 	}
@@ -201,7 +206,7 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 		sel = sel[:n]
 		if nulls != nil {
 			for _, idx := range sel {
-				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct)
+				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 			}
 		} else {
 			for _, idx := range sel {
@@ -216,7 +221,7 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 		// TODO(yuzefovich): add BCE assertions for these.
 		if nulls != nil {
 			for idx := 0; idx < n; idx++ {
-				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct)
+				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 			}
 		} else {
 			for idx := 0; idx < n; idx++ {
@@ -225,11 +230,8 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 		}
 	}
 
-	if !lastValNull {
-		// We need to perform a deep copy for the next iteration if we didn't have
-		// a null value.
-		execgen.COPYVAL(p.lastVal, lastVal)
-	}
+	// We need to perform a deep copy for the next iteration.
+	execgen.COPYVAL(p.lastVal, lastVal)
 	p.lastValNull = lastValNull
 
 	return batch
@@ -243,9 +245,7 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 // operation over it. It writes the same format to outputCol that sorted
 // distinct does: true for every row that differs from the previous row in the
 // input column.
-type partitioner_TYPE struct {
-	nullsAreDistinct bool
-}
+type partitioner_TYPE struct{}
 
 func (p partitioner_TYPE) partitionWithOrder(
 	colVec coldata.Vec, order []int, outputCol []bool, n int,
@@ -266,7 +266,7 @@ func (p partitioner_TYPE) partitionWithOrder(
 	if nulls != nil {
 		for outputIdx := 0; outputIdx < n; outputIdx++ {
 			checkIdx := order[outputIdx]
-			lastVal, lastValNull = checkDistinctWithNulls(checkIdx, outputIdx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct)
+			lastVal, lastValNull = checkDistinctWithNulls(checkIdx, outputIdx, lastVal, nulls, lastValNull, col, outputCol)
 		}
 	} else {
 		for outputIdx := 0; outputIdx < n; outputIdx++ {
@@ -293,7 +293,7 @@ func (p partitioner_TYPE) partition(colVec coldata.Vec, outputCol []bool, n int)
 	outputCol[0] = true
 	if nulls != nil {
 		for idx := 0; idx < n; idx++ {
-			lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct)
+			lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 		}
 	} else {
 		for idx := 0; idx < n; idx++ {
@@ -331,14 +331,11 @@ func checkDistinctWithNulls(
 	lastValNull bool,
 	col []_GOTYPE,
 	outputCol []bool,
-	nullsAreDistinct bool,
 ) (lastVal _GOTYPE, lastValNull bool) {
 	null := nulls.NullAt(checkIdx)
 	if null {
-		if !lastValNull || nullsAreDistinct {
-			// The current value is null, and either the previous one is not
-			// (meaning they are definitely distinct) or we treat nulls as
-			// distinct values.
+		if !lastValNull {
+			// The current value is null while the previous was not.
 			outputCol[outputIdx] = true
 		}
 	} else {

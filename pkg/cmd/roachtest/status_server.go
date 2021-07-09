@@ -17,26 +17,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
-func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
+func runStatusServer(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
-	c.Start(ctx)
+	c.Start(ctx, t)
 
 	// Get the ids for each node.
 	idMap := make(map[int]roachpb.NodeID)
 	urlMap := make(map[int]string)
-	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, c.All())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, addr := range adminUIAddrs {
+	for i, addr := range c.ExternalAdminUIAddr(ctx, c.All()) {
 		var details serverpb.DetailsResponse
 		url := `http://` + addr + `/_status/details/local`
 		// Use a retry-loop when populating the maps because we might be trying to
@@ -70,7 +64,7 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("could not GET %s - statuscode: %d - body: %s", url, resp.StatusCode, body)
 		}
-		t.L().Printf("OK response from %s\n", url)
+		t.l.Printf("OK response from %s\n", url)
 		return body
 	}
 
@@ -103,7 +97,7 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 	}
 
 	// Check local response for the every node.
-	for i := 1; i <= c.Spec().NodeCount; i++ {
+	for i := 1; i <= c.spec.NodeCount; i++ {
 		id := idMap[i]
 		checkNode(urlMap[i], id, id, id)
 		get(urlMap[i], "/_status/nodes")
@@ -111,7 +105,7 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	// Proxy from the first node to the last node.
 	firstNode := 1
-	lastNode := c.Spec().NodeCount
+	lastNode := c.spec.NodeCount
 	firstID := idMap[firstNode]
 	lastID := idMap[lastNode]
 	checkNode(urlMap[firstNode], firstID, lastID, lastID)

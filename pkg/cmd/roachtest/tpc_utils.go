@@ -15,9 +15,6 @@ import (
 	gosql "database/sql"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq"
@@ -29,18 +26,13 @@ import (
 // scale factor at least as large as the provided scale factor), performing an
 // expensive dataset restore only if it doesn't.
 func loadTPCHDataset(
-	ctx context.Context,
-	t test.Test,
-	c cluster.Cluster,
-	sf int,
-	m *monitor,
-	roachNodes option.NodeListOption,
+	ctx context.Context, t *test, c *cluster, sf int, m *monitor, roachNodes nodeListOption,
 ) error {
 	db := c.Conn(ctx, roachNodes[0])
 	defer db.Close()
 
 	if _, err := db.ExecContext(ctx, `USE tpch`); err == nil {
-		t.L().Printf("found existing tpch dataset, verifying scale factor\n")
+		t.l.Printf("found existing tpch dataset, verifying scale factor\n")
 
 		var supplierCardinality int
 		if err := db.QueryRowContext(
@@ -59,23 +51,23 @@ func loadTPCHDataset(
 		// factor.
 		expectedSupplierCardinality := 10000 * sf
 		if supplierCardinality >= expectedSupplierCardinality {
-			t.L().Printf("dataset is at least of scale factor %d, continuing", sf)
+			t.l.Printf("dataset is at least of scale factor %d, continuing", sf)
 			return nil
 		}
 
 		// If the scale factor was smaller than the required scale factor, wipe the
 		// cluster and restore.
-		m.ExpectDeaths(int32(c.Spec().NodeCount))
+		m.ExpectDeaths(int32(c.spec.NodeCount))
 		c.Wipe(ctx, roachNodes)
-		c.Start(ctx, roachNodes)
+		c.Start(ctx, t, roachNodes)
 		m.ResetDeaths()
 	} else if pqErr := (*pq.Error)(nil); !(errors.As(err, &pqErr) &&
 		pgcode.MakeCode(string(pqErr.Code)) == pgcode.InvalidCatalogName) {
 		return err
 	}
 
-	t.L().Printf("restoring tpch scale factor %d\n", sf)
-	tpchURL := fmt.Sprintf("gs://cockroach-fixtures/workload/tpch/scalefactor=%d/backup?AUTH=implicit", sf)
+	t.l.Printf("restoring tpch scale factor %d\n", sf)
+	tpchURL := fmt.Sprintf("gs://cockroach-fixtures/workload/tpch/scalefactor=%d/backup", sf)
 	query := fmt.Sprintf(`CREATE DATABASE IF NOT EXISTS tpch; RESTORE tpch.* FROM '%s' WITH into_db = 'tpch';`, tpchURL)
 	_, err := db.ExecContext(ctx, query)
 	return err
@@ -84,7 +76,7 @@ func loadTPCHDataset(
 // scatterTables runs "ALTER TABLE ... SCATTER" statement for every table in
 // tableNames. It assumes that conn is already using the target database. If an
 // error is encountered, the test is failed.
-func scatterTables(t test.Test, conn *gosql.DB, tableNames []string) {
+func scatterTables(t *test, conn *gosql.DB, tableNames []string) {
 	t.Status("scattering the data")
 	for _, table := range tableNames {
 		scatter := fmt.Sprintf("ALTER TABLE %s SCATTER;", table)
@@ -95,7 +87,7 @@ func scatterTables(t test.Test, conn *gosql.DB, tableNames []string) {
 }
 
 // disableAutoStats disables automatic collection of statistics on the cluster.
-func disableAutoStats(t test.Test, conn *gosql.DB) {
+func disableAutoStats(t *test, conn *gosql.DB) {
 	t.Status("disabling automatic collection of stats")
 	if _, err := conn.Exec(
 		`SET CLUSTER SETTING sql.stats.automatic_collection.enabled=false;`,
@@ -107,7 +99,7 @@ func disableAutoStats(t test.Test, conn *gosql.DB) {
 // createStatsFromTables runs "CREATE STATISTICS" statement for every table in
 // tableNames. It assumes that conn is already using the target database. If an
 // error is encountered, the test is failed.
-func createStatsFromTables(t test.Test, conn *gosql.DB, tableNames []string) {
+func createStatsFromTables(t *test, conn *gosql.DB, tableNames []string) {
 	t.Status("collecting stats")
 	for _, tableName := range tableNames {
 		t.Status(fmt.Sprintf("creating statistics from table %q", tableName))
@@ -116,5 +108,17 @@ func createStatsFromTables(t test.Test, conn *gosql.DB, tableNames []string) {
 		); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// disableVectorizeRowCountThresholdHeuristic sets
+// 'vectorize_row_count_threshold' cluster setting to zero so that the test
+// would use the vectorized engine with 'vectorize=on' regardless of the
+// fact whether the stats are present or not (if we don't set it, then when
+// the stats are not present, we fallback to row-by-row engine even with
+// `vectorize=on` set).
+func disableVectorizeRowCountThresholdHeuristic(t *test, conn *gosql.DB) {
+	if _, err := conn.Exec("SET CLUSTER SETTING sql.defaults.vectorize_row_count_threshold=0"); err != nil {
+		t.Fatal(err)
 	}
 }

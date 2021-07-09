@@ -12,8 +12,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"math/rand"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -24,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	_ "github.com/cockroachdb/cockroach/pkg/storage/cloudimpl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -51,7 +52,7 @@ func TestExportCmd(t *testing.T) {
 			RequestHeader: roachpb.RequestHeader{Key: keys.UserTableDataMin, EndKey: keys.MaxKey},
 			StartTime:     start,
 			Storage: roachpb.ExternalStorage{
-				Provider:  roachpb.ExternalStorageProvider_nodelocal,
+				Provider:  roachpb.ExternalStorageProvider_LocalFile,
 				LocalFile: roachpb.ExternalStorage_LocalFilePath{Path: "/foo"},
 			},
 			MVCCFilter:     mvccFilter,
@@ -82,6 +83,13 @@ func TestExportCmd(t *testing.T) {
 			}
 			defer sst.Close()
 
+			fileContents, err := ioutil.ReadFile(filepath.Join(dir, "foo", file.Path))
+			if err != nil {
+				t.Fatalf("%+v", err)
+			}
+			if !bytes.Equal(fileContents, file.SST) {
+				t.Fatal("Returned SST and exported SST don't match!")
+			}
 			sst.SeekGE(storage.MVCCKey{Key: keys.MinKey})
 			for {
 				if valid, err := sst.Valid(); !valid || err != nil {
@@ -568,11 +576,9 @@ func assertEqualKVs(
 			var summary roachpb.BulkOpSummary
 			maxSize := uint64(0)
 			prevStart := start
-			sstFile := &storage.MemFile{}
-			summary, start, err = e.ExportMVCCToSst(start, endKey, startTime, endTime,
-				exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization, sstFile)
+			sst, summary, start, err = e.ExportMVCCToSst(start, endKey, startTime, endTime,
+				exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 			require.NoError(t, err)
-			sst = sstFile.Data()
 			loaded := loadSST(t, sst, startKey, endKey)
 			// Ensure that the pagination worked properly.
 			if start != nil {
@@ -609,8 +615,8 @@ func assertEqualKVs(
 				if dataSizeWhenExceeded == maxSize {
 					maxSize--
 				}
-				_, _, err = e.ExportMVCCToSst(prevStart, endKey, startTime, endTime,
-					exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization, &storage.MemFile{})
+				_, _, _, err = e.ExportMVCCToSst(prevStart, endKey, startTime, endTime,
+					exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 				require.Regexp(t, fmt.Sprintf("export size \\(%d bytes\\) exceeds max size \\(%d bytes\\)",
 					dataSizeWhenExceeded, maxSize), err)
 			}

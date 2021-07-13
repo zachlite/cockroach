@@ -73,33 +73,6 @@ var retiredSettings = map[string]struct{}{
 	"sql.defaults.experimental_optimizer_foreign_key_cascades.enabled": {},
 	"sql.parallel_scans.enabled":                                       {},
 	"backup.table_statistics.enabled":                                  {},
-	// removed as of 21.1.
-	"sql.distsql.interleaved_joins.enabled": {},
-	"sql.testing.vectorize.batch_size":      {},
-	"sql.testing.mutations.max_batch_size":  {},
-	"sql.testing.mock_contention.enabled":   {},
-	"kv.atomic_replication_changes.enabled": {},
-	// removed as of 21.1.2.
-	"kv.tenant_rate_limiter.read_requests.rate_limit":   {},
-	"kv.tenant_rate_limiter.read_requests.burst_limit":  {},
-	"kv.tenant_rate_limiter.write_requests.rate_limit":  {},
-	"kv.tenant_rate_limiter.write_requests.burst_limit": {},
-	"kv.tenant_rate_limiter.read_bytes.rate_limit":      {},
-	"kv.tenant_rate_limiter.read_bytes.burst_limit":     {},
-	"kv.tenant_rate_limiter.write_bytes.rate_limit":     {},
-	"kv.tenant_rate_limiter.write_bytes.burst_limit":    {},
-
-	// removed as of 21.2.
-	"sql.defaults.vectorize_row_count_threshold":                 {},
-	"cloudstorage.gs.default.key":                                {},
-	"storage.sst_export.max_intents_per_error":                   {},
-	"jobs.registry.leniency":                                     {},
-	"sql.defaults.experimental_expression_based_indexes.enabled": {},
-	"kv.tenant_rate_limiter.read_request_cost":                   {},
-	"kv.tenant_rate_limiter.read_cost_per_megabyte":              {},
-	"kv.tenant_rate_limiter.write_request_cost":                  {},
-	"kv.tenant_rate_limiter.write_cost_per_megabyte":             {},
-	"kv.transaction.write_pipelining_max_outstanding_size":       {},
 }
 
 // register adds a setting to the registry.
@@ -171,8 +144,7 @@ var ReadableTypes = map[string]string{
 	"z": "byte size",
 	"d": "duration",
 	"e": "enumeration",
-	// This is named "m" (instead of "v") for backwards compatibility reasons.
-	"m": "version",
+	"m": "custom validation",
 }
 
 // RedactedValue returns a string representation of the value for settings

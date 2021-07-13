@@ -16,7 +16,7 @@ import (
 	"text/template"
 )
 
-const projConstOpsTmpl = "pkg/sql/colexec/colexecproj/proj_const_ops_tmpl.go"
+const projConstOpsTmpl = "pkg/sql/colexec/proj_const_ops_tmpl.go"
 
 // replaceProjTmplVariables replaces template variables used in the templates
 // for projection operators. It should only be used within this file.
@@ -50,11 +50,10 @@ func replaceProjTmplVariables(tmpl string) string {
 	tmpl = assignRe.ReplaceAllString(tmpl, makeTemplateFunctionCall("Right.Assign", 6))
 
 	tmpl = strings.ReplaceAll(tmpl, "_HAS_NULLS", "$hasNulls")
-	tmpl = strings.ReplaceAll(tmpl, "_HAS_SEL", "$hasSel")
 	setProjectionRe := makeFunctionRegex("_SET_PROJECTION", 1)
 	tmpl = setProjectionRe.ReplaceAllString(tmpl, `{{template "setProjection" buildDict "Global" $ "HasNulls" $1 "Overload" .}}`)
-	setSingleTupleProjectionRe := makeFunctionRegex("_SET_SINGLE_TUPLE_PROJECTION", 2)
-	tmpl = setSingleTupleProjectionRe.ReplaceAllString(tmpl, `{{template "setSingleTupleProjection" buildDict "Global" $ "HasNulls" $1 "HasSel" $2 "Overload" .}}`)
+	setSingleTupleProjectionRe := makeFunctionRegex("_SET_SINGLE_TUPLE_PROJECTION", 1)
+	tmpl = setSingleTupleProjectionRe.ReplaceAllString(tmpl, `{{template "setSingleTupleProjection" buildDict "Global" $ "HasNulls" $1 "Overload" .}}`)
 
 	return tmpl
 }
@@ -79,7 +78,7 @@ func replaceProjConstTmplVariables(tmpl string, isConstLeft bool) string {
 	return replaceProjTmplVariables(tmpl)
 }
 
-const projNonConstOpsTmpl = "pkg/sql/colexec/colexecproj/proj_non_const_ops_tmpl.go"
+const projNonConstOpsTmpl = "pkg/sql/colexec/proj_non_const_ops_tmpl.go"
 
 // genProjNonConstOps is the generator for projection operators on two vectors.
 func genProjNonConstOps(inputFileContents string, wr io.Writer) error {

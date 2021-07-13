@@ -20,15 +20,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
@@ -195,7 +199,7 @@ func (c *sqlConn) ensureConn() error {
 // SHOW LAST QUERY STATISTICS statements. This allows the CLI client to report
 // server side execution timings instead of timing on the client.
 func (c *sqlConn) tryEnableServerExecutionTimings() {
-	_, _, _, _, _, _, err := c.getLastQueryStatistics()
+	_, _, _, _, err := c.getLastQueryStatistics()
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: cannot show server execution timings: unexpected column found\n")
 		sqlCtx.enableServerExecutionTimings = false
@@ -220,7 +224,7 @@ func (c *sqlConn) getServerMetadata() (
 	defer func() { _ = rows.Close() }()
 
 	// Read the node_build_info table as an array of strings.
-	rowVals, err := getAllRowStrings(rows, rows.getColTypes(), true /* showMoreChars */)
+	rowVals, err := getAllRowStrings(rows, true /* showMoreChars */)
 	if err != nil || len(rowVals) == 0 || len(rowVals[0]) != 3 {
 		return 0, "", "", errors.New("incorrect data while retrieving the server version")
 	}
@@ -275,11 +279,6 @@ func (c *sqlConn) checkServerMetadata() error {
 	if !cliCtx.isInteractive {
 		// Version reporting is just noise if the user is not present to
 		// change their mind upon seeing the information.
-		return nil
-	}
-	if sqlCtx.embeddedMode {
-		// Version reporting is non-actionable if the user does
-		// not have control over how the server and client are run.
 		return nil
 	}
 
@@ -345,68 +344,77 @@ func (c *sqlConn) checkServerMetadata() error {
 	return nil
 }
 
+// requireServerVersion returns an error if the version of the connected server
+// is not at least the given version.
+func (c *sqlConn) requireServerVersion(required *version.Version) error {
+	_, versionString, _, err := c.getServerMetadata()
+	if err != nil {
+		return err
+	}
+	vers, err := version.Parse(versionString)
+	if err != nil {
+		return fmt.Errorf("unable to parse server version %q", versionString)
+	}
+	if !vers.AtLeast(required) {
+		return fmt.Errorf("incompatible client and server versions (detected server version: %s, required: %s)",
+			vers, required)
+	}
+	return nil
+}
+
 // getServerValue retrieves the first driverValue returned by the
 // given sql query. If the query fails or does not return a single
 // column, `false` is returned in the second result.
-func (c *sqlConn) getServerValue(what, sql string) (driver.Value, string, bool) {
+func (c *sqlConn) getServerValue(what, sql string) (driver.Value, bool) {
 	rows, err := c.Query(sql, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: error retrieving the %s: %v\n", what, err)
-		return nil, "", false
+		return nil, false
 	}
 	defer func() { _ = rows.Close() }()
 
 	if len(rows.Columns()) == 0 {
 		fmt.Fprintf(stderr, "warning: cannot get the %s\n", what)
-		return nil, "", false
+		return nil, false
 	}
 
-	dbColType := rows.ColumnTypeDatabaseTypeName(0)
 	dbVals := make([]driver.Value, len(rows.Columns()))
 
 	err = rows.Next(dbVals[:])
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: invalid %s: %v\n", what, err)
-		return nil, "", false
+		return nil, false
 	}
 
-	return dbVals[0], dbColType, true
+	return dbVals[0], true
 }
 
 // parseLastQueryStatistics runs the "SHOW LAST QUERY STATISTICS" statements,
 // performs sanity checks, and returns the exec latency and service latency from
 // the sql row parsed as time.Duration.
 func (c *sqlConn) getLastQueryStatistics() (
-	parseLat, planLat, execLat, serviceLat, jobsLat time.Duration,
-	containsJobLat bool,
+	parseLat, planLat, execLat, serviceLat time.Duration,
 	err error,
 ) {
 	rows, err := c.Query("SHOW LAST QUERY STATISTICS", nil)
 	if err != nil {
-		return 0, 0, 0, 0, 0, false, err
+		return 0, 0, 0, 0, err
 	}
 	defer func() {
 		closeErr := rows.Close()
 		err = errors.CombineErrors(err, closeErr)
 	}()
 
-	// TODO(arul): In 21.1, SHOW LAST QUERY STATISTICS returned 4 columns. In 21.2,
-	// it returns 5. Depending on which server version the CLI is connected to,
-	// both are valid. We won't have to account for this mixed version state in
-	// 22.1. All this logic can be simplified in 22.1.
-	if len(rows.Columns()) == 5 {
-		containsJobLat = true
-	} else if len(rows.Columns()) != 4 {
-		return 0, 0, 0, 0, 0, false,
-			errors.Newf("unexpected number of columns in SHOW LAST QUERY STATISTICS")
+	if len(rows.Columns()) != 4 {
+		return 0, 0, 0, 0,
+			errors.New("unexpected number of columns in SHOW LAST QUERY STATISTICS")
 	}
 
 	if rows.Columns()[0] != "parse_latency" ||
 		rows.Columns()[1] != "plan_latency" ||
 		rows.Columns()[2] != "exec_latency" ||
-		rows.Columns()[3] != "service_latency" ||
-		(containsJobLat && rows.Columns()[4] != "post_commit_jobs_latency") {
-		return 0, 0, 0, 0, 0, containsJobLat,
+		rows.Columns()[3] != "service_latency" {
+		return 0, 0, 0, 0,
 			errors.New("unexpected columns in SHOW LAST QUERY STATISTICS")
 	}
 
@@ -416,28 +424,24 @@ func (c *sqlConn) getLastQueryStatistics() (
 	var planLatencyRaw string
 	var execLatencyRaw string
 	var serviceLatencyRaw string
-	var jobsLatencyRaw string
 	for {
 		row, err := iter.Next()
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return 0, 0, 0, 0, 0, containsJobLat, err
+			return 0, 0, 0, 0, err
 		}
 
-		parseLatencyRaw = formatVal(row[0], iter.colTypes[0], false, false)
-		planLatencyRaw = formatVal(row[1], iter.colTypes[1], false, false)
-		execLatencyRaw = formatVal(row[2], iter.colTypes[2], false, false)
-		serviceLatencyRaw = formatVal(row[3], iter.colTypes[3], false, false)
-		if containsJobLat {
-			jobsLatencyRaw = formatVal(row[4], iter.colTypes[4], false, false)
-		}
+		parseLatencyRaw = formatVal(row[0], false, false)
+		planLatencyRaw = formatVal(row[1], false, false)
+		execLatencyRaw = formatVal(row[2], false, false)
+		serviceLatencyRaw = formatVal(row[3], false, false)
 
 		nRows++
 	}
 
 	if nRows != 1 {
-		return 0, 0, 0, 0, 0, containsJobLat,
+		return 0, 0, 0, 0,
 			errors.Newf("unexpected number of rows in SHOW LAST QUERY STATISTICS: %d", nRows)
 	}
 
@@ -446,17 +450,10 @@ func (c *sqlConn) getLastQueryStatistics() (
 	parsedPlanLatency, _ := tree.ParseDInterval(planLatencyRaw)
 	parsedParseLatency, _ := tree.ParseDInterval(parseLatencyRaw)
 
-	if containsJobLat {
-		parsedJobsLatency, _ := tree.ParseDInterval(jobsLatencyRaw)
-		jobsLat = time.Duration(parsedJobsLatency.Duration.Nanos())
-	}
-
 	return time.Duration(parsedParseLatency.Duration.Nanos()),
 		time.Duration(parsedPlanLatency.Duration.Nanos()),
 		time.Duration(parsedExecLatency.Duration.Nanos()),
 		time.Duration(parsedServiceLatency.Duration.Nanos()),
-		jobsLat,
-		containsJobLat,
 		nil
 }
 
@@ -481,7 +478,7 @@ func (t sqlTxnShim) Rollback(context.Context) error {
 
 func (t sqlTxnShim) Exec(_ context.Context, query string, values ...interface{}) error {
 	if len(values) != 0 {
-		panic("sqlTxnShim.ExecContext must not be called with values")
+		panic(fmt.Sprintf("sqlTxnShim.ExecContext must not be called with values"))
 	}
 	return t.conn.Exec(query, nil)
 }
@@ -572,7 +569,6 @@ func (c *sqlConn) Close() {
 
 type sqlRowsI interface {
 	driver.RowsColumnTypeScanType
-	driver.RowsColumnTypeDatabaseTypeName
 	Result() driver.Result
 	Tag() string
 
@@ -642,18 +638,6 @@ func (r *sqlRows) ColumnTypeScanType(index int) reflect.Type {
 	return r.rows.ColumnTypeScanType(index)
 }
 
-func (r *sqlRows) ColumnTypeDatabaseTypeName(index int) string {
-	return r.rows.ColumnTypeDatabaseTypeName(index)
-}
-
-func (r *sqlRows) getColTypes() []string {
-	colTypes := make([]string, len(r.Columns()))
-	for i := range colTypes {
-		colTypes[i] = r.ColumnTypeDatabaseTypeName(i)
-	}
-	return colTypes
-}
-
 func makeSQLConn(url string) *sqlConn {
 	return &sqlConn{
 		url: url,
@@ -696,20 +680,45 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 		return nil, err
 	}
 
-	if defaultMode == useSystemDb {
+	if defaultMode == useSystemDb && baseURL.Path == "" {
 		// Override the target database. This is because the current
 		// database can influence the output of CLI commands, and in the
 		// case where the database is missing it will default server-wise to
 		// `defaultdb` which may not exist.
-		baseURL.WithDefaultDatabase("system")
+		baseURL.Path = "system"
 	}
 
 	// If there is no user in the URL already, fill in the default user.
-	baseURL.WithDefaultUsername(security.RootUser)
+	if baseURL.User.Username() == "" {
+		baseURL.User = url.User(security.RootUser)
+	}
+
+	options, err := url.ParseQuery(baseURL.RawQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	// tcpConn is true iff the connection is going over the network.
+	tcpConn := baseURL.Host != ""
+
+	// If there is no TLS mode yet, conjure one based on defaults.
+	if options.Get("sslmode") == "" {
+		if cliCtx.Insecure {
+			options.Set("sslmode", "disable")
+		} else if tcpConn {
+			options.Set("sslmode", "verify-full")
+		}
+		// (We don't use TLS over unix socket conns.)
+	}
+
+	// Prevent explicit TLS request in insecure mode.
+	if cliCtx.Insecure && options.Get("sslmode") != "disable" {
+		return nil, errors.Errorf("cannot use TLS connections in insecure mode")
+	}
 
 	// How we're going to authenticate.
-	usePw, pwdSet, _ := baseURL.GetAuthnPassword()
-	if usePw {
+	_, pwdSet := baseURL.User.Password()
+	if pwdSet {
 		// There's a password already configured.
 
 		// In insecure mode, we don't want the user to get the mistaken
@@ -721,8 +730,8 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 
 	// Load the application name. It's not a command-line flag, so
 	// anything already in the URL should take priority.
-	if prevAppName := baseURL.GetOption("application_name"); prevAppName == "" && appName != "" {
-		_ = baseURL.SetOption("application_name", catconstants.ReportableAppNamePrefix+appName)
+	if options.Get("application_name") == "" && appName != "" {
+		options.Set("application_name", catconstants.ReportableAppNamePrefix+appName)
 	}
 
 	// Set a connection timeout if none is provided already. This
@@ -730,11 +739,12 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 	// network issue, the client will not be left to hang forever.
 	//
 	// This is a lib/pq feature.
-	if baseURL.GetOption("connect_timeout") == "" {
-		_ = baseURL.SetOption("connect_timeout", sqlConnTimeout)
+	if options.Get("connect_timeout") == "" {
+		options.Set("connect_timeout", sqlConnTimeout)
 	}
 
-	sqlURL := baseURL.ToPQ().String()
+	baseURL.RawQuery = options.Encode()
+	sqlURL := baseURL.String()
 
 	if log.V(2) {
 		log.Infof(context.Background(), "connecting with URL: %s", sqlURL)
@@ -742,7 +752,7 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 
 	conn := makeSQLConn(sqlURL)
 
-	conn.passwordMissing = !usePw || !pwdSet
+	conn.passwordMissing = !pwdSet
 
 	return conn, nil
 }
@@ -965,24 +975,15 @@ func maybeShowTimes(
 		// No need to print if no one's watching.
 		if sqlCtx.isInteractive {
 			fmt.Fprintf(stderr, "\nNote: timings for multiple statements on a single line are not supported. See %s.\n",
-				build.MakeIssueURL(48180))
+				unimplemented.MakeURL(48180))
 		}
 		return
 	}
 
 	// Print a newline early. This provides a discreet visual
 	// feedback that execution finished, and that the next line of
-	// output will be a warning or execution time(s).
+	// output will be execution time(s).
 	fmt.Fprintln(w)
-
-	// We accumulate the timing details into a buffer prior to emitting
-	// them to the output stream, so as to avoid interleaving warnings
-	// or SQL notices with the full timing string.
-	var stats strings.Builder
-
-	// Print a newline so that there is a visual separation between a notice and
-	// the timing information.
-	fmt.Fprintln(&stats)
 
 	// Suggested by Radu: for sub-second results, show simplified
 	// timings in milliseconds.
@@ -996,29 +997,28 @@ func maybeShowTimes(
 	}
 
 	if sqlCtx.verboseTimings {
-		fmt.Fprintf(&stats, "Time: %s", clientSideQueryLatency)
+		fmt.Fprintf(w, "Time: %s", clientSideQueryLatency)
 	} else {
 		// Simplified displays: human users typically can't
 		// distinguish sub-millisecond latencies.
-		fmt.Fprintf(&stats, "Time: %.*f%s", precision, clientSideQueryLatency.Seconds()*multiplier, unit)
+		fmt.Fprintf(w, "Time: %.*f%s", precision, clientSideQueryLatency.Seconds()*multiplier, unit)
 	}
 
 	if !sqlCtx.enableServerExecutionTimings {
-		fmt.Fprintln(w, stats.String())
+		fmt.Fprintln(w)
 		return
 	}
 
 	// If discrete server/network timings are available, also print them.
-	parseLat, planLat, execLat, serviceLat, jobsLat, containsJobLat, err := conn.getLastQueryStatistics()
+	parseLat, planLat, execLat, serviceLat, err := conn.getLastQueryStatistics()
 	if err != nil {
-		fmt.Fprint(w, stats.String())
 		fmt.Fprintf(stderr, "\nwarning: %v", err)
 		return
 	}
 
-	fmt.Fprint(&stats, " total")
+	fmt.Fprint(stderr, " total")
 
-	networkLat := clientSideQueryLatency - (serviceLat + jobsLat)
+	networkLat := clientSideQueryLatency - serviceLat
 	// serviceLat can be greater than clientSideQueryLatency for some extremely quick
 	// statements (eg. BEGIN). So as to not confuse the user, we attribute all of
 	// the clientSideQueryLatency to the network in such cases.
@@ -1027,16 +1027,8 @@ func maybeShowTimes(
 	}
 	otherLat := serviceLat - parseLat - planLat - execLat
 	if sqlCtx.verboseTimings {
-		// Only display schema change latency if the server provided that
-		// information to not confuse users.
-		// TODO(arul): this can be removed in 22.1.
-		if containsJobLat {
-			fmt.Fprintf(&stats, " (parse %s / plan %s / exec %s / schema change %s / other %s / network %s)",
-				parseLat, planLat, execLat, jobsLat, otherLat, networkLat)
-		} else {
-			fmt.Fprintf(&stats, " (parse %s / plan %s / exec %s / other %s / network %s)",
-				parseLat, planLat, execLat, otherLat, networkLat)
-		}
+		fmt.Fprintf(w, " (parse %s / plan %s / exec %s / other %s / network %s)\n",
+			parseLat, planLat, execLat, otherLat, networkLat)
 	} else {
 		// Simplified display: just show the execution/network breakdown.
 		//
@@ -1045,14 +1037,13 @@ func maybeShowTimes(
 		// small queries, the detail is just noise to the human observer.
 		sep := " ("
 		reportTiming := func(label string, lat time.Duration) {
-			fmt.Fprintf(&stats, "%s%s %.*f%s", sep, label, precision, lat.Seconds()*multiplier, unit)
+			fmt.Fprintf(w, "%s%s %.*f%s", sep, label, precision, lat.Seconds()*multiplier, unit)
 			sep = " / "
 		}
-		reportTiming("execution", serviceLat+jobsLat)
+		reportTiming("execution", serviceLat)
 		reportTiming("network", networkLat)
-		fmt.Fprint(&stats, ")")
+		fmt.Fprintln(w, ")")
 	}
-	fmt.Fprintln(w, stats.String())
 }
 
 // sqlRowsToStrings turns 'rows' into a list of rows, each of which
@@ -1064,7 +1055,7 @@ func maybeShowTimes(
 // If showMoreChars is true, then more characters are not escaped.
 func sqlRowsToStrings(rows *sqlRows, showMoreChars bool) ([]string, [][]string, error) {
 	cols := getColumnStrings(rows, showMoreChars)
-	allRows, err := getAllRowStrings(rows, rows.getColTypes(), showMoreChars)
+	allRows, err := getAllRowStrings(rows, showMoreChars)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1075,16 +1066,16 @@ func getColumnStrings(rows *sqlRows, showMoreChars bool) []string {
 	srcCols := rows.Columns()
 	cols := make([]string, len(srcCols))
 	for i, c := range srcCols {
-		cols[i] = formatVal(c, "NAME", showMoreChars, showMoreChars)
+		cols[i] = formatVal(c, showMoreChars, showMoreChars)
 	}
 	return cols
 }
 
-func getAllRowStrings(rows *sqlRows, colTypes []string, showMoreChars bool) ([][]string, error) {
+func getAllRowStrings(rows *sqlRows, showMoreChars bool) ([][]string, error) {
 	var allRows [][]string
 
 	for {
-		rowStrings, err := getNextRowStrings(rows, colTypes, showMoreChars)
+		rowStrings, err := getNextRowStrings(rows, showMoreChars)
 		if err != nil {
 			return nil, err
 		}
@@ -1097,7 +1088,7 @@ func getAllRowStrings(rows *sqlRows, colTypes []string, showMoreChars bool) ([][
 	return allRows, nil
 }
 
-func getNextRowStrings(rows *sqlRows, colTypes []string, showMoreChars bool) ([]string, error) {
+func getNextRowStrings(rows *sqlRows, showMoreChars bool) ([]string, error) {
 	cols := rows.Columns()
 	var vals []driver.Value
 	if len(cols) > 0 {
@@ -1114,19 +1105,62 @@ func getNextRowStrings(rows *sqlRows, colTypes []string, showMoreChars bool) ([]
 
 	rowStrings := make([]string, len(cols))
 	for i, v := range vals {
-		rowStrings[i] = formatVal(v, colTypes[i], showMoreChars, showMoreChars)
+		rowStrings[i] = formatVal(v, showMoreChars, showMoreChars)
 	}
 	return rowStrings, nil
 }
 
-// parseBool parses a boolean string for use in slash commands.
-func parseBool(s string) (bool, error) {
-	switch strings.TrimSpace(strings.ToLower(s)) {
-	case "true", "on", "yes", "1":
-		return true, nil
-	case "false", "off", "no", "0":
-		return false, nil
-	default:
-		return false, errors.Newf("invalid boolean value %q", s)
+func isNotPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7e || r == '"' || r == '\\' }
+func isNotGraphicUnicode(r rune) bool { return !unicode.IsGraphic(r) }
+func isNotGraphicUnicodeOrTabOrNewline(r rune) bool {
+	return r != '\t' && r != '\n' && !unicode.IsGraphic(r)
+}
+
+func formatVal(val driver.Value, showPrintableUnicode bool, showNewLinesAndTabs bool) string {
+	switch t := val.(type) {
+	case nil:
+		return "NULL"
+	case string:
+		if showPrintableUnicode {
+			pred := isNotGraphicUnicode
+			if showNewLinesAndTabs {
+				pred = isNotGraphicUnicodeOrTabOrNewline
+			}
+			if utf8.ValidString(t) && strings.IndexFunc(t, pred) == -1 {
+				return t
+			}
+		} else {
+			if strings.IndexFunc(t, isNotPrintableASCII) == -1 {
+				return t
+			}
+		}
+		s := fmt.Sprintf("%+q", t)
+		// Strip the start and final quotes. The surrounding display
+		// format (e.g. CSV/TSV) will add its own quotes.
+		return s[1 : len(s)-1]
+
+	case []byte:
+		// Format the bytes as per bytea_output = escape.
+		//
+		// We use the "escape" format here because it enables printing
+		// readable strings as-is -- the default hex format would always
+		// render as hexadecimal digits. The escape format is also more
+		// compact.
+		//
+		// TODO(knz): this formatting is unfortunate/incorrect, and exists
+		// only because lib/pq incorrectly interprets the bytes received
+		// from the server. The proper behavior would be for the driver to
+		// not interpret the bytes and for us here to print that as-is, so
+		// that we can let the user see and control the result using
+		// `bytea_output`.
+		return lex.EncodeByteArrayToRawBytes(string(t),
+			lex.BytesEncodeEscape, false /* skipHexPrefix */)
+
+	case time.Time:
+		// Since we do not know whether the datum is Timestamp or TimestampTZ,
+		// output the full format.
+		return t.Format(tree.TimestampTZOutputFormat)
 	}
+
+	return fmt.Sprint(val)
 }

@@ -13,7 +13,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
@@ -91,7 +91,7 @@ func (decimalCustomizer) getHashAssignFunc() assignFunc {
 		return fmt.Sprintf(`
 			// In order for equal decimals to hash to the same value we need to
 			// remove the trailing zeroes if there are any.
-			tmpDec := &_overloadHelper.TmpDec1
+			tmpDec := &_overloadHelper.tmpDec1
 			tmpDec.Reduce(&%[1]s)
 			b := []byte(tmpDec.String())`, vElem) +
 			fmt.Sprintf(hashByteSliceString, targetElem, "b")
@@ -141,23 +141,6 @@ func (c intervalCustomizer) getHashAssignFunc() assignFunc {
 		  %[1]s = memhash64(noescape(unsafe.Pointer(&days)), %[1]s)
 		  %[1]s = memhash64(noescape(unsafe.Pointer(&nanos)), %[1]s)
 		`, targetElem, vElem)
-	}
-}
-
-func (c jsonCustomizer) getHashAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, vElem, _, _, _, _ string) string {
-		// TODO(yuzefovich): consider refactoring this to avoid decoding-encoding of
-		// JSON altogether. This will require changing `assignFunc` to also have an
-		// access to the index of the current element and then some trickery to get
-		// to the bytes underlying the JSON.
-		return fmt.Sprintf(`
-        scratch := _overloadHelper.ByteScratch[:0]
-        _b, _err := json.EncodeJSON(scratch, %[2]s)
-        if _err != nil {
-          colexecerror.ExpectedError(_err)
-        }
-        _overloadHelper.ByteScratch = _b
-        %[1]s`, fmt.Sprintf(hashByteSliceString, targetElem, "_b"), vElem)
 	}
 }
 

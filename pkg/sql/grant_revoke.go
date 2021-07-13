@@ -14,20 +14,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -61,21 +58,11 @@ func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
 		return nil, err
 	}
 
-	// TODO(solon): there are SQL identifiers (tree.Name) in n.Grantees,
-	// but we want SQL usernames. Do we normalize or not? For reference,
-	// REASSIGN / OWNER TO do normalize.
-	// Related: https://github.com/cockroachdb/cockroach/issues/54696
-	grantees := make([]security.SQLUsername, len(n.Grantees))
-	for i, grantee := range n.Grantees {
-		grantees[i] = security.MakeSQLUsernameFromPreNormalizedString(string(grantee))
-	}
-
 	return &changePrivilegesNode{
-		isGrant:      true,
 		targets:      n.Targets,
-		grantees:     grantees,
+		grantees:     n.Grantees,
 		desiredprivs: n.Privileges,
-		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee security.SQLUsername) {
+		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee string) {
 			privDesc.Grant(grantee, n.Privileges)
 		},
 		grantOn: grantOn,
@@ -112,21 +99,11 @@ func (p *planner) Revoke(ctx context.Context, n *tree.Revoke) (planNode, error) 
 		return nil, err
 	}
 
-	// TODO(solon): there are SQL identifiers (tree.Name) in n.Grantees,
-	// but we want SQL usernames. Do we normalize or not? For reference,
-	// REASSIGN / OWNER TO do normalize.
-	// Related: https://github.com/cockroachdb/cockroach/issues/54696
-	grantees := make([]security.SQLUsername, len(n.Grantees))
-	for i, grantee := range n.Grantees {
-		grantees[i] = security.MakeSQLUsernameFromPreNormalizedString(string(grantee))
-	}
-
 	return &changePrivilegesNode{
-		isGrant:      false,
 		targets:      n.Targets,
-		grantees:     grantees,
+		grantees:     n.Grantees,
 		desiredprivs: n.Privileges,
-		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee security.SQLUsername) {
+		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee string) {
 			privDesc.Revoke(grantee, n.Privileges, grantOn)
 		},
 		grantOn: grantOn,
@@ -134,11 +111,10 @@ func (p *planner) Revoke(ctx context.Context, n *tree.Revoke) (planNode, error) 
 }
 
 type changePrivilegesNode struct {
-	isGrant         bool
 	targets         tree.TargetList
-	grantees        []security.SQLUsername
+	grantees        tree.NameList
 	desiredprivs    privilege.List
-	changePrivilege func(*descpb.PrivilegeDescriptor, security.SQLUsername)
+	changePrivilege func(*descpb.PrivilegeDescriptor, string)
 	grantOn         privilege.ObjectType
 }
 
@@ -158,12 +134,11 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 
 	// We're allowed to grant/revoke privileges to/from the "public" role even though
 	// it does not exist: add it to the list of all users and roles.
-	users[security.PublicRoleName()] = true // isRole
+	users[security.PublicRole] = true // isRole
 
-	for i, grantee := range n.grantees {
-		if _, ok := users[grantee]; !ok {
-			sqlName := tree.Name(n.grantees[i].Normalized())
-			return errors.Errorf("user or role %s does not exist", &sqlName)
+	for _, grantee := range n.grantees {
+		if _, ok := users[string(grantee)]; !ok {
+			return errors.Errorf("user or role %s does not exist", &grantee)
 		}
 	}
 
@@ -177,21 +152,10 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 		return err
 	}
 
-	var events []eventLogEntry
-
 	// First, update the descriptors. We want to catch all errors before
 	// we update them in KV below.
 	b := p.txn.NewBatch()
 	for _, descriptor := range descriptors {
-		// Disallow privilege changes on system objects. For more context, see #43842.
-		op := "REVOKE"
-		if n.isGrant {
-			op = "GRANT"
-		}
-		if descriptor.GetID() < keys.MinUserDescID {
-			return pgerror.Newf(pgcode.InsufficientPrivilege, "cannot %s on system object", op)
-		}
-
 		if err := p.CheckPrivilege(ctx, descriptor, privilege.GRANT); err != nil {
 			return err
 		}
@@ -206,15 +170,7 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 
 		privileges := descriptor.GetPrivileges()
 		for _, grantee := range n.grantees {
-			n.changePrivilege(privileges, grantee)
-		}
-
-		// Ensure superusers have exactly the allowed privilege set.
-		// Postgres does not actually enforce this, instead of checking that
-		// superusers have all the privileges, Postgres allows superusers to
-		// bypass privilege checks.
-		if err := privileges.ValidateSuperuserPrivileges(descriptor.GetID(), n.grantOn); err != nil {
-			return err
+			n.changePrivilege(privileges, string(grantee))
 		}
 
 		// Validate privilege descriptors directly as the db/table level Validate
@@ -223,31 +179,32 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 			return err
 		}
 
-		eventDetails := eventpb.CommonSQLPrivilegeEventDetails{}
-		if n.isGrant {
-			eventDetails.GrantedPrivileges = n.desiredprivs.SortedNames()
-		} else {
-			eventDetails.RevokedPrivileges = n.desiredprivs.SortedNames()
-		}
-
 		switch d := descriptor.(type) {
 		case *dbdesc.Mutable:
-			if err := p.writeDatabaseChangeToBatch(ctx, d, b); err != nil {
-				return err
-			}
-			if err := p.createNonDropDatabaseChangeJob(ctx, d.ID,
-				fmt.Sprintf("updating privileges for database %d", d.ID)); err != nil {
-				return err
-			}
-			for _, grantee := range n.grantees {
-				privs := eventDetails // copy the granted/revoked privilege list.
-				privs.Grantee = grantee.Normalized()
-				events = append(events, eventLogEntry{
-					targetID: int32(d.ID),
-					event: &eventpb.ChangeDatabasePrivilege{
-						CommonSQLPrivilegeEventDetails: privs,
-						DatabaseName:                   (*tree.Name)(&d.Name).String(),
-					}})
+			if p.Descriptors().DatabaseLeasingUnsupported() {
+				if err := d.Validate(); err != nil {
+					return err
+				}
+				if err := catalogkv.WriteDescToBatch(
+					ctx,
+					p.extendedEvalCtx.Tracing.KVTracingEnabled(),
+					p.ExecCfg().Settings,
+					b,
+					p.ExecCfg().Codec,
+					descriptor.GetID(),
+					descriptor,
+				); err != nil {
+					return err
+				}
+			} else {
+				if err := p.writeDatabaseChangeToBatch(ctx, d, b); err != nil {
+					return err
+				}
+				if err := p.createNonDropDatabaseChangeJob(ctx, d.ID,
+					fmt.Sprintf("updating privileges for database %d", d.ID),
+				); err != nil {
+					return err
+				}
 			}
 
 		case *tabledesc.Mutable:
@@ -265,30 +222,10 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 					return err
 				}
 			}
-			for _, grantee := range n.grantees {
-				privs := eventDetails // copy the granted/revoked privilege list.
-				privs.Grantee = grantee.Normalized()
-				events = append(events, eventLogEntry{
-					targetID: int32(d.ID),
-					event: &eventpb.ChangeTablePrivilege{
-						CommonSQLPrivilegeEventDetails: privs,
-						TableName:                      d.Name, // FIXME
-					}})
-			}
 		case *typedesc.Mutable:
 			err := p.writeTypeSchemaChange(ctx, d, fmt.Sprintf("updating privileges for type %d", d.ID))
 			if err != nil {
 				return err
-			}
-			for _, grantee := range n.grantees {
-				privs := eventDetails // copy the granted/revoked privilege list.
-				privs.Grantee = grantee.Normalized()
-				events = append(events, eventLogEntry{
-					targetID: int32(d.ID),
-					event: &eventpb.ChangeTypePrivilege{
-						CommonSQLPrivilegeEventDetails: privs,
-						TypeName:                       d.Name, // FIXME
-					}})
 			}
 		case *schemadesc.Mutable:
 			if err := p.writeSchemaDescChange(
@@ -298,31 +235,11 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 			); err != nil {
 				return err
 			}
-			for _, grantee := range n.grantees {
-				privs := eventDetails // copy the granted/revoked privilege list.
-				privs.Grantee = grantee.Normalized()
-				events = append(events, eventLogEntry{
-					targetID: int32(d.ID),
-					event: &eventpb.ChangeSchemaPrivilege{
-						CommonSQLPrivilegeEventDetails: privs,
-						SchemaName:                     d.Name, // FIXME
-					}})
-			}
 		}
 	}
 
 	// Now update the descriptors transactionally.
-	if err := p.txn.Run(ctx, b); err != nil {
-		return err
-	}
-
-	// Record the privilege changes in the event log. This is an
-	// auditable log event and is recorded in the same transaction as
-	// the table descriptor update.
-	if err := params.p.logEvents(params.ctx, events...); err != nil {
-		return err
-	}
-	return nil
+	return p.txn.Run(ctx, b)
 }
 
 func (*changePrivilegesNode) Next(runParams) (bool, error) { return false, nil }

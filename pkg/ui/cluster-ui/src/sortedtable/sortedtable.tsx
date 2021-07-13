@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -21,7 +21,6 @@ import classNames from "classnames/bind";
 import { TableSpinner } from "./tableSpinner";
 import { TableHead } from "./tableHead";
 import { TableRow } from "./tableRow";
-import { Tooltip } from "@cockroachlabs/ui-components";
 
 export interface ISortedTablePagination {
   current: number;
@@ -52,10 +51,6 @@ export interface ColumnDescriptor<T> {
   titleAlign?: "left" | "right" | "center";
   // uniq column identifier
   name: string;
-  // show or hide column by default; It can be overridden by users settings. True if not defined.
-  showByDefault?: boolean;
-  // If true, the user can't overwrite the setting for this column. False if not defined.
-  alwaysShow?: boolean;
 }
 
 /**
@@ -133,7 +128,7 @@ export interface SortableColumn {
   // Unique key that identifies this column from others, for the purpose of
   // indicating sort order. If not provided, the column is not considered
   // sortable.
-  columnTitle?: any;
+  sortKey?: any;
   // className is a classname to apply to the td elements
   className?: string;
   titleAlign?: "left" | "right" | "center";
@@ -143,11 +138,12 @@ export interface SortableColumn {
 
 /**
  * SortSetting is the structure that SortableTable uses to indicate its current
- * sort preference to higher-level components. It contains a columnTitle (taken from
+ * sort preference to higher-level components. It contains a sortKey (taken from
  * one of the currently displayed columns) and a boolean indicating that the
  * sort should be ascending, rather than descending.
  */
 export interface SortSetting {
+  sortKey: any;
   ascending: boolean;
   columnTitle?: string;
 }
@@ -181,8 +177,8 @@ export class SortedTable<T> extends React.Component<
     rowClass: (_obj: any) => "",
     columns: [],
     sortSetting: {
+      sortKey: null,
       ascending: false,
-      columnTitle: null,
     },
     onChangeSortSetting: _ss => {},
   };
@@ -207,19 +203,15 @@ export class SortedTable<T> extends React.Component<
     (props: SortedTableProps<T>) => props.data,
     (props: SortedTableProps<T>) => props.sortSetting,
     (props: SortedTableProps<T>) => props.columns,
-    (props: SortedTableProps<T>) => props.pagination,
     (
       data: T[],
       sortSetting: SortSetting,
       columns: ColumnDescriptor<T>[],
-      pagination?: ISortedTablePagination,
     ): T[] => {
       if (!sortSetting) {
         return this.paginatedData();
       }
-      const sortColumn = columns.filter(
-        c => c.name === sortSetting.columnTitle,
-      )[0];
+      const sortColumn = columns[sortSetting.sortKey];
       if (!sortColumn || !sortColumn.sort) {
         return this.paginatedData();
       }
@@ -254,7 +246,7 @@ export class SortedTable<T> extends React.Component<
             name: cd.name,
             title: cd.title,
             cell: index => cd.cell(sorted[index]),
-            columnTitle: cd.sort ? cd.name : undefined,
+            sortKey: cd.sort ? ii : undefined,
             rollup: rollups[ii],
             className: cd.className,
             titleAlign: cd.titleAlign,
@@ -383,31 +375,4 @@ export class SortedTable<T> extends React.Component<
       </div>
     );
   }
-}
-
-/**
- * Creates an element limited by the max length and
- * with a tooltip with one listed element per line.
- * E.g. `value1, value2, value3` with maxLength 10 will display
- * `value1, va...` on the table and
- * `value1
- * value2
- * value3`  on the tooltip.
- * @param value a string with elements separated by `, `.
- * @param maxLength the max length to which it should display value
- * and hide the remaining.
- */
-export function longListWithTooltip(value: string, maxLength: number) {
-  const summary =
-    value.length > maxLength ? value.slice(0, maxLength) + "..." : value;
-  return (
-    <Tooltip
-      placement="bottom"
-      content={
-        <pre className={cx("break-line")}>{value.split(", ").join("\r\n")}</pre>
-      }
-    >
-      <div className="cl-table-link__tooltip-hover-area">{summary}</div>
-    </Tooltip>
-  );
 }

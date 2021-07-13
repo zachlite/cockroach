@@ -11,7 +11,9 @@ import { showInstructionsBox } from "src/views/clusterviz/components/instruction
 import { LocalityTier } from "src/redux/localities";
 
 describe("InstructionsBox component", () => {
+
   describe("showInstructionsBox", () => {
+
     interface TestCase {
       showMap: boolean;
       tiers: LocalityTier[];
@@ -48,11 +50,10 @@ describe("InstructionsBox component", () => {
 
     cases.forEach((testCase) => {
       it(`returns ${testCase.expected} for case "${testCase.desc}"`, () => {
-        assert.equal(
-          showInstructionsBox(testCase.showMap, testCase.tiers),
-          testCase.expected,
-        );
+        assert.equal(showInstructionsBox(testCase.showMap, testCase.tiers), testCase.expected);
       });
     });
+
   });
+
 });

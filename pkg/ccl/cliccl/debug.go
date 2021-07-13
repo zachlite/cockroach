@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/spf13/cobra"
 )
 
@@ -95,12 +94,6 @@ AES128_CTR:be235...   # AES-128 encryption with store key ID
 		cli.VarFlag(cmd.Flags(), &storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
 	}
 
-	// init has already run in cli/debug.go since this package imports it, so
-	// DebugPebbleCmd already has all its subcommands. We could traverse those
-	// here. But we don't need to by using PersistentFlags.
-	cli.VarFlag(cli.DebugPebbleCmd.PersistentFlags(),
-		&storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
-
 	cli.PopulateRocksDBConfigHook = fillEncryptionOptionsForStore
 }
 
@@ -113,7 +106,7 @@ func fillEncryptionOptionsForStore(cfg *base.StorageConfig) error {
 	}
 
 	if opts != nil {
-		cfg.EncryptionOptions = opts
+		cfg.ExtraOptions = opts
 		cfg.UseFileRegistry = true
 	}
 	return nil
@@ -306,7 +299,7 @@ func getActiveEncryptionkey(dir string) (string, string, error) {
 	// Open the file registry. Return plaintext if it does not exist.
 	contents, err := ioutil.ReadFile(registryFile)
 	if err != nil {
-		if oserror.IsNotExist(err) {
+		if os.IsNotExist(err) {
 			return enginepbccl.EncryptionType_Plaintext.String(), "", nil
 		}
 		return "", "", errors.Wrapf(err, "could not open registry file %s", registryFile)

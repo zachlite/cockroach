@@ -12,11 +12,7 @@ import _ from "lodash";
 import React from "react";
 import { connect } from "react-redux";
 import { Link } from "react-router-dom";
-import {
-  refreshDatabaseDetails,
-  refreshTableDetails,
-  refreshTableStats,
-} from "src/redux/apiReducers";
+import { refreshDatabaseDetails, refreshTableDetails, refreshTableStats } from "src/redux/apiReducers";
 import { LocalSetting } from "src/redux/localsettings";
 import { AdminUIState } from "src/redux/state";
 import { Bytes } from "src/util/format";
@@ -41,8 +37,7 @@ import { ReplicatedSizeTooltip } from "src/views/databases/containers/databases/
 import { Button } from "src/components";
 
 const databaseTablesSortSetting = new LocalSetting<AdminUIState, SortSetting>(
-  "databases/sort_setting/tables",
-  (s) => s.localSettings,
+  "databases/sort_setting/tables", (s) => s.localSettings,
 );
 
 class DatabaseTableListSortedTable extends SortedTable<TableInfo> {}
@@ -54,9 +49,7 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
     super(props);
 
     this.state = {
-      finishedLoadingTableData:
-        props.tableInfos &&
-        props.tableInfos.every((ti) => ti.detailsAndStatsLoaded()),
+      finishedLoadingTableData: props.tableInfos && props.tableInfos.every(ti => ti.detailsAndStatsLoaded()),
     };
   }
 
@@ -80,33 +73,24 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
 
   noDatabaseResults = () => (
     <>
-      <h3 className="table__no-results--title">
-        <DatabaseIcon />
-        This database has no tables.
-      </h3>
+      <h3 className="table__no-results--title"><DatabaseIcon />This database has no tables.</h3>
     </>
-  );
+  )
 
   render() {
     const { tableInfos, dbResponse, sortSetting } = this.props;
     const dbID = this.props.name;
     const loading = dbResponse ? !!dbResponse.inFlight : true;
-    const numTables = (tableInfos && tableInfos.length) || 0;
+    const numTables = tableInfos && tableInfos.length || 0;
     return (
       <div className="database-summary">
         <div className="database-summary-title">
-          <TitleWithIcon src={Stack} title={dbID} />
-          {this.state.finishedLoadingTableData || numTables === 0 ? null : (
-            <Button
-              type="secondary"
-              className="database-summary-load-button"
-              onClick={async () => {
-                await this.loadTableDetails(this.props);
-              }}
-            >
-              Load stats for all tables
-            </Button>
-          )}
+          <TitleWithIcon src={Stack} title={dbID}/>
+          {this.state.finishedLoadingTableData || numTables === 0 ? null :
+            <Button type="secondary" className="database-summary-load-button" onClick={async () => {
+              await this.loadTableDetails(this.props);
+            }}>Load stats for all tables</Button>
+          }
         </div>
         <div className="l-columns">
           <div className="l-columns__left">
@@ -121,9 +105,7 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
                   cell: (tableInfo) => {
                     return (
                       <div className="sort-table__unbounded-column table-name">
-                        <Link to={`/database/${dbID}/table/${tableInfo.name}`}>
-                          <DatabaseIcon /> {tableInfo.name}
-                        </Link>
+                        <Link to={`/database/${dbID}/table/${tableInfo.name}`}><DatabaseIcon /> {tableInfo.name}</Link>
                       </div>
                     );
                   },
@@ -131,15 +113,8 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
                   className: "expand-link", // don't pad the td element to allow the link to expand
                 },
                 {
-                  title: (
-                    <ReplicatedSizeTooltip tableName={dbID}>
-                      {"Replicated Size"}
-                    </ReplicatedSizeTooltip>
-                  ),
-                  cell: (tableInfo) =>
-                    _.isUndefined(tableInfo.physicalSize)
-                      ? ""
-                      : Bytes(tableInfo.physicalSize),
+                  title: <ReplicatedSizeTooltip tableName={dbID}>{"Replicated Size"}</ReplicatedSizeTooltip>,
+                  cell: (tableInfo) => _.isUndefined(tableInfo.physicalSize) ? "" : Bytes(tableInfo.physicalSize),
                   sort: (tableInfo) => tableInfo.physicalSize,
                 },
                 {
@@ -153,33 +128,30 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
                   sort: (tableInfo) => tableInfo.numColumns,
                 },
                 {
-                  title: "# of Indexes",
+                  title: "# of Indices",
                   cell: (tableInfo) => tableInfo.numIndices,
                   sort: (tableInfo) => tableInfo.numIndices,
                 },
               ]}
               loading={loading}
               renderNoResult={loading ? undefined : this.noDatabaseResults()}
-            />
+          />
           </div>
           <div className="l-columns__right">
             <SummaryCard>
-              <SummaryHeadlineStat
-                title="Database Size"
-                tooltip="Approximate total disk size of this database across all table replicas."
-                value={this.totalSize()}
-                format={Bytes}
-              />
-              <SummaryHeadlineStat
-                title={numTables === 1 ? "Table" : "Tables"}
-                tooltip="The total number of tables in this database."
-                value={numTables}
-              />
-              <SummaryHeadlineStat
-                title="Total Range Count"
-                tooltip="The total ranges across all tables in this database."
-                value={this.totalRangeCount()}
-              />
+                <SummaryHeadlineStat
+                  title="Database Size"
+                  tooltip="Approximate total disk size of this database across all table replicas."
+                  value={this.totalSize()}
+                  format={Bytes} />
+                <SummaryHeadlineStat
+                  title={(numTables === 1) ? "Table" : "Tables"}
+                  tooltip="The total number of tables in this database."
+                  value={numTables} />
+                <SummaryHeadlineStat
+                  title="Total Range Count"
+                  tooltip="The total ranges across all tables in this database."
+                  value={this.totalRangeCount()} />
             </SummaryCard>
           </div>
         </div>
@@ -188,11 +160,7 @@ export class DatabaseSummaryTables extends DatabaseSummaryBase {
   }
 }
 
-const mapStateToProps = (
-  state: AdminUIState,
-  ownProps: DatabaseSummaryExplicitData,
-) => ({
-  // RootState contains declaration for whole state
+const mapStateToProps = (state: AdminUIState, ownProps: DatabaseSummaryExplicitData) => ({ // RootState contains declaration for whole state
   tableInfos: selectTableInfos(state, ownProps.name),
   sortSetting: databaseTablesSortSetting.selector(state),
   dbResponse: databaseDetails(state)[ownProps.name],

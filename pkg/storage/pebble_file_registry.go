@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/gogo/protobuf/proto"
 )
@@ -75,7 +74,7 @@ func (r *PebbleFileRegistry) Load() error {
 	r.mu.currProto = &enginepb.FileRegistry{}
 	r.registryFilename = r.FS.PathJoin(r.DBDir, fileRegistryFilename)
 	f, err := r.FS.Open(r.registryFilename)
-	if oserror.IsNotExist(err) {
+	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {

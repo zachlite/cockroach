@@ -18,9 +18,9 @@ import (
 
 const invalidIdxSentinel = -1
 
-// multiIterator multiplexes iteration over a number of SimpleMVCCIterators.
+// multiIterator multiplexes iteration over a number of Iterators.
 type multiIterator struct {
-	iters []SimpleMVCCIterator
+	iters []SimpleIterator
 	// The index into `iters` of the iterator currently being pointed at.
 	currentIdx int
 	// The indexes of every iterator with the same key as the one in currentIdx.
@@ -35,16 +35,16 @@ type multiIterator struct {
 	err error
 }
 
-var _ SimpleMVCCIterator = &multiIterator{}
+var _ SimpleIterator = &multiIterator{}
 
 // MakeMultiIterator creates an iterator that multiplexes
-// SimpleMVCCIterators. The caller is responsible for closing the passed
+// SimpleIterators. The caller is responsible for closing the passed
 // iterators after closing the returned multiIterator.
 //
 // If two iterators have an entry with exactly the same key and timestamp, the
 // one with a higher index in this constructor arg is preferred. The other is
 // skipped.
-func MakeMultiIterator(iters []SimpleMVCCIterator) SimpleMVCCIterator {
+func MakeMultiIterator(iters []SimpleIterator) SimpleIterator {
 	return &multiIterator{
 		iters:                        iters,
 		currentIdx:                   invalidIdxSentinel,
@@ -155,7 +155,7 @@ func (f *multiIterator) advance() {
 			// The iterator at iterIdx has the same key as the current best, add
 			// it to itersWithCurrentKey and check how the timestamps compare.
 			f.itersWithCurrentKey = append(f.itersWithCurrentKey, iterIdx)
-			if proposedMVCCKey.Timestamp.EqOrdering(iterMVCCKey.Timestamp) {
+			if proposedMVCCKey.Timestamp == iterMVCCKey.Timestamp {
 				// We have two exactly equal mvcc keys (both key and timestamps
 				// match). The one in the later iterator takes precedence and
 				// the one in the earlier iterator should be omitted from

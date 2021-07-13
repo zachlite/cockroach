@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
@@ -30,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,10 +61,7 @@ type mockLockTableGuard struct {
 	state         waitingState
 	signal        chan struct{}
 	stateObserved chan struct{}
-	toResolve     []roachpb.LockUpdate
 }
-
-var _ lockTableGuard = &mockLockTableGuard{}
 
 // mockLockTableGuard implements the lockTableGuard interface.
 func (g *mockLockTableGuard) ShouldWait() bool            { return true }
@@ -78,42 +73,32 @@ func (g *mockLockTableGuard) CurState() waitingState {
 	}
 	return s
 }
-func (g *mockLockTableGuard) ResolveBeforeScanning() []roachpb.LockUpdate {
-	return g.toResolve
-}
-func (g *mockLockTableGuard) CheckOptimisticNoConflicts(*spanset.SpanSet) (ok bool) {
-	return true
-}
 func (g *mockLockTableGuard) notify() { g.signal <- struct{}{} }
 
-// mockLockTable overrides TransactionIsFinalized, which is the only LockTable
-// method that should be called in this test.
-type mockLockTable struct {
-	lockTableImpl
-	txnFinalizedFn func(txn *roachpb.Transaction)
+// mockLockTableGuard implements the LockManager interface.
+func (g *mockLockTableGuard) OnLockAcquired(_ context.Context, _ *roachpb.LockAcquisition) {
+	panic("unimplemented")
 }
-
-func (lt *mockLockTable) TransactionIsFinalized(txn *roachpb.Transaction) {
-	lt.txnFinalizedFn(txn)
+func (g *mockLockTableGuard) OnLockUpdated(_ context.Context, up *roachpb.LockUpdate) {
+	if g.state.held && g.state.txn.ID == up.Txn.ID && g.state.key.Equal(up.Key) {
+		g.state = waitingState{kind: doneWaiting}
+		g.notify()
+	}
 }
-
-var lockTableWaiterTestClock = hlc.Timestamp{WallTime: 12}
 
 func setupLockTableWaiterTest() (*lockTableWaiterImpl, *mockIntentResolver, *mockLockTableGuard) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
-	manual := hlc.NewManualClock(lockTableWaiterTestClock.WallTime)
+	LockTableLivenessPushDelay.Override(&st.SV, 0)
+	LockTableDeadlockDetectionPushDelay.Override(&st.SV, 0)
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),
 	}
 	w := &lockTableWaiterImpl{
 		st:                                  st,
-		clock:                               hlc.NewClock(manual.UnixNano, time.Nanosecond),
 		stopper:                             stop.NewStopper(),
 		ir:                                  ir,
-		lt:                                  &mockLockTable{},
+		lm:                                  guard,
 		conflictingIntentsResolveRejections: metric.NewCounter(metric.Metadata{}),
 	}
 	return w, ir, guard
@@ -130,88 +115,68 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	testutils.RunTrueAndFalse(t, "synthetic", func(t *testing.T, synthetic bool) {
-		uncertaintyLimit := hlc.Timestamp{WallTime: 15}
-		makeReq := func() Request {
-			txn := makeTxnProto("request")
-			txn.GlobalUncertaintyLimit = uncertaintyLimit
-			if synthetic {
-				txn.ReadTimestamp = txn.ReadTimestamp.WithSynthetic(true)
-			}
-			return Request{
-				Txn:       &txn,
-				Timestamp: txn.ReadTimestamp,
-			}
+	maxTS := hlc.Timestamp{WallTime: 15}
+	makeReq := func() Request {
+		txn := makeTxnProto("request")
+		txn.MaxTimestamp = maxTS
+		return Request{
+			Txn:       &txn,
+			Timestamp: txn.ReadTimestamp,
 		}
+	}
 
-		expPushTS := func() hlc.Timestamp {
-			// If the waiter has a synthetic timestamp, it pushes all the way up to
-			// its global uncertainty limit, because it won't be able to use a local
-			// uncertainty limit to ignore a synthetic intent. If the waiter does not
-			// have a synthetic timestamp, it uses the local clock to bound its push
-			// timestamp, with the assumption that it will be able to use its local
-			// uncertainty limit to ignore a non-synthetic intent. For more, see
-			// lockTableWaiterImpl.pushHeader.
-			if synthetic {
-				return uncertaintyLimit.WithSynthetic(true)
-			}
-			// NOTE: lockTableWaiterTestClock < uncertaintyLimit
-			return lockTableWaiterTestClock
-		}
-
-		t.Run("state", func(t *testing.T) {
-			t.Run("waitFor", func(t *testing.T) {
-				testWaitPush(t, waitFor, makeReq, expPushTS())
-			})
-
-			t.Run("waitForDistinguished", func(t *testing.T) {
-				testWaitPush(t, waitForDistinguished, makeReq, expPushTS())
-			})
-
-			t.Run("waitElsewhere", func(t *testing.T) {
-				testWaitPush(t, waitElsewhere, makeReq, expPushTS())
-			})
-
-			t.Run("waitSelf", func(t *testing.T) {
-				testWaitNoopUntilDone(t, waitSelf, makeReq)
-			})
-
-			t.Run("doneWaiting", func(t *testing.T) {
-				w, _, g := setupLockTableWaiterTest()
-				defer w.stopper.Stop(ctx)
-
-				g.state = waitingState{kind: doneWaiting}
-				g.notify()
-
-				err := w.WaitOn(ctx, makeReq(), g)
-				require.Nil(t, err)
-			})
+	t.Run("state", func(t *testing.T) {
+		t.Run("waitFor", func(t *testing.T) {
+			testWaitPush(t, waitFor, makeReq, maxTS)
 		})
 
-		t.Run("ctx done", func(t *testing.T) {
+		t.Run("waitForDistinguished", func(t *testing.T) {
+			testWaitPush(t, waitForDistinguished, makeReq, maxTS)
+		})
+
+		t.Run("waitElsewhere", func(t *testing.T) {
+			testWaitPush(t, waitElsewhere, makeReq, maxTS)
+		})
+
+		t.Run("waitSelf", func(t *testing.T) {
+			testWaitNoopUntilDone(t, waitSelf, makeReq)
+		})
+
+		t.Run("doneWaiting", func(t *testing.T) {
 			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 
-			ctxWithCancel, cancel := context.WithCancel(ctx)
-			go cancel()
-
-			err := w.WaitOn(ctxWithCancel, makeReq(), g)
-			require.NotNil(t, err)
-			require.Equal(t, context.Canceled.Error(), err.GoError().Error())
-		})
-
-		t.Run("stopper quiesce", func(t *testing.T) {
-			w, _, g := setupLockTableWaiterTest()
-			defer w.stopper.Stop(ctx)
-
-			go func() {
-				w.stopper.Quiesce(ctx)
-			}()
+			g.state = waitingState{kind: doneWaiting}
+			g.notify()
 
 			err := w.WaitOn(ctx, makeReq(), g)
-			require.NotNil(t, err)
-			require.IsType(t, &roachpb.NodeUnavailableError{}, err.GetDetail())
+			require.Nil(t, err)
 		})
+	})
+
+	t.Run("ctx done", func(t *testing.T) {
+		w, _, g := setupLockTableWaiterTest()
+		defer w.stopper.Stop(ctx)
+
+		ctxWithCancel, cancel := context.WithCancel(ctx)
+		go cancel()
+
+		err := w.WaitOn(ctxWithCancel, makeReq(), g)
+		require.NotNil(t, err)
+		require.Equal(t, context.Canceled.Error(), err.GoError().Error())
+	})
+
+	t.Run("stopper quiesce", func(t *testing.T) {
+		w, _, g := setupLockTableWaiterTest()
+		defer w.stopper.Stop(ctx)
+
+		go func() {
+			w.stopper.Quiesce(ctx)
+		}()
+
+		err := w.WaitOn(ctx, makeReq(), g)
+		require.NotNil(t, err)
+		require.IsType(t, &roachpb.NodeUnavailableError{}, err.GetDetail())
 	})
 }
 
@@ -343,13 +308,9 @@ func testWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hl
 				resp := &roachpb.Transaction{TxnMeta: *pusheeArg, Status: roachpb.ABORTED}
 
 				// If the lock is held, we'll try to resolve it now that
-				// we know the holder is ABORTED. Otherwise, immediately
+				// we know the holder is ABORTED. Otherwide, immediately
 				// tell the request to stop waiting.
 				if lockHeld {
-					w.lt.(*mockLockTable).txnFinalizedFn = func(txn *roachpb.Transaction) {
-						require.Equal(t, pusheeTxn.ID, txn.ID)
-						require.Equal(t, roachpb.ABORTED, txn.Status)
-					}
 					ir.resolveIntent = func(_ context.Context, intent roachpb.LockUpdate) *Error {
 						require.Equal(t, keyA, intent.Key)
 						require.Equal(t, pusheeTxn.ID, intent.Txn.ID)
@@ -376,11 +337,7 @@ func testWaitNoopUntilDone(t *testing.T, k waitKind, makeReq func() Request) {
 	w, _, g := setupLockTableWaiterTest()
 	defer w.stopper.Stop(ctx)
 
-	txn := makeTxnProto("noop-wait-txn")
-	g.state = waitingState{
-		kind: k,
-		txn:  &txn.TxnMeta,
-	}
+	g.state = waitingState{kind: k}
 	g.notify()
 	defer notifyUntilDone(t, g)()
 
@@ -410,10 +367,10 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	uncertaintyLimit := hlc.Timestamp{WallTime: 15}
+	maxTS := hlc.Timestamp{WallTime: 15}
 	makeReq := func() Request {
 		txn := makeTxnProto("request")
-		txn.GlobalUncertaintyLimit = uncertaintyLimit
+		txn.MaxTimestamp = maxTS
 		return Request{
 			Txn:        &txn,
 			Timestamp:  txn.ReadTimestamp,
@@ -421,20 +378,17 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 		}
 	}
 
-	// NOTE: lockTableWaiterTestClock < uncertaintyLimit
-	expPushTS := lockTableWaiterTestClock
-
 	t.Run("state", func(t *testing.T) {
 		t.Run("waitFor", func(t *testing.T) {
-			testErrorWaitPush(t, waitFor, makeReq, expPushTS)
+			testErrorWaitPush(t, waitFor, makeReq, maxTS)
 		})
 
 		t.Run("waitForDistinguished", func(t *testing.T) {
-			testErrorWaitPush(t, waitForDistinguished, makeReq, expPushTS)
+			testErrorWaitPush(t, waitForDistinguished, makeReq, maxTS)
 		})
 
 		t.Run("waitElsewhere", func(t *testing.T) {
-			testErrorWaitPush(t, waitElsewhere, makeReq, expPushTS)
+			testErrorWaitPush(t, waitElsewhere, makeReq, maxTS)
 		})
 
 		t.Run("waitSelf", func(t *testing.T) {
@@ -500,10 +454,6 @@ func testErrorWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPush
 
 			// Next, we'll try to resolve the lock now that we know the
 			// holder is ABORTED.
-			w.lt.(*mockLockTable).txnFinalizedFn = func(txn *roachpb.Transaction) {
-				require.Equal(t, pusheeTxn.ID, txn.ID)
-				require.Equal(t, roachpb.ABORTED, txn.Status)
-			}
 			ir.resolveIntent = func(_ context.Context, intent roachpb.LockUpdate) *Error {
 				require.Equal(t, keyA, intent.Key)
 				require.Equal(t, pusheeTxn.ID, intent.Txn.ID)
@@ -596,16 +546,18 @@ func TestLockTableWaiterDeferredIntentResolverError(t *testing.T) {
 	}
 	keyA := roachpb.Key("keyA")
 	pusheeTxn := makeTxnProto("pushee")
-	// Make the pusheeTxn ABORTED so that the request avoids the transaction
-	// record push and defers the intent resolution.
+
+	// Add the conflicting txn to the finalizedTxnCache so that the request
+	// avoids the transaction record push and defers the intent resolution.
 	pusheeTxn.Status = roachpb.ABORTED
+	w.finalizedTxnCache.add(&pusheeTxn)
 
 	g.state = waitingState{
-		kind:        doneWaiting,
+		kind:        waitForDistinguished,
+		txn:         &pusheeTxn.TxnMeta,
+		key:         keyA,
+		held:        true,
 		guardAccess: spanset.SpanReadWrite,
-	}
-	g.toResolve = []roachpb.LockUpdate{
-		roachpb.MakeLockUpdate(&pusheeTxn, roachpb.Span{Key: keyA}),
 	}
 	g.notify()
 
@@ -684,50 +636,4 @@ func BenchmarkTxnCache(b *testing.B) {
 			_, _ = c.get(txnOp.ID)
 		}
 	}
-}
-
-func TestContentionEventHelper(t *testing.T) {
-	// This is mostly a regression test that ensures that we don't
-	// accidentally update tBegin when continuing to handle the same event.
-	// General coverage of the helper results from TestConcurrencyManagerBasic.
-
-	tr := tracing.NewTracer()
-	sp := tr.StartSpan("foo", tracing.WithForceRealSpan())
-
-	var sl []*roachpb.ContentionEvent
-	h := contentionEventHelper{
-		sp: sp,
-		onEvent: func(ev *roachpb.ContentionEvent) {
-			sl = append(sl, ev)
-		},
-	}
-	txn := makeTxnProto("foo")
-	h.emitAndInit(waitingState{
-		kind: waitForDistinguished,
-		key:  roachpb.Key("a"),
-		txn:  &txn.TxnMeta,
-	})
-	require.Empty(t, sl)
-	require.NotZero(t, h.tBegin)
-	tBegin := h.tBegin
-
-	// Another event for the same txn/key should not mutate tBegin
-	// or emit an event.
-	h.emitAndInit(waitingState{
-		kind: waitFor,
-		key:  roachpb.Key("a"),
-		txn:  &txn.TxnMeta,
-	})
-	require.Empty(t, sl)
-	require.Equal(t, tBegin, h.tBegin)
-
-	h.emitAndInit(waitingState{
-		kind: waitForDistinguished,
-		key:  roachpb.Key("b"),
-		txn:  &txn.TxnMeta,
-	})
-	require.Len(t, sl, 1)
-	require.Equal(t, txn.TxnMeta, sl[0].TxnMeta)
-	require.Equal(t, roachpb.Key("a"), sl[0].Key)
-	require.NotZero(t, sl[0].Duration)
 }

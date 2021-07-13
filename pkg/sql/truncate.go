@@ -17,16 +17,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -34,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -84,7 +80,7 @@ func (t *truncateNode) startExec(params runParams) error {
 
 	for i := range n.Tables {
 		tn := &n.Tables[i]
-		_, tableDesc, err := p.ResolveMutableTableDescriptor(
+		tableDesc, err := p.ResolveMutableTableDescriptor(
 			ctx, tn, true /*required*/, tree.ResolveRequireTableDesc)
 		if err != nil {
 			return err
@@ -139,9 +135,8 @@ func (t *truncateNode) startExec(params runParams) error {
 				return err
 			}
 		}
-		for _, idx := range tableDesc.NonDropIndexes() {
-			for i := 0; i < idx.NumInterleavedBy(); i++ {
-				ref := idx.GetInterleavedBy(i)
+		for _, idx := range tableDesc.AllNonDropIndexes() {
+			for _, ref := range idx.InterleavedBy {
 				if err := maybeEnqueue(ref.Table, "interleaved by"); err != nil {
 					return err
 				}
@@ -160,11 +155,18 @@ func (t *truncateNode) startExec(params runParams) error {
 		}
 
 		// Log a Truncate Table event for this table.
-		if err := params.p.logEvent(ctx,
-			id,
-			&eventpb.TruncateTable{
-				TableName: name,
-			}); err != nil {
+		if err := MakeEventLogger(p.extendedEvalCtx.ExecCfg).InsertEventRecord(
+			ctx,
+			p.txn,
+			EventLogTruncateTable,
+			int32(id),
+			int32(p.extendedEvalCtx.NodeID.SQLInstanceID()),
+			struct {
+				TableName string
+				Statement string
+				User      string
+			}{name, n.String(), p.SessionData().User},
+		); err != nil {
 			return err
 		}
 	}
@@ -216,16 +218,6 @@ func (p *planner) truncateTable(
 		return err
 	}
 
-	// Exit early with an error if the table is undergoing a new-style schema
-	// change, before we try to get job IDs and update job statuses later. See
-	// createOrUpdateSchemaChangeJob.
-	if tableDesc.NewSchemaChangeJobID != 0 {
-		return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-			"cannot perform a schema change on table %q while it is undergoing a new-style schema change",
-			tableDesc.GetName(),
-		)
-	}
-
 	// Resolve all outstanding mutations. Make all new schema elements
 	// public because the table is empty and doesn't need to be backfilled.
 	for _, m := range tableDesc.Mutations {
@@ -237,27 +229,27 @@ func (p *planner) truncateTable(
 	tableDesc.GCMutations = nil
 
 	// Collect all of the old indexes and reset all of the index IDs.
-	oldIndexes := make([]descpb.IndexDescriptor, len(tableDesc.ActiveIndexes()))
-	for _, idx := range tableDesc.ActiveIndexes() {
-		oldIndexes[idx.Ordinal()] = idx.IndexDescDeepCopy()
-		newIndex := *idx.IndexDesc()
-		newIndex.ID = descpb.IndexID(0)
-		if idx.Primary() {
-			tableDesc.SetPrimaryIndex(newIndex)
-		} else {
-			tableDesc.SetPublicNonPrimaryIndex(idx.Ordinal(), newIndex)
-		}
+	oldIndexes := make([]descpb.IndexDescriptor, len(tableDesc.Indexes)+1)
+	oldIndexes[0] = *protoutil.Clone(&tableDesc.PrimaryIndex).(*descpb.IndexDescriptor)
+	for i := range tableDesc.Indexes {
+		oldIndexes[i+1] = *protoutil.Clone(&tableDesc.Indexes[i]).(*descpb.IndexDescriptor)
 	}
 
+	// Reset all of the index IDs.
+	tableDesc.PrimaryIndex.ID = descpb.IndexID(0)
+	for i := range tableDesc.Indexes {
+		tableDesc.Indexes[i].ID = descpb.IndexID(0)
+	}
 	// Create new ID's for all of the indexes in the table.
-	if err := tableDesc.AllocateIDs(ctx); err != nil {
+	if err := tableDesc.AllocateIDs(); err != nil {
 		return err
 	}
 
 	// Construct a mapping from old index ID's to new index ID's.
 	indexIDMapping := make(map[descpb.IndexID]descpb.IndexID, len(oldIndexes))
-	for _, idx := range tableDesc.ActiveIndexes() {
-		indexIDMapping[oldIndexes[idx.Ordinal()].ID] = idx.GetID()
+	indexIDMapping[oldIndexes[0].ID] = tableDesc.PrimaryIndex.ID
+	for i := range tableDesc.Indexes {
+		indexIDMapping[oldIndexes[i+1].ID] = tableDesc.Indexes[i].ID
 	}
 
 	// Create schema change GC jobs for all of the indexes.
@@ -286,8 +278,7 @@ func (p *planner) truncateTable(
 		details.InterleavedIndexes = droppedInterleaves
 	}
 	record := CreateGCJobRecord(jobDesc, p.User(), details)
-	if _, err := p.ExecCfg().JobRegistry.CreateAdoptableJobWithTxn(
-		ctx, record, p.ExecCfg().JobRegistry.MakeJobID(), p.txn); err != nil {
+	if _, err := p.ExecCfg().JobRegistry.CreateAdoptableJobWithTxn(ctx, record, p.txn); err != nil {
 		return err
 	}
 
@@ -301,10 +292,11 @@ func (p *planner) truncateTable(
 	for i := range oldIndexIDs {
 		oldIndexIDs[i] = oldIndexes[i].ID
 	}
-	newIndexIDs := make([]descpb.IndexID, len(tableDesc.ActiveIndexes()))
-	newIndexes := tableDesc.ActiveIndexes()
+	indexes := tableDesc.AllNonDropIndexes()
+	newIndexIDs := make([]descpb.IndexID, len(indexes))
+	newIndexes := indexes
 	for i := range newIndexIDs {
-		newIndexIDs[i] = newIndexes[i].GetID()
+		newIndexIDs[i] = newIndexes[i].ID
 	}
 
 	// Move existing range split points in the pre-truncated table's indexes to
@@ -381,36 +373,40 @@ func checkTableForDisallowedMutationsWithTruncate(desc *tabledesc.Mutable) error
 	// the addition or removal of columns so long as they do not involve
 	// user-defined types.
 
-	for i, m := range desc.AllMutations() {
-		if idx := m.AsIndex(); idx != nil {
+	for i, m := range desc.Mutations {
+		if idx := m.GetIndex(); idx != nil {
 			// Do not allow dropping indexes.
-			if !m.Adding() {
+			if m.Direction != descpb.DescriptorMutation_ADD {
 				return unimplemented.Newf(
 					"TRUNCATE concurrent with ongoing schema change",
 					"cannot perform TRUNCATE on %q which has indexes being dropped", desc.GetName())
 			}
-		} else if col := m.AsColumn(); col != nil {
-			if col.Dropped() && col.GetType().UserDefined() {
+		} else if col := m.GetColumn(); col != nil {
+			if m.Direction == descpb.DescriptorMutation_DROP && col.Type.UserDefined() {
 				return unimplemented.Newf(
 					"TRUNCATE concurrent with ongoing schema change",
 					"cannot perform TRUNCATE on %q which has a column (%q) being "+
-						"dropped which depends on another object", desc.GetName(), col.GetName())
+						"dropped which depends on another object", desc.GetName(), col.Name)
 			}
-		} else if c := m.AsConstraint(); c != nil {
-			if c.IsCheck() || c.IsNotNull() || c.IsForeignKey() || c.IsUniqueWithoutIndex() {
+		} else if c := m.GetConstraint(); c != nil {
+			switch ct := c.ConstraintType; ct {
+			case descpb.ConstraintToUpdate_CHECK,
+				descpb.ConstraintToUpdate_NOT_NULL,
+				descpb.ConstraintToUpdate_FOREIGN_KEY:
 				return unimplemented.Newf(
 					"TRUNCATE concurrent with ongoing schema change",
 					"cannot perform TRUNCATE on %q which has an ongoing %s "+
-						"constraint change", desc.GetName(), c.ConstraintToUpdateDesc().ConstraintType)
+						"constraint change", desc.GetName(), ct)
+			default:
+				return errors.AssertionFailedf("cannot perform TRUNCATE due to "+
+					"unknown constraint type %v on mutation %d in %v", ct, i, desc)
 			}
-			return errors.AssertionFailedf("cannot perform TRUNCATE due to "+
-				"unknown constraint type %v on mutation %d in %v", c.ConstraintToUpdateDesc().ConstraintType, i, desc)
-		} else if s := m.AsPrimaryKeySwap(); s != nil {
+		} else if s := m.GetPrimaryKeySwap(); s != nil {
 			return unimplemented.Newf(
 				"TRUNCATE concurrent with ongoing schema change",
 				"cannot perform TRUNCATE on %q which has an ongoing primary key "+
 					"change", desc.GetName())
-		} else if m.AsComputedColumnSwap() != nil {
+		} else if m.GetComputedColumnSwap() != nil {
 			return unimplemented.Newf(
 				"TRUNCATE concurrent with ongoing schema change",
 				"cannot perform TRUNCATE on %q which has an ongoing column type "+
@@ -433,11 +429,7 @@ func checkTableForDisallowedMutationsWithTruncate(desc *tabledesc.Mutable) error
 // can even eliminate the need to use a transaction for each chunk at a later
 // stage if it proves inefficient).
 func ClearTableDataInChunks(
-	ctx context.Context,
-	db *kv.DB,
-	codec keys.SQLCodec,
-	tableDesc catalog.TableDescriptor,
-	traceKV bool,
+	ctx context.Context, db *kv.DB, codec keys.SQLCodec, tableDesc *tabledesc.Immutable, traceKV bool,
 ) error {
 	const chunkSize = row.TableTruncateChunkSize
 	var resume roachpb.Span
@@ -445,7 +437,7 @@ func ClearTableDataInChunks(
 	for rowIdx, done := 0, false; !done; rowIdx += chunkSize {
 		resumeAt := resume
 		if traceKV {
-			log.VEventf(ctx, 2, "table %s truncate at row: %d, span: %s", tableDesc.GetName(), rowIdx, resume)
+			log.VEventf(ctx, 2, "table %s truncate at row: %d, span: %s", tableDesc.Name, rowIdx, resume)
 		}
 		if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			rd := row.MakeDeleter(codec, tableDesc, nil /* requestedCols */)
@@ -503,13 +495,13 @@ func (p *planner) copySplitPointsToNewIndexes(
 		return nil
 	}
 
-	preservedSplitsMultiple := int(PreservedSplitCountMultiple.Get(p.execCfg.SV()))
+	preservedSplitsMultiple := int(PreservedSplitCountMultiple.Get(&p.execCfg.Settings.SV))
 	if preservedSplitsMultiple <= 0 {
 		return nil
 	}
 	row, err := p.execCfg.InternalExecutor.QueryRowEx(
 		// Run as Root, since ordinary users can't select from this table.
-		ctx, "count-active-nodes", nil, sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		ctx, "count-active-nodes", nil, sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"SELECT count(*) FROM crdb_internal.kv_node_status")
 	if err != nil || row == nil {
 		return err
@@ -525,7 +517,7 @@ func (p *planner) copySplitPointsToNewIndexes(
 	tablePrefix := p.execCfg.Codec.TablePrefix(uint32(tableID))
 
 	// Fetch all of the range descriptors for this index.
-	ranges, err := kvclient.ScanMetaKVs(ctx, p.execCfg.DB.NewTxn(ctx, "truncate-copy-splits"), roachpb.Span{
+	ranges, err := ScanMetaKVs(ctx, p.execCfg.DB.NewTxn(ctx, "truncate-copy-splits"), roachpb.Span{
 		Key:    tablePrefix,
 		EndKey: tablePrefix.PrefixEnd(),
 	})
@@ -593,7 +585,7 @@ func (p *planner) copySplitPointsToNewIndexes(
 	if step < 1 {
 		step = 1
 	}
-	expirationTime := kvserverbase.SplitByLoadMergeDelay.Get(p.execCfg.SV()).Nanoseconds()
+	expirationTime := kvserver.SplitByLoadMergeDelay.Get(&p.execCfg.Settings.SV).Nanoseconds()
 	for i := 0; i < nSplits; i++ {
 		// Evenly space out the ranges that we select from the ranges that are
 		// returned.
@@ -647,8 +639,7 @@ func (p *planner) reassignInterleaveIndexReferences(
 ) error {
 	for _, table := range tables {
 		changed := false
-		if err := catalog.ForEachNonDropIndex(table, func(indexI catalog.Index) error {
-			index := indexI.IndexDesc()
+		if err := table.ForeachNonDropIndex(func(index *descpb.IndexDescriptor) error {
 			for j, a := range index.Interleave.Ancestors {
 				if a.TableID == truncatedID {
 					index.Interleave.Ancestors[j].IndexID = indexIDMapping[index.Interleave.Ancestors[j].IndexID]
@@ -682,7 +673,7 @@ func (p *planner) reassignIndexComments(
 		ctx,
 		"update-table-comments",
 		p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		`SELECT count(*) FROM system.comments WHERE object_id = $1 AND type = $2`,
 		table.ID,
 		keys.IndexCommentType,
@@ -699,7 +690,7 @@ func (p *planner) reassignIndexComments(
 				ctx,
 				"update-table-comments",
 				p.txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				`UPDATE system.comments SET sub_id=$1 WHERE sub_id=$2 AND object_id=$3 AND type=$4`,
 				new,
 				old,
@@ -717,6 +708,6 @@ func (p *planner) reassignIndexComments(
 // key from a single span.
 // This determines whether an index is dropped during a schema change, or if
 // it is only deleted upon GC.
-func canClearRangeForDrop(index catalog.Index) bool {
+func canClearRangeForDrop(index *descpb.IndexDescriptor) bool {
 	return !index.IsInterleaved()
 }

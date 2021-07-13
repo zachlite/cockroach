@@ -100,7 +100,7 @@ func TestIntentAgeThresholdSetting(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	ctx := context.Background()
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 
 	// Test event timeline.
@@ -110,7 +110,7 @@ func TestIntentAgeThresholdSetting(t *testing.T) {
 	intentTs := now - (intentShortThreshold+intentLongThreshold)/2
 
 	// Prepare test intents in MVCC.
-	key := []byte("a")
+	key := []byte("b")
 	value := roachpb.Value{RawBytes: []byte("0123456789")}
 	intentHlc := hlc.Timestamp{
 		WallTime: intentTs.Nanoseconds(),
@@ -121,8 +121,8 @@ func TestIntentAgeThresholdSetting(t *testing.T) {
 
 	// Prepare test fixtures for GC run.
 	desc := roachpb.RangeDescriptor{
-		StartKey: roachpb.RKey(key),
-		EndKey:   roachpb.RKey("b"),
+		StartKey: roachpb.RKey("a"),
+		EndKey:   roachpb.RKey("z"),
 	}
 	policy := zonepb.GCPolicy{TTLSeconds: 1}
 	snap := eng.NewSnapshot()

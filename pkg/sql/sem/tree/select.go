@@ -77,14 +77,14 @@ func (node *ParenSelect) Format(ctx *FmtCtx) {
 
 // SelectClause represents a SELECT statement.
 type SelectClause struct {
-	From        From
+	Distinct    bool
 	DistinctOn  DistinctOn
 	Exprs       SelectExprs
-	GroupBy     GroupBy
-	Window      Window
-	Having      *Where
+	From        From
 	Where       *Where
-	Distinct    bool
+	GroupBy     GroupBy
+	Having      *Where
+	Window      Window
 	TableSelect bool
 }
 
@@ -238,7 +238,6 @@ func (node *TableExprs) Format(ctx *FmtCtx) {
 type TableExpr interface {
 	NodeFormatter
 	tableExpr()
-	WalkTableExpr(Visitor) TableExpr
 }
 
 func (*AliasedTableExpr) tableExpr() {}
@@ -282,9 +281,6 @@ type IndexFlags struct {
 	// references from this table. This is useful in particular for scrub queries
 	// used to verify the consistency of foreign key relations.
 	IgnoreForeignKeys bool
-	// IgnoreUniqueWithoutIndexKeys disables optimizations based on unique without
-	// index constraints.
-	IgnoreUniqueWithoutIndexKeys bool
 }
 
 // ForceIndex returns true if a forced index was specified, either using a name
@@ -302,14 +298,9 @@ func (ih *IndexFlags) CombineWith(other *IndexFlags) error {
 	if ih.IgnoreForeignKeys && other.IgnoreForeignKeys {
 		return errors.New("IGNORE_FOREIGN_KEYS specified multiple times")
 	}
-	if ih.IgnoreUniqueWithoutIndexKeys && other.IgnoreUniqueWithoutIndexKeys {
-		return errors.New("IGNORE_UNIQUE_WITHOUT_INDEX_KEYS specified multiple times")
-	}
 	result := *ih
 	result.NoIndexJoin = ih.NoIndexJoin || other.NoIndexJoin
 	result.IgnoreForeignKeys = ih.IgnoreForeignKeys || other.IgnoreForeignKeys
-	result.IgnoreUniqueWithoutIndexKeys = ih.IgnoreUniqueWithoutIndexKeys ||
-		other.IgnoreUniqueWithoutIndexKeys
 
 	if other.Direction != 0 {
 		if ih.Direction != 0 {
@@ -348,8 +339,7 @@ func (ih *IndexFlags) Check() error {
 // Format implements the NodeFormatter interface.
 func (ih *IndexFlags) Format(ctx *FmtCtx) {
 	ctx.WriteByte('@')
-	if !ih.NoIndexJoin && !ih.IgnoreForeignKeys && !ih.IgnoreUniqueWithoutIndexKeys &&
-		ih.Direction == 0 {
+	if !ih.NoIndexJoin && !ih.IgnoreForeignKeys && ih.Direction == 0 {
 		if ih.Index != "" {
 			ctx.FormatNode(&ih.Index)
 		} else {
@@ -382,11 +372,6 @@ func (ih *IndexFlags) Format(ctx *FmtCtx) {
 		if ih.IgnoreForeignKeys {
 			sep()
 			ctx.WriteString("IGNORE_FOREIGN_KEYS")
-		}
-
-		if ih.IgnoreUniqueWithoutIndexKeys {
-			sep()
-			ctx.WriteString("IGNORE_UNIQUE_WITHOUT_INDEX_KEYS")
 		}
 		ctx.WriteString("}")
 	}
@@ -460,10 +445,9 @@ const (
 
 // JoinTableExpr.Hint
 const (
-	AstHash     = "HASH"
-	AstLookup   = "LOOKUP"
-	AstMerge    = "MERGE"
-	AstInverted = "INVERTED"
+	AstHash   = "HASH"
+	AstLookup = "LOOKUP"
+	AstMerge  = "MERGE"
 )
 
 // Format implements the NodeFormatter interface.
@@ -995,12 +979,12 @@ type LockingItem struct {
 
 // Format implements the NodeFormatter interface.
 func (f *LockingItem) Format(ctx *FmtCtx) {
-	ctx.FormatNode(f.Strength)
+	f.Strength.Format(ctx)
 	if len(f.Targets) > 0 {
 		ctx.WriteString(" OF ")
-		ctx.FormatNode(&f.Targets)
+		f.Targets.Format(ctx)
 	}
-	ctx.FormatNode(f.WaitPolicy)
+	f.WaitPolicy.Format(ctx)
 }
 
 // LockingStrength represents the possible row-level lock modes for a SELECT

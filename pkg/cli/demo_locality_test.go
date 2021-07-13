@@ -18,11 +18,8 @@ import (
 )
 
 func Example_demo_locality() {
-	c := NewCLITest(TestCLIParams{NoServer: true})
-	defer c.Cleanup()
-
-	defer func(b bool) { testingForceRandomizeDemoPorts = b }(testingForceRandomizeDemoPorts)
-	testingForceRandomizeDemoPorts = true
+	c := newCLITest(cliTestParams{noServer: true})
+	defer c.cleanup()
 
 	testData := [][]string{
 		{`demo`, `--nodes`, `3`, `-e`, `select node_id, locality from crdb_internal.gossip_nodes order by node_id`},

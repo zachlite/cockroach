@@ -29,19 +29,7 @@ export interface ButtonProps {
 const cx = classNames.bind(styles);
 
 export function Button(props: ButtonProps) {
-  const {
-    children,
-    type,
-    disabled,
-    size,
-    icon,
-    iconPosition,
-    onClick,
-    className,
-    buttonType,
-    tabIndex,
-    textAlign,
-  } = props;
+  const { children, type, disabled, size, icon, iconPosition, onClick, className, buttonType, tabIndex, textAlign } = props;
 
   const rootStyles = cx(
     "crl-button",
@@ -59,7 +47,7 @@ export function Button(props: ButtonProps) {
     }
     return (
       <div className={cx(`crl-button__icon--push-${iconPosition}`)}>
-        {icon()}
+        { icon() }
       </div>
     );
   };
@@ -73,11 +61,11 @@ export function Button(props: ButtonProps) {
       tabIndex={tabIndex}
     >
       <div className={cx("crl-button__container")}>
-        {iconPosition === "left" && renderIcon()}
-        <div className={cx("crl-button__content")} style={{ textAlign }}>
+        { iconPosition === "left" && renderIcon() }
+        <div className={cx("crl-button__content")} style={{textAlign}}>
           {children}
         </div>
-        {iconPosition === "right" && renderIcon()}
+        { iconPosition === "right" && renderIcon() }
       </div>
     </button>
   );

@@ -38,7 +38,7 @@ func (d *delegator) delegateShowPartitions(n *tree.ShowPartitions) (tree.Stateme
 
 		// We use the raw_config_sql from the partition_lookup result to get the
 		// official zone config for the partition, and use the full_config_sql from the zones table
-		// which is the result of looking up the partition's inherited zone configuration.
+		// which is the result of looking up the partition's inherited zone configuraion.
 		const showTablePartitionsQuery = `
 		SELECT
 			tables.database_name,
@@ -65,9 +65,7 @@ func (d *delegator) delegateShowPartitions(n *tree.ShowPartitions) (tree.Stateme
 				AND partition_lookup.index_name = table_indexes.index_name
 				AND partition_lookup.partition_name = partitions.name
 		WHERE
-			tables.name = %[1]s AND tables.database_name = %[2]s
-		ORDER BY
-			1, 2, 3, 4, 5, 6, 7, 8, 9;
+			tables.name = %[1]s AND tables.database_name = %[2]s;
 		`
 		return parse(fmt.Sprintf(showTablePartitionsQuery,
 			lex.EscapeSQLString(resName.Table()),
@@ -102,7 +100,7 @@ func (d *delegator) delegateShowPartitions(n *tree.ShowPartitions) (tree.Stateme
 		WHERE
 			tables.database_name = %[2]s
 		ORDER BY
-			tables.name, partitions.name, 1, 4, 5, 6, 7, 8, 9;
+			tables.name, partitions.name;
 		`
 		// Note: n.Database.String() != string(n.Database)
 		return parse(fmt.Sprintf(showDatabasePartitionsQuery, n.Database.String(), lex.EscapeSQLString(string(n.Database))))
@@ -160,9 +158,7 @@ func (d *delegator) delegateShowPartitions(n *tree.ShowPartitions) (tree.Stateme
 			AND partition_lookup.index_name = table_indexes.index_name
 			AND partition_lookup.partition_name = partitions.name
 	WHERE
-		table_indexes.index_name = %[1]s AND tables.name = %[2]s
-	ORDER BY
-		1, 2, 3, 4, 5, 6, 7, 8, 9;
+		table_indexes.index_name = %[1]s AND tables.name = %[2]s;
 	`
 	return parse(fmt.Sprintf(showIndexPartitionsQuery,
 		lex.EscapeSQLString(n.Index.Index.String()),

@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cmux"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -42,25 +41,20 @@ func ListenAndServeGRPC(
 
 	ctx := context.TODO()
 
-	stopper.AddCloser(stop.CloserFn(server.Stop))
-	waitQuiesce := func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		<-stopper.ShouldQuiesce()
 		FatalIfUnexpected(ln.Close())
-	}
-	if err := stopper.RunAsyncTask(ctx, "listen-quiesce", waitQuiesce); err != nil {
-		waitQuiesce(ctx)
-		return nil, err
-	}
+		<-stopper.ShouldStop()
+		server.Stop()
+	})
 
-	if err := stopper.RunAsyncTask(ctx, "serve", func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		FatalIfUnexpected(server.Serve(ln))
-	}); err != nil {
-		return nil, err
-	}
+	})
 	return ln, nil
 }
 
-var httpLogger = log.NewStdLogger(severity.ERROR, "net/http")
+var httpLogger = log.NewStdLogger(log.Severity_ERROR, "net/http")
 
 // Server is a thin wrapper around http.Server. See MakeServer for more detail.
 type Server struct {
@@ -109,18 +103,15 @@ func MakeServer(stopper *stop.Stopper, tlsConfig *tls.Config, handler http.Handl
 		log.Fatalf(ctx, "%v", err)
 	}
 
-	waitQuiesce := func(context.Context) {
-		<-stopper.ShouldQuiesce()
+	stopper.RunWorker(ctx, func(context.Context) {
+		<-stopper.ShouldStop()
 
 		mu.Lock()
 		for conn := range activeConns {
 			conn.Close()
 		}
 		mu.Unlock()
-	}
-	if err := stopper.RunAsyncTask(ctx, "http2-wait-quiesce", waitQuiesce); err != nil {
-		waitQuiesce(ctx)
-	}
+	})
 
 	return server
 }

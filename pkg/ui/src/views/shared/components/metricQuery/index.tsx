@@ -30,7 +30,7 @@
  */
 
 import React from "react";
-import * as protos from "src/js/protos";
+import * as protos from  "src/js/protos";
 
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
 import TimeSeriesQueryAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator;
@@ -86,7 +86,6 @@ export class Axis extends React.Component<AxisProps, {}> {
     units: AxisUnits.Count,
   };
 
-  // eslint-disable-next-line react/require-render-return
   render(): React.ReactElement<any> {
     throw new Error("Component <Axis /> should never render.");
   }
@@ -130,7 +129,6 @@ export interface MetricProps {
  * without rendering them.
  */
 export class Metric extends React.Component<MetricProps> {
-  // eslint-disable-next-line react/require-render-return
   render(): React.ReactElement<any> {
     throw new Error("Component <Metric /> should never render.");
   }

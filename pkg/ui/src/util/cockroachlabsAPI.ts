@@ -14,7 +14,9 @@
 
 import moment from "moment";
 
-import { VersionList, VersionCheckRequest } from "src/interfaces/cockroachlabs";
+import {
+  VersionList, VersionCheckRequest,
+} from "src/interfaces/cockroachlabs";
 import { withTimeout } from "./api";
 
 export const COCKROACHLABS_ADDR = "https://register.cockroachdb.com";
@@ -25,16 +27,12 @@ interface FetchConfig {
 }
 
 // TODO(maxlang): might be possible to consolidate with Fetch in api.ts
-function timeoutFetch<T extends BodyInit, R>(
-  url: string,
-  req?: T,
-  config: FetchConfig = {},
-): Promise<R> {
+function timeoutFetch<T extends BodyInit, R>(url: string, req?: T, config: FetchConfig = {}): Promise<R> {
   return withTimeout(
     fetch(url, {
       method: config.method || (req ? "POST" : "GET"),
       headers: {
-        Accept: "application/json",
+        "Accept": "application/json",
         "Content-Type": "application/json",
       },
       body: req,
@@ -52,13 +50,6 @@ function timeoutFetch<T extends BodyInit, R>(
  * COCKROACH LABS ENDPOINTS
  */
 
-export function versionCheck(
-  request: VersionCheckRequest,
-  timeout?: moment.Duration,
-): Promise<VersionList> {
-  return timeoutFetch(
-    `${COCKROACHLABS_ADDR}/api/clusters/updates?uuid=${request.clusterID}&version=${request.buildtag}`,
-    null,
-    { timeout },
-  );
+export function versionCheck(request: VersionCheckRequest, timeout?: moment.Duration): Promise<VersionList> {
+  return timeoutFetch(`${COCKROACHLABS_ADDR}/api/clusters/updates?uuid=${request.clusterID}&version=${request.buildtag}`, null, { timeout });
 }

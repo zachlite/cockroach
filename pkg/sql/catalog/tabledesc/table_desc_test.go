@@ -21,27 +21,27 @@ func TestMaybeIncrementVersion(t *testing.T) {
 	// Created descriptors should not have their version incremented.
 	t.Run("created does not get incremented", func(t *testing.T) {
 		{
-			mut := NewBuilder(&descpb.TableDescriptor{
+			mut := NewCreatedMutable(descpb.TableDescriptor{
 				ID:      1,
 				Version: 1,
-			}).BuildCreatedMutableTable()
+			})
 			mut.MaybeIncrementVersion()
 			require.Equal(t, descpb.DescriptorVersion(1), mut.GetVersion())
 		}
 		{
-			mut := NewBuilder(&descpb.TableDescriptor{
+			mut := NewCreatedMutable(descpb.TableDescriptor{
 				ID:      1,
 				Version: 42,
-			}).BuildCreatedMutableTable()
+			})
 			mut.MaybeIncrementVersion()
 			require.Equal(t, descpb.DescriptorVersion(42), mut.GetVersion())
 		}
 	})
 	t.Run("existed gets incremented once", func(t *testing.T) {
-		mut := NewBuilder(&descpb.TableDescriptor{
+		mut := NewExistingMutable(descpb.TableDescriptor{
 			ID:      1,
 			Version: 1,
-		}).BuildExistingMutableTable()
+		})
 		require.Equal(t, descpb.DescriptorVersion(1), mut.GetVersion())
 		mut.MaybeIncrementVersion()
 		require.Equal(t, descpb.DescriptorVersion(2), mut.GetVersion())

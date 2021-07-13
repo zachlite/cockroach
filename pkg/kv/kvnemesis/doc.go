@@ -25,10 +25,7 @@
 // TODO
 // - CPut/InitPut/Increment/Delete
 // - DeleteRange/ClearRange/RevertRange/ReverseScan
-// - AdminRelocateRange
-// - AdminUnsplit
-// - AdminScatter
-// - CheckConsistency
+// - TransferLease
 // - ExportRequest
 // - AddSSTable
 // - Root and leaf transactions

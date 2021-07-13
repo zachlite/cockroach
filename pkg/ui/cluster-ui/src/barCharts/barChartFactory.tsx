@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -20,12 +20,11 @@ import { normalizeClosedDomain } from "./utils";
 
 const cx = classNames.bind(styles);
 
-export interface BarChartOptions<T> {
+export interface BarChartOptions {
   classes?: {
     root?: string;
     label?: string;
   };
-  displayNoSamples?: (d: T) => boolean;
 }
 
 export function barChartFactory<T>(
@@ -45,7 +44,7 @@ export function barChartFactory<T>(
     legendFormatter = formatter;
   }
 
-  return (rows: T[] = [], options: BarChartOptions<T> = {}) => {
+  return (rows: T[] = [], options: BarChartOptions = {}) => {
     const getTotal = (d: T) => _.sum(_.map(accessors, ({ value }) => value(d)));
     const getTotalWithStdDev = (d: T) => getTotal(d) + stdDevAccessor.value(d);
 
@@ -61,26 +60,6 @@ export function barChartFactory<T>(
     return (d: T) => {
       if (rows.length === 0) {
         scale.domain(normalizeClosedDomain([0, getTotal(d)]));
-      }
-
-      if (options?.displayNoSamples ? options.displayNoSamples(d) : false) {
-        return (
-          <Tooltip
-            placement="bottom"
-            content={
-              <div className={cx("tooltip__table--title")}>
-                <p>
-                  Either the statement sample rate is set to 0, disabling
-                  sampling, or statements have not yet been sampled. To turn on
-                  sampling, set <code>sql.txn_stats.sample_rate</code> to a
-                  nonzero value less than or equal to 1.
-                </p>
-              </div>
-            }
-          >
-            no samples
-          </Tooltip>
-        );
       }
 
       let sum = 0;

@@ -89,8 +89,6 @@ func TestScanner(t *testing.T) {
 		{`$a$1$$3$a$`, []int{SCONST}},
 		{`$a$1$3$a$`, []int{SCONST}},
 		{`$ab$1$a$ab$`, []int{SCONST}},
-		{`$ab1$ab$ab1$`, []int{SCONST}},
-		{`$ab1$ab12$ab1$`, []int{SCONST}},
 		{`$$~!@#$%^&*()_+:",./<>?;'$$`, []int{SCONST}},
 		{`$$hello
 world$$`, []int{SCONST}},
@@ -314,8 +312,6 @@ world`},
 		{`$a$1$$3$a$`, "1$$3"},
 		{`$a$1$3$a$`, "1$3"},
 		{`$ab$1$a$ab$`, "1$a"},
-		{`$ab1$ab$ab1$`, "ab"},
-		{`$ab1$ab12$ab1$`, "ab12"},
 		{`$$~!@#$%^&*()_+:",./<>?;'$$`, "~!@#$%^&*()_+:\",./<>?;'"},
 		{`$$hello
 world$$`, `hello

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -11,7 +11,7 @@
 import React from "react";
 import classNames from "classnames/bind";
 import styles from "./barCharts.module.scss";
-import { longToInt } from "../util";
+import { longToInt } from "./utils";
 
 const cx = classNames.bind(styles);
 

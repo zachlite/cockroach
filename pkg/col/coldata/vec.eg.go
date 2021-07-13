@@ -17,16 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
-)
-
-// Workaround for bazel auto-generated code. goimports does not automatically
-// pick up the right packages when run within the bazel sandbox.
-var (
-	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ apd.Context
-	_ duration.Duration
-	_ json.JSON
 )
 
 func (m *memColumn) Append(args SliceArgs) {
@@ -45,7 +35,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -68,9 +58,20 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol.AppendSlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				// We need to truncate toCol before appending to it, so in case of
-				// bytes-like columns, we append an empty slice.
+				// We need to truncate toCol before appending to it, so in case of Bytes,
+				// we append an empty slice.
 				toCol.AppendSlice(toCol, args.DestIdx, 0, 0)
+				// We will be getting all values below to be appended, regardless of
+				// whether the value is NULL. It is possible that Bytes' invariant of
+				// non-decreasing offsets on the source is currently not maintained, so
+				// we explicitly enforce it.
+				maxIdx := 0
+				for _, selIdx := range sel {
+					if selIdx > maxIdx {
+						maxIdx = selIdx
+					}
+				}
+				fromCol.UpdateOffsetsToBeNonDecreasing(maxIdx + 1)
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol.AppendVal(val)
@@ -106,15 +107,13 @@ func (m *memColumn) Append(args SliceArgs) {
 					}
 					__src_slice := fromCol[args.SrcStartIdx:args.SrcEndIdx]
 					__dst_slice := toCol[args.DestIdx:]
-					_ = __dst_slice[len(__src_slice)-1]
 					for __i := range __src_slice {
-						//gcassert:bce
 						__dst_slice[__i].Set(&__src_slice[__i])
 					}
 				}
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, apd.Decimal{})
@@ -137,7 +136,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -156,7 +155,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -176,7 +175,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -199,7 +198,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -222,7 +221,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
@@ -245,35 +244,10 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol = append(toCol[:args.DestIdx], fromCol[args.SrcStartIdx:args.SrcEndIdx]...)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol[0:args.DestIdx]
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol = append(toCol, val)
-				}
-			}
-			m.nulls.set(args)
-			m.col = toCol
-		}
-	case types.JsonFamily:
-		switch m.t.Width() {
-		case -1:
-		default:
-			fromCol := args.Src.JSON()
-			toCol := m.JSON()
-			// NOTE: it is unfortunate that we always append whole slice without paying
-			// attention to whether the values are NULL. However, if we do start paying
-			// attention, the performance suffers dramatically, so we choose to copy
-			// over "actual" as well as "garbage" values.
-			if args.Sel == nil {
-				toCol.AppendSlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
-			} else {
-				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				// We need to truncate toCol before appending to it, so in case of
-				// bytes-like columns, we append an empty slice.
-				toCol.AppendSlice(toCol, args.DestIdx, 0, 0)
-				for _, selIdx := range sel {
-					val := fromCol.Get(selIdx)
-					toCol.AppendVal(val)
 				}
 			}
 			m.nulls.set(args)
@@ -293,7 +267,7 @@ func (m *memColumn) Append(args SliceArgs) {
 				toCol.AppendSlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
 			} else {
 				sel := args.Sel[args.SrcStartIdx:args.SrcEndIdx]
-				toCol = toCol.Window(0, args.DestIdx)
+				toCol = toCol.Slice(0, args.DestIdx)
 				for _, selIdx := range sel {
 					val := fromCol.Get(selIdx)
 					toCol.AppendVal(val)
@@ -308,10 +282,6 @@ func (m *memColumn) Append(args SliceArgs) {
 }
 
 func (m *memColumn) Copy(args CopySliceArgs) {
-	if args.SrcStartIdx == args.SrcEndIdx {
-		// Nothing to copy, so return early.
-		return
-	}
 	if !args.SelOnDest {
 		// We're about to overwrite this entire range, so unset all the nulls.
 		m.Nulls().UnsetNullRange(args.DestIdx, args.DestIdx+(args.SrcEndIdx-args.SrcStartIdx))
@@ -331,63 +301,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		}
 	case types.BytesFamily:
@@ -399,14 +357,12 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
@@ -417,20 +373,15 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
 						toCol.Set(selIdx, v)
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
@@ -441,9 +392,8 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
 						toCol.Set(i+args.DestIdx, v)
 					}
@@ -463,63 +413,57 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx].Set(&v)
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx].Set(&v)
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx].Set(&v)
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx].Set(&v)
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			{
+				__tgt_slice := toCol[args.DestIdx:]
+				__src_slice := fromCol[args.SrcStartIdx:args.SrcEndIdx]
+				for __i := range __src_slice {
+					__tgt_slice[__i].Set(&__src_slice[__i])
+				}
+			}
 			m.nulls.set(args.SliceArgs)
 		}
 	case types.IntFamily:
@@ -530,63 +474,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		case 32:
 			fromCol := args.Src.Int32()
@@ -594,63 +526,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		case -1:
 		default:
@@ -659,63 +579,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		}
 	case types.FloatFamily:
@@ -727,63 +635,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		}
 	case types.TimestampTZFamily:
@@ -795,63 +691,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		}
 	case types.IntervalFamily:
@@ -863,127 +747,51 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
 								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
+								toCol[selIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
+						toCol[selIdx] = v
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					toCol = toCol[args.DestIdx:]
-					_ = toCol[n-1]
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
 								v := fromCol.Get(selIdx)
-								//gcassert:bce
-								toCol.Set(i, v)
+								toCol[i+args.DestIdx] = v
 							}
 						}
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
-						//gcassert:bce
-						toCol.Set(i, v)
+						toCol[i+args.DestIdx] = v
 					}
 				}
 				return
 			}
 			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
-			m.nulls.set(args.SliceArgs)
-		}
-	case types.JsonFamily:
-		switch m.t.Width() {
-		case -1:
-		default:
-			fromCol := args.Src.JSON()
-			toCol := m.JSON()
-			if args.Sel != nil {
-				sel := args.Sel
-				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					if args.Src.MaybeHasNulls() {
-						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
-							if nulls.NullAt(selIdx) {
-								m.nulls.SetNull(selIdx)
-							} else {
-								v := fromCol.Get(selIdx)
-								m.nulls.UnsetNull(selIdx)
-								toCol.Set(selIdx, v)
-							}
-						}
-						return
-					}
-					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
-						v := fromCol.Get(selIdx)
-						toCol.Set(selIdx, v)
-					}
-				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
-					if args.Src.MaybeHasNulls() {
-						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
-							if nulls.NullAt(selIdx) {
-								m.nulls.SetNull(i + args.DestIdx)
-							} else {
-								v := fromCol.Get(selIdx)
-								toCol.Set(i+args.DestIdx, v)
-							}
-						}
-						return
-					}
-					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
-						v := fromCol.Get(selIdx)
-						toCol.Set(i+args.DestIdx, v)
-					}
-				}
-				return
-			}
-			// No Sel.
-			toCol.CopySlice(fromCol, args.DestIdx, args.SrcStartIdx, args.SrcEndIdx)
+			copy(toCol[args.DestIdx:], fromCol[args.SrcStartIdx:args.SrcEndIdx])
 			m.nulls.set(args.SliceArgs)
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:
@@ -995,14 +803,12 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 			if args.Sel != nil {
 				sel := args.Sel
 				if args.SelOnDest {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
+								// Remove an unused warning in some cases.
+								_ = i
 								m.nulls.SetNull(selIdx)
 							} else {
 								v := fromCol.Get(selIdx)
@@ -1013,20 +819,15 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
 						toCol.Set(selIdx, v)
 					}
 				} else {
-					sel = sel[args.SrcStartIdx:args.SrcEndIdx]
-					n := len(sel)
 					if args.Src.MaybeHasNulls() {
 						nulls := args.Src.Nulls()
-						for i := 0; i < n; i++ {
-							//gcassert:bce
-							selIdx := sel[i]
+						for i, selIdx := range sel[args.SrcStartIdx:args.SrcEndIdx] {
 							if nulls.NullAt(selIdx) {
 								m.nulls.SetNull(i + args.DestIdx)
 							} else {
@@ -1037,9 +838,8 @@ func (m *memColumn) Copy(args CopySliceArgs) {
 						return
 					}
 					// No Nulls.
-					for i := 0; i < n; i++ {
-						//gcassert:bce
-						selIdx := sel[i]
+					for i := range sel[args.SrcStartIdx:args.SrcEndIdx] {
+						selIdx := sel[args.SrcStartIdx+i]
 						v := fromCol.Get(selIdx)
 						toCol.Set(i+args.DestIdx, v)
 					}
@@ -1065,7 +865,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1089,7 +889,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1100,7 +900,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		case 32:
@@ -1108,7 +908,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		case -1:
@@ -1117,7 +917,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1129,7 +929,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1141,7 +941,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1153,19 +953,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
-				nulls:               m.nulls.Slice(start, end),
-			}
-		}
-	case types.JsonFamily:
-		switch m.t.Width() {
-		case -1:
-		default:
-			col := m.JSON()
-			return &memColumn{
-				t:                   m.t,
-				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col[start:end],
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1177,7 +965,7 @@ func (m *memColumn) Window(start int, end int) Vec {
 			return &memColumn{
 				t:                   m.t,
 				canonicalTypeFamily: m.canonicalTypeFamily,
-				col:                 col.Window(start, end),
+				col:                 col.Slice(start, end),
 				nulls:               m.nulls.Slice(start, end),
 			}
 		}
@@ -1195,7 +983,7 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		default:
 			target := v.Bool()
 			newVal := elem.(bool)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		}
 	case types.BytesFamily:
 		switch t.Width() {
@@ -1211,23 +999,23 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		default:
 			target := v.Decimal()
 			newVal := elem.(apd.Decimal)
-			target.Set(rowIdx, newVal)
+			target[rowIdx].Set(&newVal)
 		}
 	case types.IntFamily:
 		switch t.Width() {
 		case 16:
 			target := v.Int16()
 			newVal := elem.(int16)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		case 32:
 			target := v.Int32()
 			newVal := elem.(int32)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		case -1:
 		default:
 			target := v.Int64()
 			newVal := elem.(int64)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		}
 	case types.FloatFamily:
 		switch t.Width() {
@@ -1235,7 +1023,7 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		default:
 			target := v.Float64()
 			newVal := elem.(float64)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		}
 	case types.TimestampTZFamily:
 		switch t.Width() {
@@ -1243,7 +1031,7 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		default:
 			target := v.Timestamp()
 			newVal := elem.(time.Time)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		}
 	case types.IntervalFamily:
 		switch t.Width() {
@@ -1251,15 +1039,7 @@ func SetValueAt(v Vec, elem interface{}, rowIdx int) {
 		default:
 			target := v.Interval()
 			newVal := elem.(duration.Duration)
-			target.Set(rowIdx, newVal)
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			target := v.JSON()
-			newVal := elem.(json.JSON)
-			target.Set(rowIdx, newVal)
+			target[rowIdx] = newVal
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:
 		switch t.Width() {
@@ -1335,13 +1115,6 @@ func GetValueAt(v Vec, rowIdx int) interface{} {
 		case -1:
 		default:
 			target := v.Interval()
-			return target.Get(rowIdx)
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			target := v.JSON()
 			return target.Get(rowIdx)
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:

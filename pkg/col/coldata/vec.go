@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 // Column is an interface that represents a raw array of a Go native type.
@@ -59,9 +58,6 @@ type Vec interface {
 	// CanonicalTypeFamily returns the canonical type family of data stored in
 	// this Vec.
 	CanonicalTypeFamily() types.Family
-	// IsBytesLike returns true if this data is stored with a flat bytes
-	// representation.
-	IsBytesLike() bool
 
 	// Bool returns a bool list.
 	Bool() Bools
@@ -81,8 +77,6 @@ type Vec interface {
 	Timestamp() Times
 	// Interval returns a duration.Duration slice.
 	Interval() Durations
-	// JSON returns a vector of JSONs.
-	JSON() *JSONs
 	// Datum returns a vector of Datums.
 	Datum() DatumVec
 
@@ -102,10 +96,6 @@ type Vec interface {
 	// An optional Sel slice can also be provided to apply a filter on the source
 	// Vec.
 	// Refer to the SliceArgs comment for specifics and TestAppend for examples.
-	//
-	// NOTE: Append does *not* support the case of appending 0 values (i.e.
-	// the behavior of Append when args.SrcStartIdx == args.SrcEndIdx is
-	// undefined).
 	Append(SliceArgs)
 
 	// Copy uses CopySliceArgs to copy elements of a source Vec into this Vec. It is
@@ -134,6 +124,10 @@ type Vec interface {
 
 	// Length returns the length of the slice that is underlying this Vec.
 	Length() int
+
+	// SetLength sets the length of the slice that is underlying this Vec. Note
+	// that the length of the batch which this Vec belongs to "takes priority".
+	SetLength(int)
 
 	// Capacity returns the capacity of the Golang's slice that is underlying
 	// this Vec. Note that if there is no "slice" (like in case of flat bytes),
@@ -168,9 +162,6 @@ func (cf *defaultColumnFactory) MakeColumn(t *types.T, length int) Column {
 	case types.BoolFamily:
 		return make(Bools, length)
 	case types.BytesFamily:
-		if t.Family() == types.UuidFamily {
-			return NewBytesWithAvgLength(length, uuid.Size)
-		}
 		return NewBytes(length)
 	case types.IntFamily:
 		switch t.Width() {
@@ -191,8 +182,6 @@ func (cf *defaultColumnFactory) MakeColumn(t *types.T, length int) Column {
 		return make(Times, length)
 	case types.IntervalFamily:
 		return make(Durations, length)
-	case types.JsonFamily:
-		return NewJSONs(length)
 	default:
 		panic(fmt.Sprintf("StandardColumnFactory doesn't support %s", t))
 	}
@@ -215,14 +204,6 @@ func (m *memColumn) Type() *types.T {
 
 func (m *memColumn) CanonicalTypeFamily() types.Family {
 	return m.canonicalTypeFamily
-}
-
-func (m *memColumn) IsBytesLike() bool {
-	switch m.canonicalTypeFamily {
-	case types.BytesFamily, types.JsonFamily:
-		return true
-	}
-	return false
 }
 
 func (m *memColumn) SetCol(col interface{}) {
@@ -263,10 +244,6 @@ func (m *memColumn) Timestamp() Times {
 
 func (m *memColumn) Interval() Durations {
 	return m.col.(Durations)
-}
-
-func (m *memColumn) JSON() *JSONs {
-	return m.col.(*JSONs)
 }
 
 func (m *memColumn) Datum() DatumVec {
@@ -318,10 +295,40 @@ func (m *memColumn) Length() int {
 		return len(m.col.(Times))
 	case types.IntervalFamily:
 		return len(m.col.(Durations))
-	case types.JsonFamily:
-		return m.JSON().Len()
 	case typeconv.DatumVecCanonicalTypeFamily:
 		return m.col.(DatumVec).Len()
+	default:
+		panic(fmt.Sprintf("unhandled type %s", m.t))
+	}
+}
+
+func (m *memColumn) SetLength(l int) {
+	switch m.CanonicalTypeFamily() {
+	case types.BoolFamily:
+		m.col = m.col.(Bools)[:l]
+	case types.BytesFamily:
+		m.Bytes().SetLength(l)
+	case types.IntFamily:
+		switch m.t.Width() {
+		case 16:
+			m.col = m.col.(Int16s)[:l]
+		case 32:
+			m.col = m.col.(Int32s)[:l]
+		case 0, 64:
+			m.col = m.col.(Int64s)[:l]
+		default:
+			panic(fmt.Sprintf("unexpected int width: %d", m.t.Width()))
+		}
+	case types.FloatFamily:
+		m.col = m.col.(Float64s)[:l]
+	case types.DecimalFamily:
+		m.col = m.col.(Decimals)[:l]
+	case types.TimestampTZFamily:
+		m.col = m.col.(Times)[:l]
+	case types.IntervalFamily:
+		m.col = m.col.(Durations)[:l]
+	case typeconv.DatumVecCanonicalTypeFamily:
+		m.col.(DatumVec).SetLength(l)
 	default:
 		panic(fmt.Sprintf("unhandled type %s", m.t))
 	}
@@ -352,8 +359,6 @@ func (m *memColumn) Capacity() int {
 		return cap(m.col.(Times))
 	case types.IntervalFamily:
 		return cap(m.col.(Durations))
-	case types.JsonFamily:
-		return m.JSON().Len()
 	case typeconv.DatumVecCanonicalTypeFamily:
 		return m.col.(DatumVec).Cap()
 	default:

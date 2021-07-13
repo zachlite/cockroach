@@ -10,9 +10,11 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
@@ -23,15 +25,15 @@ func newSubstringOperator(
 	typs []*types.T,
 	argumentCols []int,
 	outputIdx int,
-	input colexecop.Operator,
-) colexecop.Operator {
+	input colexecbase.Operator,
+) colexecbase.Operator {
 	startType := typs[argumentCols[1]]
 	lengthType := typs[argumentCols[2]]
 	base := substringFunctionBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		argumentCols:   argumentCols,
-		outputIdx:      outputIdx,
+		OneInputNode: NewOneInputNode(input),
+		allocator:    allocator,
+		argumentCols: argumentCols,
+		outputIdx:    outputIdx,
 	}
 	if startType.Family() != types.IntFamily {
 		colexecerror.InternalError(errors.AssertionFailedf("non-int start argument type %s", startType))
@@ -78,20 +80,24 @@ func newSubstringOperator(
 }
 
 type substringFunctionBase struct {
-	colexecop.OneInputHelper
+	OneInputNode
 	allocator    *colmem.Allocator
 	argumentCols []int
 	outputIdx    int
+}
+
+func (s *substringFunctionBase) Init() {
+	s.input.Init()
 }
 
 type substringInt64Int16Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt64Int16Operator{}
+var _ colexecbase.Operator = &substringInt64Int16Operator{}
 
-func (s *substringInt64Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -111,8 +117,6 @@ func (s *substringInt64Int16Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -170,10 +174,10 @@ type substringInt64Int32Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt64Int32Operator{}
+var _ colexecbase.Operator = &substringInt64Int32Operator{}
 
-func (s *substringInt64Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -193,8 +197,6 @@ func (s *substringInt64Int32Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -252,10 +254,10 @@ type substringInt64Int64Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt64Int64Operator{}
+var _ colexecbase.Operator = &substringInt64Int64Operator{}
 
-func (s *substringInt64Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -275,8 +277,6 @@ func (s *substringInt64Int64Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -334,10 +334,10 @@ type substringInt16Int16Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt16Int16Operator{}
+var _ colexecbase.Operator = &substringInt16Int16Operator{}
 
-func (s *substringInt16Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -357,8 +357,6 @@ func (s *substringInt16Int16Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -416,10 +414,10 @@ type substringInt16Int32Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt16Int32Operator{}
+var _ colexecbase.Operator = &substringInt16Int32Operator{}
 
-func (s *substringInt16Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -439,8 +437,6 @@ func (s *substringInt16Int32Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -498,10 +494,10 @@ type substringInt16Int64Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt16Int64Operator{}
+var _ colexecbase.Operator = &substringInt16Int64Operator{}
 
-func (s *substringInt16Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -521,8 +517,6 @@ func (s *substringInt16Int64Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -580,10 +574,10 @@ type substringInt32Int16Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt32Int16Operator{}
+var _ colexecbase.Operator = &substringInt32Int16Operator{}
 
-func (s *substringInt32Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -603,8 +597,6 @@ func (s *substringInt32Int16Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -662,10 +654,10 @@ type substringInt32Int32Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt32Int32Operator{}
+var _ colexecbase.Operator = &substringInt32Int32Operator{}
 
-func (s *substringInt32Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -685,8 +677,6 @@ func (s *substringInt32Int32Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {
@@ -744,10 +734,10 @@ type substringInt32Int64Operator struct {
 	substringFunctionBase
 }
 
-var _ colexecop.Operator = &substringInt32Int64Operator{}
+var _ colexecbase.Operator = &substringInt32Int64Operator{}
 
-func (s *substringInt32Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -767,8 +757,6 @@ func (s *substringInt32Int64Operator) Next() coldata.Batch {
 	s.allocator.PerformOperation(
 		[]coldata.Vec{outputVec},
 		func() {
-			// TODO(yuzefovich): refactor this loop so that BCE occurs when sel
-			// is nil.
 			for i := 0; i < n; i++ {
 				rowIdx := i
 				if sel != nil {

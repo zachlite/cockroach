@@ -66,7 +66,7 @@ const (
 
 func (p *planner) ShowZoneConfig(ctx context.Context, n *tree.ShowZoneConfig) (planNode, error) {
 	if !p.ExecCfg().Codec.ForSystemTenant() {
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
+		return nil, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
 
 	return &delayedNode{
@@ -108,7 +108,7 @@ func getShowZoneConfigRow(
 			return nil, err
 		}
 	} else if zoneSpecifier.Database != "" {
-		database, err := p.Descriptors().GetImmutableDatabaseByName(
+		_, database, err := p.Descriptors().GetImmutableDatabaseByName(
 			ctx,
 			p.txn,
 			string(zoneSpecifier.Database),

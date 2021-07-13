@@ -212,10 +212,10 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts,
 		})
@@ -259,10 +259,10 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts2,
 		})
@@ -347,10 +347,10 @@ func TestPebbleEncryption2(t *testing.T) {
 			context.Background(),
 			storage.PebbleConfig{
 				StorageConfig: base.StorageConfig{
-					Attrs:             roachpb.Attributes{},
-					MaxSize:           512 << 20,
-					UseFileRegistry:   true,
-					EncryptionOptions: encOptionsBytes,
+					Attrs:           roachpb.Attributes{},
+					MaxSize:         512 << 20,
+					UseFileRegistry: true,
+					ExtraOptions:    encOptionsBytes,
 				},
 				Opts: opts,
 			})

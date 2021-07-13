@@ -35,11 +35,11 @@ func main() {
 }
 
 type sinkInfo struct {
-	Comment      string
-	Name         string
-	AnchorName   string
-	Fields       []fieldInfo
-	CommonFields []fieldInfo
+	Comment         string
+	Name            string
+	AnchorName      string
+	Fields          []fieldInfo
+	InheritedFields []fieldInfo
 }
 
 type fieldInfo struct {
@@ -87,7 +87,7 @@ func run() error {
 	sort.Strings(keys)
 	var sortedSinkInfos []*sinkInfo
 	for _, k := range keys {
-		if k == "CommonSinkConfig" || strings.HasSuffix(k, "Defaults") {
+		if k == "CommonSinkConfig" {
 			// We don't want the common configuration to appear as a sink in
 			// the output doc.
 			continue
@@ -218,18 +218,8 @@ func readInput(infos map[string]*sinkInfo) error {
 			}
 
 			if otherMsg, ok := infos[typ]; ok {
-				if typ == "CommonSinkConfig" {
-					// Inline the fields from the other struct here.
-					curSink.CommonFields = append(curSink.CommonFields, otherMsg.Fields...)
-				} else {
-					for _, f := range otherMsg.Fields {
-						f.Comment = fmt.Sprintf(
-							"%v Inherited from `%v.%v` if not specified.",
-							f.Comment, camelToSnake(otherMsg.Name), f.FieldName)
-						curSink.Fields = append(curSink.Fields, f)
-					}
-					curSink.CommonFields = append(curSink.CommonFields, otherMsg.CommonFields...)
-				}
+				// Inline the fields from the other struct here.
+				curSink.InheritedFields = append(curSink.InheritedFields, otherMsg.Fields...)
 			} else {
 				fi := fieldInfo{
 					Comment:   comment,
@@ -245,7 +235,7 @@ func readInput(infos map[string]*sinkInfo) error {
 	return nil
 }
 
-var configStructRe = regexp.MustCompile(`^type (?P<name>[A-Z][a-z0-9]*)(SinkConfig|Defaults) struct`)
+var configStructRe = regexp.MustCompile(`^type (?P<name>[A-Z][a-z0-9]*)SinkConfig struct`)
 
 var fieldDefRe = regexp.MustCompile(`^\s*` +
 	// Field name in Go.
@@ -274,10 +264,12 @@ func camelToSnake(typeName string) string {
 }
 
 var tmplSrc = `
+# Documentation for logging sinks
+
 The supported log output sink types are documented below.
 
 {{range .Sinks}}
-- [{{.Name}}](#{{.AnchorName}})
+- [{{.Name}}](#sink-{{.AnchorName}})
 {{end}}
 
 {{range .Sinks}}
@@ -297,13 +289,13 @@ Type-specific configuration options:
 {{end}}
 {{- end}}
 
-{{if .CommonFields -}}
+{{if .InheritedFields -}}
 
 Configuration options shared across all sink types:
 
 | Field | Description |
 |--|--|
-{{range .CommonFields -}}
+{{range .InheritedFields -}}
 | ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }} |
 {{end}}
 {{- end}}

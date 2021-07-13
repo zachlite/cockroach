@@ -17,8 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -28,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -43,64 +42,6 @@ var csvOutputTypes = []*types.T{
 }
 
 const readImportDataProcessorName = "readImportDataProcessor"
-
-var importPKAdderBufferSize = func() *settings.ByteSizeSetting {
-	s := settings.RegisterByteSizeSetting(
-		"kv.bulk_ingest.pk_buffer_size",
-		"the initial size of the BulkAdder buffer handling primary index imports",
-		32<<20,
-	)
-	return s
-}()
-
-var importPKAdderMaxBufferSize = func() *settings.ByteSizeSetting {
-	s := settings.RegisterByteSizeSetting(
-		"kv.bulk_ingest.max_pk_buffer_size",
-		"the maximum size of the BulkAdder buffer handling primary index imports",
-		128<<20,
-	)
-	return s
-}()
-
-var importIndexAdderBufferSize = func() *settings.ByteSizeSetting {
-	s := settings.RegisterByteSizeSetting(
-		"kv.bulk_ingest.index_buffer_size",
-		"the initial size of the BulkAdder buffer handling secondary index imports",
-		32<<20,
-	)
-	return s
-}()
-
-var importIndexAdderMaxBufferSize = func() *settings.ByteSizeSetting {
-	s := settings.RegisterByteSizeSetting(
-		"kv.bulk_ingest.max_index_buffer_size",
-		"the maximum size of the BulkAdder buffer handling secondary index imports",
-		512<<20,
-	)
-	return s
-}()
-
-var importBufferIncrementSize = func() *settings.ByteSizeSetting {
-	s := settings.RegisterByteSizeSetting(
-		"kv.bulk_ingest.buffer_increment",
-		"the size by which the BulkAdder attempts to grow its buffer before flushing",
-		32<<20,
-	)
-	return s
-}()
-
-// ImportBufferConfigSizes determines the minimum, maximum and step size for the
-// BulkAdder buffer used in import.
-func importBufferConfigSizes(st *cluster.Settings, isPKAdder bool) (int64, func() int64, int64) {
-	if isPKAdder {
-		return importPKAdderBufferSize.Get(&st.SV),
-			func() int64 { return importPKAdderMaxBufferSize.Get(&st.SV) },
-			importBufferIncrementSize.Get(&st.SV)
-	}
-	return importIndexAdderBufferSize.Get(&st.SV),
-		func() int64 { return importIndexAdderMaxBufferSize.Get(&st.SV) },
-		importBufferIncrementSize.Get(&st.SV)
-}
 
 // readImportDataProcessor is a processor that does not take any inputs. It
 // starts a worker goroutine in Start(), which emits progress updates over an
@@ -205,6 +146,12 @@ func (idp *readImportDataProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.Pro
 	}, nil
 }
 
+// ConsumerClosed is part of the RowSource interface.
+func (idp *readImportDataProcessor) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	idp.InternalClose()
+}
+
 func injectTimeIntoEvalCtx(ctx *tree.EvalContext, walltime int64) {
 	sec := walltime / int64(time.Second)
 	nsec := walltime % int64(time.Second)
@@ -265,7 +212,7 @@ func makeInputConverter(
 	case roachpb.IOFileFormat_CSV:
 		isWorkload := true
 		for _, file := range spec.Uri {
-			if _, err := parseWorkloadConfig(file); err != nil {
+			if conf, err := cloudimpl.ExternalStorageConfFromURI(file, spec.User()); err != nil || conf.Provider != roachpb.ExternalStorageProvider_Workload {
 				isWorkload = false
 				break
 			}
@@ -312,7 +259,7 @@ func ingestKvs(
 
 	writeTS := hlc.Timestamp{WallTime: spec.WalltimeNanos}
 
-	flushSize := func() int64 { return storageccl.MaxIngestBatchSize(flowCtx.Cfg.Settings) }
+	flushSize := func() int64 { return storageccl.MaxImportBatchSize(flowCtx.Cfg.Settings) }
 
 	// We create two bulk adders so as to combat the excessive flushing of small
 	// SSTs which was observed when using a single adder for both primary and
@@ -323,8 +270,7 @@ func ingestKvs(
 	// of the pkIndexAdder buffer be set below that of the indexAdder buffer.
 	// Otherwise, as a consequence of filling up faster the pkIndexAdder buffer
 	// will hog memory as it tries to grow more aggressively.
-	minBufferSize, maxBufferSize, stepSize := importBufferConfigSizes(flowCtx.Cfg.Settings,
-		true /* isPKAdder */)
+	minBufferSize, maxBufferSize, stepSize := storageccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings, true /* isPKAdder */)
 	pkIndexAdder, err := flowCtx.Cfg.BulkAdder(ctx, flowCtx.Cfg.DB, writeTS, kvserverbase.BulkAdderOptions{
 		Name:              "pkAdder",
 		DisallowShadowing: true,
@@ -339,8 +285,7 @@ func ingestKvs(
 	}
 	defer pkIndexAdder.Close(ctx)
 
-	minBufferSize, maxBufferSize, stepSize = importBufferConfigSizes(flowCtx.Cfg.Settings,
-		false /* isPKAdder */)
+	minBufferSize, maxBufferSize, stepSize = storageccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings, false /* isPKAdder */)
 	indexAdder, err := flowCtx.Cfg.BulkAdder(ctx, flowCtx.Cfg.DB, writeTS, kvserverbase.BulkAdderOptions{
 		Name:              "indexAdder",
 		DisallowShadowing: true,

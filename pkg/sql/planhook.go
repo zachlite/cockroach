@@ -18,11 +18,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -88,14 +88,17 @@ type PlanHookState interface {
 	GetAllRoles(ctx context.Context) (map[security.SQLUsername]bool, error)
 	BumpRoleMembershipTableVersion(ctx context.Context) error
 	EvalAsOfTimestamp(ctx context.Context, asOf tree.AsOfClause) (hlc.Timestamp, error)
-	ResolveMutableTableDescriptor(ctx context.Context, tn *tree.TableName, required bool, requiredType tree.RequiredTableKind) (prefix catalog.ResolvedObjectPrefix, table *tabledesc.Mutable, err error)
+	ResolveUncachedDatabaseByName(
+		ctx context.Context, dbName string, required bool) (*dbdesc.Immutable, error)
+	ResolveMutableTableDescriptor(
+		ctx context.Context, tn *tree.TableName, required bool, requiredType tree.RequiredTableKind,
+	) (table *tabledesc.Mutable, err error)
 	ShowCreate(
 		ctx context.Context, dbPrefix string, allDescs []descpb.Descriptor, desc catalog.TableDescriptor, displayOptions ShowCreateDisplayOptions,
 	) (string, error)
 	CreateSchemaNamespaceEntry(ctx context.Context, schemaNameKey roachpb.Key,
 		schemaID descpb.ID) error
 	MigrationJobDeps() migration.JobDeps
-	BufferClientNotice(ctx context.Context, notice pgnotice.Notice)
 }
 
 // AddPlanHook adds a hook used to short-circuit creating a planNode from a

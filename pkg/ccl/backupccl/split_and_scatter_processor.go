@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -59,12 +60,12 @@ func (n noopSplitAndScatterer) scatter(
 // layer.
 type dbSplitAndScatterer struct {
 	db *kv.DB
-	kr *KeyRewriter
+	kr *storageccl.KeyRewriter
 }
 
 var _ splitAndScatterer = dbSplitAndScatterer{}
 
-func makeSplitAndScatterer(db *kv.DB, kr *KeyRewriter) splitAndScatterer {
+func makeSplitAndScatterer(db *kv.DB, kr *storageccl.KeyRewriter) splitAndScatterer {
 	return dbSplitAndScatterer{db: db, kr: kr}
 }
 
@@ -187,6 +188,11 @@ type splitAndScatterProcessor struct {
 
 var _ execinfra.Processor = &splitAndScatterProcessor{}
 
+// OutputTypes implements the execinfra.Processor interface.
+func (ssp *splitAndScatterProcessor) OutputTypes() []*types.T {
+	return splitAndScatterOutputTypes
+}
+
 func newSplitAndScatterProcessor(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
@@ -200,7 +206,7 @@ func newSplitAndScatterProcessor(
 	}
 
 	db := flowCtx.Cfg.DB
-	kr, err := makeKeyRewriterFromRekeys(flowCtx.Codec(), spec.Rekeys)
+	kr, err := storageccl.MakeKeyRewriterFromRekeys(flowCtx.Codec(), spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}

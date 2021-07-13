@@ -74,9 +74,8 @@ var (
 	LocalAbortSpanSuffix = []byte("abc-")
 	// localRangeFrozenStatusSuffix is DEPRECATED and remains to prevent reuse.
 	localRangeFrozenStatusSuffix = []byte("fzn-")
-	// LocalRangeGCThresholdSuffix is the suffix for the GC threshold. It keeps
-	// the lgc- ("last GC") representation for backwards compatibility.
-	LocalRangeGCThresholdSuffix = []byte("lgc-")
+	// LocalRangeLastGCSuffix is the suffix for the last GC.
+	LocalRangeLastGCSuffix = []byte("lgc-")
 	// LocalRangeAppliedStateSuffix is the suffix for the range applied state
 	// key.
 	LocalRangeAppliedStateSuffix = []byte("rask")
@@ -401,9 +400,6 @@ const (
 	TenantsRangesID                     = 38 // pseudo
 	SqllivenessID                       = 39
 	MigrationsID                        = 40
-	JoinTokensTableID                   = 41
-	StatementStatisticsTableID          = 42
-	TransactionStatisticsTableID        = 43
 
 	// CommentType is type for system.comments
 	DatabaseCommentType = 0

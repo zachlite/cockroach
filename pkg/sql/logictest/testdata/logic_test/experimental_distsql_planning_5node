@@ -165,8 +165,7 @@ EXPLAIN (VEC) SELECT k::REGCLASS FROM kv
 ----
 │
 └ Node 1
-  └ *rowexec.noopProcessor
-    └ *colfetcher.ColBatchScan
+  └ *rowexec.tableReader
 
 statement ok
 SET disable_partially_distributed_plans = false

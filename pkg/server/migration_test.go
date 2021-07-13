@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/stretchr/testify/require"
 )
@@ -248,7 +247,7 @@ func TestUpgradeHappensAfterMigrations(t *testing.T) {
 		clusterversion.TestingBinaryMinSupportedVersion,
 		false, /* initializeVersion */
 	)
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
 		Settings: st,
 		Knobs: base.TestingKnobs{
 			Server: &TestingKnobs{
@@ -266,10 +265,5 @@ func TestUpgradeHappensAfterMigrations(t *testing.T) {
 			},
 		},
 	})
-	sqlutils.MakeSQLRunner(db).
-		CheckQueryResultsRetry(t, `
-SELECT version = crdb_internal.node_executable_version()
-  FROM [SHOW CLUSTER SETTING version]`,
-			[][]string{{"true"}})
 	s.Stopper().Stop(context.Background())
 }

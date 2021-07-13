@@ -60,9 +60,7 @@ rowid_2
 query TT
 SELECT index_name, column_name FROM [SHOW INDEXES FROM t]
 ----
-primary  rowid_2
-primary  rowid
-primary  rowid_1
+primary rowid_2
 
 query TT
 SHOW CREATE t
@@ -425,14 +423,6 @@ subtest regression_57630
 statement error pgcode 42P07 duplicate index name: \"idx\"
 CREATE TABLE error (a INT, b INT, INDEX idx (a), INDEX idx (b))
 
-subtest duplicate_index_name_unique_index
-
-statement error pgcode 42P07 duplicate index name: \"idx\"
-CREATE TABLE error (a INT, b INT, INDEX idx (a), UNIQUE INDEX idx (b))
-
-statement error pgcode 42P07 duplicate index name: \"idx\"
-CREATE TABLE error (a INT, b INT, UNIQUE INDEX idx (a), UNIQUE INDEX idx (b))
-
 # Regression test for using some virtual tables in CREATE TABLE AS which is not
 # supported at the moment (#65512).
 
@@ -444,3 +434,11 @@ CREATE TABLE ctas AS (SELECT * FROM crdb_internal.node_transaction_statistics);
 
 query error crdb_internal.node_txn_stats cannot be used in this context
 CREATE TABLE ctas AS (SELECT * FROM crdb_internal.node_txn_stats);
+
+subtest duplicate_index_name_unique_index
+
+statement error pgcode 42P07 duplicate index name: \"idx\"
+CREATE TABLE error (a INT, b INT, INDEX idx (a), UNIQUE INDEX idx (b))
+
+statement error pgcode 42P07 duplicate index name: \"idx\"
+CREATE TABLE error (a INT, b INT, UNIQUE INDEX idx (a), UNIQUE INDEX idx (b))

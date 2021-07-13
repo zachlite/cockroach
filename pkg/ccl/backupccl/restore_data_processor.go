@@ -43,7 +43,7 @@ type restoreDataProcessor struct {
 	input   execinfra.RowSource
 	output  execinfra.RowReceiver
 
-	kr *KeyRewriter
+	kr *storageccl.KeyRewriter
 
 	// concurrentWorkerLimit is a semaphore that can change capacity, which controls
 	// the number of active restore worker threads.
@@ -76,7 +76,7 @@ const maxConcurrentRestoreWorkers = 32
 // The maximum is not enforced since if the maximum is reduced in the future that
 // may cause the cluster setting to fail.
 var numRestoreWorkers = settings.RegisterIntSetting(
-	"kv.bulk_io_write.restore_node_concurrency",
+	"kv.bulk_io_write.experimental_restore_node_concurrency",
 	fmt.Sprintf("the number of workers processing a restore per job per node; maximum %d",
 		maxConcurrentRestoreWorkers),
 	1, /* default */
@@ -106,12 +106,12 @@ func newRestoreDataProcessor(
 		),
 	}
 
-	numRestoreWorkers.SetOnChange(sv, func(_ context.Context) {
+	numRestoreWorkers.SetOnChange(sv, func() {
 		rd.concurrentWorkerLimit.UpdateCapacity(uint64(numRestoreWorkers.Get(sv)))
 	})
 
 	var err error
-	rd.kr, err = makeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
+	rd.kr, err = storageccl.MakeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,6 @@ func inputReader(
 		if !ok {
 			return errors.AssertionFailedf(`unexpected datum type %T: %+v`, datum, row)
 		}
-
 		var entry execinfrapb.RestoreSpanEntry
 		if err := protoutil.Unmarshal([]byte(*entryDatumBytes), &entry); err != nil {
 			return errors.Wrap(err, "un-marshaling restore span entry")
@@ -266,7 +265,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	log.VEventf(rd.Ctx, 1 /* level */, "ingesting span [%s-%s)", entry.Span.Key, entry.Span.EndKey)
 
 	for _, file := range entry.Files {
-		log.VEventf(ctx, 2, "import file %s which starts at %s", file.Path, entry.Span.Key)
+		log.VEventf(ctx, 2, "import file %s %s", file.Path, entry.Span.Key)
 
 		dir, err := rd.flowCtx.Cfg.ExternalStorage(ctx, file.Dir)
 		if err != nil {
@@ -286,7 +285,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	}
 
 	batcher, err := bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return storageccl.MaxIngestBatchSize(evalCtx.Settings) })
+		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
 	if err != nil {
 		return summary, err
 	}
@@ -338,7 +337,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		if !ok {
 			// If the key rewriter didn't match this key, it's not data for the
 			// table(s) we're interested in.
-			if log.V(5) {
+			if log.V(3) {
 				log.Infof(ctx, "skipping %s %s", key.Key, value.PrettyPrint())
 			}
 			continue
@@ -348,7 +347,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		value.ClearChecksum()
 		value.InitChecksum(key.Key)
 
-		if log.V(5) {
+		if log.V(3) {
 			log.Infof(ctx, "Put %s -> %s", key.Key, value.PrettyPrint())
 		}
 		if err := batcher.AddMVCCKey(ctx, key, value.RawBytes); err != nil {
@@ -359,6 +358,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	if err := batcher.Flush(ctx); err != nil {
 		return summary, err
 	}
+	log.Event(ctx, "done")
 
 	if restoreKnobs, ok := rd.flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
 		if restoreKnobs.RunAfterProcessingRestoreSpanEntry != nil {

@@ -3,15 +3,13 @@
 
 package eventpb
 
-import (
-	encoding_binary "encoding/binary"
-	fmt "fmt"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	io "io"
-	math "math"
-	math_bits "math/bits"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+
+import encoding_binary "encoding/binary"
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -22,7 +20,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // CommonSQLExecDetails contains the field common to all SQL query logs.
 type CommonSQLExecDetails struct {
@@ -51,21 +49,21 @@ func (m *CommonSQLExecDetails) Reset()         { *m = CommonSQLExecDetails{} }
 func (m *CommonSQLExecDetails) String() string { return proto.CompactTextString(m) }
 func (*CommonSQLExecDetails) ProtoMessage()    {}
 func (*CommonSQLExecDetails) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{0}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{0}
 }
 func (m *CommonSQLExecDetails) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *CommonSQLExecDetails) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *CommonSQLExecDetails) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_CommonSQLExecDetails.Merge(m, src)
+func (dst *CommonSQLExecDetails) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_CommonSQLExecDetails.Merge(dst, src)
 }
 func (m *CommonSQLExecDetails) XXX_Size() int {
 	return m.Size()
@@ -92,21 +90,21 @@ func (m *SensitiveTableAccess) Reset()         { *m = SensitiveTableAccess{} }
 func (m *SensitiveTableAccess) String() string { return proto.CompactTextString(m) }
 func (*SensitiveTableAccess) ProtoMessage()    {}
 func (*SensitiveTableAccess) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{1}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{1}
 }
 func (m *SensitiveTableAccess) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *SensitiveTableAccess) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *SensitiveTableAccess) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_SensitiveTableAccess.Merge(m, src)
+func (dst *SensitiveTableAccess) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SensitiveTableAccess.Merge(dst, src)
 }
 func (m *SensitiveTableAccess) XXX_Size() int {
 	return m.Size()
@@ -129,21 +127,21 @@ func (m *AdminQuery) Reset()         { *m = AdminQuery{} }
 func (m *AdminQuery) String() string { return proto.CompactTextString(m) }
 func (*AdminQuery) ProtoMessage()    {}
 func (*AdminQuery) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{2}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{2}
 }
 func (m *AdminQuery) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *AdminQuery) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *AdminQuery) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_AdminQuery.Merge(m, src)
+func (dst *AdminQuery) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_AdminQuery.Merge(dst, src)
 }
 func (m *AdminQuery) XXX_Size() int {
 	return m.Size()
@@ -173,21 +171,21 @@ func (m *SlowQuery) Reset()         { *m = SlowQuery{} }
 func (m *SlowQuery) String() string { return proto.CompactTextString(m) }
 func (*SlowQuery) ProtoMessage()    {}
 func (*SlowQuery) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{3}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{3}
 }
 func (m *SlowQuery) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *SlowQuery) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *SlowQuery) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_SlowQuery.Merge(m, src)
+func (dst *SlowQuery) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SlowQuery.Merge(dst, src)
 }
 func (m *SlowQuery) XXX_Size() int {
 	return m.Size()
@@ -213,21 +211,21 @@ func (m *SlowQueryInternal) Reset()         { *m = SlowQueryInternal{} }
 func (m *SlowQueryInternal) String() string { return proto.CompactTextString(m) }
 func (*SlowQueryInternal) ProtoMessage()    {}
 func (*SlowQueryInternal) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{4}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{4}
 }
 func (m *SlowQueryInternal) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *SlowQueryInternal) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *SlowQueryInternal) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_SlowQueryInternal.Merge(m, src)
+func (dst *SlowQueryInternal) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SlowQueryInternal.Merge(dst, src)
 }
 func (m *SlowQueryInternal) XXX_Size() int {
 	return m.Size()
@@ -250,21 +248,21 @@ func (m *QueryExecute) Reset()         { *m = QueryExecute{} }
 func (m *QueryExecute) String() string { return proto.CompactTextString(m) }
 func (*QueryExecute) ProtoMessage()    {}
 func (*QueryExecute) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b7a82d5e93041841, []int{5}
+	return fileDescriptor_sql_audit_events_29de63a882b1a688, []int{5}
 }
 func (m *QueryExecute) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *QueryExecute) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *QueryExecute) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_QueryExecute.Merge(m, src)
+func (dst *QueryExecute) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_QueryExecute.Merge(dst, src)
 }
 func (m *QueryExecute) XXX_Size() int {
 	return m.Size()
@@ -283,58 +281,10 @@ func init() {
 	proto.RegisterType((*SlowQueryInternal)(nil), "cockroach.util.log.eventpb.SlowQueryInternal")
 	proto.RegisterType((*QueryExecute)(nil), "cockroach.util.log.eventpb.QueryExecute")
 }
-
-func init() {
-	proto.RegisterFile("util/log/eventpb/sql_audit_events.proto", fileDescriptor_b7a82d5e93041841)
-}
-
-var fileDescriptor_b7a82d5e93041841 = []byte{
-	// 612 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xec, 0x95, 0xcf, 0x4f, 0x13, 0x4f,
-	0x18, 0xc6, 0xbb, 0x2d, 0x3f, 0xda, 0xb7, 0xf0, 0xfd, 0xc6, 0x09, 0x26, 0x1b, 0x12, 0xb7, 0xcd,
-	0x5e, 0x28, 0x89, 0x6e, 0x15, 0x12, 0x0f, 0xde, 0x28, 0x90, 0x48, 0x82, 0x9a, 0xfe, 0x38, 0x79,
-	0xd9, 0x0c, 0xd3, 0xd7, 0xba, 0x71, 0x76, 0x06, 0x76, 0x66, 0x61, 0xf9, 0x0f, 0x34, 0x7a, 0xe0,
-	0xcf, 0xe2, 0xc8, 0x91, 0x53, 0xa3, 0xe5, 0xc6, 0xd1, 0xab, 0x17, 0x33, 0xb3, 0x05, 0x95, 0xda,
-	0x88, 0x67, 0xbc, 0xf5, 0xc7, 0xf3, 0x7c, 0xde, 0x9d, 0x67, 0x9e, 0x37, 0x0b, 0x2b, 0xa9, 0x8e,
-	0x78, 0x93, 0xcb, 0x41, 0x13, 0x0f, 0x51, 0xe8, 0xfd, 0xbd, 0xa6, 0x3a, 0xe0, 0x21, 0x4d, 0xfb,
-	0x91, 0x0e, 0xed, 0x2f, 0x2a, 0xd8, 0x4f, 0xa4, 0x96, 0x64, 0x99, 0x49, 0xf6, 0x2e, 0x91, 0x94,
-	0xbd, 0x0d, 0x8c, 0x25, 0xe0, 0x72, 0x10, 0x8c, 0x2d, 0xcb, 0x4b, 0x03, 0x39, 0x90, 0x56, 0xd6,
-	0x34, 0x9f, 0x72, 0xc7, 0xf2, 0x83, 0x09, 0xf4, 0xcf, 0x40, 0xff, 0x5b, 0x09, 0x96, 0x36, 0x65,
-	0x1c, 0x4b, 0xd1, 0x6d, 0xef, 0x6e, 0x67, 0xc8, 0xb6, 0x50, 0xd3, 0x88, 0x2b, 0xb2, 0x05, 0x15,
-	0xcc, 0x90, 0x85, 0xb1, 0xec, 0xa3, 0xeb, 0xd4, 0x9d, 0x46, 0xa5, 0xb5, 0x72, 0x39, 0xac, 0xc1,
-	0x43, 0x19, 0x47, 0x1a, 0xe3, 0x7d, 0x7d, 0xfc, 0x75, 0x58, 0xbb, 0x9f, 0x60, 0x9f, 0x32, 0xfd,
-	0xcc, 0x17, 0x52, 0x28, 0x14, 0x2a, 0xd2, 0xd1, 0x21, 0xfa, 0x9d, 0xb2, 0x71, 0xbe, 0x90, 0x7d,
-	0x24, 0xab, 0x50, 0x16, 0x69, 0x1c, 0x26, 0xf2, 0x48, 0xb9, 0xc5, 0xba, 0xd3, 0x98, 0x69, 0xfd,
-	0xf7, 0x2b, 0xa4, 0x33, 0x2f, 0xd2, 0xb8, 0x23, 0x8f, 0x14, 0x79, 0x05, 0x65, 0x75, 0xc0, 0x95,
-	0xa6, 0x1a, 0xdd, 0x92, 0x9d, 0xb7, 0x3e, 0x1a, 0xd6, 0xca, 0xdd, 0xf6, 0x6e, 0xb7, 0xb7, 0xd1,
-	0xdb, 0xbe, 0xf5, 0xec, 0x2b, 0x08, 0x79, 0x04, 0x80, 0x49, 0x22, 0x93, 0x50, 0x63, 0xa6, 0xdd,
-	0x19, 0x8b, 0xbc, 0x39, 0xbd, 0x62, 0x15, 0x3d, 0xcc, 0x34, 0xa9, 0x43, 0x89, 0x0e, 0xd0, 0x9d,
-	0xad, 0x3b, 0x8d, 0xe2, 0x84, 0xce, 0xfc, 0x45, 0x9a, 0x50, 0xb5, 0x87, 0x41, 0x9d, 0x44, 0xa8,
-	0xdc, 0xb9, 0xba, 0xd3, 0x58, 0x9c, 0x50, 0x82, 0x39, 0x4f, 0xae, 0x20, 0x4f, 0xe1, 0xff, 0x37,
-	0x29, 0xe7, 0xa1, 0xa6, 0x7b, 0x1c, 0x43, 0xc5, 0xa8, 0x70, 0xe7, 0xeb, 0x4e, 0xa3, 0x3c, 0x61,
-	0x5a, 0x34, 0xb2, 0x9e, 0x51, 0x75, 0x19, 0x15, 0xd7, 0xbe, 0x48, 0xf4, 0x31, 0xcb, 0x7d, 0xe5,
-	0xe9, 0xbe, 0x1d, 0xa3, 0xb2, 0xbe, 0x26, 0x54, 0x75, 0x26, 0x42, 0x26, 0x53, 0xa1, 0x31, 0x71,
-	0x2b, 0xbf, 0x7f, 0x40, 0x9d, 0x89, 0xcd, 0x5c, 0xe1, 0x7f, 0x2a, 0xc1, 0x52, 0xf7, 0x2a, 0x3b,
-	0x3b, 0x7f, 0x83, 0x31, 0x54, 0x8a, 0xf4, 0x60, 0x8e, 0xd9, 0x56, 0xd8, 0xab, 0xaf, 0xae, 0x05,
-	0xc1, 0xf4, 0xe2, 0x05, 0x79, 0x7f, 0xb6, 0xcd, 0xb7, 0x71, 0x7b, 0x5a, 0x0b, 0xa7, 0xc3, 0x5a,
-	0xe1, 0x6c, 0x58, 0x73, 0x2e, 0x87, 0xb5, 0x42, 0x67, 0xcc, 0x22, 0x6d, 0x28, 0xa9, 0x03, 0x6e,
-	0x8b, 0x50, 0x5d, 0x7b, 0xf2, 0x67, 0xa4, 0xa9, 0xe4, 0x74, 0xaa, 0x61, 0x91, 0x0e, 0xcc, 0x98,
-	0xb2, 0xd9, 0xc6, 0x54, 0xd7, 0x1e, 0xdf, 0x8e, 0xf9, 0xa3, 0xe6, 0x37, 0x90, 0x96, 0x65, 0x8a,
-	0x93, 0xdf, 0x98, 0xa0, 0x31, 0x4e, 0x2b, 0x8e, 0x55, 0xbc, 0xa4, 0x31, 0x92, 0xe7, 0x50, 0xa5,
-	0x36, 0xb5, 0x7c, 0x57, 0x66, 0xff, 0x6e, 0x57, 0x20, 0xf7, 0x9a, 0x6d, 0xf1, 0x3f, 0x14, 0x01,
-	0x36, 0xfa, 0x71, 0x24, 0xda, 0x29, 0x26, 0xc7, 0x77, 0xfa, 0x12, 0xfc, 0xf7, 0x45, 0xa8, 0x74,
-	0xb9, 0x3c, 0xfa, 0x17, 0x85, 0x7f, 0x52, 0x84, 0x7b, 0xd7, 0x51, 0xec, 0x98, 0xc5, 0x15, 0x94,
-	0xdf, 0xed, 0x48, 0x3e, 0x16, 0x61, 0xc1, 0xc6, 0x61, 0x84, 0xa9, 0xc6, 0x3b, 0x9d, 0x46, 0x6b,
-	0xf5, 0xf4, 0x8b, 0x57, 0x38, 0x1d, 0x79, 0xce, 0xd9, 0xc8, 0x73, 0xce, 0x47, 0x9e, 0xf3, 0x79,
-	0xe4, 0x39, 0x27, 0x17, 0x5e, 0xe1, 0xec, 0xc2, 0x2b, 0x9c, 0x5f, 0x78, 0x85, 0xd7, 0xf3, 0x63,
-	0xe6, 0xde, 0x9c, 0x7d, 0xed, 0xaf, 0x7f, 0x0f, 0x00, 0x00, 0xff, 0xff, 0x35, 0xbf, 0x4c, 0x0f,
-	0x72, 0x08, 0x00, 0x00,
-}
-
 func (m *CommonSQLExecDetails) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -342,84 +292,76 @@ func (m *CommonSQLExecDetails) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *CommonSQLExecDetails) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *CommonSQLExecDetails) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.TxnCounter != 0 {
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.TxnCounter))
-		i--
-		dAtA[i] = 0x48
+	if len(m.ExecMode) > 0 {
+		dAtA[i] = 0xa
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.ExecMode)))
+		i += copy(dAtA[i:], m.ExecMode)
 	}
-	if m.FullIndexScan {
-		i--
-		if m.FullIndexScan {
-			dAtA[i] = 1
-		} else {
-			dAtA[i] = 0
-		}
-		i--
-		dAtA[i] = 0x40
+	if m.NumRows != 0 {
+		dAtA[i] = 0x10
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.NumRows))
+	}
+	if len(m.SQLSTATE) > 0 {
+		dAtA[i] = 0x1a
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.SQLSTATE)))
+		i += copy(dAtA[i:], m.SQLSTATE)
+	}
+	if len(m.ErrorText) > 0 {
+		dAtA[i] = 0x22
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.ErrorText)))
+		i += copy(dAtA[i:], m.ErrorText)
+	}
+	if m.Age != 0 {
+		dAtA[i] = 0x2d
+		i++
+		encoding_binary.LittleEndian.PutUint32(dAtA[i:], uint32(math.Float32bits(float32(m.Age))))
+		i += 4
+	}
+	if m.NumRetries != 0 {
+		dAtA[i] = 0x30
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.NumRetries))
 	}
 	if m.FullTableScan {
-		i--
+		dAtA[i] = 0x38
+		i++
 		if m.FullTableScan {
 			dAtA[i] = 1
 		} else {
 			dAtA[i] = 0
 		}
-		i--
-		dAtA[i] = 0x38
+		i++
 	}
-	if m.NumRetries != 0 {
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.NumRetries))
-		i--
-		dAtA[i] = 0x30
+	if m.FullIndexScan {
+		dAtA[i] = 0x40
+		i++
+		if m.FullIndexScan {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i++
 	}
-	if m.Age != 0 {
-		i -= 4
-		encoding_binary.LittleEndian.PutUint32(dAtA[i:], uint32(math.Float32bits(float32(m.Age))))
-		i--
-		dAtA[i] = 0x2d
+	if m.TxnCounter != 0 {
+		dAtA[i] = 0x48
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.TxnCounter))
 	}
-	if len(m.ErrorText) > 0 {
-		i -= len(m.ErrorText)
-		copy(dAtA[i:], m.ErrorText)
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.ErrorText)))
-		i--
-		dAtA[i] = 0x22
-	}
-	if len(m.SQLSTATE) > 0 {
-		i -= len(m.SQLSTATE)
-		copy(dAtA[i:], m.SQLSTATE)
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.SQLSTATE)))
-		i--
-		dAtA[i] = 0x1a
-	}
-	if m.NumRows != 0 {
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.NumRows))
-		i--
-		dAtA[i] = 0x10
-	}
-	if len(m.ExecMode) > 0 {
-		i -= len(m.ExecMode)
-		copy(dAtA[i:], m.ExecMode)
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.ExecMode)))
-		i--
-		dAtA[i] = 0xa
-	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *SensitiveTableAccess) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -427,66 +369,53 @@ func (m *SensitiveTableAccess) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *SensitiveTableAccess) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *SensitiveTableAccess) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if len(m.AccessMode) > 0 {
-		i -= len(m.AccessMode)
-		copy(dAtA[i:], m.AccessMode)
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.AccessMode)))
-		i--
-		dAtA[i] = 0x2a
-	}
-	if len(m.TableName) > 0 {
-		i -= len(m.TableName)
-		copy(dAtA[i:], m.TableName)
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.TableName)))
-		i--
-		dAtA[i] = 0x22
-	}
-	{
-		size, err := m.CommonSQLExecDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.CommonSQLEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n1, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n1
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLEventDetails.Size()))
+	n2, err := m.CommonSQLEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n2
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLExecDetails.Size()))
+	n3, err := m.CommonSQLExecDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n3
+	if len(m.TableName) > 0 {
+		dAtA[i] = 0x22
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.TableName)))
+		i += copy(dAtA[i:], m.TableName)
+	}
+	if len(m.AccessMode) > 0 {
+		dAtA[i] = 0x2a
+		i++
+		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(len(m.AccessMode)))
+		i += copy(dAtA[i:], m.AccessMode)
+	}
+	return i, nil
 }
 
 func (m *AdminQuery) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -494,52 +423,41 @@ func (m *AdminQuery) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *AdminQuery) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *AdminQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonSQLExecDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.CommonSQLEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n4, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n4
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLEventDetails.Size()))
+	n5, err := m.CommonSQLEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n5
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLExecDetails.Size()))
+	n6, err := m.CommonSQLExecDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n6
+	return i, nil
 }
 
 func (m *SlowQuery) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -547,52 +465,41 @@ func (m *SlowQuery) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *SlowQuery) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *SlowQuery) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonSQLExecDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.CommonSQLEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n7, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n7
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLEventDetails.Size()))
+	n8, err := m.CommonSQLEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n8
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLExecDetails.Size()))
+	n9, err := m.CommonSQLExecDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n9
+	return i, nil
 }
 
 func (m *SlowQueryInternal) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -600,52 +507,41 @@ func (m *SlowQueryInternal) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *SlowQueryInternal) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *SlowQueryInternal) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonSQLExecDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.CommonSQLEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n10, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n10
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLEventDetails.Size()))
+	n11, err := m.CommonSQLEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n11
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLExecDetails.Size()))
+	n12, err := m.CommonSQLExecDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n12
+	return i, nil
 }
 
 func (m *QueryExecute) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -653,58 +549,45 @@ func (m *QueryExecute) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *QueryExecute) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *QueryExecute) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonSQLExecDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.CommonSQLEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintSqlAuditEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n13, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n13
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLEventDetails.Size()))
+	n14, err := m.CommonSQLEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n14
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintSqlAuditEvents(dAtA, i, uint64(m.CommonSQLExecDetails.Size()))
+	n15, err := m.CommonSQLExecDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n15
+	return i, nil
 }
 
 func encodeVarintSqlAuditEvents(dAtA []byte, offset int, v uint64) int {
-	offset -= sovSqlAuditEvents(v)
-	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return base
+	return offset + 1
 }
 func (m *CommonSQLExecDetails) Size() (n int) {
 	if m == nil {
@@ -829,7 +712,14 @@ func (m *QueryExecute) Size() (n int) {
 }
 
 func sovSqlAuditEvents(x uint64) (n int) {
-	return (math_bits.Len64(x|1) + 6) / 7
+	for {
+		n++
+		x >>= 7
+		if x == 0 {
+			break
+		}
+	}
+	return n
 }
 func sozSqlAuditEvents(x uint64) (n int) {
 	return sovSqlAuditEvents(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -849,7 +739,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -877,7 +767,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -887,9 +777,6 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -909,7 +796,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NumRows |= uint64(b&0x7F) << shift
+				m.NumRows |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -928,7 +815,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -938,9 +825,6 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -960,7 +844,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -970,9 +854,6 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1003,7 +884,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NumRetries |= uint32(b&0x7F) << shift
+				m.NumRetries |= (uint32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1022,7 +903,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				v |= int(b&0x7F) << shift
+				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1042,7 +923,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				v |= int(b&0x7F) << shift
+				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1062,7 +943,7 @@ func (m *CommonSQLExecDetails) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.TxnCounter |= uint32(b&0x7F) << shift
+				m.TxnCounter |= (uint32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1103,7 +984,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1131,7 +1012,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1140,9 +1021,6 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1164,7 +1042,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1173,9 +1051,6 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1197,7 +1072,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1206,9 +1081,6 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1230,7 +1102,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1240,9 +1112,6 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1262,7 +1131,7 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1272,9 +1141,6 @@ func (m *SensitiveTableAccess) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1316,7 +1182,7 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1344,7 +1210,7 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1353,9 +1219,6 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1377,7 +1240,7 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1386,9 +1249,6 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1410,7 +1270,7 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1419,9 +1279,6 @@ func (m *AdminQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1465,7 +1322,7 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1493,7 +1350,7 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1502,9 +1359,6 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1526,7 +1380,7 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1535,9 +1389,6 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1559,7 +1410,7 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1568,9 +1419,6 @@ func (m *SlowQuery) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1614,7 +1462,7 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1642,7 +1490,7 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1651,9 +1499,6 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1675,7 +1520,7 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1684,9 +1529,6 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1708,7 +1550,7 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1717,9 +1559,6 @@ func (m *SlowQueryInternal) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1763,7 +1602,7 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1791,7 +1630,7 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1800,9 +1639,6 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1824,7 +1660,7 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1833,9 +1669,6 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1857,7 +1690,7 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1866,9 +1699,6 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthSqlAuditEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthSqlAuditEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1900,7 +1730,6 @@ func (m *QueryExecute) Unmarshal(dAtA []byte) error {
 func skipSqlAuditEvents(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
-	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -1932,8 +1761,10 @@ func skipSqlAuditEvents(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			return iNdEx, nil
 		case 1:
 			iNdEx += 8
+			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -1950,34 +1781,100 @@ func skipSqlAuditEvents(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthSqlAuditEvents
 			}
-			iNdEx += length
+			return iNdEx, nil
 		case 3:
-			depth++
-		case 4:
-			if depth == 0 {
-				return 0, ErrUnexpectedEndOfGroupSqlAuditEvents
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowSqlAuditEvents
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipSqlAuditEvents(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
 			}
-			depth--
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
 		case 5:
 			iNdEx += 4
+			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
-		if iNdEx < 0 {
-			return 0, ErrInvalidLengthSqlAuditEvents
-		}
-		if depth == 0 {
-			return iNdEx, nil
-		}
 	}
-	return 0, io.ErrUnexpectedEOF
+	panic("unreachable")
 }
 
 var (
-	ErrInvalidLengthSqlAuditEvents        = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowSqlAuditEvents          = fmt.Errorf("proto: integer overflow")
-	ErrUnexpectedEndOfGroupSqlAuditEvents = fmt.Errorf("proto: unexpected end of group")
+	ErrInvalidLengthSqlAuditEvents = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowSqlAuditEvents   = fmt.Errorf("proto: integer overflow")
 )
+
+func init() {
+	proto.RegisterFile("util/log/eventpb/sql_audit_events.proto", fileDescriptor_sql_audit_events_29de63a882b1a688)
+}
+
+var fileDescriptor_sql_audit_events_29de63a882b1a688 = []byte{
+	// 612 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xec, 0x95, 0xcf, 0x4f, 0x13, 0x4f,
+	0x18, 0xc6, 0xbb, 0x2d, 0x3f, 0xda, 0xb7, 0xf0, 0xfd, 0xc6, 0x09, 0x26, 0x1b, 0x12, 0xb7, 0xcd,
+	0x5e, 0x28, 0x89, 0x6e, 0x15, 0x12, 0x0f, 0xde, 0x28, 0x90, 0x48, 0x82, 0x9a, 0xfe, 0x38, 0x79,
+	0xd9, 0x0c, 0xd3, 0xd7, 0xba, 0x71, 0x76, 0x06, 0x76, 0x66, 0x61, 0xf9, 0x0f, 0x34, 0x7a, 0xe0,
+	0xcf, 0xe2, 0xc8, 0x91, 0x53, 0xa3, 0xe5, 0xc6, 0xd1, 0xab, 0x17, 0x33, 0xb3, 0x05, 0x95, 0xda,
+	0x88, 0x67, 0xbc, 0xf5, 0xc7, 0xf3, 0x7c, 0xde, 0x9d, 0x67, 0x9e, 0x37, 0x0b, 0x2b, 0xa9, 0x8e,
+	0x78, 0x93, 0xcb, 0x41, 0x13, 0x0f, 0x51, 0xe8, 0xfd, 0xbd, 0xa6, 0x3a, 0xe0, 0x21, 0x4d, 0xfb,
+	0x91, 0x0e, 0xed, 0x2f, 0x2a, 0xd8, 0x4f, 0xa4, 0x96, 0x64, 0x99, 0x49, 0xf6, 0x2e, 0x91, 0x94,
+	0xbd, 0x0d, 0x8c, 0x25, 0xe0, 0x72, 0x10, 0x8c, 0x2d, 0xcb, 0x4b, 0x03, 0x39, 0x90, 0x56, 0xd6,
+	0x34, 0x9f, 0x72, 0xc7, 0xf2, 0x83, 0x09, 0xf4, 0xcf, 0x40, 0xff, 0x5b, 0x09, 0x96, 0x36, 0x65,
+	0x1c, 0x4b, 0xd1, 0x6d, 0xef, 0x6e, 0x67, 0xc8, 0xb6, 0x50, 0xd3, 0x88, 0x2b, 0xb2, 0x05, 0x15,
+	0xcc, 0x90, 0x85, 0xb1, 0xec, 0xa3, 0xeb, 0xd4, 0x9d, 0x46, 0xa5, 0xb5, 0x72, 0x39, 0xac, 0xc1,
+	0x43, 0x19, 0x47, 0x1a, 0xe3, 0x7d, 0x7d, 0xfc, 0x75, 0x58, 0xbb, 0x9f, 0x60, 0x9f, 0x32, 0xfd,
+	0xcc, 0x17, 0x52, 0x28, 0x14, 0x2a, 0xd2, 0xd1, 0x21, 0xfa, 0x9d, 0xb2, 0x71, 0xbe, 0x90, 0x7d,
+	0x24, 0xab, 0x50, 0x16, 0x69, 0x1c, 0x26, 0xf2, 0x48, 0xb9, 0xc5, 0xba, 0xd3, 0x98, 0x69, 0xfd,
+	0xf7, 0x2b, 0xa4, 0x33, 0x2f, 0xd2, 0xb8, 0x23, 0x8f, 0x14, 0x79, 0x05, 0x65, 0x75, 0xc0, 0x95,
+	0xa6, 0x1a, 0xdd, 0x92, 0x9d, 0xb7, 0x3e, 0x1a, 0xd6, 0xca, 0xdd, 0xf6, 0x6e, 0xb7, 0xb7, 0xd1,
+	0xdb, 0xbe, 0xf5, 0xec, 0x2b, 0x08, 0x79, 0x04, 0x80, 0x49, 0x22, 0x93, 0x50, 0x63, 0xa6, 0xdd,
+	0x19, 0x8b, 0xbc, 0x39, 0xbd, 0x62, 0x15, 0x3d, 0xcc, 0x34, 0xa9, 0x43, 0x89, 0x0e, 0xd0, 0x9d,
+	0xad, 0x3b, 0x8d, 0xe2, 0x84, 0xce, 0xfc, 0x45, 0x9a, 0x50, 0xb5, 0x87, 0x41, 0x9d, 0x44, 0xa8,
+	0xdc, 0xb9, 0xba, 0xd3, 0x58, 0x9c, 0x50, 0x82, 0x39, 0x4f, 0xae, 0x20, 0x4f, 0xe1, 0xff, 0x37,
+	0x29, 0xe7, 0xa1, 0xa6, 0x7b, 0x1c, 0x43, 0xc5, 0xa8, 0x70, 0xe7, 0xeb, 0x4e, 0xa3, 0x3c, 0x61,
+	0x5a, 0x34, 0xb2, 0x9e, 0x51, 0x75, 0x19, 0x15, 0xd7, 0xbe, 0x48, 0xf4, 0x31, 0xcb, 0x7d, 0xe5,
+	0xe9, 0xbe, 0x1d, 0xa3, 0xb2, 0xbe, 0x26, 0x54, 0x75, 0x26, 0x42, 0x26, 0x53, 0xa1, 0x31, 0x71,
+	0x2b, 0xbf, 0x7f, 0x40, 0x9d, 0x89, 0xcd, 0x5c, 0xe1, 0x7f, 0x2a, 0xc1, 0x52, 0xf7, 0x2a, 0x3b,
+	0x3b, 0x7f, 0x83, 0x31, 0x54, 0x8a, 0xf4, 0x60, 0x8e, 0xd9, 0x56, 0xd8, 0xab, 0xaf, 0xae, 0x05,
+	0xc1, 0xf4, 0xe2, 0x05, 0x79, 0x7f, 0xb6, 0xcd, 0xb7, 0x71, 0x7b, 0x5a, 0x0b, 0xa7, 0xc3, 0x5a,
+	0xe1, 0x6c, 0x58, 0x73, 0x2e, 0x87, 0xb5, 0x42, 0x67, 0xcc, 0x22, 0x6d, 0x28, 0xa9, 0x03, 0x6e,
+	0x8b, 0x50, 0x5d, 0x7b, 0xf2, 0x67, 0xa4, 0xa9, 0xe4, 0x74, 0xaa, 0x61, 0x91, 0x0e, 0xcc, 0x98,
+	0xb2, 0xd9, 0xc6, 0x54, 0xd7, 0x1e, 0xdf, 0x8e, 0xf9, 0xa3, 0xe6, 0x37, 0x90, 0x96, 0x65, 0x8a,
+	0x93, 0xdf, 0x98, 0xa0, 0x31, 0x4e, 0x2b, 0x8e, 0x55, 0xbc, 0xa4, 0x31, 0x92, 0xe7, 0x50, 0xa5,
+	0x36, 0xb5, 0x7c, 0x57, 0x66, 0xff, 0x6e, 0x57, 0x20, 0xf7, 0x9a, 0x6d, 0xf1, 0x3f, 0x14, 0x01,
+	0x36, 0xfa, 0x71, 0x24, 0xda, 0x29, 0x26, 0xc7, 0x77, 0xfa, 0x12, 0xfc, 0xf7, 0x45, 0xa8, 0x74,
+	0xb9, 0x3c, 0xfa, 0x17, 0x85, 0x7f, 0x52, 0x84, 0x7b, 0xd7, 0x51, 0xec, 0x98, 0xc5, 0x15, 0x94,
+	0xdf, 0xed, 0x48, 0x3e, 0x16, 0x61, 0xc1, 0xc6, 0x61, 0x84, 0xa9, 0xc6, 0x3b, 0x9d, 0x46, 0x6b,
+	0xf5, 0xf4, 0x8b, 0x57, 0x38, 0x1d, 0x79, 0xce, 0xd9, 0xc8, 0x73, 0xce, 0x47, 0x9e, 0xf3, 0x79,
+	0xe4, 0x39, 0x27, 0x17, 0x5e, 0xe1, 0xec, 0xc2, 0x2b, 0x9c, 0x5f, 0x78, 0x85, 0xd7, 0xf3, 0x63,
+	0xe6, 0xde, 0x9c, 0x7d, 0xed, 0xaf, 0x7f, 0x0f, 0x00, 0x00, 0xff, 0xff, 0x35, 0xbf, 0x4c, 0x0f,
+	0x72, 0x08, 0x00, 0x00,
+}

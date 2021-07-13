@@ -26,13 +26,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -42,9 +39,6 @@ var (
 	_ tree.AggType
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
-	_ colexecerror.StorageError
-	_ coldataext.Datum
 )
 
 // {{/*
@@ -179,12 +173,17 @@ func (a *anyNotNull_TYPE_AGGKINDAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		execgen.SET(a.col, outputIdx, a.curAgg)
 	}
-	// {{if or (.IsBytesLike) (eq .VecMethod "Datum")}}
+	// {{if or (eq .VecMethod "Bytes") (eq .VecMethod "Datum")}}
 	// Release the reference to curAgg eagerly.
-	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	// {{if eq .VecMethod "Bytes"}}
+	a.allocator.AdjustMemoryUsage(-int64(len(a.curAgg)))
+	// {{else}}
+	if d, ok := a.curAgg.(*coldataext.Datum); ok {
+		a.allocator.AdjustMemoryUsage(-int64(d.Size()))
+	}
+	// {{end}}
 	a.curAgg = nil
 	// {{end}}
 }
@@ -246,7 +245,9 @@ func _FIND_ANY_NOT_NULL(
 			if !a.foundNonNullForCurrentGroup {
 				a.nulls.SetNull(a.curIdx)
 			} else {
-				a.col.Set(a.curIdx, a.curAgg)
+				// {{with .Global}}
+				execgen.SET(a.col, a.curIdx, a.curAgg)
+				// {{end}}
 			}
 			a.curIdx++
 			a.foundNonNullForCurrentGroup = false
@@ -268,8 +269,8 @@ func _FIND_ANY_NOT_NULL(
 		// {{if and (.Sliceable) (not .HasSel)}}
 		//gcassert:bce
 		// {{end}}
-		val := col.Get(i)
 		// {{with .Global}}
+		val := col.Get(i)
 		execgen.COPYVAL(a.curAgg, val)
 		// {{end}}
 		a.foundNonNullForCurrentGroup = true

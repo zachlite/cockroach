@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
@@ -63,17 +62,6 @@ func UnderRaceWithIssue(t SkippableTest, githubIssueID int, args ...interface{})
 	if util.RaceEnabled {
 		t.Skip(append([]interface{}{fmt.Sprintf(
 			"disabled under race. issue: https://github.com/cockroachdb/cockroach/issue/%d", githubIssueID,
-		)}, args...))
-	}
-}
-
-// UnderBazelWithIssue skips this test if we are building inside bazel,
-// logging the given issue ID as the reason.
-func UnderBazelWithIssue(t SkippableTest, githubIssueID int, args ...interface{}) {
-	t.Helper()
-	if bazel.BuiltWithBazel() {
-		t.Skip(append([]interface{}{fmt.Sprintf(
-			"disabled under bazel. issue: https://github.com/cockroachdb/cockroach/issue/%d", githubIssueID,
 		)}, args...))
 	}
 }

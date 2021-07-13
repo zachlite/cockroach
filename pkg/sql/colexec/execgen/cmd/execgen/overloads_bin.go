@@ -25,7 +25,7 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-var binaryOpDecMethod = map[tree.BinaryOperatorSymbol]string{
+var binaryOpDecMethod = map[tree.BinaryOperator]string{
 	tree.Plus:     "Add",
 	tree.Minus:    "Sub",
 	tree.Mult:     "Mul",
@@ -35,13 +35,13 @@ var binaryOpDecMethod = map[tree.BinaryOperatorSymbol]string{
 	tree.Pow:      "Pow",
 }
 
-var binaryOpFloatMethod = map[tree.BinaryOperatorSymbol]string{
+var binaryOpFloatMethod = map[tree.BinaryOperator]string{
 	tree.FloorDiv: "math.Trunc",
 	tree.Mod:      "math.Mod",
 	tree.Pow:      "math.Pow",
 }
 
-var binaryOpDecCtx = map[tree.BinaryOperatorSymbol]string{
+var binaryOpDecCtx = map[tree.BinaryOperator]string{
 	tree.Plus:     "ExactCtx",
 	tree.Minus:    "ExactCtx",
 	tree.Mult:     "ExactCtx",
@@ -84,12 +84,6 @@ var compatibleCanonicalTypeFamilies = map[types.Family][]types.Family{
 		types.IntervalFamily,
 		typeconv.DatumVecCanonicalTypeFamily,
 	),
-	types.JsonFamily: append([]types.Family{},
-		types.BytesFamily,
-		types.IntFamily,
-		types.JsonFamily,
-		typeconv.DatumVecCanonicalTypeFamily,
-	),
 	typeconv.DatumVecCanonicalTypeFamily: append(
 		[]types.Family{
 			typeconv.DatumVecCanonicalTypeFamily,
@@ -103,12 +97,12 @@ var compatibleCanonicalTypeFamilies = map[types.Family][]types.Family{
 // sameTypeBinaryOpToOverloads maps a binary operator to all of the overloads
 // that implement that comparison between two values of the same type (meaning
 // they have the same family and width).
-var sameTypeBinaryOpToOverloads = make(map[tree.BinaryOperatorSymbol][]*oneArgOverload, len(execgen.BinaryOpName))
+var sameTypeBinaryOpToOverloads = make(map[tree.BinaryOperator][]*oneArgOverload, len(execgen.BinaryOpName))
 
-var binOpOutputTypes = make(map[tree.BinaryOperatorSymbol]map[typePair]*types.T)
+var binOpOutputTypes = make(map[tree.BinaryOperator]map[typePair]*types.T)
 
 func registerBinOpOutputTypes() {
-	populateBinOpIntOutputTypeOnIntArgs := func(binOp tree.BinaryOperatorSymbol) {
+	populateBinOpIntOutputTypeOnIntArgs := func(binOp tree.BinaryOperator) {
 		for _, leftIntWidth := range supportedWidthsByCanonicalTypeFamily[types.IntFamily] {
 			for _, rightIntWidth := range supportedWidthsByCanonicalTypeFamily[types.IntFamily] {
 				binOpOutputTypes[binOp][typePair{types.IntFamily, leftIntWidth, types.IntFamily, rightIntWidth}] = types.Int
@@ -117,14 +111,14 @@ func registerBinOpOutputTypes() {
 	}
 
 	// Bit binary operators.
-	for _, binOp := range []tree.BinaryOperatorSymbol{tree.Bitand, tree.Bitor, tree.Bitxor} {
+	for _, binOp := range []tree.BinaryOperator{tree.Bitand, tree.Bitor, tree.Bitxor} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
 		binOpOutputTypes[binOp][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}] = types.Any
 	}
 
 	// Simple arithmetic binary operators.
-	for _, binOp := range []tree.BinaryOperatorSymbol{tree.Plus, tree.Minus, tree.Mult, tree.Div} {
+	for _, binOp := range []tree.BinaryOperator{tree.Plus, tree.Minus, tree.Mult, tree.Div} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		binOpOutputTypes[binOp][typePair{types.FloatFamily, anyWidth, types.FloatFamily, anyWidth}] = types.Float
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
@@ -178,7 +172,7 @@ func registerBinOpOutputTypes() {
 	}
 
 	// Other arithmetic binary operators.
-	for _, binOp := range []tree.BinaryOperatorSymbol{tree.FloorDiv, tree.Mod, tree.Pow} {
+	for _, binOp := range []tree.BinaryOperator{tree.FloorDiv, tree.Mod, tree.Pow} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
 		binOpOutputTypes[binOp][typePair{types.FloatFamily, anyWidth, types.FloatFamily, anyWidth}] = types.Float
@@ -195,7 +189,7 @@ func registerBinOpOutputTypes() {
 		{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.Any,
 	}
 
-	for _, binOp := range []tree.BinaryOperatorSymbol{tree.LShift, tree.RShift} {
+	for _, binOp := range []tree.BinaryOperator{tree.LShift, tree.RShift} {
 		binOpOutputTypes[binOp] = make(map[typePair]*types.T)
 		populateBinOpIntOutputTypeOnIntArgs(binOp)
 		for _, intWidth := range supportedWidthsByCanonicalTypeFamily[types.IntFamily] {
@@ -203,34 +197,19 @@ func registerBinOpOutputTypes() {
 		}
 	}
 
-	// JSON operators.
-
-	// ->, ->>, -
-
 	binOpOutputTypes[tree.JSONFetchVal] = map[typePair]*types.T{
-		{types.JsonFamily, anyWidth, types.BytesFamily, anyWidth}: types.Jsonb,
+		{typeconv.DatumVecCanonicalTypeFamily, anyWidth, types.BytesFamily, anyWidth}: types.Any,
 	}
-	binOpOutputTypes[tree.JSONFetchText] = map[typePair]*types.T{
-		{types.JsonFamily, anyWidth, types.BytesFamily, anyWidth}: types.String,
-	}
-	binOpOutputTypes[tree.JSONFetchValPath] = map[typePair]*types.T{
-		{types.JsonFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.Jsonb,
-	}
-	binOpOutputTypes[tree.JSONFetchTextPath] = map[typePair]*types.T{
-		{types.JsonFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.String,
-	}
-	binOpOutputTypes[tree.Minus][typePair{types.JsonFamily, anyWidth, types.BytesFamily, anyWidth}] = types.Jsonb
 	for _, intWidth := range supportedWidthsByCanonicalTypeFamily[types.IntFamily] {
-		binOpOutputTypes[tree.JSONFetchVal][typePair{types.JsonFamily, anyWidth, types.IntFamily, intWidth}] = types.Jsonb
-		binOpOutputTypes[tree.Minus][typePair{types.JsonFamily, anyWidth, types.IntFamily, intWidth}] = types.Jsonb
-		binOpOutputTypes[tree.JSONFetchText][typePair{types.JsonFamily, anyWidth, types.IntFamily, intWidth}] = types.String
+		binOpOutputTypes[tree.JSONFetchVal][typePair{typeconv.DatumVecCanonicalTypeFamily, anyWidth, types.IntFamily, intWidth}] = types.Any
 	}
 
-	// ||
-	binOpOutputTypes[tree.Concat][typePair{types.JsonFamily, anyWidth, types.JsonFamily, anyWidth}] = types.Jsonb
+	binOpOutputTypes[tree.JSONFetchValPath] = map[typePair]*types.T{
+		{typeconv.DatumVecCanonicalTypeFamily, anyWidth, typeconv.DatumVecCanonicalTypeFamily, anyWidth}: types.Any,
+	}
 }
 
-func newBinaryOverloadBase(op tree.BinaryOperatorSymbol) *overloadBase {
+func newBinaryOverloadBase(op tree.BinaryOperator) *overloadBase {
 	opStr := op.String()
 	switch op {
 	case tree.Bitxor:
@@ -260,7 +239,7 @@ func populateBinOpOverloads() {
 	// Also note that we're sorting all operators in order to have the
 	// generated code not change when the order of iteration over map
 	// tree.BinOps changes.
-	var allBinaryOperators []tree.BinaryOperatorSymbol
+	var allBinaryOperators []tree.BinaryOperator
 	for binOp := range tree.BinOps {
 		allBinaryOperators = append(allBinaryOperators, binOp)
 	}
@@ -300,9 +279,9 @@ func (bytesCustomizer) getBinOpAssignFunc() assignFunc {
 				var r = []byte{}
 				r = append(r, %s...)
 				r = append(r, %s...)
-				%s.Set(%s, r)
+				%s
 			}
-			`, leftElem, rightElem, caller, idx)
+			`, leftElem, rightElem, set(types.BytesFamily, caller, idx, "r"))
 		} else {
 			colexecerror.InternalError(errors.AssertionFailedf("unhandled binary operator %s", op.overloadBase.BinOp.String()))
 		}
@@ -310,7 +289,7 @@ func (bytesCustomizer) getBinOpAssignFunc() assignFunc {
 	}
 }
 
-func checkRightIsZero(binOp tree.BinaryOperatorSymbol) bool {
+func checkRightIsZero(binOp tree.BinaryOperator) bool {
 	// TODO(yuzefovich): introduce a new operator that would check whether a
 	// vector contains a zero value so that the division didn't have to do the
 	// check. This is likely to be more performant.
@@ -632,177 +611,6 @@ func (c intervalCustomizer) getBinOpAssignFunc() assignFunc {
 	}
 }
 
-func (c jsonCustomizer) getBinOpAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, leftElem, rightElem, targetCol, leftCol, rightCol string) string {
-		vecVariable, idxVariable, err := parseNonIndexableTargetElem(targetElem)
-		if err != nil {
-			return fmt.Sprintf("colexecerror.InternalError(\"%s\")", err)
-		}
-		switch op.overloadBase.BinOp {
-		case tree.Concat:
-			return fmt.Sprintf(`
-_j, _err := %[3]s.Concat(%[4]s)
-if _err != nil {
-    colexecerror.ExpectedError(_err)
-}
-
-%[1]s.Set(%[2]s, _j)`, vecVariable, idxVariable, leftElem, rightElem)
-		default:
-			colexecerror.InternalError(errors.AssertionFailedf("unhandled binary operator %s", op.overloadBase.BinOp.String()))
-		}
-		// This code is unreachable, but the compiler cannot infer that.
-		return ""
-	}
-}
-
-func (j jsonBytesCustomizer) getBinOpAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, leftElem, rightElem, targetCol, leftCol, rightCol string) string {
-		vecVariable, idxVariable, err := parseNonIndexableTargetElem(targetElem)
-		if err != nil {
-			return fmt.Sprintf("colexecerror.InternalError(\"%s\")", err)
-		}
-		getJSONFetchValKey := func(handleNonNilPath string) string {
-			return fmt.Sprintf(`
-// Get an unsafe string handle onto the bytes, to avoid a spurious copy. This
-// is safe since we know the bytes won't change out from under us during
-// FetchValKey.
-_j, _err := %[3]s.FetchValKey(*(*string)(unsafe.Pointer(&%[4]s)))
-if _err != nil {
-    colexecerror.ExpectedError(_err)
-}
-if _j == nil {
-    _outNulls.SetNull(%[2]s)
-} else {
-    %[1]s
-}`,
-				handleNonNilPath, idxVariable, leftElem, rightElem)
-		}
-		switch op.overloadBase.BinOp {
-		case tree.JSONFetchVal:
-			return getJSONFetchValKey(fmt.Sprintf("%s.Set(%s, _j)", vecVariable, idxVariable))
-		case tree.JSONFetchText:
-			return getJSONFetchValKey(fmt.Sprintf(`
-			_text, _err := _j.AsText()
-			if _err != nil {
-				colexecerror.ExpectedError(_err)
-			}
-			if _text == nil {
-				_outNulls.SetNull(%[2]s)
-			} else {
-				%[1]s.Set(%[2]s, []byte(*_text))
-			}`, vecVariable, idxVariable))
-		case tree.Minus:
-			return fmt.Sprintf(`
-// Get an unsafe string handle onto the bytes, to avoid a spurious copy. This
-// is safe since we know the bytes won't change out from under us during
-// RemoveString.
-_j, _, _err := %[3]s.RemoveString(*(*string)(unsafe.Pointer(&%[4]s)))
-if _err != nil {
-    colexecerror.ExpectedError(_err)
-}
-%[1]s.Set(%[2]s, _j)
-`, vecVariable, idxVariable, leftElem, rightElem)
-		default:
-			colexecerror.InternalError(errors.AssertionFailedf("unhandled binary operator %s", op.overloadBase.BinOp.String()))
-		}
-		// This code is unreachable, but the compiler cannot infer that.
-		return ""
-	}
-}
-
-func (j jsonIntCustomizer) getBinOpAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, leftElem, rightElem, targetCol, leftCol, rightCol string) string {
-		vecVariable, idxVariable, err := parseNonIndexableTargetElem(targetElem)
-		if err != nil {
-			return fmt.Sprintf("colexecerror.InternalError(\"%s\")", err)
-		}
-		getJSONFetchValIdx := func(handleNonNilPath string) string {
-			return fmt.Sprintf(`
-_j, _err := %[3]s.FetchValIdx(int(%[4]s))
-if _err != nil {
-    colexecerror.ExpectedError(_err)
-}
-if _j == nil {
-    _outNulls.SetNull(%[2]s)
-} else {
-    %[1]s
-}`,
-				handleNonNilPath, idxVariable, leftElem, rightElem)
-		}
-		switch op.overloadBase.BinOp {
-		case tree.JSONFetchVal:
-			return getJSONFetchValIdx(fmt.Sprintf("%s.Set(%s, _j)", vecVariable, idxVariable))
-		case tree.JSONFetchText:
-			return getJSONFetchValIdx(fmt.Sprintf(`
-			_text, _err := _j.AsText()
-			if _err != nil {
-				colexecerror.ExpectedError(_err)
-			}
-			if _text == nil {
-				_outNulls.SetNull(%[2]s)
-			} else {
-				%[1]s.Set(%[2]s, []byte(*_text))
-			}`, vecVariable, idxVariable))
-		case tree.Minus:
-			return fmt.Sprintf(`
-_j, _, _err := %[3]s.RemoveIndex(int(%[4]s))
-if _err != nil {
-	  colexecerror.ExpectedError(_err)
-}
-%[1]s.Set(%[2]s, _j)`, vecVariable, idxVariable, leftElem, rightElem)
-		default:
-			colexecerror.InternalError(errors.AssertionFailedf("unhandled binary operator %s", op.overloadBase.BinOp.String()))
-		}
-		// This code is unreachable, but the compiler cannot infer that.
-		return ""
-	}
-}
-
-func (j jsonDatumCustomizer) getBinOpAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, leftElem, rightElem, targetCol, leftCol, rightCol string) string {
-		vecVariable, idxVariable, err := parseNonIndexableTargetElem(targetElem)
-		if err != nil {
-			return fmt.Sprintf("colexecerror.InternalError(\"%s\")", err)
-		}
-		// getJSONFetchPath is a utility function that generates code for JSON
-		// fetch operation. It takes the code snippet that will be invoked when
-		// JSON path (stored at "_path") is non-nil.
-		getJSONFetchPath := func(handleNonNilPath string) string {
-			return fmt.Sprintf(`
-_path, _err := tree.GetJSONPath(%[3]s, *tree.MustBeDArray(%[4]s.(*coldataext.Datum).Datum))
-if _err != nil {
-    colexecerror.ExpectedError(_err)
-}
-if _path == nil {
-    _outNulls.SetNull(%[2]s)
-} else {
-    %[1]s
-}`,
-				handleNonNilPath, idxVariable, leftElem, rightElem)
-		}
-		switch op.overloadBase.BinOp {
-		case tree.JSONFetchValPath:
-			return getJSONFetchPath(fmt.Sprintf("%s.Set(%s, _path)", vecVariable, idxVariable))
-		case tree.JSONFetchTextPath:
-			return getJSONFetchPath(fmt.Sprintf(`
-    _text, _err := _path.AsText()
-    if _err != nil {
-        colexecerror.ExpectedError(_err)
-    }
-    if _text == nil {
-        _outNulls.SetNull(%[2]s)
-    } else {
-        %[1]s.Set(%[2]s, []byte(*_text))
-    }
-`, vecVariable, idxVariable))
-		default:
-			colexecerror.InternalError(errors.AssertionFailedf("unhandled binary operator %s", op.overloadBase.BinOp.String()))
-		}
-		// This code is unreachable, but the compiler cannot infer that.
-		return ""
-	}
-}
-
 func (c timestampIntervalCustomizer) getBinOpAssignFunc() assignFunc {
 	return func(op *lastArgWidthOverload, targetElem, leftElem, rightElem, targetCol, leftCol, rightCol string) string {
 		switch op.overloadBase.BinOp {
@@ -960,8 +768,9 @@ func executeBinOpOnDatums(prelude, targetElem, leftColdataExtDatum, rightDatumEl
 			if _res == tree.DNull {
 				_outNulls.SetNull(%s)
 			}
-			%s.Set(%s, _res)
-		`, prelude, leftColdataExtDatum, rightDatumElem, idxVariable, vecVariable, idxVariable,
+			%s
+		`, prelude, leftColdataExtDatum, rightDatumElem, idxVariable,
+		set(typeconv.DatumVecCanonicalTypeFamily, vecVariable, idxVariable, "_res"),
 	)
 }
 
@@ -977,9 +786,7 @@ func (c datumCustomizer) getBinOpAssignFunc() assignFunc {
 // convertNativeToDatum returns a string that converts nativeElem to a
 // tree.Datum that is stored in local variable named datumElemVarName.
 func convertNativeToDatum(
-	op tree.BinaryOperatorSymbol,
-	canonicalTypeFamily types.Family,
-	nativeElem, datumElemVarName string,
+	op tree.BinaryOperator, canonicalTypeFamily types.Family, nativeElem, datumElemVarName string,
 ) string {
 	var runtimeConversion string
 	switch canonicalTypeFamily {

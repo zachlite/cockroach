@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -217,8 +216,34 @@ func (s *Store) RequestClosedTimestamp(nodeID roachpb.NodeID, rangeID roachpb.Ra
 	s.cfg.ClosedTimestamp.Clients.Request(nodeID, rangeID)
 }
 
+// AssertInvariants verifies that the store's bookkeping is self-consistent. It
+// is only valid to call this method when there is no in-flight traffic to the
+// store (e.g., after the store is shut down).
+func (s *Store) AssertInvariants() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.mu.replicas.Range(func(_ int64, p unsafe.Pointer) bool {
+		ctx := s.cfg.AmbientCtx.AnnotateCtx(context.Background())
+		repl := (*Replica)(p)
+		// We would normally need to hold repl.raftMu. Otherwise we can observe an
+		// initialized replica that is not in s.replicasByKey, e.g., if we race with
+		// a goroutine that is currently initializing repl. The lock ordering makes
+		// acquiring repl.raftMu challenging; instead we require that this method is
+		// called only when there is no in-flight traffic to the store, at which
+		// point acquiring repl.raftMu is unnecessary.
+		if repl.IsInitialized() {
+			if rbkRepl := s.mu.replicasByKey.LookupReplica(ctx, repl.Desc().StartKey); rbkRepl != repl {
+				log.Fatalf(ctx, "%v misplaced in replicasByKey; found %+v instead", repl, rbkRepl)
+			}
+		} else if _, ok := s.mu.uninitReplicas[repl.RangeID]; !ok {
+			log.Fatalf(ctx, "%v missing from uninitReplicas", repl)
+		}
+		return true // keep iterating
+	})
+}
+
 func NewTestStorePool(cfg StoreConfig) *StorePool {
-	TimeUntilStoreDead.Override(context.Background(), &cfg.Settings.SV, TestTimeUntilStoreDeadOff)
+	TimeUntilStoreDead.Override(&cfg.Settings.SV, TestTimeUntilStoreDeadOff)
 	return NewStorePool(
 		cfg.AmbientCtx,
 		cfg.Settings,
@@ -389,12 +414,6 @@ func (r *Replica) LargestPreviousMaxRangeSizeBytes() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.mu.largestPreviousMaxRangeSizeBytes
-}
-
-// LoadBasedSplitter returns the replica's split.Decider, which is used to
-// assist load-based split (and merge) decisions.
-func (r *Replica) LoadBasedSplitter() *split.Decider {
-	return &r.loadBasedSplitter
 }
 
 func MakeSSTable(key, value string, ts hlc.Timestamp) ([]byte, storage.MVCCKeyValue) {

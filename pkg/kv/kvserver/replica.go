@@ -39,7 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	enginepb "github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -50,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -807,6 +808,11 @@ func (r *Replica) Clock() *hlc.Clock {
 	return r.store.Clock()
 }
 
+// DB returns the Replica's client DB.
+func (r *Replica) DB() *kv.DB {
+	return r.store.DB()
+}
+
 // Engine returns the Replica's underlying Engine. In most cases the
 // evaluation Batch should be used instead.
 func (r *Replica) Engine() storage.Engine {
@@ -1029,26 +1035,14 @@ func (r *Replica) GetMVCCStats() enginepb.MVCCStats {
 	return *r.mu.state.Stats
 }
 
-// GetMaxSplitQPS returns the Replica's maximum queries/s request rate over a
-// configured measurement period. If the Replica has not been recording QPS for
-// at least an entire measurement period, the method will return false.
+// GetSplitQPS returns the Replica's queries/s request rate.
 //
 // NOTE: This should only be used for load based splitting, only
 // works when the load based splitting cluster setting is enabled.
 //
 // Use QueriesPerSecond() for current QPS stats for all other purposes.
-func (r *Replica) GetMaxSplitQPS() (float64, bool) {
-	return r.loadBasedSplitter.MaxQPS(r.Clock().PhysicalTime())
-}
-
-// GetLastSplitQPS returns the Replica's most recent queries/s request rate.
-//
-// NOTE: This should only be used for load based splitting, only
-// works when the load based splitting cluster setting is enabled.
-//
-// Use QueriesPerSecond() for current QPS stats for all other purposes.
-func (r *Replica) GetLastSplitQPS() float64 {
-	return r.loadBasedSplitter.LastQPS(r.Clock().PhysicalTime())
+func (r *Replica) GetSplitQPS() float64 {
+	return r.loadBasedSplitter.LastQPS(timeutil.Now())
 }
 
 // ContainsKey returns whether this range contains the specified key.
@@ -1642,7 +1636,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 				PusheeTxn: intent.Txn,
 				PushType:  roachpb.PUSH_ABORT,
 			})
-			if err := r.store.DB().Run(ctx, b); err != nil {
+			if err := r.DB().Run(ctx, b); err != nil {
 				select {
 				case <-r.store.stopper.ShouldQuiesce():
 					// The server is shutting down. The error while pushing the
@@ -1677,7 +1671,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 			var getRes *roachpb.GetResponse
 			for retry := retry.Start(base.DefaultRetryOptions()); retry.Next(); {
 				metaKey := keys.RangeMetaKey(desc.EndKey)
-				res, pErr := kv.SendWrappedWith(ctx, r.store.DB().NonTransactionalSender(), roachpb.Header{
+				res, pErr := kv.SendWrappedWith(ctx, r.DB().NonTransactionalSender(), roachpb.Header{
 					// Use READ_UNCOMMITTED to avoid trying to resolve intents, since
 					// resolving those intents might involve sending requests to this
 					// range, and that could deadlock. See the comment on

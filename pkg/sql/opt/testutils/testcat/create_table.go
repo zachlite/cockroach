@@ -155,22 +155,6 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 	)
 	tab.Columns = append(tab.Columns, mvcc)
 
-	// Add the tableoid system column.
-	var tableoid cat.Column
-	ordinal = len(tab.Columns)
-	tableoid.InitNonVirtual(
-		ordinal,
-		cat.StableID(1+ordinal),
-		colinfo.TableOIDColumnName,
-		cat.System,
-		types.Oid,
-		true, /* nullable */
-		cat.Hidden,
-		nil, /* defaultExpr */
-		nil, /* computedExpr */
-	)
-	tab.Columns = append(tab.Columns, tableoid)
-
 	// Cache the partitioning statement for the primary index.
 	if stmt.PartitionByTable != nil {
 		tab.partitionBy = stmt.PartitionByTable.PartitionBy
@@ -381,26 +365,8 @@ func (tc *Catalog) resolveFK(tab *Table, d *tree.ForeignKeyConstraintTableDef) {
 		targetTable = tc.Table(&d.Table)
 	}
 
-	referencedColNames := d.ToCols
-	if len(referencedColNames) == 0 {
-		// If no columns are specified, attempt to default to PK, ignoring implicit
-		// columns.
-		idx := targetTable.Index(cat.PrimaryIndex)
-		numImplicitCols := idx.ImplicitPartitioningColumnCount()
-		referencedColNames = make(
-			tree.NameList,
-			0,
-			idx.KeyColumnCount()-numImplicitCols,
-		)
-		for i := numImplicitCols; i < idx.KeyColumnCount(); i++ {
-			referencedColNames = append(
-				referencedColNames,
-				idx.Column(i).ColName(),
-			)
-		}
-	}
-	toCols := make([]int, len(referencedColNames))
-	for i, c := range referencedColNames {
+	toCols := make([]int, len(d.ToCols))
+	for i, c := range d.ToCols {
 		toCols[i] = targetTable.FindOrdinal(string(c))
 	}
 
@@ -893,7 +859,7 @@ func (tt *Table) addFamily(def *tree.FamilyTableDef) {
 }
 
 // addColumn adds a column to the index. If necessary, creates a virtual column
-// (for inverted and expression indexes).
+// (for inverted and expression-based indexes).
 //
 // isLastIndexCol indicates if this is the last explicit column in the index as
 // specified in the schema; it is used to indicate the inverted column if the
@@ -903,7 +869,7 @@ func (ti *Index) addColumn(
 ) *cat.Column {
 	if elem.Expr != nil {
 		if ti.Inverted && isLastIndexCol {
-			panic("inverted index expression element not supported")
+			panic("expression-based inverted column not supported")
 		}
 		col := columnForIndexElemExpr(tt, elem.Expr)
 		return ti.addColumnByOrdinal(tt, col.Ordinal(), elem.Direction, colType)

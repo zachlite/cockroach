@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/pebble/vfs"
 )
 
 // NewInMem allocates and returns a new, opened in-memory engine. The caller
@@ -31,22 +30,7 @@ func NewInMem(
 	cacheSize, storeSize int64,
 	settings *cluster.Settings,
 ) Engine {
-	return newPebbleInMem(ctx, attrs, cacheSize, storeSize, vfs.NewMem(), "", settings)
-}
-
-// InMemFromFS allocates and returns new, opened in-memory engine. Engine
-// uses provided in mem file system and base directory to store data. The
-// caller must call obtained engine's Close method when engine is no longer
-// needed.
-func InMemFromFS(
-	ctx context.Context,
-	attrs roachpb.Attributes,
-	cacheSize, storeSize int64,
-	fs vfs.FS,
-	dir string,
-	settings *cluster.Settings,
-) Engine {
-	return newPebbleInMem(ctx, attrs, cacheSize, storeSize, fs, dir, settings)
+	return newPebbleInMem(ctx, attrs, cacheSize, storeSize, settings)
 }
 
 // The ForTesting functions randomize the settings for separated intents. This
@@ -64,7 +48,7 @@ func InMemFromFS(
 // must call the engine's Close method when the engine is no longer needed.
 func NewInMemForTesting(ctx context.Context, attrs roachpb.Attributes, storeSize int64) Engine {
 	settings := MakeRandomSettingsForSeparatedIntents()
-	return newPebbleInMem(ctx, attrs, 0 /* cacheSize */, storeSize, vfs.NewMem(), "", settings)
+	return newPebbleInMem(ctx, attrs, 0 /* cacheSize */, storeSize, settings)
 }
 
 // NewDefaultInMemForTesting allocates and returns a new, opened in-memory engine with
@@ -92,6 +76,6 @@ func makeSettingsForSeparatedIntents(oldClusterVersion bool, enabled bool) *clus
 		version = clusterversion.ByKey(clusterversion.V20_2)
 	}
 	settings := cluster.MakeTestingClusterSettingsWithVersions(version, version, true)
-	SeparatedIntentsEnabled.Override(context.TODO(), &settings.SV, enabled)
+	SeparatedIntentsEnabled.Override(&settings.SV, enabled)
 	return settings
 }

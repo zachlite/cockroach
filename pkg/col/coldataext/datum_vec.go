@@ -117,8 +117,8 @@ func (dv *datumVec) Set(i int, v coldata.Datum) {
 	dv.data[i] = datum
 }
 
-// Window implements coldata.DatumVec interface.
-func (dv *datumVec) Window(start, end int) coldata.DatumVec {
+// Slice implements coldata.DatumVec interface.
+func (dv *datumVec) Slice(start, end int) coldata.DatumVec {
 	return &datumVec{
 		t:       dv.t,
 		data:    dv.data[start:end],
@@ -163,10 +163,10 @@ func (dv *datumVec) Cap() int {
 }
 
 // MarshalAt implements coldata.DatumVec interface.
-func (dv *datumVec) MarshalAt(appendTo []byte, i int) ([]byte, error) {
+func (dv *datumVec) MarshalAt(i int) ([]byte, error) {
 	dv.maybeSetDNull(i)
 	return rowenc.EncodeTableValue(
-		appendTo, descpb.ColumnID(encoding.NoColumnID), dv.data[i], dv.scratch,
+		nil /* appendTo */, descpb.ColumnID(encoding.NoColumnID), dv.data[i], dv.scratch,
 	)
 }
 
@@ -180,30 +180,21 @@ func (dv *datumVec) UnmarshalTo(i int, b []byte) error {
 const sizeOfDatum = unsafe.Sizeof(tree.Datum(nil))
 
 // Size implements coldata.DatumVec interface.
-func (dv *datumVec) Size(startIdx int) uintptr {
+func (dv *datumVec) Size() uintptr {
 	// Note that we don't account for the overhead of datumVec struct, and the
 	// calculations are such that they are in line with
 	// colmem.EstimateBatchSizeBytes.
-	if startIdx >= dv.Cap() {
-		return 0
-	}
-	if startIdx < 0 {
-		startIdx = 0
-	}
-	count := uintptr(dv.Cap() - startIdx)
+	count := uintptr(dv.Cap())
 	size := sizeOfDatum * count
 	if datumSize, variable := tree.DatumTypeSize(dv.t); variable {
-		// The elements in dv.data[max(startIdx,len):cap] range are accounted with
-		// the default datum size for the type. For those in the range
-		// [startIdx, len) we call Datum.Size().
-		idx := startIdx
-		for ; idx < len(dv.data); idx++ {
-			if dv.data[idx] != nil {
-				size += dv.data[idx].Size()
+		for _, d := range dv.data {
+			if d != nil {
+				size += d.Size()
 			}
 		}
-		// Pick up where the loop left off.
-		size += uintptr(dv.Cap()-idx) * datumSize
+		// The elements in dv.data[len:cap] range are accounted with the
+		// default datum size for the type.
+		size += (count - uintptr(dv.Len())) * datumSize
 	} else {
 		size += datumSize * count
 	}

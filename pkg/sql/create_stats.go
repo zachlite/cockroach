@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
@@ -40,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // createStatsPostEvents controls the cluster setting for logging
@@ -124,7 +124,7 @@ func (n *createStatsNode) startJob(ctx context.Context, resultsCh chan<- tree.Da
 		return err
 	}
 
-	if n.Name == jobspb.AutoStatsName {
+	if n.Name == stats.AutoStatsName {
 		// Don't start the job if there is already a CREATE STATISTICS job running.
 		// (To handle race conditions we check this again after the job starts,
 		// but this check is used to prevent creating a large number of jobs that
@@ -266,7 +266,7 @@ func (n *createStatsNode) makeJobRecord(ctx context.Context) (*jobs.Record, erro
 	statement := tree.AsStringWithFQNames(n, n.p.EvalContext().Annotations)
 	eventLogStatement := statement
 	var description string
-	if n.Name == jobspb.AutoStatsName {
+	if n.Name == stats.AutoStatsName {
 		// Use a user-friendly description for automatic statistics.
 		description = fmt.Sprintf("Table statistics refresh for %s", fqTableName)
 	} else {
@@ -277,7 +277,7 @@ func (n *createStatsNode) makeJobRecord(ctx context.Context) (*jobs.Record, erro
 	}
 	return &jobs.Record{
 		Description: description,
-		Statements:  []string{statement},
+		Statement:   statement,
 		Username:    n.p.User(),
 		Details: jobspb.CreateStatsDetails{
 			Name:            string(n.Name),
@@ -363,9 +363,9 @@ func createStatsDefaultColumns(
 	}
 
 	// Add column stats for the primary key.
-	for i := 0; i < desc.GetPrimaryIndex().NumKeyColumns(); i++ {
+	for i := 0; i < desc.GetPrimaryIndex().NumColumns(); i++ {
 		// Generate stats for each column in the primary key.
-		addIndexColumnStatsIfNotExists(desc.GetPrimaryIndex().GetKeyColumnID(i), false /* isInverted */)
+		addIndexColumnStatsIfNotExists(desc.GetPrimaryIndex().GetColumnID(i), false /* isInverted */)
 
 		// Only collect multi-column stats if enabled.
 		if i == 0 || !multiColEnabled {
@@ -374,7 +374,7 @@ func createStatsDefaultColumns(
 
 		colIDs := make([]descpb.ColumnID, i+1)
 		for j := 0; j <= i; j++ {
-			colIDs[j] = desc.GetPrimaryIndex().GetKeyColumnID(j)
+			colIDs[j] = desc.GetPrimaryIndex().GetColumnID(j)
 		}
 
 		// Remember the requested stats so we don't request duplicates.
@@ -389,8 +389,8 @@ func createStatsDefaultColumns(
 
 	// Add column stats for each secondary index.
 	for _, idx := range desc.PublicNonPrimaryIndexes() {
-		for j, n := 0, idx.NumKeyColumns(); j < n; j++ {
-			colID := idx.GetKeyColumnID(j)
+		for j, n := 0, idx.NumColumns(); j < n; j++ {
+			colID := idx.GetColumnID(j)
 			isInverted := idx.GetType() == descpb.IndexDescriptor_INVERTED && colID == idx.InvertedColumnID()
 
 			// Generate stats for each indexed column.
@@ -403,7 +403,7 @@ func createStatsDefaultColumns(
 
 			colIDs := make([]descpb.ColumnID, j+1)
 			for k := 0; k <= j; k++ {
-				colIDs[k] = idx.GetKeyColumnID(k)
+				colIDs[k] = idx.GetColumnID(k)
 			}
 
 			// Check for existing stats and remember the requested stats.
@@ -495,9 +495,9 @@ var _ jobs.Resumer = &createStatsResumer{}
 func (r *createStatsResumer) Resume(ctx context.Context, execCtx interface{}) error {
 	p := execCtx.(JobExecContext)
 	details := r.job.Details().(jobspb.CreateStatsDetails)
-	if details.Name == jobspb.AutoStatsName {
-		// We want to make sure that an automatic CREATE STATISTICS job only runs if
-		// there are no other CREATE STATISTICS jobs running, automatic or manual.
+	if details.Name == stats.AutoStatsName {
+		// We want to make sure there is only one automatic CREATE STATISTICS job
+		// running at a time.
 		if err := checkRunningJobs(ctx, r.job, p); err != nil {
 			return err
 		}
@@ -505,6 +505,14 @@ func (r *createStatsResumer) Resume(ctx context.Context, execCtx interface{}) er
 
 	r.tableID = details.Table.ID
 	evalCtx := p.ExtendedEvalContext()
+
+	ci := colinfo.ColTypeInfoFromColTypes([]*types.T{})
+	rows := rowcontainer.NewRowContainer(evalCtx.Mon.MakeBoundAccount(), ci)
+	defer func() {
+		if rows != nil {
+			rows.Close(ctx)
+		}
+	}()
 
 	dsp := p.DistSQLPlanner()
 	if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
@@ -519,11 +527,8 @@ func (r *createStatsResumer) Resume(ctx context.Context, execCtx interface{}) er
 		}
 
 		planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, txn, true /* distribute */)
-		// CREATE STATS flow doesn't produce any rows and only emits the
-		// metadata, so we can use a nil rowContainerHelper.
-		resultWriter := NewRowResultWriter(nil /* rowContainer */)
 		if err := dsp.planAndRunCreateStats(
-			ctx, evalCtx, planCtx, txn, r.job, resultWriter,
+			ctx, evalCtx, planCtx, txn, r.job, NewRowResultWriter(rows),
 		); err != nil {
 			// Check if this was a context canceled error and restart if it was.
 			if grpcutil.IsContextCanceled(err) {
@@ -583,7 +588,7 @@ func (r *createStatsResumer) Resume(ctx context.Context, execCtx interface{}) er
 			sqlEventCommonExecPayload{
 				user:         evalCtx.SessionData.User(),
 				appName:      evalCtx.SessionData.ApplicationName,
-				stmt:         redact.Sprint(details.Statement),
+				stmt:         details.Statement,
 				stmtTag:      "CREATE STATISTICS",
 				placeholders: nil, /* no placeholders known at this point */
 			},

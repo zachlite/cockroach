@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -126,38 +127,39 @@ func resolveNewTypeName(
 		return nil, nil, errors.New("cannot create a type in the system database")
 	}
 
-	typename := tree.NewUnqualifiedTypeName(name.Object())
+	typename := tree.NewUnqualifiedTypeName(tree.Name(name.Object()))
 	typename.ObjectNamePrefix = prefix
 	return typename, db, nil
 }
 
 // getCreateTypeParams performs some initial validation on the input new
-// TypeName and returns the ID of the parent schema.
+// TypeName and returns the key for the new type descriptor, and the ID of
+// the parent schema.
 func getCreateTypeParams(
 	params runParams, name *tree.TypeName, db catalog.DatabaseDescriptor,
-) (schema catalog.SchemaDescriptor, err error) {
+) (typeKey catalogkeys.DescriptorKey, schemaID descpb.ID, err error) {
 	// Check we are not creating a type which conflicts with an alias available
 	// as a built-in type in CockroachDB but an extension type on the public
 	// schema for PostgreSQL.
 	if name.Schema() == tree.PublicSchema {
 		if _, ok := types.PublicSchemaAliases[name.Object()]; ok {
-			return nil, sqlerrors.NewTypeAlreadyExistsError(name.String())
+			return nil, 0, sqlerrors.NewTypeAlreadyExistsError(name.String())
 		}
 	}
 	// Get the ID of the schema the type is being created in.
 	dbID := db.GetID()
-	schema, err = params.p.getNonTemporarySchemaForCreate(params.ctx, db, name.Schema())
+	schemaID, err = params.p.getSchemaIDForCreate(params.ctx, params.ExecCfg().Codec, dbID, name.Schema())
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Check permissions on the schema.
 	if err := params.p.canCreateOnSchema(
-		params.ctx, schema.GetID(), dbID, params.p.User(), skipCheckPublicSchema); err != nil {
-		return nil, err
+		params.ctx, schemaID, dbID, params.p.User(), skipCheckPublicSchema); err != nil {
+		return nil, 0, err
 	}
 
-	if schema.SchemaKind() == catalog.SchemaUserDefined {
+	if schemaID != keys.PublicSchemaID {
 		sqltelemetry.IncrementUserDefinedSchemaCounter(sqltelemetry.UserDefinedSchemaUsedByObject)
 	}
 
@@ -166,14 +168,15 @@ func getCreateTypeParams(
 		params.p.txn,
 		params.ExecCfg().Codec,
 		db.GetID(),
-		schema.GetID(),
+		schemaID,
 		name,
 	)
 	if err != nil {
-		return nil, err
+		return nil, descpb.InvalidID, err
 	}
 
-	return schema, nil
+	typeKey = catalogkv.MakeObjectNameKey(params.ctx, params.ExecCfg().Settings, db.GetID(), schemaID, name.Type())
+	return typeKey, schemaID, nil
 }
 
 // Postgres starts off trying to create the type as _<typename>. It then
@@ -231,7 +234,7 @@ func (p *planner) createArrayType(
 	if err != nil {
 		return 0, err
 	}
-	arrayTypeKey := catalogkeys.MakeObjectNameKey(params.ExecCfg().Codec, db.GetID(), schemaID, arrayTypeName)
+	arrayTypeKey := catalogkv.MakeObjectNameKey(params.ctx, params.ExecCfg().Settings, db.GetID(), schemaID, arrayTypeName)
 
 	// Generate the stable ID for the array type.
 	id, err := catalogkv.GenerateUniqueDescID(params.ctx, params.ExecCfg().DB, params.ExecCfg().Codec)
@@ -266,7 +269,7 @@ func (p *planner) createArrayType(
 	jobStr := fmt.Sprintf("implicit array type creation for %s", typ)
 	if err := p.createDescriptorWithID(
 		params.ctx,
-		arrayTypeKey,
+		arrayTypeKey.Key(params.ExecCfg().Codec),
 		id,
 		arrayTypDesc,
 		params.EvalContext().Settings,
@@ -298,6 +301,11 @@ func (p *planner) createEnumWithID(
 	typeName *tree.TypeName,
 	enumType enumType,
 ) error {
+	// Make sure that all nodes in the cluster are able to recognize ENUM types.
+	if !p.ExecCfg().Settings.Version.IsActive(params.ctx, clusterversion.Enums) {
+		return pgerror.Newf(pgcode.FeatureNotSupported,
+			"not all nodes are the correct version for ENUM type creation")
+	}
 
 	sqltelemetry.IncrementEnumCounter(sqltelemetry.EnumCreate)
 
@@ -313,7 +321,7 @@ func (p *planner) createEnumWithID(
 	}
 
 	// Generate a key in the namespace table and a new id for this type.
-	schema, err := getCreateTypeParams(params, typeName, dbDesc)
+	typeKey, schemaID, err := getCreateTypeParams(params, typeName, dbDesc)
 	if err != nil {
 		return err
 	}
@@ -333,8 +341,13 @@ func (p *planner) createEnumWithID(
 	// However having USAGE on a parent schema of the type
 	// gives USAGE privilege to the type.
 	privs := descpb.NewDefaultPrivilegeDescriptor(params.p.User())
+	resolvedSchema, err := p.Descriptors().GetImmutableSchemaByID(
+		params.ctx, p.Txn(), schemaID, tree.SchemaLookupFlags{})
+	if err != nil {
+		return err
+	}
 
-	inheritUsagePrivilegeFromSchema(schema, privs)
+	inheritUsagePrivilegeFromSchema(resolvedSchema, privs)
 	privs.Grant(params.p.User(), privilege.List{privilege.ALL})
 
 	enumKind := descpb.TypeDescriptor_ENUM
@@ -359,7 +372,7 @@ func (p *planner) createEnumWithID(
 		Name:           typeName.Type(),
 		ID:             id,
 		ParentID:       dbDesc.GetID(),
-		ParentSchemaID: schema.GetID(),
+		ParentSchemaID: schemaID,
 		Kind:           enumKind,
 		EnumMembers:    members,
 		Version:        1,
@@ -368,7 +381,7 @@ func (p *planner) createEnumWithID(
 	}).BuildCreatedMutableType()
 
 	// Create the implicit array type for this type before finishing the type.
-	arrayTypeID, err := p.createArrayType(params, typeName, typeDesc, dbDesc, schema.GetID())
+	arrayTypeID, err := p.createArrayType(params, typeName, typeDesc, dbDesc, schemaID)
 	if err != nil {
 		return err
 	}
@@ -379,7 +392,7 @@ func (p *planner) createEnumWithID(
 	// Now create the type after the implicit array type as been created.
 	if err := p.createDescriptorWithID(
 		params.ctx,
-		catalogkeys.MakeObjectNameKey(params.ExecCfg().Codec, dbDesc.GetID(), schema.GetID(), typeName.Type()),
+		typeKey.Key(params.ExecCfg().Codec),
 		id,
 		typeDesc,
 		params.EvalContext().Settings,
@@ -406,10 +419,10 @@ func (n *createTypeNode) ReadingOwnWrites()                   {}
 // this seems to be how Postgres does it.
 // Add a test for this when we support granting privileges to schemas #50879.
 func inheritUsagePrivilegeFromSchema(
-	schema catalog.SchemaDescriptor, privs *descpb.PrivilegeDescriptor,
+	resolvedSchema catalog.ResolvedSchema, privs *descpb.PrivilegeDescriptor,
 ) {
 
-	switch kind := schema.SchemaKind(); kind {
+	switch resolvedSchema.Kind {
 	case catalog.SchemaPublic:
 		// If the type is in the public schema, the public role has USAGE on it.
 		privs.Grant(security.PublicRoleName(), privilege.List{privilege.USAGE})
@@ -417,9 +430,10 @@ func inheritUsagePrivilegeFromSchema(
 		// No types should be created in a temporary schema or a virtual schema.
 		panic(errors.AssertionFailedf(
 			"type being created in schema kind %d with id %d",
-			kind, schema.GetID()))
+			resolvedSchema.Kind, resolvedSchema.ID))
 	case catalog.SchemaUserDefined:
-		schemaPrivs := schema.GetPrivileges()
+		schemaDesc := resolvedSchema.Desc
+		schemaPrivs := schemaDesc.GetPrivileges()
 
 		// Look for all users that have USAGE on the schema and add it to the
 		// privilege descriptor.
@@ -429,6 +443,6 @@ func inheritUsagePrivilegeFromSchema(
 			}
 		}
 	default:
-		panic(errors.AssertionFailedf("unknown schema kind %d", kind))
+		panic(errors.AssertionFailedf("unknown schema kind %d", resolvedSchema.Kind))
 	}
 }

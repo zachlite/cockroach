@@ -36,7 +36,7 @@ import (
 )
 
 type callbackRemoteComponentCreator struct {
-	newOutboxFn func(*colmem.Allocator, colexecop.Operator, []*types.T, []colexecop.MetadataSource) (*colrpc.Outbox, error)
+	newOutboxFn func(*colmem.Allocator, colexecop.Operator, []*types.T, []execinfrapb.MetadataSource) (*colrpc.Outbox, error)
 	newInboxFn  func(allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID) (*colrpc.Inbox, error)
 }
 
@@ -45,14 +45,14 @@ func (c callbackRemoteComponentCreator) newOutbox(
 	input colexecop.Operator,
 	typs []*types.T,
 	_ func() []*execinfrapb.ComponentStats,
-	metadataSources []colexecop.MetadataSource,
+	metadataSources []execinfrapb.MetadataSource,
 	_ []colexecop.Closer,
 ) (*colrpc.Outbox, error) {
 	return c.newOutboxFn(allocator, input, typs, metadataSources)
 }
 
 func (c callbackRemoteComponentCreator) newInbox(
-	allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID,
+	ctx context.Context, allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID,
 ) (*colrpc.Inbox, error) {
 	return c.newInboxFn(allocator, typs, streamID)
 }
@@ -194,7 +194,7 @@ func TestDrainOnlyInputDAG(t *testing.T) {
 			allocator *colmem.Allocator,
 			op colexecop.Operator,
 			typs []*types.T,
-			sources []colexecop.MetadataSource,
+			sources []execinfrapb.MetadataSource,
 		) (*colrpc.Outbox, error) {
 			require.False(t, outboxCreated)
 			outboxCreated = true
@@ -207,7 +207,7 @@ func TestDrainOnlyInputDAG(t *testing.T) {
 			return colrpc.NewOutbox(allocator, op, typs, nil /* getStats */, sources, nil /* toClose */)
 		},
 		newInboxFn: func(allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID) (*colrpc.Inbox, error) {
-			inbox, err := colrpc.NewInbox(allocator, typs, streamID)
+			inbox, err := colrpc.NewInbox(context.Background(), allocator, typs, streamID)
 			inboxToNumInputTypes[inbox] = typs
 			return inbox, err
 		},
@@ -225,11 +225,11 @@ func TestDrainOnlyInputDAG(t *testing.T) {
 	var wg sync.WaitGroup
 	vfc := newVectorizedFlowCreator(
 		&vectorizedFlowCreatorHelper{f: f}, componentCreator, false, false, &wg, &execinfra.RowChannel{},
-		nil /* batchSyncFlowConsumer */, nil /* nodeDialer */, execinfrapb.FlowID{}, colcontainer.DiskQueueCfg{},
+		nil /* nodeDialer */, execinfrapb.FlowID{}, colcontainer.DiskQueueCfg{},
 		nil /* fdSemaphore */, descs.DistSQLTypeResolver{},
 	)
 
-	_, _, err := vfc.setupFlow(ctx, &f.FlowCtx, procs, nil /* localProcessors */, flowinfra.FuseNormally)
+	_, err := vfc.setupFlow(ctx, &f.FlowCtx, procs, nil /* localProcessors */, flowinfra.FuseNormally)
 	defer vfc.cleanup(ctx)
 	require.NoError(t, err)
 
@@ -294,7 +294,7 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 			creator = c
 		}
 
-		_, _, err := vf.Setup(ctx, &execinfrapb.FlowSpec{}, flowinfra.FuseNormally)
+		_, err := vf.Setup(ctx, &execinfrapb.FlowSpec{}, flowinfra.FuseNormally)
 		require.NoError(t, err)
 
 		// No directory should have been created.
@@ -328,7 +328,7 @@ func TestVectorizedFlowTempDirectory(t *testing.T) {
 			creator = c
 		}
 
-		_, _, err := vf.Setup(ctx, &execinfrapb.FlowSpec{}, flowinfra.FuseNormally)
+		_, err := vf.Setup(ctx, &execinfrapb.FlowSpec{}, flowinfra.FuseNormally)
 		require.NoError(t, err)
 
 		createTempDir := creator.diskQueueCfg.GetPather.GetPath

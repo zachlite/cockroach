@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
@@ -59,11 +58,6 @@ type Connector interface {
 	// obviates the need for SQL-only tenant processes to join the cluster-wide
 	// gossip network.
 	config.SystemConfigProvider
-
-	// Connector is capable of knowing every region in the cluster.
-	// This is necessary for region validation for zone configurations and
-	// multi-region primitives.
-	serverpb.RegionsServer
 }
 
 // ConnectorConfig encompasses the configuration required to create a Connector.

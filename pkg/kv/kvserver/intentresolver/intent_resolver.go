@@ -73,11 +73,11 @@ const (
 	// ResumeSpan and the batcher will send a new range request.
 	intentResolverRangeRequestSize = 200
 
-	// MaxTxnsPerIntentCleanupBatch is the number of transactions whose
+	// cleanupIntentsTxnsPerBatch is the number of transactions whose
 	// corresponding intents will be resolved at a time. Intents are batched
 	// by transaction to avoid timeouts while resolving intents and ensure that
 	// progress is made.
-	MaxTxnsPerIntentCleanupBatch = 100
+	cleanupIntentsTxnsPerBatch = 100
 
 	// defaultGCBatchIdle is the default duration which the gc request batcher
 	// will wait between requests for a range before sending it.
@@ -497,7 +497,7 @@ func (ir *IntentResolver) CleanupIntents(
 		var i int
 		for i = 0; i < len(unpushed); i++ {
 			if curTxn := &unpushed[i].Txn; curTxn.ID != prevTxnID {
-				if len(pushTxns) >= MaxTxnsPerIntentCleanupBatch {
+				if len(pushTxns) == cleanupIntentsTxnsPerBatch {
 					break
 				}
 				prevTxnID = curTxn.ID

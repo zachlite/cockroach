@@ -18,7 +18,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/gossip",
-        "//pkg/jobs/jobspb",
         "//pkg/keys",
         "//pkg/kv",
         "//pkg/kv/kvclient/rangefeed",
@@ -61,6 +60,7 @@ go_test(
         "automatic_stats_test.go",
         "create_stats_job_test.go",
         "delete_stats_test.go",
+        "gossip_invalidation_test.go",
         "histogram_test.go",
         "main_test.go",
         "row_sampling_test.go",
@@ -69,6 +69,7 @@ go_test(
     embed = [":stats"],
     deps = [
         "//pkg/base",
+        "//pkg/gossip",
         "//pkg/jobs",
         "//pkg/jobs/jobspb",
         "//pkg/keys",
@@ -99,6 +100,7 @@ go_test(
         "//pkg/testutils/testcluster",
         "//pkg/util",
         "//pkg/util/encoding",
+        "//pkg/util/hlc",
         "//pkg/util/leaktest",
         "//pkg/util/log",
         "//pkg/util/mon",

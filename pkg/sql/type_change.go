@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -202,10 +201,8 @@ type TypeSchemaChangerTestingKnobs struct {
 // ModuleTestingKnobs implements the ModuleTestingKnobs interface.
 func (TypeSchemaChangerTestingKnobs) ModuleTestingKnobs() {}
 
-func (t *typeSchemaChanger) getTypeDescFromStore(
-	ctx context.Context,
-) (catalog.TypeDescriptor, error) {
-	var typeDesc catalog.TypeDescriptor
+func (t *typeSchemaChanger) getTypeDescFromStore(ctx context.Context) (*typedesc.Immutable, error) {
+	var typeDesc *typedesc.Immutable
 	if err := t.execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		typeDesc, err = catalogkv.MustGetTypeDescByID(ctx, txn, t.execCfg.Codec, t.typeID)
 		return err
@@ -219,12 +216,12 @@ func (t *typeSchemaChanger) getTypeDescFromStore(
 // and its array type descriptor (if one exists). If a descriptor is not found,
 // it is assumed dropped, and the error is swallowed.
 func refreshTypeDescriptorLeases(
-	ctx context.Context, leaseMgr *lease.Manager, typeDesc catalog.TypeDescriptor,
+	ctx context.Context, leaseMgr *lease.Manager, typeDesc *typedesc.Immutable,
 ) error {
 	var err error
-	var ids = []descpb.ID{typeDesc.GetID()}
-	if typeDesc.GetArrayTypeID() != descpb.InvalidID {
-		ids = append(ids, typeDesc.GetArrayTypeID())
+	var ids = []descpb.ID{typeDesc.ID}
+	if typeDesc.ArrayTypeID != descpb.InvalidID {
+		ids = append(ids, typeDesc.ArrayTypeID)
 	}
 	for _, id := range ids {
 		if updateErr := WaitToUpdateLeases(ctx, leaseMgr, id); updateErr != nil {
@@ -260,7 +257,7 @@ func (t *typeSchemaChanger) exec(ctx context.Context) error {
 	}
 
 	// If there are any names to drain, then do so.
-	if len(typeDesc.GetDrainingNames()) > 0 {
+	if len(typeDesc.DrainingNames) > 0 {
 		if err := drainNamesForDescriptor(
 			ctx, t.execCfg.Settings, typeDesc.GetID(), t.execCfg.DB, t.execCfg.InternalExecutor,
 			leaseMgr, codec, nil,
@@ -277,8 +274,8 @@ func (t *typeSchemaChanger) exec(ctx context.Context) error {
 	// For all the read only members the current job is responsible for, either
 	// promote them to writeable or remove them from the descriptor entirely,
 	// as dictated by the direction.
-	if (typeDesc.GetKind() == descpb.TypeDescriptor_ENUM ||
-		typeDesc.GetKind() == descpb.TypeDescriptor_MULTIREGION_ENUM) &&
+	if (typeDesc.Kind == descpb.TypeDescriptor_ENUM ||
+		typeDesc.Kind == descpb.TypeDescriptor_MULTIREGION_ENUM) &&
 		len(t.transitioningMembers) != 0 {
 		if fn := t.execCfg.TypeSchemaChangerTestingKnobs.RunBeforeEnumMemberPromotion; fn != nil {
 			if err := fn(); err != nil {
@@ -487,7 +484,7 @@ func (t *typeSchemaChanger) exec(ctx context.Context) error {
 	if typeDesc.Dropped() {
 		if err := t.execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			b := txn.NewBatch()
-			b.Del(catalogkeys.MakeDescMetadataKey(codec, typeDesc.GetID()))
+			b.Del(catalogkeys.MakeDescMetadataKey(codec, typeDesc.ID))
 			return txn.Run(ctx, b)
 		}); err != nil {
 			return err
@@ -542,7 +539,7 @@ func (t *typeSchemaChanger) cleanupEnumValues(ctx context.Context) error {
 			return err
 		}
 		// No cleanup required.
-		if !enumHasNonPublic(typeDesc) {
+		if !enumHasNonPublic(&typeDesc.Immutable) {
 			return nil
 		}
 
@@ -593,6 +590,14 @@ func (t *typeSchemaChanger) cleanupEnumValues(ctx context.Context) error {
 		return err
 	}
 
+	// Finally, make sure all of the leases are updated.
+	if err := WaitToUpdateLeases(ctx, t.execCfg.LeaseManager, t.typeID); err != nil {
+		if errors.Is(err, catalog.ErrDescriptorNotFound) {
+			return nil
+		}
+		return err
+	}
+
 	if regionChangeFinalizer != nil {
 		if err := regionChangeFinalizer.waitToUpdateLeases(ctx, t.execCfg.LeaseManager); err != nil {
 			return err
@@ -615,149 +620,6 @@ func convertToSQLStringRepresentation(bytes []byte) (string, error) {
 	return byteRep.String(), nil
 }
 
-// doesArrayContainEnumValues takes an array of enum values represented
-// as a string, along with an EnumMember, and checks if the
-// array contains the given EnumMember. Only works for arrays in the form
-// of something like {a, b, c}. Used to capture dependencies in
-// expressions in the form of something like '{a, b, c}'::typ[]
-func doesArrayContainEnumValues(s string, member *descpb.TypeDescriptor_EnumMember) bool {
-	enumValues := strings.Split(s[1:len(s)-1], ",")
-	for _, val := range enumValues {
-		if strings.TrimSpace(val) == member.LogicalRepresentation {
-			return true
-		}
-	}
-	return false
-}
-
-// findUsagesOfEnumValue takes an expr, type ID and a enum member of that type,
-// and checks if the expr uses that enum member.
-func findUsagesOfEnumValue(
-	exprStr string, member *descpb.TypeDescriptor_EnumMember, typeID descpb.ID,
-) (bool, error) {
-	expr, err := parser.ParseExpr(exprStr)
-	if err != nil {
-		return false, err
-	}
-	var foundUsage bool
-
-	visitFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		switch t := expr.(type) {
-		// Case for types being used regularly, which are serialized like '\x80':::@100053.
-		case *tree.AnnotateTypeExpr:
-			// Check if this expr's type is the one we're dropping the enum value from.
-			typeOid, ok := t.Type.(*tree.OIDTypeReference)
-			if !ok {
-				return true, expr, nil
-			}
-			id, err := typedesc.UserDefinedTypeOIDToID(typeOid.OID)
-			if err != nil {
-				return false, expr, err
-			}
-			if id != typeID {
-				return true, expr, nil
-			}
-
-			// Check if this expr uses the enum value we're dropping.
-			strVal, ok := t.Expr.(*tree.StrVal)
-			if !ok {
-				return true, expr, nil
-			}
-			physicalRep := []byte(strVal.RawString())
-			if bytes.Equal(physicalRep, member.PhysicalRepresentation) {
-				foundUsage = true
-			}
-			return false, expr, nil
-
-		// Case for types used in string arrays, serialized like '{a, b, c}':::STRING::@100053.
-		case *tree.CastExpr:
-			typeOid, ok := t.Type.(*tree.OIDTypeReference)
-			if !ok {
-				return true, expr, nil
-			}
-			id, err := typedesc.UserDefinedTypeOIDToID(typeOid.OID)
-			if err != nil {
-				return false, expr, err
-			}
-			// -1 since the type of this CastExpr is the array type.
-			id = id - 1
-			if id != typeID {
-				return true, expr, nil
-			}
-
-			// Extract the array and check if it contains the enum member.
-			annotateType, ok := t.Expr.(*tree.AnnotateTypeExpr)
-			if !ok {
-				return true, expr, nil
-			}
-			strVal, ok := annotateType.Expr.(*tree.StrVal)
-			if !ok {
-				return true, expr, nil
-			}
-			foundUsage = doesArrayContainEnumValues(strVal.RawString(), member)
-			return false, expr, nil
-		default:
-			return true, expr, nil
-		}
-	}
-
-	_, err = tree.SimpleVisit(expr, visitFunc)
-	if err != nil {
-		return false, err
-	}
-	return foundUsage, nil
-}
-
-// findUsagesOfEnumValueInViewQuery takes a view query, type ID and an
-// enum member of that type, and checks if the view query uses that enum member.
-func findUsagesOfEnumValueInViewQuery(
-	viewQuery string, member *descpb.TypeDescriptor_EnumMember, typeID descpb.ID,
-) (bool, error) {
-	var foundUsage bool
-	visitFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		annotateType, ok := expr.(*tree.AnnotateTypeExpr)
-		if !ok {
-			return true, expr, nil
-		}
-
-		// Check if this expr's type is the one we're dropping the enum value from.
-		typeOid, ok := annotateType.Type.(*tree.OIDTypeReference)
-		if !ok {
-			return true, expr, nil
-		}
-		id, err := typedesc.UserDefinedTypeOIDToID(typeOid.OID)
-		if err != nil {
-			return false, expr, err
-		}
-		if id != typeID {
-			return true, expr, nil
-		}
-
-		// Check if this expr uses the enum value we're dropping.
-		strVal, ok := annotateType.Expr.(*tree.StrVal)
-		if !ok {
-			return true, expr, nil
-		}
-		physicalRep := []byte(strVal.RawString())
-		if bytes.Equal(physicalRep, member.PhysicalRepresentation) {
-			foundUsage = true
-			return false, expr, nil
-		}
-
-		return false, expr, nil
-	}
-
-	stmt, err := parser.ParseOne(viewQuery)
-	if err != nil {
-		return false, err
-	}
-	_, err = tree.SimpleStmtVisit(stmt.AST, visitFunc)
-	if err != nil {
-		return false, err
-	}
-	return foundUsage, nil
-}
-
 // canRemoveEnumValue returns an error if the enum value is in use and therefore
 // can't be removed.
 func (t *typeSchemaChanger) canRemoveEnumValue(
@@ -773,18 +635,6 @@ func (t *typeSchemaChanger) canRemoveEnumValue(
 			return errors.Wrapf(err,
 				"could not validate enum value removal for %q", member.LogicalRepresentation)
 		}
-		if desc.IsView() {
-			foundUsage, err := findUsagesOfEnumValueInViewQuery(desc.GetViewQuery(), member, typeDesc.ID)
-			if err != nil {
-				return err
-			}
-			if foundUsage {
-				return pgerror.Newf(pgcode.DependentObjectsStillExist,
-					"could not remove enum value %q as it is being used in view %q",
-					member.LogicalRepresentation, desc.GetName())
-			}
-		}
-
 		var query strings.Builder
 		colSelectors := tabledesc.ColumnsSelectors(desc.PublicColumns())
 		columns := tree.AsStringWithFlags(&colSelectors, tree.FmtSerializable)
@@ -792,54 +642,22 @@ func (t *typeSchemaChanger) canRemoveEnumValue(
 		firstClause := true
 		validationQueryConstructed := false
 		for _, col := range desc.PublicColumns() {
-			// If this column has a default expression, check if it uses the enum member being dropped.
-			if col.HasDefault() {
-				foundUsage, err := findUsagesOfEnumValue(col.GetDefaultExpr(), member, typeDesc.ID)
+			if typeDesc.ID == typedesc.GetTypeDescID(col.GetType()) {
+				if !firstClause {
+					query.WriteString(" OR")
+				}
+				sqlPhysRep, err := convertToSQLStringRepresentation(member.PhysicalRepresentation)
 				if err != nil {
 					return err
 				}
-				if foundUsage {
-					return pgerror.Newf(pgcode.DependentObjectsStillExist,
-						"could not remove enum value %q as it is being used in a default expresion of %q",
-						member.LogicalRepresentation, desc.GetName())
-				}
-			}
-
-			// If this column is computed, check if it uses the enum member being dropped.
-			if col.IsComputed() {
-				foundUsage, err := findUsagesOfEnumValue(col.GetComputeExpr(), member, typeDesc.ID)
-				if err != nil {
-					return err
-				}
-				if foundUsage {
-					return pgerror.Newf(pgcode.DependentObjectsStillExist,
-						"could not remove enum value %q as it is being used in a computed column of %q",
-						member.LogicalRepresentation, desc.GetName())
-				}
-			}
-
-			if col.GetType().UserDefined() {
-				tid, terr := typedesc.GetUserDefinedTypeDescID(col.GetType())
-				if terr != nil {
-					return terr
-				}
-				if typeDesc.ID == tid {
-					if !firstClause {
-						query.WriteString(" OR")
-					}
-					sqlPhysRep, err := convertToSQLStringRepresentation(member.PhysicalRepresentation)
-					if err != nil {
-						return err
-					}
-					colName := col.ColName()
-					query.WriteString(fmt.Sprintf(
-						" t.%s = %s",
-						colName.String(),
-						sqlPhysRep,
-					))
-					firstClause = false
-					validationQueryConstructed = true
-				}
+				colName := col.ColName()
+				query.WriteString(fmt.Sprintf(
+					" t.%s = %s",
+					colName.String(),
+					sqlPhysRep,
+				))
+				firstClause = false
+				validationQueryConstructed = true
 			}
 		}
 		query.WriteString(" LIMIT 1")
@@ -862,7 +680,7 @@ func (t *typeSchemaChanger) canRemoveEnumValue(
 			}
 			override := sessiondata.InternalExecutorOverride{
 				User:     security.RootUserName(),
-				Database: dbDesc.GetName(),
+				Database: dbDesc.Name,
 			}
 			rows, err := t.execCfg.InternalExecutor.QueryRowEx(ctx, "count-value-usage", txn, override, query.String())
 			if err != nil {
@@ -907,14 +725,13 @@ func (t *typeSchemaChanger) canRemoveEnumValue(
 // type.
 func (t *typeSchemaChanger) canRemoveEnumValueFromArrayUsages(
 	ctx context.Context,
-	arrayTypeDesc catalog.TypeDescriptor,
+	arrayTypeDesc *typedesc.Immutable,
 	member *descpb.TypeDescriptor_EnumMember,
 	txn *kv.Txn,
 	descsCol *descs.Collection,
 ) error {
 	const validationErr = "could not validate removal of enum value %q"
-	for i := 0; i < arrayTypeDesc.NumReferencingDescriptors(); i++ {
-		id := arrayTypeDesc.GetReferencingDescriptorID(i)
+	for _, id := range arrayTypeDesc.ReferencingDescriptorIDs {
 		desc, err := descsCol.GetImmutableTableByID(ctx, txn, id, tree.ObjectLookupFlags{})
 		if err != nil {
 			return errors.Wrapf(err, validationErr, member.LogicalRepresentation)
@@ -931,14 +748,7 @@ func (t *typeSchemaChanger) canRemoveEnumValueFromArrayUsages(
 		//	) WHERE unnest = 'enum_value'
 		firstClause := true
 		for _, col := range desc.PublicColumns() {
-			if !col.GetType().UserDefined() {
-				continue
-			}
-			tid, terr := typedesc.GetUserDefinedTypeDescID(col.GetType())
-			if terr != nil {
-				return terr
-			}
-			if arrayTypeDesc.GetID() == tid {
+			if arrayTypeDesc.ID == typedesc.GetTypeDescID(col.GetType()) {
 				if !firstClause {
 					unionUnnests.WriteString(" UNION ")
 				}
@@ -968,13 +778,13 @@ func (t *typeSchemaChanger) canRemoveEnumValueFromArrayUsages(
 		query.WriteString(fmt.Sprintf(") WHERE unnest = %s", sqlPhysRep))
 
 		_, dbDesc, err := descsCol.GetImmutableDatabaseByID(
-			ctx, txn, arrayTypeDesc.GetParentID(), tree.DatabaseLookupFlags{Required: true})
+			ctx, txn, arrayTypeDesc.ParentID, tree.DatabaseLookupFlags{Required: true})
 		if err != nil {
 			return errors.Wrapf(err, validationErr, member.LogicalRepresentation)
 		}
 		override := sessiondata.InternalExecutorOverride{
 			User:     security.RootUserName(),
-			Database: dbDesc.GetName(),
+			Database: dbDesc.Name,
 		}
 		rows, err := t.execCfg.InternalExecutor.QueryRowEx(
 			ctx,
@@ -993,11 +803,8 @@ func (t *typeSchemaChanger) canRemoveEnumValueFromArrayUsages(
 			if err != nil {
 				return err
 			}
-			fqName := tree.MakeTableNameWithSchema(
-				tree.Name(dbDesc.GetName()),
-				tree.Name(parentSchema.GetName()),
-				tree.Name(desc.GetName()),
-			)
+			fqName := tree.MakeTableNameWithSchema(tree.Name(dbDesc.GetName()), tree.Name(parentSchema.Name), tree.Name(desc.GetName()))
+
 			return pgerror.Newf(pgcode.DependentObjectsStillExist, "could not remove enum value %q as it is being used by table %q",
 				member.LogicalRepresentation, fqName.FQString(),
 			)
@@ -1007,10 +814,10 @@ func (t *typeSchemaChanger) canRemoveEnumValueFromArrayUsages(
 	return nil
 }
 
-func enumHasNonPublic(typeDesc catalog.TypeDescriptor) bool {
+func enumHasNonPublic(typeDesc *typedesc.Immutable) bool {
 	hasNonPublic := false
-	for i := 0; i < typeDesc.NumEnumMembers(); i++ {
-		if typeDesc.IsMemberReadOnly(i) {
+	for _, member := range typeDesc.EnumMembers {
+		if member.Capability == descpb.TypeDescriptor_EnumMember_READ_ONLY {
 			hasNonPublic = true
 			break
 		}

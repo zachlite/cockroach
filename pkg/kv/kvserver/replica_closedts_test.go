@@ -521,16 +521,6 @@ func TestRejectedLeaseDoesntDictateClosedTimestamp(t *testing.T) {
 	tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
-			RaftConfig: base.RaftConfig{
-				// Disable preemptive lease extensions because, if the server startup
-				// takes too long before we pause the clock, such an extension can
-				// happen on the range of interest, and messes up the test that expects
-				// the lease to expire.
-				RangeLeaseRenewalFraction: -1,
-				// Also make expiration-based leases last for a long time, as the test
-				// wants a valid lease after cluster start.
-				RaftElectionTimeoutTicks: 1000,
-			},
 			Knobs: base.TestingKnobs{
 				Server: &server.TestingKnobs{
 					ClockSource: manual.UnixNano,
@@ -608,7 +598,6 @@ func TestRejectedLeaseDoesntDictateClosedTimestamp(t *testing.T) {
 	select {
 	case <-leaseAcqCh:
 	case err := <-leaseAcqErrCh:
-		close(leaseTransferCh)
 		t.Fatalf("lease request unexpectedly finished. err: %v", err)
 	}
 	// Let the previously blocked transfer succeed. n2's lease acquisition remains

@@ -35,13 +35,8 @@ interface RangeTableRow {
 }
 
 interface RangeTableCellContent {
-  // value represents the strings to be rendered. Each one is rendered on its
-  // own line (as a <li>).
   value: string[];
-  // title represents the strings that will constitute the HTML title of the
-  // cell (i.e. the tooltip). If nil, value is used.
   title?: string[];
-  // The classes to be applied to the cell.
   className?: string[];
 }
 
@@ -386,7 +381,6 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
 
   contentTimestamp(
     timestamp: protos.cockroach.util.hlc.ITimestamp,
-    now: moment.Moment,
   ): RangeTableCellContent {
     if (_.isNil(timestamp) || _.isNil(timestamp.wall_time)) {
       return {
@@ -394,16 +388,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         className: ["range-table__cell--warning"],
       };
     }
-    if (FixLong(timestamp.wall_time).isZero()) {
-      return {
-        value: [""],
-        title: ["0"],
-      };
-    }
     const humanized = Print.Timestamp(timestamp);
-    const delta = Print.TimestampDeltaFromNow(timestamp, now);
     return {
-      value: [humanized, delta],
+      value: [humanized],
       title: [humanized, FixLong(timestamp.wall_time).toString()],
     };
   }
@@ -630,8 +617,6 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
 
     const dormantStoreIDs: Set<number> = new Set();
 
-    const now = moment();
-
     // Convert the infos to a simpler object for display purposes. This helps when trying to
     // determine if any warnings should be displayed.
     const detailsByStoreID: Map<number, RangeTableDetail> = new Map();
@@ -694,10 +679,10 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         leaseEpoch: epoch
           ? this.createContent(lease.epoch)
           : rangeTableEmptyContent,
-        leaseStart: this.contentTimestamp(lease.start, now),
+        leaseStart: this.contentTimestamp(lease.start),
         leaseExpiration: epoch
           ? rangeTableEmptyContent
-          : this.contentTimestamp(lease.expiration, now),
+          : this.contentTimestamp(lease.expiration),
         leaseAppliedIndex: this.createContent(
           FixLong(info.state.state.lease_applied_index),
         ),
@@ -812,11 +797,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         ),
         closedTimestampRaft: this.contentTimestamp(
           info.state.state.raft_closed_timestamp,
-          now,
         ),
         closedTimestampSideTransportReplica: this.contentTimestamp(
           info.state.closed_timestamp_sidetransport_info.replica_closed,
-          now,
         ),
         closedTimestampSideTransportReplicaLAI: this.createContent(
           FixLong(info.state.closed_timestamp_sidetransport_info.replica_lai),
@@ -828,7 +811,6 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         ),
         closedTimestampSideTransportCentral: this.contentTimestamp(
           info.state.closed_timestamp_sidetransport_info.central_closed,
-          now,
         ),
         closedTimestampSideTransportCentralLAI: this.createContent(
           FixLong(info.state.closed_timestamp_sidetransport_info.central_lai),

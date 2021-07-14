@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -339,23 +338,6 @@ var options = map[string]struct {
 			return sqlCtx.autoTrace
 		},
 	},
-	`border`: {
-		description:               "the border style for the display format 'table'",
-		isBoolean:                 false,
-		validDuringMultilineEntry: true,
-		set: func(val string) error {
-			v, err := strconv.Atoi(val)
-			if err != nil {
-				return err
-			}
-			if v < 0 || v > 3 {
-				return errors.New("only values between 0 and 4 are supported")
-			}
-			cliCtx.tableBorderMode = v
-			return nil
-		},
-		display: func() string { return strconv.Itoa(cliCtx.tableBorderMode) },
-	},
 	`display_format`: {
 		description:               "the output format for tabular data (table, csv, tsv, html, sql, records, raw)",
 		isBoolean:                 false,
@@ -467,9 +449,9 @@ func (c *cliState) handleSet(args []string, nextState, errState cliStateEnum) cl
 			}
 			optData = append(optData, []string{n, options[n].display(), options[n].description})
 		}
-		err := PrintQueryOutput(os.Stdout,
+		err := printQueryOutput(os.Stdout,
 			[]string{"Option", "Value", "Description"},
-			NewRowSliceIter(optData, "lll" /*align*/))
+			newRowSliceIter(optData, "lll" /*align*/))
 		if err != nil {
 			panic(err)
 		}
@@ -849,7 +831,7 @@ func (c *cliState) refreshTransactionStatus() {
 		return
 	}
 
-	txnString := clisqlclient.FormatVal(dbVal, dbColType,
+	txnString := formatVal(dbVal, dbColType,
 		false /* showPrintableUnicode */, false /* shownewLinesAndTabs */)
 
 	// Change the prompt based on the response from the server.
@@ -888,7 +870,7 @@ func (c *cliState) refreshDatabaseName() string {
 			" Use SET database = <dbname> to change, CREATE DATABASE to make a new database.")
 	}
 
-	dbName := clisqlclient.FormatVal(dbVal, dbColType,
+	dbName := formatVal(dbVal, dbColType,
 		false /* showPrintableUnicode */, false /* shownewLinesAndTabs */)
 
 	// Preserve the current database name in case of reconnects.

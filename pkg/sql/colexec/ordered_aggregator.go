@@ -83,7 +83,6 @@ const (
 // value is part of a new group).
 type orderedAggregator struct {
 	colexecop.OneInputNode
-	colexecop.InitHelper
 
 	state orderedAggregatorState
 
@@ -149,9 +148,7 @@ func NewOrderedAggregator(
 			return nil, errors.AssertionFailedf("filtering ordered aggregation is not supported")
 		}
 	}
-	op, groupCol, err := colexecbase.OrderedDistinctColsToOperators(
-		args.Input, args.Spec.GroupCols, args.InputTypes, false, /* nullsAreDistinct */
-	)
+	op, groupCol, err := colexecbase.OrderedDistinctColsToOperators(args.Input, args.Spec.GroupCols, args.InputTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -181,15 +178,12 @@ func NewOrderedAggregator(
 	return a, nil
 }
 
-func (a *orderedAggregator) Init(ctx context.Context) {
-	if !a.InitHelper.Init(ctx) {
-		return
-	}
-	a.Input.Init(a.Ctx)
+func (a *orderedAggregator) Init() {
+	a.Input.Init()
 	a.bucket.init(a.bucket.fns, a.aggHelper.makeSeenMaps(), a.groupCol)
 }
 
-func (a *orderedAggregator) Next() coldata.Batch {
+func (a *orderedAggregator) Next(ctx context.Context) coldata.Batch {
 	stateAfterOutputting := orderedAggregatorUnknown
 	for {
 		switch a.state {
@@ -207,7 +201,7 @@ func (a *orderedAggregator) Next() coldata.Batch {
 			batch := a.lastReadBatch
 			a.lastReadBatch = nil
 			if batch == nil {
-				batch = a.Input.Next()
+				batch = a.Input.Next(ctx)
 			}
 			batchLength := batch.Length()
 
@@ -247,7 +241,7 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				if batchLength > 0 {
 					a.inputArgsConverter.ConvertBatch(batch)
 					a.aggHelper.performAggregation(
-						a.Ctx, batch.ColVecs(), batchLength, batch.Selection(), &a.bucket, a.groupCol,
+						ctx, batch.ColVecs(), batchLength, batch.Selection(), &a.bucket, a.groupCol,
 					)
 				} else {
 					a.allocator.PerformOperation(a.scratch.ColVecs(), func() {
@@ -420,6 +414,6 @@ func (a *orderedAggregator) Reset(ctx context.Context) {
 	}
 }
 
-func (a *orderedAggregator) Close() error {
-	return a.toClose.Close()
+func (a *orderedAggregator) Close(ctx context.Context) error {
+	return a.toClose.Close(ctx)
 }

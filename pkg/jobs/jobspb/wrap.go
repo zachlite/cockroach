@@ -11,14 +11,12 @@
 package jobspb
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/jsonpb"
 )
 
 // JobID is the ID of a job.
@@ -58,11 +56,6 @@ func (p *Payload) Type() Type {
 	return DetailsType(p.Details)
 }
 
-// AutoStatsName is the name to use for statistics created automatically.
-// The name is chosen to be something that users are unlikely to choose when
-// running CREATE STATISTICS manually.
-const AutoStatsName = "__auto__"
-
 // DetailsType returns the type for a payload detail.
 func DetailsType(d isPayload_Details) Type {
 	switch d := d.(type) {
@@ -78,7 +71,7 @@ func DetailsType(d isPayload_Details) Type {
 		return TypeChangefeed
 	case *Payload_CreateStats:
 		createStatsName := d.CreateStats.Name
-		if createStatsName == AutoStatsName {
+		if createStatsName == stats.AutoStatsName {
 			return TypeAutoCreateStats
 		}
 		return TypeCreateStats
@@ -270,16 +263,6 @@ func (Type) SafeValue() {}
 
 // NumJobTypes is the number of jobs types.
 const NumJobTypes = 13
-
-// MarshalJSONPB redacts sensitive sink URI parameters from ChangefeedDetails.
-func (p ChangefeedDetails) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte, error) {
-	var err error
-	p.SinkURI, err = cloud.SanitizeExternalStorageURI(p.SinkURI, nil)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(p)
-}
 
 func init() {
 	if len(Type_name) != NumJobTypes {

@@ -76,12 +76,6 @@ const statementStats: any = {
     mean: 7,
     squared_diffs: 1000000,
   },
-  last_exec_timestamp: {
-    seconds: Long.fromInt(1599670292),
-    nanos: 111613000,
-  },
-  database: "defaultdb",
-  nodes: [Long.fromInt(1), Long.fromInt(2)],
   sensitive_info: {
     last_err: "",
     most_recent_plan_description: {
@@ -127,46 +121,39 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
     state: null,
   },
   match: {
-    path: "/statement/:database/:implicitTxn/:statement",
-    url:
-      "/statement/defaultdb/true/SELECT city%2C id FROM vehicles WHERE city %3D %241",
+    path: "/statement/:implicitTxn/:statement",
+    url: "/statement/true/SELECT city%2C id FROM vehicles WHERE city %3D %241",
     isExact: true,
     params: {
       implicitTxn: "true",
       statement: "SELECT city%2C id FROM vehicles WHERE city %3D %241",
-      database: "defaultdb",
     },
   },
   statement: {
     statement: "SELECT city, id FROM vehicles WHERE city = $1",
     stats: statementStats,
-    database: "defaultdb",
     byNode: [
       {
         label: "4",
         implicitTxn: true,
-        database: "defaultdb",
         fullScan: true,
         stats: statementStats,
       },
       {
         label: "3",
         implicitTxn: true,
-        database: "defaultdb",
         fullScan: true,
         stats: statementStats,
       },
       {
         label: "2",
         implicitTxn: true,
-        database: "defaultdb",
         fullScan: true,
         stats: statementStats,
       },
       {
         label: "1",
         implicitTxn: true,
-        database: "defaultdb",
         fullScan: true,
         stats: statementStats,
       },
@@ -200,12 +187,6 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
     "2": "127.0.0.1:55532 (n2)",
     "3": "127.0.0.1:55538 (n3)",
     "4": "127.0.0.1:55546 (n4)",
-  },
-  nodeRegions: {
-    "1": "gcp-us-east1",
-    "2": "gcp-us-east1",
-    "3": "gcp-us-west1",
-    "4": "gcp-europe-west1",
   },
   refreshStatements: noop,
   refreshStatementDiagnosticsRequests: noop,

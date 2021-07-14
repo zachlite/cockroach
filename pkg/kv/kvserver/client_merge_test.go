@@ -88,9 +88,7 @@ func createSplitRanges(
 			lhsDesc.StartKey, rhsDesc.StartKey)
 	}
 
-	// NB: return copies of the descriptors as a purely precautionary measure.
-	// Tests have been observed to mutate the returned memory, for example in #67346.
-	return protoutil.Clone(lhsDesc).(*roachpb.RangeDescriptor), protoutil.Clone(rhsDesc).(*roachpb.RangeDescriptor), nil
+	return lhsDesc, rhsDesc, nil
 }
 
 // TestStoreRangeMergeTwoEmptyRanges tries to merge two empty ranges together.
@@ -413,22 +411,19 @@ func TestStoreRangeMergeTimestampCache(t *testing.T) {
 func mergeCheckingTimestampCaches(
 	t *testing.T, disjointLeaseholders, throughSnapshot, futureRead bool,
 ) {
-
-	var filterMu struct {
-		syncutil.Mutex
-		// mergeCommitFilter is used to issue a sequence of operations on the LHS of
-		// a range merge immediately before it.
-		mergeCommitFilter func()
-		// blockHBAndGCs is used to black hole Heartbeat and GC requests for the
-		// duration of the merge on the throughSnapshot path. Neither request type
-		// is needed and both can create issues by holding latches during the split
-		// leader-leaseholder state.
-		blockHBAndGCs chan struct{}
-	}
+	// mergeCommitFilter is used to issue a sequence of operations on the LHS of
+	// a range merge immediately before it.
+	var mergeCommitFilter func()
+	// blockHBAndGCs is used to black hole Heartbeat and GC requests for the
+	// duration of the merge on the throughSnapshot path. Neither request type
+	// is needed and both can create issues by holding latches during the split
+	// leader-leaseholder state.
+	var blockHBAndGCs chan struct{}
+	var filterMu syncutil.Mutex
 	testingRequestFilter := func(_ context.Context, ba roachpb.BatchRequest) *roachpb.Error {
 		filterMu.Lock()
-		mergeCommitFilterCopy := filterMu.mergeCommitFilter
-		blockHBAndGCsCopy := filterMu.blockHBAndGCs
+		mergeCommitFilterCopy := mergeCommitFilter
+		blockHBAndGCsCopy := blockHBAndGCs
 		filterMu.Unlock()
 		for _, req := range ba.Requests {
 			switch v := req.GetInner().(type) {
@@ -481,17 +476,6 @@ func mergeCheckingTimestampCaches(
 			},
 		})
 	defer tc.Stopper().Stop(ctx)
-	defer func() {
-		filterMu.Lock()
-		defer filterMu.Unlock()
-		if filterMu.blockHBAndGCs != nil {
-			// If test failed before closing the channel, do so now
-			// to (maybe) avoid hangs. Note that this must execute
-			// before the Stopper().Stop() call above.
-			close(filterMu.blockHBAndGCs)
-		}
-	}()
-
 	lhsStore := tc.GetFirstStoreFromServer(t, 0)
 	var rhsStore *kvserver.Store
 	if disjointLeaseholders {
@@ -658,7 +642,7 @@ func mergeCheckingTimestampCaches(
 		snapChan := make(chan kvserver.IncomingSnapshot, 1)
 
 		filterMu.Lock()
-		filterMu.mergeCommitFilter = func() {
+		mergeCommitFilter = func() {
 			// Install leader-leaseholder partition.
 			for i, s := range lhsStores {
 				var funcs unreliableRaftHandlerFuncs
@@ -736,7 +720,7 @@ func mergeCheckingTimestampCaches(
 		// Begin blocking txn heartbeats and GC requests. They cause issues
 		// because they can grab latches and then get stuck once in the split
 		// leader-leaseholder state.
-		filterMu.blockHBAndGCs = make(chan struct{})
+		blockHBAndGCs = make(chan struct{})
 
 		// Install a filter to capture the Raft snapshot.
 		snapshotFilter = func(inSnap kvserver.IncomingSnapshot) {
@@ -780,24 +764,15 @@ func mergeCheckingTimestampCaches(
 			}
 			tc.Servers[i].RaftTransport().Listen(s.StoreID(), h)
 		}
-		close(filterMu.blockHBAndGCs)
-		filterMu.Lock()
-		filterMu.blockHBAndGCs = nil
-		filterMu.Unlock()
+		close(blockHBAndGCs)
 
 		t.Logf("waiting for snapshot to LHS leaseholder")
-		var inSnap kvserver.IncomingSnapshot
-		select {
-		case inSnap = <-snapChan:
-		case <-time.After(45 * time.Second):
-			t.Fatal("timed out waiting for snapChan")
-		}
+		inSnap := <-snapChan
 		inSnapDesc := inSnap.State.Desc
 		require.Equal(t, lhsDesc.StartKey, inSnapDesc.StartKey)
 		require.Equal(t, rhsDesc.EndKey, inSnapDesc.EndKey)
 
 		// Wait for all async ops to complete.
-		after45s := time.After(45 * time.Second)
 		for _, asyncRes := range []struct {
 			name string
 			ch   chan *roachpb.Error
@@ -807,12 +782,7 @@ func mergeCheckingTimestampCaches(
 			{"merge", mergeChan},
 		} {
 			t.Logf("waiting for result of %s", asyncRes.name)
-			var err *roachpb.Error
-			select {
-			case err = <-asyncRes.ch:
-			case <-after45s:
-				t.Fatalf("timed out on %s", asyncRes.name)
-			}
+			err := <-asyncRes.ch
 			require.NotNil(t, err, "%s should fail", asyncRes.name)
 			require.Regexp(t, "result is ambiguous", err, "%s's result should be ambiguous", asyncRes.name)
 		}
@@ -4121,7 +4091,7 @@ func TestMergeQueue(t *testing.T) {
 	zoneConfig.RangeMinBytes = &rangeMinBytes
 	settings := cluster.MakeTestingClusterSettings()
 	sv := &settings.SV
-	kvserver.MergeQueueInterval.Override(ctx, sv, 0) // process greedily
+	kvserver.MergeQueueInterval.Override(sv, 0) // process greedily
 
 	tc := testcluster.StartTestCluster(t, 2,
 		base.TestClusterArgs{
@@ -4178,18 +4148,9 @@ func TestMergeQueue(t *testing.T) {
 
 	// setThresholds simulates a zone config update that updates the ranges'
 	// minimum and maximum sizes.
-	setZones := func(t *testing.T, zone zonepb.ZoneConfig) {
-		t.Helper()
-		if l := lhs(); l == nil {
-			t.Fatal("left-hand side range not found")
-		} else {
-			l.SetZoneConfig(&zone)
-		}
-		if r := rhs(); r == nil {
-			t.Fatal("right-hand side range not found")
-		} else {
-			r.SetZoneConfig(&zone)
-		}
+	setZones := func(zone zonepb.ZoneConfig) {
+		lhs().SetZoneConfig(&zone)
+		rhs().SetZoneConfig(&zone)
 	}
 
 	reset := func(t *testing.T) {
@@ -4200,11 +4161,7 @@ func TestMergeQueue(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		setZones(t, zoneConfig)
-		// Disable load-based splitting, so that the absence of sufficient QPS
-		// measurements do not prevent ranges from merging. Certain subtests
-		// re-enable the functionality.
-		kvserver.SplitByLoadEnabled.Override(ctx, sv, false)
+		setZones(zoneConfig)
 		store.MustForceMergeScanAndProcess() // drain any merges that might already be queued
 		split(t, rhsStartKey.AsRawKey(), hlc.Timestamp{} /* expirationTime */)
 	}
@@ -4235,7 +4192,7 @@ func TestMergeQueue(t *testing.T) {
 		verifyMerged(t, store, lhsStartKey, rhsStartKey)
 	})
 
-	t.Run("combined-size-threshold", func(t *testing.T) {
+	t.Run("combined-threshold", func(t *testing.T) {
 		reset(t)
 
 		// The ranges are individually beneath the minimum size threshold, but
@@ -4243,13 +4200,13 @@ func TestMergeQueue(t *testing.T) {
 		zone := protoutil.Clone(&zoneConfig).(*zonepb.ZoneConfig)
 		zone.RangeMinBytes = proto.Int64(rhs().GetMVCCStats().Total() + 1)
 		zone.RangeMaxBytes = proto.Int64(lhs().GetMVCCStats().Total() + rhs().GetMVCCStats().Total() - 1)
-		setZones(t, *zone)
+		setZones(*zone)
 		store.MustForceMergeScanAndProcess()
 		verifyUnmerged(t, store, lhsStartKey, rhsStartKey)
 
 		// Once the maximum size threshold is increased, the merge can occur.
 		zone.RangeMaxBytes = proto.Int64(*zone.RangeMaxBytes + 1)
-		setZones(t, *zone)
+		setZones(*zone)
 		l := lhs().RangeID
 		r := rhs().RangeID
 		log.Infof(ctx, "Left=%s, Right=%s", l, r)
@@ -4272,88 +4229,8 @@ func TestMergeQueue(t *testing.T) {
 		verifyMerged(t, store, lhsStartKey, rhsStartKey)
 	})
 
-	t.Run("load-based-merging", func(t *testing.T) {
-		const splitByLoadQPS = 10
-		const mergeByLoadQPS = splitByLoadQPS / 2 // see conservativeLoadBasedSplitThreshold
-		const splitByLoadMergeDelay = 500 * time.Millisecond
-
-		resetForLoadBasedSubtest := func(t *testing.T) {
-			reset(t)
-
-			// Enable load-based splitting for these subtests, which also instructs
-			// the mergeQueue to consider load when making range merge decisions. When
-			// load is a consideration, the mergeQueue is fairly conservative. In an
-			// effort to avoid thrashing and to avoid overreacting to temporary
-			// fluctuations in load, the mergeQueue will only consider a merge when
-			// the combined load across the RHS and LHS ranges is below half the
-			// threshold required to split a range due to load. Furthermore, to ensure
-			// that transient drops in load do not trigger range merges, the
-			// mergeQueue will only consider a merge when it deems the maximum qps
-			// measurement from both sides to be sufficiently stable and reliable,
-			// meaning that it was a maximum measurement over some extended period of
-			// time.
-			kvserver.SplitByLoadEnabled.Override(ctx, sv, true)
-			kvserver.SplitByLoadQPSThreshold.Override(ctx, sv, splitByLoadQPS)
-
-			// Drop the load-based splitting merge delay setting, which also dictates
-			// the duration that a leaseholder must measure QPS before considering its
-			// measurements to be reliable enough to base range merging decisions on.
-			kvserverbase.SplitByLoadMergeDelay.Override(ctx, sv, splitByLoadMergeDelay)
-
-			// Reset both range's load-based splitters, so that QPS measurements do
-			// not leak over between subtests. Then, bump the manual clock so that
-			// both range's load-based splitters consider their measurements to be
-			// reliable.
-			lhs().LoadBasedSplitter().Reset(tc.Servers[0].Clock().PhysicalTime())
-			rhs().LoadBasedSplitter().Reset(tc.Servers[1].Clock().PhysicalTime())
-			manualClock.Increment(splitByLoadMergeDelay.Nanoseconds())
-		}
-
-		t.Run("unreliable-lhs-qps", func(t *testing.T) {
-			resetForLoadBasedSubtest(t)
-
-			lhs().LoadBasedSplitter().Reset(tc.Servers[0].Clock().PhysicalTime())
-
-			clearRange(t, lhsStartKey, rhsEndKey)
-			store.MustForceMergeScanAndProcess()
-			verifyUnmerged(t, store, lhsStartKey, rhsStartKey)
-		})
-
-		t.Run("unreliable-rhs-qps", func(t *testing.T) {
-			resetForLoadBasedSubtest(t)
-
-			rhs().LoadBasedSplitter().Reset(tc.Servers[1].Clock().PhysicalTime())
-
-			clearRange(t, lhsStartKey, rhsEndKey)
-			store.MustForceMergeScanAndProcess()
-			verifyUnmerged(t, store, lhsStartKey, rhsStartKey)
-		})
-
-		t.Run("combined-qps-above-threshold", func(t *testing.T) {
-			resetForLoadBasedSubtest(t)
-
-			moreThanHalfQPS := mergeByLoadQPS/2 + 1
-			rhs().LoadBasedSplitter().RecordMax(tc.Servers[0].Clock().PhysicalTime(), float64(moreThanHalfQPS))
-			lhs().LoadBasedSplitter().RecordMax(tc.Servers[1].Clock().PhysicalTime(), float64(moreThanHalfQPS))
-
-			clearRange(t, lhsStartKey, rhsEndKey)
-			store.MustForceMergeScanAndProcess()
-			verifyUnmerged(t, store, lhsStartKey, rhsStartKey)
-		})
-
-		t.Run("combined-qps-below-threshold", func(t *testing.T) {
-			resetForLoadBasedSubtest(t)
-
-			manualClock.Increment(splitByLoadMergeDelay.Nanoseconds())
-			lessThanHalfQPS := mergeByLoadQPS/2 - 1
-			rhs().LoadBasedSplitter().RecordMax(tc.Servers[0].Clock().PhysicalTime(), float64(lessThanHalfQPS))
-			lhs().LoadBasedSplitter().RecordMax(tc.Servers[1].Clock().PhysicalTime(), float64(lessThanHalfQPS))
-
-			clearRange(t, lhsStartKey, rhsEndKey)
-			store.MustForceMergeScanAndProcess()
-			verifyMerged(t, store, lhsStartKey, rhsStartKey)
-		})
-	})
+	// TODO(jeffreyxiao): Add subtest to consider load when making merging
+	// decisions.
 
 	t.Run("sticky-bit", func(t *testing.T) {
 		reset(t)
@@ -4380,7 +4257,6 @@ func TestMergeQueue(t *testing.T) {
 	})
 
 	t.Run("sticky-bit-expiration", func(t *testing.T) {
-		skip.WithIssue(t, 66942, "flakey test")
 		manualSplitTTL := time.Millisecond * 200
 		reset(t)
 		store.MustForceMergeScanAndProcess()
@@ -4528,15 +4404,6 @@ func TestMergeQueueSeesNonVoters(t *testing.T) {
 	var clusterArgs = base.TestClusterArgs{
 		// We dont want the replicate queue mucking with our test, so disable it.
 		ReplicationMode: base.ReplicationManual,
-		ServerArgs: base.TestServerArgs{
-			Knobs: base.TestingKnobs{
-				Store: &kvserver.StoreTestingKnobs{
-					// Disable load-based splitting, so that the absence of sufficient QPS
-					// measurements do not prevent ranges from merging.
-					DisableLoadBasedSplitting: true,
-				},
-			},
-		},
 	}
 	ctx := context.Background()
 
@@ -4624,15 +4491,6 @@ func TestMergeQueueWithSlowNonVoterSnaps(t *testing.T) {
 	var clusterArgs = base.TestClusterArgs{
 		// We dont want the replicate queue mucking with our test, so disable it.
 		ReplicationMode: base.ReplicationManual,
-		ServerArgs: base.TestServerArgs{
-			Knobs: base.TestingKnobs{
-				Store: &kvserver.StoreTestingKnobs{
-					// Disable load-based splitting, so that the absence of sufficient QPS
-					// measurements do not prevent ranges from merging.
-					DisableLoadBasedSplitting: true,
-				},
-			},
-		},
 		ServerArgsPerNode: map[int]base.TestServerArgs{
 			1: {
 				Knobs: base.TestingKnobs{
@@ -4645,8 +4503,6 @@ func TestMergeQueueWithSlowNonVoterSnaps(t *testing.T) {
 							}
 							return nil
 						},
-						// See above.
-						DisableLoadBasedSplitting: true,
 					},
 				},
 			},
@@ -4962,33 +4818,31 @@ func setupClusterWithSubsumedRange(
 	require.NoError(t, err)
 	lhsDesc, rhsDesc, err := createSplitRanges(ctx, store)
 	require.NoError(t, err)
-	add := func(desc *roachpb.RangeDescriptor) *roachpb.RangeDescriptor {
-		var newDesc roachpb.RangeDescriptor
+	add := func(desc *roachpb.RangeDescriptor) {
 		testutils.SucceedsSoon(t, func() error {
-			var err error
-			newDesc, err = tc.AddVoters(desc.StartKey.AsRawKey(), tc.Target(1))
+			*desc, err = tc.AddVoters(desc.StartKey.AsRawKey(), tc.Target(1))
 			if kv.IsExpectedRelocateError(err) {
 				// Retry.
 				return errors.Newf("ChangeReplicas: received error %s", err)
 			}
 			return nil
 		})
+		require.NoError(t, err)
 		require.NoError(t, tc.(*testcluster.TestCluster).WaitForFullReplication())
 		testutils.SucceedsSoon(t, func() error {
-			if count := len(replsForRange(ctx, t, tc, newDesc, numNodes)); count != 2 {
-				return errors.Newf("expected %d replicas for range %d; found %d", 2, newDesc.RangeID, count)
+			if count := len(replsForRange(ctx, t, tc, *desc, numNodes)); count != 2 {
+				return errors.Newf("expected %d replicas for range %d; found %d", 2, desc.RangeID, count)
 			}
 			return nil
 		})
-		require.NoError(t, tc.(*testcluster.TestCluster).WaitForVoters(newDesc.StartKey.AsRawKey(), tc.Target(1)))
-		require.NoError(t, tc.(*testcluster.TestCluster).WaitForVoters(newDesc.StartKey.AsRawKey(), tc.Target(0)))
-		return &newDesc
+		require.NoError(t, tc.(*testcluster.TestCluster).WaitForVoters(desc.StartKey.AsRawKey(), tc.Target(1)))
+		require.NoError(t, tc.(*testcluster.TestCluster).WaitForVoters(desc.StartKey.AsRawKey(), tc.Target(0)))
 	}
 	if numNodes > 1 {
 		// Replicate the involved ranges to at least one other node in case the
 		// TestCluster is a multi-node cluster.
-		rhsDesc = add(rhsDesc)
-		lhsDesc = add(lhsDesc)
+		add(rhsDesc)
+		add(lhsDesc)
 	}
 	errCh := make(chan error)
 	blocker := filter.BlockNextMerge()

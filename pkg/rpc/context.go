@@ -45,6 +45,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
+	encodingproto "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -728,7 +729,7 @@ func (ctx *Context) grpcDialOptions(
 		// is in setupSpanForIncomingRPC().
 		//
 		tagger := func(span *tracing.Span) {
-			span.SetTag("node", ctx.NodeID.Get().String())
+			span.SetTag("node", ctx.NodeID.String())
 		}
 		unaryInterceptors = append(unaryInterceptors,
 			tracing.ClientInterceptor(tracer, tagger))
@@ -791,7 +792,8 @@ func (c growStackCodec) Unmarshal(data []byte, v interface{}) error {
 // Install the growStackCodec over the default proto codec in order to grow the
 // stack for BatchRequest RPCs prior to unmarshaling.
 func init() {
-	encoding.RegisterCodec(growStackCodec{Codec: codec{}})
+	protoCodec := encoding.GetCodec(encodingproto.Name)
+	encoding.RegisterCodec(growStackCodec{Codec: protoCodec})
 }
 
 // onlyOnceDialer implements the grpc.WithDialer interface but only

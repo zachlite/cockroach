@@ -66,8 +66,6 @@ type mockLockTableGuard struct {
 	toResolve     []roachpb.LockUpdate
 }
 
-var _ lockTableGuard = &mockLockTableGuard{}
-
 // mockLockTableGuard implements the lockTableGuard interface.
 func (g *mockLockTableGuard) ShouldWait() bool            { return true }
 func (g *mockLockTableGuard) NewStateChan() chan struct{} { return g.signal }
@@ -80,9 +78,6 @@ func (g *mockLockTableGuard) CurState() waitingState {
 }
 func (g *mockLockTableGuard) ResolveBeforeScanning() []roachpb.LockUpdate {
 	return g.toResolve
-}
-func (g *mockLockTableGuard) CheckOptimisticNoConflicts(*spanset.SpanSet) (ok bool) {
-	return true
 }
 func (g *mockLockTableGuard) notify() { g.signal <- struct{}{} }
 
@@ -102,8 +97,8 @@ var lockTableWaiterTestClock = hlc.Timestamp{WallTime: 12}
 func setupLockTableWaiterTest() (*lockTableWaiterImpl, *mockIntentResolver, *mockLockTableGuard) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
+	LockTableLivenessPushDelay.Override(&st.SV, 0)
+	LockTableDeadlockDetectionPushDelay.Override(&st.SV, 0)
 	manual := hlc.NewManualClock(lockTableWaiterTestClock.WallTime)
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),

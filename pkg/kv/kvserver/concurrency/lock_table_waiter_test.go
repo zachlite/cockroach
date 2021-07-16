@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -65,8 +66,6 @@ type mockLockTableGuard struct {
 	toResolve     []roachpb.LockUpdate
 }
 
-var _ lockTableGuard = &mockLockTableGuard{}
-
 // mockLockTableGuard implements the lockTableGuard interface.
 func (g *mockLockTableGuard) ShouldWait() bool            { return true }
 func (g *mockLockTableGuard) NewStateChan() chan struct{} { return g.signal }
@@ -79,9 +78,6 @@ func (g *mockLockTableGuard) CurState() waitingState {
 }
 func (g *mockLockTableGuard) ResolveBeforeScanning() []roachpb.LockUpdate {
 	return g.toResolve
-}
-func (g *mockLockTableGuard) CheckOptimisticNoConflicts(*spanset.SpanSet) (ok bool) {
-	return true
 }
 func (g *mockLockTableGuard) notify() { g.signal <- struct{}{} }
 
@@ -101,18 +97,19 @@ var lockTableWaiterTestClock = hlc.Timestamp{WallTime: 12}
 func setupLockTableWaiterTest() (*lockTableWaiterImpl, *mockIntentResolver, *mockLockTableGuard) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
+	LockTableLivenessPushDelay.Override(&st.SV, 0)
+	LockTableDeadlockDetectionPushDelay.Override(&st.SV, 0)
 	manual := hlc.NewManualClock(lockTableWaiterTestClock.WallTime)
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),
 	}
 	w := &lockTableWaiterImpl{
-		st:      st,
-		clock:   hlc.NewClock(manual.UnixNano, time.Nanosecond),
-		stopper: stop.NewStopper(),
-		ir:      ir,
-		lt:      &mockLockTable{},
+		st:                                  st,
+		clock:                               hlc.NewClock(manual.UnixNano, time.Nanosecond),
+		stopper:                             stop.NewStopper(),
+		ir:                                  ir,
+		lt:                                  &mockLockTable{},
+		conflictingIntentsResolveRejections: metric.NewCounter(metric.Metadata{}),
 	}
 	return w, ir, guard
 }

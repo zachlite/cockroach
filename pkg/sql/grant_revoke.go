@@ -41,7 +41,21 @@ import (
 //   Notes: postgres requires the object owner.
 //          mysql requires the "grant option" and the same privileges, and sometimes superuser.
 func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
-	grantOn := getGrantOnObject(n.Targets, sqltelemetry.IncIAMGrantPrivilegesCounter)
+	var grantOn privilege.ObjectType
+	switch {
+	case n.Targets.Databases != nil:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnDatabase)
+		grantOn = privilege.Database
+	case n.Targets.Schemas != nil:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnSchema)
+		grantOn = privilege.Schema
+	case n.Targets.Types != nil:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnType)
+		grantOn = privilege.Type
+	default:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnTable)
+		grantOn = privilege.Table
+	}
 
 	if err := privilege.ValidatePrivileges(n.Privileges, grantOn); err != nil {
 		return nil, err
@@ -78,7 +92,21 @@ func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
 //   Notes: postgres requires the object owner.
 //          mysql requires the "grant option" and the same privileges, and sometimes superuser.
 func (p *planner) Revoke(ctx context.Context, n *tree.Revoke) (planNode, error) {
-	grantOn := getGrantOnObject(n.Targets, sqltelemetry.IncIAMRevokePrivilegesCounter)
+	var grantOn privilege.ObjectType
+	switch {
+	case n.Targets.Databases != nil:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnDatabase)
+		grantOn = privilege.Database
+	case n.Targets.Schemas != nil:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnSchema)
+		grantOn = privilege.Schema
+	case n.Targets.Types != nil:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnType)
+		grantOn = privilege.Type
+	default:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnTable)
+		grantOn = privilege.Table
+	}
 
 	if err := privilege.ValidatePrivileges(n.Privileges, grantOn); err != nil {
 		return nil, err
@@ -149,10 +177,6 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 		return err
 	}
 
-	if len(descriptors) == 0 {
-		return nil
-	}
-
 	var events []eventLogEntry
 
 	// First, update the descriptors. We want to catch all errors before
@@ -183,14 +207,6 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 		privileges := descriptor.GetPrivileges()
 		for _, grantee := range n.grantees {
 			n.changePrivilege(privileges, grantee)
-		}
-
-		// Ensure superusers have exactly the allowed privilege set.
-		// Postgres does not actually enforce this, instead of checking that
-		// superusers have all the privileges, Postgres allows superusers to
-		// bypass privilege checks.
-		if err := privileges.ValidateSuperuserPrivileges(descriptor.GetID(), n.grantOn); err != nil {
-			return err
 		}
 
 		// Validate privilege descriptors directly as the db/table level Validate
@@ -304,25 +320,3 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 func (*changePrivilegesNode) Next(runParams) (bool, error) { return false, nil }
 func (*changePrivilegesNode) Values() tree.Datums          { return tree.Datums{} }
 func (*changePrivilegesNode) Close(context.Context)        {}
-
-// getGrantOnObject returns the type of object being granted on based on the TargetList.
-// getGrantOnObject also calls incIAMFunc with the object type name.
-func getGrantOnObject(targets tree.TargetList, incIAMFunc func(on string)) privilege.ObjectType {
-	switch {
-	case targets.Databases != nil:
-		incIAMFunc(sqltelemetry.OnDatabase)
-		return privilege.Database
-	case targets.AllTablesInSchema:
-		incIAMFunc(sqltelemetry.OnAllTablesInSchema)
-		return privilege.Table
-	case targets.Schemas != nil:
-		incIAMFunc(sqltelemetry.OnSchema)
-		return privilege.Schema
-	case targets.Types != nil:
-		incIAMFunc(sqltelemetry.OnType)
-		return privilege.Type
-	default:
-		incIAMFunc(sqltelemetry.OnTable)
-		return privilege.Table
-	}
-}

@@ -96,7 +96,7 @@ func TestLookupJoinProvided(t *testing.T) {
 			input := &testexpr.Instance{
 				Rel: &props.Relational{},
 				Provided: &physical.Provided{
-					Ordering: props.ParseOrdering(tc.input),
+					Ordering: physical.ParseOrdering(tc.input),
 				},
 			}
 			lookupJoin := f.Memo().MemoizeLookupJoin(
@@ -110,7 +110,7 @@ func TestLookupJoinProvided(t *testing.T) {
 					Cols:     tc.outCols,
 				},
 			)
-			req := props.ParseOrderingChoice(tc.required)
+			req := physical.ParseOrderingChoice(tc.required)
 			res := lookupJoinBuildProvided(lookupJoin, &req).String()
 			if res != tc.provided {
 				t.Errorf("expected '%s', got '%s'", tc.provided, res)

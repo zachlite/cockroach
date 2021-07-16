@@ -14,10 +14,7 @@ import (
 	"github.com/jackc/pgproto3/v2"
 )
 
-// authenticate handles the startup of the pgwire protocol to the point where
-// the connections is considered authenticated. If that doesn't happen, it
-// returns an error.
-var authenticate = func(clientConn, crdbConn net.Conn) error {
+func authenticate(clientConn, crdbConn net.Conn) error {
 	fe := pgproto3.NewBackend(pgproto3.NewChunkReader(clientConn), clientConn)
 	be := pgproto3.NewFrontend(pgproto3.NewChunkReader(crdbConn), crdbConn)
 
@@ -29,13 +26,13 @@ var authenticate = func(clientConn, crdbConn net.Conn) error {
 		// TODO(spaskob): in verbose mode, log these messages.
 		backendMsg, err := be.Receive()
 		if err != nil {
-			return newErrorf(codeBackendReadFailed, "unable to receive message from backend: %v", err)
+			return NewErrorf(CodeBackendReadFailed, "unable to receive message from backend: %v", err)
 		}
 
 		err = fe.Send(backendMsg)
 		if err != nil {
-			return newErrorf(
-				codeClientWriteFailed, "unable to send message %v to client: %v", backendMsg, err,
+			return NewErrorf(
+				CodeClientWriteFailed, "unable to send message %v to client: %v", backendMsg, err,
 			)
 		}
 
@@ -58,7 +55,7 @@ var authenticate = func(clientConn, crdbConn net.Conn) error {
 		case *pgproto3.ErrorResponse:
 			// Server has rejected the authentication response from the client and
 			// has closed the connection.
-			return newErrorf(codeAuthFailed, "authentication failed: %s", tp.Message)
+			return NewErrorf(CodeAuthFailed, "authentication failed: %v", backendMsg)
 		case
 			*pgproto3.AuthenticationCleartextPassword,
 			*pgproto3.AuthenticationMD5Password,
@@ -67,17 +64,17 @@ var authenticate = func(clientConn, crdbConn net.Conn) error {
 			// Read the client response and forward it to server.
 			fntMsg, err := fe.Receive()
 			if err != nil {
-				return newErrorf(codeClientReadFailed, "unable to receive message from client: %v", err)
+				return NewErrorf(CodeClientReadFailed, "unable to receive message from client: %v", err)
 			}
 			err = be.Send(fntMsg)
 			if err != nil {
-				return newErrorf(
-					codeBackendWriteFailed, "unable to send message %v to backend: %v", fntMsg, err,
+				return NewErrorf(
+					CodeBackendWriteFailed, "unable to send message %v to backend: %v", fntMsg, err,
 				)
 			}
 		default:
-			return newErrorf(codeBackendDisconnected, "received unexpected backend message type: %v", tp)
+			return NewErrorf(CodeBackendDisconnected, "received unexpected backend message type: %v", tp)
 		}
 	}
-	return newErrorf(codeBackendDisconnected, "authentication took more than %d iterations", i)
+	return NewErrorf(CodeBackendDisconnected, "authentication took more than %d iterations", i)
 }

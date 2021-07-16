@@ -13,7 +13,6 @@ package colrpc
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
@@ -45,7 +44,6 @@ type flowStreamClient interface {
 // given remote endpoint.
 type Outbox struct {
 	colexecop.OneInputNode
-	inputInitialized bool
 
 	typs []*types.T
 
@@ -55,7 +53,7 @@ type Outbox struct {
 
 	// draining is an atomic that represents whether the Outbox is draining.
 	draining        uint32
-	metadataSources colexecop.MetadataSources
+	metadataSources execinfrapb.MetadataSources
 	// closers is a slice of Closers that need to be Closed on termination.
 	closers colexecop.Closers
 
@@ -84,7 +82,7 @@ func NewOutbox(
 	input colexecop.Operator,
 	typs []*types.T,
 	getStats func() []*execinfrapb.ComponentStats,
-	metadataSources []colexecop.MetadataSource,
+	metadataSources []execinfrapb.MetadataSource,
 	toClose []colexecop.Closer,
 ) (*Outbox, error) {
 	c, err := colserde.NewArrowBatchConverter(typs)
@@ -235,9 +233,9 @@ func handleStreamErr(
 	}
 }
 
-func (o *Outbox) moveToDraining(ctx context.Context, reason string) {
+func (o *Outbox) moveToDraining(ctx context.Context) {
 	if atomic.CompareAndSwapUint32(&o.draining, 0, 1) {
-		log.VEventf(ctx, 2, "Outbox moved to draining (%s)", reason)
+		log.VEvent(ctx, 2, "Outbox moved to draining")
 	}
 }
 
@@ -271,15 +269,14 @@ func (o *Outbox) sendBatches(
 		o.runnerCtx = ctx
 	}
 	errToSend = colexecerror.CatchVectorizedRuntimeError(func() {
-		o.Input.Init(o.runnerCtx)
-		o.inputInitialized = true
+		o.Input.Init()
 		for {
 			if atomic.LoadUint32(&o.draining) == 1 {
 				terminatedGracefully = true
 				return
 			}
 
-			batch := o.Input.Next()
+			batch := o.Input.Next(o.runnerCtx)
 			n := batch.Length()
 			if n == 0 {
 				terminatedGracefully = true
@@ -326,21 +323,13 @@ func (o *Outbox) sendBatches(
 func (o *Outbox) sendMetadata(ctx context.Context, stream flowStreamClient, errToSend error) error {
 	msg := &execinfrapb.ProducerMessage{}
 	if errToSend != nil {
-		log.VEventf(ctx, 1, "Outbox sending an error as metadata: %v", errToSend)
 		msg.Data.Metadata = append(
 			msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, execinfrapb.ProducerMetadata{Err: errToSend}),
 		)
 	}
-	if o.inputInitialized {
-		// Retrieving stats and draining the metadata is only safe if the input
-		// to the outbox was properly initialized.
-		if o.span != nil && o.getStats != nil {
-			for _, s := range o.getStats() {
-				o.span.RecordStructured(s)
-			}
-		}
-		for _, meta := range o.metadataSources.DrainMeta() {
-			msg.Data.Metadata = append(msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, meta))
+	if o.span != nil && o.getStats != nil {
+		for _, s := range o.getStats() {
+			o.span.RecordStructured(s)
 		}
 	}
 	if trace := execinfra.GetTraceData(ctx); trace != nil {
@@ -351,6 +340,9 @@ func (o *Outbox) sendMetadata(ctx context.Context, stream flowStreamClient, errT
 				},
 			},
 		})
+	}
+	for _, meta := range o.metadataSources.DrainMeta(ctx) {
+		msg.Data.Metadata = append(msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, meta))
 	}
 	if len(msg.Data.Metadata) == 0 {
 		return nil
@@ -398,7 +390,7 @@ func (o *Outbox) runWithStream(
 				log.VEventf(ctx, 2, "Outbox received handshake: %v", msg.Handshake)
 			case msg.DrainRequest != nil:
 				log.VEventf(ctx, 2, "Outbox received drain request")
-				o.moveToDraining(ctx, "consumer requested draining" /* reason */)
+				o.moveToDraining(ctx)
 			}
 		}
 		close(waitCh)
@@ -406,11 +398,7 @@ func (o *Outbox) runWithStream(
 
 	terminatedGracefully, errToSend := o.sendBatches(ctx, stream, flowCtxCancel, outboxCtxCancel)
 	if terminatedGracefully || errToSend != nil {
-		reason := "terminated gracefully"
-		if errToSend != nil {
-			reason = fmt.Sprintf("encountered error when sending batches: %v", errToSend)
-		}
-		o.moveToDraining(ctx, reason)
+		o.moveToDraining(ctx)
 		if err := o.sendMetadata(ctx, stream, errToSend); err != nil {
 			handleStreamErr(ctx, "Send (metadata)", err, flowCtxCancel, outboxCtxCancel)
 		} else {

@@ -7,7 +7,6 @@ go_library(
     srcs = [
         "constants.go",
         "crdb_test_off.go",
-        "crdb_test_on.go",  # keep
         "every_n.go",
         "fast_int_map.go",
         "fast_int_set.go",
@@ -45,7 +44,6 @@ go_test(
         "every_n_test.go",
         "fast_int_map_test.go",
         "fast_int_set_test.go",
-        "slices_test.go",
         "smalltrace_test.go",
         "strings_test.go",
         "topk_test.go",

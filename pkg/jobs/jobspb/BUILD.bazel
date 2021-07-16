@@ -10,9 +10,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/sql/catalog/descpb",
-        "//pkg/storage/cloud",
+        "//pkg/sql/stats",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_gogo_protobuf//jsonpb",
     ],
 )
 

@@ -10,6 +10,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -41,12 +42,12 @@ func newSumIntOrderedAggAlloc(
 			return &sumIntInt16OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &sumIntInt32OrderedAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &sumIntInt64OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		}
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower("Int"), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 type sumIntInt16OrderedAgg struct {

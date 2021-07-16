@@ -42,9 +42,6 @@ $viz-sides = 62px
     font-family $font-family--bold
     color $body-color
 
-  &__underline
-    border-bottom 1px dashed $colors--neutral-5;
-
   &__subtitle
     color $tooltip-color
     margin-left 5px
@@ -55,15 +52,30 @@ $viz-sides = 62px
     width 40px
     height 40px
 
+  &__tooltip
+    width 36px  // Reserve space for 10px padding around centered 16px icon
+    height 16px
+
+  &__tooltip-hover-area
+    width 100%
+    padding 0px 10px
+
+  &__info-icon
+    width 16px
+    height 16px
+    border-radius 50%
+    border 1px solid $tooltip-color
+    font-size 12px
+    line-height 14px  // Visual tweak to vertically center the "i"
+    text-align center
+    color $tooltip-color
+
+  .hover-tooltip--hovered &__info-icon
+    border-color $body-color
+    color $body-color
+
   .icon-warning
     color $warning-color
-
-.anchor-light
-  color white
-  text-decoration underline
-  &:hover
-    color gray
-    text-decoration underline
 
 .linegraph
   height 100%

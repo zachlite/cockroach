@@ -47,7 +47,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/flagutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -60,11 +59,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/tool"
-	"github.com/cockroachdb/pebble/vfs"
-	humanize "github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/kr/pretty"
 	"github.com/spf13/cobra"
@@ -187,56 +183,6 @@ func printKey(kv storage.MVCCKeyValue) (bool, error) {
 	return false, nil
 }
 
-func transactionPredicate(kv storage.MVCCKeyValue) bool {
-	if kv.Key.IsValue() {
-		return false
-	}
-	_, suffix, _, err := keys.DecodeRangeKey(kv.Key.Key)
-	if err != nil {
-		return false
-	}
-	return keys.LocalTransactionSuffix.Equal(suffix)
-}
-
-func intentPredicate(kv storage.MVCCKeyValue) bool {
-	if kv.Key.IsValue() {
-		return false
-	}
-	var meta enginepb.MVCCMetadata
-	if err := protoutil.Unmarshal(kv.Value, &meta); err != nil {
-		return false
-	}
-	return meta.Txn != nil
-}
-
-var keyTypeParams = map[keyTypeFilter]struct {
-	predicate      func(kv storage.MVCCKeyValue) bool
-	minKey, maxKey storage.MVCCKey
-}{
-	showAll: {
-		predicate: func(kv storage.MVCCKeyValue) bool { return true },
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKeyMax,
-	},
-	showTxns: {
-		predicate: transactionPredicate,
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKey{Key: keys.LocalMax},
-	},
-	showValues: {
-		predicate: func(kv storage.MVCCKeyValue) bool {
-			return kv.Key.IsValue()
-		},
-		minKey: storage.NilKey,
-		maxKey: storage.MVCCKeyMax,
-	},
-	showIntents: {
-		predicate: intentPredicate,
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKeyMax,
-	},
-}
-
 func runDebugKeys(cmd *cobra.Command, args []string) error {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
@@ -284,19 +230,8 @@ func runDebugKeys(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	keyTypeOptions := keyTypeParams[debugCtx.keyTypes]
-	if debugCtx.startKey.Equal(storage.NilKey) {
-		debugCtx.startKey = keyTypeOptions.minKey
-	}
-	if debugCtx.endKey.Equal(storage.NilKey) {
-		debugCtx.endKey = keyTypeOptions.maxKey
-	}
-
 	results := 0
 	iterFunc := func(kv storage.MVCCKeyValue) error {
-		if !keyTypeOptions.predicate(kv) {
-			return nil
-		}
 		done, err := printer(kv)
 		if err != nil {
 			return err
@@ -336,17 +271,15 @@ func runDebugBallast(cmd *cobra.Command, args []string) error {
 	ballastFile := args[0] // we use cobra.ExactArgs(1)
 	dataDirectory := filepath.Dir(ballastFile)
 
-	du, err := vfs.Default.GetDiskUsage(dataDirectory)
+	fs, err := sysutil.StatFS(dataDirectory)
 	if err != nil {
 		return errors.Wrapf(err, "failed to stat filesystem %s", dataDirectory)
 	}
+	total := fs.TotalBlocks * fs.BlockSize
+	free := fs.AvailBlocks * fs.BlockSize
 
-	// Use a 'usedBytes' calculation that counts disk space reserved for the
-	// root user as used. The UsedBytes value returned by GetDiskUsage is
-	// the true count of currently allocated bytes.
-	usedBytes := du.TotalBytes - du.AvailBytes
-
-	var targetUsage uint64
+	used := total - free
+	var targetUsage int64
 	p := debugCtx.ballastSize.Percent
 	if math.Abs(p) > 100 {
 		return errors.Errorf("absolute percentage value %f greater than 100", p)
@@ -358,41 +291,36 @@ func runDebugBallast(cmd *cobra.Command, args []string) error {
 	switch {
 	case p > 0:
 		fillRatio := p / float64(100)
-		targetUsage = usedBytes + uint64((fillRatio)*float64(du.TotalBytes))
+		targetUsage = used + int64((fillRatio)*float64(total))
 	case p < 0:
 		// Negative means leave the absolute %age of disk space.
 		fillRatio := 1.0 + (p / float64(100))
-		targetUsage = uint64((fillRatio) * float64(du.TotalBytes))
+		targetUsage = int64((fillRatio) * float64(total))
 	case b > 0:
-		targetUsage = usedBytes + uint64(b)
+		targetUsage = used + b
 	case b < 0:
 		// Negative means leave that many bytes of disk space.
-		targetUsage = du.TotalBytes - uint64(-b)
+		targetUsage = total + b
 	default:
 		return errors.New("expected exactly one of percentage or bytes non-zero, found none")
 	}
-	if usedBytes > targetUsage {
+	if used > targetUsage {
 		return errors.Errorf(
 			"Used space %s already more than needed to be filled %s\n",
-			humanize.IBytes(usedBytes),
-			humanize.IBytes(targetUsage),
+			humanizeutil.IBytes(used),
+			humanizeutil.IBytes(targetUsage),
 		)
 	}
-	if usedBytes == targetUsage {
+	if used == targetUsage {
 		return nil
 	}
-	ballastSize := targetUsage - usedBytes
+	ballastSize := targetUsage - used
 
-	// Note: We intentionally fail if the target file already exists. This is
-	// a feature; we have seen users mistakenly applying the `ballast` command
-	// directly to block devices, thereby trashing their filesystem.
-	if _, err := os.Stat(ballastFile); err == nil {
-		return os.ErrExist
-	} else if !oserror.IsNotExist(err) {
-		return errors.Wrap(err, "stating ballast file")
-	}
-
-	if err := sysutil.ResizeLargeFile(ballastFile, int64(ballastSize)); err != nil {
+	// Note: CreateLargeFile fails if the target file already
+	// exists. This is a feature; we have seen users mistakenly applying
+	// the `ballast` command directly to block devices, thereby trashing
+	// their filesystem.
+	if err := sysutil.CreateLargeFile(ballastFile, ballastSize); err != nil {
 		return errors.Wrap(err, "error allocating ballast file")
 	}
 	return nil
@@ -680,7 +608,6 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	var rangeID roachpb.RangeID
 	gcTTLInSeconds := int64((24 * time.Hour).Seconds())
 	intentAgeThreshold := gc.IntentAgeThreshold.Default()
-	intentBatchSize := gc.MaxIntentsPerCleanupBatch.Default()
 
 	if len(args) > 3 {
 		var err error
@@ -748,7 +675,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 		info, err := gc.Run(
 			context.Background(),
 			&desc, snap,
-			now, thresh, gc.RunOptions{IntentAgeThreshold: intentAgeThreshold, MaxIntentsPerIntentCleanupBatch: intentBatchSize}, policy,
+			now, thresh, intentAgeThreshold, policy,
 			gc.NoopGCer{},
 			func(_ context.Context, _ []roachpb.Intent) error { return nil },
 			func(_ context.Context, _ *roachpb.Transaction) error { return nil },
@@ -762,9 +689,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// DebugPebbleCmd is the root of all debug pebble commands.
-// Exported to allow modification by CCL code.
-var DebugPebbleCmd = &cobra.Command{
+var debugPebbleCmd = &cobra.Command{
 	Use:   "pebble [command]",
 	Short: "run a Pebble introspection tool command",
 	Long: `
@@ -812,27 +737,9 @@ func runDebugCompact(cmd *cobra.Command, args []string) error {
 		fmt.Printf("approximate reported database size before compaction: %s\n", humanizeutil.IBytes(int64(approxBytesBefore)))
 	}
 
-	// Begin compacting the store in a separate goroutine.
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- errors.Wrap(db.Compact(), "while compacting")
-	}()
-
-	// Print the current LSM every minute.
-	ticker := time.NewTicker(time.Minute)
-	for done := false; !done; {
-		select {
-		case <-ticker.C:
-			fmt.Printf("%s\n", db.GetMetrics())
-		case err := <-errCh:
-			ticker.Stop()
-			if err != nil {
-				return err
-			}
-			done = true
-		}
+	if err := db.Compact(); err != nil {
+		return errors.Wrap(err, "while compacting")
 	}
-	fmt.Printf("%s\n", db.GetMetrics())
 
 	{
 		approxBytesAfter, err := db.ApproximateDiskBytes(roachpb.KeyMin, roachpb.KeyMax)
@@ -1003,8 +910,7 @@ var debugUnsafeRemoveDeadReplicasCmd = &cobra.Command{
 This command is UNSAFE and should only be used with the supervision of
 a Cockroach Labs engineer. It is a last-resort option to recover data
 after multiple node failures. The recovered data is not guaranteed to
-be consistent. If a suitable backup exists, restore it instead of
-using this tool.
+be consistent.
 
 The --dead-store-ids flag takes a comma-separated list of dead store
 IDs and scans this store for any ranges whose only live replica is on
@@ -1012,34 +918,11 @@ this store. These range descriptors will be edited to forcibly remove
 the dead stores, allowing the range to recover from this single
 replica.
 
-This command will prompt for confirmation before committing its changes.
-
-It is safest to run this command while all nodes are stopped. In some
-circumstances it may be possible to run it while some nodes are still
-running provided all nodes containing replicas of nodes that have lost
-quorum are stopped.
-
-It is recommended to take a filesystem-level backup or snapshot of the
-nodes to be affected before running this command (remember that it is
-not safe to take a filesystem-level backup of a running node, but it is
-possible while the node is stopped)
-
-WARNINGS
-
-This tool will cause previously committed data to be lost. It does not
-preserve atomicity of transactions, so further inconsistencies and
-undefined behavior may result. Before proceeding at the yes/no prompt,
-review the ranges that are affected to consider the possible impact
-of inconsistencies. Further remediation may be necessary after running
-this tool, including dropping and recreating affected indexes, or in the
-worst case creating a new backup or export of this cluster's data for
-restoration into a brand new cluster. Because of the latter possibilities,
-this tool is a slower means of disaster recovery than restoring from
-a backup.
-
 Must only be used when the dead stores are lost and unrecoverable. If
 the dead stores were to rejoin the cluster after this command was
 used, data may be corrupted.
+
+This command will prompt for confirmation before committing its changes.
 
 After this command is used, the node should not be restarted until at
 least 10 seconds have passed since it was stopped. Restarting it too
@@ -1267,7 +1150,7 @@ func removeDeadReplicas(
 	return batch, nil
 }
 
-var debugMergeLogsCmd = &cobra.Command{
+var debugMergeLogsCommand = &cobra.Command{
 	Use:   "merge-logs <log file globs>",
 	Short: "merge multiple log files from different machines into a single stream",
 	Long: `
@@ -1295,7 +1178,6 @@ var debugMergeLogsOpts = struct {
 	prefix         string
 	keepRedactable bool
 	redactInput    bool
-	format         string
 }{
 	program:        nil, // match everything
 	file:           regexp.MustCompile(log.FilePattern),
@@ -1309,7 +1191,7 @@ func runDebugMergeLogs(cmd *cobra.Command, args []string) error {
 	inputEditMode := log.SelectEditMode(o.redactInput, o.keepRedactable)
 
 	s, err := newMergedStreamFromPatterns(context.Background(),
-		args, o.file, o.program, o.from, o.to, inputEditMode, o.format)
+		args, o.file, o.program, o.from, o.to, inputEditMode)
 	if err != nil {
 		return err
 	}
@@ -1343,7 +1225,7 @@ var debugCmds = append(DebugCmdsForRocksDB,
 	debugUnsafeRemoveDeadReplicasCmd,
 	debugEnvCmd,
 	debugZipCmd,
-	debugMergeLogsCmd,
+	debugMergeLogsCommand,
 	debugListFilesCmd,
 	debugResetQuorumCmd,
 )
@@ -1385,12 +1267,6 @@ func (m lockValueFormatter) Format(f fmt.State, c rune) {
 	fmt.Fprint(f, kvserver.SprintIntent(m.value))
 }
 
-// pebbleToolFS is the vfs.FS that the pebble tool should use.
-// It is necessary because an FS must be passed to tool.New before
-// the command line flags are parsed (i.e. before we can determine
-// if we have an encrypted FS).
-var pebbleToolFS = &swappableFS{vfs.Default}
-
 func init() {
 	DebugCmd.AddCommand(debugCmds...)
 
@@ -1415,19 +1291,14 @@ func init() {
 	// and merger functions must be specified to pebble that match the ones used
 	// to write those files.
 	pebbleTool := tool.New(tool.Mergers(storage.MVCCMerger),
-		tool.DefaultComparer(storage.EngineComparer),
-		tool.FS(&absoluteFS{pebbleToolFS}),
-	)
-	DebugPebbleCmd.AddCommand(pebbleTool.Commands...)
-	initPebbleCmds(DebugPebbleCmd)
-	DebugCmd.AddCommand(DebugPebbleCmd)
+		tool.DefaultComparer(storage.EngineComparer))
+	debugPebbleCmd.AddCommand(pebbleTool.Commands...)
+	DebugCmd.AddCommand(debugPebbleCmd)
 
 	doctorExamineCmd.AddCommand(doctorExamineClusterCmd, doctorExamineZipDirCmd)
 	doctorRecreateCmd.AddCommand(doctorRecreateClusterCmd, doctorRecreateZipDirCmd)
 	debugDoctorCmd.AddCommand(doctorExamineCmd, doctorRecreateCmd, doctorExamineFallbackClusterCmd, doctorExamineFallbackZipDirCmd)
 	DebugCmd.AddCommand(debugDoctorCmd)
-
-	DebugCmd.AddCommand(debugJobTraceFromClusterCmd)
 
 	f := debugSyncBenchCmd.Flags()
 	f.IntVarP(&syncBenchOpts.Concurrency, "concurrency", "c", syncBenchOpts.Concurrency,
@@ -1441,7 +1312,7 @@ func init() {
 	f.IntSliceVar(&removeDeadReplicasOpts.deadStoreIDs, "dead-store-ids", nil,
 		"list of dead store IDs")
 
-	f = debugMergeLogsCmd.Flags()
+	f = debugMergeLogsCommand.Flags()
 	f.Var(flagutil.Time(&debugMergeLogsOpts.from), "from",
 		"time before which messages should be filtered")
 	// TODO(knz): the "to" should be named "until" - it's a time boundary, not a space boundary.
@@ -1460,8 +1331,6 @@ func init() {
 		"keep the output log file redactable")
 	f.BoolVar(&debugMergeLogsOpts.redactInput, "redact", debugMergeLogsOpts.redactInput,
 		"redact the input files to remove sensitive information")
-	f.StringVar(&debugMergeLogsOpts.format, "format", "",
-		"log format of the input files")
 
 	f = debugDecodeProtoCmd.Flags()
 	f.StringVar(&debugDecodeProtoName, "schema", "cockroach.sql.sqlbase.Descriptor",
@@ -1471,49 +1340,4 @@ func init() {
 
 	f = debugCheckLogConfigCmd.Flags()
 	f.Var(&debugLogChanSel, "only-channels", "selection of channels to include in the output diagram.")
-
-	f = debugTimeSeriesDumpCmd.Flags()
-	f.Var(&debugTimeSeriesDumpOpts.format, "format", "output format (text, csv, tsv, raw)")
-}
-
-func initPebbleCmds(cmd *cobra.Command) {
-	for _, c := range cmd.Commands() {
-		wrapped := c.PreRunE
-		c.PreRunE = func(cmd *cobra.Command, args []string) error {
-			if wrapped != nil {
-				if err := wrapped(cmd, args); err != nil {
-					return err
-				}
-			}
-			return pebbleCryptoInitializer()
-		}
-		initPebbleCmds(c)
-	}
-}
-
-func pebbleCryptoInitializer() error {
-	storageConfig := base.StorageConfig{
-		Settings: serverCfg.Settings,
-		Dir:      serverCfg.Stores.Specs[0].Path,
-	}
-
-	if PopulateRocksDBConfigHook != nil {
-		if err := PopulateRocksDBConfigHook(&storageConfig); err != nil {
-			return err
-		}
-	}
-
-	cfg := storage.PebbleConfig{
-		StorageConfig: storageConfig,
-		Opts:          storage.DefaultPebbleOptions(),
-	}
-
-	// This has the side effect of storing the encrypted FS into cfg.Opts.FS.
-	_, _, err := storage.ResolveEncryptedEnvOptions(&cfg)
-	if err != nil {
-		return err
-	}
-
-	pebbleToolFS.set(cfg.Opts.FS)
-	return nil
 }

@@ -3,9 +3,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "install",
     srcs = [
+        "cassandra.go",
+        "cassandra_yaml.go",
         "cluster_synced.go",
         "cockroach.go",
-        "download.go",
         "expander.go",
         "install.go",
         "iterm2.go",
@@ -13,7 +14,6 @@ go_library(
         "session.go",
         "staging.go",
     ],
-    embedsrcs = ["scripts/download.sh"],
     importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachprod/install",
     visibility = ["//visibility:public"],
     deps = [

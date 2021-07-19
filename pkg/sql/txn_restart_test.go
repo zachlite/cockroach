@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -340,9 +339,7 @@ func (ta *TxnAborter) GetExecCount(stmt string) (int, bool) {
 	return 0, false
 }
 
-func (ta *TxnAborter) statementFilter(
-	ctx context.Context, _ *sessiondata.SessionData, stmt string, err error,
-) {
+func (ta *TxnAborter) statementFilter(ctx context.Context, stmt string, err error) {
 	ta.mu.Lock()
 	log.Infof(ctx, "statement filter running on: %s, with err=%v", stmt, err)
 	ri, ok := ta.mu.stmtsToAbort[stmt]
@@ -1107,7 +1104,7 @@ func TestNonRetryableError(t *testing.T) {
 	hitError := false
 	cleanupFilter := cmdFilters.AppendFilter(
 		func(args kvserverbase.FilterArgs) *roachpb.Error {
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
 				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
 					hitError = true
 					return roachpb.NewErrorWithTxn(fmt.Errorf("testError"), args.Hdr.Txn)
@@ -1170,7 +1167,7 @@ func TestReacquireLeaseOnRestart(t *testing.T) {
 	var clockUpdate, restartDone int32
 	cleanupFilter := cmdFilters.AppendFilter(
 		func(args kvserverbase.FilterArgs) *roachpb.Error {
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
 				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
 					if atomic.LoadInt32(&clockUpdate) == 0 {
 						atomic.AddInt32(&clockUpdate, 1)
@@ -1255,7 +1252,7 @@ func TestFlushUncommitedDescriptorCacheOnRestart(t *testing.T) {
 				return nil
 			}
 
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
 				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
 					atomic.AddInt32(&restartDone, 1)
 					// Return ReadWithinUncertaintyIntervalError.

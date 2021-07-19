@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//pkg/kv",
         "//pkg/security",
+        "//pkg/sql",
         "//pkg/sql/parser",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",

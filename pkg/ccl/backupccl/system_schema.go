@@ -281,6 +281,9 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.NamespaceTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
+	systemschema.DeprecatedNamespaceTable.GetName(): {
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
+	},
 	systemschema.ProtectedTimestampsMetaTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
@@ -321,15 +324,6 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
 	systemschema.MigrationsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.JoinTokensTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.StatementStatisticsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.TransactionStatisticsTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
 }

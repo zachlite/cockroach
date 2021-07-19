@@ -99,12 +99,10 @@ func TestFormatTableName(t *testing.T) {
 		// `GRANT SELECT ON xoxoxo TO foo`},
 	}
 
-	f := tree.NewFmtCtx(
-		tree.FmtSimple,
-		tree.FmtReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
-			ctx.WriteString("xoxoxo")
-		}),
-	)
+	f := tree.NewFmtCtx(tree.FmtSimple)
+	f.SetReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
+		ctx.WriteString("xoxoxo")
+	})
 
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d %s", i, test.stmt), func(t *testing.T) {

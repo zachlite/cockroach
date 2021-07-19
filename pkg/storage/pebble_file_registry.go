@@ -24,10 +24,6 @@ import (
 	"github.com/gogo/protobuf/proto"
 )
 
-// CanRegistryElideFunc is a function that returns true for entries that can be
-// elided instead of being written to the registry.
-var CanRegistryElideFunc func(entry *enginepb.FileEntry) bool
-
 // PebbleFileRegistry keeps track of files for the data-FS and store-FS for Pebble (see encrypted_fs.go
 // for high-level comment).
 //
@@ -62,23 +58,17 @@ const (
 	fileRegistryFilename = "COCKROACHDB_REGISTRY"
 )
 
-// CheckNoRegistryFile checks that no registry file currently exists.
-// CheckNoRegistryFile should be called if the file registry will not be used.
-func (r *PebbleFileRegistry) CheckNoRegistryFile() error {
-	// NB: We do not assign r.registryFilename if the registry will not be used.
-	registryFilename := r.FS.PathJoin(r.DBDir, fileRegistryFilename)
-	_, err := r.FS.Stat(registryFilename)
-	if err == nil {
+func (r *PebbleFileRegistry) checkNoRegistryFile() error {
+	r.registryFilename = r.FS.PathJoin(r.DBDir, fileRegistryFilename)
+	if f, err := r.FS.Open(r.registryFilename); err == nil {
+		f.Close()
 		return os.ErrExist
-	}
-	if !oserror.IsNotExist(err) {
-		return err
 	}
 	return nil
 }
 
 // Load loads the contents of the file registry from a file, if the file exists, else it is a noop.
-// Load should be called exactly once if the file registry will be used.
+// It must be called at most once, before the other functions.
 func (r *PebbleFileRegistry) Load() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -99,26 +89,6 @@ func (r *PebbleFileRegistry) Load() error {
 	if err = protoutil.Unmarshal(b, r.mu.currProto); err != nil {
 		return err
 	}
-	// Delete all unnecessary entries to reduce registry size.
-	if err := r.maybeElideEntries(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (r *PebbleFileRegistry) maybeElideEntries() error {
-	newProto := &enginepb.FileRegistry{}
-	proto.Merge(newProto, r.mu.currProto)
-	filesChanged := false
-	for filename, entry := range newProto.Files {
-		if CanRegistryElideFunc != nil && CanRegistryElideFunc(entry) {
-			delete(newProto.Files, filename)
-			filesChanged = true
-		}
-	}
-	if filesChanged {
-		return r.writeRegistry(newProto)
-	}
 	return nil
 }
 
@@ -131,11 +101,10 @@ func (r *PebbleFileRegistry) GetFileEntry(filename string) *enginepb.FileEntry {
 }
 
 // SetFileEntry sets filename => entry in the registry map and persists the registry.
-// It should not be called for entries corresponding to unencrypted files since the
-// absence of a file in the file registry implies that it is unencrypted.
 func (r *PebbleFileRegistry) SetFileEntry(filename string, entry *enginepb.FileEntry) error {
-	// We don't need to store nil entries since that's the default zero value.
-	if entry == nil {
+	// We choose not to store an entry for unencrypted files since the absence of
+	// a file in the file registry implies that it is unencrypted.
+	if entry != nil && entry.EnvType == enginepb.EnvType_Plaintext {
 		return r.MaybeDeleteEntry(filename)
 	}
 

@@ -4,11 +4,10 @@ go_library(
     name = "testutils",
     srcs = [
         "base.go",
-        "data_path.go",
+        "bazel.go",
         "dir.go",
         "error.go",
         "files.go",
-        "hook.go",
         "keys.go",
         "net.go",
         "pprof.go",
@@ -22,7 +21,6 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/base",
-        "//pkg/build/bazel",
         "//pkg/roachpb",
         "//pkg/security",
         "//pkg/sql/pgwire/pgerror",
@@ -33,7 +31,6 @@ go_library(
         "//pkg/util/timeutil",
         "//pkg/util/tracing",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_stretchr_testify//require",
     ],
 )
 
@@ -41,7 +38,6 @@ go_test(
     name = "testutils_test",
     size = "small",
     srcs = [
-        "hook_test.go",
         "net_test.go",
         "soon_test.go",
     ],
@@ -53,6 +49,5 @@ go_test(
         "//pkg/util/netutil",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_stretchr_testify//require",
     ],
 )

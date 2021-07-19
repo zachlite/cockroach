@@ -42,30 +42,18 @@ func newAvgHashAggAlloc(
 			return &avgInt16HashAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &avgInt32HashAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &avgInt64HashAggAlloc{aggAllocBase: allocBase}, nil
 		}
 	case types.DecimalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &avgDecimalHashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &avgDecimalHashAggAlloc{aggAllocBase: allocBase}, nil
 	case types.FloatFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &avgFloat64HashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &avgFloat64HashAggAlloc{aggAllocBase: allocBase}, nil
 	case types.IntervalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &avgIntervalHashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &avgIntervalHashAggAlloc{aggAllocBase: allocBase}, nil
+	default:
+		return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 	}
-	return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 }
 
 type avgInt16HashAgg struct {

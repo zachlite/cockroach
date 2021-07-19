@@ -19,10 +19,7 @@ import (
 )
 
 // Column is an interface that represents a raw array of a Go native type.
-type Column interface {
-	// Len returns the number of elements in the Column.
-	Len() int
-}
+type Column interface{}
 
 // SliceArgs represents the arguments passed in to Vec.Append and Nulls.set.
 type SliceArgs struct {
@@ -62,9 +59,6 @@ type Vec interface {
 	// CanonicalTypeFamily returns the canonical type family of data stored in
 	// this Vec.
 	CanonicalTypeFamily() types.Family
-	// IsBytesLike returns true if this data is stored with a flat bytes
-	// representation.
-	IsBytesLike() bool
 
 	// Bool returns a bool list.
 	Bool() Bools
@@ -84,16 +78,14 @@ type Vec interface {
 	Timestamp() Times
 	// Interval returns a duration.Duration slice.
 	Interval() Durations
-	// JSON returns a vector of JSONs.
-	JSON() *JSONs
 	// Datum returns a vector of Datums.
 	Datum() DatumVec
 
 	// Col returns the raw, typeless backing storage for this Vec.
-	Col() Column
+	Col() interface{}
 
 	// SetCol sets the member column (in the case of mutable columns).
-	SetCol(Column)
+	SetCol(interface{})
 
 	// TemplateType returns an []interface{} and is used for operator templates.
 	// Do not call this from normal code - it'll always panic.
@@ -194,8 +186,6 @@ func (cf *defaultColumnFactory) MakeColumn(t *types.T, length int) Column {
 		return make(Times, length)
 	case types.IntervalFamily:
 		return make(Durations, length)
-	case types.JsonFamily:
-		return NewJSONs(length)
 	default:
 		panic(fmt.Sprintf("StandardColumnFactory doesn't support %s", t))
 	}
@@ -220,15 +210,7 @@ func (m *memColumn) CanonicalTypeFamily() types.Family {
 	return m.canonicalTypeFamily
 }
 
-func (m *memColumn) IsBytesLike() bool {
-	switch m.canonicalTypeFamily {
-	case types.BytesFamily, types.JsonFamily:
-		return true
-	}
-	return false
-}
-
-func (m *memColumn) SetCol(col Column) {
+func (m *memColumn) SetCol(col interface{}) {
 	m.col = col
 }
 
@@ -268,15 +250,11 @@ func (m *memColumn) Interval() Durations {
 	return m.col.(Durations)
 }
 
-func (m *memColumn) JSON() *JSONs {
-	return m.col.(*JSONs)
-}
-
 func (m *memColumn) Datum() DatumVec {
 	return m.col.(DatumVec)
 }
 
-func (m *memColumn) Col() Column {
+func (m *memColumn) Col() interface{} {
 	return m.col
 }
 
@@ -297,7 +275,35 @@ func (m *memColumn) SetNulls(n *Nulls) {
 }
 
 func (m *memColumn) Length() int {
-	return m.col.Len()
+	switch m.CanonicalTypeFamily() {
+	case types.BoolFamily:
+		return len(m.col.(Bools))
+	case types.BytesFamily:
+		return m.Bytes().Len()
+	case types.IntFamily:
+		switch m.t.Width() {
+		case 16:
+			return len(m.col.(Int16s))
+		case 32:
+			return len(m.col.(Int32s))
+		case 0, 64:
+			return len(m.col.(Int64s))
+		default:
+			panic(fmt.Sprintf("unexpected int width: %d", m.t.Width()))
+		}
+	case types.FloatFamily:
+		return len(m.col.(Float64s))
+	case types.DecimalFamily:
+		return len(m.col.(Decimals))
+	case types.TimestampTZFamily:
+		return len(m.col.(Times))
+	case types.IntervalFamily:
+		return len(m.col.(Durations))
+	case typeconv.DatumVecCanonicalTypeFamily:
+		return m.col.(DatumVec).Len()
+	default:
+		panic(fmt.Sprintf("unhandled type %s", m.t))
+	}
 }
 
 func (m *memColumn) Capacity() int {
@@ -325,8 +331,6 @@ func (m *memColumn) Capacity() int {
 		return cap(m.col.(Times))
 	case types.IntervalFamily:
 		return cap(m.col.(Durations))
-	case types.JsonFamily:
-		return m.JSON().Len()
 	case typeconv.DatumVecCanonicalTypeFamily:
 		return m.col.(DatumVec).Cap()
 	default:

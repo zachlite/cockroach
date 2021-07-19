@@ -104,7 +104,7 @@ var nilStats *enginepb.MVCCStats
 func runTestDBAddSSTable(
 	ctx context.Context, t *testing.T, db *kv.DB, tr *tracing.Tracer, store *kvserver.Store,
 ) {
-	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
+	tr.TestingIncludeAsyncSpansInRecordings() // we assert on async span traces in this test
 	{
 		key := storage.MVCCKey{Key: []byte("bb"), Timestamp: hlc.Timestamp{WallTime: 2}}
 		data, err := singleKVSSTable(key, roachpb.MakeValueFromString("1").RawBytes)

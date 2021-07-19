@@ -66,6 +66,11 @@ func (j *Job) Started(ctx context.Context) error {
 	return j.started(ctx, nil /* txn */)
 }
 
+// Created is a test only function that inserts a new jobs table row.
+func (j *Job) Created(ctx context.Context) error {
+	return j.deprecatedInsert(ctx, nil /* txn */, j.ID(), nil /* lease */, nil /* session */)
+}
+
 // Paused is a wrapper around the internal function that moves a job to the
 // paused state.
 func (j *Job) Paused(ctx context.Context) error {
@@ -83,33 +88,3 @@ func (j *Job) Failed(ctx context.Context, causingErr error) error {
 func (j *Job) Succeeded(ctx context.Context) error {
 	return j.succeeded(ctx, nil /* txn */, nil /* fn */)
 }
-
-var (
-	AdoptQuery = claimQuery
-
-	CancelQuery = cancelQuery
-
-	GcQuery = expiredJobsQuery
-
-	IntervalBaseSettingKey = intervalBaseSettingKey
-
-	AdoptIntervalSettingKey = adoptIntervalSettingKey
-
-	CancelIntervalSettingKey = cancelIntervalSettingKey
-
-	GcIntervalSettingKey = gcIntervalSettingKey
-
-	RetentionTimeSettingKey = retentionTimeSettingKey
-
-	AdoptIntervalSetting = adoptIntervalSetting
-
-	CancelIntervalSetting = cancelIntervalSetting
-
-	CancellationsUpdateLimitSetting = cancellationsUpdateLimitSetting
-
-	GcIntervalSetting = gcIntervalSetting
-
-	RetentionTimeSetting = retentionTimeSetting
-
-	DefaultAdoptInterval = defaultAdoptInterval
-)

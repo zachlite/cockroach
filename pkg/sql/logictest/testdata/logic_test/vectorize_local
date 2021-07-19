@@ -51,8 +51,6 @@ regions: <hidden>
   nodes: <hidden>
   regions: <hidden>
   actual row count: 2,001
-  KV time: 0µs
-  KV contention time: 0µs
   KV rows read: 2,001
   KV bytes read: 16 KiB
   missing stats
@@ -77,8 +75,6 @@ regions: <hidden>
 │ nodes: <hidden>
 │ regions: <hidden>
 │ actual row count: 2
-│ KV time: 0µs
-│ KV contention time: 0µs
 │ KV rows read: 1
 │ KV bytes read: 8 B
 │ table: d@primary
@@ -88,8 +84,6 @@ regions: <hidden>
       nodes: <hidden>
       regions: <hidden>
       actual row count: 2
-      KV time: 0µs
-      KV contention time: 0µs
       KV rows read: 2
       KV bytes read: 16 B
       estimated row count: 1 (100% of the table; stats collected <hidden> ago)
@@ -168,8 +162,6 @@ regions: <hidden>
 │         nodes: <hidden>
 │         regions: <hidden>
 │         actual row count: 2
-│         KV time: 0µs
-│         KV contention time: 0µs
 │         KV rows read: 2
 │         KV bytes read: 16 B
 │         estimated row count: 1 (100% of the table; stats collected <hidden> ago)
@@ -180,15 +172,13 @@ regions: <hidden>
       nodes: <hidden>
       regions: <hidden>
       actual row count: 2
-      KV time: 0µs
-      KV contention time: 0µs
       KV rows read: 2
       KV bytes read: 16 B
       missing stats
       table: d@primary
       spans: FULL SCAN
 ·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMk8GO0zAQhu88xWhOoDW7dbriYGmlChRQF5qgdMUF5eDaQzYisbO2I1pVfSxegCdDSajYdMtCxWVvmX_mt-ebcbbo7yoUuIw_xG9uQJ1LeJulC1AwT5I4g0WcvYvhOp0noCFN-oIr0OcrZGispkTW5FF8Ro45w8ZZRd5b10nbvmCu1ygmDEvTtKGTc4bKOkKxxVCGilDgjVxVlJHU5C4myFBTkGXVH6tmnhQyXDbSeAEvkWHaBgEzjgzff4JQ1iRg8uO7H2JlTSATSmsepJz95sGR1AKiQVltAu0l_gpeI8OVDOqWPNg2NN09XTu9cS9EmO8YDtEvHB9kQSj4jv078tK6QO6Cj2ln_AwZ0ppU-xChlmuoqbZuA7KqrJKBtIBJ33aX83cVBKob0KX_Cq2XBe3T_0EVnUJ1f5HRGE3PGlfW0m2OLTN6csuc_hH7N21rrNPkSI9I8875t5Ijs1uQK-jalobcxXQ8u4q-hOczfvbiypXF7fA5-hGe1Iu5POXFZOQbazwdjvDoyZNubqQLGvbgbesUfXRW9dcMYdr7ekGTD0OWD8HcDKmuwftm_qh5OjLzQ3N0gjk6NE8fNV8etJ3vnv0MAAD__xmY2Xc=
+Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMk8GO0zwQx-_fU4zm9KE12zpdcbC0UgQKqAtNULrignJw7aEbkdjBdkSrqo_FC_BkKAkrNm1ZqLjsLfOf-dvzm3F26L9UKHCZvEte3YK6lPA6zxagYJ6mSQ6LJH-TwE02T0FDlvYF16AvV8jQWE2prMmj-IgcC4aNs4q8t66Tdn3BXG9QTBmWpmlDJxcMlXWEYoehDBWhwFu5qignqclNpshQU5Bl1R-rYk8KGS4babyA58gwa4OAmCPDtx8glDUJmH7_5odYWRPIhNKao5SzXz04klpANCirbaB7ib-Al8hwJYO6Iw-2DU13T9dOb7wXIiz2DIfoJ44Pck0o-J79PfLSukBuwse0Mb9AhrQh1R4j1HIDNdXWbUFWlVUykBYw7dvucl65rnnQpf98XPEPYNE5YA93GY3pdNy4spZue2qf0ZPb5-y32L9oW2OdJkd6RFp0zj-VnJjdgtyabmxpyE1m49lV9Cn8H_OLZ9euXN8Nn6N_4ak9mqtzHk1OvrHG0-EUT5487UZHek3DKrxtnaL3zqr-miHMel8vaPJhyPIhmJsh1TX40MwfNc9GZn5ojs4wR4fm2aPmq4O2i_1_PwIAAP__IIXcIw==
 
 statement ok
 RESET vectorize; RESET distsql
@@ -219,10 +209,12 @@ SET tracing = on; SELECT * FROM tpar WHERE a = 0 OR a = 10; SET tracing = off
 # Note that table ID here is hardcoded, so if a new table is created before
 # tpar, this query will need an adjustment.
 query T
-SELECT message FROM [SHOW TRACE FOR SESSION] WHERE message LIKE 'querying next range at %'
+SELECT message FROM [SHOW TRACE FOR SESSION] WHERE message IN
+    ('querying next range at /Table/56/1/0',
+     'querying next range at /Table/56/1/10')
 ----
-querying next range at /Table/56/1/0/0
-querying next range at /Table/56/1/10/0
+querying next range at /Table/56/1/0
+querying next range at /Table/56/1/10
 
 # Regression test for #46123 (rowexec.TableReader not implementing
 # execinfra.OpNode interface).
@@ -235,9 +227,10 @@ EXPLAIN (VEC) SELECT stddev(0) FROM t46123 WHERE ('' COLLATE en)::BOOL
 │
 └ Node 1
   └ *colexec.orderedAggregator
-    └ *colexecbase.constInt64Op
-      └ *rowexec.filtererProcessor
-        └ *colfetcher.ColBatchScan
+    └ *colexecbase.distinctChainOps
+      └ *colexecbase.constInt64Op
+        └ *rowexec.filtererProcessor
+          └ *colfetcher.ColBatchScan
 
 # Regression test for #46122.
 statement ok
@@ -293,7 +286,8 @@ EXPLAIN (VEC) SELECT max(c) FROM a
 │
 └ Node 1
   └ *colexec.orderedAggregator
-    └ *colfetcher.ColBatchScan
+    └ *colexecbase.distinctChainOps
+      └ *colfetcher.ColBatchScan
 
 # Verify that binary operations on integers of any width return INT8.
 statement ok
@@ -363,31 +357,8 @@ EXPLAIN (VEC) SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string
 │
 └ Node 1
   └ *colexec.orderedAggregator
-    └ *colfetcher.ColBatchScan
-
-statement ok
-CREATE TABLE t63792 (c INT);
-INSERT INTO t63792 VALUES (NULL), (1), (2)
-
-# Check that casts of constants are pre-evaluated (which allows us to use
-# colexec.isNullProjOp instead of colexecproj.defaultCmpProjOp).
-query T
-EXPLAIN (VEC) SELECT c = c FROM t63792
-----
-│
-└ Node 1
-  └ *colexec.orProjOp
-    ├ *colfetcher.ColBatchScan
-    ├ *colexec.isNullProjOp
-    └ *colexecbase.castOpNullAny
-      └ *colexecbase.constNullOp
-
-query IB rowsort
-SELECT c, c = c FROM t63792
-----
-NULL  NULL
-1     true
-2     true
+    └ *colexecbase.distinctChainOps
+      └ *colfetcher.ColBatchScan
 
 # Regression test that we can run EXPLAIN (VEC) on a mutation that utilizes the
 # vectorized engine for some internal operations (#66568).

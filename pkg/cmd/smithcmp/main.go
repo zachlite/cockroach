@@ -33,7 +33,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/cockroachdb/cockroach/pkg/cmd/cmpconn"
 	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -65,9 +66,9 @@ type options struct {
 	}
 }
 
-var sqlMutators = []randgen.Mutator{randgen.ColumnFamilyMutator}
+var sqlMutators = []rowenc.Mutator{mutations.ColumnFamilyMutator}
 
-func enableMutations(shouldEnable bool, mutations []randgen.Mutator) []randgen.Mutator {
+func enableMutations(shouldEnable bool, mutations []rowenc.Mutator) []rowenc.Mutator {
 	if shouldEnable {
 		return mutations
 	}
@@ -104,7 +105,7 @@ func main() {
 		var err error
 		mutators := enableMutations(opts.Databases[name].AllowMutations, sqlMutators)
 		if opts.Postgres {
-			mutators = append(mutators, randgen.PostgresMutator)
+			mutators = append(mutators, mutations.PostgresMutator)
 		}
 		conns[name], err = cmpconn.NewConnWithMutators(
 			db.Addr, rng, mutators, db.InitSQL, opts.InitSQL)
@@ -164,9 +165,10 @@ func main() {
 	var prep, exec string
 	ctx := context.Background()
 	done := time.After(timeout)
-	for i := 0; true; i++ {
+	for i, ignoredErrCount := 0, 0; true; i++ {
 		select {
 		case <-done:
+			fmt.Printf("executed query count: %d\nignored error count: %d\n", i, ignoredErrCount)
 			return
 		default:
 		}
@@ -185,7 +187,7 @@ func main() {
 				} else {
 					sb.WriteString(" (")
 				}
-				d := randgen.RandDatum(rng, typ, true)
+				d := rowenc.RandDatum(rng, typ, true)
 				fmt.Println(i, typ, d, tree.Serialize(d))
 				sb.WriteString(tree.Serialize(d))
 			}
@@ -197,11 +199,13 @@ func main() {
 			fmt.Println(exec)
 		}
 		if compare {
-			if err := cmpconn.CompareConns(
+			if ignoredErr, err := cmpconn.CompareConns(
 				ctx, stmtTimeout, conns, prep, exec, true, /* ignoreSQLErrors */
 			); err != nil {
 				fmt.Printf("prep:\n%s;\nexec:\n%s;\nERR: %s\n\n", prep, exec, err)
 				os.Exit(1)
+			} else if ignoredErr {
+				ignoredErrCount++
 			}
 		} else {
 			for _, conn := range conns {

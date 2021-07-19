@@ -15,7 +15,7 @@ import Helmet from "react-helmet";
 import classNames from "classnames/bind";
 import { Loading } from "src/loading";
 import { PageConfig, PageConfigItem } from "src/pageConfig";
-import { ColumnDescriptor, SortSetting } from "src/sortedtable";
+import { SortSetting } from "src/sortedtable";
 import { Search } from "src/search";
 import { Pagination } from "src/pagination";
 import { TableStatistics } from "../tableStatistics";
@@ -28,24 +28,12 @@ import {
   getTimeValueInSeconds,
 } from "../queryFilter";
 
-import {
-  appAttr,
-  getMatchParamByName,
-  calculateTotalWorkload,
-  unique,
-  containAny,
-} from "src/util";
+import { appAttr, getMatchParamByName, calculateTotalWorkload } from "src/util";
 import {
   AggregateStatistics,
-  populateRegionNodeForStatements,
   makeStatementsColumns,
   StatementsSortedTable,
 } from "../statementsTable";
-import {
-  getLabel,
-  statisticsColumnLabels,
-  StatisticTableColumnKeys,
-} from "../statsTableUtil/statsTableUtil";
 import {
   ActivateStatementDiagnosticsModal,
   ActivateDiagnosticsModalRef,
@@ -57,8 +45,6 @@ import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 
 type IStatementDiagnosticsReport = cockroach.server.serverpb.IStatementDiagnosticsReport;
 import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
-import ColumnsSelector from "../columnsSelector/columnsSelector";
-import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
 
 const cx = classNames.bind(styles);
 const sortableTableCx = classNames.bind(sortableTableStyles);
@@ -85,18 +71,14 @@ export interface StatementsPageDispatchProps {
   onDiagnosticsReportDownload?: (report: IStatementDiagnosticsReport) => void;
   onFilterChange?: (value: string) => void;
   onStatementClick?: (statement: string) => void;
-  onColumnsChange?: (selectedColumns: string[]) => void;
 }
 
 export interface StatementsPageStateProps {
   statements: AggregateStatistics[];
   statementsError: Error | null;
   apps: string[];
-  databases: string[];
   totalFingerprints: number;
   lastReset: string;
-  columns: string[];
-  nodeRegions: { [key: string]: string };
 }
 
 export interface StatementsPageState {
@@ -257,10 +239,6 @@ export class StatementsPage extends React.Component<
       app: filters.app,
       timeNumber: filters.timeNumber,
       timeUnit: filters.timeUnit,
-      sqlType: filters.sqlType,
-      database: filters.database,
-      regions: filters.regions,
-      nodes: filters.nodes,
     });
     this.selectApp(filters.app);
   };
@@ -284,42 +262,16 @@ export class StatementsPage extends React.Component<
       app: undefined,
       timeNumber: undefined,
       timeUnit: undefined,
-      sqlType: undefined,
-      database: undefined,
-      regions: undefined,
-      nodes: undefined,
     });
     this.selectApp("");
   };
 
   filteredStatementsData = () => {
     const { search, filters } = this.state;
-    const { statements, nodeRegions } = this.props;
+    const { statements } = this.props;
     const timeValue = getTimeValueInSeconds(filters);
-    const sqlTypes =
-      filters.sqlType.length > 0
-        ? filters.sqlType.split(",").map(function(sqlType: string) {
-            // Adding "Type" to match the value on the Statement
-            // Possible values: TypeDDL, TypeDML, TypeDCL and TypeTCL
-            return "Type" + sqlType;
-          })
-        : [];
-    const databases =
-      filters.database.length > 0 ? filters.database.split(",") : [];
-    const regions =
-      filters.regions.length > 0 ? filters.regions.split(",") : [];
-    const nodes = filters.nodes.length > 0 ? filters.nodes.split(",") : [];
 
-    // Return statements filtered by the values selected on the filter and
-    // the search text. A statement must match all selected filters to be
-    // displayed on the table.
-    // Current filters: search text, database, fullScan, service latency,
-    // SQL Type, nodes and regions.
     return statements
-      .filter(
-        statement =>
-          databases.length == 0 || databases.includes(statement.database),
-      )
       .filter(statement =>
         this.state.filters.fullScan ? statement.fullScan : true,
       )
@@ -334,33 +286,6 @@ export class StatementsPage extends React.Component<
         statement =>
           statement.stats.service_lat.mean >= timeValue ||
           timeValue === "empty",
-      )
-      .filter(
-        statement =>
-          sqlTypes.length == 0 || sqlTypes.includes(statement.stats.sql_type),
-      )
-      .filter(
-        // The statement must contain at least one value from the selected nodes
-        // list if the list is not empty.
-        statement =>
-          regions.length == 0 ||
-          containAny(
-            statement.stats.nodes.map(
-              node => nodeRegions[node.toString()],
-              regions,
-            ),
-            regions,
-          ),
-      )
-      .filter(
-        // The statement must contain at least one value from the selected regions
-        // list if the list is not empty.
-        statement =>
-          nodes.length == 0 ||
-          containAny(
-            statement.stats.nodes.map(node => "n" + node),
-            nodes,
-          ),
       );
   };
 
@@ -368,15 +293,11 @@ export class StatementsPage extends React.Component<
     const { pagination, search, filters, activeFilters } = this.state;
     const {
       statements,
-      databases,
       match,
       lastReset,
       onDiagnosticsReportDownload,
       onStatementClick,
       resetSQLStats,
-      columns: userSelectedColumnsToShow,
-      onColumnsChange,
-      nodeRegions,
     } = this.props;
     const appAttrValue = getMatchParamByName(match, appAttr);
     const selectedApp = appAttrValue || "";
@@ -386,57 +307,6 @@ export class StatementsPage extends React.Component<
     const totalWorkload = calculateTotalWorkload(data);
     const totalCount = data.length;
     const isEmptySearchResults = statements?.length > 0 && search?.length > 0;
-    const nodes = Object.keys(nodeRegions)
-      .map(n => Number(n))
-      .sort();
-    const regions = unique(
-      nodes.map(node => nodeRegions[node.toString()]),
-    ).sort();
-    populateRegionNodeForStatements(statements, nodeRegions);
-
-    // Creates a list of all possible columns
-    const columns = makeStatementsColumns(
-      statements,
-      selectedApp,
-      totalWorkload,
-      nodeRegions,
-      "statement",
-      search,
-      this.activateDiagnosticsRef,
-      onDiagnosticsReportDownload,
-      onStatementClick,
-    );
-
-    // If it's multi-region, we want to show the Regions/Nodes column by default
-    // and hide otherwise.
-    if (regions.length > 1) {
-      columns.filter(c => c.name === "regionNodes")[0].showByDefault = true;
-    }
-
-    const isColumnSelected = (c: ColumnDescriptor<AggregateStatistics>) => {
-      return (
-        (userSelectedColumnsToShow === null && c.showByDefault !== false) || // show column if list of visible was never defined and can be show by default.
-        (userSelectedColumnsToShow !== null &&
-          userSelectedColumnsToShow.includes(c.name)) || // show column if user changed its visibility.
-        c.alwaysShow === true // show column if alwaysShow option is set explicitly.
-      );
-    };
-
-    // Iterate over all available columns and create list of SelectOptions with initial selection
-    // values based on stored user selections in local storage and default column configs.
-    // Columns that are set to alwaysShow are filtered from the list.
-    const tableColumns = columns
-      .filter(c => !c.alwaysShow)
-      .map(
-        (c): SelectOption => ({
-          label: getLabel(c.name as StatisticTableColumnKeys, "statement"),
-          value: c.name,
-          isSelected: isColumnSelected(c),
-        }),
-      );
-
-    // List of all columns that will be displayed based on the column selection.
-    const displayColumns = columns.filter(c => isColumnSelected(c));
 
     return (
       <div>
@@ -452,40 +322,35 @@ export class StatementsPage extends React.Component<
             <Filter
               onSubmitFilters={this.onSubmitFilters}
               appNames={appOptions}
-              dbNames={databases}
-              regions={regions}
-              nodes={nodes.map(n => "n" + n)}
               activeFilters={activeFilters}
               filters={filters}
-              showDB={true}
-              showSqlType={true}
               showScan={true}
-              showRegions={regions.length > 1}
-              showNodes={nodes.length > 1}
             />
           </PageConfigItem>
         </PageConfig>
         <section className={sortableTableCx("cl-table-container")}>
-          <div>
-            <ColumnsSelector
-              options={tableColumns}
-              onSubmitColumns={onColumnsChange}
-            />
-            <TableStatistics
-              pagination={pagination}
-              lastReset={lastReset}
-              search={search}
-              totalCount={totalCount}
-              arrayItemName="statements"
-              activeFilters={activeFilters}
-              onClearFilters={this.onClearFilters}
-              resetSQLStats={resetSQLStats}
-            />
-          </div>
+          <TableStatistics
+            pagination={pagination}
+            lastReset={lastReset}
+            search={search}
+            totalCount={totalCount}
+            arrayItemName="statements"
+            activeFilters={activeFilters}
+            onClearFilters={this.onClearFilters}
+            resetSQLStats={resetSQLStats}
+          />
           <StatementsSortedTable
             className="statements-table"
             data={data}
-            columns={displayColumns}
+            columns={makeStatementsColumns(
+              statements,
+              selectedApp,
+              totalWorkload,
+              search,
+              this.activateDiagnosticsRef,
+              onDiagnosticsReportDownload,
+              onStatementClick,
+            )}
             sortSetting={this.state.sortSetting}
             onChangeSortSetting={this.changeSortSetting}
             renderNoResult={

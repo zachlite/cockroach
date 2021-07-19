@@ -82,8 +82,6 @@ func New_OPERATIONProjOp(
 // {{range .Overloads}}
 
 type _OP_LOWERProjOp struct {
-	colexecop.InitHelper
-
 	allocator *colmem.Allocator
 	input     colexecop.Operator
 
@@ -143,15 +141,11 @@ func (o *_OP_LOWERProjOp) Child(nth int, verbose bool) execinfra.OpNode {
 	}
 }
 
-// Init is part of the colexecop.Operator interface.
-func (o *_OP_LOWERProjOp) Init(ctx context.Context) {
-	if !o.InitHelper.Init(ctx) {
-		return
-	}
-	o.input.Init(o.Ctx)
+func (o *_OP_LOWERProjOp) Init() {
+	o.input.Init()
 }
 
-// Next is part of the colexecop.Operator interface.
+// Next is part of the Operator interface.
 // The idea to handle the short-circuiting logic is similar to what caseOp
 // does: a logical operator has an input and two projection chains. First,
 // it runs the left chain on the input batch. Then, it "subtracts" the
@@ -161,8 +155,8 @@ func (o *_OP_LOWERProjOp) Init(ctx context.Context) {
 // side projection only on the remaining tuples (i.e. those that were not
 // "subtracted"). Next, it restores the original selection vector and
 // populates the result of the logical operation.
-func (o *_OP_LOWERProjOp) Next() coldata.Batch {
-	batch := o.input.Next()
+func (o *_OP_LOWERProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := o.input.Next(ctx)
 	origLen := batch.Length()
 	if origLen == 0 {
 		return coldata.ZeroBatch
@@ -178,7 +172,7 @@ func (o *_OP_LOWERProjOp) Next() coldata.Batch {
 	// here. First, we set the input batch for the left projection to run and
 	// actually run the projection.
 	o.leftFeedOp.SetBatch(batch)
-	batch = o.leftProjOpChain.Next()
+	batch = o.leftProjOpChain.Next(ctx)
 
 	// Now we need to populate a selection vector on the batch in such a way that
 	// those tuples that we already know the result of logical operation for do
@@ -251,7 +245,7 @@ func (o *_OP_LOWERProjOp) Next() coldata.Batch {
 		// remaining tuples.
 		batch.SetLength(curIdx)
 		o.rightFeedOp.SetBatch(batch)
-		batch = o.rightProjOpChain.Next()
+		batch = o.rightProjOpChain.Next(ctx)
 		rightVec = batch.ColVec(o.rightIdx)
 		rightVals = rightVec.Bool()
 	}

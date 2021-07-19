@@ -681,9 +681,9 @@ func (p *PreFilterer) PreFilter(
 						geogfn.UseSphereOrSpheroid(tree.MustBeDBool(p.additionalPreFilterParams[1]))
 				}
 				// TODO(sumeer): refactor to share code with geogfn.DWithin.
-				proj, err := geoprojbase.Projection(fs.srid)
-				if err != nil {
-					return false, err
+				proj, ok := geoprojbase.Projection(fs.srid)
+				if !ok {
+					return false, errors.Errorf("cannot compute DWithin on unknown SRID %d", fs.srid)
 				}
 				angleToExpand := s1.Angle(distance / proj.Spheroid.SphereRadius)
 				if useSphereOrSpheroid == geogfn.UseSpheroid {

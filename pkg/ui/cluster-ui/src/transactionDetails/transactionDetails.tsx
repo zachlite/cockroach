@@ -23,10 +23,7 @@ import { Pagination } from "../pagination";
 import { TableStatistics } from "../tableStatistics";
 import { baseHeadingClasses } from "../transactionsPage/transactionsPageClasses";
 import { Button } from "../button";
-import {
-  collectStatementsText,
-  generateRegionNode,
-} from "src/transactionsPage/utils";
+import { collectStatementsText } from "src/transactionsPage/utils";
 import { tableClasses } from "../transactionsTable/transactionsTableClasses";
 import { SqlBox } from "../sql";
 import { aggregateStatements } from "../transactionsPage/utils";
@@ -46,10 +43,7 @@ import { Col, Row } from "antd";
 import { Text, Heading } from "@cockroachlabs/ui-components";
 import { formatTwoPlaces } from "../barCharts";
 import { ArrowLeft } from "@cockroachlabs/icons";
-import {
-  populateRegionNodeForStatements,
-  makeStatementsColumns,
-} from "src/statementsTable/statementsTable";
+import { makeStatementsColumns } from "src/statementsTable/statementsTable";
 
 const { containerClass } = tableClasses;
 const cx = classNames.bind(statementsStyles);
@@ -62,11 +56,10 @@ const transactionDetailsStylesCx = classNames.bind(transactionDetailsStyles);
 
 interface TransactionDetailsProps {
   statements?: Statement[];
-  nodeRegions: { [nodeId: string]: string };
   transactionStats?: TransactionStats;
   lastReset?: string | Date;
   handleDetails: (
-    statementFingerprintIds: Long[] | null,
+    statementIds: Long[] | null,
     transactionStats: TransactionStats | null,
   ) => void;
   error?: Error | null;
@@ -112,7 +105,6 @@ export class TransactionDetails extends React.Component<
       handleDetails,
       error,
       resetSQLStats,
-      nodeRegions,
     } = this.props;
     return (
       <div>
@@ -137,7 +129,6 @@ export class TransactionDetails extends React.Component<
             const statementsSummary = collectStatementsText(statements);
             const aggregatedStatements = aggregateStatements(statements);
             const totalWorkload = calculateTotalWorkload(statements);
-            populateRegionNodeForStatements(aggregatedStatements, nodeRegions);
             const duration = (v: number) => Duration(v * 1e9);
             return (
               <React.Fragment>
@@ -250,8 +241,7 @@ export class TransactionDetails extends React.Component<
                         aggregatedStatements,
                         "",
                         totalWorkload,
-                        nodeRegions,
-                        "transactionDetails",
+                        "",
                       )}
                       className={cx("statements-table")}
                       sortSetting={sortSetting}

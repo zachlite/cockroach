@@ -608,13 +608,9 @@ func (mb *mutationBuilder) addSynthesizedDefaultCols(
 		tabColID := mb.tabID.ColumnID(i)
 		expr := mb.parseDefaultOrComputedExpr(tabColID)
 
-		// Add synthesized column. It is important to use the real column
-		// reference name, as this column may later be referred to by a computed
-		// column.
-		colName := scopeColName(tabCol.ColName()).WithMetadataName(
-			string(tabCol.ColName()) + "_default",
-		)
-		newCol, _ := pb.Add(colName, expr, tabCol.DatumType())
+		// Add synthesized column. It is important to use the real column name, as
+		// this column may later be referred to by a computed column.
+		newCol, _ := pb.Add(tabCol.ColName(), expr, tabCol.DatumType())
 
 		// Remember id of newly synthesized column.
 		colIDs[i] = newCol
@@ -666,10 +662,7 @@ func (mb *mutationBuilder) addSynthesizedComputedCols(colIDs opt.OptionalColList
 		expr := mb.parseDefaultOrComputedExpr(tabColID)
 
 		// Add synthesized column.
-		colName := scopeColName(tabCol.ColName()).WithMetadataName(
-			string(tabCol.ColName()) + "_comp",
-		)
-		newCol, scalar := pb.Add(colName, expr, tabCol.DatumType())
+		newCol, scalar := pb.Add(tabCol.ColName(), expr, tabCol.DatumType())
 
 		if restrict && kind != cat.WriteOnly {
 			// Check if any of the columns referred to in the computed column
@@ -801,7 +794,7 @@ func (mb *mutationBuilder) roundDecimalValues(colIDs opt.OptionalColList, roundC
 		// addUpdateColumns would not include columns in the FROM clause. Those
 		// columns are only in-scope in the RETURNING clause via
 		// mb.extraAccessibleCols.
-		scopeCol.name = scopeColName(mb.tab.Column(i).ColName())
+		scopeCol.name = mb.tab.Column(i).ColName()
 	}
 
 	if projectionsScope != nil {
@@ -844,15 +837,9 @@ func findRoundingFunction(
 }
 
 // addCheckConstraintCols synthesizes a boolean output column for each check
-// constraint defined on the target table. The mutation operator will report a
-// constraint violation error if the value of the column is false.
-//
-// Synthesized check columns are not necessary for UPDATE mutations if the
-// columns referenced in the check expression are not being mutated. If isUpdate
-// is true, check columns that do not reference mutation columns are not added
-// to checkColIDs, which allows pruning normalization rules to remove the
-// unnecessary projected column.
-func (mb *mutationBuilder) addCheckConstraintCols(isUpdate bool) {
+// constraint defined on the target table. The mutation operator will report
+// a constraint violation error if the value of the column is false.
+func (mb *mutationBuilder) addCheckConstraintCols() {
 	if mb.tab.CheckCount() != 0 {
 		projectionsScope := mb.outScope.replace()
 		projectionsScope.appendColumnsFromScope(mb.outScope)
@@ -864,23 +851,21 @@ func (mb *mutationBuilder) addCheckConstraintCols(isUpdate bool) {
 				panic(err)
 			}
 
+			alias := fmt.Sprintf("check%d", i+1)
 			texpr := mb.outScope.resolveAndRequireType(expr, types.Bool)
-
-			// Use an anonymous name because the column cannot be referenced
-			// in other expressions.
-			colName := scopeColName("").WithMetadataName(fmt.Sprintf("check%d", i+1))
-			scopeCol := projectionsScope.addColumn(colName, texpr)
+			scopeCol := projectionsScope.addColumn(alias, texpr)
 
 			// TODO(ridwanmsharif): Maybe we can avoid building constraints here
 			// and instead use the constraints stored in the table metadata.
 			referencedCols := &opt.ColSet{}
 			mb.b.buildScalar(texpr, mb.outScope, projectionsScope, scopeCol, referencedCols)
 
-			// If the mutation is not an UPDATE, track the synthesized check
-			// columns in checkColIDS. If the mutation is an UPDATE, only track
-			// the check columns if the columns referenced in the check
-			// expression are being mutated.
-			if !isUpdate || referencedCols.Intersects(mutationCols) {
+			// Synthesized check columns are only necessary if the columns
+			// referenced in the check expression are being mutated. If they are
+			// not being mutated, we do not add the newly built column to
+			// checkColIDs. This allows pruning normalization rules to remove
+			// the unnecessary projected column.
+			if referencedCols.Intersects(mutationCols) {
 				mb.checkColIDs[i] = scopeCol.id
 			}
 		}
@@ -908,23 +893,47 @@ func (mb *mutationBuilder) mutationColumnIDs() opt.ColSet {
 // projectPartialIndexPutCols builds a Project that synthesizes boolean PUT
 // columns for each partial index defined on the target table. See
 // partialIndexPutColIDs for more info on these columns.
-func (mb *mutationBuilder) projectPartialIndexPutCols() {
-	mb.projectPartialIndexColsImpl(mb.outScope, nil /* delScope */)
+//
+// putScope must contain the columns representing the values of each mutated row
+// AFTER the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexPutCols(putScope *scope) {
+	if putScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index PUT columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(putScope, nil /* delScope */)
 }
 
 // projectPartialIndexDelCols builds a Project that synthesizes boolean PUT
 // columns for each partial index defined on the target table. See
 // partialIndexDelColIDs for more info on these columns.
-func (mb *mutationBuilder) projectPartialIndexDelCols() {
-	mb.projectPartialIndexColsImpl(nil /* putScope */, mb.fetchScope)
+//
+// delScope must contain the columns representing the values of each mutated row
+// BEFORE the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexDelCols(delScope *scope) {
+	if delScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index DEL columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(nil /* putScope */, delScope)
 }
 
-// projectPartialIndexPutAndDelCols builds a Project that synthesizes boolean
-// PUT and DEL columns for each partial index defined on the target table. See
+// projectPartialIndexPutAndDelCols builds a Project that synthesizes boolean PUT and
+// DEL columns for each partial index defined on the target table. See
 // partialIndexPutColIDs and partialIndexDelColIDs for more info on these
 // columns.
-func (mb *mutationBuilder) projectPartialIndexPutAndDelCols() {
-	mb.projectPartialIndexColsImpl(mb.outScope, mb.fetchScope)
+//
+// putScope must contain the columns representing the values of each mutated row
+// AFTER the mutation is applied.
+//
+// delScope must contain the columns representing the values of each mutated row
+// BEFORE the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexPutAndDelCols(putScope, delScope *scope) {
+	if putScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index PUT columns with nil scope"))
+	}
+	if delScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index DEL columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(putScope, delScope)
 }
 
 // projectPartialIndexColsImpl builds a Project that synthesizes boolean PUT and
@@ -953,11 +962,8 @@ func (mb *mutationBuilder) projectPartialIndexColsImpl(putScope, delScope *scope
 			// Build synthesized PUT columns.
 			if putScope != nil {
 				texpr := putScope.resolveAndRequireType(expr, types.Bool)
-
-				// Use an anonymous name because the column cannot be referenced
-				// in other expressions.
-				colName := scopeColName("").WithMetadataName(fmt.Sprintf("partial_index_put%d", ord+1))
-				scopeCol := projectionScope.addColumn(colName, texpr)
+				alias := fmt.Sprintf("partial_index_put%d", ord+1)
+				scopeCol := projectionScope.addColumn(alias, texpr)
 
 				mb.b.buildScalar(texpr, putScope, projectionScope, scopeCol, nil)
 				mb.partialIndexPutColIDs[ord] = scopeCol.id
@@ -966,11 +972,8 @@ func (mb *mutationBuilder) projectPartialIndexColsImpl(putScope, delScope *scope
 			// Build synthesized DEL columns.
 			if delScope != nil {
 				texpr := delScope.resolveAndRequireType(expr, types.Bool)
-
-				// Use an anonymous name because the column cannot be referenced
-				// in other expressions.
-				colName := scopeColName("").WithMetadataName(fmt.Sprintf("partial_index_del%d", ord+1))
-				scopeCol := projectionScope.addColumn(colName, texpr)
+				alias := fmt.Sprintf("partial_index_del%d", ord+1)
+				scopeCol := projectionScope.addColumn(alias, texpr)
 
 				mb.b.buildScalar(texpr, delScope, projectionScope, scopeCol, nil)
 				mb.partialIndexDelColIDs[ord] = scopeCol.id
@@ -1384,7 +1387,7 @@ func (mb *mutationBuilder) buildCheckInputScan(
 		outCol := mb.md.AddColumn(string(tableCol.ColName()), tableCol.DatumType())
 		withScanScope.cols[i] = scopeColumn{
 			id:   outCol,
-			name: scopeColName(tableCol.ColName()),
+			name: tableCol.ColName(),
 			typ:  tableCol.DatumType(),
 		}
 

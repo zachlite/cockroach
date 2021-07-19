@@ -142,73 +142,6 @@ SystemInfo contains information about the host system.
 
 
 
-## Regions
-
-
-
-RegionsRequest retrieves all available regions.
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-RegionsRequest requests all available regions.
-
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-RegionsResponse describes the available regions.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| regions | [RegionsResponse.RegionsEntry](#cockroach.server.serverpb.RegionsResponse-cockroach.server.serverpb.RegionsResponse.RegionsEntry) | repeated |  | [reserved](#support-status) |
-
-
-
-
-
-
-<a name="cockroach.server.serverpb.RegionsResponse-cockroach.server.serverpb.RegionsResponse.RegionsEntry"></a>
-#### RegionsResponse.RegionsEntry
-
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| key | [string](#cockroach.server.serverpb.RegionsResponse-string) |  |  |  |
-| value | [RegionsResponse.Region](#cockroach.server.serverpb.RegionsResponse-cockroach.server.serverpb.RegionsResponse.Region) |  |  |  |
-
-
-
-
-
-<a name="cockroach.server.serverpb.RegionsResponse-cockroach.server.serverpb.RegionsResponse.Region"></a>
-#### RegionsResponse.Region
-
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| zones | [string](#cockroach.server.serverpb.RegionsResponse-string) | repeated |  | [reserved](#support-status) |
-
-
-
-
-
-
 ## Nodes
 
 `GET /_status/nodes`
@@ -716,7 +649,7 @@ Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
 <a name="cockroach.server.serverpb.RaftDebugResponse-cockroach.server.serverpb.RangeProblems"></a>
 #### RangeProblems
 
-RangeProblems describes issues reported by a range. For internal use only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -736,13 +669,12 @@ RangeProblems describes issues reported by a range. For internal use only.
 <a name="cockroach.server.serverpb.RaftDebugResponse-cockroach.server.serverpb.RangeStatistics"></a>
 #### RangeStatistics
 
-RangeStatistics describes statistics reported by a range. For internal use
-only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
-| queries_per_second | [double](#cockroach.server.serverpb.RaftDebugResponse-double) |  | Queries per second served by this range.<br><br>Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
-| writes_per_second | [double](#cockroach.server.serverpb.RaftDebugResponse-double) |  | Writes per second served by this range. | [reserved](#support-status) |
+| queries_per_second | [double](#cockroach.server.serverpb.RaftDebugResponse-double) |  | Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
+| writes_per_second | [double](#cockroach.server.serverpb.RaftDebugResponse-double) |  |  | [reserved](#support-status) |
 
 
 
@@ -900,7 +832,7 @@ Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
 <a name="cockroach.server.serverpb.RangesResponse-cockroach.server.serverpb.RangeProblems"></a>
 #### RangeProblems
 
-RangeProblems describes issues reported by a range. For internal use only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -920,13 +852,12 @@ RangeProblems describes issues reported by a range. For internal use only.
 <a name="cockroach.server.serverpb.RangesResponse-cockroach.server.serverpb.RangeStatistics"></a>
 #### RangeStatistics
 
-RangeStatistics describes statistics reported by a range. For internal use
-only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
-| queries_per_second | [double](#cockroach.server.serverpb.RangesResponse-double) |  | Queries per second served by this range.<br><br>Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
-| writes_per_second | [double](#cockroach.server.serverpb.RangesResponse-double) |  | Writes per second served by this range. | [reserved](#support-status) |
+| queries_per_second | [double](#cockroach.server.serverpb.RangesResponse-double) |  | Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
+| writes_per_second | [double](#cockroach.server.serverpb.RangesResponse-double) |  |  | [reserved](#support-status) |
 
 
 
@@ -1250,7 +1181,7 @@ ActiveQuery represents a query in flight on some Session.
 | start | [google.protobuf.Timestamp](#cockroach.server.serverpb.ListSessionsResponse-google.protobuf.Timestamp) |  | Start timestamp of this query. | [reserved](#support-status) |
 | is_distributed | [bool](#cockroach.server.serverpb.ListSessionsResponse-bool) |  | True if this query is distributed. | [reserved](#support-status) |
 | phase | [ActiveQuery.Phase](#cockroach.server.serverpb.ListSessionsResponse-cockroach.server.serverpb.ActiveQuery.Phase) |  | phase stores the current phase of execution for this query. | [reserved](#support-status) |
-| progress | [float](#cockroach.server.serverpb.ListSessionsResponse-float) |  | progress is an estimate of the fraction of this query that has been processed. | [reserved](#support-status) |
+| progress | [float](#cockroach.server.serverpb.ListSessionsResponse-float) |  |  | [reserved](#support-status) |
 | sql_anon | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The SQL statement fingerprint, compatible with StatementStatisticsKey. | [reserved](#support-status) |
 
 
@@ -1378,7 +1309,7 @@ ActiveQuery represents a query in flight on some Session.
 | start | [google.protobuf.Timestamp](#cockroach.server.serverpb.ListSessionsResponse-google.protobuf.Timestamp) |  | Start timestamp of this query. | [reserved](#support-status) |
 | is_distributed | [bool](#cockroach.server.serverpb.ListSessionsResponse-bool) |  | True if this query is distributed. | [reserved](#support-status) |
 | phase | [ActiveQuery.Phase](#cockroach.server.serverpb.ListSessionsResponse-cockroach.server.serverpb.ActiveQuery.Phase) |  | phase stores the current phase of execution for this query. | [reserved](#support-status) |
-| progress | [float](#cockroach.server.serverpb.ListSessionsResponse-float) |  | progress is an estimate of the fraction of this query that has been processed. | [reserved](#support-status) |
+| progress | [float](#cockroach.server.serverpb.ListSessionsResponse-float) |  |  | [reserved](#support-status) |
 | sql_anon | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The SQL statement fingerprint, compatible with StatementStatisticsKey. | [reserved](#support-status) |
 
 
@@ -1523,18 +1454,17 @@ Response object for ListContentionEvents and ListLocalContentionEvents.
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
 | events | [cockroach.sql.contentionpb.SerializedRegistry](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.sql.contentionpb.SerializedRegistry) |  | All available contention information on this node or cluster. | [reserved](#support-status) |
-| errors | [ListActivityError](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListActivityError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
+| errors | [ListContentionEventsError](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListContentionEventsError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
 
 
 
 
 
 
-<a name="cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListActivityError"></a>
-#### ListActivityError
+<a name="cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListContentionEventsError"></a>
+#### ListContentionEventsError
 
-An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+An error wrapper object for ListContentionEventsResponse.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -1596,206 +1526,22 @@ Response object for ListContentionEvents and ListLocalContentionEvents.
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
 | events | [cockroach.sql.contentionpb.SerializedRegistry](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.sql.contentionpb.SerializedRegistry) |  | All available contention information on this node or cluster. | [reserved](#support-status) |
-| errors | [ListActivityError](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListActivityError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
+| errors | [ListContentionEventsError](#cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListContentionEventsError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
 
 
 
 
 
 
-<a name="cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListActivityError"></a>
-#### ListActivityError
+<a name="cockroach.server.serverpb.ListContentionEventsResponse-cockroach.server.serverpb.ListContentionEventsError"></a>
+#### ListContentionEventsError
 
-An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+An error wrapper object for ListContentionEventsResponse.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
 | node_id | [int32](#cockroach.server.serverpb.ListContentionEventsResponse-int32) |  | ID of node that was being contacted when this error occurred. | [reserved](#support-status) |
 | message | [string](#cockroach.server.serverpb.ListContentionEventsResponse-string) |  | Error message. | [reserved](#support-status) |
-
-
-
-
-
-
-## ListDistSQLFlows
-
-`GET /_status/distsql_flows`
-
-ListDistSQLFlows retrieves all of the remote flows of the DistSQL execution
-that are currently running or queued on any node in the cluster. The local
-flows (those that are running on the same node as the query originated on)
-are not included.
-
-Flows are ordered lexicographically by the flow ID.
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-Request object for ListDistSQLFlows and ListLocalDistSQLFlows.
-
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-Response object for ListDistSQLFlows and ListLocalDistSQLFlows.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| flows | [DistSQLRemoteFlows](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows) | repeated | Flows are ordered by FlowID lexicographically and do not contain duplicates. | [reserved](#support-status) |
-| errors | [ListActivityError](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.ListActivityError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
-
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows"></a>
-#### DistSQLRemoteFlows
-
-DistSQLRemoteFlows describes all DistSQL remote flows that are part of the
-same physical plan. The gateway node that initiated the execution of the plan
-isn't included.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| flow_id | [bytes](#cockroach.server.serverpb.ListDistSQLFlowsResponse-bytes) |  | FlowID is the unique identifier of the physical plan shared by all remote flows. | [reserved](#support-status) |
-| infos | [DistSQLRemoteFlows.Info](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Info) | repeated | Infos contains the information about all remote flows that are part of this DistSQL physical plan and that haven't finished yet.<br><br>The slice doesn't contain duplicate NodeIDs and is sorted by NodeID in ASC order. | [reserved](#support-status) |
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Info"></a>
-#### DistSQLRemoteFlows.Info
-
-Info contains an information about a single DistSQL remote flow.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| node_id | [int32](#cockroach.server.serverpb.ListDistSQLFlowsResponse-int32) |  | NodeID is the node on which this remote flow is either running or queued. | [reserved](#support-status) |
-| timestamp | [google.protobuf.Timestamp](#cockroach.server.serverpb.ListDistSQLFlowsResponse-google.protobuf.Timestamp) |  | Timestamp must be in the UTC timezone. | [reserved](#support-status) |
-| status | [DistSQLRemoteFlows.Status](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Status) |  | Status is the current status of this remote flow. | [reserved](#support-status) |
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.ListActivityError"></a>
-#### ListActivityError
-
-An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| node_id | [int32](#cockroach.server.serverpb.ListDistSQLFlowsResponse-int32) |  | ID of node that was being contacted when this error occurred. | [reserved](#support-status) |
-| message | [string](#cockroach.server.serverpb.ListDistSQLFlowsResponse-string) |  | Error message. | [reserved](#support-status) |
-
-
-
-
-
-
-## ListLocalDistSQLFlows
-
-`GET /_status/local_distsql_flows`
-
-ListLocalDistSQLFlows retrieves all of the remote flows of the DistSQL
-execution that are currently running or queued on this node in the cluster.
-Queries that originated on this node are not be included.
-
-Flows are ordered lexicographically by the flow ID.
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-Request object for ListDistSQLFlows and ListLocalDistSQLFlows.
-
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-Response object for ListDistSQLFlows and ListLocalDistSQLFlows.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| flows | [DistSQLRemoteFlows](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows) | repeated | Flows are ordered by FlowID lexicographically and do not contain duplicates. | [reserved](#support-status) |
-| errors | [ListActivityError](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.ListActivityError) | repeated | Any errors that occurred during fan-out calls to other nodes. | [reserved](#support-status) |
-
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows"></a>
-#### DistSQLRemoteFlows
-
-DistSQLRemoteFlows describes all DistSQL remote flows that are part of the
-same physical plan. The gateway node that initiated the execution of the plan
-isn't included.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| flow_id | [bytes](#cockroach.server.serverpb.ListDistSQLFlowsResponse-bytes) |  | FlowID is the unique identifier of the physical plan shared by all remote flows. | [reserved](#support-status) |
-| infos | [DistSQLRemoteFlows.Info](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Info) | repeated | Infos contains the information about all remote flows that are part of this DistSQL physical plan and that haven't finished yet.<br><br>The slice doesn't contain duplicate NodeIDs and is sorted by NodeID in ASC order. | [reserved](#support-status) |
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Info"></a>
-#### DistSQLRemoteFlows.Info
-
-Info contains an information about a single DistSQL remote flow.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| node_id | [int32](#cockroach.server.serverpb.ListDistSQLFlowsResponse-int32) |  | NodeID is the node on which this remote flow is either running or queued. | [reserved](#support-status) |
-| timestamp | [google.protobuf.Timestamp](#cockroach.server.serverpb.ListDistSQLFlowsResponse-google.protobuf.Timestamp) |  | Timestamp must be in the UTC timezone. | [reserved](#support-status) |
-| status | [DistSQLRemoteFlows.Status](#cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.DistSQLRemoteFlows.Status) |  | Status is the current status of this remote flow. | [reserved](#support-status) |
-
-
-
-
-
-<a name="cockroach.server.serverpb.ListDistSQLFlowsResponse-cockroach.server.serverpb.ListActivityError"></a>
-#### ListActivityError
-
-An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| node_id | [int32](#cockroach.server.serverpb.ListDistSQLFlowsResponse-int32) |  | ID of node that was being contacted when this error occurred. | [reserved](#support-status) |
-| message | [string](#cockroach.server.serverpb.ListDistSQLFlowsResponse-string) |  | Error message. | [reserved](#support-status) |
 
 
 
@@ -2595,7 +2341,7 @@ Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
 <a name="cockroach.server.serverpb.RangeResponse-cockroach.server.serverpb.RangeProblems"></a>
 #### RangeProblems
 
-RangeProblems describes issues reported by a range. For internal use only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -2615,13 +2361,12 @@ RangeProblems describes issues reported by a range. For internal use only.
 <a name="cockroach.server.serverpb.RangeResponse-cockroach.server.serverpb.RangeStatistics"></a>
 #### RangeStatistics
 
-RangeStatistics describes statistics reported by a range. For internal use
-only.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
-| queries_per_second | [double](#cockroach.server.serverpb.RangeResponse-double) |  | Queries per second served by this range.<br><br>Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
-| writes_per_second | [double](#cockroach.server.serverpb.RangeResponse-double) |  | Writes per second served by this range. | [reserved](#support-status) |
+| queries_per_second | [double](#cockroach.server.serverpb.RangeResponse-double) |  | Note that queries per second will only be known by the leaseholder. All other replicas will report it as 0. | [reserved](#support-status) |
+| writes_per_second | [double](#cockroach.server.serverpb.RangeResponse-double) |  |  | [reserved](#support-status) |
 
 
 
@@ -3122,94 +2867,6 @@ Request object for issuing a SQL stats reset request.
 
 Response object returned by ResetSQLStats.
 
-
-
-
-
-
-
-
-## RequestCA
-
-`GET /_join/v1/ca`
-
-
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-CARequest requests the CA cert anchoring this service.
-
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-CAResponse contains a PEM encoded copy of the CA cert for this service.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| ca_cert | [bytes](#cockroach.server.serverpb.CAResponse-bytes) |  |  | [reserved](#support-status) |
-
-
-
-
-
-
-
-## RequestCertBundle
-
-`GET /_join/v1/requestbundle`
-
-
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-CertBundleRequest requests the bundle of initialization CAs for a new node.
-It provides authentication in the form of a joinToken containing a
-sharedSecret.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| token_id | [string](#cockroach.server.serverpb.CertBundleRequest-string) |  |  | [reserved](#support-status) |
-| shared_secret | [bytes](#cockroach.server.serverpb.CertBundleRequest-bytes) |  |  | [reserved](#support-status) |
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-CertBundleResponse contains a copy of all CAs needed to intialize TLS for
-a new node.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| bundle | [bytes](#cockroach.server.serverpb.CertBundleResponse-bytes) |  |  | [reserved](#support-status) |
 
 
 
@@ -4132,17 +3789,17 @@ JobsResponse contains the job record for each matching job.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
-| jobs | [JobResponse](#cockroach.server.serverpb.JobsResponse-cockroach.server.serverpb.JobResponse) | repeated |  | [reserved](#support-status) |
+| jobs | [JobsResponse.Job](#cockroach.server.serverpb.JobsResponse-cockroach.server.serverpb.JobsResponse.Job) | repeated |  | [reserved](#support-status) |
 
 
 
 
 
 
-<a name="cockroach.server.serverpb.JobsResponse-cockroach.server.serverpb.JobResponse"></a>
-#### JobResponse
+<a name="cockroach.server.serverpb.JobsResponse-cockroach.server.serverpb.JobsResponse.Job"></a>
+#### JobsResponse.Job
 
-JobResponse contains the job record for a job.
+
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -4162,65 +3819,6 @@ JobResponse contains the job record for a job.
 | highwater_timestamp | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobsResponse-google.protobuf.Timestamp) |  | highwater_timestamp is the highwater timestamp returned as normal timestamp. This is appropriate for display to humans. | [reserved](#support-status) |
 | highwater_decimal | [string](#cockroach.server.serverpb.JobsResponse-string) |  | highwater_decimal is the highwater timestamp in the proprietary decimal form used by logical timestamps internally. This is appropriate to pass to a "AS OF SYSTEM TIME" SQL statement. | [reserved](#support-status) |
 | running_status | [string](#cockroach.server.serverpb.JobsResponse-string) |  |  | [reserved](#support-status) |
-
-
-
-
-
-
-## Job
-
-`GET /_admin/v1/jobs/{job_id}`
-
-Job returns the job record for the job of the given job_id.
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-JobRequest requests system job information for the given job_id.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| job_id | [int64](#cockroach.server.serverpb.JobRequest-int64) |  |  | [reserved](#support-status) |
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-JobResponse contains the job record for a job.
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| id | [int64](#cockroach.server.serverpb.JobResponse-int64) |  |  | [reserved](#support-status) |
-| type | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| description | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| statement | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| username | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| descriptor_ids | [uint32](#cockroach.server.serverpb.JobResponse-uint32) | repeated |  | [reserved](#support-status) |
-| status | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| created | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobResponse-google.protobuf.Timestamp) |  |  | [reserved](#support-status) |
-| started | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobResponse-google.protobuf.Timestamp) |  |  | [reserved](#support-status) |
-| finished | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobResponse-google.protobuf.Timestamp) |  |  | [reserved](#support-status) |
-| modified | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobResponse-google.protobuf.Timestamp) |  |  | [reserved](#support-status) |
-| fraction_completed | [float](#cockroach.server.serverpb.JobResponse-float) |  |  | [reserved](#support-status) |
-| error | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-| highwater_timestamp | [google.protobuf.Timestamp](#cockroach.server.serverpb.JobResponse-google.protobuf.Timestamp) |  | highwater_timestamp is the highwater timestamp returned as normal timestamp. This is appropriate for display to humans. | [reserved](#support-status) |
-| highwater_decimal | [string](#cockroach.server.serverpb.JobResponse-string) |  | highwater_decimal is the highwater timestamp in the proprietary decimal form used by logical timestamps internally. This is appropriate to pass to a "AS OF SYSTEM TIME" SQL statement. | [reserved](#support-status) |
-| running_status | [string](#cockroach.server.serverpb.JobResponse-string) |  |  | [reserved](#support-status) |
-
 
 
 

@@ -113,7 +113,7 @@ func createTestStorePool(
 	g := gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
 	mnl := newMockNodeLiveness(defaultNodeStatus)
 
-	TimeUntilStoreDead.Override(context.Background(), &st.SV, timeUntilStoreDeadValue)
+	TimeUntilStoreDead.Override(&st.SV, timeUntilStoreDeadValue)
 	storePool := NewStorePool(
 		log.AmbientContext{Tracer: st.Tracer},
 		st,

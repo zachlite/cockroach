@@ -9,7 +9,6 @@
 // licenses/APL.txt.
 
 export * from "./appStats";
-export * from "./arrays";
 export * from "./constants";
 export * from "./convert";
 export * from "./dataFromServer";

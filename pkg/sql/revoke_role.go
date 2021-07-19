@@ -45,7 +45,7 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 	sqltelemetry.IncIAMRevokeCounter(n.AdminOption)
 
 	ctx, span := tracing.ChildSpan(ctx, n.StatementTag())
-	defer span.Finish()
+	defer tracing.FinishSpan(span)
 
 	hasAdminRole, err := p.HasAdminRole(ctx)
 	if err != nil {
@@ -56,21 +56,15 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 	if err != nil {
 		return nil, err
 	}
-	for i := range n.Roles {
-		// TODO(solon): there are SQL identifiers (tree.Name) in n.Roles,
-		// but we want SQL usernames. Do we normalize or not? For reference,
-		// REASSIGN / OWNER TO do normalize.
-		// Related: https://github.com/cockroachdb/cockroach/issues/54696
-		r := security.MakeSQLUsernameFromPreNormalizedString(string(n.Roles[i]))
-
+	for _, r := range n.Roles {
 		// If the user is an admin, don't check if the user is allowed to add/drop
 		// roles in the role. However, if the role being modified is the admin role, then
 		// make sure the user is an admin with the admin option.
-		if hasAdminRole && !r.IsAdminRole() {
+		if hasAdminRole && string(r) != security.AdminRole {
 			continue
 		}
-		if isAdmin, ok := allRoles[r]; !ok || !isAdmin {
-			if r.IsAdminRole() {
+		if isAdmin, ok := allRoles[string(r)]; !ok || !isAdmin {
+			if string(r) == security.AdminRole {
 				return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
 					"%s is not a role admin for role %s", p.User(), r)
 			}
@@ -87,27 +81,15 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 		return nil, err
 	}
 
-	for i := range n.Roles {
-		// TODO(solon): there are SQL identifiers (tree.Name) in n.Roles,
-		// but we want SQL usernames. Do we normalize or not? For reference,
-		// REASSIGN / OWNER TO do normalize.
-		// Related: https://github.com/cockroachdb/cockroach/issues/54696
-		r := security.MakeSQLUsernameFromPreNormalizedString(string(n.Roles[i]))
-
-		if _, ok := roles[r]; !ok {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", n.Roles[i])
+	for _, r := range n.Roles {
+		if _, ok := roles[string(r)]; !ok {
+			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", r)
 		}
 	}
 
-	for i := range n.Members {
-		// TODO(solon): there are SQL identifiers (tree.Name) in n.Roles,
-		// but we want SQL usernames. Do we normalize or not? For reference,
-		// REASSIGN / OWNER TO do normalize.
-		// Related: https://github.com/cockroachdb/cockroach/issues/54696
-		m := security.MakeSQLUsernameFromPreNormalizedString(string(n.Members[i]))
-
-		if _, ok := roles[m]; !ok {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", n.Members[i])
+	for _, m := range n.Members {
+		if _, ok := roles[string(m)]; !ok {
+			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", m)
 		}
 	}
 
@@ -131,18 +113,9 @@ func (n *RevokeRoleNode) startExec(params runParams) error {
 	}
 
 	var rowsAffected int
-	for i := range n.roles {
-		// TODO(solon): there are SQL identifiers (tree.Name) in
-		// n.Roles, but we want SQL usernames. Do we normalize or not? For
-		// reference, REASSIGN / OWNER TO do normalize.  Related:
-		// https://github.com/cockroachdb/cockroach/issues/54696
-		r := security.MakeSQLUsernameFromPreNormalizedString(string(n.roles[i]))
-
-		for j := range n.members {
-			// TODO(solon): ditto above, names in n.members.
-			m := security.MakeSQLUsernameFromPreNormalizedString(string(n.members[j]))
-
-			if r.IsAdminRole() && m.IsRootUser() {
+	for _, r := range n.roles {
+		for _, m := range n.members {
+			if string(r) == security.AdminRole && string(m) == security.RootUser {
 				// We use CodeObjectInUseError which is what happens if you tried to delete the current user in pg.
 				return pgerror.Newf(pgcode.ObjectInUse,
 					"role/user %s cannot be removed from role %s or lose the ADMIN OPTION",
@@ -152,9 +125,9 @@ func (n *RevokeRoleNode) startExec(params runParams) error {
 				params.ctx,
 				opName,
 				params.p.txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				memberStmt,
-				r.Normalized(), m.Normalized(),
+				r, m,
 			)
 			if err != nil {
 				return err

@@ -19,11 +19,7 @@
 
 package tree
 
-import (
-	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
-)
+import "github.com/cockroachdb/cockroach/pkg/sql/lex"
 
 // ShowVar represents a SHOW statement.
 type ShowVar struct {
@@ -35,7 +31,7 @@ func (node *ShowVar) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW ")
 	// Session var names never contain PII and should be distinguished
 	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 		ctx.FormatNameP(&node.Name)
 	})
 }
@@ -50,7 +46,7 @@ func (node *ShowClusterSetting) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CLUSTER SETTING ")
 	// Cluster setting names never contain PII and should be distinguished
 	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 		ctx.FormatNameP(&node.Name)
 	})
 }
@@ -83,8 +79,6 @@ const (
 	BackupRangeDetails
 	// BackupFileDetails identifies a SHOW BACKUP FILES statement.
 	BackupFileDetails
-	// BackupManifestAsJSON displays full backup manifest as json
-	BackupManifestAsJSON
 )
 
 // ShowBackup represents a SHOW BACKUP statement.
@@ -154,9 +148,7 @@ func (node *ShowDatabases) Format(ctx *FmtCtx) {
 }
 
 // ShowEnums represents a SHOW ENUMS statement.
-type ShowEnums struct {
-	ObjectNamePrefix
-}
+type ShowEnums struct{}
 
 // Format implements the NodeFormatter interface.
 func (node *ShowEnums) Format(ctx *FmtCtx) {
@@ -229,7 +221,7 @@ func (node *ShowDatabaseIndexes) Format(ctx *FmtCtx) {
 	}
 }
 
-// ShowQueries represents a SHOW STATEMENTS statement.
+// ShowQueries represents a SHOW QUERIES statement.
 type ShowQueries struct {
 	All     bool
 	Cluster bool
@@ -242,9 +234,9 @@ func (node *ShowQueries) Format(ctx *FmtCtx) {
 		ctx.WriteString("ALL ")
 	}
 	if node.Cluster {
-		ctx.WriteString("CLUSTER STATEMENTS")
+		ctx.WriteString("CLUSTER QUERIES")
 	} else {
-		ctx.WriteString("LOCAL STATEMENTS")
+		ctx.WriteString("LOCAL QUERIES")
 	}
 }
 
@@ -282,76 +274,7 @@ func (node *ShowJobs) Format(ctx *FmtCtx) {
 	}
 	if node.Schedules != nil {
 		ctx.WriteString(" FOR SCHEDULES ")
-		ctx.FormatNode(node.Schedules)
-	}
-}
-
-// ShowChangefeedJobs represents a SHOW CHANGEFEED JOBS statement
-type ShowChangefeedJobs struct {
-	// If non-nil, a select statement that provides the job ids to be shown.
-	Jobs *Select
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowChangefeedJobs) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CHANGEFEED JOBS")
-	if node.Jobs != nil {
-		ctx.WriteString(" ")
-		ctx.FormatNode(node.Jobs)
-	}
-}
-
-// ShowSurvivalGoal represents a SHOW REGIONS statement
-type ShowSurvivalGoal struct {
-	DatabaseName Name
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowSurvivalGoal) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW SURVIVAL GOAL FROM DATABASE")
-	if node.DatabaseName != "" {
-		ctx.WriteString(" ")
-		ctx.FormatNode(&node.DatabaseName)
-	}
-}
-
-// ShowRegionsFrom denotes what kind of SHOW REGIONS command is being used.
-type ShowRegionsFrom int
-
-const (
-	// ShowRegionsFromCluster represents SHOW REGIONS FROM CLUSTER.
-	ShowRegionsFromCluster ShowRegionsFrom = iota
-	// ShowRegionsFromDatabase represents SHOW REGIONS FROM DATABASE.
-	ShowRegionsFromDatabase
-	// ShowRegionsFromAllDatabases represents SHOW REGIONS FROM ALL DATABASES.
-	ShowRegionsFromAllDatabases
-	// ShowRegionsFromDefault represents SHOW REGIONS.
-	ShowRegionsFromDefault
-)
-
-// ShowRegions represents a SHOW REGIONS statement
-type ShowRegions struct {
-	ShowRegionsFrom ShowRegionsFrom
-	DatabaseName    Name
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowRegions) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW REGIONS")
-	switch node.ShowRegionsFrom {
-	case ShowRegionsFromDefault:
-	case ShowRegionsFromAllDatabases:
-		ctx.WriteString(" FROM ALL DATABASES")
-	case ShowRegionsFromDatabase:
-		ctx.WriteString(" FROM DATABASE")
-		if node.DatabaseName != "" {
-			ctx.WriteString(" ")
-			ctx.FormatNode(&node.DatabaseName)
-		}
-	case ShowRegionsFromCluster:
-		ctx.WriteString(" FROM CLUSTER")
-	default:
-		panic(fmt.Sprintf("unknown ShowRegionsFrom: %v", node.ShowRegionsFrom))
+		node.Schedules.Format(ctx)
 	}
 }
 
@@ -490,43 +413,15 @@ func (node *ShowRoleGrants) Format(ctx *FmtCtx) {
 	}
 }
 
-// ShowCreateMode denotes what kind of SHOW CREATE should be used
-type ShowCreateMode int
-
-const (
-	// ShowCreateModeTable represents SHOW CREATE TABLE
-	ShowCreateModeTable ShowCreateMode = iota
-	// ShowCreateModeView represents SHOW CREATE VIEW
-	ShowCreateModeView
-	// ShowCreateModeSequence represents SHOW CREATE SEQUENCE
-	ShowCreateModeSequence
-	// ShowCreateModeDatabase represents SHOW CREATE DATABASE
-	ShowCreateModeDatabase
-)
-
 // ShowCreate represents a SHOW CREATE statement.
 type ShowCreate struct {
-	Mode ShowCreateMode
 	Name *UnresolvedObjectName
 }
 
 // Format implements the NodeFormatter interface.
 func (node *ShowCreate) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CREATE ")
-
-	switch node.Mode {
-	case ShowCreateModeDatabase:
-		ctx.WriteString("DATABASE ")
-	}
 	ctx.FormatNode(node.Name)
-}
-
-// ShowCreateAllTables represents a SHOW CREATE ALL TABLES statement.
-type ShowCreateAllTables struct{}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowCreateAllTables) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CREATE ALL TABLES")
 }
 
 // ShowSyntax represents a SHOW SYNTAX statement.
@@ -541,11 +436,7 @@ type ShowSyntax struct {
 // Format implements the NodeFormatter interface.
 func (node *ShowSyntax) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW SYNTAX ")
-	if ctx.flags.HasFlags(FmtAnonymize) || ctx.flags.HasFlags(FmtHideConstants) {
-		ctx.WriteByte('_')
-	} else {
-		ctx.WriteString(lex.EscapeSQLString(node.Statement))
-	}
+	ctx.WriteString(lex.EscapeSQLString(node.Statement))
 }
 
 // ShowTransactionStatus represents a SHOW TRANSACTION STATUS statement.
@@ -563,15 +454,6 @@ type ShowLastQueryStatistics struct{}
 // Format implements the NodeFormatter interface.
 func (node *ShowLastQueryStatistics) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW LAST QUERY STATISTICS")
-}
-
-// ShowFullTableScans represents a SHOW FULL TABLE SCANS statement.
-type ShowFullTableScans struct {
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowFullTableScans) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW FULL TABLE SCANS")
 }
 
 // ShowSavepointStatus represents a SHOW SAVEPOINT STATUS statement.
@@ -779,22 +661,19 @@ var _ Statement = &ShowSchedules{}
 // Format implements the NodeFormatter interface.
 func (n *ShowSchedules) Format(ctx *FmtCtx) {
 	if n.ScheduleID != nil {
-		ctx.WriteString("SHOW SCHEDULE ")
-		ctx.FormatNode(n.ScheduleID)
+		ctx.Printf("SHOW SCHEDULE %s", AsString(n.ScheduleID))
 		return
 	}
 	ctx.Printf("SHOW")
 
 	if n.WhichSchedules != SpecifiedSchedules {
 		ctx.WriteString(" ")
-		ctx.FormatNode(&n.WhichSchedules)
+		n.WhichSchedules.Format(ctx)
 	}
 
 	ctx.Printf(" SCHEDULES")
 
 	if n.ExecutorType != InvalidExecutor {
-		// TODO(knz): beware of using ctx.FormatNode here if
-		// FOR changes to support expressions.
 		ctx.Printf(" FOR %s", n.ExecutorType.UserName())
 	}
 }

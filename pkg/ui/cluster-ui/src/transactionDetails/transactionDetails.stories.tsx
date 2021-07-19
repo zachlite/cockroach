@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -15,7 +15,7 @@ import { transactionDetails } from "./transactionDetails.fixture";
 
 import { TransactionDetails } from ".";
 
-const { data, nodeRegions, error } = transactionDetails;
+const { data, error } = transactionDetails;
 
 storiesOf("Transactions Details", module)
   .addDecorator(storyFn => <MemoryRouter>{storyFn()}</MemoryRouter>)
@@ -25,28 +25,22 @@ storiesOf("Transactions Details", module)
   .add("with data", () => (
     <TransactionDetails
       statements={data.statements as any}
-      nodeRegions={nodeRegions}
       lastReset={Date().toString()}
       handleDetails={() => {}}
-      resetSQLStats={() => {}}
     />
   ))
   .add("with loading indicator", () => (
     <TransactionDetails
       statements={undefined}
-      nodeRegions={nodeRegions}
       lastReset={Date().toString()}
       handleDetails={() => {}}
-      resetSQLStats={() => {}}
     />
   ))
   .add("with error alert", () => (
     <TransactionDetails
       statements={undefined}
-      nodeRegions={nodeRegions}
       error={error}
       lastReset={Date().toString()}
       handleDetails={() => {}}
-      resetSQLStats={() => {}}
     />
   ));

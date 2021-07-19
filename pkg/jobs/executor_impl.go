@@ -57,7 +57,7 @@ func (e *inlineScheduledJobExecutor) ExecuteJob(
 	// Also, performing this under the same transaction as the scan loop is not ideal
 	// since a single failure would result in rollback for all of the changes.
 	_, err := cfg.InternalExecutor.ExecEx(ctx, "inline-exec", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		sqlArgs.Statement,
 	)
 
@@ -72,7 +72,7 @@ func (e *inlineScheduledJobExecutor) ExecuteJob(
 // NotifyJobTermination implements ScheduledJobExecutor interface.
 func (e *inlineScheduledJobExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus Status,
 	_ jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,

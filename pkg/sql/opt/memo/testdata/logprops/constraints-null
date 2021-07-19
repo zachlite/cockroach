@@ -87,24 +87,22 @@ select
            └── null [type=unknown]
 
 exec-ddl
-CREATE TABLE xyz (
+CREATE TABLE xy (
   x INT,
-  y INT,
-  z FLOAT
+  y INT
 )
 ----
 
 # Test that we get a not-NULL constraint on x.
 opt
-SELECT * FROM xyz WHERE x > abs(y)
+SELECT * FROM xy WHERE x > abs(y)
 ----
 select
- ├── columns: x:1(int!null) y:2(int) z:3(float)
+ ├── columns: x:1(int!null) y:2(int)
  ├── immutable
- ├── prune: (3)
- ├── scan xyz
- │    ├── columns: x:1(int) y:2(int) z:3(float)
- │    └── prune: (1-3)
+ ├── scan xy
+ │    ├── columns: x:1(int) y:2(int)
+ │    └── prune: (1,2)
  └── filters
       └── gt [type=bool, outer=(1,2), immutable, constraints=(/1: (/NULL - ])]
            ├── variable: x:1 [type=int]
@@ -113,15 +111,15 @@ select
 
 # Test that we get a not-NULL constraint on x.
 opt
-SELECT * FROM xyz WHERE sin(x::float)::int < x
+SELECT * FROM xy WHERE sin(x::float)::int < x
 ----
 select
- ├── columns: x:1(int!null) y:2(int) z:3(float)
+ ├── columns: x:1(int!null) y:2(int)
  ├── immutable
- ├── prune: (2,3)
- ├── scan xyz
- │    ├── columns: x:1(int) y:2(int) z:3(float)
- │    └── prune: (1-3)
+ ├── prune: (2)
+ ├── scan xy
+ │    ├── columns: x:1(int) y:2(int)
+ │    └── prune: (1,2)
  └── filters
       └── gt [type=bool, outer=(1), immutable, constraints=(/1: (/NULL - ])]
            ├── variable: x:1 [type=int]
@@ -132,14 +130,13 @@ select
 
 # Test that we get a not-NULL constraint on x and y.
 opt
-SELECT * FROM xyz WHERE x > y
+SELECT * FROM xy WHERE x > y
 ----
 select
- ├── columns: x:1(int!null) y:2(int!null) z:3(float)
- ├── prune: (3)
- ├── scan xyz
- │    ├── columns: x:1(int) y:2(int) z:3(float)
- │    └── prune: (1-3)
+ ├── columns: x:1(int!null) y:2(int!null)
+ ├── scan xy
+ │    ├── columns: x:1(int) y:2(int)
+ │    └── prune: (1,2)
  └── filters
       └── gt [type=bool, outer=(1,2), constraints=(/1: (/NULL - ]; /2: (/NULL - ])]
            ├── variable: x:1 [type=int]
@@ -147,33 +144,15 @@ select
 
 # Test that we get a not-NULL constraint on x and y.
 opt
-SELECT * FROM xyz WHERE x = y
+SELECT * FROM xy WHERE x = y
 ----
 select
- ├── columns: x:1(int!null) y:2(int!null) z:3(float)
+ ├── columns: x:1(int!null) y:2(int!null)
  ├── fd: (1)==(2), (2)==(1)
- ├── prune: (3)
- ├── scan xyz
- │    ├── columns: x:1(int) y:2(int) z:3(float)
- │    └── prune: (1-3)
+ ├── scan xy
+ │    ├── columns: x:1(int) y:2(int)
+ │    └── prune: (1,2)
  └── filters
       └── eq [type=bool, outer=(1,2), constraints=(/1: (/NULL - ]; /2: (/NULL - ]), fd=(1)==(2), (2)==(1)]
            ├── variable: x:1 [type=int]
            └── variable: y:2 [type=int]
-
-# Test that we get a not-NULL constraint on z.
-opt
-SELECT * FROM xyz WHERE st_dwithin('point(0 0)'::geometry, 'point(1 1)'::geometry, z)
-----
-select
- ├── columns: x:1(int) y:2(int) z:3(float!null)
- ├── immutable
- ├── prune: (1,2)
- ├── scan xyz
- │    ├── columns: x:1(int) y:2(int) z:3(float)
- │    └── prune: (1-3)
- └── filters
-      └── function: st_dwithin [type=bool, outer=(3), immutable, constraints=(/3: (/NULL - ])]
-           ├── const: '010100000000000000000000000000000000000000' [type=geometry]
-           ├── const: '0101000000000000000000F03F000000000000F03F' [type=geometry]
-           └── variable: z:3 [type=float]

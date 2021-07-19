@@ -55,9 +55,6 @@ func (a tenantAuthorizer) authorize(
 	case "/cockroach.rpc.Heartbeat/Ping":
 		return nil // no authorization
 
-	case "/cockroach.server.serverpb.Status/Regions":
-		return nil // no authorization
-
 	default:
 		return authErrorf("unknown method %q", fullMethod)
 	}
@@ -102,7 +99,6 @@ var reqMethodAllowlist = [...]bool{
 	roachpb.QueryIntent:    true,
 	roachpb.InitPut:        true,
 	roachpb.AddSSTable:     true,
-	roachpb.Export:         true,
 	roachpb.Refresh:        true,
 	roachpb.RefreshRange:   true,
 }

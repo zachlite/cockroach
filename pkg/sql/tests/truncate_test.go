@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -67,9 +66,9 @@ func TestTruncateWithConcurrentMutations(t *testing.T) {
 		)
 		{
 			settings := cluster.MakeTestingClusterSettings()
-			stats.AutomaticStatisticsClusterMode.Override(ctx, &settings.SV, false)
+			stats.AutomaticStatisticsClusterMode.Override(&settings.SV, false)
 			scKnobs := &sql.SchemaChangerTestingKnobs{}
-			blockFunc := func(jobID jobspb.JobID) error {
+			blockFunc := func(jobID int64) error {
 				select {
 				case blocked <- struct{}{}:
 				case err := <-unblock:
@@ -160,10 +159,6 @@ func TestTruncateWithConcurrentMutations(t *testing.T) {
 	commonValidations := []validateQuery{
 		{
 			stmt: "ALTER TABLE t ADD COLUMN added_column INT",
-		},
-		{
-			stmt:            "SELECT * FROM crdb_internal.invalid_objects",
-			optionalResults: [][]string{},
 		},
 	}
 	commonIdxValidations := append([]validateQuery{
@@ -337,19 +332,6 @@ func TestTruncateWithConcurrentMutations(t *testing.T) {
 			},
 			validations: commonValidations,
 		},
-		{
-			name: "alter column type",
-			setupStmts: []string{
-				commonCreateTable,
-				commonPopulateData,
-				`SET enable_experimental_alter_column_type_general = true`,
-			},
-			truncateStmt: "TRUNCATE TABLE t",
-			stmts: []string{
-				`ALTER TABLE t ALTER COLUMN j TYPE STRING`,
-			},
-			expErrRE: `pq: unimplemented: cannot perform TRUNCATE on "t" which has an ongoing column type change`,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { run(t, tc) })
@@ -396,8 +378,7 @@ ALTER INDEX a_b_idx SPLIT AT VALUES(1000), (2000), (3000), (4000), (5000), (6000
 			assert.NoError(t, err)
 
 			row := tc.Conns[0].QueryRowContext(ctx, `
-SELECT count(*) FROM crdb_internal.ranges_no_leases WHERE table_id = 'a'::regclass`)
-			assert.NoError(t, row.Err())
+SELECT count(*) FROM crdb_internal.ranges_no_leases WHERE table_name = 'a'`)
 			var nRanges int
 			assert.NoError(t, row.Scan(&nRanges))
 
@@ -408,8 +389,7 @@ SELECT count(*) FROM crdb_internal.ranges_no_leases WHERE table_id = 'a'::regcla
 			assert.NoError(t, err)
 
 			row = tc.Conns[0].QueryRowContext(ctx, `
-SELECT count(*) FROM crdb_internal.ranges_no_leases WHERE table_id = 'a'::regclass`)
-			assert.NoError(t, row.Err())
+SELECT count(*) FROM crdb_internal.ranges_no_leases WHERE table_name = 'a'`)
 			assert.NoError(t, row.Scan(&nRanges))
 
 			// We subtract 1 from the original n ranges because the first range can't

@@ -16,7 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
@@ -38,7 +38,7 @@ type bulkRowWriter struct {
 	flowCtx        *execinfra.FlowCtx
 	processorID    int32
 	batchIdxAtomic int64
-	tableDesc      catalog.TableDescriptor
+	tableDesc      tabledesc.Immutable
 	spec           execinfrapb.BulkRowWriterSpec
 	input          execinfra.RowSource
 	output         execinfra.RowReceiver
@@ -59,7 +59,7 @@ func newBulkRowWriterProcessor(
 		flowCtx:        flowCtx,
 		processorID:    processorID,
 		batchIdxAtomic: 0,
-		tableDesc:      spec.BuildTableDescriptor(),
+		tableDesc:      tabledesc.MakeImmutable(spec.Table),
 		spec:           spec,
 		input:          input,
 		output:         output,
@@ -74,11 +74,12 @@ func newBulkRowWriterProcessor(
 }
 
 // Start is part of the RowSource interface.
-func (sp *bulkRowWriter) Start(ctx context.Context) {
-	ctx = sp.StartInternal(ctx, "bulkRowWriter")
+func (sp *bulkRowWriter) Start(ctx context.Context) context.Context {
 	sp.input.Start(ctx)
+	ctx = sp.StartInternal(ctx, "bulkRowWriter")
 	err := sp.work(ctx)
 	sp.MoveToDraining(err)
+	return ctx
 }
 
 // Next is part of the RowSource interface.
@@ -102,7 +103,7 @@ func (sp *bulkRowWriter) work(ctx context.Context) error {
 	var g ctxgroup.Group
 
 	conv, err := row.NewDatumRowConverter(ctx,
-		sp.tableDesc, nil /* targetColNames */, sp.EvalCtx, kvCh, nil /* seqChunkProvider */)
+		&sp.tableDesc, nil /* targetColNames */, sp.EvalCtx, kvCh)
 	if err != nil {
 		return err
 	}
@@ -126,7 +127,7 @@ func (sp *bulkRowWriter) wrapDupError(ctx context.Context, orig error) error {
 		return orig
 	}
 	v := &roachpb.Value{RawBytes: typed.Value}
-	return row.NewUniquenessConstraintViolationError(ctx, sp.tableDesc, typed.Key, v)
+	return row.NewUniquenessConstraintViolationError(ctx, &sp.tableDesc, typed.Key, v)
 }
 
 func (sp *bulkRowWriter) ingestLoop(ctx context.Context, kvCh chan row.KVBatch) error {
@@ -234,4 +235,10 @@ func (sp *bulkRowWriter) convertLoop(
 	}
 
 	return nil
+}
+
+// ConsumerClosed is part of the RowSource interface.
+func (sp *bulkRowWriter) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	sp.InternalClose()
 }

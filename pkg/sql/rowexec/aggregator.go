@@ -12,6 +12,7 @@ package rowexec
 
 import (
 	"context"
+	"fmt"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -20,11 +21,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/cockroach/pkg/util/stringarena"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 type aggregateFuncs []tree.AggregateFunc
@@ -89,13 +92,13 @@ func (ag *aggregatorBase) init(
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
-	trailingMetaCallback func() []execinfrapb.ProducerMetadata,
+	trailingMetaCallback func(context.Context) []execinfrapb.ProducerMetadata,
 ) error {
 	ctx := flowCtx.EvalCtx.Ctx()
 	memMonitor := execinfra.NewMonitor(ctx, flowCtx.EvalCtx.Mon, "aggregator-mem")
-	if execinfra.ShouldCollectStats(ctx, flowCtx) {
+	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		input = newInputStatCollector(input)
-		ag.ExecStatsForTrace = ag.execStatsForTrace
+		ag.FinishTrace = ag.outputStatsToTrace
 	}
 	ag.input = input
 	ag.isScalar = spec.IsScalar()
@@ -151,18 +154,42 @@ func (ag *aggregatorBase) init(
 	)
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (ag *aggregatorBase) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getInputStats(ag.input)
-	if !ok {
-		return nil
+var _ execinfrapb.DistSQLSpanStats = &AggregatorStats{}
+
+const aggregatorTagPrefix = "aggregator."
+
+// Stats implements the SpanStats interface.
+func (as *AggregatorStats) Stats() map[string]string {
+	inputStatsMap := as.InputStats.Stats(aggregatorTagPrefix)
+	inputStatsMap[aggregatorTagPrefix+MaxMemoryTagSuffix] = humanizeutil.IBytes(as.MaxAllocatedMem)
+	return inputStatsMap
+}
+
+// StatsForQueryPlan implements the DistSQLSpanStats interface.
+func (as *AggregatorStats) StatsForQueryPlan() []string {
+	stats := as.InputStats.StatsForQueryPlan("" /* prefix */)
+
+	if as.MaxAllocatedMem != 0 {
+		stats = append(stats,
+			fmt.Sprintf("%s: %s", MaxMemoryQueryPlanSuffix, humanizeutil.IBytes(as.MaxAllocatedMem)))
 	}
-	return &execinfrapb.ComponentStats{
-		Inputs: []execinfrapb.InputStats{is},
-		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem: optional.MakeUint(uint64(ag.MemMonitor.MaximumBytes())),
-		},
-		Output: ag.OutputHelper.Stats(),
+
+	return stats
+}
+
+func (ag *aggregatorBase) outputStatsToTrace() {
+	is, ok := getInputStats(ag.FlowCtx, ag.input)
+	if !ok {
+		return
+	}
+	if sp := opentracing.SpanFromContext(ag.Ctx); sp != nil {
+		tracing.SetSpanStats(
+			sp,
+			&AggregatorStats{
+				InputStats:      is,
+				MaxAllocatedMem: ag.MemMonitor.MaximumBytes(),
+			},
+		)
 	}
 }
 
@@ -278,7 +305,7 @@ func newAggregator(
 		input,
 		post,
 		output,
-		func() []execinfrapb.ProducerMetadata {
+		func(context.Context) []execinfrapb.ProducerMetadata {
 			ag.close()
 			return nil
 		},
@@ -311,7 +338,7 @@ func newOrderedAggregator(
 		input,
 		post,
 		output,
-		func() []execinfrapb.ProducerMetadata {
+		func(context.Context) []execinfrapb.ProducerMetadata {
 			ag.close()
 			return nil
 		},
@@ -327,20 +354,21 @@ func newOrderedAggregator(
 }
 
 // Start is part of the RowSource interface.
-func (ag *hashAggregator) Start(ctx context.Context) {
-	ag.start(ctx, hashAggregatorProcName)
+func (ag *hashAggregator) Start(ctx context.Context) context.Context {
+	return ag.start(ctx, hashAggregatorProcName)
 }
 
 // Start is part of the RowSource interface.
-func (ag *orderedAggregator) Start(ctx context.Context) {
-	ag.start(ctx, orderedAggregatorProcName)
+func (ag *orderedAggregator) Start(ctx context.Context) context.Context {
+	return ag.start(ctx, orderedAggregatorProcName)
 }
 
-func (ag *aggregatorBase) start(ctx context.Context, procName string) {
-	ctx = ag.StartInternal(ctx, procName)
+func (ag *aggregatorBase) start(ctx context.Context, procName string) context.Context {
 	ag.input.Start(ctx)
+	ctx = ag.StartInternal(ctx, procName)
 	ag.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	ag.runningState = aggAccumulating
+	return ctx
 }
 
 func (ag *hashAggregator) close() {
@@ -923,15 +951,13 @@ func (a *aggregateFuncHolder) isDistinct(
 	if err != nil {
 		return false, err
 	}
-	for _, arg := range otherArgs {
-		// Note that we don't need to explicitly unset ed because encoded
-		// field is never set during fingerprinting - we'll compute the
-		// encoding and return it without updating the EncDatum; therefore,
-		// simply setting Datum field to the argument is sufficient.
-		ed.Datum = arg
-		encoded, err = ed.Fingerprint(ctx, arg.ResolvedType(), alloc, encoded, nil /* acc */)
-		if err != nil {
-			return false, err
+	if otherArgs != nil {
+		for _, arg := range otherArgs {
+			ed.Datum = arg
+			encoded, err = ed.Fingerprint(ctx, arg.ResolvedType(), alloc, encoded, nil /* acc */)
+			if err != nil {
+				return false, err
+			}
 		}
 	}
 

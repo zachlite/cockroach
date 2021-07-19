@@ -11,7 +11,7 @@
 package sqlsmith
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -148,13 +148,7 @@ func makeConstExpr(s *Smither, typ *types.T, refs colRefs) tree.TypedExpr {
 		}
 	}
 
-	expr := tree.TypedExpr(makeConstDatum(s, typ))
-	// In Postgres mode, make sure the datum is resolved as the type we want.
-	// CockroachDB and Postgres differ in how constants are typed otherwise.
-	if s.postgres {
-		expr = tree.NewTypedCastExpr(expr, typ)
-	}
-	return expr
+	return makeConstDatum(s, typ)
 }
 
 func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
@@ -164,9 +158,9 @@ func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
 	if s.vectorizable {
 		nullChance = 0
 	}
-	datum = randgen.RandDatumWithNullChance(s.rnd, typ, nullChance)
+	datum = rowenc.RandDatumWithNullChance(s.rnd, typ, nullChance)
 	if f := datum.ResolvedType().Family(); f != types.UnknownFamily && s.simpleDatums {
-		datum = randgen.RandDatumSimple(s.rnd, typ)
+		datum = rowenc.RandDatumSimple(s.rnd, typ)
 	}
 	s.lock.Unlock()
 
@@ -248,7 +242,7 @@ func makeNot(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 }
 
 // TODO(mjibson): add the other operators somewhere.
-var compareOps = [...]tree.ComparisonOperatorSymbol{
+var compareOps = [...]tree.ComparisonOperator{
 	tree.EQ,
 	tree.LT,
 	tree.GT,
@@ -273,10 +267,10 @@ func makeCompareOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool
 	}
 	left := makeScalar(s, typ, refs)
 	right := makeScalar(s, typ, refs)
-	return typedParen(tree.NewTypedComparisonExpr(tree.MakeComparisonOperator(op), left, right), typ), true
+	return typedParen(tree.NewTypedComparisonExpr(op, left, right), typ), true
 }
 
-var vecBinOps = map[tree.BinaryOperatorSymbol]bool{
+var vecBinOps = map[tree.BinaryOperator]bool{
 	tree.Plus:  true,
 	tree.Minus: true,
 	tree.Mult:  true,
@@ -291,26 +285,16 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	}
 	n := s.rnd.Intn(len(ops))
 	op := ops[n]
-	if s.vectorizable && !vecBinOps[op.Operator.Symbol] {
+	if s.vectorizable && !vecBinOps[op.Operator] {
 		return nil, false
 	}
 	if s.postgres {
 		if ignorePostgresBinOps[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}] {
 			return nil, false
-		}
-	}
-	if s.postgres {
-		if transform, needTransform := postgresBinOpTransformations[binOpTriple{
-			op.LeftType.Family(),
-			op.Operator.Symbol,
-			op.RightType.Family(),
-		}]; needTransform {
-			op.LeftType = transform.leftType
-			op.RightType = transform.rightType
 		}
 	}
 	left := makeScalar(s, op.LeftType, refs)
@@ -326,13 +310,8 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 
 type binOpTriple struct {
 	left  types.Family
-	op    tree.BinaryOperatorSymbol
+	op    tree.BinaryOperator
 	right types.Family
-}
-
-type binOpOperands struct {
-	leftType  *types.T
-	rightType *types.T
 }
 
 var ignorePostgresBinOps = map[binOpTriple]bool{
@@ -342,26 +321,6 @@ var ignorePostgresBinOps = map[binOpTriple]bool{
 	{types.FloatFamily, tree.Mult, types.DateFamily}: true,
 	{types.DateFamily, tree.Mult, types.FloatFamily}: true,
 	{types.DateFamily, tree.Div, types.FloatFamily}:  true,
-
-	// Postgres does not have separate floor division operator.
-	{types.IntFamily, tree.FloorDiv, types.IntFamily}:         true,
-	{types.FloatFamily, tree.FloorDiv, types.FloatFamily}:     true,
-	{types.DecimalFamily, tree.FloorDiv, types.DecimalFamily}: true,
-	{types.DecimalFamily, tree.FloorDiv, types.IntFamily}:     true,
-	{types.IntFamily, tree.FloorDiv, types.DecimalFamily}:     true,
-
-	{types.FloatFamily, tree.Mod, types.FloatFamily}: true,
-}
-
-// For certain operations, Postgres is picky about the operand types.
-var postgresBinOpTransformations = map[binOpTriple]binOpOperands{
-	{types.IntFamily, tree.Plus, types.DateFamily}:          {types.Int4, types.Date},
-	{types.DateFamily, tree.Plus, types.IntFamily}:          {types.Date, types.Int4},
-	{types.IntFamily, tree.Minus, types.DateFamily}:         {types.Int4, types.Date},
-	{types.DateFamily, tree.Minus, types.IntFamily}:         {types.Date, types.Int4},
-	{types.JsonFamily, tree.JSONFetchVal, types.IntFamily}:  {types.Jsonb, types.Int4},
-	{types.JsonFamily, tree.JSONFetchText, types.IntFamily}: {types.Jsonb, types.Int4},
-	{types.JsonFamily, tree.Minus, types.IntFamily}:         {types.Jsonb, types.Int4},
 }
 
 func makeFunc(s *Smither, ctx Context, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
@@ -393,19 +352,16 @@ func makeFunc(s *Smither, ctx Context, typ *types.T, refs colRefs) (tree.TypedEx
 
 	args := make(tree.TypedExprs, 0)
 	for _, argTyp := range fn.overload.Types.Types() {
-		// Postgres is picky about having Int4 arguments instead of Int8.
-		if s.postgres && argTyp.Family() == types.IntFamily {
-			argTyp = types.Int4
-		}
 		var arg tree.TypedExpr
 		// If we're a GROUP BY or window function, try to choose a col ref for the arguments.
 		if class == tree.AggregateClass || class == tree.WindowClass {
 			var ok bool
 			arg, ok = makeColRef(s, argTyp, refs)
 			if !ok {
-				// If we can't find a col ref for our aggregate function, just use a
-				// constant.
-				arg = makeConstExpr(s, typ, refs)
+				// If we can't find a col ref for our
+				// aggregate function, try again with
+				// a non-aggregate.
+				return makeFunc(s, emptyCtx, typ, refs)
 			}
 		}
 		if arg == nil {
@@ -620,7 +576,7 @@ func makeIn(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 		op = tree.NotIn
 	}
 	return tree.NewTypedComparisonExpr(
-		tree.MakeComparisonOperator(op),
+		op,
 		// Cast any NULLs to a concrete type.
 		castType(makeScalar(s, t, refs), t),
 		rhs,
@@ -632,9 +588,9 @@ func makeStringComparison(s *Smither, typ *types.T, refs colRefs) (tree.TypedExp
 	if s.vectorizable {
 		// Vectorized supports only tree.Like and tree.NotLike.
 		if s.coin() {
-			stringComparison = tree.MakeComparisonOperator(tree.Like)
+			stringComparison = tree.Like
 		} else {
-			stringComparison = tree.MakeComparisonOperator(tree.NotLike)
+			stringComparison = tree.NotLike
 		}
 	}
 	switch typ.Family() {

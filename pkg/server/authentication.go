@@ -36,7 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -53,9 +52,6 @@ const (
 	secretLength = 16
 	// SessionCookieName is the name of the cookie used for HTTP auth.
 	SessionCookieName = "session"
-
-	// DemoLoginPath is the demo shell auto-login URL.
-	DemoLoginPath = "/demologin"
 )
 
 type noOIDCConfigured struct{}
@@ -86,12 +82,11 @@ var ConfigureOIDC = func(
 	return &noOIDCConfigured{}, nil
 }
 
-var webSessionTimeout = settings.RegisterDurationSetting(
+var webSessionTimeout = settings.RegisterPublicNonNegativeDurationSetting(
 	"server.web_session_timeout",
 	"the duration that a newly created web session will be valid",
 	7*24*time.Hour,
-	settings.NonNegativeDuration,
-).WithPublic()
+)
 
 type authenticationServer struct {
 	server *Server
@@ -130,7 +125,8 @@ func (s *authenticationServer) RegisterGateway(
 func (s *authenticationServer) UserLogin(
 	ctx context.Context, req *serverpb.UserLoginRequest,
 ) (*serverpb.UserLoginResponse, error) {
-	if req.Username == "" {
+	username := req.Username
+	if username == "" {
 		return nil, status.Errorf(
 			codes.Unauthenticated,
 			"no username was provided",
@@ -142,7 +138,7 @@ func (s *authenticationServer) UserLogin(
 	// here, so that the normalized username is retained in the session
 	// table: the APIs extract the username from the session table
 	// without further normalization.
-	username, _ := security.MakeSQLUsernameFromUserInput(req.Username, security.UsernameValidation)
+	username = tree.Name(username).Normalize()
 
 	// Verify the provided username/password pair.
 	verified, expired, err := s.verifyPassword(ctx, username, req.Password)
@@ -173,68 +169,6 @@ func (s *authenticationServer) UserLogin(
 	return &serverpb.UserLoginResponse{}, nil
 }
 
-// demoLogin is the same as UserLogin but using the GET method.
-// It is only available for demo and test clusters.
-func (s *authenticationServer) demoLogin(w http.ResponseWriter, req *http.Request) {
-	ctx := context.Background()
-	ctx = logtags.AddTag(ctx, "client", req.RemoteAddr)
-	ctx = logtags.AddTag(ctx, "demologin", nil)
-
-	fail := func(err error) {
-		w.WriteHeader(500)
-		_, _ = w.Write([]byte(fmt.Sprintf("invalid request: %v", err)))
-	}
-
-	if err := req.ParseForm(); err != nil {
-		fail(err)
-		return
-	}
-
-	var userInput, password string
-	if len(req.Form["username"]) != 1 {
-		fail(errors.New("username not passed right"))
-		return
-	}
-	if len(req.Form["password"]) != 1 {
-		fail(errors.New("password not passed right"))
-		return
-	}
-	userInput = req.Form["username"][0]
-	password = req.Form["password"][0]
-
-	// In CockroachDB SQL, unlike in PostgreSQL, usernames are
-	// case-insensitive. Therefore we need to normalize the username
-	// here, so that the normalized username is retained in the session
-	// table: the APIs extract the username from the session table
-	// without further normalization.
-	username, _ := security.MakeSQLUsernameFromUserInput(userInput, security.UsernameValidation)
-	// Verify the provided username/password pair.
-	verified, expired, err := s.verifyPassword(ctx, username, password)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if expired {
-		fail(errors.New("password expired"))
-		return
-	}
-	if !verified {
-		fail(errors.New("password invalid"))
-		return
-	}
-
-	cookie, err := s.createSessionFor(ctx, username)
-	if err != nil {
-		fail(err)
-		return
-	}
-
-	w.Header()["Set-Cookie"] = []string{cookie.String()}
-	w.Header()["Location"] = []string{"/"}
-	w.WriteHeader(302)
-	_, _ = w.Write([]byte("you can use the UI now"))
-}
-
 var errWebAuthenticationFailure = status.Errorf(
 	codes.Unauthenticated,
 	"the provided credentials did not match any account on the server",
@@ -245,20 +179,17 @@ var errWebAuthenticationFailure = status.Errorf(
 // The session's ID and secret are returned to the caller as an HTTP cookie,
 // added via a "Set-Cookie" header.
 func (s *authenticationServer) UserLoginFromSSO(
-	ctx context.Context, reqUsername string,
+	ctx context.Context, username string,
 ) (*http.Cookie, error) {
 	// In CockroachDB SQL, unlike in PostgreSQL, usernames are
 	// case-insensitive. Therefore we need to normalize the username
 	// here, so that the normalized username is retained in the session
 	// table: the APIs extract the username from the session table
 	// without further normalization.
-	username, _ := security.MakeSQLUsernameFromUserInput(reqUsername, security.UsernameValidation)
+	username = tree.Name(username).Normalize()
 
 	exists, canLogin, _, _, err := sql.GetUserHashedPassword(
-		ctx,
-		s.server.sqlServer.execCfg,
-		s.server.sqlServer.execCfg.InternalExecutor,
-		username,
+		ctx, s.server.sqlServer.execCfg.InternalExecutor, username,
 	)
 
 	if err != nil {
@@ -276,7 +207,7 @@ func (s *authenticationServer) UserLoginFromSSO(
 //
 // The caller is responsible to ensure the username has been normalized already.
 func (s *authenticationServer) createSessionFor(
-	ctx context.Context, username security.SQLUsername,
+	ctx context.Context, username string,
 ) (*http.Cookie, error) {
 	// Create a new database session, generating an ID and secret key.
 	id, secret, err := s.newAuthSession(ctx, username)
@@ -319,7 +250,7 @@ func (s *authenticationServer) UserLogout(
 		ctx,
 		"revoke-auth-session",
 		nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		`UPDATE system.web_sessions SET "revokedAt" = now() WHERE id = $1`,
 		sessionID,
 	); err != nil {
@@ -369,7 +300,7 @@ WHERE id = $1`
 		ctx,
 		"lookup-auth-session",
 		nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		sessionQuery, cookie.ID)
 	if row == nil || err != nil {
 		return false, "", err
@@ -414,13 +345,10 @@ WHERE id = $1`
 // The caller is responsible for ensuring that the username is normalized.
 // (CockroachDB has case-insensitive usernames, unlike PostgreSQL.)
 func (s *authenticationServer) verifyPassword(
-	ctx context.Context, username security.SQLUsername, password string,
+	ctx context.Context, username string, password string,
 ) (valid bool, expired bool, err error) {
 	exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(
-		ctx,
-		s.server.sqlServer.execCfg,
-		s.server.sqlServer.execCfg.InternalExecutor,
-		username,
+		ctx, s.server.sqlServer.execCfg.InternalExecutor, username,
 	)
 	if err != nil {
 		return false, false, err
@@ -443,7 +371,7 @@ func (s *authenticationServer) verifyPassword(
 		}
 	}
 
-	return security.CompareHashAndPassword(ctx, hashedPassword, password) == nil, false, nil
+	return security.CompareHashAndPassword(hashedPassword, password) == nil, false, nil
 }
 
 // CreateAuthSecret creates a secret, hash pair to populate a session auth token.
@@ -464,7 +392,7 @@ func CreateAuthSecret() (secret, hashedSecret []byte, err error) {
 //
 // The caller is responsible to ensure the username has been normalized already.
 func (s *authenticationServer) newAuthSession(
-	ctx context.Context, username security.SQLUsername,
+	ctx context.Context, username string,
 ) (int64, []byte, error) {
 	secret, hashedSecret, err := CreateAuthSecret()
 	if err != nil {
@@ -484,10 +412,10 @@ RETURNING id
 		ctx,
 		"create-auth-session",
 		nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		insertSessionStmt,
 		hashedSecret,
-		username.Normalized(),
+		username,
 		expiration,
 	)
 	if err != nil {

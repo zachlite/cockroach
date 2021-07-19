@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -362,6 +361,7 @@ func (expr *NumVal) ResolveAsType(
 			return nil, err
 		}
 		oid := NewDOid(*d.(*DInt))
+		oid.semanticType = typ
 		return oid, nil
 	default:
 		return nil, errors.AssertionFailedf("could not resolve %T %v into a %T", expr, expr, typ)
@@ -555,7 +555,12 @@ func (expr *StrVal) ResolveAsType(
 		case types.UuidFamily:
 			return ParseDUuidFromBytes([]byte(expr.s))
 		case types.StringFamily:
-			expr.resString = DString(adjustStringValueToType(typ, expr.s))
+			// bpchar types truncate trailing whitespace.
+			if typ.Oid() == oid.T_bpchar {
+				expr.resString = DString(strings.TrimRight(expr.s, " "))
+				return &expr.resString, nil
+			}
+			expr.resString = DString(expr.s)
 			return &expr.resString, nil
 		}
 		return nil, errors.AssertionFailedf("attempt to type byte array literal to %T", typ)
@@ -568,7 +573,12 @@ func (expr *StrVal) ResolveAsType(
 			expr.resString = DString(expr.s)
 			return NewDNameFromDString(&expr.resString), nil
 		}
-		expr.resString = DString(adjustStringValueToType(typ, expr.s))
+		// bpchar types truncate trailing whitespace.
+		if typ.Oid() == oid.T_bpchar {
+			expr.resString = DString(strings.TrimRight(expr.s, " "))
+			return &expr.resString, nil
+		}
+		expr.resString = DString(expr.s)
 		return &expr.resString, nil
 
 	case types.BytesFamily:
@@ -606,8 +616,4 @@ var dummyTime = time.Date(2000, time.January, 2, 3, 4, 5, 0, time.UTC)
 
 func (dummyParseTimeContext) GetRelativeParseTime() time.Time {
 	return dummyTime
-}
-
-func (dummyParseTimeContext) GetIntervalStyle() duration.IntervalStyle {
-	return duration.IntervalStyle_POSTGRES
 }

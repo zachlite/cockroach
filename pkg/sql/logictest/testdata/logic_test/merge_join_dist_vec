@@ -43,27 +43,9 @@ start_key  end_key  replicas  lease_holder
 NULL       /2       {3}       3
 
 query T
-EXPLAIN (DISTSQL) SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 2
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 2]
 ----
-distribution: full
-vectorized: true
-·
-• merge join (left outer)
-│ equality: (a) = (a)
-│ left cols are key
-│ right cols are key
-│
-├── • scan
-│     missing stats
-│     table: l@primary
-│     spans: [/2 - /2]
-│
-└── • scan
-      missing stats
-      table: r@primary
-      spans: [/2 - /2]
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzEk1-Pk0AUxd_9FJP71OpsYCi-TLIJRlllw8IKNJoYHmbLtSVhGZwZEpum390AJhXs1jZG96Xp_Pmde8-Zyw70two4-J_vwzdBRGbvgjRLP4Zzkvqh_zYjL8lNEt-RioT-TUZu4yAiiizTIHpPZmJOPn3wE58Ick0coFDLAiPxiBr4F2BAwYGcQqPkCrWWqtve9ZeC4jtwm0JZN63ptnMKK6kQ-A5MaSoEDpl4qDBBUaCyOq0CjSirXlp5jSofhdoChbQRtebEciz7qvuxomUYQr6nIFvzU_0g-rAlG6E3YzmPQb7PKWgj1gjc2dMnujzotLVUBSosRkp5R_7pyhGrd6jWeCvLGpW1GPeWbRvkQ_jxMvOT_gmAQoVfzcxjr-bXqlxvhr9AIW4NJx6jnkM9d5LCweHiLxweaT-SV7Kx3GkUR0u7o9Ls_BGwx7lU_3QE2JNd_o8RcJ51BI40l6BuZK3xrBe2O3tYrHGIS8tWrfBeyVVfZljGPdcnW6A2w6k7LIK6P-q_wvNhdhpmU9j-FXZGMJvCzkn49Qi2p_DiAs-_VT4Ns9Owe5HnfP_iRwAAAP__RCHy6Q==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzEk9FvmzAQxt_3V1i3l2ZzBXbYi6VKTBvdqFLogGqTKh7ccEuQKGa2kRZF-d8noFIGS7NU07Y3bN_vu_u-E1sw3yoQkAaL4F1GWl2RyyS-JnfBl5vF2zAiZ-_DNEs_LWbkseTVUFCRRXCZkas4jIgmt2kYfSBnckY-fwySgEhyQXgOFGpVYCQf0IC4AwYUOOQUGq2WaIzS3fW2LwqL7yBcCmXdtLa7zikslUYQW7ClrRAEZPK-wgRlgdrptAq0sqx6ae03unyQegMU0kbWRhCHnzvceQn5joJq7aPsXu1-Q9bSrMc6PoN8l1MwVq4QBN_RJ8bb67S10gVqLEZKeUf-ruSAx2vUK7xSZY3amY9nyzYNiiH2-DYLkj58oFDhV3vms9ezC12u1sMnUIhbK4jPqM-p701S2Duc_4HDA-NH6lw1jjeN4mBrb9Sanb57d5xL9Xd2z54c71_snv_X3R8YLkHTqNrgSat1O3tYrHCIy6hWL_FGq2XfZjjGPdcnW6Cxw6s3HMK6f-p_v9NhdhxmU9j9GeYjmE1hfhR-M4LdKTx_hudfOh-H2XHYe5bnfPfiRwAAAP__WUL0nA==
 
 # Test that we can handle merge joins with equality columns of integers with
 # different widths.
@@ -80,8 +62,8 @@ EXPLAIN (VEC) SELECT * FROM numbers AS t1 INNER MERGE JOIN numbers AS t2 ON t1._
 ----
 │
 └ Node 1
-  └ *colexecjoin.mergeJoinInnerOp
-    ├ *colexecbase.castInt16Int32Op
+  └ *colexec.mergeJoinInnerOp
+    ├ *colexec.castInt16Int32Op
     │ └ *colexec.sortOp
     │   └ *colfetcher.ColBatchScan
     └ *colexec.sortOp
@@ -92,10 +74,10 @@ EXPLAIN (VEC) SELECT * FROM numbers AS t1 INNER MERGE JOIN numbers AS t2 ON t1._
 ----
 │
 └ Node 1
-  └ *colexecjoin.mergeJoinInnerOp
+  └ *colexec.mergeJoinInnerOp
     ├ *colexec.sortOp
     │ └ *colfetcher.ColBatchScan
-    └ *colexecbase.castInt16Int64Op
+    └ *colexec.castInt16Int64Op
       └ *colexec.sortOp
         └ *colfetcher.ColBatchScan
 

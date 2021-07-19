@@ -20,13 +20,10 @@ interface EmailSubscriptionFormState {
 }
 
 interface EmailSubscriptionFormProps {
-  onSubmit?: (emailAddress: string) => void;
+ onSubmit?: (emailAddress: string) => void;
 }
 
-export class EmailSubscriptionForm extends React.Component<
-  EmailSubscriptionFormProps,
-  EmailSubscriptionFormState
-> {
+export class EmailSubscriptionForm extends React.Component<EmailSubscriptionFormProps, EmailSubscriptionFormState> {
   constructor(props: EmailSubscriptionFormProps) {
     super(props);
     this.state = {
@@ -43,14 +40,14 @@ export class EmailSubscriptionForm extends React.Component<
         canSubmit: false,
       });
     }
-  };
+  }
 
   handleChange = (value: string) => {
     this.handleEmailValidation(value);
     this.setState({
       emailAddress: value,
     });
-  };
+  }
 
   handleEmailValidation = (value: string) => {
     const isCorrectEmail = isValidEmail(value);
@@ -64,7 +61,7 @@ export class EmailSubscriptionForm extends React.Component<
       return undefined;
     }
     return "Invalid email address.";
-  };
+  }
 
   render() {
     const { canSubmit, emailAddress } = this.state;

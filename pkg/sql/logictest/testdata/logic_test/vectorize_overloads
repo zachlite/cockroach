@@ -18,7 +18,6 @@ CREATE TABLE many_types (
     _interval    INTERVAL,
     _inet        INet,
     _json        JSON,
-    _stringarray STRING[],
     _time        Time,
     _varbit      VARBIT
 )
@@ -27,7 +26,6 @@ statement ok
 INSERT
   INTO many_types
 VALUES (
-        NULL,
         NULL,
         NULL,
         NULL,
@@ -64,7 +62,6 @@ VALUES (
        '12:34:56.123456',
        '127.0.0.1',
        '[1, "hello", {"a": ["foo", {"b": 3}]}]',
-       '{2,a}'::STRING[],
        '1:00:00.001',
        B'1'
        ),
@@ -85,7 +82,6 @@ VALUES (
        '01:23:45.012345',
        '192.168.0.0/16',
        '[2, "hi", {"b": ["bar", {"c": 4}]}]',
-       '{2,b}'::STRING[],
        '1:00:00.456',
        B'11'
        ),
@@ -106,7 +102,6 @@ VALUES (
         NULL,
         NULL,
         '[1, "hello", {"a": ["foo", {"b": 3}]}]',
-        '{1,a}'::STRING[],
         NULL,
         B'11010'
        )
@@ -116,7 +111,7 @@ EXPLAIN (VEC) SELECT _inet & _inet FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projBitandDatumDatumOp
+  └ *colexec.projBitandDatumDatumOp
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -132,8 +127,8 @@ EXPLAIN (VEC) SELECT _inet - _int2 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projMinusDatumInt64Op
-    └ *colexecbase.castInt16Int64Op
+  └ *colexec.projMinusDatumInt64Op
+    └ *colexec.castInt16Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -141,9 +136,9 @@ EXPLAIN (VEC) SELECT _int2^_int4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPowInt64Int64Op
-    └ *colexecbase.castInt32Int64Op
-      └ *colexecbase.castInt16Int64Op
+  └ *colexec.projPowInt64Int64Op
+    └ *colexec.castInt32Int64Op
+      └ *colexec.castInt16Int64Op
         └ *colfetcher.ColBatchScan
 
 query T
@@ -151,8 +146,8 @@ EXPLAIN (VEC) SELECT _int2^_int FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPowInt64Int64Op
-    └ *colexecbase.castInt16Int64Op
+  └ *colexec.projPowInt64Int64Op
+    └ *colexec.castInt16Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -160,7 +155,7 @@ EXPLAIN (VEC) SELECT _float^_float FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPowFloat64Float64Op
+  └ *colexec.projPowFloat64Float64Op
     └ *colfetcher.ColBatchScan
 
 query T
@@ -168,8 +163,8 @@ EXPLAIN (VEC) SELECT _decimal^_int4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPowDecimalInt64Op
-    └ *colexecbase.castInt32Int64Op
+  └ *colexec.projPowDecimalInt64Op
+    └ *colexec.castInt32Int64Op
       └ *colfetcher.ColBatchScan
 
 query R rowsort
@@ -201,7 +196,7 @@ EXPLAIN (VEC) SELECT _inet - 1 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projMinusDatumInt64ConstOp
+  └ *colexec.projMinusDatumInt64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -217,8 +212,8 @@ EXPLAIN (VEC) SELECT _int4 + _inet FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPlusDatumInt64Op
-    └ *colexecbase.castInt32Int64Op
+  └ *colexec.projPlusDatumInt64Op
+    └ *colexec.castInt32Int64Op
       └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -234,7 +229,7 @@ EXPLAIN (VEC) SELECT 2 + _inet FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPlusDatumInt64ConstOp
+  └ *colexec.projPlusDatumInt64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -250,7 +245,7 @@ EXPLAIN (VEC) SELECT _time + _interval FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projPlusDatumIntervalOp
+  └ *colexec.projPlusDatumIntervalOp
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -266,7 +261,7 @@ EXPLAIN (VEC) SELECT _json - _int FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projMinusJSONInt64Op
+  └ *colexec.projMinusDatumInt64Op
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -282,7 +277,7 @@ EXPLAIN (VEC) SELECT _bytes || _bytes FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projConcatBytesBytesOp
+  └ *colexec.projConcatBytesBytesOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -298,7 +293,7 @@ EXPLAIN (VEC) SELECT _string || _string FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projConcatBytesBytesOp
+  └ *colexec.projConcatBytesBytesOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -314,7 +309,7 @@ EXPLAIN (VEC) SELECT _json || _json FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projConcatJSONJSONOp
+  └ *colexec.projConcatDatumDatumOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -330,7 +325,7 @@ EXPLAIN (VEC) SELECT _varbit || _varbit FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projConcatDatumDatumOp
+  └ *colexec.projConcatDatumDatumOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -346,7 +341,7 @@ EXPLAIN (VEC) SELECT _int << 1 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projLShiftInt64Int64ConstOp
+  └ *colexec.projLShiftInt64Int64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -354,7 +349,7 @@ EXPLAIN (VEC) SELECT _int >> 1 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projRShiftInt64Int64ConstOp
+  └ *colexec.projRShiftInt64Int64ConstOp
     └ *colfetcher.ColBatchScan
 
 query I rowsort
@@ -392,7 +387,7 @@ EXPLAIN (VEC) SELECT _varbit << 4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projLShiftDatumInt64ConstOp
+  └ *colexec.projLShiftDatumInt64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -400,8 +395,8 @@ EXPLAIN (VEC) SELECT _varbit << _int2 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projLShiftDatumInt64Op
-    └ *colexecbase.castInt16Int64Op
+  └ *colexec.projLShiftDatumInt64Op
+    └ *colexec.castInt16Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -409,8 +404,8 @@ EXPLAIN (VEC) SELECT _varbit << _int4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projLShiftDatumInt64Op
-    └ *colexecbase.castInt32Int64Op
+  └ *colexec.projLShiftDatumInt64Op
+    └ *colexec.castInt32Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -418,7 +413,7 @@ EXPLAIN (VEC) SELECT _varbit << _int FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projLShiftDatumInt64Op
+  └ *colexec.projLShiftDatumInt64Op
     └ *colfetcher.ColBatchScan
 
 
@@ -427,7 +422,7 @@ EXPLAIN (VEC) SELECT _varbit >> 4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projRShiftDatumInt64ConstOp
+  └ *colexec.projRShiftDatumInt64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -435,8 +430,8 @@ EXPLAIN (VEC) SELECT _varbit >> _int2 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projRShiftDatumInt64Op
-    └ *colexecbase.castInt16Int64Op
+  └ *colexec.projRShiftDatumInt64Op
+    └ *colexec.castInt16Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -444,8 +439,8 @@ EXPLAIN (VEC) SELECT _varbit >> _int4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projRShiftDatumInt64Op
-    └ *colexecbase.castInt32Int64Op
+  └ *colexec.projRShiftDatumInt64Op
+    └ *colexec.castInt32Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -453,7 +448,7 @@ EXPLAIN (VEC) SELECT _varbit >> _int FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projRShiftDatumInt64Op
+  └ *colexec.projRShiftDatumInt64Op
     └ *colfetcher.ColBatchScan
 
 query T
@@ -485,8 +480,8 @@ EXPLAIN (VEC) SELECT _json -> _int2 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONInt64Op
-    └ *colexecbase.castInt16Int64Op
+  └ *colexec.projJSONFetchValDatumInt64Op
+    └ *colexec.castInt16Int64Op
       └ *colfetcher.ColBatchScan
 
 query I rowsort
@@ -517,8 +512,8 @@ EXPLAIN (VEC) SELECT _json -> _int4 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONInt64Op
-    └ *colexecbase.castInt32Int64Op
+  └ *colexec.projJSONFetchValDatumInt64Op
+    └ *colexec.castInt32Int64Op
       └ *colfetcher.ColBatchScan
 
 query T
@@ -534,7 +529,7 @@ EXPLAIN (VEC) SELECT _json -> _int FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONInt64Op
+  └ *colexec.projJSONFetchValDatumInt64Op
     └ *colfetcher.ColBatchScan
 
 query T
@@ -550,7 +545,7 @@ EXPLAIN (VEC) SELECT _json -> 2 FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONInt64ConstOp
+  └ *colexec.projJSONFetchValDatumInt64ConstOp
     └ *colfetcher.ColBatchScan
 
 query T
@@ -566,8 +561,8 @@ EXPLAIN (VEC) SELECT _json -> 2 -> 'a' FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONBytesConstOp
-    └ *colexecproj.projJSONFetchValJSONInt64ConstOp
+  └ *colexec.projJSONFetchValDatumBytesConstOp
+    └ *colexec.projJSONFetchValDatumInt64ConstOp
       └ *colfetcher.ColBatchScan
 
 query T
@@ -577,108 +572,6 @@ NULL
 ["foo", {"b": 3}]
 NULL
 ["foo", {"b": 3}]
-
-query T
-EXPLAIN (VEC) SELECT _json #> _stringarray, _json #> '{a,b}' FROM many_types
-----
-│
-└ Node 1
-  └ *colexecproj.projJSONFetchValPathJSONDatumConstOp
-    └ *colexecproj.projJSONFetchValPathJSONDatumOp
-      └ *colfetcher.ColBatchScan
-
-query T
-EXPLAIN (VEC) SELECT _json #> _stringarray #> '{c}', _json #> '{a,b}' #> '{c}' FROM many_types
-----
-│
-└ Node 1
-  └ *colexecproj.projJSONFetchValPathJSONDatumConstOp
-    └ *colexecproj.projJSONFetchValPathJSONDatumConstOp
-      └ *colexecproj.projJSONFetchValPathJSONDatumConstOp
-        └ *colexecproj.projJSONFetchValPathJSONDatumOp
-          └ *colfetcher.ColBatchScan
-
-query TT
-SELECT _json #> _stringarray, _json #> '{2,a}' FROM many_types
-----
-NULL               NULL
-["foo", {"b": 3}]  ["foo", {"b": 3}]
-["bar", {"c": 4}]  NULL
-NULL               ["foo", {"b": 3}]
-
-query TT
-SELECT _json #> _stringarray #> '{1,b}', _json #> '{2,a}' #> '{1,b}' FROM many_types
-----
-NULL  NULL
-3     3
-NULL  NULL
-NULL  3
-
-query T
-SELECT _json #> '{}' FROM many_types
-----
-NULL
-[1, "hello", {"a": ["foo", {"b": 3}]}]
-[2, "hi", {"b": ["bar", {"c": 4}]}]
-[1, "hello", {"a": ["foo", {"b": 3}]}]
-
-query TT
-SELECT _json #> _stringarray #> '{d}', _json #> '{c}' #> '{d}' FROM many_types
-----
-NULL  NULL
-NULL  NULL
-NULL  NULL
-NULL  NULL
-
-query T
-EXPLAIN (VEC) SELECT _json #>> _stringarray, _json #>> '{a,b}' FROM many_types
-----
-│
-└ Node 1
-  └ *colexecproj.projJSONFetchTextPathJSONDatumConstOp
-    └ *colexecproj.projJSONFetchTextPathJSONDatumOp
-      └ *colfetcher.ColBatchScan
-
-query T
-EXPLAIN (VEC) SELECT _json #> '{a,b}' #>> '{c}' FROM many_types
-----
-│
-└ Node 1
-  └ *colexecproj.projJSONFetchTextPathJSONDatumConstOp
-    └ *colexecproj.projJSONFetchValPathJSONDatumConstOp
-      └ *colfetcher.ColBatchScan
-
-query TT
-SELECT _json #>> _stringarray, _json #>> '{2,a}' FROM many_types
-----
-NULL               NULL
-["foo", {"b": 3}]  ["foo", {"b": 3}]
-["bar", {"c": 4}]  NULL
-NULL               ["foo", {"b": 3}]
-
-query TT
-SELECT _json #> '{2,a}' #>> _stringarray, _json #> '{2,a}' #>> '{1,b}' FROM many_types
-----
-NULL  NULL
-NULL  3
-NULL  NULL
-NULL  3
-
-query T
-SELECT _json #>> '{}' FROM many_types
-----
-NULL
-[1, "hello", {"a": ["foo", {"b": 3}]}]
-[2, "hi", {"b": ["bar", {"c": 4}]}]
-[1, "hello", {"a": ["foo", {"b": 3}]}]
-
-query T
-SELECT _json #> '{c}' #>> '{d}' FROM many_types
-----
-NULL
-NULL
-NULL
-NULL
 
 # Regression tests for #49143. Correctly handle cases where the -> operator
 # results in NULL when both arguments are non-NULL.
@@ -709,8 +602,7 @@ EXPLAIN (VEC) SELECT _time + _date FROM many_types
 ----
 │
 └ Node 1
-  └ *rowexec.noopProcessor
-    └ *colfetcher.ColBatchScan
+  └ *rowexec.tableReader
 
 # Regression #50261 (not handling constant datum-backed values on the left
 # correctly).
@@ -722,7 +614,7 @@ EXPLAIN (VEC) SELECT '[2, "hi", {"b": ["bar", {"c": 4}]}]'::jsonb -> _int FROM m
 ----
 │
 └ Node 1
-  └ *colexecproj.projJSONFetchValJSONConstInt64Op
+  └ *colexec.projJSONFetchValDatumConstInt64Op
     └ *colfetcher.ColBatchScan
 
 query T rowsort
@@ -741,7 +633,7 @@ EXPLAIN (VEC) SELECT B'11' <> _varbit FROM many_types
 ----
 │
 └ Node 1
-  └ *colexecproj.projNEDatumDatumConstOp
+  └ *colexec.projNEDatumDatumConstOp
     └ *colfetcher.ColBatchScan
 
 query B rowsort
@@ -757,9 +649,9 @@ EXPLAIN (VEC) SELECT _int4 // _int FROM many_types WHERE _int <> 0
 ----
 │
 └ Node 1
-  └ *colexecproj.projFloorDivInt64Int64Op
-    └ *colexecbase.castInt32Int64Op
-      └ *colexecsel.selNEInt64Int64ConstOp
+  └ *colexec.projFloorDivInt64Int64Op
+    └ *colexec.castInt32Int64Op
+      └ *colexec.selNEInt64Int64ConstOp
         └ *colfetcher.ColBatchScan
 
 query III rowsort

@@ -273,9 +273,8 @@ func (o *providerOpts) ConfigureCreateFlags(flags *pflag.FlagSet) {
 		"Machine type (see https://cloud.google.com/compute/docs/machine-types)")
 	flags.StringVar(&o.MinCPUPlatform, ProviderName+"-min-cpu-platform", "",
 		"Minimum CPU platform (see https://cloud.google.com/compute/docs/instances/specify-min-cpu-platform)")
-	flags.StringVar(&o.Image, ProviderName+"-image", "ubuntu-2004-focal-v20210603",
-		"Image to use to create the vm, "+
-			"use `gcloud compute images list --filter=\"family=ubuntu-2004-lts\"` to list available images")
+	flags.StringVar(&o.Image, ProviderName+"-image", "ubuntu-1604-xenial-v20200129",
+		"Image to use to create the vm, ubuntu-1904-disco-v20191008 is a more modern image")
 
 	flags.IntVar(&o.SSDCount, ProviderName+"-local-ssd-count", 1,
 		"Number of local SSDs to create, only used if local-ssd=true")
@@ -385,6 +384,7 @@ func (p *Provider) Create(names []string, opts vm.CreateOpts) error {
 		"--scopes", "default,storage-rw",
 		"--image", p.opts.Image,
 		"--image-project", "ubuntu-os-cloud",
+		"--boot-disk-size", "10",
 		"--boot-disk-type", "pd-ssd",
 	}
 
@@ -404,7 +404,7 @@ func (p *Provider) Create(names []string, opts vm.CreateOpts) error {
 		// come in different sizes.
 		// See: https://cloud.google.com/compute/docs/disks/
 		n2MachineTypes := regexp.MustCompile("^[cn]2-.+-16")
-		if n2MachineTypes.MatchString(p.opts.MachineType) && p.opts.SSDCount == 1 {
+		if n2MachineTypes.MatchString(p.opts.MachineType) && p.opts.SSDCount < 2 {
 			fmt.Fprint(os.Stderr, "WARNING: SSD count must be at least 2 for n2 and c2 machine types with 16vCPU. Setting --gce-local-ssd-count to 2.\n")
 			p.opts.SSDCount = 2
 		}
@@ -443,7 +443,7 @@ func (p *Provider) Create(names []string, opts vm.CreateOpts) error {
 
 	args = append(args, "--metadata-from-file", fmt.Sprintf("startup-script=%s", filename))
 	args = append(args, "--project", project)
-	args = append(args, fmt.Sprintf("--boot-disk-size=%dGB", opts.OsVolumeSize))
+
 	var g errgroup.Group
 
 	nodeZones := vm.ZonePlacement(len(zones), len(names))
@@ -493,49 +493,6 @@ func (p *Provider) Delete(vms vm.List) error {
 			args := []string{
 				"compute", "instances", "delete",
 				"--delete-disks", "all",
-			}
-
-			args = append(args, "--project", project)
-			args = append(args, "--zone", zone)
-			args = append(args, names...)
-
-			g.Go(func() error {
-				cmd := exec.CommandContext(ctx, "gcloud", args...)
-
-				output, err := cmd.CombinedOutput()
-				if err != nil {
-					return errors.Wrapf(err, "Command: gcloud %s\nOutput: %s", args, output)
-				}
-				return nil
-			})
-		}
-	}
-
-	return g.Wait()
-}
-
-// Reset implements the vm.Provider interface.
-func (p *Provider) Reset(vms vm.List) error {
-	// Map from project to map of zone to list of machines in that project/zone.
-	projectZoneMap := make(map[string]map[string][]string)
-	for _, v := range vms {
-		if v.Provider != ProviderName {
-			return errors.Errorf("%s received VM instance from %s", ProviderName, v.Provider)
-		}
-		if projectZoneMap[v.Project] == nil {
-			projectZoneMap[v.Project] = make(map[string][]string)
-		}
-
-		projectZoneMap[v.Project][v.Zone] = append(projectZoneMap[v.Project][v.Zone], v.Name)
-	}
-
-	var g errgroup.Group
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	for project, zoneMap := range projectZoneMap {
-		for zone, names := range zoneMap {
-			args := []string{
-				"compute", "instances", "reset",
 			}
 
 			args = append(args, "--project", project)

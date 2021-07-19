@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -26,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -59,12 +61,12 @@ func (n noopSplitAndScatterer) scatter(
 // layer.
 type dbSplitAndScatterer struct {
 	db *kv.DB
-	kr *KeyRewriter
+	kr *storageccl.KeyRewriter
 }
 
 var _ splitAndScatterer = dbSplitAndScatterer{}
 
-func makeSplitAndScatterer(db *kv.DB, kr *KeyRewriter) splitAndScatterer {
+func makeSplitAndScatterer(db *kv.DB, kr *storageccl.KeyRewriter) splitAndScatterer {
 	return dbSplitAndScatterer{db: db, kr: kr}
 }
 
@@ -80,7 +82,7 @@ func (s dbSplitAndScatterer) split(
 	}
 
 	expirationTime := s.db.Clock().Now().Add(time.Hour.Nanoseconds(), 0)
-	newSplitKey, err := rewriteBackupSpanKey(codec, s.kr, splitKey)
+	newSplitKey, err := rewriteBackupSpanKey(s.kr, splitKey)
 	if err != nil {
 		return err
 	}
@@ -103,7 +105,7 @@ func (s dbSplitAndScatterer) scatter(
 		return 0, errors.AssertionFailedf("split and scatterer's database was not set when expected")
 	}
 
-	newScatterKey, err := rewriteBackupSpanKey(codec, s.kr, scatterKey)
+	newScatterKey, err := rewriteBackupSpanKey(s.kr, scatterKey)
 	if err != nil {
 		return 0, err
 	}
@@ -156,8 +158,6 @@ func (s dbSplitAndScatterer) findDestination(res *roachpb.AdminScatterResponse) 
 	return roachpb.NodeID(0)
 }
 
-const splitAndScatterProcessorName = "splitAndScatter"
-
 var splitAndScatterOutputTypes = []*types.T{
 	types.Bytes, // Span key for the range router
 	types.Bytes, // RestoreDataEntry bytes
@@ -170,140 +170,44 @@ var splitAndScatterOutputTypes = []*types.T{
 // each row, it updates the entry in the RangeRouter's map with the destination
 // of the scatter.
 type splitAndScatterProcessor struct {
-	execinfra.ProcessorBase
-
-	flowCtx *execinfra.FlowCtx
-	spec    execinfrapb.SplitAndScatterSpec
-	output  execinfra.RowReceiver
-
-	scatterer      splitAndScatterer
-	stopScattering context.CancelFunc
-
-	doneScatterCh chan entryNode
-	// A cache for routing datums, so only 1 is allocated per node.
-	routingDatumCache map[roachpb.NodeID]rowenc.EncDatum
-	scatterErr        error
+	flowCtx   *execinfra.FlowCtx
+	spec      execinfrapb.SplitAndScatterSpec
+	output    execinfra.RowReceiver
+	scatterer splitAndScatterer
 }
 
 var _ execinfra.Processor = &splitAndScatterProcessor{}
 
+// OutputTypes implements the execinfra.Processor interface.
+func (ssp *splitAndScatterProcessor) OutputTypes() []*types.T {
+	return splitAndScatterOutputTypes
+}
+
 func newSplitAndScatterProcessor(
 	flowCtx *execinfra.FlowCtx,
-	processorID int32,
+	_ int32,
 	spec execinfrapb.SplitAndScatterSpec,
-	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
-	numEntries := 0
-	for _, chunk := range spec.Chunks {
-		numEntries += len(chunk.Entries)
-	}
-
 	db := flowCtx.Cfg.DB
-	kr, err := makeKeyRewriterFromRekeys(flowCtx.Codec(), spec.Rekeys)
+	kr, err := storageccl.MakeKeyRewriterFromRekeys(spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}
 
 	var scatterer splitAndScatterer = makeSplitAndScatterer(db, kr)
-	if !flowCtx.Cfg.Codec.ForSystemTenant() {
-		scatterer = noopSplitAndScatterer{}
-	}
 	ssp := &splitAndScatterProcessor{
 		flowCtx:   flowCtx,
 		spec:      spec,
 		output:    output,
 		scatterer: scatterer,
-		// Large enough so that it never blocks.
-		doneScatterCh:     make(chan entryNode, numEntries),
-		routingDatumCache: make(map[roachpb.NodeID]rowenc.EncDatum),
-	}
-	if err := ssp.Init(ssp, post, splitAndScatterOutputTypes, flowCtx, processorID, output, nil, /* memMonitor */
-		execinfra.ProcStateOpts{
-			InputsToDrain: nil, // there are no inputs to drain
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				ssp.close()
-				return nil
-			},
-		}); err != nil {
-		return nil, err
 	}
 	return ssp, nil
-}
-
-// Start is part of the RowSource interface.
-func (ssp *splitAndScatterProcessor) Start(ctx context.Context) {
-	ctx = ssp.StartInternal(ctx, splitAndScatterProcessorName)
-	go func() {
-		// Note that the loop over doneScatterCh in Next should prevent this
-		// goroutine from leaking when there are no errors. However, if that loop
-		// needs to exit early, runSplitAndScatter's context will be canceled.
-		scatterCtx, stopScattering := context.WithCancel(ctx)
-		ssp.stopScattering = stopScattering
-
-		defer close(ssp.doneScatterCh)
-		ssp.scatterErr = ssp.runSplitAndScatter(scatterCtx, ssp.flowCtx, &ssp.spec, ssp.scatterer)
-	}()
 }
 
 type entryNode struct {
 	entry execinfrapb.RestoreSpanEntry
 	node  roachpb.NodeID
-}
-
-// Next implements the execinfra.RowSource interface.
-func (ssp *splitAndScatterProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
-	if ssp.State != execinfra.StateRunning {
-		return nil, ssp.DrainHelper()
-	}
-
-	scatteredEntry, ok := <-ssp.doneScatterCh
-	if ok {
-		entry := scatteredEntry.entry
-		entryBytes, err := protoutil.Marshal(&entry)
-		if err != nil {
-			ssp.MoveToDraining(err)
-			return nil, ssp.DrainHelper()
-		}
-
-		// The routing datums informs the router which output stream should be used.
-		routingDatum, ok := ssp.routingDatumCache[scatteredEntry.node]
-		if !ok {
-			routingDatum, _ = routingDatumsForNode(scatteredEntry.node)
-			ssp.routingDatumCache[scatteredEntry.node] = routingDatum
-		}
-
-		row := rowenc.EncDatumRow{
-			routingDatum,
-			rowenc.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes(entryBytes))),
-		}
-		return row, nil
-	}
-
-	if ssp.scatterErr != nil {
-		ssp.MoveToDraining(ssp.scatterErr)
-		return nil, ssp.DrainHelper()
-	}
-
-	ssp.MoveToDraining(nil /* error */)
-	return nil, ssp.DrainHelper()
-}
-
-// ConsumerClosed is part of the RowSource interface.
-func (ssp *splitAndScatterProcessor) ConsumerClosed() {
-	// The consumer is done, Next() will not be called again.
-	ssp.close()
-}
-
-// close stops the production workers. This needs to be called if the consumer
-// runs into an error and stops consuming scattered entries to make sure we
-// don't leak goroutines.
-func (ssp *splitAndScatterProcessor) close() {
-	if ssp.InternalClose() {
-		if ssp.stopScattering != nil {
-			ssp.stopScattering()
-		}
-	}
 }
 
 // scatteredChunk is the entries of a chunk of entries to process along with the
@@ -313,11 +217,70 @@ type scatteredChunk struct {
 	entries     []execinfrapb.RestoreSpanEntry
 }
 
-func (ssp *splitAndScatterProcessor) runSplitAndScatter(
+// Run implements the execinfra.Processor interface.
+func (ssp *splitAndScatterProcessor) Run(ctx context.Context) {
+	ctx, span := tracing.ChildSpan(ctx, "splitAndScatterProcessor")
+	defer tracing.FinishSpan(span)
+	defer ssp.output.ProducerDone()
+
+	numEntries := 0
+	for _, chunk := range ssp.spec.Chunks {
+		numEntries += len(chunk.Entries)
+	}
+	// Large enough so that it never blocks.
+	doneScatterCh := make(chan entryNode, numEntries)
+
+	// A cache for routing datums, so only 1 is allocated per node.
+	routingDatumCache := make(map[roachpb.NodeID]rowenc.EncDatum)
+
+	var err error
+	splitAndScatterCtx, cancelSplitAndScatter := context.WithCancel(ctx)
+	defer cancelSplitAndScatter()
+	// Note that the loop over doneScatterCh should prevent this goroutine from
+	// leaking when there are no errors. However, if that loop needs to exit
+	// early, runSplitAndScatter's context will be canceled.
+	go func() {
+		defer close(doneScatterCh)
+		err = runSplitAndScatter(splitAndScatterCtx, ssp.flowCtx, &ssp.spec, ssp.scatterer, doneScatterCh)
+		if err != nil {
+			log.Errorf(ctx, "error while running split and scatter: %+v", err)
+		}
+	}()
+
+	for scatteredEntry := range doneScatterCh {
+		entry := scatteredEntry.entry
+		entryBytes, err := protoutil.Marshal(&entry)
+		if err != nil {
+			ssp.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
+			break
+		}
+
+		// The routing datums informs the router which output stream should be used.
+		routingDatum, ok := routingDatumCache[scatteredEntry.node]
+		if !ok {
+			routingDatum, _ = routingDatumsForNode(scatteredEntry.node)
+			routingDatumCache[scatteredEntry.node] = routingDatum
+		}
+
+		row := rowenc.EncDatumRow{
+			routingDatum,
+			rowenc.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes(entryBytes))),
+		}
+		ssp.output.Push(row, nil)
+	}
+
+	if err != nil {
+		ssp.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
+		return
+	}
+}
+
+func runSplitAndScatter(
 	ctx context.Context,
 	flowCtx *execinfra.FlowCtx,
 	spec *execinfrapb.SplitAndScatterSpec,
 	scatterer splitAndScatterer,
+	doneScatterCh chan entryNode,
 ) error {
 	g := ctxgroup.WithContext(ctx)
 
@@ -383,7 +346,7 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
-					case ssp.doneScatterCh <- scatteredEntry:
+					case doneScatterCh <- scatteredEntry:
 					}
 				}
 			}

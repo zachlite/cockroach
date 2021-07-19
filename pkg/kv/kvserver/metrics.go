@@ -294,15 +294,6 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 
-	// Server-side transaction metrics.
-	metaCommitWaitBeforeCommitTriggerCount = metric.Metadata{
-		Name: "txn.commit_waits.before_commit_trigger",
-		Help: "Number of KV transactions that had to commit-wait on the server " +
-			"before committing because they had a commit trigger",
-		Measurement: "KV Transactions",
-		Unit:        metric.Unit_COUNT,
-	}
-
 	// RocksDB metrics.
 	metaRdbBlockCacheHits = metric.Metadata{
 		Name:        "rocksdb.block.cache.hits",
@@ -406,32 +397,6 @@ var (
 		Measurement: "Storage",
 		Unit:        metric.Unit_BYTES,
 	}
-	metaRdbL0Sublevels = metric.Metadata{
-		Name:        "storage.l0-sublevels",
-		Help:        "Number of Level 0 sublevels",
-		Measurement: "Storage",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaRdbL0NumFiles = metric.Metadata{
-		Name:        "storage.l0-num-files",
-		Help:        "Number of Level 0 files",
-		Measurement: "Storage",
-		Unit:        metric.Unit_COUNT,
-	}
-
-	// Disk health metrics.
-	metaDiskSlow = metric.Metadata{
-		Name:        "storage.disk-slow",
-		Help:        "Number of instances of disk operations taking longer than 10s",
-		Measurement: "Events",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaDiskStalled = metric.Metadata{
-		Name:        "storage.disk-stalled",
-		Help:        "Number of instances of disk operations taking longer than 30s",
-		Measurement: "Events",
-		Unit:        metric.Unit_COUNT,
-	}
 
 	// Range event metrics.
 	metaRangeSplits = metric.Metadata{
@@ -464,21 +429,15 @@ var (
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaRangeSnapshotsAppliedByVoters = metric.Metadata{
-		Name:        "range.snapshots.applied-voter",
-		Help:        "Number of snapshots applied by voter replicas",
+	metaRangeSnapshotsNormalApplied = metric.Metadata{
+		Name:        "range.snapshots.normal-applied",
+		Help:        "Number of applied snapshots",
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaRangeSnapshotsAppliedForInitialUpreplication = metric.Metadata{
-		Name:        "range.snapshots.applied-initial",
-		Help:        "Number of snapshots applied for initial upreplication",
-		Measurement: "Snapshots",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaRangeSnapshotsAppliedByNonVoter = metric.Metadata{
-		Name:        "range.snapshots.applied-non-voter",
-		Help:        "Number of snapshots applied by non-voter replicas",
+	metaRangeSnapshotsLearnerApplied = metric.Metadata{
+		Name:        "range.snapshots.learner-applied",
+		Help:        "Number of applied learner snapshots",
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -537,18 +496,6 @@ var (
 		Help:        "Latency histogram for applying all committed Raft commands in a Raft ready",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
-	}
-	metaRaftSchedulerLatency = metric.Metadata{
-		Name:        "raft.scheduler.latency",
-		Help:        "Nanoseconds spent waiting for a range to be processed by the Raft scheduler",
-		Measurement: "Latency",
-		Unit:        metric.Unit_NANOSECONDS,
-	}
-	metaRaftTimeoutCampaign = metric.Metadata{
-		Name:        "raft.timeoutcampaign",
-		Help:        "Number of Raft replicas campaigning after missed heartbeats from leader",
-		Measurement: "Elections called after timeout",
-		Unit:        metric.Unit_COUNT,
 	}
 
 	// Raft message metrics.
@@ -1051,14 +998,6 @@ var (
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
-	// Export request counter.
-	metaExportEvalTotalDelay = metric.Metadata{
-		Name:        "exportrequest.delay.total",
-		Help:        "Amount by which evaluation of Export requests was delayed",
-		Measurement: "Nanoseconds",
-		Unit:        metric.Unit_NANOSECONDS,
-	}
-
 	// Encryption-at-rest metrics.
 	// TODO(mberhault): metrics for key age, per-key file/bytes counts.
 	metaEncryptionAlgorithm = metric.Metadata{
@@ -1074,12 +1013,6 @@ var (
 		Help:        "Largest latency between realtime and replica max closed timestamp",
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
-	}
-	metaClosedTimestampFailuresToClose = metric.Metadata{
-		Name:        "kv.closed_timestamp.failures_to_close",
-		Help:        "Number of times the min prop tracker failed to close timestamps due to epoch mismatch or pending evaluations",
-		Measurement: "Attempts",
-		Unit:        metric.Unit_COUNT,
 	}
 
 	metaConflictingIntentsResolveRejected = metric.Metadata{
@@ -1144,9 +1077,6 @@ type StoreMetrics struct {
 	// Follower read metrics.
 	FollowerReadsCount *metric.Counter
 
-	// Server-side transaction metrics.
-	CommitWaitsBeforeCommitTrigger *metric.Counter
-
 	// RocksDB metrics.
 	RdbBlockCacheHits           *metric.Gauge
 	RdbBlockCacheMisses         *metric.Gauge
@@ -1165,12 +1095,6 @@ type StoreMetrics struct {
 	RdbReadAmplification        *metric.Gauge
 	RdbNumSSTables              *metric.Gauge
 	RdbPendingCompaction        *metric.Gauge
-	RdbL0Sublevels              *metric.Gauge
-	RdbL0NumFiles               *metric.Gauge
-
-	// Disk health metrics.
-	DiskSlow    *metric.Gauge
-	DiskStalled *metric.Gauge
 
 	// TODO(mrtracy): This should be removed as part of #4465. This is only
 	// maintained to keep the current structure of NodeStatus; it would be
@@ -1178,15 +1102,14 @@ type StoreMetrics struct {
 	// accordingly.
 
 	// Range event metrics.
-	RangeSplits                                  *metric.Counter
-	RangeMerges                                  *metric.Counter
-	RangeAdds                                    *metric.Counter
-	RangeRemoves                                 *metric.Counter
-	RangeSnapshotsGenerated                      *metric.Counter
-	RangeSnapshotsAppliedByVoters                *metric.Counter
-	RangeSnapshotsAppliedForInitialUpreplication *metric.Counter
-	RangeSnapshotsAppliedByNonVoters             *metric.Counter
-	RangeRaftLeaderTransfers                     *metric.Counter
+	RangeSplits                  *metric.Counter
+	RangeMerges                  *metric.Counter
+	RangeAdds                    *metric.Counter
+	RangeRemoves                 *metric.Counter
+	RangeSnapshotsGenerated      *metric.Counter
+	RangeSnapshotsNormalApplied  *metric.Counter
+	RangeSnapshotsLearnerApplied *metric.Counter
+	RangeRaftLeaderTransfers     *metric.Counter
 
 	// Raft processing metrics.
 	RaftTicks                 *metric.Counter
@@ -1197,8 +1120,6 @@ type StoreMetrics struct {
 	RaftCommandCommitLatency  *metric.Histogram
 	RaftHandleReadyLatency    *metric.Histogram
 	RaftApplyCommittedLatency *metric.Histogram
-	RaftSchedulerLatency      *metric.Histogram
-	RaftTimeoutCampaign       *metric.Counter
 
 	// Raft message metrics.
 	//
@@ -1290,9 +1211,6 @@ type StoreMetrics struct {
 	AddSSTableProposalTotalDelay  *metric.Counter
 	AddSSTableProposalEngineDelay *metric.Counter
 
-	// Export request stats.
-	ExportRequestProposalTotalDelay *metric.Counter
-
 	// Encryption-at-rest stats.
 	// EncryptionAlgorithm is an enum representing the cipher in use, so we use a gauge.
 	EncryptionAlgorithm *metric.Gauge
@@ -1301,8 +1219,7 @@ type StoreMetrics struct {
 	RangeFeedMetrics *rangefeed.Metrics
 
 	// Closed timestamp metrics.
-	ClosedTimestampMaxBehindNanos  *metric.Gauge
-	ClosedTimestampFailuresToClose *metric.Gauge
+	ClosedTimestampMaxBehindNanos *metric.Gauge
 
 	// Intent cleanup failures
 	ConflictingIntentsResolveRejected *metric.Counter
@@ -1532,10 +1449,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Follower reads metrics.
 		FollowerReadsCount: metric.NewCounter(metaFollowerReadsCount),
 
-		// Server-side transaction metrics.
-		CommitWaitsBeforeCommitTrigger: metric.NewCounter(metaCommitWaitBeforeCommitTriggerCount),
-
-		// RocksDB/Pebble metrics.
+		// RocksDB metrics.
 		RdbBlockCacheHits:           metric.NewGauge(metaRdbBlockCacheHits),
 		RdbBlockCacheMisses:         metric.NewGauge(metaRdbBlockCacheMisses),
 		RdbBlockCacheUsage:          metric.NewGauge(metaRdbBlockCacheUsage),
@@ -1553,23 +1467,16 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RdbReadAmplification:        metric.NewGauge(metaRdbReadAmplification),
 		RdbNumSSTables:              metric.NewGauge(metaRdbNumSSTables),
 		RdbPendingCompaction:        metric.NewGauge(metaRdbPendingCompaction),
-		RdbL0Sublevels:              metric.NewGauge(metaRdbL0Sublevels),
-		RdbL0NumFiles:               metric.NewGauge(metaRdbL0NumFiles),
-
-		// Disk health metrics.
-		DiskSlow:    metric.NewGauge(metaDiskSlow),
-		DiskStalled: metric.NewGauge(metaDiskStalled),
 
 		// Range event metrics.
-		RangeSplits:                   metric.NewCounter(metaRangeSplits),
-		RangeMerges:                   metric.NewCounter(metaRangeMerges),
-		RangeAdds:                     metric.NewCounter(metaRangeAdds),
-		RangeRemoves:                  metric.NewCounter(metaRangeRemoves),
-		RangeSnapshotsGenerated:       metric.NewCounter(metaRangeSnapshotsGenerated),
-		RangeSnapshotsAppliedByVoters: metric.NewCounter(metaRangeSnapshotsAppliedByVoters),
-		RangeSnapshotsAppliedForInitialUpreplication: metric.NewCounter(metaRangeSnapshotsAppliedForInitialUpreplication),
-		RangeSnapshotsAppliedByNonVoters:             metric.NewCounter(metaRangeSnapshotsAppliedByNonVoter),
-		RangeRaftLeaderTransfers:                     metric.NewCounter(metaRangeRaftLeaderTransfers),
+		RangeSplits:                  metric.NewCounter(metaRangeSplits),
+		RangeMerges:                  metric.NewCounter(metaRangeMerges),
+		RangeAdds:                    metric.NewCounter(metaRangeAdds),
+		RangeRemoves:                 metric.NewCounter(metaRangeRemoves),
+		RangeSnapshotsGenerated:      metric.NewCounter(metaRangeSnapshotsGenerated),
+		RangeSnapshotsNormalApplied:  metric.NewCounter(metaRangeSnapshotsNormalApplied),
+		RangeSnapshotsLearnerApplied: metric.NewCounter(metaRangeSnapshotsLearnerApplied),
+		RangeRaftLeaderTransfers:     metric.NewCounter(metaRangeRaftLeaderTransfers),
 
 		// Raft processing metrics.
 		RaftTicks:                 metric.NewCounter(metaRaftTicks),
@@ -1580,8 +1487,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftCommandCommitLatency:  metric.NewLatency(metaRaftCommandCommitLatency, histogramWindow),
 		RaftHandleReadyLatency:    metric.NewLatency(metaRaftHandleReadyLatency, histogramWindow),
 		RaftApplyCommittedLatency: metric.NewLatency(metaRaftApplyCommittedLatency, histogramWindow),
-		RaftSchedulerLatency:      metric.NewLatency(metaRaftSchedulerLatency, histogramWindow),
-		RaftTimeoutCampaign:       metric.NewCounter(metaRaftTimeoutCampaign),
 
 		// Raft message metrics.
 		RaftRcvdMessages: [...]*metric.Counter{
@@ -1683,9 +1588,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		AddSSTableProposalTotalDelay:  metric.NewCounter(metaAddSSTableEvalTotalDelay),
 		AddSSTableProposalEngineDelay: metric.NewCounter(metaAddSSTableEvalEngineDelay),
 
-		// ExportRequest proposal.
-		ExportRequestProposalTotalDelay: metric.NewCounter(metaExportEvalTotalDelay),
-
 		// Encryption-at-rest.
 		EncryptionAlgorithm: metric.NewGauge(metaEncryptionAlgorithm),
 
@@ -1693,8 +1595,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RangeFeedMetrics: rangefeed.NewMetrics(),
 
 		// Closed timestamp metrics.
-		ClosedTimestampMaxBehindNanos:  metric.NewGauge(metaClosedTimestampMaxBehindNanos),
-		ClosedTimestampFailuresToClose: metric.NewGauge(metaClosedTimestampFailuresToClose),
+		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
 		// Intent leak metrics
 		ConflictingIntentsResolveRejected: metric.NewCounter(metaConflictingIntentsResolveRejected),
@@ -1744,32 +1645,24 @@ func (sm *TenantsStorageMetrics) subtractMVCCStats(
 	sm.incMVCCGauges(ctx, tenantID, neg)
 }
 
-func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
-	sm.RdbBlockCacheHits.Update(m.BlockCache.Hits)
-	sm.RdbBlockCacheMisses.Update(m.BlockCache.Misses)
-	sm.RdbBlockCacheUsage.Update(m.BlockCache.Size)
-	// TODO(jackson): Delete RdbBlockCachePinnedUsage or calculate the
-	// equivalent (the sum of IteratorMetrics.ReadAmp for all open iterator,
-	// times the block size).
-	sm.RdbBlockCachePinnedUsage.Update(0)
-	sm.RdbBloomFilterPrefixUseful.Update(m.Filter.Hits)
-	sm.RdbBloomFilterPrefixChecked.Update(m.Filter.Hits + m.Filter.Misses)
-	sm.RdbMemtableTotalSize.Update(int64(m.MemTable.Size))
-	sm.RdbFlushes.Update(m.Flush.Count)
-	sm.RdbFlushedBytes.Update(int64(m.Levels[0].BytesFlushed))
-	sm.RdbCompactions.Update(m.Compact.Count)
-	sm.RdbIngestedBytes.Update(int64(m.IngestedBytes()))
-	compactedRead, compactedWritten := m.CompactedBytes()
-	sm.RdbCompactedBytesRead.Update(int64(compactedRead))
-	sm.RdbCompactedBytesWritten.Update(int64(compactedWritten))
-	sm.RdbTableReadersMemEstimate.Update(m.TableCache.Size)
-	sm.RdbReadAmplification.Update(int64(m.ReadAmp()))
-	sm.RdbPendingCompaction.Update(int64(m.Compact.EstimatedDebt))
-	sm.RdbL0Sublevels.Update(int64(m.Levels[0].Sublevels))
-	sm.RdbL0NumFiles.Update(m.Levels[0].NumFiles)
-	sm.RdbNumSSTables.Update(m.NumSSTables())
-	sm.DiskSlow.Update(m.DiskSlowCount)
-	sm.DiskStalled.Update(m.DiskStallCount)
+func (sm *StoreMetrics) updateRocksDBStats(stats storage.Stats) {
+	// We do not grab a lock here, because it's not possible to get a point-in-
+	// time snapshot of RocksDB stats. Retrieving RocksDB stats doesn't grab any
+	// locks, and there's no way to retrieve multiple stats in a single operation.
+	sm.RdbBlockCacheHits.Update(stats.BlockCacheHits)
+	sm.RdbBlockCacheMisses.Update(stats.BlockCacheMisses)
+	sm.RdbBlockCacheUsage.Update(stats.BlockCacheUsage)
+	sm.RdbBlockCachePinnedUsage.Update(stats.BlockCachePinnedUsage)
+	sm.RdbBloomFilterPrefixUseful.Update(stats.BloomFilterPrefixUseful)
+	sm.RdbBloomFilterPrefixChecked.Update(stats.BloomFilterPrefixChecked)
+	sm.RdbMemtableTotalSize.Update(stats.MemtableTotalSize)
+	sm.RdbFlushes.Update(stats.Flushes)
+	sm.RdbFlushedBytes.Update(stats.FlushedBytes)
+	sm.RdbCompactions.Update(stats.Compactions)
+	sm.RdbIngestedBytes.Update(stats.IngestedBytes)
+	sm.RdbCompactedBytesRead.Update(stats.CompactedBytesRead)
+	sm.RdbCompactedBytesWritten.Update(stats.CompactedBytesWritten)
+	sm.RdbTableReadersMemEstimate.Update(stats.TableReadersMemEstimate)
 }
 
 func (sm *StoreMetrics) updateEnvStats(stats storage.EnvStats) {

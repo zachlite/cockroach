@@ -49,7 +49,6 @@ func TestContextualHelp(t *testing.T) {
 		{`ALTER TYPE t ADD VALUE ??`, `ALTER TYPE`},
 		{`ALTER TYPE t SET ??`, `ALTER TYPE`},
 		{`ALTER TYPE t RENAME ??`, `ALTER TYPE`},
-		{`ALTER TYPE t DROP VALUE ??`, `ALTER TYPE`},
 
 		{`ALTER INDEX foo@bar RENAME ??`, `ALTER INDEX`},
 		{`ALTER INDEX foo@bar RENAME TO blih ??`, `ALTER INDEX`},
@@ -245,10 +244,6 @@ func TestContextualHelp(t *testing.T) {
 		{`PAUSE SCHEDULE ??`, `PAUSE SCHEDULES`},
 		{`PAUSE SCHEDULES ??`, `PAUSE SCHEDULES`},
 
-		{`REASSIGN OWNED BY ?? TO ??`, `REASSIGN OWNED BY`},
-		{`REASSIGN OWNED BY foo, bar TO ??`, `REASSIGN OWNED BY`},
-		{`DROP OWNED BY ??`, `DROP OWNED BY`},
-
 		{`RESUME ??`, `RESUME`},
 		{`RESUME JOB ??`, `RESUME JOBS`},
 		{`RESUME JOBS ??`, `RESUME JOBS`},
@@ -285,11 +280,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`SHOW HISTOGRAM ??`, `SHOW HISTOGRAM`},
 
-		{`SHOW QUERIES ??`, `SHOW STATEMENTS`},
-		{`SHOW LOCAL QUERIES ??`, `SHOW STATEMENTS`},
-
-		{`SHOW STATEMENTS ??`, `SHOW STATEMENTS`},
-		{`SHOW LOCAL STATEMENTS ??`, `SHOW STATEMENTS`},
+		{`SHOW QUERIES ??`, `SHOW QUERIES`},
+		{`SHOW LOCAL QUERIES ??`, `SHOW QUERIES`},
 
 		{`SHOW TRACE ??`, `SHOW TRACE`},
 		{`SHOW TRACE FOR SESSION ??`, `SHOW TRACE`},
@@ -338,8 +330,6 @@ func TestContextualHelp(t *testing.T) {
 
 		{`SHOW PARTITIONS FROM ??`, `SHOW PARTITIONS`},
 
-		{`SHOW REGIONS ??`, `SHOW REGIONS`},
-
 		{`SHOW ROLES ??`, `SHOW ROLES`},
 
 		{`SHOW SCHEMAS FROM ??`, `SHOW SCHEMAS`},
@@ -364,8 +354,6 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW RANGES ??`, `SHOW RANGES`},
 
 		{`SHOW USERS ??`, `SHOW USERS`},
-
-		{`SHOW ZONE CONFIGURATION FROM ??`, `SHOW ZONE CONFIGURATION`},
 
 		{`TRUNCATE foo ??`, `TRUNCATE`},
 		{`TRUNCATE foo, ??`, `TRUNCATE`},

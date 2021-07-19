@@ -66,11 +66,9 @@ func (d *ChanDialer) Dial(ctx context.Context, nodeID roachpb.NodeID) (ctpb.Clie
 		},
 	}
 
-	if err := d.stopper.RunAsyncTask(ctx, "closedts-dial", func(ctx context.Context) {
+	d.stopper.RunWorker(ctx, func(ctx context.Context) {
 		_ = d.server.Get((*incomingClient)(c))
-	}); err != nil {
-		return nil, err
-	}
+	})
 	return c, nil
 
 }

@@ -35,7 +35,7 @@ import (
 )
 
 func descForTable(
-	ctx context.Context, t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
+	t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
 ) *tabledesc.Mutable {
 	t.Helper()
 	parsed, err := parser.Parse(create)
@@ -53,9 +53,8 @@ func descForTable(
 		name := parsed[0].AST.(*tree.CreateSequence).Name.String()
 
 		ts := hlc.Timestamp{WallTime: nanos}
-		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
+		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRole)
 		desc, err := sql.NewSequenceTableDesc(
-			ctx,
 			name,
 			tree.SequenceOptions{},
 			parent,
@@ -64,18 +63,17 @@ func descForTable(
 			ts,
 			priv,
 			tree.PersistencePermanent,
-			nil,   /* params */
-			false, /* isMultiRegion */
+			nil, /* params */
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fks.resolver.tableNameToDesc[name] = desc
+		fks.resolver[name] = desc
 	} else {
 		stmt = parsed[0].AST.(*tree.CreateTable)
 	}
 	semaCtx := tree.MakeSemaContext()
-	table, err := MakeTestingSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
+	table, err := MakeSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
 	if err != nil {
 		t.Fatalf("could not interpret %q: %v", create, err)
 	}
@@ -87,7 +85,7 @@ func descForTable(
 
 var testEvalCtx = &tree.EvalContext{
 	SessionData: &sessiondata.SessionData{
-		Location: time.UTC,
+		DataConversion: sessiondata.DataConversionConfig{Location: time.UTC},
 	},
 	StmtTimestamp: timeutil.Unix(100000000, 0),
 	Settings:      cluster.MakeTestingClusterSettings(),
@@ -256,12 +254,6 @@ func (es *generatorExternalStorage) ReadFile(
 	return es.gen.Open()
 }
 
-func (es *generatorExternalStorage) ReadFileAt(
-	ctx context.Context, basename string, offset int64,
-) (io.ReadCloser, int64, error) {
-	panic("unimplemented")
-}
-
 func (es *generatorExternalStorage) Close() error {
 	return nil
 }
@@ -271,9 +263,13 @@ func (es *generatorExternalStorage) Size(ctx context.Context, basename string) (
 	return int64(es.gen.size), nil
 }
 
-func (es *generatorExternalStorage) Writer(
-	ctx context.Context, basename string,
-) (io.WriteCloser, error) {
+func (es *generatorExternalStorage) WriteFile(
+	ctx context.Context, basename string, content io.ReadSeeker,
+) error {
+	return errors.New("unsupported")
+}
+
+func (es *generatorExternalStorage) ListFiles(ctx context.Context, _ string) ([]string, error) {
 	return nil, errors.New("unsupported")
 }
 

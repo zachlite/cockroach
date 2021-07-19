@@ -29,7 +29,7 @@ type rowHelper struct {
 
 	TableDesc catalog.TableDescriptor
 	// Secondary indexes.
-	Indexes      []catalog.Index
+	Indexes      []descpb.IndexDescriptor
 	indexEntries []rowenc.IndexEntry
 
 	// Computed during initialization for pretty-printing.
@@ -38,13 +38,12 @@ type rowHelper struct {
 
 	// Computed and cached.
 	primaryIndexKeyPrefix []byte
-	primaryIndexKeyCols   catalog.TableColSet
-	primaryIndexValueCols catalog.TableColSet
+	primaryIndexCols      map[descpb.ColumnID]struct{}
 	sortedColumnFamilies  map[descpb.FamilyID][]descpb.ColumnID
 }
 
 func newRowHelper(
-	codec keys.SQLCodec, desc catalog.TableDescriptor, indexes []catalog.Index,
+	codec keys.SQLCodec, desc catalog.TableDescriptor, indexes []descpb.IndexDescriptor,
 ) rowHelper {
 	rh := rowHelper{Codec: codec, TableDesc: desc, Indexes: indexes}
 
@@ -54,7 +53,7 @@ func newRowHelper(
 
 	rh.secIndexValDirs = make([][]encoding.Direction, len(rh.Indexes))
 	for i := range rh.Indexes {
-		rh.secIndexValDirs[i] = catalogkeys.IndexKeyValDirs(rh.Indexes[i])
+		rh.secIndexValDirs[i] = catalogkeys.IndexKeyValDirs(&rh.Indexes[i])
 	}
 
 	return rh
@@ -65,7 +64,7 @@ func newRowHelper(
 // encodeSecondaryIndexes. includeEmpty details whether the results should
 // include empty secondary index k/v pairs.
 func (rh *rowHelper) encodeIndexes(
-	colIDtoRowIndex catalog.TableColMap,
+	colIDtoRowIndex map[descpb.ColumnID]int,
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
 	includeEmpty bool,
@@ -83,7 +82,7 @@ func (rh *rowHelper) encodeIndexes(
 
 // encodePrimaryIndex encodes the primary index key.
 func (rh *rowHelper) encodePrimaryIndex(
-	colIDtoRowIndex catalog.TableColMap, values []tree.Datum,
+	colIDtoRowIndex map[descpb.ColumnID]int, values []tree.Datum,
 ) (primaryIndexKey []byte, err error) {
 	if rh.primaryIndexKeyPrefix == nil {
 		rh.primaryIndexKeyPrefix = rowenc.MakeIndexKeyPrefix(rh.Codec, rh.TableDesc,
@@ -106,7 +105,7 @@ func (rh *rowHelper) encodePrimaryIndex(
 // includeEmpty details whether the results should include empty secondary index
 // k/v pairs.
 func (rh *rowHelper) encodeSecondaryIndexes(
-	colIDtoRowIndex catalog.TableColMap,
+	colIDtoRowIndex map[descpb.ColumnID]int,
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
 	includeEmpty bool,
@@ -118,8 +117,8 @@ func (rh *rowHelper) encodeSecondaryIndexes(
 	rh.indexEntries = rh.indexEntries[:0]
 
 	for i := range rh.Indexes {
-		index := rh.Indexes[i]
-		if !ignoreIndexes.Contains(int(index.GetID())) {
+		index := &rh.Indexes[i]
+		if !ignoreIndexes.Contains(int(index.ID)) {
 			entries, err := rowenc.EncodeSecondaryIndex(rh.Codec, rh.TableDesc, index, colIDtoRowIndex, values, includeEmpty)
 			if err != nil {
 				return nil, err
@@ -131,19 +130,22 @@ func (rh *rowHelper) encodeSecondaryIndexes(
 	return rh.indexEntries, nil
 }
 
-// skipColumnNotInPrimaryIndexValue returns true if the value at column colID
-// does not need to be encoded, either because it is already part of the primary
-// key, or because it is not part of the primary index altogether. Composite
+// skipColumnInPK returns true if the value at column colID does not need
+// to be encoded because it is already part of the primary key. Composite
 // datums are considered too, so a composite datum in a PK will return false.
-func (rh *rowHelper) skipColumnNotInPrimaryIndexValue(
-	colID descpb.ColumnID, value tree.Datum,
+// TODO(dan): This logic is common and being moved into TableDescriptor (see
+// #6233). Once it is, use the shared one.
+func (rh *rowHelper) skipColumnInPK(
+	colID descpb.ColumnID, family descpb.FamilyID, value tree.Datum,
 ) (bool, error) {
-	if rh.primaryIndexKeyCols.Empty() {
-		rh.primaryIndexKeyCols = rh.TableDesc.GetPrimaryIndex().CollectKeyColumnIDs()
-		rh.primaryIndexValueCols = rh.TableDesc.GetPrimaryIndex().CollectPrimaryStoredColumnIDs()
+	if rh.primaryIndexCols == nil {
+		rh.primaryIndexCols = make(map[descpb.ColumnID]struct{})
+		for _, colID := range rh.TableDesc.GetPrimaryIndex().ColumnIDs {
+			rh.primaryIndexCols[colID] = struct{}{}
+		}
 	}
-	if !rh.primaryIndexKeyCols.Contains(colID) {
-		return !rh.primaryIndexValueCols.Contains(colID), nil
+	if _, ok := rh.primaryIndexCols[colID]; !ok {
+		return false, nil
 	}
 	if cdatum, ok := value.(tree.CompositeDatum); ok {
 		// Composite columns are encoded in both the key and the value.

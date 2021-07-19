@@ -30,7 +30,7 @@ SELECT * FROM t WHERE a = '2015-08-25 04:45:45.53453+01:00'::timestamp
 2015-08-25 04:45:45.53453 +0000 +0000  2015-08-25 00:00:00 +0000 +0000  02:45:02.234
 
 # insert duplicate value with different time zone offset
-statement error duplicate key value violates unique constraint "primary"\nDETAIL: Key \(a\)=\('2015-08-30 03:34:45\.34567'\) already exists\.
+statement error duplicate key value \(a\)=\('2015-08-30 03:34:45\.34567'\) violates unique constraint "primary"
 INSERT INTO t VALUES
   ('2015-08-30 03:34:45.34567-07:00', '2015-08-31', '35h2s')
 
@@ -1094,9 +1094,9 @@ query TTBTTTB
 SHOW COLUMNS FROM tz
 ----
 a  INT8         false  NULL  ·  {primary}  false
-b  TIMESTAMP    true   NULL  ·  {primary}  false
-c  TIMESTAMPTZ  true   NULL  ·  {primary}  false
-d  TIMESTAMPTZ  true   NULL  ·  {primary}  false
+b  TIMESTAMP    true   NULL  ·  {}         false
+c  TIMESTAMPTZ  true   NULL  ·  {}         false
+d  TIMESTAMPTZ  true   NULL  ·  {}         false
 
 statement ok
 INSERT INTO tz VALUES
@@ -1522,8 +1522,8 @@ ORDER BY
 ----
 01:00:00               00:30:00          02:00:00                00:30:00          02:00:00                04:14:01.320914                 00:14:10.32
 1 day                  12:00:00          2 days                  12:00:00          2 days                  4 days 05:36:31.701948          05:40:07.68
-1 mon                  15 days           2 mons                  15 days           2 mons                  4 mons 7 days 00:15:51.0912     7 days 02:03:50.4
-1 mon 2 days 04:00:00  16 days 02:00:00  2 mons 4 days 08:00:00  16 days 02:00:00  2 mons 4 days 08:00:00  4 mons 15 days 28:24:59.778753  7 days 14:20:47.04
+1 mon                  15 days           2 mons                  15 days           2 mons                  4 mons 7 days 00:15:51.058425   7 days 02:03:50.4
+1 mon 2 days 04:00:00  16 days 02:00:00  2 mons 4 days 08:00:00  16 days 02:00:00  2 mons 4 days 08:00:00  4 mons 15 days 28:24:59.745978  7 days 14:20:47.04
 
 subtest tz_utc_normalization
 

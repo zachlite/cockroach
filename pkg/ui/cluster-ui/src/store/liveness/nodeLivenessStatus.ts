@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -11,4 +11,4 @@
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 
 export const NodeLivenessStatus =
-  cockroach.kv.kvserver.liveness.livenesspb.NodeLivenessStatus;
+  cockroach.kv.kvserver.storagepb.NodeLivenessStatus;

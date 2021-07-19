@@ -17,7 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/observedts"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -32,20 +32,15 @@ import (
 // iterator to evaluate the batch and then updates the timestamp cache to
 // reflect the key spans that it read.
 func (r *Replica) executeReadOnlyBatch(
-	ctx context.Context, ba *roachpb.BatchRequest, g *concurrency.Guard,
+	ctx context.Context, ba *roachpb.BatchRequest, st kvserverpb.LeaseStatus, g *concurrency.Guard,
 ) (br *roachpb.BatchResponse, _ *concurrency.Guard, pErr *roachpb.Error) {
 	r.readOnlyCmdMu.RLock()
 	defer r.readOnlyCmdMu.RUnlock()
 
 	// Verify that the batch can be executed.
-	st, err := r.checkExecutionCanProceed(ctx, ba, g)
-	if err != nil {
+	if _, err := r.checkExecutionCanProceed(ctx, ba, g, &st); err != nil {
 		return nil, g, roachpb.NewError(err)
 	}
-
-	// Compute the transaction's local uncertainty limit using observed
-	// timestamps, which can help avoid uncertainty restarts.
-	localUncertaintyLimit := observedts.ComputeLocalUncertaintyLimit(ba.Txn, st)
 
 	// Evaluate read-only batch command.
 	spans := g.LatchSpans()
@@ -55,11 +50,6 @@ func (r *Replica) executeReadOnlyBatch(
 	// we're stuck with a ReadWriter because of the way evaluateBatch is
 	// designed.
 	rw := r.store.Engine().NewReadOnly()
-	if !rw.ConsistentIterators() {
-		// This is not currently needed for correctness, but future optimizations
-		// may start relying on this, so we assert here.
-		panic("expected consistent iterators")
-	}
 	if util.RaceEnabled {
 		rw = spanset.NewReadWriterAt(rw, spans, ba.Timestamp)
 	}
@@ -71,83 +61,25 @@ func (r *Replica) executeReadOnlyBatch(
 	// turn means that we can bump the timestamp cache *before* evaluation
 	// without risk of starving writes. Once we start doing that, we're free to
 	// release latches immediately after we acquire an engine iterator as long
-	// as we're performing a non-locking read. Note that this also requires that
-	// the request is not being optimistically evaluated (optimistic evaluation
-	// does not wait for latches or check locks). It would also be nice, but not
-	// required for correctness, that the read-only engine eagerly create an
-	// iterator (that is later cloned) while the latches are held, so that this
-	// request does not "see" the effect of any later requests that happen after
-	// the latches are released.
+	// as we're performing a non-locking read.
 
 	var result result.Result
-	br, result, pErr = r.executeReadOnlyBatchWithServersideRefreshes(
-		ctx, rw, rec, ba, localUncertaintyLimit, spans,
-	)
+	br, result, pErr = r.executeReadOnlyBatchWithServersideRefreshes(ctx, rw, rec, ba, spans)
 
 	// If the request hit a server-side concurrency retry error, immediately
-	// propagate the error. Don't assume ownership of the concurrency guard.
+	// proagate the error. Don't assume ownership of the concurrency guard.
 	if isConcurrencyRetryError(pErr) {
-		if g.EvalKind == concurrency.OptimisticEval {
-			// Since this request was not holding latches, it could have raced with
-			// intent resolution. So we can't trust it to add discovered locks, if
-			// there is a latch conflict. This means that a discovered lock plus a
-			// latch conflict will likely cause the request to evaluate at least 3
-			// times: optimistically; pessimistically and add the discovered lock;
-			// wait until resolution and evaluate pessimistically again.
-			//
-			// TODO(sumeer): scans and gets are correctly setting the resume span
-			// when returning a WriteIntentError. I am not sure about other
-			// concurrency errors. We could narrow the spans we check the latch
-			// conflicts for by using collectSpansRead as done below in the
-			// non-error path.
-			if !g.CheckOptimisticNoLatchConflicts() {
-				return nil, g, roachpb.NewError(roachpb.NewOptimisticEvalConflictsError())
-			}
-		}
-		pErr = maybeAttachLease(pErr, &st.Lease)
 		return nil, g, pErr
 	}
 
-	if g.EvalKind == concurrency.OptimisticEval {
-		if pErr == nil {
-			// Gather the spans that were read -- we distinguish the spans in the
-			// request from the spans that were actually read, using resume spans in
-			// the response.
-			latchSpansRead, lockSpansRead, err := r.collectSpansRead(ba, br)
-			if err != nil {
-				return nil, g, roachpb.NewError(err)
-			}
-			if ok := g.CheckOptimisticNoConflicts(latchSpansRead, lockSpansRead); !ok {
-				return nil, g, roachpb.NewError(roachpb.NewOptimisticEvalConflictsError())
-			}
-		} else {
-			// There was an error, that was not classified as a concurrency retry
-			// error, and this request was not holding latches. This should be rare,
-			// and in the interest of not having subtle correctness bugs, we retry
-			// pessimistically.
-			return nil, g, roachpb.NewError(roachpb.NewOptimisticEvalConflictsError())
-		}
-	}
-
 	// Handle any local (leaseholder-only) side-effects of the request.
-	//
-	// Processing these is fine for optimistic evaluation since these were non
-	// conflicting intents so intent resolution could have been racing with this
-	// request even if latches were held.
 	intents := result.Local.DetachEncounteredIntents()
 	if pErr == nil {
 		pErr = r.handleReadOnlyLocalEvalResult(ctx, ba, result.Local)
 	}
 
 	// Otherwise, update the timestamp cache and release the concurrency guard.
-	// Note:
-	// - The update to the timestamp cache is not gated on pErr == nil,
-	//   since certain semantic errors (e.g. ConditionFailedError on CPut)
-	//   require updating the timestamp cache (see updatesTSCacheOnErr).
-	// - For optimistic evaluation, used for limited scans, the update to the
-	//   timestamp cache limits itself to the spans that were read, by using
-	//   the ResumeSpans.
-	ec, g := endCmds{repl: r, g: g, st: st}, nil
+	ec, g := endCmds{repl: r, g: g}, nil
 	ec.done(ctx, ba, br, pErr)
 
 	// Semi-synchronously process any intents that need resolving here in
@@ -188,7 +120,6 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 	rw storage.ReadWriter,
 	rec batcheval.EvalContext,
 	ba *roachpb.BatchRequest,
-	lul hlc.Timestamp,
 	latchSpans *spanset.SpanSet,
 ) (br *roachpb.BatchResponse, res result.Result, pErr *roachpb.Error) {
 	log.Event(ctx, "executing read-only batch")
@@ -197,7 +128,7 @@ func (r *Replica) executeReadOnlyBatchWithServersideRefreshes(
 		if retries > 0 {
 			log.VEventf(ctx, 2, "server-side retry of batch")
 		}
-		br, res, pErr = evaluateBatch(ctx, kvserverbase.CmdIDKey(""), rw, rec, nil, ba, lul, true /* readOnly */)
+		br, res, pErr = evaluateBatch(ctx, kvserverbase.CmdIDKey(""), rw, rec, nil, ba, true /* readOnly */)
 		// If we can retry, set a higher batch timestamp and continue.
 		// Allow one retry only.
 		if pErr == nil || retries > 0 || !canDoServersideRetry(ctx, pErr, ba, br, latchSpans, nil /* deadline */) {
@@ -236,70 +167,18 @@ func (r *Replica) handleReadOnlyLocalEvalResult(
 		lResult.AcquiredLocks = nil
 	}
 
+	if !lResult.FreezeStart.IsEmpty() {
+		// A merge is (likely) about to be carried out, and this replica needs to
+		// block all non-read traffic until the merge either commits or aborts. See
+		// docs/tech-notes/range-merges.md.
+		if err := r.maybeWatchForMerge(ctx, lResult.FreezeStart); err != nil {
+			return roachpb.NewError(err)
+		}
+		lResult.FreezeStart = hlc.Timestamp{}
+	}
+
 	if !lResult.IsZero() {
 		log.Fatalf(ctx, "unhandled field in LocalEvalResult: %s", pretty.Diff(lResult, result.LocalResult{}))
 	}
 	return nil
-}
-
-// collectSpansRead uses the spans declared in the requests, and the resume
-// spans in the responses, to construct the effective spans that were read,
-// and uses that to compute the latch and lock spans.
-func (r *Replica) collectSpansRead(
-	ba *roachpb.BatchRequest, br *roachpb.BatchResponse,
-) (latchSpans, lockSpans *spanset.SpanSet, _ error) {
-	baCopy := *ba
-	baCopy.Requests = make([]roachpb.RequestUnion, len(baCopy.Requests))
-	j := 0
-	for i := 0; i < len(baCopy.Requests); i++ {
-		baReq := ba.Requests[i]
-		req := baReq.GetInner()
-		header := req.Header()
-
-		resp := br.Responses[i].GetInner()
-		if resp.Header().ResumeSpan == nil {
-			// Fully evaluated.
-			baCopy.Requests[j] = baReq
-			j++
-			continue
-		}
-
-		switch t := resp.(type) {
-		case *roachpb.ScanResponse:
-			if header.Key.Equal(t.ResumeSpan.Key) {
-				// The request did not evaluate. Ignore it.
-				continue
-			}
-			// The scan will resume at the inclusive ResumeSpan.Key. So
-			// ResumeSpan.Key has not been read and becomes the exclusive end key of
-			// what was read.
-			header.EndKey = t.ResumeSpan.Key
-		case *roachpb.ReverseScanResponse:
-			if header.EndKey.Equal(t.ResumeSpan.EndKey) {
-				// The request did not evaluate. Ignore it.
-				continue
-			}
-			// The scan will resume at the exclusive ResumeSpan.EndKey and proceed
-			// towards the current header.Key. So ResumeSpan.EndKey has been read
-			// and becomes the inclusive start key of what was read.
-			header.Key = t.ResumeSpan.EndKey
-		default:
-			// Consider it fully evaluated, which is safe.
-			baCopy.Requests[j] = baReq
-			j++
-			continue
-		}
-		// The ResumeSpan has changed the header.
-		req = req.ShallowCopy()
-		req.SetHeader(header)
-		baCopy.Requests[j].MustSetInner(req)
-		j++
-	}
-	baCopy.Requests = baCopy.Requests[:j]
-
-	// Collect the batch's declared spans again, this time with the
-	// span bounds constrained to what was read.
-	var err error
-	latchSpans, lockSpans, _, err = r.collectSpans(&baCopy)
-	return latchSpans, lockSpans, err
 }

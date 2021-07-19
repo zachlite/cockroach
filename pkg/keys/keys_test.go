@@ -36,6 +36,11 @@ func TestStoreKeyEncodeDecode(t *testing.T) {
 		{key: StoreClusterVersionKey(), expSuffix: localStoreClusterVersionSuffix, expDetail: nil},
 		{key: StoreLastUpKey(), expSuffix: localStoreLastUpSuffix, expDetail: nil},
 		{key: StoreHLCUpperBoundKey(), expSuffix: localStoreHLCUpperBoundSuffix, expDetail: nil},
+		{
+			key:       StoreSuggestedCompactionKey(roachpb.Key("a"), roachpb.Key("z")),
+			expSuffix: localStoreSuggestedCompactionSuffix,
+			expDetail: encoding.EncodeBytesAscending(encoding.EncodeBytesAscending(nil, roachpb.Key("a")), roachpb.Key("z")),
+		},
 	}
 	for _, test := range testCases {
 		t.Run("", func(t *testing.T) {
@@ -50,12 +55,20 @@ func TestStoreKeyEncodeDecode(t *testing.T) {
 	}
 }
 
-func TestStoreCachedSettingsKeyDecode(t *testing.T) {
-	origSettingKey := roachpb.Key("testSettingKey")
-	actualKey := StoreCachedSettingsKey(origSettingKey)
-	settingKey, err := DecodeStoreCachedSettingsKey(actualKey)
-	require.NoError(t, err)
-	require.True(t, settingKey.Equal(origSettingKey))
+func TestStoreSuggestedCompactionKeyDecode(t *testing.T) {
+	origStart := roachpb.Key("a")
+	origEnd := roachpb.Key("z")
+	key := StoreSuggestedCompactionKey(origStart, origEnd)
+	start, end, err := DecodeStoreSuggestedCompactionKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !start.Equal(origStart) {
+		t.Errorf("expected %s == %s", start, origStart)
+	}
+	if !end.Equal(origEnd) {
+		t.Errorf("expected %s == %s", end, origEnd)
+	}
 }
 
 // TestLocalKeySorting is a sanity check to make sure that
@@ -66,7 +79,7 @@ func TestKeySorting(t *testing.T) {
 		roachpb.RKey("\x01").Less(roachpb.RKey("\x01\x00"))) {
 		t.Fatalf("something is seriously wrong with this machine")
 	}
-	if bytes.Compare(LocalPrefix, Meta1Prefix) >= 0 {
+	if bytes.Compare(localPrefix, Meta1Prefix) >= 0 {
 		t.Fatalf("local key spilling into replicated ranges")
 	}
 	if !bytes.Equal(roachpb.Key(""), roachpb.Key(nil)) {
@@ -140,7 +153,7 @@ func TestKeyAddressError(t *testing.T) {
 			RangeLastReplicaGCTimestampKey(0),
 		},
 		"local key .* malformed": {
-			makeKey(LocalPrefix, roachpb.Key("z")),
+			makeKey(localPrefix, roachpb.Key("z")),
 		},
 	}
 	for regexp, keyList := range testCases {
@@ -708,29 +721,6 @@ func TestTenantPrefix(t *testing.T) {
 			require.Len(t, rem, 0)
 			require.Equal(t, uint64(tableID), retTableID)
 			require.NoError(t, err)
-		})
-	}
-}
-
-func TestLockTableKeyEncodeDecode(t *testing.T) {
-	expectedPrefix := append([]byte(nil), LocalRangeLockTablePrefix...)
-	expectedPrefix = append(expectedPrefix, LockTableSingleKeyInfix...)
-	testCases := []struct {
-		key roachpb.Key
-	}{
-		{key: roachpb.Key("foo")},
-		{key: roachpb.Key("a")},
-		{key: roachpb.Key("")},
-		// Causes a doubly-local range local key.
-		{key: RangeDescriptorKey(roachpb.RKey("baz"))},
-	}
-	for _, test := range testCases {
-		t.Run("", func(t *testing.T) {
-			ltKey, _ := LockTableSingleKey(test.key, nil)
-			require.True(t, bytes.HasPrefix(ltKey, expectedPrefix))
-			k, err := DecodeLockTableSingleKey(ltKey)
-			require.NoError(t, err)
-			require.Equal(t, test.key, k)
 		})
 	}
 }

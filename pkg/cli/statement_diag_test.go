@@ -20,8 +20,8 @@ import (
 )
 
 func Example_statement_diag() {
-	c := NewCLITest(TestCLIParams{})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{})
+	defer c.cleanup()
 
 	// First, set up some diagnostics state.
 	commands := []string{

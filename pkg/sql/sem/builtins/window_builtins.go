@@ -590,9 +590,7 @@ func newNtileWindow([]*types.T, *tree.EvalContext) tree.WindowFunc {
 	return &ntileWindow{}
 }
 
-// ErrInvalidArgumentForNtile is thrown when the ntile function is given an
-// argument less than or equal to zero.
-var ErrInvalidArgumentForNtile = pgerror.Newf(
+var errInvalidArgumentForNtile = pgerror.Newf(
 	pgcode.InvalidParameterValue, "argument of ntile() must be greater than zero")
 
 func (w *ntileWindow) Compute(
@@ -615,7 +613,7 @@ func (w *ntileWindow) Compute(
 		nbuckets := int(tree.MustBeDInt(arg))
 		if nbuckets <= 0 {
 			// per spec: If argument is less than or equal to 0, then an error is returned.
-			return nil, ErrInvalidArgumentForNtile
+			return nil, errInvalidArgumentForNtile
 		}
 
 		w.ntile = tree.NewDInt(1)

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
@@ -43,10 +42,10 @@ func GetCastOperator(
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, toType, resultIdx)
 	if fromType.Family() == types.UnknownFamily {
 		return &castOpNullAny{
-			OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-			allocator:                allocator,
-			colIdx:                   colIdx,
-			outputIdx:                resultIdx,
+			OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+			allocator:            allocator,
+			colIdx:               colIdx,
+			outputIdx:            resultIdx,
 		}, nil
 	}
 	leftType, rightType := fromType, toType
@@ -61,11 +60,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castBoolBoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.FloatFamily:
@@ -73,39 +72,39 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castBoolFloat64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.IntFamily:
 				switch rightType.Width() {
 				case 16:
 					return &castBoolInt16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case 32:
 					return &castBoolInt32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case -1:
 				default:
 					return &castBoolInt64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -120,51 +119,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castDecimalBoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
-					}, nil
-				}
-			case types.IntFamily:
-				switch rightType.Width() {
-				case 16:
-					return &castDecimalInt16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
-					}, nil
-				case 32:
-					return &castDecimalInt32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
-					}, nil
-				case -1:
-				default:
-					return &castDecimalInt64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
-					}, nil
-				}
-			case types.FloatFamily:
-				switch rightType.Width() {
-				case -1:
-				default:
-					return &castDecimalFloat64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.DecimalFamily:
@@ -172,11 +131,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castDecimalDecimalOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -189,28 +148,28 @@ func GetCastOperator(
 				switch rightType.Width() {
 				case 16:
 					return &castInt16Int16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case 32:
 					return &castInt16Int32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case -1:
 				default:
 					return &castInt16Int64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.BoolFamily:
@@ -218,11 +177,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt16BoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.DecimalFamily:
@@ -230,11 +189,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt16DecimalOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.FloatFamily:
@@ -242,11 +201,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt16Float64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -256,28 +215,28 @@ func GetCastOperator(
 				switch rightType.Width() {
 				case 16:
 					return &castInt32Int16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case 32:
 					return &castInt32Int32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case -1:
 				default:
 					return &castInt32Int64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.BoolFamily:
@@ -285,11 +244,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt32BoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.DecimalFamily:
@@ -297,11 +256,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt32DecimalOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.FloatFamily:
@@ -309,11 +268,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt32Float64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -324,28 +283,28 @@ func GetCastOperator(
 				switch rightType.Width() {
 				case 16:
 					return &castInt64Int16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case 32:
 					return &castInt64Int32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case -1:
 				default:
 					return &castInt64Int64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.BoolFamily:
@@ -353,11 +312,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt64BoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.DecimalFamily:
@@ -365,11 +324,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt64DecimalOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.FloatFamily:
@@ -377,11 +336,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castInt64Float64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -396,11 +355,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castFloat64Float64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.BoolFamily:
@@ -408,11 +367,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castFloat64BoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.DecimalFamily:
@@ -420,39 +379,39 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castFloat64DecimalOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case types.IntFamily:
 				switch rightType.Width() {
 				case 16:
 					return &castFloat64Int16Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case 32:
 					return &castFloat64Int32Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				case -1:
 				default:
 					return &castFloat64Int64Op{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -467,11 +426,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castDatumBoolOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			case typeconv.DatumVecCanonicalTypeFamily:
@@ -479,11 +438,11 @@ func GetCastOperator(
 				case -1:
 				default:
 					return &castDatumDatumOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 				}
 			}
@@ -533,22 +492,6 @@ func IsCastSupported(fromType, toType *types.T) bool {
 		default:
 			switch typeconv.TypeFamilyToCanonicalTypeFamily(rightType.Family()) {
 			case types.BoolFamily:
-				switch rightType.Width() {
-				case -1:
-				default:
-					return true
-				}
-			case types.IntFamily:
-				switch rightType.Width() {
-				case 16:
-					return true
-				case 32:
-					return true
-				case -1:
-				default:
-					return true
-				}
-			case types.FloatFamily:
 				switch rightType.Width() {
 				case -1:
 				default:
@@ -718,7 +661,7 @@ func IsCastSupported(fromType, toType *types.T) bool {
 }
 
 type castOpNullAny struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -727,8 +670,12 @@ type castOpNullAny struct {
 
 var _ colexecop.ClosableOperator = &castOpNullAny{}
 
-func (c *castOpNullAny) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castOpNullAny) Init() {
+	c.Input.Init()
+}
+
+func (c *castOpNullAny) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -768,7 +715,7 @@ func (c *castOpNullAny) Next() coldata.Batch {
 // probably require changing the way we handle cast overloads as well.
 
 type castBoolBoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -779,14 +726,18 @@ type castBoolBoolOp struct {
 var _ colexecop.ResettableOperator = &castBoolBoolOp{}
 var _ colexecop.ClosableOperator = &castBoolBoolOp{}
 
+func (c *castBoolBoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castBoolBoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castBoolBoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castBoolBoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -813,7 +764,7 @@ func (c *castBoolBoolOp) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r bool
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -830,7 +781,7 @@ func (c *castBoolBoolOp) Next() coldata.Batch {
 						var r bool
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -845,7 +796,7 @@ func (c *castBoolBoolOp) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r bool
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -859,7 +810,7 @@ func (c *castBoolBoolOp) Next() coldata.Batch {
 						var r bool
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -869,7 +820,7 @@ func (c *castBoolBoolOp) Next() coldata.Batch {
 }
 
 type castBoolFloat64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -880,14 +831,18 @@ type castBoolFloat64Op struct {
 var _ colexecop.ResettableOperator = &castBoolFloat64Op{}
 var _ colexecop.ClosableOperator = &castBoolFloat64Op{}
 
+func (c *castBoolFloat64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castBoolFloat64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castBoolFloat64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castBoolFloat64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -919,7 +874,7 @@ func (c *castBoolFloat64Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -941,7 +896,7 @@ func (c *castBoolFloat64Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -961,7 +916,7 @@ func (c *castBoolFloat64Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -980,7 +935,7 @@ func (c *castBoolFloat64Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -990,7 +945,7 @@ func (c *castBoolFloat64Op) Next() coldata.Batch {
 }
 
 type castBoolInt16Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -1001,14 +956,18 @@ type castBoolInt16Op struct {
 var _ colexecop.ResettableOperator = &castBoolInt16Op{}
 var _ colexecop.ClosableOperator = &castBoolInt16Op{}
 
+func (c *castBoolInt16Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castBoolInt16Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castBoolInt16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castBoolInt16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -1040,7 +999,7 @@ func (c *castBoolInt16Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1062,7 +1021,7 @@ func (c *castBoolInt16Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -1082,7 +1041,7 @@ func (c *castBoolInt16Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1101,7 +1060,7 @@ func (c *castBoolInt16Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -1111,7 +1070,7 @@ func (c *castBoolInt16Op) Next() coldata.Batch {
 }
 
 type castBoolInt32Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -1122,14 +1081,18 @@ type castBoolInt32Op struct {
 var _ colexecop.ResettableOperator = &castBoolInt32Op{}
 var _ colexecop.ClosableOperator = &castBoolInt32Op{}
 
+func (c *castBoolInt32Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castBoolInt32Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castBoolInt32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castBoolInt32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -1161,7 +1124,7 @@ func (c *castBoolInt32Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1183,7 +1146,7 @@ func (c *castBoolInt32Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -1203,7 +1166,7 @@ func (c *castBoolInt32Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1222,7 +1185,7 @@ func (c *castBoolInt32Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -1232,7 +1195,7 @@ func (c *castBoolInt32Op) Next() coldata.Batch {
 }
 
 type castBoolInt64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -1243,14 +1206,18 @@ type castBoolInt64Op struct {
 var _ colexecop.ResettableOperator = &castBoolInt64Op{}
 var _ colexecop.ClosableOperator = &castBoolInt64Op{}
 
+func (c *castBoolInt64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castBoolInt64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castBoolInt64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castBoolInt64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -1282,7 +1249,7 @@ func (c *castBoolInt64Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1304,7 +1271,7 @@ func (c *castBoolInt64Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -1324,7 +1291,7 @@ func (c *castBoolInt64Op) Next() coldata.Batch {
 							r = 1
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1343,7 +1310,7 @@ func (c *castBoolInt64Op) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -1353,7 +1320,7 @@ func (c *castBoolInt64Op) Next() coldata.Batch {
 }
 
 type castDecimalBoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -1364,14 +1331,18 @@ type castDecimalBoolOp struct {
 var _ colexecop.ResettableOperator = &castDecimalBoolOp{}
 var _ colexecop.ClosableOperator = &castDecimalBoolOp{}
 
+func (c *castDecimalBoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castDecimalBoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castDecimalBoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castDecimalBoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -1398,7 +1369,7 @@ func (c *castDecimalBoolOp) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r bool
 						r = v.Sign() != 0
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1415,7 +1386,7 @@ func (c *castDecimalBoolOp) Next() coldata.Batch {
 						var r bool
 						r = v.Sign() != 0
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -1430,7 +1401,7 @@ func (c *castDecimalBoolOp) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r bool
 						r = v.Sign() != 0
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -1444,659 +1415,7 @@ func (c *castDecimalBoolOp) Next() coldata.Batch {
 						var r bool
 						r = v.Sign() != 0
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			}
-		},
-	)
-	return batch
-}
-
-type castDecimalInt16Op struct {
-	colexecop.OneInputInitCloserHelper
-
-	allocator      *colmem.Allocator
-	colIdx         int
-	outputIdx      int
-	toType         *types.T
-	overloadHelper execgen.OverloadHelper
-}
-
-var _ colexecop.ResettableOperator = &castDecimalInt16Op{}
-var _ colexecop.ClosableOperator = &castDecimalInt16Op{}
-
-func (c *castDecimalInt16Op) Reset(ctx context.Context) {
-	if r, ok := c.Input.(colexecop.Resetter); ok {
-		r.Reset(ctx)
-	}
-}
-
-func (c *castDecimalInt16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
-	n := batch.Length()
-	if n == 0 {
-		return coldata.ZeroBatch
-	}
-	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "execgen.OverloadHelper".
-	_overloadHelper := c.overloadHelper
-	sel := batch.Selection()
-	inputVec := batch.ColVec(c.colIdx)
-	outputVec := batch.ColVec(c.outputIdx)
-	c.allocator.PerformOperation(
-		[]coldata.Vec{outputVec}, func() {
-			inputCol := inputVec.Decimal()
-			outputCol := outputVec.Int16()
-			outputNulls := outputVec.Nulls()
-			if inputVec.MaybeHasNulls() {
-				inputNulls := inputVec.Nulls()
-				outputNulls.Copy(inputNulls)
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						v := inputCol.Get(tupleIdx)
-						var r int16
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-
-							shifted := _i >> uint(15)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-							r = int16(_i)
-
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int16
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-
-							shifted := _i >> uint(15)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-							r = int16(_i)
-
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			} else {
-				// We need to make sure that there are no left over null values
-				// in the output vector.
-				outputNulls.UnsetNulls()
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						v := inputCol.Get(tupleIdx)
-						var r int16
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-
-							shifted := _i >> uint(15)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-							r = int16(_i)
-
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int16
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-
-							shifted := _i >> uint(15)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt2OutOfRange)
-							}
-							r = int16(_i)
-
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			}
-		},
-	)
-	return batch
-}
-
-type castDecimalInt32Op struct {
-	colexecop.OneInputInitCloserHelper
-
-	allocator      *colmem.Allocator
-	colIdx         int
-	outputIdx      int
-	toType         *types.T
-	overloadHelper execgen.OverloadHelper
-}
-
-var _ colexecop.ResettableOperator = &castDecimalInt32Op{}
-var _ colexecop.ClosableOperator = &castDecimalInt32Op{}
-
-func (c *castDecimalInt32Op) Reset(ctx context.Context) {
-	if r, ok := c.Input.(colexecop.Resetter); ok {
-		r.Reset(ctx)
-	}
-}
-
-func (c *castDecimalInt32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
-	n := batch.Length()
-	if n == 0 {
-		return coldata.ZeroBatch
-	}
-	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "execgen.OverloadHelper".
-	_overloadHelper := c.overloadHelper
-	sel := batch.Selection()
-	inputVec := batch.ColVec(c.colIdx)
-	outputVec := batch.ColVec(c.outputIdx)
-	c.allocator.PerformOperation(
-		[]coldata.Vec{outputVec}, func() {
-			inputCol := inputVec.Decimal()
-			outputCol := outputVec.Int32()
-			outputNulls := outputVec.Nulls()
-			if inputVec.MaybeHasNulls() {
-				inputNulls := inputVec.Nulls()
-				outputNulls.Copy(inputNulls)
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						v := inputCol.Get(tupleIdx)
-						var r int32
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-
-							shifted := _i >> uint(31)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-							r = int32(_i)
-
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int32
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-
-							shifted := _i >> uint(31)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-							r = int32(_i)
-
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			} else {
-				// We need to make sure that there are no left over null values
-				// in the output vector.
-				outputNulls.UnsetNulls()
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						v := inputCol.Get(tupleIdx)
-						var r int32
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-
-							shifted := _i >> uint(31)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-							r = int32(_i)
-
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int32
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-
-							shifted := _i >> uint(31)
-							if (_i >= 0 && shifted > 0) || (_i < 0 && shifted < -1) {
-								colexecerror.ExpectedError(tree.ErrInt4OutOfRange)
-							}
-							r = int32(_i)
-
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			}
-		},
-	)
-	return batch
-}
-
-type castDecimalInt64Op struct {
-	colexecop.OneInputInitCloserHelper
-
-	allocator      *colmem.Allocator
-	colIdx         int
-	outputIdx      int
-	toType         *types.T
-	overloadHelper execgen.OverloadHelper
-}
-
-var _ colexecop.ResettableOperator = &castDecimalInt64Op{}
-var _ colexecop.ClosableOperator = &castDecimalInt64Op{}
-
-func (c *castDecimalInt64Op) Reset(ctx context.Context) {
-	if r, ok := c.Input.(colexecop.Resetter); ok {
-		r.Reset(ctx)
-	}
-}
-
-func (c *castDecimalInt64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
-	n := batch.Length()
-	if n == 0 {
-		return coldata.ZeroBatch
-	}
-	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "execgen.OverloadHelper".
-	_overloadHelper := c.overloadHelper
-	sel := batch.Selection()
-	inputVec := batch.ColVec(c.colIdx)
-	outputVec := batch.ColVec(c.outputIdx)
-	c.allocator.PerformOperation(
-		[]coldata.Vec{outputVec}, func() {
-			inputCol := inputVec.Decimal()
-			outputCol := outputVec.Int64()
-			outputNulls := outputVec.Nulls()
-			if inputVec.MaybeHasNulls() {
-				inputNulls := inputVec.Nulls()
-				outputNulls.Copy(inputNulls)
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						v := inputCol.Get(tupleIdx)
-						var r int64
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrIntOutOfRange)
-							}
-							r = int64(_i)
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int64
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrIntOutOfRange)
-							}
-							r = int64(_i)
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			} else {
-				// We need to make sure that there are no left over null values
-				// in the output vector.
-				outputNulls.UnsetNulls()
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						v := inputCol.Get(tupleIdx)
-						var r int64
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrIntOutOfRange)
-							}
-							r = int64(_i)
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r int64
-
-						{
-							tmpDec := &_overloadHelper.TmpDec1
-							_, err := tree.DecimalCtx.RoundToIntegralValue(tmpDec, &v)
-							if err != nil {
-								colexecerror.ExpectedError(err)
-							}
-							_i, err := tmpDec.Int64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrIntOutOfRange)
-							}
-							r = int64(_i)
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			}
-		},
-	)
-	return batch
-}
-
-type castDecimalFloat64Op struct {
-	colexecop.OneInputInitCloserHelper
-
-	allocator *colmem.Allocator
-	colIdx    int
-	outputIdx int
-	toType    *types.T
-}
-
-var _ colexecop.ResettableOperator = &castDecimalFloat64Op{}
-var _ colexecop.ClosableOperator = &castDecimalFloat64Op{}
-
-func (c *castDecimalFloat64Op) Reset(ctx context.Context) {
-	if r, ok := c.Input.(colexecop.Resetter); ok {
-		r.Reset(ctx)
-	}
-}
-
-func (c *castDecimalFloat64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
-	n := batch.Length()
-	if n == 0 {
-		return coldata.ZeroBatch
-	}
-	sel := batch.Selection()
-	inputVec := batch.ColVec(c.colIdx)
-	outputVec := batch.ColVec(c.outputIdx)
-	c.allocator.PerformOperation(
-		[]coldata.Vec{outputVec}, func() {
-			inputCol := inputVec.Decimal()
-			outputCol := outputVec.Float64()
-			outputNulls := outputVec.Nulls()
-			if inputVec.MaybeHasNulls() {
-				inputNulls := inputVec.Nulls()
-				outputNulls.Copy(inputNulls)
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						v := inputCol.Get(tupleIdx)
-						var r float64
-
-						{
-							f, err := v.Float64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrFloatOutOfRange)
-							}
-							r = f
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						if inputNulls.NullAt(tupleIdx) {
-							continue
-						}
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r float64
-
-						{
-							f, err := v.Float64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrFloatOutOfRange)
-							}
-							r = f
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
-					}
-				}
-			} else {
-				// We need to make sure that there are no left over null values
-				// in the output vector.
-				outputNulls.UnsetNulls()
-				if sel != nil {
-					sel = sel[:n]
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = sel[i]
-						v := inputCol.Get(tupleIdx)
-						var r float64
-
-						{
-							f, err := v.Float64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrFloatOutOfRange)
-							}
-							r = f
-						}
-
-						outputCol.Set(tupleIdx, r)
-					}
-				} else {
-					// Remove bounds checks for inputCol[i] and outputCol[i].
-					_ = inputCol.Get(n - 1)
-					_ = outputCol.Get(n - 1)
-					var tupleIdx int
-					for i := 0; i < n; i++ {
-						tupleIdx = i
-						//gcassert:bce
-						v := inputCol.Get(tupleIdx)
-						var r float64
-
-						{
-							f, err := v.Float64()
-							if err != nil {
-								colexecerror.ExpectedError(tree.ErrFloatOutOfRange)
-							}
-							r = f
-						}
-
-						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2106,7 +1425,7 @@ func (c *castDecimalFloat64Op) Next() coldata.Batch {
 }
 
 type castDecimalDecimalOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2117,14 +1436,18 @@ type castDecimalDecimalOp struct {
 var _ colexecop.ResettableOperator = &castDecimalDecimalOp{}
 var _ colexecop.ClosableOperator = &castDecimalDecimalOp{}
 
+func (c *castDecimalDecimalOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castDecimalDecimalOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castDecimalDecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castDecimalDecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2156,7 +1479,7 @@ func (c *castDecimalDecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2178,7 +1501,7 @@ func (c *castDecimalDecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			} else {
@@ -2198,7 +1521,7 @@ func (c *castDecimalDecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2217,7 +1540,7 @@ func (c *castDecimalDecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			}
@@ -2227,7 +1550,7 @@ func (c *castDecimalDecimalOp) Next() coldata.Batch {
 }
 
 type castInt16Int16Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2238,14 +1561,18 @@ type castInt16Int16Op struct {
 var _ colexecop.ResettableOperator = &castInt16Int16Op{}
 var _ colexecop.ClosableOperator = &castInt16Int16Op{}
 
+func (c *castInt16Int16Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16Int16Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16Int16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16Int16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2272,7 +1599,7 @@ func (c *castInt16Int16Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int16
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2289,7 +1616,7 @@ func (c *castInt16Int16Op) Next() coldata.Batch {
 						var r int16
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2304,7 +1631,7 @@ func (c *castInt16Int16Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int16
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2318,7 +1645,7 @@ func (c *castInt16Int16Op) Next() coldata.Batch {
 						var r int16
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2328,7 +1655,7 @@ func (c *castInt16Int16Op) Next() coldata.Batch {
 }
 
 type castInt16Int32Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2339,14 +1666,18 @@ type castInt16Int32Op struct {
 var _ colexecop.ResettableOperator = &castInt16Int32Op{}
 var _ colexecop.ClosableOperator = &castInt16Int32Op{}
 
+func (c *castInt16Int32Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16Int32Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16Int32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16Int32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2373,7 +1704,7 @@ func (c *castInt16Int32Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int32
 						r = int32(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2390,7 +1721,7 @@ func (c *castInt16Int32Op) Next() coldata.Batch {
 						var r int32
 						r = int32(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2405,7 +1736,7 @@ func (c *castInt16Int32Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int32
 						r = int32(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2419,7 +1750,7 @@ func (c *castInt16Int32Op) Next() coldata.Batch {
 						var r int32
 						r = int32(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2429,7 +1760,7 @@ func (c *castInt16Int32Op) Next() coldata.Batch {
 }
 
 type castInt16Int64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2440,14 +1771,18 @@ type castInt16Int64Op struct {
 var _ colexecop.ResettableOperator = &castInt16Int64Op{}
 var _ colexecop.ClosableOperator = &castInt16Int64Op{}
 
+func (c *castInt16Int64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16Int64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16Int64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16Int64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2474,7 +1809,7 @@ func (c *castInt16Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = int64(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2491,7 +1826,7 @@ func (c *castInt16Int64Op) Next() coldata.Batch {
 						var r int64
 						r = int64(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2506,7 +1841,7 @@ func (c *castInt16Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = int64(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2520,7 +1855,7 @@ func (c *castInt16Int64Op) Next() coldata.Batch {
 						var r int64
 						r = int64(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2530,7 +1865,7 @@ func (c *castInt16Int64Op) Next() coldata.Batch {
 }
 
 type castInt16BoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2541,14 +1876,18 @@ type castInt16BoolOp struct {
 var _ colexecop.ResettableOperator = &castInt16BoolOp{}
 var _ colexecop.ClosableOperator = &castInt16BoolOp{}
 
+func (c *castInt16BoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16BoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16BoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16BoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2577,7 +1916,7 @@ func (c *castInt16BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2596,7 +1935,7 @@ func (c *castInt16BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2613,7 +1952,7 @@ func (c *castInt16BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2629,7 +1968,7 @@ func (c *castInt16BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2639,7 +1978,7 @@ func (c *castInt16BoolOp) Next() coldata.Batch {
 }
 
 type castInt16DecimalOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2650,14 +1989,18 @@ type castInt16DecimalOp struct {
 var _ colexecop.ResettableOperator = &castInt16DecimalOp{}
 var _ colexecop.ClosableOperator = &castInt16DecimalOp{}
 
+func (c *castInt16DecimalOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16DecimalOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16DecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16DecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2690,7 +2033,7 @@ func (c *castInt16DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2713,7 +2056,7 @@ func (c *castInt16DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			} else {
@@ -2734,7 +2077,7 @@ func (c *castInt16DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2754,7 +2097,7 @@ func (c *castInt16DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			}
@@ -2764,7 +2107,7 @@ func (c *castInt16DecimalOp) Next() coldata.Batch {
 }
 
 type castInt16Float64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2775,14 +2118,18 @@ type castInt16Float64Op struct {
 var _ colexecop.ResettableOperator = &castInt16Float64Op{}
 var _ colexecop.ClosableOperator = &castInt16Float64Op{}
 
+func (c *castInt16Float64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt16Float64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt16Float64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt16Float64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2811,7 +2158,7 @@ func (c *castInt16Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2830,7 +2177,7 @@ func (c *castInt16Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2847,7 +2194,7 @@ func (c *castInt16Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2863,7 +2210,7 @@ func (c *castInt16Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2873,7 +2220,7 @@ func (c *castInt16Float64Op) Next() coldata.Batch {
 }
 
 type castInt32Int16Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -2884,14 +2231,18 @@ type castInt32Int16Op struct {
 var _ colexecop.ResettableOperator = &castInt32Int16Op{}
 var _ colexecop.ClosableOperator = &castInt32Int16Op{}
 
+func (c *castInt32Int16Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32Int16Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32Int16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32Int16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -2924,7 +2275,7 @@ func (c *castInt32Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2947,7 +2298,7 @@ func (c *castInt32Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -2968,7 +2319,7 @@ func (c *castInt32Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -2988,7 +2339,7 @@ func (c *castInt32Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -2998,7 +2349,7 @@ func (c *castInt32Int16Op) Next() coldata.Batch {
 }
 
 type castInt32Int32Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3009,14 +2360,18 @@ type castInt32Int32Op struct {
 var _ colexecop.ResettableOperator = &castInt32Int32Op{}
 var _ colexecop.ClosableOperator = &castInt32Int32Op{}
 
+func (c *castInt32Int32Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32Int32Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32Int32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32Int32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3043,7 +2398,7 @@ func (c *castInt32Int32Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int32
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3060,7 +2415,7 @@ func (c *castInt32Int32Op) Next() coldata.Batch {
 						var r int32
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3075,7 +2430,7 @@ func (c *castInt32Int32Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int32
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3089,7 +2444,7 @@ func (c *castInt32Int32Op) Next() coldata.Batch {
 						var r int32
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3099,7 +2454,7 @@ func (c *castInt32Int32Op) Next() coldata.Batch {
 }
 
 type castInt32Int64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3110,14 +2465,18 @@ type castInt32Int64Op struct {
 var _ colexecop.ResettableOperator = &castInt32Int64Op{}
 var _ colexecop.ClosableOperator = &castInt32Int64Op{}
 
+func (c *castInt32Int64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32Int64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32Int64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32Int64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3144,7 +2503,7 @@ func (c *castInt32Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = int64(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3161,7 +2520,7 @@ func (c *castInt32Int64Op) Next() coldata.Batch {
 						var r int64
 						r = int64(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3176,7 +2535,7 @@ func (c *castInt32Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = int64(v)
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3190,7 +2549,7 @@ func (c *castInt32Int64Op) Next() coldata.Batch {
 						var r int64
 						r = int64(v)
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3200,7 +2559,7 @@ func (c *castInt32Int64Op) Next() coldata.Batch {
 }
 
 type castInt32BoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3211,14 +2570,18 @@ type castInt32BoolOp struct {
 var _ colexecop.ResettableOperator = &castInt32BoolOp{}
 var _ colexecop.ClosableOperator = &castInt32BoolOp{}
 
+func (c *castInt32BoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32BoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32BoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32BoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3247,7 +2610,7 @@ func (c *castInt32BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3266,7 +2629,7 @@ func (c *castInt32BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3283,7 +2646,7 @@ func (c *castInt32BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3299,7 +2662,7 @@ func (c *castInt32BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3309,7 +2672,7 @@ func (c *castInt32BoolOp) Next() coldata.Batch {
 }
 
 type castInt32DecimalOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3320,14 +2683,18 @@ type castInt32DecimalOp struct {
 var _ colexecop.ResettableOperator = &castInt32DecimalOp{}
 var _ colexecop.ClosableOperator = &castInt32DecimalOp{}
 
+func (c *castInt32DecimalOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32DecimalOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32DecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32DecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3360,7 +2727,7 @@ func (c *castInt32DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3383,7 +2750,7 @@ func (c *castInt32DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			} else {
@@ -3404,7 +2771,7 @@ func (c *castInt32DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3424,7 +2791,7 @@ func (c *castInt32DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			}
@@ -3434,7 +2801,7 @@ func (c *castInt32DecimalOp) Next() coldata.Batch {
 }
 
 type castInt32Float64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3445,14 +2812,18 @@ type castInt32Float64Op struct {
 var _ colexecop.ResettableOperator = &castInt32Float64Op{}
 var _ colexecop.ClosableOperator = &castInt32Float64Op{}
 
+func (c *castInt32Float64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt32Float64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt32Float64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt32Float64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3481,7 +2852,7 @@ func (c *castInt32Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3500,7 +2871,7 @@ func (c *castInt32Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3517,7 +2888,7 @@ func (c *castInt32Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3533,7 +2904,7 @@ func (c *castInt32Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3543,7 +2914,7 @@ func (c *castInt32Float64Op) Next() coldata.Batch {
 }
 
 type castInt64Int16Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3554,14 +2925,18 @@ type castInt64Int16Op struct {
 var _ colexecop.ResettableOperator = &castInt64Int16Op{}
 var _ colexecop.ClosableOperator = &castInt64Int16Op{}
 
+func (c *castInt64Int16Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64Int16Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64Int16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64Int16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3594,7 +2969,7 @@ func (c *castInt64Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3617,7 +2992,7 @@ func (c *castInt64Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3638,7 +3013,7 @@ func (c *castInt64Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3658,7 +3033,7 @@ func (c *castInt64Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3668,7 +3043,7 @@ func (c *castInt64Int16Op) Next() coldata.Batch {
 }
 
 type castInt64Int32Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3679,14 +3054,18 @@ type castInt64Int32Op struct {
 var _ colexecop.ResettableOperator = &castInt64Int32Op{}
 var _ colexecop.ClosableOperator = &castInt64Int32Op{}
 
+func (c *castInt64Int32Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64Int32Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64Int32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64Int32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3719,7 +3098,7 @@ func (c *castInt64Int32Op) Next() coldata.Batch {
 						}
 						r = int32(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3742,7 +3121,7 @@ func (c *castInt64Int32Op) Next() coldata.Batch {
 						r = int32(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3763,7 +3142,7 @@ func (c *castInt64Int32Op) Next() coldata.Batch {
 						}
 						r = int32(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3783,7 +3162,7 @@ func (c *castInt64Int32Op) Next() coldata.Batch {
 						r = int32(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3793,7 +3172,7 @@ func (c *castInt64Int32Op) Next() coldata.Batch {
 }
 
 type castInt64Int64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3804,14 +3183,18 @@ type castInt64Int64Op struct {
 var _ colexecop.ResettableOperator = &castInt64Int64Op{}
 var _ colexecop.ClosableOperator = &castInt64Int64Op{}
 
+func (c *castInt64Int64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64Int64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64Int64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64Int64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3838,7 +3221,7 @@ func (c *castInt64Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3855,7 +3238,7 @@ func (c *castInt64Int64Op) Next() coldata.Batch {
 						var r int64
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3870,7 +3253,7 @@ func (c *castInt64Int64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r int64
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3884,7 +3267,7 @@ func (c *castInt64Int64Op) Next() coldata.Batch {
 						var r int64
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -3894,7 +3277,7 @@ func (c *castInt64Int64Op) Next() coldata.Batch {
 }
 
 type castInt64BoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -3905,14 +3288,18 @@ type castInt64BoolOp struct {
 var _ colexecop.ResettableOperator = &castInt64BoolOp{}
 var _ colexecop.ClosableOperator = &castInt64BoolOp{}
 
+func (c *castInt64BoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64BoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64BoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64BoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -3941,7 +3328,7 @@ func (c *castInt64BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3960,7 +3347,7 @@ func (c *castInt64BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -3977,7 +3364,7 @@ func (c *castInt64BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -3993,7 +3380,7 @@ func (c *castInt64BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4003,7 +3390,7 @@ func (c *castInt64BoolOp) Next() coldata.Batch {
 }
 
 type castInt64DecimalOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4014,14 +3401,18 @@ type castInt64DecimalOp struct {
 var _ colexecop.ResettableOperator = &castInt64DecimalOp{}
 var _ colexecop.ClosableOperator = &castInt64DecimalOp{}
 
+func (c *castInt64DecimalOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64DecimalOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64DecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64DecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4054,7 +3445,7 @@ func (c *castInt64DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4077,7 +3468,7 @@ func (c *castInt64DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			} else {
@@ -4098,7 +3489,7 @@ func (c *castInt64DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4118,7 +3509,7 @@ func (c *castInt64DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			}
@@ -4128,7 +3519,7 @@ func (c *castInt64DecimalOp) Next() coldata.Batch {
 }
 
 type castInt64Float64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4139,14 +3530,18 @@ type castInt64Float64Op struct {
 var _ colexecop.ResettableOperator = &castInt64Float64Op{}
 var _ colexecop.ClosableOperator = &castInt64Float64Op{}
 
+func (c *castInt64Float64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castInt64Float64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castInt64Float64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castInt64Float64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4175,7 +3570,7 @@ func (c *castInt64Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4194,7 +3589,7 @@ func (c *castInt64Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4211,7 +3606,7 @@ func (c *castInt64Float64Op) Next() coldata.Batch {
 
 						r = float64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4227,7 +3622,7 @@ func (c *castInt64Float64Op) Next() coldata.Batch {
 						r = float64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4237,7 +3632,7 @@ func (c *castInt64Float64Op) Next() coldata.Batch {
 }
 
 type castFloat64Float64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4248,14 +3643,18 @@ type castFloat64Float64Op struct {
 var _ colexecop.ResettableOperator = &castFloat64Float64Op{}
 var _ colexecop.ClosableOperator = &castFloat64Float64Op{}
 
+func (c *castFloat64Float64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64Float64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64Float64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64Float64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4282,7 +3681,7 @@ func (c *castFloat64Float64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r float64
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4299,7 +3698,7 @@ func (c *castFloat64Float64Op) Next() coldata.Batch {
 						var r float64
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4314,7 +3713,7 @@ func (c *castFloat64Float64Op) Next() coldata.Batch {
 						v := inputCol.Get(tupleIdx)
 						var r float64
 						r = v
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4328,7 +3727,7 @@ func (c *castFloat64Float64Op) Next() coldata.Batch {
 						var r float64
 						r = v
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4338,7 +3737,7 @@ func (c *castFloat64Float64Op) Next() coldata.Batch {
 }
 
 type castFloat64BoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4349,14 +3748,18 @@ type castFloat64BoolOp struct {
 var _ colexecop.ResettableOperator = &castFloat64BoolOp{}
 var _ colexecop.ClosableOperator = &castFloat64BoolOp{}
 
+func (c *castFloat64BoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64BoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64BoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64BoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4385,7 +3788,7 @@ func (c *castFloat64BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4404,7 +3807,7 @@ func (c *castFloat64BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4421,7 +3824,7 @@ func (c *castFloat64BoolOp) Next() coldata.Batch {
 
 						r = v != 0
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4437,7 +3840,7 @@ func (c *castFloat64BoolOp) Next() coldata.Batch {
 						r = v != 0
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4447,7 +3850,7 @@ func (c *castFloat64BoolOp) Next() coldata.Batch {
 }
 
 type castFloat64DecimalOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4458,14 +3861,18 @@ type castFloat64DecimalOp struct {
 var _ colexecop.ResettableOperator = &castFloat64DecimalOp{}
 var _ colexecop.ClosableOperator = &castFloat64DecimalOp{}
 
+func (c *castFloat64DecimalOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64DecimalOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64DecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64DecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4500,7 +3907,7 @@ func (c *castFloat64DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4525,7 +3932,7 @@ func (c *castFloat64DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			} else {
@@ -4548,7 +3955,7 @@ func (c *castFloat64DecimalOp) Next() coldata.Batch {
 							colexecerror.ExpectedError(err)
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4570,7 +3977,7 @@ func (c *castFloat64DecimalOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx].Set(&r)
 					}
 				}
 			}
@@ -4580,7 +3987,7 @@ func (c *castFloat64DecimalOp) Next() coldata.Batch {
 }
 
 type castFloat64Int16Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4591,14 +3998,18 @@ type castFloat64Int16Op struct {
 var _ colexecop.ResettableOperator = &castFloat64Int16Op{}
 var _ colexecop.ClosableOperator = &castFloat64Int16Op{}
 
+func (c *castFloat64Int16Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64Int16Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64Int16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64Int16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4630,7 +4041,7 @@ func (c *castFloat64Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4652,7 +4063,7 @@ func (c *castFloat64Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4672,7 +4083,7 @@ func (c *castFloat64Int16Op) Next() coldata.Batch {
 						}
 						r = int16(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4691,7 +4102,7 @@ func (c *castFloat64Int16Op) Next() coldata.Batch {
 						r = int16(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4701,7 +4112,7 @@ func (c *castFloat64Int16Op) Next() coldata.Batch {
 }
 
 type castFloat64Int32Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4712,14 +4123,18 @@ type castFloat64Int32Op struct {
 var _ colexecop.ResettableOperator = &castFloat64Int32Op{}
 var _ colexecop.ClosableOperator = &castFloat64Int32Op{}
 
+func (c *castFloat64Int32Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64Int32Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64Int32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64Int32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4751,7 +4166,7 @@ func (c *castFloat64Int32Op) Next() coldata.Batch {
 						}
 						r = int32(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4773,7 +4188,7 @@ func (c *castFloat64Int32Op) Next() coldata.Batch {
 						r = int32(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4793,7 +4208,7 @@ func (c *castFloat64Int32Op) Next() coldata.Batch {
 						}
 						r = int32(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4812,7 +4227,7 @@ func (c *castFloat64Int32Op) Next() coldata.Batch {
 						r = int32(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4822,7 +4237,7 @@ func (c *castFloat64Int32Op) Next() coldata.Batch {
 }
 
 type castFloat64Int64Op struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4833,14 +4248,18 @@ type castFloat64Int64Op struct {
 var _ colexecop.ResettableOperator = &castFloat64Int64Op{}
 var _ colexecop.ClosableOperator = &castFloat64Int64Op{}
 
+func (c *castFloat64Int64Op) Init() {
+	c.Input.Init()
+}
+
 func (c *castFloat64Int64Op) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castFloat64Int64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castFloat64Int64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4872,7 +4291,7 @@ func (c *castFloat64Int64Op) Next() coldata.Batch {
 						}
 						r = int64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4894,7 +4313,7 @@ func (c *castFloat64Int64Op) Next() coldata.Batch {
 						r = int64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -4914,7 +4333,7 @@ func (c *castFloat64Int64Op) Next() coldata.Batch {
 						}
 						r = int64(v)
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -4933,7 +4352,7 @@ func (c *castFloat64Int64Op) Next() coldata.Batch {
 						r = int64(v)
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -4943,7 +4362,7 @@ func (c *castFloat64Int64Op) Next() coldata.Batch {
 }
 
 type castDatumBoolOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -4954,14 +4373,18 @@ type castDatumBoolOp struct {
 var _ colexecop.ResettableOperator = &castDatumBoolOp{}
 var _ colexecop.ClosableOperator = &castDatumBoolOp{}
 
+func (c *castDatumBoolOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castDatumBoolOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castDatumBoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castDatumBoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -4996,7 +4419,7 @@ func (c *castDatumBoolOp) Next() coldata.Batch {
 							r = _castedDatum == tree.DBoolTrue
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -5021,7 +4444,7 @@ func (c *castDatumBoolOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			} else {
@@ -5044,7 +4467,7 @@ func (c *castDatumBoolOp) Next() coldata.Batch {
 							r = _castedDatum == tree.DBoolTrue
 						}
 
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				} else {
 					// Remove bounds checks for inputCol[i] and outputCol[i].
@@ -5066,7 +4489,7 @@ func (c *castDatumBoolOp) Next() coldata.Batch {
 						}
 
 						//gcassert:bce
-						outputCol.Set(tupleIdx, r)
+						outputCol[tupleIdx] = r
 					}
 				}
 			}
@@ -5076,7 +4499,7 @@ func (c *castDatumBoolOp) Next() coldata.Batch {
 }
 
 type castDatumDatumOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -5087,14 +4510,18 @@ type castDatumDatumOp struct {
 var _ colexecop.ResettableOperator = &castDatumDatumOp{}
 var _ colexecop.ClosableOperator = &castDatumDatumOp{}
 
+func (c *castDatumDatumOp) Init() {
+	c.Input.Init()
+}
+
 func (c *castDatumDatumOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
 		r.Reset(ctx)
 	}
 }
 
-func (c *castDatumDatumOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castDatumDatumOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch

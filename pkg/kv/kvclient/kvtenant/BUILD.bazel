@@ -14,7 +14,6 @@ go_library(
         "//pkg/roachpb",
         "//pkg/rpc",
         "//pkg/rpc/nodedialer",
-        "//pkg/server/serverpb",
         "//pkg/util/log",
         "//pkg/util/retry",
         "@com_github_cockroachdb_errors//:errors",

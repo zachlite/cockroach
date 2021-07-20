@@ -21,7 +21,6 @@ import "roachpb/metadata.proto";
 import "server/diagnostics/diagnosticspb/diagnostics.proto";
 import "server/status/statuspb/status.proto";
 import "sql/contentionpb/contention.proto";
-import "sql/execinfrapb/api.proto";
 import "storage/enginepb/engine.proto";
 import "storage/enginepb/mvcc.proto";
 import "storage/enginepb/rocksdb.proto";
@@ -130,17 +129,6 @@ message NodesResponse {
   ];
 }
 
-// RegionsRequest requests all available regions.
-message RegionsRequest {}
-
-// RegionsResponse describes the available regions.
-message RegionsResponse {
-  message Region {
-    repeated string zones = 1;
-  }
-  map<string, Region> regions = 1;
-}
-
 message NodeRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
@@ -171,7 +159,6 @@ message RaftState {
   uint64 lead_transferee = 7;
 }
 
-// RangeProblems describes issues reported by a range. For internal use only.
 message RangeProblems {
   bool unavailable = 1;
   bool leader_not_lease_holder = 2;
@@ -190,15 +177,10 @@ message RangeProblems {
   bool raft_log_too_large = 7;
 }
 
-// RangeStatistics describes statistics reported by a range. For internal use
-// only.
 message RangeStatistics {
-  // Queries per second served by this range.
-  //
   // Note that queries per second will only be known by the leaseholder.
   // All other replicas will report it as 0.
   double queries_per_second = 1;
-  // Writes per second served by this range.
   double writes_per_second = 2;
 }
 
@@ -371,7 +353,7 @@ message LogFileRequest {
 
 enum StacksType {
   GOROUTINE_STACKS = 0;
-  reserved 1;
+  THREAD_STACKS = 1;
 }
 
 message StacksRequest {
@@ -383,7 +365,7 @@ message StacksRequest {
 
 // Represents the type of file.
 // TODO(ridwanmsharif): Add support for log files. They're currently served
-// by an endpoint that parses the log messages, which is not what the
+// by an endpoint that parses the log messages, which is not what the 
 // debug zip client wants.
 enum FileType {
   HEAP = 0;
@@ -548,8 +530,6 @@ message ActiveQuery {
   // phase stores the current phase of execution for this query.
   Phase phase = 5;
 
-  // progress is an estimate of the fraction of this query that has been
-  // processed.
   float progress = 6;
 
   // The SQL statement fingerprint, compatible with StatementStatisticsKey.
@@ -669,9 +649,8 @@ message CancelSessionResponse {
 // Request object for ListContentionEvents and ListLocalContentionEvents.
 message ListContentionEventsRequest {}
 
-// An error wrapper object for ListContentionEventsResponse and
-// ListDistSQLFlowsResponse.
-message ListActivityError {
+// An error wrapper object for ListContentionEventsResponse.
+message ListContentionEventsError {
   // ID of node that was being contacted when this error occurred.
   int32 node_id = 1 [
     (gogoproto.customname) = "NodeID",
@@ -688,58 +667,7 @@ message ListContentionEventsResponse {
   cockroach.sql.contentionpb.SerializedRegistry events = 1 [ (gogoproto.nullable) = false ];
 
   // Any errors that occurred during fan-out calls to other nodes.
-  repeated ListActivityError errors = 2 [ (gogoproto.nullable) = false ];
-}
-
-// Request object for ListDistSQLFlows and ListLocalDistSQLFlows.
-message ListDistSQLFlowsRequest {}
-
-// DistSQLRemoteFlows describes all DistSQL remote flows that are part of the
-// same physical plan. The gateway node that initiated the execution of the plan
-// isn't included.
-message DistSQLRemoteFlows {
-  enum Status {
-    RUNNING = 0;
-    QUEUED = 1;
-  }
-
-  // Info contains an information about a single DistSQL remote flow.
-  message Info {
-    // NodeID is the node on which this remote flow is either running or queued.
-    int32 node_id = 1 [(gogoproto.customname) = "NodeID",
-                       (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
-
-    // Timestamp must be in the UTC timezone.
-    google.protobuf.Timestamp timestamp = 2 [
-      (gogoproto.nullable) = false, (gogoproto.stdtime) = true
-    ];
-
-    // Status is the current status of this remote flow.
-    Status status = 3;
-  }
-
-  // FlowID is the unique identifier of the physical plan shared by all remote
-  // flows.
-  bytes flow_id = 1 [(gogoproto.nullable) = false,
-                     (gogoproto.customname) = "FlowID",
-                     (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/execinfrapb.FlowID"];
-
-  // Infos contains the information about all remote flows that are part of this
-  // DistSQL physical plan and that haven't finished yet.
-  //
-  // The slice doesn't contain duplicate NodeIDs and is sorted by NodeID in ASC
-  // order.
-  repeated Info infos = 2 [(gogoproto.nullable) = false];
-}
-
-// Response object for ListDistSQLFlows and ListLocalDistSQLFlows.
-message ListDistSQLFlowsResponse {
-  // Flows are ordered by FlowID lexicographically and do not contain
-  // duplicates.
-  repeated DistSQLRemoteFlows flows = 1 [ (gogoproto.nullable) = false ];
-
-  // Any errors that occurred during fan-out calls to other nodes.
-  repeated ListActivityError errors = 2 [ (gogoproto.nullable) = false ];
+  repeated ListContentionEventsError errors = 2 [ (gogoproto.nullable) = false ];
 }
 
 message SpanStatsRequest {
@@ -997,7 +925,7 @@ message StatementsResponse {
   message CollectedStatementStatistics {
     ExtendedStatementStatisticsKey key = 1 [(gogoproto.nullable) = false];
     uint64 id = 3 [(gogoproto.customname) = "ID",
-                   (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtFingerprintID"];
+                   (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtID"];
     cockroach.sql.StatementStatistics stats = 2 [(gogoproto.nullable) = false];
   }
 
@@ -1106,9 +1034,6 @@ service Status {
       get : "/_status/details/{node_id}"
     };
   }
-
-  // RegionsRequest retrieves all available regions.
-  rpc Regions(RegionsRequest) returns (RegionsResponse) {}
 
   // Nodes returns status info for all commissioned nodes. Decommissioned nodes
   // are not included, except in rare cases where the node doing the
@@ -1245,29 +1170,6 @@ service Status {
   rpc ListLocalContentionEvents(ListContentionEventsRequest) returns (ListContentionEventsResponse) {
     option (google.api.http) = {
       get : "/_status/local_contention_events"
-    };
-  }
-
-  // ListDistSQLFlows retrieves all of the remote flows of the DistSQL execution
-  // that are currently running or queued on any node in the cluster. The local
-  // flows (those that are running on the same node as the query originated on)
-  // are not included.
-  //
-  // Flows are ordered lexicographically by the flow ID.
-  rpc ListDistSQLFlows(ListDistSQLFlowsRequest) returns (ListDistSQLFlowsResponse) {
-    option (google.api.http) = {
-      get : "/_status/distsql_flows"
-    };
-  }
-
-  // ListLocalDistSQLFlows retrieves all of the remote flows of the DistSQL
-  // execution that are currently running or queued on this node in the cluster.
-  // Queries that originated on this node are not be included.
-  //
-  // Flows are ordered lexicographically by the flow ID.
-  rpc ListLocalDistSQLFlows(ListDistSQLFlowsRequest) returns (ListDistSQLFlowsResponse) {
-    option (google.api.http) = {
-      get : "/_status/local_distsql_flows"
     };
   }
 

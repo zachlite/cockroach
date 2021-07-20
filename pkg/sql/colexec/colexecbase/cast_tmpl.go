@@ -29,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
@@ -66,6 +65,11 @@ func _CAST(to, from, fromCol, toType interface{}) {
 	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
+// This will be replaced with execgen.SET.
+func _R_SET(to, from interface{}) {
+	colexecerror.InternalError(errors.AssertionFailedf(""))
+}
+
 // */}}
 
 func GetCastOperator(
@@ -79,10 +83,10 @@ func GetCastOperator(
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, toType, resultIdx)
 	if fromType.Family() == types.UnknownFamily {
 		return &castOpNullAny{
-			OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-			allocator:                allocator,
-			colIdx:                   colIdx,
-			outputIdx:                resultIdx,
+			OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+			allocator:            allocator,
+			colIdx:               colIdx,
+			outputIdx:            resultIdx,
 		}, nil
 	}
 	leftType, rightType := fromType, toType
@@ -99,11 +103,11 @@ func GetCastOperator(
 				// {{range .RightWidths}}
 				case _RIGHT_TYPE_WIDTH:
 					return &cast_NAMEOp{
-						OneInputInitCloserHelper: colexecop.MakeOneInputInitCloserHelper(input),
-						allocator:                allocator,
-						colIdx:                   colIdx,
-						outputIdx:                resultIdx,
-						toType:                   toType,
+						OneInputCloserHelper: colexecop.MakeOneInputCloserHelper(input),
+						allocator:            allocator,
+						colIdx:               colIdx,
+						outputIdx:            resultIdx,
+						toType:               toType,
 					}, nil
 					// {{end}}
 				}
@@ -146,7 +150,7 @@ func IsCastSupported(fromType, toType *types.T) bool {
 }
 
 type castOpNullAny struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
@@ -155,8 +159,12 @@ type castOpNullAny struct {
 
 var _ colexecop.ClosableOperator = &castOpNullAny{}
 
-func (c *castOpNullAny) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *castOpNullAny) Init() {
+	c.Input.Init()
+}
+
+func (c *castOpNullAny) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -196,30 +204,25 @@ func (c *castOpNullAny) Next() coldata.Batch {
 // probably require changing the way we handle cast overloads as well.
 
 // {{range .LeftFamilies}}
-// {{$leftFamily := .LeftCanonicalFamilyStr}}
 // {{range .LeftWidths}}
 // {{range .RightFamilies}}
-// {{$rightFamily := .RightCanonicalFamilyStr}}
 // {{range .RightWidths}}
 
 type cast_NAMEOp struct {
-	colexecop.OneInputInitCloserHelper
+	colexecop.OneInputCloserHelper
 
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
 	toType    *types.T
-	// {{if and (eq $leftFamily "types.DecimalFamily") (eq $rightFamily "types.IntFamily")}}
-	// {{/*
-	// overloadHelper is used only when we perform the cast from decimals to
-	// ints. In all other cases we don't want to wastefully allocate the helper.
-	// */}}
-	overloadHelper execgen.OverloadHelper
-	// {{end}}
 }
 
 var _ colexecop.ResettableOperator = &cast_NAMEOp{}
 var _ colexecop.ClosableOperator = &cast_NAMEOp{}
+
+func (c *cast_NAMEOp) Init() {
+	c.Input.Init()
+}
 
 func (c *cast_NAMEOp) Reset(ctx context.Context) {
 	if r, ok := c.Input.(colexecop.Resetter); ok {
@@ -227,17 +230,12 @@ func (c *cast_NAMEOp) Reset(ctx context.Context) {
 	}
 }
 
-func (c *cast_NAMEOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c *cast_NAMEOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
 	}
-	// {{if and (eq $leftFamily "types.DecimalFamily") (eq $rightFamily "types.IntFamily")}}
-	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "execgen.OverloadHelper".
-	_overloadHelper := c.overloadHelper
-	// {{end}}
 	sel := batch.Selection()
 	inputVec := batch.ColVec(c.colIdx)
 	outputVec := batch.ColVec(c.outputIdx)
@@ -310,7 +308,7 @@ func _CAST_TUPLES(_HAS_NULLS, _HAS_SEL bool) { // */}}
 		// {{if and (.Right.Sliceable) (not $hasSel)}}
 		//gcassert:bce
 		// {{end}}
-		outputCol.Set(tupleIdx, r)
+		_R_SET(outputCol, tupleIdx, r)
 		// {{if eq .Right.VecMethod "Datum"}}
 		// Casting to datum-backed vector might produce a null value on
 		// non-null tuple, so we need to check that case after the cast was

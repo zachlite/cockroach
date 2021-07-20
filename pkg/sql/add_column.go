@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -30,6 +31,7 @@ func (p *planner) addColumnImpl(
 	tn *tree.TableName,
 	desc *tabledesc.Mutable,
 	t *tree.AlterTableAddColumn,
+	sessionData *sessiondata.SessionData,
 ) error {
 	d := t.ColumnDef
 
@@ -59,15 +61,15 @@ func (p *planner) addColumnImpl(
 		)
 	}
 
-	newDef, seqPrefix, seqName, seqOpts, err := params.p.processSerialInColumnDef(params.ctx, d, tn)
+	newDef, seqDbDesc, seqName, seqOpts, err := params.p.processSerialInColumnDef(params.ctx, d, tn)
 	if err != nil {
 		return err
 	}
 	if seqName != nil {
 		if err := doCreateSequence(
 			params,
-			seqPrefix.Database,
-			seqPrefix.Schema,
+			seqDbDesc,
+			n.tableDesc.GetParentSchemaID(),
 			seqName,
 			n.tableDesc.Persistence(),
 			seqOpts,
@@ -160,21 +162,17 @@ func (p *planner) addColumnImpl(
 	}
 
 	if d.IsComputed() {
-		serializedExpr, _, err := schemaexpr.ValidateComputedColumnExpression(
-			params.ctx, n.tableDesc, d, tn, "computed column", params.p.SemaCtx(),
+		computedColValidator := schemaexpr.MakeComputedColumnValidator(
+			params.ctx,
+			n.tableDesc,
+			&params.p.semaCtx,
+			tn,
 		)
+		serializedExpr, err := computedColValidator.Validate(d)
 		if err != nil {
 			return err
 		}
 		col.ComputeExpr = &serializedExpr
-	}
-
-	if !col.Virtual {
-		// Add non-virtual column name and ID to primary index.
-		primaryIndex := n.tableDesc.GetPrimaryIndex().IndexDescDeepCopy()
-		primaryIndex.StoreColumnNames = append(primaryIndex.StoreColumnNames, col.Name)
-		primaryIndex.StoreColumnIDs = append(primaryIndex.StoreColumnIDs, col.ID)
-		n.tableDesc.SetPrimaryIndex(primaryIndex)
 	}
 
 	// Zone configuration logic is only required for REGIONAL BY ROW tables

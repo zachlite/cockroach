@@ -35,7 +35,7 @@ func (node *ShowVar) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW ")
 	// Session var names never contain PII and should be distinguished
 	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 		ctx.FormatNameP(&node.Name)
 	})
 }
@@ -50,7 +50,7 @@ func (node *ShowClusterSetting) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CLUSTER SETTING ")
 	// Cluster setting names never contain PII and should be distinguished
 	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 		ctx.FormatNameP(&node.Name)
 	})
 }
@@ -83,8 +83,6 @@ const (
 	BackupRangeDetails
 	// BackupFileDetails identifies a SHOW BACKUP FILES statement.
 	BackupFileDetails
-	// BackupManifestAsJSON displays full backup manifest as json
-	BackupManifestAsJSON
 )
 
 // ShowBackup represents a SHOW BACKUP statement.
@@ -286,21 +284,6 @@ func (node *ShowJobs) Format(ctx *FmtCtx) {
 	}
 }
 
-// ShowChangefeedJobs represents a SHOW CHANGEFEED JOBS statement
-type ShowChangefeedJobs struct {
-	// If non-nil, a select statement that provides the job ids to be shown.
-	Jobs *Select
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowChangefeedJobs) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CHANGEFEED JOBS")
-	if node.Jobs != nil {
-		ctx.WriteString(" ")
-		ctx.FormatNode(node.Jobs)
-	}
-}
-
 // ShowSurvivalGoal represents a SHOW REGIONS statement
 type ShowSurvivalGoal struct {
 	DatabaseName Name
@@ -490,34 +473,14 @@ func (node *ShowRoleGrants) Format(ctx *FmtCtx) {
 	}
 }
 
-// ShowCreateMode denotes what kind of SHOW CREATE should be used
-type ShowCreateMode int
-
-const (
-	// ShowCreateModeTable represents SHOW CREATE TABLE
-	ShowCreateModeTable ShowCreateMode = iota
-	// ShowCreateModeView represents SHOW CREATE VIEW
-	ShowCreateModeView
-	// ShowCreateModeSequence represents SHOW CREATE SEQUENCE
-	ShowCreateModeSequence
-	// ShowCreateModeDatabase represents SHOW CREATE DATABASE
-	ShowCreateModeDatabase
-)
-
 // ShowCreate represents a SHOW CREATE statement.
 type ShowCreate struct {
-	Mode ShowCreateMode
 	Name *UnresolvedObjectName
 }
 
 // Format implements the NodeFormatter interface.
 func (node *ShowCreate) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CREATE ")
-
-	switch node.Mode {
-	case ShowCreateModeDatabase:
-		ctx.WriteString("DATABASE ")
-	}
 	ctx.FormatNode(node.Name)
 }
 

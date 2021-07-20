@@ -39,7 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	enginepb "github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -66,11 +66,6 @@ const (
 	// put operations will possibly be optimized by determining whether
 	// the key space being written is starting out empty.
 	optimizePutThreshold = 10
-
-	// Transaction names used for range changes.
-	// Note that those names are used by tests to perform request filtering
-	// in absence of better criteria. If names are changed, tests should be
-	// updated accordingly to avoid flakiness.
 
 	replicaChangeTxnName = "change-replica"
 	splitTxnName         = "split"
@@ -810,6 +805,11 @@ func (r *Replica) EvalKnobs() kvserverbase.BatchEvalTestingKnobs {
 // Clock returns the hlc clock shared by this replica.
 func (r *Replica) Clock() *hlc.Clock {
 	return r.store.Clock()
+}
+
+// DB returns the Replica's client DB.
+func (r *Replica) DB() *kv.DB {
+	return r.store.DB()
 }
 
 // Engine returns the Replica's underlying Engine. In most cases the
@@ -1647,7 +1647,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 				PusheeTxn: intent.Txn,
 				PushType:  roachpb.PUSH_ABORT,
 			})
-			if err := r.store.DB().Run(ctx, b); err != nil {
+			if err := r.DB().Run(ctx, b); err != nil {
 				select {
 				case <-r.store.stopper.ShouldQuiesce():
 					// The server is shutting down. The error while pushing the
@@ -1682,7 +1682,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 			var getRes *roachpb.GetResponse
 			for retry := retry.Start(base.DefaultRetryOptions()); retry.Next(); {
 				metaKey := keys.RangeMetaKey(desc.EndKey)
-				res, pErr := kv.SendWrappedWith(ctx, r.store.DB().NonTransactionalSender(), roachpb.Header{
+				res, pErr := kv.SendWrappedWith(ctx, r.DB().NonTransactionalSender(), roachpb.Header{
 					// Use READ_UNCOMMITTED to avoid trying to resolve intents, since
 					// resolving those intents might involve sending requests to this
 					// range, and that could deadlock. See the comment on

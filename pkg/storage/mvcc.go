@@ -15,6 +15,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
@@ -27,11 +29,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/errors/oserror"
+	"github.com/dustin/go-humanize"
+	"github.com/elastic/gosigar"
 )
 
 const (
@@ -1381,7 +1387,7 @@ func replayTransactionalWrite(
 // Note that, when writing transactionally, the txn's timestamps
 // dictate the timestamp of the operation, and the timestamp parameter
 // is redundant. Specifically, the intent is written at the txn's
-// provisional commit timestamp, txn.WriteTimestamp, unless it is
+// provisional commit timestamp, txn.Timestamp, unless it is
 // forwarded by an existing committed value above that timestamp.
 // However, reads (e.g., for a ConditionalPut) are performed at the
 // txn's read timestamp (txn.ReadTimestamp) to ensure that the
@@ -1480,9 +1486,9 @@ func mvccPutInternal(
 
 	// Determine the read and write timestamps for the write. For a
 	// non-transactional write, these will be identical. For a transactional
-	// write, we read at the transaction's read timestamp but write intents at its
-	// provisional commit timestamp. See the comment on the txn.WriteTimestamp field
-	// definition for rationale.
+	// write, we read at the transaction's original timestamp (forwarded by any
+	// refresh timestamp) but write intents at its provisional commit timestamp.
+	// See the comment on the txn.Timestamp field definition for rationale.
 	readTimestamp := timestamp
 	writeTimestamp := timestamp
 	if txn != nil {
@@ -2507,9 +2513,9 @@ type MVCCScanOptions struct {
 	MaxKeys int64
 	// TargetBytes is a byte threshold to limit the amount of data pulled into
 	// memory during a Scan operation. Once the target is satisfied (i.e. met or
-	// exceeded) by the emitted KV pairs, iteration stops (with a ResumeSpan as
-	// appropriate). In particular, at least one kv pair is returned (when one
-	// exists).
+	// exceeded) by the emitted emitted KV pairs, iteration stops (with a
+	// ResumeSpan as appropriate). In particular, at least one kv pair is
+	// returned (when one exists).
 	//
 	// The number of bytes a particular kv pair accrues depends on internal data
 	// structures, but it is guaranteed to exceed that of the bytes stored in
@@ -2633,12 +2639,11 @@ func MVCCScanAsTxn(
 
 // MVCCIterate iterates over the key range [start,end). At each step of the
 // iteration, f() is invoked with the current key/value pair. If f returns
-// iterutil.StopIteration, the iteration stops with no error propagated. If f
-// returns any other error, the iteration stops and the error is propagated. If
-// the reverse flag is set, the iterator will be moved in reverse order. If the
-// scan options specify an inconsistent scan, all "ignored" intents will be
-// returned. In consistent mode, intents are only ever returned as part of a
-// WriteIntentError.
+// true (done) or an error, the iteration stops and the error is propagated.
+// If the reverse is flag set the iterator will be moved in reverse order.
+// If the scan options specify an inconsistent scan, all "ignored" intents
+// will be returned. In consistent mode, intents are only ever returned as
+// part of a WriteIntentError.
 func MVCCIterate(
 	ctx context.Context,
 	reader Reader,
@@ -2692,8 +2697,8 @@ func MVCCIterate(
 	return intents, nil
 }
 
-// MVCCResolveWriteIntent either commits, aborts (rolls back), or moves forward
-// in time an extant write intent for a given txn according to commit parameter.
+// MVCCResolveWriteIntent either commits or aborts (rolls back) an
+// extant write intent for a given txn according to commit parameter.
 // ResolveWriteIntent will skip write intents of other txns. It returns
 // whether or not an intent was found to resolve.
 //
@@ -3702,6 +3707,93 @@ func ComputeStatsForRange(
 
 	ms.LastUpdateNanos = nowNanos
 	return ms, nil
+}
+
+// computeCapacity returns capacity details for the engine's available storage,
+// by querying the underlying file system.
+func computeCapacity(path string, maxSizeBytes int64) (roachpb.StoreCapacity, error) {
+	fileSystemUsage := gosigar.FileSystemUsage{}
+	dir := path
+	if dir == "" {
+		// This is an in-memory instance. Pretend we're empty since we
+		// don't know better and only use this for testing. Using any
+		// part of the actual file system here can throw off allocator
+		// rebalancing in a hard-to-trace manner. See #7050.
+		return roachpb.StoreCapacity{
+			Capacity:  maxSizeBytes,
+			Available: maxSizeBytes,
+		}, nil
+	}
+	var err error
+	// Eval directory if it is a symbolic links.
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return roachpb.StoreCapacity{}, err
+	}
+	if err := fileSystemUsage.Get(dir); err != nil {
+		return roachpb.StoreCapacity{}, err
+	}
+
+	if fileSystemUsage.Total > math.MaxInt64 {
+		return roachpb.StoreCapacity{}, fmt.Errorf("unsupported disk size %s, max supported size is %s",
+			humanize.IBytes(fileSystemUsage.Total), humanizeutil.IBytes(math.MaxInt64))
+	}
+	if fileSystemUsage.Avail > math.MaxInt64 {
+		return roachpb.StoreCapacity{}, fmt.Errorf("unsupported disk size %s, max supported size is %s",
+			humanize.IBytes(fileSystemUsage.Avail), humanizeutil.IBytes(math.MaxInt64))
+	}
+	fsuTotal := int64(fileSystemUsage.Total)
+	fsuAvail := int64(fileSystemUsage.Avail)
+
+	// Find the total size of all the files in the r.dir and all its
+	// subdirectories.
+	var totalUsedBytes int64
+	if errOuter := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			// This can happen if rocksdb removes files out from under us - just keep
+			// going to get the best estimate we can.
+			if oserror.IsNotExist(err) {
+				return nil
+			}
+			// Special-case: if the store-dir is configured using the root of some fs,
+			// e.g. "/mnt/db", we might have special fs-created files like lost+found
+			// that we can't read, so just ignore them rather than crashing.
+			if oserror.IsPermission(err) && filepath.Base(path) == "lost+found" {
+				return nil
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			totalUsedBytes += info.Size()
+		}
+		return nil
+	}); errOuter != nil {
+		return roachpb.StoreCapacity{}, errOuter
+	}
+
+	// If no size limitation have been placed on the store size or if the
+	// limitation is greater than what's available, just return the actual
+	// totals.
+	if maxSizeBytes == 0 || maxSizeBytes >= fsuTotal || path == "" {
+		return roachpb.StoreCapacity{
+			Capacity:  fsuTotal,
+			Available: fsuAvail,
+			Used:      totalUsedBytes,
+		}, nil
+	}
+
+	available := maxSizeBytes - totalUsedBytes
+	if available > fsuAvail {
+		available = fsuAvail
+	}
+	if available < 0 {
+		available = 0
+	}
+
+	return roachpb.StoreCapacity{
+		Capacity:  maxSizeBytes,
+		Available: available,
+		Used:      totalUsedBytes,
+	}, nil
 }
 
 // checkForKeyCollisionsGo iterates through both existingIter and an SST

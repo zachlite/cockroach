@@ -338,17 +338,22 @@ func TestTxnCoordSenderEndTxn(t *testing.T) {
 
 			case 1:
 				// Past deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp.Prev())
-				require.NoError(t, err, "Deadline update to past failed")
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp.Prev()) {
+					t.Fatalf("did not update deadline")
+				}
+
 			case 2:
 				// Equal deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp)
-				require.NoError(t, err, "Deadline update to equal failed")
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp) {
+					t.Fatalf("did not update deadline")
+				}
 
 			case 3:
 				// Future deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp.Next())
-				require.NoError(t, err, "Deadline update to future failed")
+
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp.Next()) {
+					t.Fatalf("did not update deadline")
+				}
 			}
 			err = txn.CommitOrCleanup(ctx)
 
@@ -2158,12 +2163,11 @@ func TestReadOnlyTxnObeysDeadline(t *testing.T) {
 	t.Run("standalone commit", func(t *testing.T) {
 		txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 		// Set a deadline. We'll generate a retriable error with a higher timestamp.
-		err := txn.UpdateDeadline(ctx, clock.Now())
-		require.NoError(t, err, "Deadline update to now failed")
+		txn.UpdateDeadlineMaybe(ctx, clock.Now())
 		if _, err := txn.Get(ctx, "k"); err != nil {
 			t.Fatal(err)
 		}
-		err = txn.Commit(ctx)
+		err := txn.Commit(ctx)
 		assertTransactionRetryError(t, err)
 		if !testutils.IsError(err, "RETRY_COMMIT_DEADLINE_EXCEEDED") {
 			t.Fatalf("expected deadline exceeded, got: %s", err)
@@ -2173,11 +2177,10 @@ func TestReadOnlyTxnObeysDeadline(t *testing.T) {
 	t.Run("commit in batch", func(t *testing.T) {
 		txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 		// Set a deadline. We'll generate a retriable error with a higher timestamp.
-		err := txn.UpdateDeadline(ctx, clock.Now())
-		require.NoError(t, err, "Deadline update to now failed")
+		txn.UpdateDeadlineMaybe(ctx, clock.Now())
 		b := txn.NewBatch()
 		b.Get("k")
-		err = txn.CommitInBatch(ctx, b)
+		err := txn.CommitInBatch(ctx, b)
 		assertTransactionRetryError(t, err)
 		if !testutils.IsError(err, "RETRY_COMMIT_DEADLINE_EXCEEDED") {
 			t.Fatalf("expected deadline exceeded, got: %s", err)
@@ -2428,7 +2431,7 @@ func TestPutsInStagingTxn(t *testing.T) {
 	// DistSender are send serially and the transaction is updated from one to
 	// another. See below.
 	settings := cluster.MakeTestingClusterSettings()
-	senderConcurrencyLimit.Override(ctx, &settings.SV, 0)
+	senderConcurrencyLimit.Override(&settings.SV, 0)
 
 	s, _, db := serverutils.StartServer(t,
 		base.TestServerArgs{

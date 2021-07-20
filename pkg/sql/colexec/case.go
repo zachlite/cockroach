@@ -24,8 +24,6 @@ import (
 )
 
 type caseOp struct {
-	colexecop.InitHelper
-
 	allocator *colmem.Allocator
 	buffer    *bufferOp
 
@@ -88,7 +86,7 @@ func NewCaseOp(
 	typ *types.T,
 ) colexecop.Operator {
 	// We internally use two selection vectors, origSel and prevSel.
-	allocator.AdjustMemoryUsage(2 * colmem.SizeOfBatchSizeSelVector)
+	allocator.AdjustMemoryUsage(int64(2 * colmem.SizeOfBatchSizeSelVector))
 	return &caseOp{
 		allocator: allocator,
 		buffer:    buffer.(*bufferOp),
@@ -100,18 +98,15 @@ func NewCaseOp(
 	}
 }
 
-func (c *caseOp) Init(ctx context.Context) {
-	if !c.InitHelper.Init(ctx) {
-		return
-	}
+func (c *caseOp) Init() {
 	for i := range c.caseOps {
-		c.caseOps[i].Init(c.Ctx)
+		c.caseOps[i].Init()
 	}
-	c.elseOp.Init(c.Ctx)
+	c.elseOp.Init()
 }
 
-func (c *caseOp) Next() coldata.Batch {
-	c.buffer.advance()
+func (c *caseOp) Next(ctx context.Context) coldata.Batch {
+	c.buffer.advance(ctx)
 	origLen := c.buffer.batch.Length()
 	if origLen == 0 {
 		return coldata.ZeroBatch
@@ -145,7 +140,7 @@ func (c *caseOp) Next() coldata.Batch {
 			// Run the next case operator chain. It will project its THEN expression
 			// for all tuples that matched its WHEN expression and that were not
 			// already matched.
-			batch := c.caseOps[i].Next()
+			batch := c.caseOps[i].Next(ctx)
 			// The batch's projection column now additionally contains results for all
 			// of the tuples that passed the ith WHEN clause. The batch's selection
 			// vector is set to the same selection of tuples.
@@ -219,21 +214,21 @@ func (c *caseOp) Next() coldata.Batch {
 					}
 				}
 				// Set the buffered batch into the desired state.
-				c.buffer.batch.SetLength(curIdx)
-				prevLen = curIdx
 				c.buffer.batch.SetSelection(true)
 				prevHasSel = true
 				copy(c.buffer.batch.Selection()[:curIdx], c.prevSel)
 				c.prevSel = c.prevSel[:curIdx]
+				c.buffer.batch.SetLength(curIdx)
+				prevLen = curIdx
 			} else {
 				// There were no matches with the current WHEN arm, so we simply need
 				// to restore the buffered batch into the previous state.
-				c.buffer.batch.SetLength(prevLen)
 				c.buffer.batch.SetSelection(prevHasSel)
 				if prevHasSel {
 					copy(c.buffer.batch.Selection()[:prevLen], c.prevSel)
 					c.prevSel = c.prevSel[:prevLen]
 				}
+				c.buffer.batch.SetLength(prevLen)
 			}
 			// Now our selection vector is set to exclude all the things that have
 			// matched so far. Reset the buffer and run the next case arm.
@@ -242,7 +237,7 @@ func (c *caseOp) Next() coldata.Batch {
 		// Finally, run the else operator, which will project into all tuples that
 		// are remaining in the selection vector (didn't match any case arms). Once
 		// that's done, restore the original selection vector and return the batch.
-		batch := c.elseOp.Next()
+		batch := c.elseOp.Next(ctx)
 		if batch.Length() > 0 {
 			inputCol := batch.ColVec(c.thenIdxs[len(c.thenIdxs)-1])
 			outputCol.Copy(
@@ -258,10 +253,10 @@ func (c *caseOp) Next() coldata.Batch {
 		}
 	})
 	// Restore the original state of the buffered batch.
-	c.buffer.batch.SetLength(origLen)
 	c.buffer.batch.SetSelection(origHasSel)
 	if origHasSel {
 		copy(c.buffer.batch.Selection()[:origLen], c.origSel[:origLen])
 	}
+	c.buffer.batch.SetLength(origLen)
 	return c.buffer.batch
 }

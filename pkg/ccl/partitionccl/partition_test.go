@@ -29,11 +29,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
@@ -135,13 +133,13 @@ func (pt *partitioningTest) parse() error {
 		}
 		st := cluster.MakeTestingClusterSettings()
 		const parentID, tableID = keys.MinUserDescID, keys.MinUserDescID + 1
-		mutDesc, err := importccl.MakeTestingSimpleTableDescriptor(
+		mutDesc, err := importccl.MakeSimpleTableDescriptor(
 			ctx, &semaCtx, st, createTable, parentID, keys.PublicSchemaID, tableID, importccl.NoFKs, hlc.UnixNano())
 		if err != nil {
 			return err
 		}
 		pt.parsed.tableDesc = mutDesc
-		if err := catalog.ValidateSelf(pt.parsed.tableDesc); err != nil {
+		if err := pt.parsed.tableDesc.ValidateTable(); err != nil {
 			return err
 		}
 	}
@@ -179,21 +177,21 @@ func (pt *partitioningTest) parse() error {
 		if !strings.HasPrefix(indexName, "@") {
 			panic(errors.Errorf("unsupported config: %s", c))
 		}
-		idx, err := pt.parsed.tableDesc.FindIndexWithName(indexName[1:])
+		idxDesc, _, err := pt.parsed.tableDesc.FindIndexByName(indexName[1:])
 		if err != nil {
 			return errors.Wrapf(err, "could not find index %s", indexName)
 		}
-		subzone.IndexID = uint32(idx.GetID())
+		subzone.IndexID = uint32(idxDesc.ID)
 		if len(constraints) > 0 {
 			if subzone.PartitionName == "" {
 				fmt.Fprintf(&zoneConfigStmts,
 					`ALTER INDEX %s@%s CONFIGURE ZONE USING constraints = '[%s]';`,
-					pt.parsed.tableName, idx.GetName(), constraints,
+					pt.parsed.tableName, idxDesc.Name, constraints,
 				)
 			} else {
 				fmt.Fprintf(&zoneConfigStmts,
 					`ALTER PARTITION %s OF INDEX %s@%s CONFIGURE ZONE USING constraints = '[%s]';`,
-					subzone.PartitionName, pt.parsed.tableName, idx.GetName(), constraints,
+					subzone.PartitionName, pt.parsed.tableName, idxDesc.Name, constraints,
 				)
 			}
 		}
@@ -873,9 +871,9 @@ func allPartitioningTests(rng *rand.Rand) []partitioningTest {
 			// Not indexable.
 			continue
 		case types.CollatedStringFamily:
-			typ = types.MakeCollatedString(types.String, *randgen.RandCollationLocale(rng))
+			typ = types.MakeCollatedString(types.String, *rowenc.RandCollationLocale(rng))
 		}
-		datum := randgen.RandDatum(rng, typ, false /* nullOk */)
+		datum := rowenc.RandDatum(rng, typ, false /* nullOk */)
 		if datum == tree.DNull {
 			// DNull is returned by RandDatum for types.UNKNOWN or if the
 			// column type is unimplemented in RandDatum. In either case, the
@@ -1117,9 +1115,6 @@ func verifyScansOnNode(
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return errors.Wrap(err, "unexpected error querying traces")
-	}
 	if len(scansWrongNode) > 0 {
 		err := errors.Newf("expected to scan on %s: %s", node, query)
 		err = errors.WithDetailf(err, "scans:\n%s", strings.Join(scansWrongNode, "\n"))
@@ -1331,23 +1326,23 @@ func TestRepartitioning(t *testing.T) {
 				}
 				sqlDB.Exec(t, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", test.old.parsed.tableName, test.new.parsed.tableName))
 
-				testIndex, err := test.new.parsed.tableDesc.FindIndexWithName(test.index)
+				testIndex, _, err := test.new.parsed.tableDesc.FindIndexByName(test.index)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
 
 				var repartition bytes.Buffer
-				if testIndex.GetID() == test.new.parsed.tableDesc.GetPrimaryIndexID() {
+				if testIndex.ID == test.new.parsed.tableDesc.PrimaryIndex.ID {
 					fmt.Fprintf(&repartition, `ALTER TABLE %s `, test.new.parsed.tableName)
 				} else {
-					fmt.Fprintf(&repartition, `ALTER INDEX %s@%s `, test.new.parsed.tableName, testIndex.GetName())
+					fmt.Fprintf(&repartition, `ALTER INDEX %s@%s `, test.new.parsed.tableName, testIndex.Name)
 				}
-				if testIndex.GetPartitioning().NumColumns() == 0 {
+				if testIndex.Partitioning.NumColumns == 0 {
 					repartition.WriteString(`PARTITION BY NOTHING`)
 				} else {
 					if err := sql.ShowCreatePartitioning(
 						&rowenc.DatumAlloc{}, keys.SystemSQLCodec, test.new.parsed.tableDesc, testIndex,
-						testIndex.GetPartitioning(), &repartition, 0 /* indent */, 0, /* colOffset */
+						&testIndex.Partitioning, &repartition, 0 /* indent */, 0, /* colOffset */
 					); err != nil {
 						t.Fatalf("%+v", err)
 					}
@@ -1357,11 +1352,8 @@ func TestRepartitioning(t *testing.T) {
 				// Verify that repartitioning removes zone configs for partitions that
 				// have been removed.
 				newPartitionNames := map[string]struct{}{}
-				for _, index := range test.new.parsed.tableDesc.NonDropIndexes() {
-					_ = index.GetPartitioning().ForEachPartitionName(func(name string) error {
-						newPartitionNames[name] = struct{}{}
-						return nil
-					})
+				for _, name := range test.new.parsed.tableDesc.PartitionNames() {
+					newPartitionNames[name] = struct{}{}
 				}
 				for _, row := range sqlDB.QueryStr(
 					t, "SELECT partition_name FROM crdb_internal.zones WHERE partition_name IS NOT NULL") {
@@ -1421,7 +1413,7 @@ ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
 
 	// Get the zone config corresponding to the table.
 	table := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "t")
-	kv, err := kvDB.Get(ctx, config.MakeZoneKey(config.SystemTenantObjectID(table.GetID())))
+	kv, err := kvDB.Get(ctx, config.MakeZoneKey(config.SystemTenantObjectID(table.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1436,7 @@ ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
 	}
 
 	// Subzone spans have the table prefix omitted.
-	prefix := keys.SystemSQLCodec.TablePrefix(uint32(table.GetID()))
+	prefix := keys.SystemSQLCodec.TablePrefix(uint32(table.ID))
 	for i := range expectedSpans {
 		// Subzone spans have the table prefix omitted.
 		expected := bytes.TrimPrefix(expectedSpans[i], prefix)

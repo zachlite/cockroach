@@ -18,8 +18,7 @@ import (
 	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -44,7 +43,7 @@ func newPgCopyReader(
 	kvCh chan row.KVBatch,
 	walltime int64,
 	parallelism int,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	targetCols tree.NameList,
 	evalCtx *tree.EvalContext,
 ) (*pgCopyReader, error) {
@@ -70,7 +69,7 @@ func (d *pgCopyReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user security.SQLUsername,
+	user string,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, d.readFile, makeExternalStorage, user)
 }
@@ -333,7 +332,7 @@ func (p *pgCopyConsumer) FillDatums(
 				col := conv.VisibleCols[i]
 				return newImportRowError(fmt.Errorf(
 					"encountered error %s when attempting to parse %q as %s",
-					err.Error(), col.GetName(), col.GetType().SQLString()), data.String(), rowNum)
+					err.Error(), col.Name, col.Type.SQLString()), data.String(), rowNum)
 			}
 		}
 	}

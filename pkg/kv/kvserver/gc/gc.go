@@ -47,7 +47,7 @@ const (
 
 // IntentAgeThreshold is the threshold after which an extant intent
 // will be resolved.
-var IntentAgeThreshold = settings.RegisterDurationSetting(
+var IntentAgeThreshold = settings.RegisterValidatedDurationSetting(
 	"kv.gc.intent_age_threshold",
 	"intents older than this threshold will be resolved when encountered by the GC queue",
 	2*time.Hour,
@@ -159,8 +159,8 @@ type CleanupIntentsFunc func(context.Context, []roachpb.Intent) error
 // transaction record.
 type CleanupTxnIntentsAsyncFunc func(context.Context, *roachpb.Transaction) error
 
-// Run runs garbage collection for the specified range on the
-// provided snapshot (which is not mutated). It uses the provided GCer
+// Run runs garbage collection for the specified descriptor on the
+// provided Engine (which is not mutated). It uses the provided gcFn
 // to run garbage collection once on all implicated spans,
 // cleanupIntentsFn to resolve intents synchronously, and
 // cleanupTxnIntentsAsyncFn to asynchronously cleanup intents and
@@ -222,12 +222,6 @@ func Run(
 	log.Eventf(ctx, "GC'ed keys; stats %+v", info)
 
 	// Push transactions (if pending) and resolve intents.
-	//
-	// FIXME(erikgrinaker): We should have a timeout for suboperations here now
-	// that the overall GC timeout has been increased, to make sure we'll make
-	// progress even with range unavailability. That's probably best done once
-	// batching is implemented, so we'll wait for that:
-	// https://github.com/cockroachdb/cockroach/pull/65847
 	var intents []roachpb.Intent
 	for txnID, txn := range txnMap {
 		intents = append(intents, roachpb.AsIntents(&txn.TxnMeta, intentKeyMap[txnID])...)
@@ -270,7 +264,7 @@ func processReplicatedKeyRange(
 		if meta.Txn != nil {
 			// Keep track of intent to resolve if older than the intent
 			// expiration threshold.
-			if meta.Timestamp.ToTimestamp().Less(intentExp) {
+			if hlc.Timestamp(meta.Timestamp).Less(intentExp) {
 				txnID := meta.Txn.ID
 				if _, ok := txnMap[txnID]; !ok {
 					txnMap[txnID] = &roachpb.Transaction{
@@ -368,7 +362,7 @@ func processReplicatedKeyRange(
 			}
 			batchGCKeys = nil
 			batchGCKeysBytes = 0
-			alloc = bufalloc.ByteAllocator{}
+			alloc = nil
 		}
 	}
 	if len(batchGCKeys) > 0 {
@@ -504,8 +498,8 @@ func processLocalKeyRange(
 	endKey := keys.MakeRangeKeyPrefix(desc.EndKey)
 
 	_, err := storage.MVCCIterate(ctx, snap, startKey, endKey, hlc.Timestamp{}, storage.MVCCScanOptions{},
-		func(kv roachpb.KeyValue) error {
-			return handleOne(kv)
+		func(kv roachpb.KeyValue) (bool, error) {
+			return false, handleOne(kv)
 		})
 	return err
 }

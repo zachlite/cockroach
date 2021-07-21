@@ -95,9 +95,6 @@ func (e *scheduledBackupExecutor) executeBackup(
 		}
 	}
 
-	log.Infof(ctx, "Starting scheduled backup %d: %s",
-		sj.ScheduleID(), tree.AsString(backupStmt))
-
 	// Invoke backup plan hook.
 	hook, cleanup := cfg.PlanHookMaker("exec-backup", txn, sj.Owner())
 	defer cleanup()
@@ -148,7 +145,7 @@ func planBackup(
 // NotifyJobTermination implements jobs.ScheduledJobExecutor interface.
 func (e *scheduledBackupExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus jobs.Status,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,

@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -82,7 +81,7 @@ var _ kvcoord.NodeDescStore = (*Connector)(nil)
 // directly. Instead, the RangeLookup requests are proxied through existing KV
 // nodes while being subject to additional validation (e.g. is the Range being
 // requested owned by the requesting tenant?).
-var _ rangecache.RangeDescriptorDB = (*Connector)(nil)
+var _ kvcoord.RangeDescriptorDB = (*Connector)(nil)
 
 // Connector is capable of providing a filtered view of the SystemConfig
 // containing only information applicable to secondary tenants. This obviates
@@ -118,14 +117,12 @@ func (connectorFactory) NewConnector(
 // cluster's ID and set Connector.rpcContext.ClusterID.
 func (c *Connector) Start(ctx context.Context) error {
 	startupC := c.startupC
-	if err := c.rpcContext.Stopper.RunAsyncTask(context.Background(), "connector", func(ctx context.Context) {
+	c.rpcContext.Stopper.RunWorker(context.Background(), func(ctx context.Context) {
 		ctx = c.AnnotateCtx(ctx)
 		ctx, cancel := c.rpcContext.Stopper.WithCancelOnQuiesce(ctx)
 		defer cancel()
 		c.runGossipSubscription(ctx)
-	}); err != nil {
-		return err
-	}
+	})
 	// Synchronously block until the first GossipSubscription event.
 	select {
 	case <-startupC:
@@ -329,8 +326,8 @@ func (c *Connector) RangeLookup(
 		})
 		if err != nil {
 			log.Warningf(ctx, "error issuing RangeLookup RPC: %v", err)
-			if grpcutil.IsAuthError(err) {
-				// Authentication or authorization error. Propagate.
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
 				return nil, nil, err
 			}
 			// Soft RPC error. Drop client and retry.
@@ -365,20 +362,12 @@ func (c *Connector) getClient(ctx context.Context) (roachpb.InternalClient, erro
 		dialCtx := c.AnnotateCtx(context.Background())
 		dialCtx, cancel := c.rpcContext.Stopper.WithCancelOnQuiesce(dialCtx)
 		defer cancel()
-		var client roachpb.InternalClient
-		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial",
-			func(ctx context.Context) error {
-				var err error
-				client, err = c.dialAddrs(ctx)
-				return err
-			})
+		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial", c.dialAddrs)
 		if err != nil {
 			return nil, err
 		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.mu.client = client
-		return client, nil
+		// NB: read lock not needed.
+		return c.mu.client, nil
 	})
 	c.mu.RUnlock()
 
@@ -395,7 +384,7 @@ func (c *Connector) getClient(ctx context.Context) (roachpb.InternalClient, erro
 
 // dialAddrs attempts to dial each of the configured addresses in a retry loop.
 // The method will only return a non-nil error on context cancellation.
-func (c *Connector) dialAddrs(ctx context.Context) (roachpb.InternalClient, error) {
+func (c *Connector) dialAddrs(ctx context.Context) error {
 	for r := retry.StartWithCtx(ctx, c.rpcRetryOptions); r.Next(); {
 		// Try each address on each retry iteration.
 		randStart := rand.Intn(len(c.addrs))
@@ -406,10 +395,14 @@ func (c *Connector) dialAddrs(ctx context.Context) (roachpb.InternalClient, erro
 				log.Warningf(ctx, "error dialing tenant KV address %s: %v", addr, err)
 				continue
 			}
-			return roachpb.NewInternalClient(conn), nil
+			client := roachpb.NewInternalClient(conn)
+			c.mu.Lock()
+			c.mu.client = client
+			c.mu.Unlock()
+			return nil
 		}
 	}
-	return nil, ctx.Err()
+	return ctx.Err()
 }
 
 func (c *Connector) dialAddr(ctx context.Context, addr string) (conn *grpc.ClientConn, err error) {

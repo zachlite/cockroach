@@ -21,8 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -111,7 +109,6 @@ func TestFormatLocation(t *testing.T) {
 type logger struct {
 	TB       testing.TB
 	Severity log.Severity
-	Channel  log.Channel
 	Err      error
 }
 
@@ -120,7 +117,6 @@ func (l *logger) Log(_ context.Context, sev log.Severity, msg string, args ...in
 	err, ok := args[0].(error)
 	require.True(l.TB, ok, "expected to log an error")
 	l.Severity = sev
-	l.Channel = channel.SESSIONS
 	l.Err = err
 }
 
@@ -137,41 +133,41 @@ func TestErrorReporting(t *testing.T) {
 		{
 			desc:         "plain",
 			err:          errors.New("boom"),
-			wantSeverity: severity.ERROR,
+			wantSeverity: log.Severity_ERROR,
 			wantCLICause: false,
 		},
 		{
 			desc: "single cliError",
 			err: &cliError{
 				exitCode: exit.UnspecifiedError(),
-				severity: severity.INFO,
+				severity: log.Severity_INFO,
 				cause:    errors.New("routine"),
 			},
-			wantSeverity: severity.INFO,
+			wantSeverity: log.Severity_INFO,
 			wantCLICause: false,
 		},
 		{
 			desc: "double cliError",
 			err: &cliError{
 				exitCode: exit.UnspecifiedError(),
-				severity: severity.INFO,
+				severity: log.Severity_INFO,
 				cause: &cliError{
 					exitCode: exit.UnspecifiedError(),
-					severity: severity.ERROR,
+					severity: log.Severity_ERROR,
 					cause:    errors.New("serious"),
 				},
 			},
-			wantSeverity: severity.INFO, // should only unwrap one layer
+			wantSeverity: log.Severity_INFO, // should only unwrap one layer
 			wantCLICause: true,
 		},
 		{
 			desc: "wrapped cliError",
 			err: fmt.Errorf("some context: %w", &cliError{
 				exitCode: exit.UnspecifiedError(),
-				severity: severity.INFO,
+				severity: log.Severity_INFO,
 				cause:    errors.New("routine"),
 			}),
-			wantSeverity: severity.INFO,
+			wantSeverity: log.Severity_INFO,
 			wantCLICause: false,
 		},
 	}
@@ -182,7 +178,6 @@ func TestErrorReporting(t *testing.T) {
 			checked := checkAndMaybeShoutTo(tt.err, got.Log)
 			assert.Equal(t, tt.err, checked, "should return error unchanged")
 			assert.Equal(t, tt.wantSeverity, got.Severity, "wrong severity log")
-			assert.Equal(t, channel.SESSIONS, got.Channel, "wrong channel")
 			gotCLI := errors.HasType(got.Err, (*cliError)(nil))
 			if tt.wantCLICause {
 				assert.True(t, gotCLI, "logged cause should be *cliError, got %T", got.Err)

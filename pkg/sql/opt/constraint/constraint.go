@@ -52,23 +52,15 @@ func (c *Constraint) Init(keyCtx *KeyContext, spans *Spans) {
 			panic(errors.AssertionFailedf("spans must be ordered and non-overlapping"))
 		}
 	}
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = Constraint{
-		Columns: keyCtx.Columns,
-		Spans:   *spans,
-	}
+	c.Columns = keyCtx.Columns
+	c.Spans = *spans
 	c.Spans.makeImmutable()
 }
 
 // InitSingleSpan initializes the constraint to the columns in the key context
 // and with one span.
 func (c *Constraint) InitSingleSpan(keyCtx *KeyContext, span *Span) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = Constraint{
-		Columns: keyCtx.Columns,
-	}
+	c.Columns = keyCtx.Columns
 	c.Spans.InitSingleSpan(span)
 }
 
@@ -281,7 +273,7 @@ func (c *Constraint) Contains(evalCtx *tree.EvalContext, other *Constraint) bool
 			rightIndex++
 		}
 
-		// If the current left span ends after the current right span, then
+		// If the current left span ends after the the current right span, then
 		// the left span contains the right span. The current left span could
 		// also contain other right spans, so only increment rightIndex.
 		if cmpEnd > 0 {
@@ -551,10 +543,6 @@ func (c *Constraint) ConstrainedColumns(evalCtx *tree.EvalContext) int {
 //   /a/b/c: [/1/2/3 - /1/2/3] [/1/2/5 - /1/3/8] -> ExactPrefix = 1, Prefix = 1
 //   /a/b/c: [/1/2/3 - /1/2/3] [/1/3/3 - /1/3/3] -> ExactPrefix = 1, Prefix = 3
 func (c *Constraint) Prefix(evalCtx *tree.EvalContext) int {
-	if c.IsContradiction() {
-		return 0
-	}
-
 	prefix := 0
 	for ; prefix < c.Columns.Count(); prefix++ {
 		for i := 0; i < c.Spans.Count(); i++ {
@@ -573,42 +561,12 @@ func (c *Constraint) Prefix(evalCtx *tree.EvalContext) int {
 
 // ExtractConstCols returns a set of columns which are restricted to be
 // constant by the constraint.
-//
-// For example, in this constraint, columns a and c are constant:
-//   /a/b/c: [/1/1/1 - /1/1/1] [/1/4/1 - /1/4/1]
-//
-// However, none of the columns in this constraint are constant:
-//   /a/b: [/1/1 - /2/1] [/3/1 - /3/1]
-// Even though column b might appear to be constant, the first span allows
-// column b to take on any value. For example, a=1 and b=100 is contained in
-// the first span.
-//
-// This function returns all columns which have the same value for all spans,
-// and are within the constraint prefix (see Constraint.Prefix() for details).
 func (c *Constraint) ExtractConstCols(evalCtx *tree.EvalContext) opt.ColSet {
 	var res opt.ColSet
-	prefix := c.Prefix(evalCtx)
-	for col := 0; col < prefix; col++ {
-		// Check if all spans have the same value for this column.
-		var val tree.Datum
-		allMatch := true
-		for i := 0; i < c.Spans.Count(); i++ {
-			sp := c.Spans.Get(i)
-			// We only need to check the start value, since we know the end value is
-			// the same as the start value for all columns within the prefix.
-			startVal := sp.start.Value(col)
-			if i == 0 {
-				val = startVal
-			} else if startVal.Compare(evalCtx, val) != 0 {
-				allMatch = false
-				break
-			}
-		}
-		if allMatch {
-			res.Add(c.Columns.Get(col).ID())
-		}
+	pre := c.ExactPrefix(evalCtx)
+	for i := 0; i < pre; i++ {
+		res.Add(c.Columns.Get(i).ID())
 	}
-
 	return res
 }
 

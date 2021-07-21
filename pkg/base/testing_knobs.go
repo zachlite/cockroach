@@ -21,21 +21,19 @@ type ModuleTestingKnobs interface {
 type TestingKnobs struct {
 	Store                ModuleTestingKnobs
 	KVClient             ModuleTestingKnobs
-	RangeFeed            ModuleTestingKnobs
 	SQLExecutor          ModuleTestingKnobs
 	SQLLeaseManager      ModuleTestingKnobs
 	SQLSchemaChanger     ModuleTestingKnobs
-	SQLNewSchemaChanger  ModuleTestingKnobs
 	SQLTypeSchemaChanger ModuleTestingKnobs
 	GCJob                ModuleTestingKnobs
 	PGWireTestingKnobs   ModuleTestingKnobs
 	SQLMigrationManager  ModuleTestingKnobs
 	DistSQL              ModuleTestingKnobs
 	SQLEvalContext       ModuleTestingKnobs
+	RegistryLiveness     ModuleTestingKnobs
 	NodeLiveness         ModuleTestingKnobs
 	Server               ModuleTestingKnobs
 	TenantTestingKnobs   ModuleTestingKnobs
 	JobsTestingKnobs     ModuleTestingKnobs
 	BackupRestore        ModuleTestingKnobs
-	MigrationManager     ModuleTestingKnobs
 }

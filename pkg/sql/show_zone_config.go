@@ -66,7 +66,7 @@ const (
 
 func (p *planner) ShowZoneConfig(ctx context.Context, n *tree.ShowZoneConfig) (planNode, error) {
 	if !p.ExecCfg().Codec.ForSystemTenant() {
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
+		return nil, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
 
 	return &delayedNode{
@@ -108,11 +108,10 @@ func getShowZoneConfigRow(
 			return nil, err
 		}
 	} else if zoneSpecifier.Database != "" {
-		database, err := p.Descriptors().GetImmutableDatabaseByName(
+		database, err := p.ResolveUncachedDatabaseByName(
 			ctx,
-			p.txn,
 			string(zoneSpecifier.Database),
-			tree.DatabaseLookupFlags{Required: true},
+			true, /* required */
 		)
 		if err != nil {
 			return nil, err
@@ -179,14 +178,6 @@ func zoneConfigToSQL(zs *tree.ZoneSpecifier, zone *zonepb.ZoneConfig) (string, e
 		return "", err
 	}
 	constraints = strings.TrimSpace(constraints)
-	voterConstraints, err := yamlMarshalFlow(zonepb.ConstraintsList{
-		Constraints: zone.VoterConstraints,
-		Inherited:   zone.InheritedVoterConstraints(),
-	})
-	if err != nil {
-		return "", err
-	}
-	voterConstraints = strings.TrimSpace(voterConstraints)
 	prefs, err := yamlMarshalFlow(zone.LeasePreferences)
 	if err != nil {
 		return "", err
@@ -194,51 +185,36 @@ func zoneConfigToSQL(zs *tree.ZoneSpecifier, zone *zonepb.ZoneConfig) (string, e
 	prefs = strings.TrimSpace(prefs)
 
 	useComma := false
-	maybeWriteComma := func(f *tree.FmtCtx) {
-		if useComma {
-			f.Printf(",\n")
-		}
-		useComma = true
-	}
-
 	f := tree.NewFmtCtx(tree.FmtParsable)
 	f.WriteString("ALTER ")
 	f.FormatNode(zs)
 	f.WriteString(" CONFIGURE ZONE USING\n")
 	if zone.RangeMinBytes != nil {
-		maybeWriteComma(f)
 		f.Printf("\trange_min_bytes = %d", *zone.RangeMinBytes)
+		useComma = true
 	}
 	if zone.RangeMaxBytes != nil {
-		maybeWriteComma(f)
+		writeComma(f, useComma)
 		f.Printf("\trange_max_bytes = %d", *zone.RangeMaxBytes)
+		useComma = true
 	}
 	if zone.GC != nil {
-		maybeWriteComma(f)
+		writeComma(f, useComma)
 		f.Printf("\tgc.ttlseconds = %d", zone.GC.TTLSeconds)
-	}
-	if zone.GlobalReads != nil {
-		maybeWriteComma(f)
-		f.Printf("\tglobal_reads = %t", *zone.GlobalReads)
+		useComma = true
 	}
 	if zone.NumReplicas != nil {
-		maybeWriteComma(f)
+		writeComma(f, useComma)
 		f.Printf("\tnum_replicas = %d", *zone.NumReplicas)
-	}
-	if zone.NumVoters != nil {
-		maybeWriteComma(f)
-		f.Printf("\tnum_voters = %d", *zone.NumVoters)
+		useComma = true
 	}
 	if !zone.InheritedConstraints {
-		maybeWriteComma(f)
+		writeComma(f, useComma)
 		f.Printf("\tconstraints = %s", lex.EscapeSQLString(constraints))
-	}
-	if !zone.InheritedVoterConstraints() && zone.NumVoters != nil && *zone.NumVoters > 0 {
-		maybeWriteComma(f)
-		f.Printf("\tvoter_constraints = %s", lex.EscapeSQLString(voterConstraints))
+		useComma = true
 	}
 	if !zone.InheritedLeasePreferences {
-		maybeWriteComma(f)
+		writeComma(f, useComma)
 		f.Printf("\tlease_preferences = %s", lex.EscapeSQLString(prefs))
 	}
 	return f.String(), nil
@@ -342,6 +318,13 @@ func generateZoneConfigIntrospectionValues(
 		values[fullConfigSQLCol] = tree.NewDString(sqlStr)
 	}
 	return nil
+}
+
+// Writes a comma followed by a newline if useComma is true.
+func writeComma(f *tree.FmtCtx, useComma bool) {
+	if useComma {
+		f.Printf(",\n")
+	}
 }
 
 func yamlMarshalFlow(v interface{}) (string, error) {

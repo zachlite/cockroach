@@ -19,10 +19,12 @@ import (
 	"context"
 	"encoding/hex"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
 // SessionID represents an opaque identifier for a session. This ID should be
@@ -37,10 +39,6 @@ type Provider interface {
 	Metrics() metric.Struct
 	Reader
 	Instance
-
-	// CachedReader returns a reader which only consults its local cache and
-	// does not perform any RPCs in the IsAlive call.
-	CachedReader() Reader
 }
 
 // String returns a hex-encoded version of the SessionID.
@@ -57,7 +55,7 @@ func (s SessionID) UnsafeBytes() []byte {
 
 // Instance represents a SQL tenant server instance and is responsible for
 // maintaining at most once session for this instance and heart beating the
-// current live one if it exists and otherwise creating a new live one.
+// current live one if it exists and otherwise creating a new  live one.
 type Instance interface {
 	Session(context.Context) (Session, error)
 }
@@ -84,6 +82,22 @@ type Reader interface {
 	IsAlive(context.Context, SessionID) (alive bool, err error)
 }
 
-// NotStartedError can be returned from calls to the sqlliveness subsystem
-// prior to its being started.
-var NotStartedError = errors.Errorf("sqlliveness subsystem has not yet been started")
+// WaitForActive waits for the sqlliveness subsystem's migration to have been
+// performed.
+func WaitForActive(ctx context.Context, settings *cluster.Settings) {
+	// Use the default retry options which will retry forever with sane backoff.
+	for r := retry.StartWithCtx(ctx, retry.Options{}); r.Next(); {
+		if IsActive(ctx, settings) {
+			return
+		}
+	}
+}
+
+// IsActive returns whether the sqlliveness subsystem's migration to has been
+// performed.
+func IsActive(ctx context.Context, settings *cluster.Settings) bool {
+	return settings.Version.IsActive(
+		ctx,
+		clusterversion.VersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable,
+	)
+}

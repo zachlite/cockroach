@@ -12,17 +12,21 @@ package sql
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // runParams is a struct containing all parameters passed to planNode.Next() and
@@ -140,7 +144,6 @@ var _ planNode = &alterIndexNode{}
 var _ planNode = &alterSchemaNode{}
 var _ planNode = &alterSequenceNode{}
 var _ planNode = &alterTableNode{}
-var _ planNode = &alterTableOwnerNode{}
 var _ planNode = &alterTableSetSchemaNode{}
 var _ planNode = &alterTypeNode{}
 var _ planNode = &bufferNode{}
@@ -168,6 +171,7 @@ var _ planNode = &dropTypeNode{}
 var _ planNode = &DropRoleNode{}
 var _ planNode = &dropViewNode{}
 var _ planNode = &errorIfRowsNode{}
+var _ planNode = &explainDistSQLNode{}
 var _ planNode = &explainVecNode{}
 var _ planNode = &filterNode{}
 var _ planNode = &GrantRoleNode{}
@@ -181,7 +185,6 @@ var _ planNode = &limitNode{}
 var _ planNode = &max1RowNode{}
 var _ planNode = &ordinalityNode{}
 var _ planNode = &projectSetNode{}
-var _ planNode = &reassignOwnedByNode{}
 var _ planNode = &refreshMaterializedViewNode{}
 var _ planNode = &recursiveCTENode{}
 var _ planNode = &relocateNode{}
@@ -228,7 +231,6 @@ var _ planNodeReadingOwnWrites = &alterTableNode{}
 var _ planNodeReadingOwnWrites = &alterTypeNode{}
 var _ planNodeReadingOwnWrites = &createIndexNode{}
 var _ planNodeReadingOwnWrites = &createSequenceNode{}
-var _ planNodeReadingOwnWrites = &createDatabaseNode{}
 var _ planNodeReadingOwnWrites = &createTableNode{}
 var _ planNodeReadingOwnWrites = &createTypeNode{}
 var _ planNodeReadingOwnWrites = &createViewNode{}
@@ -264,18 +266,6 @@ type planNodeSpooled interface {
 
 var _ planNodeSpooled = &spoolNode{}
 
-type flowInfo struct {
-	typ     planComponentType
-	diagram execinfrapb.FlowDiagram
-	// explainVec and explainVecVerbose are only populated when collecting a
-	// statement bundle when the plan was vectorized.
-	explainVec        []string
-	explainVecVerbose []string
-	// flowsMetadata stores metadata from flows that will be used by
-	// execstats.TraceAnalyzer.
-	flowsMetadata *execstats.FlowsMetadata
-}
-
 // planTop is the struct that collects the properties
 // of an entire plan.
 // Note: some additional per-statement state is also stored in
@@ -289,9 +279,12 @@ type planTop struct {
 	planComponents
 
 	// mem/catalog retains the memo and catalog that were used to create the
-	// plan. Only set if needed by instrumentation (see ShouldSaveMemo).
+	// plan. Only set if savePlanForStats or savePlanString is true.
 	mem     *memo.Memo
 	catalog *optCatalog
+
+	// codec is populated during planning.
+	codec keys.SQLCodec
 
 	// auditEvents becomes non-nil if any of the descriptors used by
 	// current statement is causing an auditing event. See exec_log.go.
@@ -300,15 +293,28 @@ type planTop struct {
 	// flags is populated during planning and execution.
 	flags planFlags
 
+	// execErr retains the last execution error, if any.
+	execErr error
+
 	// avoidBuffering, when set, causes the execution to avoid buffering
 	// results.
 	avoidBuffering bool
 
-	// If we are collecting query diagnostics, flow information, including
-	// diagrams, are saved here.
-	distSQLFlowInfos []flowInfo
+	// If we are collecting query diagnostics, flow diagrams are saved here.
+	distSQLDiagrams []execinfrapb.FlowDiagram
 
-	instrumentation *instrumentationHelper
+	// If savePlanForStats is true, an ExplainTreePlanNode tree will be saved in
+	// planForStats when the plan is closed.
+	savePlanForStats bool
+	// appStats is used to populate savePlanForStats.
+	appStats     *appStats
+	planForStats *roachpb.ExplainTreePlanNode
+
+	// If savePlanString is set to true, an EXPLAIN (VERBOSE)-style plan string
+	// will be saved in planString when the plan is closed.
+	savePlanString bool
+	planString     string
+	explainPlan    *explain.Plan
 }
 
 // physicalPlanTop is a utility wrapper around PhysicalPlan that allows for
@@ -373,28 +379,6 @@ func (p *planMaybePhysical) Close(ctx context.Context) {
 	}
 }
 
-type planComponentType int
-
-const (
-	planComponentTypeUnknown = iota
-	planComponentTypeMainQuery
-	planComponentTypeSubquery
-	planComponentTypePostquery
-)
-
-func (t planComponentType) String() string {
-	switch t {
-	case planComponentTypeMainQuery:
-		return "main-query"
-	case planComponentTypeSubquery:
-		return "subquery"
-	case planComponentTypePostquery:
-		return "postquery"
-	default:
-		return "unknownquerytype"
-	}
-}
-
 // planComponents groups together the various components of the entire query
 // plan.
 type planComponents struct {
@@ -441,16 +425,17 @@ func (p *planComponents) close(ctx context.Context) {
 
 // init resets planTop to point to a given statement; used at the start of the
 // planning process.
-func (p *planTop) init(stmt *Statement, instrumentation *instrumentationHelper) {
+func (p *planTop) init(stmt *Statement, appStats *appStats, savePlanString bool) {
 	*p = planTop{
-		stmt:            stmt,
-		instrumentation: instrumentation,
+		stmt:           stmt,
+		appStats:       appStats,
+		savePlanString: savePlanString,
 	}
 }
 
 // close ensures that the plan's resources have been deallocated.
 func (p *planTop) close(ctx context.Context) {
-	if p.flags.IsSet(planFlagExecDone) {
+	if p.explainPlan != nil && p.flags.IsSet(planFlagExecDone) {
 		p.savePlanInfo(ctx)
 	}
 	p.planComponents.close(ctx)
@@ -465,7 +450,29 @@ func (p *planTop) savePlanInfo(ctx context.Context) {
 	} else if p.flags.IsSet(planFlagPartiallyDistributed) {
 		distribution = physicalplan.PartiallyDistributedPlan
 	}
-	p.instrumentation.RecordPlanInfo(distribution, vectorized)
+
+	if p.savePlanForStats {
+		ob := explain.NewOutputBuilder(explain.Flags{
+			HideValues: true,
+		})
+		if err := emitExplain(ob, p.codec, p.explainPlan, distribution, vectorized); err != nil {
+			log.Warningf(ctx, "unable to emit explain plan tree: %v", err)
+		} else {
+			p.planForStats = ob.BuildProtoTree()
+		}
+	}
+
+	if p.savePlanString {
+		ob := explain.NewOutputBuilder(explain.Flags{
+			Verbose:   true,
+			ShowTypes: true,
+		})
+		if err := emitExplain(ob, p.codec, p.explainPlan, distribution, vectorized); err != nil {
+			p.planString = fmt.Sprintf("error emitting plan: %v", err)
+		} else {
+			p.planString = ob.BuildString()
+		}
+	}
 }
 
 // startExec calls startExec() on each planNode using a depth-first, post-order
@@ -482,7 +489,7 @@ func startExec(params runParams, plan planNode) error {
 	o := planObserver{
 		enterNode: func(ctx context.Context, _ string, p planNode) (bool, error) {
 			switch p.(type) {
-			case *explainVecNode, *explainDDLNode:
+			case *explainDistSQLNode, *explainVecNode:
 				// Do not recurse: we're not starting the plan if we just show its structure with EXPLAIN.
 				return false, nil
 			case *showTraceNode:
@@ -518,6 +525,14 @@ func (p *planner) maybePlanHook(ctx context.Context, stmt tree.Statement) (planN
 			return &hookFnNode{f: fn, header: header, subplans: subplans}, nil
 		}
 	}
+	for _, planHook := range wrappedPlanHooks {
+		if node, err := planHook(ctx, stmt, p); err != nil {
+			return nil, err
+		} else if node != nil {
+			return node, err
+		}
+	}
+
 	return nil, nil
 }
 

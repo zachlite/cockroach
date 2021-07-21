@@ -13,13 +13,16 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
+	"github.com/cockroachdb/errors"
 )
 
 var errEmptyColumnName = pgerror.New(pgcode.Syntax, "empty column name")
@@ -34,16 +37,8 @@ type renameColumnNode struct {
 //   notes: postgres requires CREATE on the table.
 //          mysql requires ALTER, CREATE, INSERT on the table.
 func (p *planner) RenameColumn(ctx context.Context, n *tree.RenameColumn) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"RENAME COLUMN",
-	); err != nil {
-		return nil, err
-	}
-
 	// Check if table exists.
-	_, tableDesc, err := p.ResolveMutableTableDescriptor(ctx, &n.Table, !n.IfExists, tree.ResolveRequireTableDesc)
+	tableDesc, err := p.ResolveMutableTableDescriptor(ctx, &n.Table, !n.IfExists, tree.ResolveRequireTableDesc)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +74,9 @@ func (n *renameColumnNode) startExec(params runParams) error {
 		return nil
 	}
 
-	if err := validateDescriptor(ctx, p, tableDesc); err != nil {
+	if err := tableDesc.Validate(
+		ctx, catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.ExecCfg().Codec),
+	); err != nil {
 		return err
 	}
 
@@ -100,7 +97,7 @@ func (p *planner) renameColumn(
 		return false, errEmptyColumnName
 	}
 
-	col, err := tableDesc.FindColumnWithName(*oldName)
+	col, _, err := tableDesc.FindColumnByName(*oldName)
 	if err != nil {
 		return false, err
 	}
@@ -108,7 +105,7 @@ func (p *planner) renameColumn(
 	for _, tableRef := range tableDesc.DependedOnBy {
 		found := false
 		for _, colID := range tableRef.ColumnIDs {
-			if colID == col.GetID() {
+			if colID == col.ID {
 				found = true
 			}
 		}
@@ -129,9 +126,26 @@ func (p *planner) renameColumn(
 	// Understand if the active column already exists before checking for column
 	// mutations to detect assertion failure of empty mutation and no column.
 	// Otherwise we would have to make the above call twice.
-	_, err = checkColumnDoesNotExist(tableDesc, *newName)
-	if err != nil {
-		return false, err
+	_, columnNotFoundErr := tableDesc.FindActiveColumnByName(string(*newName))
+	if m := tableDesc.FindColumnMutationByName(*newName); m != nil {
+		switch m.Direction {
+		case descpb.DescriptorMutation_ADD:
+			return false, pgerror.Newf(pgcode.DuplicateColumn,
+				"duplicate: column %q in the middle of being added, not yet public",
+				col.Name)
+		case descpb.DescriptorMutation_DROP:
+			return false, pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				"column %q being dropped, try again later", col.Name)
+		default:
+			if columnNotFoundErr != nil {
+				return false, errors.AssertionFailedf(
+					"mutation in state %s, direction %s, and no column descriptor",
+					errors.Safe(m.State), errors.Safe(m.Direction))
+			}
+		}
+	}
+	if columnNotFoundErr == nil {
+		return false, sqlerrors.NewColumnAlreadyExistsError(tree.ErrString(newName), tableDesc.Name)
 	}
 
 	// Rename the column in CHECK constraints.
@@ -155,13 +169,13 @@ func (p *planner) renameColumn(
 	}
 
 	// Rename the column in partial index predicates.
-	for _, index := range tableDesc.PublicNonPrimaryIndexes() {
-		if index.IsPartial() {
-			newExpr, err := schemaexpr.RenameColumn(index.GetPredicate(), *oldName, *newName)
+	for i := range tableDesc.Indexes {
+		if index := &tableDesc.Indexes[i]; index.IsPartial() {
+			newExpr, err := schemaexpr.RenameColumn(index.Predicate, *oldName, *newName)
 			if err != nil {
 				return false, err
 			}
-			index.IndexDesc().Predicate = newExpr
+			index.Predicate = newExpr
 		}
 	}
 
@@ -225,8 +239,8 @@ func (p *planner) renameColumn(
 		// Keep the shardedDesc name in sync with the column name.
 		shardedDesc.Name = string(newName)
 	}
-	for _, idx := range tableDesc.NonDropIndexes() {
-		maybeUpdateShardedDesc(&idx.IndexDesc().Sharded)
+	for _, idx := range tableDesc.AllNonDropIndexes() {
+		maybeUpdateShardedDesc(&idx.Sharded)
 	}
 
 	// Rename the column in the indexes.
@@ -245,16 +259,6 @@ func (p *planner) renameColumn(
 		}
 	}
 
-	// Rename the REGIONAL BY ROW column reference.
-	if tableDesc.IsLocalityRegionalByRow() {
-		rbrColName, err := tableDesc.GetRegionalByRowTableRegionColumnName()
-		if err != nil {
-			return false, err
-		}
-		if rbrColName == *oldName {
-			tableDesc.SetTableLocalityRegionalByRow(*newName)
-		}
-	}
 	return true, nil
 }
 

@@ -27,13 +27,12 @@ type Column struct {
 	ordinal                     int
 	stableID                    StableID
 	name                        tree.Name
-	datumType                   *types.T
 	kind                        ColumnKind
+	datumType                   *types.T
 	nullable                    bool
-	visibility                  ColumnVisibility
-	virtualComputed             bool
-	defaultExpr                 string
-	computedExpr                string
+	hidden                      bool
+	defaultExpr                 *string
+	computedExpr                *string
 	invertedSourceColumnOrdinal int
 }
 
@@ -50,11 +49,11 @@ func (c *Column) Ordinal() int {
 // dropped and then re-added with the same name; the new column will have a
 // different ID. See the comment for StableID for more detail.
 //
-// Virtual inverted columns don't have stable IDs; for these columns ColID()
-// must not be called.
+// Virtual columns don't have stable IDs; for these columns ColID() must not be
+// called.
 func (c *Column) ColID() StableID {
-	if c.kind == VirtualInverted {
-		panic(errors.AssertionFailedf("virtual inverted columns have no StableID"))
+	if c.kind == Virtual {
+		panic(errors.AssertionFailedf("virtual columns have no StableID"))
 	}
 	return c.stableID
 }
@@ -74,6 +73,12 @@ func (c *Column) IsMutation() bool {
 	return c.kind == WriteOnly || c.kind == DeleteOnly
 }
 
+// IsSelectable returns true if this column should be accessible from user
+// queries (based on its Kind).
+func (c *Column) IsSelectable() bool {
+	return c.kind == Ordinary || c.kind == System
+}
+
 // DatumType returns the data type of the column.
 func (c *Column) DatumType() *types.T {
 	return c.datumType
@@ -84,15 +89,16 @@ func (c *Column) IsNullable() bool {
 	return c.nullable
 }
 
-// Visibility returns the column visibility.
-func (c *Column) Visibility() ColumnVisibility {
-	return c.visibility
+// IsHidden returns true if the column is hidden (e.g., there is always a hidden
+// column called rowid if there is no primary key on the table).
+func (c *Column) IsHidden() bool {
+	return c.hidden
 }
 
 // HasDefault returns true if the column has a default value. DefaultExprStr
 // will be set to the SQL expression string in that case.
 func (c *Column) HasDefault() bool {
-	return c.defaultExpr != ""
+	return c.defaultExpr != nil
 }
 
 // DefaultExprStr is set to the SQL expression string that describes the
@@ -100,13 +106,13 @@ func (c *Column) HasDefault() bool {
 // the column when inserting a row. Default values cannot depend on other
 // columns.
 func (c *Column) DefaultExprStr() string {
-	return c.defaultExpr
+	return *c.defaultExpr
 }
 
 // IsComputed returns true if the column is a computed value. ComputedExprStr
 // will be set to the SQL expression string in that case.
 func (c *Column) IsComputed() bool {
-	return c.computedExpr != ""
+	return c.computedExpr != nil
 }
 
 // ComputedExprStr is set to the SQL expression string that describes the
@@ -115,12 +121,7 @@ func (c *Column) IsComputed() bool {
 // columns, but they can depend on all other columns, including columns with
 // default values.
 func (c *Column) ComputedExprStr() string {
-	return c.computedExpr
-}
-
-// IsVirtualComputed returns true if this is a virtual computed column.
-func (c *Column) IsVirtualComputed() bool {
-	return c.virtualComputed
+	return *c.computedExpr
 }
 
 // InvertedSourceColumnOrdinal is used for virtual columns that are part
@@ -133,9 +134,6 @@ func (c *Column) IsVirtualComputed() bool {
 //
 // Must not be called if this is not a virtual column.
 func (c *Column) InvertedSourceColumnOrdinal() int {
-	if c.kind != VirtualInverted {
-		panic(errors.AssertionFailedf("non-virtual columns have no inverted source column ordinal"))
-	}
 	return c.invertedSourceColumnOrdinal
 }
 
@@ -144,7 +142,7 @@ type ColumnKind uint8
 
 const (
 	// Ordinary columns are "regular" table columns (including hidden columns
-	// like `rowid` and virtual computed columns).
+	// like `rowid`).
 	Ordinary ColumnKind = iota
 	// WriteOnly columns are mutation columns that have to be updated on writes
 	// (inserts, updates, deletes) and cannot be otherwise accessed.
@@ -157,36 +155,10 @@ const (
 	// as part of mutations. They also cannot be part of the lax or key columns
 	// for indexes. System columns are not members of any column family.
 	System
-	// VirtualInverted columns are implicit columns that are used by inverted
-	// indexes.
-	VirtualInverted
+	// Virtual columns are implicit columns that are used by inverted indexes (and
+	// later, expression-based indexes).
+	Virtual
 )
-
-// ColumnVisibility controls if a column is visible for queries and if it is
-// part of the star expansion.
-type ColumnVisibility uint8
-
-const (
-	// Visible columns are visible to queries and are part of the star expansion
-	// (e.g. SELECT * FROM t).
-	Visible ColumnVisibility = iota
-
-	// Hidden columns are visible to queries by name, but are not part of the star
-	// expansion (e.g. implicit PK column "rowid").
-	Hidden
-
-	// Inaccessible columns are not visible to queries in any way.
-	Inaccessible
-)
-
-// MaybeHidden is a helper constructor for either Visible or Hidden, depending
-// on a flag.
-func MaybeHidden(hidden bool) ColumnVisibility {
-	if hidden {
-		return Hidden
-	}
-	return Visible
-}
 
 // InitNonVirtual is used by catalog implementations to populate a non-virtual
 // Column. It should not be used anywhere else.
@@ -197,78 +169,38 @@ func (c *Column) InitNonVirtual(
 	kind ColumnKind,
 	datumType *types.T,
 	nullable bool,
-	visibility ColumnVisibility,
+	hidden bool,
 	defaultExpr *string,
 	computedExpr *string,
 ) {
-	if kind == VirtualInverted {
+	if kind == Virtual {
 		panic(errors.AssertionFailedf("incorrect init method"))
 	}
-	if (kind == WriteOnly || kind == DeleteOnly) && visibility != Inaccessible {
-		panic(errors.AssertionFailedf("mutation columns should always be inaccessible"))
-	}
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = Column{
-		ordinal:                     ordinal,
-		stableID:                    stableID,
-		name:                        name,
-		kind:                        kind,
-		datumType:                   datumType,
-		nullable:                    nullable,
-		visibility:                  visibility,
-		invertedSourceColumnOrdinal: -1,
-	}
-	if defaultExpr != nil {
-		c.defaultExpr = *defaultExpr
-	}
-	if computedExpr != nil {
-		c.computedExpr = *computedExpr
-	}
+	c.ordinal = ordinal
+	c.stableID = stableID
+	c.name = name
+	c.kind = kind
+	c.datumType = datumType
+	c.nullable = nullable
+	c.hidden = hidden
+	c.defaultExpr = defaultExpr
+	c.computedExpr = computedExpr
+	c.invertedSourceColumnOrdinal = -1
 }
 
-// InitVirtualInverted is used by catalog implementations to populate a
-// VirtualInverted Column. It should not be used anywhere else.
-func (c *Column) InitVirtualInverted(
+// InitVirtual is used by catalog implementations to populate a virtual Column.
+// It should not be used anywhere else.
+func (c *Column) InitVirtual(
 	ordinal int, name tree.Name, datumType *types.T, nullable bool, invertedSourceColumnOrdinal int,
 ) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = Column{
-		ordinal:                     ordinal,
-		stableID:                    0,
-		name:                        name,
-		kind:                        VirtualInverted,
-		datumType:                   datumType,
-		nullable:                    nullable,
-		visibility:                  Inaccessible,
-		invertedSourceColumnOrdinal: invertedSourceColumnOrdinal,
-	}
-}
-
-// InitVirtualComputed is used by catalog implementations to populate a
-// virtual computed Column. It should not be used anywhere else.
-func (c *Column) InitVirtualComputed(
-	ordinal int,
-	stableID StableID,
-	name tree.Name,
-	datumType *types.T,
-	nullable bool,
-	visibility ColumnVisibility,
-	computedExpr string,
-) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = Column{
-		ordinal:                     ordinal,
-		stableID:                    stableID,
-		name:                        name,
-		kind:                        Ordinary,
-		datumType:                   datumType,
-		nullable:                    nullable,
-		visibility:                  visibility,
-		computedExpr:                computedExpr,
-		virtualComputed:             true,
-		invertedSourceColumnOrdinal: -1,
-	}
+	c.ordinal = ordinal
+	c.stableID = 0
+	c.name = name
+	c.kind = Virtual
+	c.datumType = datumType
+	c.nullable = nullable
+	c.hidden = true
+	c.defaultExpr = nil
+	c.computedExpr = nil
+	c.invertedSourceColumnOrdinal = invertedSourceColumnOrdinal
 }

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func runFKBench(
@@ -54,8 +53,6 @@ func runFKBench(
 }
 
 func BenchmarkFKInsert(b *testing.B) {
-	defer log.Scope(b).Close(b)
-
 	const parentRows = 1000
 	setup := func(b *testing.B, r *sqlutils.SQLRunner, setupFKs bool) {
 		r.Exec(b, "CREATE TABLE child (k int primary key, p int)")

@@ -25,12 +25,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
-	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -56,7 +54,7 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	buf, syncResults, finished, stopper, resultChannel, err := startConnExecutor(ctx)
+	buf, syncResults, finished, stopper, err := startConnExecutor(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +68,11 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	// succeed and the 2nd one to fail (since the portal is destroyed after the
 	// Execute).
 	cmdPos := 0
-	if err = buf.Push(ctx, PrepareStmt{Name: "ps_nontxn", Statement: mustParseOne("SELECT 1")}); err != nil {
+	stmt := mustParseOne("SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = buf.Push(ctx, PrepareStmt{Name: "ps_nontxn", Statement: stmt}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,9 +101,6 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = resultChannel.nextResult(ctx)
-	require.NoError(t, err)
-
 	cmdPos++
 	failedDescribePos := cmdPos
 	if err = buf.Push(ctx, DescribeStmt{
@@ -121,7 +120,7 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	if numResults != cmdPos+1 {
 		t.Fatalf("expected %d results, got: %d", cmdPos+1, len(results))
 	}
-	if err = results[successfulDescribePos].err; err != nil {
+	if err := results[successfulDescribePos].err; err != nil {
 		t.Fatalf("expected first Describe to succeed, got err: %s", err)
 	}
 	if !testutils.IsError(results[failedDescribePos].err, "unknown portal") {
@@ -134,15 +133,20 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	// after the COMMIT). The point of the SELECT is to show that the portal
 	// survives execution of a statement.
 	cmdPos++
-	if err = buf.Push(ctx, ExecStmt{Statement: mustParseOne("BEGIN")}); err != nil {
+	stmt = mustParseOne("BEGIN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buf.Push(ctx, ExecStmt{Statement: stmt}); err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = resultChannel.nextResult(ctx)
-	require.NoError(t, err)
-
 	cmdPos++
-	if err = buf.Push(ctx, PrepareStmt{Name: "ps1", Statement: mustParseOne("SELECT 1")}); err != nil {
+	stmt = mustParseOne("SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = buf.Push(ctx, PrepareStmt{Name: "ps1", Statement: stmt}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,12 +159,13 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	}
 
 	cmdPos++
-	if err = buf.Push(ctx, ExecStmt{Statement: mustParseOne("SELECT 2")}); err != nil {
+	stmt = mustParseOne("SELECT 2")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, _, err = resultChannel.nextResult(ctx)
-	require.NoError(t, err)
+	if err := buf.Push(ctx, ExecStmt{Statement: stmt}); err != nil {
+		t.Fatal(err)
+	}
 
 	cmdPos++
 	successfulDescribePos = cmdPos
@@ -172,12 +177,13 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	}
 
 	cmdPos++
-	if err = buf.Push(ctx, ExecStmt{Statement: mustParseOne("COMMIT")}); err != nil {
+	stmt = mustParseOne("COMMIT")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, _, err = resultChannel.nextResult(ctx)
-	require.NoError(t, err)
+	if err := buf.Push(ctx, ExecStmt{Statement: stmt}); err != nil {
+		t.Fatal(err)
+	}
 
 	cmdPos++
 	failedDescribePos = cmdPos
@@ -200,7 +206,7 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 		t.Fatalf("expected %d results, got: %d", exp, len(results))
 	}
 	succDescIdx := successfulDescribePos - numResults
-	if err = results[succDescIdx].err; err != nil {
+	if err := results[succDescIdx].err; err != nil {
 		t.Fatalf("expected first Describe to succeed, got err: %s", err)
 	}
 	failDescIdx := failedDescribePos - numResults
@@ -209,7 +215,7 @@ func TestPortalsDestroyedOnTxnFinish(t *testing.T) {
 	}
 
 	buf.Close()
-	if err = <-finished; err != nil {
+	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -233,13 +239,9 @@ func mustParseOne(s string) parser.Statement {
 // gets the error from closing down the executor once the StmtBuf is closed, a
 // stopper that must be stopped when the test completes (this does not stop the
 // executor but stops other background work).
-//
-// It also returns an asyncIEResultChannel which can buffer up to
-// asyncIEResultChannelBufferSize items written by AddRow, so the caller might
-// need to read from it.
 func startConnExecutor(
 	ctx context.Context,
-) (*StmtBuf, <-chan []resWithPos, <-chan error, *stop.Stopper, ieResultReader, error) {
+) (*StmtBuf, <-chan []resWithPos, <-chan error, *stop.Stopper, error) {
 	// A lot of boilerplate for creating a connExecutor.
 	stopper := stop.NewStopper()
 	clock := hlc.NewClock(hlc.UnixNano, 0 /* maxOffset */)
@@ -253,14 +255,8 @@ func startConnExecutor(
 	nodeID := base.TestingIDContainer
 	distSQLMetrics := execinfra.MakeDistSQLMetrics(time.Hour /* histogramWindow */)
 	gw := gossip.MakeOptionalGossip(nil)
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
-	if err != nil {
-		return nil, nil, nil, nil, nil, err
-	}
-	defer tempEngine.Close()
-	ambientCtx := testutils.MakeAmbientCtx()
 	cfg := &ExecutorConfig{
-		AmbientCtx:      ambientCtx,
+		AmbientCtx:      testutils.MakeAmbientCtx(),
 		Settings:        st,
 		Clock:           clock,
 		DB:              db,
@@ -274,19 +270,13 @@ func startConnExecutor(
 		DistSQLPlanner: NewDistSQLPlanner(
 			ctx, execinfra.Version, st, roachpb.NodeID(1),
 			nil, /* rpcCtx */
-			distsql.NewServer(
-				ctx,
-				execinfra.ServerConfig{
-					AmbientContext:    ambientCtx,
-					Settings:          st,
-					Stopper:           stopper,
-					Metrics:           &distSQLMetrics,
-					NodeID:            nodeID,
-					TempFS:            tempFS,
-					ParentDiskMonitor: execinfra.NewTestDiskMonitor(ctx, st),
-				},
-				flowinfra.NewFlowScheduler(ambientCtx, stopper, st),
-			),
+			distsql.NewServer(ctx, execinfra.ServerConfig{
+				AmbientContext: testutils.MakeAmbientCtx(),
+				Settings:       st,
+				Stopper:        stopper,
+				Metrics:        &distSQLMetrics,
+				NodeID:         nodeID,
+			}),
 			nil, /* distSender */
 			nil, /* nodeDescs */
 			gw,
@@ -297,7 +287,6 @@ func startConnExecutor(
 		QueryCache:              querycache.New(0),
 		TestingKnobs:            ExecutorTestingKnobs{},
 		StmtDiagnosticsRecorder: stmtdiagnostics.NewRegistry(nil, nil, gw, st),
-		HistogramWindowInterval: base.DefaultHistogramWindowInterval(),
 	}
 	pool := mon.NewUnlimitedMonitor(
 		context.Background(), "test", mon.MemoryResource,
@@ -309,18 +298,16 @@ func startConnExecutor(
 	s := NewServer(cfg, pool)
 	buf := NewStmtBuf()
 	syncResults := make(chan []resWithPos, 1)
-	resultChannel := newAsyncIEResultChannel()
 	var cc ClientComm = &internalClientComm{
 		sync: func(res []resWithPos) {
 			syncResults <- res
 		},
-		w: resultChannel,
 	}
 	sqlMetrics := MakeMemMetrics("test" /* endpoint */, time.Second /* histogramWindow */)
 
 	conn, err := s.SetupConn(ctx, SessionArgs{}, buf, cc, sqlMetrics)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	finished := make(chan error)
 
@@ -330,7 +317,7 @@ func startConnExecutor(
 	go func() {
 		finished <- s.ServeConn(ctx, conn, mon.BoundAccount{}, nil /* cancel */)
 	}()
-	return buf, syncResults, finished, stopper, resultChannel, nil
+	return buf, syncResults, finished, stopper, nil
 }
 
 // Test that a client session can close without deadlocking when the closing
@@ -353,7 +340,7 @@ func TestSessionCloseWithPendingTempTableInTxn(t *testing.T) {
 			flushed <- res
 		},
 	}
-	connHandler, err := srv.SetupConn(ctx, SessionArgs{User: security.RootUserName()}, stmtBuf, clientComm, MemoryMetrics{})
+	connHandler, err := srv.SetupConn(ctx, SessionArgs{User: security.RootUser}, stmtBuf, clientComm, MemoryMetrics{})
 	require.NoError(t, err)
 
 	stmts, err := parser.Parse(`

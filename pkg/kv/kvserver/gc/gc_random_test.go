@@ -91,7 +91,7 @@ func TestRunNewVsOld(t *testing.T) {
 		},
 	} {
 		t.Run(fmt.Sprintf("%v@%v,ttl=%v", tc.ds, tc.now, tc.ttl), func(t *testing.T) {
-			eng := storage.NewDefaultInMemForTesting()
+			eng := storage.NewDefaultInMem()
 			defer eng.Close()
 
 			tc.ds.dist(N, rng).setupTest(t, eng, *tc.ds.desc())
@@ -148,7 +148,7 @@ func BenchmarkRun(b *testing.B) {
 	}
 	makeTest := func(old bool, spec randomRunGCTestSpec) func(b *testing.B) {
 		return func(b *testing.B) {
-			eng := storage.NewDefaultInMemForTesting()
+			eng := storage.NewDefaultInMem()
 			defer eng.Close()
 			ms := spec.ds.dist(b.N, rng).setupTest(b, eng, *spec.ds.desc())
 			b.SetBytes(int64(float64(ms.Total()) / float64(b.N)))

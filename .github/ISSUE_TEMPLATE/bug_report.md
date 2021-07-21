@@ -1,9 +1,7 @@
 ---
-name: 'Bug or crash report'
-title: ''
-about: 'Report unexpected behavior to help us improve'
-labels: 'C-bug'
-assignees: ''
+name: Bug or crash report
+about: Report unexpected behavior to help us improve
+
 ---
 
 **Describe the problem**

@@ -66,11 +66,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		rows := [][]string{
 			{username, fmt.Sprintf("%d", id), hC},
 		}
-		if err := PrintQueryOutput(os.Stdout, cols, NewRowSliceIter(rows, "ll")); err != nil {
+		if err := printQueryOutput(os.Stdout, cols, newRowSliceIter(rows, "ll")); err != nil {
 			return err
 		}
 
-		checkInteractive(os.Stdin)
+		checkInteractive()
 		if cliCtx.isInteractive {
 			fmt.Fprintf(stderr, `#
 # Example uses:

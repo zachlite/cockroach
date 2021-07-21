@@ -40,26 +40,6 @@ func Centroid(g geo.Geometry) (geo.Geometry, error) {
 	return geo.ParseGeometryFromEWKB(centroidEWKB)
 }
 
-// MinimumBoundingCircle returns minimum bounding circle of an EWKB
-func MinimumBoundingCircle(g geo.Geometry) (geo.Geometry, geo.Geometry, float64, error) {
-	polygonEWKB, centroidEWKB, radius, err := geos.MinimumBoundingCircle(g.EWKB())
-	if err != nil {
-		return geo.Geometry{}, geo.Geometry{}, 0, err
-	}
-
-	polygon, err := geo.ParseGeometryFromEWKB(polygonEWKB)
-	if err != nil {
-		return geo.Geometry{}, geo.Geometry{}, 0, err
-	}
-
-	centroid, err := geo.ParseGeometryFromEWKB(centroidEWKB)
-	if err != nil {
-		return geo.Geometry{}, geo.Geometry{}, 0, err
-	}
-
-	return polygon, centroid, radius, nil
-}
-
 // ClipByRect clips a given Geometry by the given BoundingBox.
 func ClipByRect(g geo.Geometry, b geo.CartesianBoundingBox) (geo.Geometry, error) {
 	if g.Empty() {
@@ -97,9 +77,9 @@ func Difference(a, b geo.Geometry) (geo.Geometry, error) {
 	return geo.ParseGeometryFromEWKB(diffEWKB)
 }
 
-// SimplifyGEOS returns a simplified Geometry with GEOS.
-func SimplifyGEOS(g geo.Geometry, tolerance float64) (geo.Geometry, error) {
-	if math.IsNaN(tolerance) || g.ShapeType2D() == geopb.ShapeType_Point || g.ShapeType2D() == geopb.ShapeType_MultiPoint {
+// Simplify returns a simplified Geometry.
+func Simplify(g geo.Geometry, tolerance float64) (geo.Geometry, error) {
+	if math.IsNaN(tolerance) || g.ShapeType() == geopb.ShapeType_Point || g.ShapeType() == geopb.ShapeType_MultiPoint {
 		return g, nil
 	}
 	simplifiedEWKB, err := geos.Simplify(g.EWKB(), tolerance)
@@ -146,15 +126,6 @@ func Intersection(a geo.Geometry, b geo.Geometry) (geo.Geometry, error) {
 	return geo.ParseGeometryFromEWKB(retEWKB)
 }
 
-// UnaryUnion returns the geometry of union between input geometry components
-func UnaryUnion(g geo.Geometry) (geo.Geometry, error) {
-	retEWKB, err := geos.UnaryUnion(g.EWKB())
-	if err != nil {
-		return geo.Geometry{}, err
-	}
-	return geo.ParseGeometryFromEWKB(retEWKB)
-}
-
 // Union returns the geometries of union between A and B.
 func Union(a geo.Geometry, b geo.Geometry) (geo.Geometry, error) {
 	if a.SRID() != b.SRID() {
@@ -185,19 +156,6 @@ func SharedPaths(a geo.Geometry, b geo.Geometry) (geo.Geometry, error) {
 		return geo.Geometry{}, geo.NewMismatchingSRIDsError(a.SpatialObject(), b.SpatialObject())
 	}
 	paths, err := geos.SharedPaths(a.EWKB(), b.EWKB())
-	if err != nil {
-		return geo.Geometry{}, err
-	}
-	gm, err := geo.ParseGeometryFromEWKB(paths)
-	if err != nil {
-		return geo.Geometry{}, err
-	}
-	return gm, nil
-}
-
-// MinimumRotatedRectangle Returns a minimum rotated rectangle enclosing a geometry
-func MinimumRotatedRectangle(g geo.Geometry) (geo.Geometry, error) {
-	paths, err := geos.MinimumRotatedRectangle(g.EWKB())
 	if err != nil {
 		return geo.Geometry{}, err
 	}

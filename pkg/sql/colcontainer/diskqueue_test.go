@@ -18,7 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
 )
@@ -76,7 +75,6 @@ func TestDiskQueue(t *testing.T) {
 							batches = append(batches, coldatatestutils.CopyBatch(b, typs, testColumnFactory))
 						},
 					})
-					op.Init(ctx)
 					typs := op.Typs()
 
 					queueCfg.CacheMode = diskQueueCacheMode
@@ -102,7 +100,7 @@ func TestDiskQueue(t *testing.T) {
 					require.NoError(t, err)
 
 					// Verify that a directory was created.
-					directories, err := queueCfg.FS.List(queueCfg.GetPather.GetPath(ctx))
+					directories, err := queueCfg.FS.List(queueCfg.Path)
 					require.NoError(t, err)
 					require.Equal(t, 1, len(directories))
 
@@ -110,7 +108,7 @@ func TestDiskQueue(t *testing.T) {
 					// since that is the common pattern.
 					dest := coldata.NewMemBatch(typs, testColumnFactory)
 					for {
-						src := op.Next()
+						src := op.Next(ctx)
 						require.NoError(t, q.Enqueue(ctx, src))
 						if src.Length() == 0 {
 							break
@@ -164,7 +162,7 @@ func TestDiskQueue(t *testing.T) {
 					require.NoError(t, q.Close(ctx))
 
 					// Verify no directories are left over.
-					directories, err = queueCfg.FS.List(queueCfg.GetPather.GetPath(ctx))
+					directories, err = queueCfg.FS.List(queueCfg.Path)
 					require.NoError(t, err)
 					require.Equal(t, 0, len(directories))
 				})
@@ -181,8 +179,8 @@ func TestDiskQueueCloseOnErr(t *testing.T) {
 	defer cleanup()
 
 	serverCfg := &execinfra.ServerConfig{}
-	serverCfg.TestingKnobs.ForceDiskSpill = true
-	diskMon := execinfra.NewLimitedMonitorNoFlowCtx(ctx, testDiskMonitor, serverCfg, nil /* sd */, t.Name())
+	serverCfg.TestingKnobs.MemoryLimitBytes = 1
+	diskMon := execinfra.NewLimitedMonitor(ctx, testDiskMonitor, serverCfg, t.Name())
 	defer diskMon.Stop(ctx)
 	diskAcc := diskMon.MakeBoundAccount()
 	defer diskAcc.Close(ctx)
@@ -192,6 +190,7 @@ func TestDiskQueueCloseOnErr(t *testing.T) {
 	require.NoError(t, err)
 
 	b := coldata.NewMemBatch(typs, coldata.StandardColumnFactory)
+	b.SetLength(0)
 
 	err = q.Enqueue(ctx, b)
 	require.Error(t, err, "expected Enqueue to produce an error given a disk limit of one byte")
@@ -211,7 +210,6 @@ var (
 // BenchmarkDiskQueue benchmarks a queue with parameters provided through flags.
 func BenchmarkDiskQueue(b *testing.B) {
 	skip.UnderShort(b)
-	defer log.Scope(b).Close(b)
 
 	bufSize, err := humanizeutil.ParseBytes(*bufferSizeBytes)
 	if err != nil {
@@ -235,14 +233,14 @@ func BenchmarkDiskQueue(b *testing.B) {
 	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int}
 	batch := coldatatestutils.RandomBatch(testAllocator, rng, typs, coldata.BatchSize(), 0, 0)
-	op := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
+	op := colexecbase.NewRepeatableBatchSource(testAllocator, batch, typs)
 	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
 		op.ResetBatchesToReturn(numBatches)
 		q, err := colcontainer.NewDiskQueue(ctx, typs, queueCfg, testDiskAcc)
 		require.NoError(b, err)
 		for {
-			batchToEnqueue := op.Next()
+			batchToEnqueue := op.Next(ctx)
 			if err := q.Enqueue(ctx, batchToEnqueue); err != nil {
 				b.Fatal(err)
 			}

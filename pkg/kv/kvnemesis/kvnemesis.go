@@ -34,22 +34,18 @@ import (
 func RunNemesis(
 	ctx context.Context,
 	rng *rand.Rand,
-	env *Env,
+	ct ClosedTimestampTargetInterval,
 	config GeneratorConfig,
-	numSteps int,
 	dbs ...*kv.DB,
 ) ([]error, error) {
-	const concurrency = 5
-	if numSteps <= 0 {
-		return nil, fmt.Errorf("numSteps must be >0, got %v", numSteps)
-	}
+	const concurrency, numSteps = 5, 30
 
 	g, err := MakeGenerator(config, newGetReplicasFn(dbs...))
 	if err != nil {
 		return nil, err
 	}
-	a := MakeApplier(env, dbs...)
-	w, err := Watch(ctx, env, dbs, GeneratorDataSpan())
+	a := MakeApplier(dbs...)
+	w, err := Watch(ctx, dbs, ct, GeneratorDataSpan())
 	if err != nil {
 		return nil, err
 	}
@@ -61,11 +57,10 @@ func RunNemesis(
 	workerFn := func(ctx context.Context, workerIdx int) error {
 		workerName := fmt.Sprintf(`%d`, workerIdx)
 		var buf strings.Builder
-		for atomic.AddInt64(&stepsStartedAtomic, 1) <= int64(numSteps) {
+		for atomic.AddInt64(&stepsStartedAtomic, 1) <= numSteps {
 			step := g.RandStep(rng)
 
-			recCtx, collect, cancel := tracing.ContextWithRecordingSpan(
-				ctx, tracing.NewTracer(), "txn step")
+			recCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, "txn step")
 			err := a.Apply(recCtx, &step)
 			log.VEventf(recCtx, 2, "step: %v", step)
 			step.Trace = collect().String()

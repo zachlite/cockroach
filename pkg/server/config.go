@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -37,7 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
+	"github.com/elastic/gosigar"
 )
 
 // Context defaults.
@@ -129,9 +130,6 @@ type BaseConfig struct {
 	// HeapProfileDirName is the directory name for heap profiles using
 	// heapprofiler. If empty, no heap profiles will be collected.
 	HeapProfileDirName string
-
-	// CPUProfileDirName is the directory name for CPU profile dumps.
-	CPUProfileDirName string
 
 	// DefaultZoneConfig is used to set the default zone config inside the server.
 	// It can be overridden during tests by setting the DefaultZoneConfigOverride
@@ -275,10 +273,6 @@ type KVConfig struct {
 	// the Admin API's HTTP endpoints.
 	EnableWebSessionAuthentication bool
 
-	// EnableDemoLoginEndpoint enables the HTTP GET endpoint for user logins,
-	// which a feature unique to the demo shell.
-	EnableDemoLoginEndpoint bool
-
 	enginesCreated bool
 }
 
@@ -307,6 +301,9 @@ type SQLConfig struct {
 	// The tenant that the SQL server runs on the behalf of.
 	TenantID roachpb.TenantID
 
+	// LeaseManagerConfig holds configuration values specific to the LeaseManager.
+	LeaseManagerConfig *base.LeaseManagerConfig
+
 	// SocketFile, if non-empty, sets up a TLS-free local listener using
 	// a unix datagram socket at the specified path.
 	SocketFile string
@@ -322,6 +319,9 @@ type SQLConfig struct {
 	// MemoryPoolSize is the amount of memory in bytes that can be
 	// used by SQL clients to store row data in server RAM.
 	MemoryPoolSize int64
+
+	// AuditLogDirName is the target directory name for SQL audit logs.
+	AuditLogDirName *log.DirName
 
 	// TableStatCacheSize is the size (number of tables) of the table
 	// statistics cache.
@@ -344,6 +344,7 @@ func MakeSQLConfig(tenID roachpb.TenantID, tempStorageCfg base.TempStorageConfig
 		TableStatCacheSize: defaultSQLTableStatCacheSize,
 		QueryCacheSize:     defaultSQLQueryCacheSize,
 		TempStorageConfig:  tempStorageCfg,
+		LeaseManagerConfig: base.NewLeaseManagerConfig(),
 	}
 	return sqlCfg
 }
@@ -457,9 +458,22 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 		return Engines{}, errors.Errorf("engines already created")
 	}
 	cfg.enginesCreated = true
-	details := []string{fmt.Sprintf("Pebble cache size: %s", humanizeutil.IBytes(cfg.CacheSize))}
-	pebbleCache := pebble.NewCache(cfg.CacheSize)
-	defer pebbleCache.Unref()
+
+	var details []string
+
+	var cache storage.RocksDBCache
+	var pebbleCache *pebble.Cache
+	if cfg.StorageEngine == enginepb.EngineTypeDefault ||
+		cfg.StorageEngine == enginepb.EngineTypePebble || cfg.StorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
+		details = append(details, fmt.Sprintf("Pebble cache size: %s", humanizeutil.IBytes(cfg.CacheSize)))
+		pebbleCache = pebble.NewCache(cfg.CacheSize)
+		defer pebbleCache.Unref()
+	}
+	if cfg.StorageEngine == enginepb.EngineTypeRocksDB || cfg.StorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
+		details = append(details, fmt.Sprintf("RocksDB cache size: %s", humanizeutil.IBytes(cfg.CacheSize)))
+		cache = storage.NewRocksDBCache(cfg.CacheSize)
+		defer cache.Release()
+	}
 
 	var physicalStores int
 	for _, spec := range cfg.Stores.Specs {
@@ -494,32 +508,23 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			details = append(details, fmt.Sprintf("store %d: in-memory, size %s",
 				i, humanizeutil.IBytes(sizeInBytes)))
 			if spec.StickyInMemoryEngineID != "" {
-				if cfg.TestingKnobs.Server == nil {
-					return Engines{}, errors.AssertionFailedf("Could not create a sticky " +
-						"engine no server knobs available to get a registry. " +
-						"Please use Knobs.Server.StickyEngineRegistry to provide one.")
-				}
-				knobs := cfg.TestingKnobs.Server.(*TestingKnobs)
-				if knobs.StickyEngineRegistry == nil {
-					return Engines{}, errors.Errorf("Could not create a sticky " +
-						"engine no registry available. Please use " +
-						"Knobs.Server.StickyEngineRegistry to provide one.")
-				}
-				e, err := knobs.StickyEngineRegistry.GetOrCreateStickyInMemEngine(ctx, cfg, spec)
+				e, err := getOrCreateStickyInMemEngine(
+					ctx, spec.StickyInMemoryEngineID, cfg.StorageEngine, spec.Attributes, sizeInBytes,
+				)
 				if err != nil {
 					return Engines{}, err
 				}
 				engines = append(engines, e)
 			} else {
-				engines = append(engines, storage.NewInMem(ctx, spec.Attributes, cfg.CacheSize, sizeInBytes, cfg.Settings))
+				engines = append(engines, storage.NewInMem(ctx, cfg.StorageEngine, spec.Attributes, sizeInBytes))
 			}
 		} else {
 			if spec.Size.Percent > 0 {
-				du, err := vfs.Default.GetDiskUsage(spec.Path)
-				if err != nil {
+				fileSystemUsage := gosigar.FileSystemUsage{}
+				if err := fileSystemUsage.Get(spec.Path); err != nil {
 					return Engines{}, err
 				}
-				sizeInBytes = int64(float64(du.TotalBytes) * spec.Size.Percent / 100)
+				sizeInBytes = int64(float64(fileSystemUsage.Total) * spec.Size.Percent / 100)
 			}
 			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
 				return Engines{}, errors.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
@@ -529,31 +534,81 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			details = append(details, fmt.Sprintf("store %d: RocksDB, max size %s, max open file limit %d",
 				i, humanizeutil.IBytes(sizeInBytes), openFileLimitPerStore))
 
+			var eng storage.Engine
+			var err error
 			storageConfig := base.StorageConfig{
-				Attrs:             spec.Attributes,
-				Dir:               spec.Path,
-				MaxSize:           sizeInBytes,
-				Settings:          cfg.Settings,
-				UseFileRegistry:   spec.UseFileRegistry,
-				EncryptionOptions: spec.EncryptionOptions,
+				Attrs:           spec.Attributes,
+				Dir:             spec.Path,
+				MaxSize:         sizeInBytes,
+				Settings:        cfg.Settings,
+				UseFileRegistry: spec.UseFileRegistry,
+				ExtraOptions:    spec.ExtraOptions,
 			}
-			pebbleConfig := storage.PebbleConfig{
-				StorageConfig: storageConfig,
-				Opts:          storage.DefaultPebbleOptions(),
-			}
-			pebbleConfig.Opts.Cache = pebbleCache
-			pebbleConfig.Opts.MaxOpenFiles = int(openFileLimitPerStore)
-			// If the spec contains Pebble options, set those too.
-			if len(spec.PebbleOptions) > 0 {
-				err := pebbleConfig.Opts.Parse(spec.PebbleOptions, &pebble.ParseHooks{})
+			if cfg.StorageEngine == enginepb.EngineTypeDefault || cfg.StorageEngine == enginepb.EngineTypePebble {
+				pebbleConfig := storage.PebbleConfig{
+					StorageConfig: storageConfig,
+					Opts:          storage.DefaultPebbleOptions(),
+				}
+				pebbleConfig.Opts.Cache = pebbleCache
+				pebbleConfig.Opts.MaxOpenFiles = int(openFileLimitPerStore)
+				// If the spec contains Pebble options, set those too.
+				if len(spec.PebbleOptions) > 0 {
+					err = pebbleConfig.Opts.Parse(spec.PebbleOptions, &pebble.ParseHooks{})
+					if err != nil {
+						return nil, err
+					}
+				}
+				if len(spec.RocksDBOptions) > 0 {
+					return nil, errors.Errorf("store %d: using Pebble storage engine but StoreSpec provides RocksDB options", i)
+				}
+				eng, err = storage.NewPebble(ctx, pebbleConfig)
+			} else if cfg.StorageEngine == enginepb.EngineTypeRocksDB {
+				rocksDBConfig := storage.RocksDBConfig{
+					StorageConfig:           storageConfig,
+					MaxOpenFiles:            openFileLimitPerStore,
+					WarnLargeBatchThreshold: 500 * time.Millisecond,
+					RocksDBOptions:          spec.RocksDBOptions,
+				}
+				if len(spec.PebbleOptions) > 0 {
+					return nil, errors.Errorf("store %d: using RocksDB storage engine but StoreSpec provides Pebble options", i)
+				}
+				eng, err = storage.NewRocksDB(rocksDBConfig, cache)
+			} else {
+				// cfg.StorageEngine == enginepb.EngineTypeTeePebbleRocksDB
+				pebbleConfig := storage.PebbleConfig{
+					StorageConfig: storageConfig,
+					Opts:          storage.DefaultPebbleOptions(),
+				}
+				pebbleConfig.Dir = filepath.Join(pebbleConfig.Dir, "pebble")
+				pebbleConfig.Opts.Cache = pebbleCache
+				pebbleConfig.Opts.MaxOpenFiles = int(openFileLimitPerStore)
+				// If the spec contains Pebble options, set those too.
+				if len(spec.PebbleOptions) > 0 {
+					err = pebbleConfig.Opts.Parse(spec.PebbleOptions, nil)
+					if err != nil {
+						return nil, err
+					}
+				}
+				pebbleEng, err := storage.NewPebble(ctx, pebbleConfig)
 				if err != nil {
 					return nil, err
 				}
+
+				rocksDBConfig := storage.RocksDBConfig{
+					StorageConfig:           storageConfig,
+					MaxOpenFiles:            openFileLimitPerStore,
+					WarnLargeBatchThreshold: 500 * time.Millisecond,
+					RocksDBOptions:          spec.RocksDBOptions,
+				}
+				rocksDBConfig.Dir = filepath.Join(rocksDBConfig.Dir, "rocksdb")
+
+				rocksdbEng, err := storage.NewRocksDB(rocksDBConfig, cache)
+				if err != nil {
+					return nil, err
+				}
+
+				eng = storage.NewTee(ctx, rocksdbEng, pebbleEng)
 			}
-			if len(spec.RocksDBOptions) > 0 {
-				return nil, errors.Errorf("store %d: using Pebble storage engine but StoreSpec provides RocksDB options", i)
-			}
-			eng, err := storage.NewPebble(ctx, pebbleConfig)
 			if err != nil {
 				return Engines{}, err
 			}

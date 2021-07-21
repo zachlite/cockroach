@@ -240,16 +240,7 @@ func (bc *baseCache) Get(key interface{}) (value interface{}, ok bool) {
 		bc.access(e)
 		return e.Value, true
 	}
-	return nil, false
-}
-
-// StealthyGet looks up a key's value from the cache but does not consider it an
-// "access" (with respect to the policy).
-func (bc *baseCache) StealthyGet(key interface{}) (value interface{}, ok bool) {
-	if e := bc.store.get(key); e != nil {
-		return e.Value, true
-	}
-	return nil, false
+	return
 }
 
 // Del removes the provided key from the cache.
@@ -284,13 +275,6 @@ func (bc *baseCache) Clear() {
 // Len returns the number of items in the cache.
 func (bc *baseCache) Len() int {
 	return bc.store.length()
-}
-
-// Do iterates over all entries in the cache and calls fn with each entry.
-func (bc *baseCache) Do(fn func(e *Entry)) {
-	for e := bc.ll.root.next; e != &bc.ll.root; e = e.next {
-		fn(e)
-	}
 }
 
 func (bc *baseCache) access(e *Entry) {

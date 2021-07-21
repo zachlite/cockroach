@@ -16,9 +16,11 @@ import (
 	"context"
 	"sort"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -112,7 +114,7 @@ func (ms MetadataSchema) GetInitialValues() ([]roachpb.KeyValue, []roachpb.RKey)
 		value.SetInt(int64(desc.GetID()))
 		if parentID != keys.RootNamespaceID {
 			ret = append(ret, roachpb.KeyValue{
-				Key:   catalogkeys.MakePublicObjectNameKey(ms.codec, parentID, desc.GetName()),
+				Key:   catalogkeys.NewPublicTableKey(parentID, desc.GetName()).Key(ms.codec),
 				Value: value,
 			})
 		} else {
@@ -123,11 +125,11 @@ func (ms MetadataSchema) GetInitialValues() ([]roachpb.KeyValue, []roachpb.RKey)
 			ret = append(
 				ret,
 				roachpb.KeyValue{
-					Key:   catalogkeys.MakeDatabaseNameKey(ms.codec, desc.GetName()),
+					Key:   catalogkeys.NewDatabaseKey(desc.GetName()).Key(ms.codec),
 					Value: value,
 				},
 				roachpb.KeyValue{
-					Key:   catalogkeys.MakePublicSchemaNameKey(ms.codec, desc.GetID()),
+					Key:   catalogkeys.NewPublicSchemaKey(desc.GetID()).Key(ms.codec),
 					Value: publicSchemaValue,
 				})
 		}
@@ -223,6 +225,19 @@ var systemTableIDCache = func() [2]map[string]descpb.ID {
 			cache[t.GetName()] = t.GetID()
 		}
 
+		// This special case exists so that we resolve "namespace" to the new
+		// namespace table ID (30) in 20.1, while the Name in the "namespace"
+		// descriptor is still set to "namespace2" during the 20.1 cycle. We
+		// couldn't set the new namespace table's Name to "namespace" in 20.1,
+		// because it had to co-exist with the old namespace table, whose name
+		// must *remain* "namespace" - and you can't have duplicate descriptor
+		// Name fields.
+		//
+		// This can be removed in 20.2, when we add a migration to change the
+		// new namespace table's Name to "namespace" again.
+		// TODO(solon): remove this in 20.2.
+		cache[systemschema.NamespaceTableName] = keys.NamespaceTableID
+
 		return cache
 	}
 
@@ -243,12 +258,21 @@ func boolToInt(b bool) int {
 // LookupSystemTableDescriptorID uses the lookup cache above
 // to bypass a KV lookup when resolving the name of system tables.
 func LookupSystemTableDescriptorID(
-	codec keys.SQLCodec, dbID descpb.ID, tableName string,
+	ctx context.Context,
+	settings *cluster.Settings,
+	codec keys.SQLCodec,
+	dbID descpb.ID,
+	tableName string,
 ) descpb.ID {
 	if dbID != systemschema.SystemDB.GetID() {
 		return descpb.InvalidID
 	}
 
+	if settings != nil &&
+		!settings.Version.IsActive(ctx, clusterversion.VersionNamespaceTableWithSchemas) &&
+		tableName == systemschema.NamespaceTableName {
+		return systemschema.DeprecatedNamespaceTable.ID
+	}
 	systemTenant := boolToInt(codec.ForSystemTenant())
 	dbID, ok := systemTableIDCache[systemTenant][tableName]
 	if !ok {
@@ -266,6 +290,7 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 	target.AddDescriptor(keys.RootNamespaceID, systemschema.SystemDB)
 
 	// Add system config tables.
+	target.AddDescriptor(keys.SystemDatabaseID, systemschema.DeprecatedNamespaceTable)
 	target.AddDescriptor(keys.SystemDatabaseID, systemschema.NamespaceTable)
 	target.AddDescriptor(keys.SystemDatabaseID, systemschema.DescriptorTable)
 	target.AddDescriptor(keys.SystemDatabaseID, systemschema.UsersTable)
@@ -317,16 +342,6 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 
 	target.AddDescriptor(keys.SystemDatabaseID, systemschema.ScheduledJobsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, systemschema.SqllivenessTable)
-	target.AddDescriptor(keys.SystemDatabaseID, systemschema.MigrationsTable)
-
-	// Tables introduced in 21.1.
-
-	target.AddDescriptor(keys.SystemDatabaseID, systemschema.JoinTokensTable)
-
-	// Tables introduced in 21.2.
-
-	target.AddDescriptor(keys.SystemDatabaseID, systemschema.StatementStatisticsTable)
-	target.AddDescriptor(keys.SystemDatabaseID, systemschema.TransactionStatisticsTable)
 }
 
 // addSplitIDs adds a split point for each of the PseudoTableIDs to the supplied

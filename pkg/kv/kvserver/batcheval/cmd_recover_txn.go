@@ -28,11 +28,14 @@ func init() {
 }
 
 func declareKeysRecoverTransaction(
-	rs ImmutableRangeState, _ roachpb.Header, req roachpb.Request, latchSpans, _ *spanset.SpanSet,
+	_ *roachpb.RangeDescriptor,
+	header roachpb.Header,
+	req roachpb.Request,
+	latchSpans, _ *spanset.SpanSet,
 ) {
 	rr := req.(*roachpb.RecoverTxnRequest)
 	latchSpans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{Key: keys.TransactionKey(rr.Txn.Key, rr.Txn.ID)})
-	latchSpans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{Key: keys.AbortSpanKey(rs.GetRangeID(), rr.Txn.ID)})
+	latchSpans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{Key: keys.AbortSpanKey(header.RangeID, rr.Txn.ID)})
 }
 
 // RecoverTxn attempts to recover the specified transaction from an
@@ -55,15 +58,13 @@ func RecoverTxn(
 	if h.Txn != nil {
 		return result.Result{}, ErrTransactionUnsupported
 	}
-	if h.WriteTimestamp().Less(args.Txn.MinTimestamp) {
-		// This condition must hold for the timestamp cache access in
-		// SynthesizeTxnFromMeta and the timestamp cache update in
-		// Replica.updateTimestampCache to be safe.
-		return result.Result{}, errors.AssertionFailedf("RecoverTxn request timestamp %s less than txn MinTimestamp %s",
-			h.Timestamp, args.Txn.MinTimestamp)
+	if h.Timestamp.Less(args.Txn.WriteTimestamp) {
+		// This condition must hold for the timestamp cache access/update to be safe.
+		return result.Result{}, errors.Errorf("RecoverTxn request timestamp %s less than txn timestamp %s",
+			h.Timestamp, args.Txn.WriteTimestamp)
 	}
 	if !args.Key.Equal(args.Txn.Key) {
-		return result.Result{}, errors.AssertionFailedf("RecoverTxn request key %s does not match txn key %s",
+		return result.Result{}, errors.Errorf("RecoverTxn request key %s does not match txn key %s",
 			args.Key, args.Txn.Key)
 	}
 	key := keys.TransactionKey(args.Txn.Key, args.Txn.ID)
@@ -85,7 +86,7 @@ func RecoverTxn(
 		// returned even if it is possible that the transaction was actually
 		// COMMITTED. This is safe because a COMMITTED transaction must have
 		// resolved all of its intents before garbage collecting its intents.
-		synthTxn := SynthesizeTxnFromMeta(ctx, cArgs.EvalCtx, args.Txn)
+		synthTxn := SynthesizeTxnFromMeta(cArgs.EvalCtx, args.Txn)
 		if synthTxn.Status != roachpb.ABORTED {
 			err := errors.Errorf("txn record synthesized with non-ABORTED status: %v", synthTxn)
 			return result.Result{}, err
@@ -201,7 +202,7 @@ func RecoverTxn(
 		sp := roachpb.Span{Key: w.Key}
 		reply.RecoveredTxn.LockSpans = append(reply.RecoveredTxn.LockSpans, sp)
 	}
-	reply.RecoveredTxn.LockSpans, _ = roachpb.MergeSpans(&reply.RecoveredTxn.LockSpans)
+	reply.RecoveredTxn.LockSpans, _ = roachpb.MergeSpans(reply.RecoveredTxn.LockSpans)
 	reply.RecoveredTxn.InFlightWrites = nil
 
 	// Recover the transaction based on whether or not all of its writes

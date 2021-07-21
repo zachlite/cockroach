@@ -24,16 +24,6 @@ const (
 	_ ShowTelemetryType = iota
 	// Ranges represents the SHOW RANGES command.
 	Ranges
-	// Regions represents the SHOW REGIONS command.
-	Regions
-	// RegionsFromCluster represents the SHOW REGIONS FROM CLUSTER command.
-	RegionsFromCluster
-	// RegionsFromAllDatabases represents the SHOW REGIONS FROM ALL DATABASES command.
-	RegionsFromAllDatabases
-	// RegionsFromDatabase represents the SHOW REGIONS FROM DATABASE command.
-	RegionsFromDatabase
-	// SurvivalGoal represents the SHOW SURVIVAL GOAL command.
-	SurvivalGoal
 	// Partitions represents the SHOW PARTITIONS command.
 	Partitions
 	// Locality represents the SHOW LOCALITY command.
@@ -54,28 +44,20 @@ const (
 	Roles
 	// Schedules represents the SHOW SCHEDULE command.
 	Schedules
-	// FullTableScans represents the SHOW FULL TABLE SCANS command.
-	FullTableScans
 )
 
 var showTelemetryNameMap = map[ShowTelemetryType]string{
-	Ranges:                  "ranges",
-	Partitions:              "partitions",
-	Locality:                "locality",
-	Create:                  "create",
-	RangeForRow:             "rangeforrow",
-	Regions:                 "regions",
-	RegionsFromCluster:      "regions_from_cluster",
-	RegionsFromDatabase:     "regions_from_database",
-	RegionsFromAllDatabases: "regions_from_all_databases",
-	SurvivalGoal:            "survival_goal",
-	Queries:                 "queries",
-	Indexes:                 "indexes",
-	Constraints:             "constraints",
-	Jobs:                    "jobs",
-	Roles:                   "roles",
-	Schedules:               "schedules",
-	FullTableScans:          "full_table_scans",
+	Ranges:      "ranges",
+	Partitions:  "partitions",
+	Locality:    "locality",
+	Create:      "create",
+	RangeForRow: "rangeforrow",
+	Queries:     "queries",
+	Indexes:     "indexes",
+	Constraints: "constraints",
+	Jobs:        "jobs",
+	Roles:       "roles",
+	Schedules:   "schedules",
 }
 
 func (s ShowTelemetryType) String() string {

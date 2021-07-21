@@ -16,15 +16,13 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
 type avgTmplInfo struct {
-	aggTmplInfoBase
 	NeedsHelper    bool
 	InputVecMethod string
 	RetGoType      string
@@ -71,31 +69,10 @@ var (
 	_ = avgTmplInfo{}.AssignDivInt64
 )
 
-// avgAggTypeTmplInfo is similar to lastArgTypeOverload and provides a way to
-// see the type family of the overload. This is the top level of data passed to
-// the template.
-type avgAggTypeTmplInfo struct {
-	TypeFamily     string
-	WidthOverloads []avgAggWidthTmplInfo
-}
-
-// avgAggWidthTmplInfo is similar to lastArgWidthOverload and provides a way to
-// see the width of the type of the overload. This is the middle level of data
-// passed to the template.
-type avgAggWidthTmplInfo struct {
-	Width int32
-	// Overload field contains all the necessary information for the template.
-	// It should be accessed via {{with .Overload}} template instruction so that
-	// the template has all of its info in scope.
-	Overload avgTmplInfo
-}
-
-const avgAggTmpl = "pkg/sql/colexec/colexecagg/avg_agg_tmpl.go"
+const avgAggTmpl = "pkg/sql/colexec/avg_agg_tmpl.go"
 
 func genAvgAgg(inputFileContents string, wr io.Writer) error {
 	r := strings.NewReplacer(
-		"_TYPE_FAMILY", "{{.TypeFamily}}",
-		"_TYPE_WIDTH", typeWidthReplacement,
 		"_RET_GOTYPE", `{{.RetGoType}}`,
 		"_RET_TYPE", "{{.RetVecMethod}}",
 		"_TYPE", "{{.InputVecMethod}}",
@@ -108,17 +85,15 @@ func genAvgAgg(inputFileContents string, wr io.Writer) error {
 	assignAddRe := makeFunctionRegex("_ASSIGN_ADD", 6)
 	s = assignAddRe.ReplaceAllString(s, makeTemplateFunctionCall("Global.AssignAdd", 6))
 
-	accumulateAvg := makeFunctionRegex("_ACCUMULATE_AVG", 5)
-	s = accumulateAvg.ReplaceAllString(s, `{{template "accumulateAvg" buildDict "Global" . "HasNulls" $4 "HasSel" $5}}`)
-
-	s = replaceManipulationFuncs(s)
+	accumulateAvg := makeFunctionRegex("_ACCUMULATE_AVG", 4)
+	s = accumulateAvg.ReplaceAllString(s, `{{template "accumulateAvg" buildDict "Global" . "HasNulls" $4}}`)
 
 	tmpl, err := template.New("avg_agg").Funcs(template.FuncMap{"buildDict": buildDict}).Parse(s)
 	if err != nil {
 		return err
 	}
 
-	var tmplInfos []avgAggTypeTmplInfo
+	var tmplInfos []avgTmplInfo
 	// Average is computed as SUM / COUNT. The counting is performed directly
 	// by the aggregate function struct, the division is handled by
 	// AssignDivInt64 defined above, and resolving SUM overload is performed by
@@ -126,33 +101,24 @@ func genAvgAgg(inputFileContents string, wr io.Writer) error {
 	// Note that all types on which we support avg aggregate function are the
 	// canonical representatives, so we can operate with their type family
 	// directly.
-	for _, inputTypeFamily := range []types.Family{types.IntFamily, types.DecimalFamily, types.FloatFamily, types.IntervalFamily} {
-		tmplInfo := avgAggTypeTmplInfo{TypeFamily: toString(inputTypeFamily)}
-		for _, inputTypeWidth := range supportedWidthsByCanonicalTypeFamily[inputTypeFamily] {
-			needsHelper := false
-			// Note that we don't use execinfrapb.GetAggregateInfo because we don't
-			// want to bring in a dependency on that package to reduce the burden
-			// of regenerating execgen code when the protobufs get generated.
-			retTypeFamily, retTypeWidth := inputTypeFamily, inputTypeWidth
-			if inputTypeFamily == types.IntFamily {
-				// Average of integers is a decimal.
-				needsHelper = true
-				retTypeFamily, retTypeWidth = types.DecimalFamily, anyWidth
-			}
-			tmplInfo.WidthOverloads = append(tmplInfo.WidthOverloads, avgAggWidthTmplInfo{
-				Width: inputTypeWidth,
-				Overload: avgTmplInfo{
-					aggTmplInfoBase: aggTmplInfoBase{
-						canonicalTypeFamily: typeconv.TypeFamilyToCanonicalTypeFamily(retTypeFamily),
-					},
-					NeedsHelper:    needsHelper,
-					InputVecMethod: toVecMethod(inputTypeFamily, inputTypeWidth),
-					RetGoType:      toPhysicalRepresentation(retTypeFamily, retTypeWidth),
-					RetVecMethod:   toVecMethod(retTypeFamily, retTypeWidth),
-					addOverload:    getSumAddOverload(inputTypeFamily),
-				}})
+	for _, inputType := range []*types.T{types.Int2, types.Int4, types.Int, types.Decimal, types.Float, types.Interval} {
+		needsHelper := false
+		// Note that we don't use execinfrapb.GetAggregateInfo because we don't
+		// want to bring in a dependency on that package to reduce the burden
+		// of regenerating execgen code when the protobufs get generated.
+		retType := inputType
+		if inputType.Family() == types.IntFamily {
+			// Average of integers is a decimal.
+			needsHelper = true
+			retType = types.Decimal
 		}
-		tmplInfos = append(tmplInfos, tmplInfo)
+		tmplInfos = append(tmplInfos, avgTmplInfo{
+			NeedsHelper:    needsHelper,
+			InputVecMethod: toVecMethod(inputType.Family(), inputType.Width()),
+			RetGoType:      toPhysicalRepresentation(retType.Family(), retType.Width()),
+			RetVecMethod:   toVecMethod(retType.Family(), retType.Width()),
+			addOverload:    getSumAddOverload(inputType),
+		})
 	}
 	return tmpl.Execute(wr, tmplInfos)
 }

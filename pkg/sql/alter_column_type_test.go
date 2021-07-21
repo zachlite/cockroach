@@ -12,19 +12,17 @@ package sql_test
 
 import (
 	"context"
-	gosql "database/sql"
 	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -37,38 +35,26 @@ import (
 func TestInsertBeforeOldColumnIsDropped(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
 
-	ctx := context.Background()
-
-	var s serverutils.TestServerInterface
 	params, _ := tests.CreateTestServerParams()
 	childJobStartNotification := make(chan struct{})
 	waitBeforeContinuing := make(chan struct{})
 	var doOnce sync.Once
 	params.Knobs = base.TestingKnobs{
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-			RunBeforeResume: func(jobID jobspb.JobID) error {
-				// Block in the job to drop old indexes, which has mutation ID 2.
-				scJob, err := s.JobRegistry().(*jobs.Registry).LoadJob(ctx, jobID)
-				if err != nil {
-					return err
-				}
-				pl := scJob.Payload()
-				if pl.GetSchemaChange().TableMutationID < 2 {
-					return nil
-				}
+			RunBeforeChildJobs: func() {
 				doOnce.Do(func() {
 					childJobStartNotification <- struct{}{}
 					<-waitBeforeContinuing
 				})
-				return nil
 			},
 		},
 	}
 
-	var db *gosql.DB
-	s, db, _ = serverutils.StartServer(t, params)
+	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
+	ctx := context.Background()
 	defer s.Stopper().Stop(ctx)
 
 	sqlDB.Exec(t, `
@@ -112,38 +98,26 @@ ALTER TABLE test ALTER COLUMN x TYPE STRING;`)
 func TestInsertBeforeOldColumnIsDroppedUsingExpr(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
 
-	ctx := context.Background()
-
-	var s serverutils.TestServerInterface
 	params, _ := tests.CreateTestServerParams()
 	childJobStartNotification := make(chan struct{})
 	waitBeforeContinuing := make(chan struct{})
 	var doOnce sync.Once
 	params.Knobs = base.TestingKnobs{
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-			RunBeforeResume: func(jobID jobspb.JobID) error {
-				// Block in the job to drop old indexes, which has mutation ID 2.
-				scJob, err := s.JobRegistry().(*jobs.Registry).LoadJob(ctx, jobID)
-				if err != nil {
-					return err
-				}
-				pl := scJob.Payload()
-				if pl.GetSchemaChange().TableMutationID < 2 {
-					return nil
-				}
+			RunBeforeChildJobs: func() {
 				doOnce.Do(func() {
 					childJobStartNotification <- struct{}{}
 					<-waitBeforeContinuing
 				})
-				return nil
 			},
 		},
 	}
 
-	var db *gosql.DB
-	s, db, _ = serverutils.StartServer(t, params)
+	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
+	ctx := context.Background()
 	defer s.Stopper().Stop(ctx)
 
 	sqlDB.Exec(t, `
@@ -188,6 +162,9 @@ ALTER TABLE test ALTER COLUMN x TYPE BOOL USING (x > 0);`)
 func TestVisibilityDuringAlterColumnType(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
+
+	defer setTestJobsAdoptInterval()()
 
 	ctx := context.Background()
 	swapNotification := make(chan struct{})
@@ -202,8 +179,6 @@ func TestVisibilityDuringAlterColumnType(t *testing.T) {
 				<-waitBeforeContinuing
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -229,8 +204,6 @@ INSERT INTO t.test VALUES (1), (2), (3);
 	expected := [][]string{{"t.public.test",
 		`CREATE TABLE public.test (
 	x INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -243,8 +216,6 @@ INSERT INTO t.test VALUES (1), (2), (3);
 	expected = [][]string{{"t.public.test",
 		`CREATE TABLE public.test (
 	x STRING NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -256,6 +227,7 @@ INSERT INTO t.test VALUES (1), (2), (3);
 func TestAlterColumnTypeFailureRollback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
 
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
@@ -277,7 +249,7 @@ ALTER TABLE t.test ALTER COLUMN x TYPE INT;
 	// Ensure that the add column and column swap mutations are cleaned up.
 	testutils.SucceedsSoon(t, func() error {
 		desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "test")
-		if len(desc.AllMutations()) != 0 {
+		if len(desc.Mutations) != 0 {
 			return errors.New("expected no mutations on TableDescriptor")
 		}
 		return nil
@@ -289,10 +261,10 @@ ALTER TABLE t.test ALTER COLUMN x TYPE INT;
 func TestQueryIntToString(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer setTestJobsAdoptInterval()()
+	skip.WithIssue(t, 54844)
 
 	params, _ := tests.CreateTestServerParams()
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -317,6 +289,7 @@ ALTER TABLE t.test ALTER COLUMN y TYPE STRING;
 func TestSchemaChangeBeforeAlterColumnType(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
 
 	ctx := context.Background()
 
@@ -366,6 +339,7 @@ ALTER TABLE t.test ALTER COLUMN y TYPE STRING;`)
 func TestSchemaChangeWhileExecutingAlterColumnType(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	skip.WithIssue(t, 54844)
 
 	params, _ := tests.CreateTestServerParams()
 	childJobStartNotification := make(chan struct{})
@@ -404,7 +378,7 @@ ALTER TABLE t.test ALTER COLUMN x TYPE STRING;
 
 	<-childJobStartNotification
 
-	expected := `pq: relation "test" \(53\): unimplemented: cannot perform a schema change operation while an ALTER COLUMN TYPE schema change is in progress`
+	expected := "pq: unimplemented: cannot perform a schema change operation while an ALTER COLUMN TYPE schema change is in progress"
 	sqlDB.ExpectErr(t, expected, `
 ALTER TABLE t.test ADD COLUMN y INT;
 	`)

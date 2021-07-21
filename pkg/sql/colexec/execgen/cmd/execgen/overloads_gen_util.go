@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
@@ -62,8 +62,7 @@ func populateTwoArgsOverloads(
 				for _, rightWidth := range rightWidths {
 					customizer, ok := customizers[typePair{leftFamily, leftWidth, rightFamily, rightWidth}]
 					if !ok {
-						colexecerror.InternalError(errors.AssertionFailedf(
-							"unexpectedly didn't find a type customizer for %s %d %s %d", leftFamily, leftWidth, rightFamily, rightWidth))
+						colexecerror.InternalError(errors.AssertionFailedf("unexpectedly didn't find a type customizer"))
 					}
 					// Skip overloads that don't have associated output types.
 					retType, ok := opOutputTypes[typePair{leftFamily, leftWidth, rightFamily, rightWidth}]

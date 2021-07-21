@@ -19,7 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client/requestbatcher"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
@@ -55,29 +55,18 @@ const (
 	// many batches by the DistSender.
 	gcBatchSize = 1024
 
-	// intentResolverBatchSize is the maximum number of single-intent resolution
-	// requests that will be sent in a single batch. Batches that span many
-	// ranges (which is possible for the commit of a transaction that spans many
-	// ranges) will be split into many batches by the DistSender.
+	// intentResolverBatchSize is the maximum number of intents that will be
+	// resolved in a single batch. Batches that span many ranges (which is
+	// possible for the commit of a transaction that spans many ranges) will be
+	// split into many batches by the DistSender.
 	// TODO(ajwerner): justify this value
 	intentResolverBatchSize = 100
 
-	// intentResolverRangeBatchSize is the maximum number of ranged intent
-	// resolutions requests that will be sent in a single batch.  It is set
-	// lower that intentResolverBatchSize since each request can fan out to a
-	// large number of intents.
-	intentResolverRangeBatchSize = 10
-
-	// intentResolverRangeRequestSize is the maximum number of intents a single
-	// range request can resolve. When exceeded, the response will include a
-	// ResumeSpan and the batcher will send a new range request.
-	intentResolverRangeRequestSize = 200
-
-	// MaxTxnsPerIntentCleanupBatch is the number of transactions whose
+	// cleanupIntentsTxnsPerBatch is the number of transactions whose
 	// corresponding intents will be resolved at a time. Intents are batched
 	// by transaction to avoid timeouts while resolving intents and ensure that
 	// progress is made.
-	MaxTxnsPerIntentCleanupBatch = 100
+	cleanupIntentsTxnsPerBatch = 100
 
 	// defaultGCBatchIdle is the default duration which the gc request batcher
 	// will wait between requests for a range before sending it.
@@ -112,19 +101,13 @@ type Config struct {
 	Stopper              *stop.Stopper
 	AmbientCtx           log.AmbientContext
 	TestingKnobs         kvserverbase.IntentResolverTestingKnobs
-	RangeDescriptorCache RangeCache
+	RangeDescriptorCache kvbase.RangeDescriptorCache
 
 	TaskLimit                    int
 	MaxGCBatchWait               time.Duration
 	MaxGCBatchIdle               time.Duration
 	MaxIntentResolutionBatchWait time.Duration
 	MaxIntentResolutionBatchIdle time.Duration
-}
-
-// RangeCache is a simplified interface to the rngcache.RangeCache.
-type RangeCache interface {
-	// Lookup looks up range information for the range containing key.
-	Lookup(ctx context.Context, key roachpb.RKey) (rangecache.CacheEntry, error)
 }
 
 // IntentResolver manages the process of pushing transactions and
@@ -139,7 +122,7 @@ type IntentResolver struct {
 	ambientCtx   log.AmbientContext
 	sem          *quotapool.IntPool // semaphore to limit async goroutines
 
-	rdc RangeCache
+	rdc kvbase.RangeDescriptorCache
 
 	gcBatcher      *requestbatcher.RequestBatcher
 	irBatcher      *requestbatcher.RequestBatcher
@@ -184,10 +167,34 @@ func setConfigDefaults(c *Config) {
 
 type nopRangeDescriptorCache struct{}
 
+type zeroCacheEntry struct{}
+
+func (z zeroCacheEntry) Desc() *roachpb.RangeDescriptor {
+	return &roachpb.RangeDescriptor{}
+}
+
+func (z zeroCacheEntry) DescSpeculative() bool {
+	return false
+}
+
+func (z zeroCacheEntry) Leaseholder() *roachpb.ReplicaDescriptor {
+	return nil
+}
+
+func (z zeroCacheEntry) Lease() *roachpb.Lease {
+	return nil
+}
+
+func (z zeroCacheEntry) LeaseSpeculative() bool {
+	return false
+}
+
+var _ kvbase.RangeCacheEntry = zeroCacheEntry{}
+
 func (nrdc nopRangeDescriptorCache) Lookup(
 	ctx context.Context, key roachpb.RKey,
-) (rangecache.CacheEntry, error) {
-	return rangecache.CacheEntry{}, nil
+) (kvbase.RangeCacheEntry, error) {
+	return zeroCacheEntry{}, nil
 }
 
 // New creates an new IntentResolver.
@@ -219,10 +226,8 @@ func New(c Config) *IntentResolver {
 		Sender:          c.DB.NonTransactionalSender(),
 	})
 	intentResolutionBatchSize := intentResolverBatchSize
-	intentResolutionRangeBatchSize := intentResolverRangeBatchSize
 	if c.TestingKnobs.MaxIntentResolutionBatchSize > 0 {
 		intentResolutionBatchSize = c.TestingKnobs.MaxIntentResolutionBatchSize
-		intentResolutionRangeBatchSize = c.TestingKnobs.MaxIntentResolutionBatchSize
 	}
 	ir.irBatcher = requestbatcher.New(requestbatcher.Config{
 		Name:            "intent_resolver_ir_batcher",
@@ -233,9 +238,12 @@ func New(c Config) *IntentResolver {
 		Sender:          c.DB.NonTransactionalSender(),
 	})
 	ir.irRangeBatcher = requestbatcher.New(requestbatcher.Config{
-		Name:               "intent_resolver_ir_range_batcher",
-		MaxMsgsPerBatch:    intentResolutionRangeBatchSize,
-		MaxKeysPerBatchReq: intentResolverRangeRequestSize,
+		Name:            "intent_resolver_ir_range_batcher",
+		MaxMsgsPerBatch: intentResolutionBatchSize,
+		// NOTE: Allow each request sent in a batch to touch up to twice as
+		// many keys as messages in the batch to avoid pagination if only a
+		// few ResolveIntentRange requests touch multiple intents.
+		MaxKeysPerBatchReq: 2 * intentResolverBatchSize,
 		MaxWait:            c.MaxIntentResolutionBatchWait,
 		MaxIdle:            c.MaxIntentResolutionBatchIdle,
 		Stopper:            c.Stopper,
@@ -371,10 +379,8 @@ func (ir *IntentResolver) MaybePushTransactions(
 	log.Eventf(ctx, "pushing %d transaction(s)", len(pushTxns))
 
 	// Attempt to push the transaction(s).
-	pushTo := h.Timestamp.Next()
 	b := &kv.Batch{}
 	b.Header.Timestamp = ir.clock.Now()
-	b.Header.Timestamp.Forward(pushTo)
 	for _, pushTxn := range pushTxns {
 		b.AddRawRequest(&roachpb.PushTxnRequest{
 			RequestHeader: roachpb.RequestHeader{
@@ -382,7 +388,7 @@ func (ir *IntentResolver) MaybePushTransactions(
 			},
 			PusherTxn: pusherTxn,
 			PusheeTxn: *pushTxn,
-			PushTo:    pushTo,
+			PushTo:    h.Timestamp.Next(),
 			PushType:  pushType,
 		})
 	}
@@ -391,10 +397,6 @@ func (ir *IntentResolver) MaybePushTransactions(
 	if err != nil {
 		return nil, b.MustPErr()
 	}
-
-	// TODO(nvanbenschoten): if we succeed because the transaction has already
-	// been pushed _past_ where we were pushing, we need to set the synthetic
-	// bit. This is part of #36431.
 
 	br := b.RawResponse()
 	pushedTxns := make(map[uuid.UUID]*roachpb.Transaction, len(br.Responses))
@@ -497,7 +499,7 @@ func (ir *IntentResolver) CleanupIntents(
 		var i int
 		for i = 0; i < len(unpushed); i++ {
 			if curTxn := &unpushed[i].Txn; curTxn.ID != prevTxnID {
-				if len(pushTxns) >= MaxTxnsPerIntentCleanupBatch {
+				if len(pushTxns) == cleanupIntentsTxnsPerBatch {
 					break
 				}
 				prevTxnID = curTxn.ID
@@ -888,8 +890,6 @@ func (ir *IntentResolver) ResolveIntents(
 			_ = resp.Resp // ignore the response
 		case <-ctx.Done():
 			return roachpb.NewError(ctx.Err())
-		case <-ir.stopper.ShouldQuiesce():
-			return roachpb.NewErrorf("stopping")
 		}
 	}
 	return nil

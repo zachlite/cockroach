@@ -14,13 +14,13 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 )
 
-var showEstimatedRowCountClusterSetting = settings.RegisterBoolSetting(
+var showEstimatedRowCountClusterSetting = settings.RegisterPublicBoolSetting(
 	"sql.show_tables.estimated_row_count.enabled",
 	"whether the estimated_row_count is shown on SHOW TABLES. Turning this off "+
 		"will improve SHOW TABLES performance.",
@@ -49,7 +49,7 @@ func (d *delegator) delegateShowTables(n *tree.ShowTables) (tree.Statement, erro
 	var schemaClause string
 	if name.ExplicitSchema {
 		schema := lex.EscapeSQLString(name.Schema())
-		if name.Schema() == catconstants.PgTempSchemaName {
+		if name.Schema() == sessiondata.PgTempSchemaName {
 			schema = lex.EscapeSQLString(d.evalCtx.SessionData.SearchPath.GetTemporarySchemaName())
 		}
 		schemaClause = fmt.Sprintf("AND ns.nspname = %s", schema)
@@ -68,43 +68,36 @@ SELECT ns.nspname AS schema_name,
        WHEN pc.relkind = 'S' THEN 'sequence'
        ELSE 'table'
        END AS type,
-       rl.rolname AS owner,
-			 %[5]s
-       ct.locality AS locality
+       rl.rolname AS owner
+			 %[4]s
        %[3]s
-FROM %[1]s.pg_catalog.pg_class AS pc
-LEFT JOIN %[1]s.pg_catalog.pg_roles AS rl on (pc.relowner = rl.oid)
-JOIN %[1]s.pg_catalog.pg_namespace AS ns ON (ns.oid = pc.relnamespace)
-%[4]s
-%[6]s
-LEFT JOIN crdb_internal.tables AS ct ON (pc.oid::int8 = ct.table_id)
-WHERE pc.relkind IN ('r', 'v', 'S', 'm') %[2]s
-ORDER BY schema_name, table_name
+  FROM %[1]s.pg_catalog.pg_class AS pc
+  LEFT JOIN %[1]s.pg_catalog.pg_roles AS rl on (pc.relowner = rl.oid)
+  JOIN %[1]s.pg_catalog.pg_namespace AS ns ON (ns.oid = pc.relnamespace)
+  LEFT
+  JOIN %[1]s.pg_catalog.pg_description AS pd ON (pc.oid = pd.objoid AND pd.objsubid = 0)
+	%[5]s
+ WHERE pc.relkind IN ('r', 'v', 'S', 'm') %[2]s
+ ORDER BY schema_name, table_name
 `
+	var comment string
 	var estimatedRowCount string
 	var estimatedRowCountJoin string
+	if n.WithComment {
+		comment = `, COALESCE(pd.description, '')       AS comment`
+	}
 	if showEstimatedRowCountClusterSetting.Get(&d.evalCtx.Settings.SV) {
-		estimatedRowCount = "s.estimated_row_count AS estimated_row_count, "
+		estimatedRowCount = ", s.estimated_row_count AS estimated_row_count"
 		estimatedRowCountJoin = fmt.Sprintf(
 			`LEFT JOIN %[1]s.crdb_internal.table_row_statistics AS s on (s.table_id = pc.oid::INT8)`,
 			&name.CatalogName,
 		)
-	}
-	var descJoin string
-	var comment string
-	if n.WithComment {
-		descJoin = fmt.Sprintf(
-			`LEFT JOIN %s.pg_catalog.pg_description AS pd ON (pc.oid = pd.objoid AND pd.objsubid = 0)`,
-			&name.CatalogName,
-		)
-		comment = `, COALESCE(pd.description, '') AS comment`
 	}
 	query := fmt.Sprintf(
 		getTablesQuery,
 		&name.CatalogName,
 		schemaClause,
 		comment,
-		descJoin,
 		estimatedRowCount,
 		estimatedRowCountJoin,
 	)

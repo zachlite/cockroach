@@ -20,10 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -34,7 +32,6 @@ import (
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,12 +123,12 @@ func TestPebbleIterReuse(t *testing.T) {
 	batch := eng.NewBatch()
 	for i := 0; i < 100; i++ {
 		key := MVCCKey{[]byte{byte(i)}, hlc.Timestamp{WallTime: 100}}
-		if err := batch.PutMVCC(key, []byte("foo")); err != nil {
+		if err := batch.Put(key, []byte("foo")); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	iter1 := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{LowerBound: []byte{40}, UpperBound: []byte{50}})
+	iter1 := batch.NewIterator(IterOptions{LowerBound: []byte{40}, UpperBound: []byte{50}})
 	valuesCount := 0
 	// Seek to a value before the lower bound. Identical to seeking to the lower bound.
 	iter1.SeekGE(MVCCKey{Key: []byte{30}})
@@ -154,21 +151,16 @@ func TestPebbleIterReuse(t *testing.T) {
 		t.Fatalf("expected 10 values, got %d", valuesCount)
 	}
 	iter1.Close()
-	iter1 = nil
 
 	// Create another iterator, with no lower bound but an upper bound that
 	// is lower than the previous iterator's lower bound. This should still result
 	// in the right amount of keys being returned; the lower bound from the
 	// previous iterator should get zeroed.
-	iter2 := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: []byte{10}})
+	iter2 := batch.NewIterator(IterOptions{UpperBound: []byte{10}})
 	valuesCount = 0
-	// This is a peculiar test that is disregarding how local and global keys
-	// affect the behavior of MVCCIterators. This test is writing []byte{0}
-	// which precedes the localPrefix. Ignore the local and preceding keys in
-	// this seek.
-	iter2.SeekGE(MVCCKey{Key: []byte{2}})
+	iter1.SeekGE(MVCCKey{Key: []byte{0}})
 	for ; ; iter2.Next() {
-		ok, err := iter2.Valid()
+		ok, err := iter1.Valid()
 		if err != nil {
 			t.Fatal(err)
 		} else if !ok {
@@ -182,144 +174,10 @@ func TestPebbleIterReuse(t *testing.T) {
 		valuesCount++
 	}
 
-	if valuesCount != 8 {
-		t.Fatalf("expected 8 values, got %d", valuesCount)
+	if valuesCount != 10 {
+		t.Fatalf("expected 10 values, got %d", valuesCount)
 	}
 	iter2.Close()
-}
-
-type iterBoundsChecker struct {
-	t                  *testing.T
-	expectSetBounds    bool
-	boundsSlices       [2][]byte
-	boundsSlicesCopied [2][]byte
-}
-
-func (ibc *iterBoundsChecker) postSetBounds(lower, upper []byte) {
-	require.True(ibc.t, ibc.expectSetBounds)
-	ibc.expectSetBounds = false
-	// The slices passed in the second from last SetBounds call
-	// must still be the same.
-	for i := range ibc.boundsSlices {
-		if ibc.boundsSlices[i] != nil {
-			if !bytes.Equal(ibc.boundsSlices[i], ibc.boundsSlicesCopied[i]) {
-				ibc.t.Fatalf("bound slice changed: expected: %x, actual: %x",
-					ibc.boundsSlicesCopied[i], ibc.boundsSlices[i])
-			}
-		}
-	}
-	// Stash the bounds for later checking.
-	for i, bound := range [][]byte{lower, upper} {
-		ibc.boundsSlices[i] = bound
-		if bound != nil {
-			ibc.boundsSlicesCopied[i] = append(ibc.boundsSlicesCopied[i][:0], bound...)
-		} else {
-			ibc.boundsSlicesCopied[i] = nil
-		}
-	}
-}
-
-func TestPebbleIterBoundSliceStabilityAndNoop(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	eng := createTestPebbleEngine().(*Pebble)
-	defer eng.Close()
-	iter := newPebbleIterator(eng.db, nil, IterOptions{UpperBound: roachpb.Key("foo")})
-	defer iter.Close()
-	checker := &iterBoundsChecker{t: t}
-	iter.testingSetBoundsListener = checker
-
-	tc := []struct {
-		expectSetBounds bool
-		setUpperOnly    bool
-		lb              roachpb.Key
-		ub              roachpb.Key
-	}{
-		{
-			// [nil, www)
-			expectSetBounds: true,
-			ub:              roachpb.Key("www"),
-		},
-		{
-			// [nil, www)
-			expectSetBounds: false,
-			ub:              roachpb.Key("www"),
-		},
-		{
-			// [nil, www)
-			expectSetBounds: false,
-			setUpperOnly:    true,
-			ub:              roachpb.Key("www"),
-		},
-		{
-			// [ddd, www)
-			expectSetBounds: true,
-			lb:              roachpb.Key("ddd"),
-			ub:              roachpb.Key("www"),
-		},
-		{
-			// [ddd, www)
-			expectSetBounds: false,
-			setUpperOnly:    true,
-			ub:              roachpb.Key("www"),
-		},
-		{
-			// [ddd, xxx)
-			expectSetBounds: true,
-			setUpperOnly:    true,
-			ub:              roachpb.Key("xxx"),
-		},
-		{
-			// [aaa, bbb)
-			expectSetBounds: true,
-			lb:              roachpb.Key("aaa"),
-			ub:              roachpb.Key("bbb"),
-		},
-		{
-			// [ccc, ddd)
-			expectSetBounds: true,
-			lb:              roachpb.Key("ccc"),
-			ub:              roachpb.Key("ddd"),
-		},
-		{
-			// [ccc, nil)
-			expectSetBounds: true,
-			lb:              roachpb.Key("ccc"),
-		},
-		{
-			// [ccc, nil)
-			expectSetBounds: false,
-			lb:              roachpb.Key("ccc"),
-		},
-	}
-	var lb, ub roachpb.Key
-	for _, c := range tc {
-		t.Run(fmt.Sprintf("%v", c), func(t *testing.T) {
-			checker.expectSetBounds = c.expectSetBounds
-			checker.t = t
-			if c.setUpperOnly {
-				iter.SetUpperBound(c.ub)
-				ub = c.ub
-			} else {
-				iter.setBounds(c.lb, c.ub)
-				lb, ub = c.lb, c.ub
-			}
-			require.False(t, checker.expectSetBounds)
-			for i, bound := range [][]byte{lb, ub} {
-				if (bound == nil) != (checker.boundsSlicesCopied[i] == nil) {
-					t.Fatalf("inconsistent nil %d", i)
-				}
-				if bound != nil {
-					expected := append([]byte(nil), bound...)
-					expected = append(expected, 0x00)
-					if !bytes.Equal(expected, checker.boundsSlicesCopied[i]) {
-						t.Fatalf("expected: %x, actual: %x", expected, checker.boundsSlicesCopied[i])
-					}
-				}
-			}
-		})
-	}
 }
 
 func makeMVCCKey(a string) MVCCKey {
@@ -375,7 +233,7 @@ func TestPebbleSeparatorSuccessor(t *testing.T) {
 	}
 	for _, tc := range sepCases {
 		t.Run("", func(t *testing.T) {
-			got := string(EngineComparer.Separator(nil, EncodeKey(tc.a), EncodeKey(tc.b)))
+			got := string(MVCCComparer.Separator(nil, EncodeKey(tc.a), EncodeKey(tc.b)))
 			if got != string(EncodeKey(tc.want)) {
 				t.Errorf("a, b = %q, %q: got %q, want %q", tc.a, tc.b, got, tc.want)
 			}
@@ -410,147 +268,13 @@ func TestPebbleSeparatorSuccessor(t *testing.T) {
 	}
 	for _, tc := range succCases {
 		t.Run("", func(t *testing.T) {
-			got := string(EngineComparer.Successor(nil, EncodeKey(tc.a)))
+			got := string(MVCCComparer.Successor(nil, EncodeKey(tc.a)))
 			if got != string(EncodeKey(tc.want)) {
 				t.Errorf("a = %q: got %q, want %q", tc.a, got, tc.want)
 			}
 		})
 	}
 
-}
-
-func TestPebbleDiskSlowEmit(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	settings := cluster.MakeTestingClusterSettings()
-	MaxSyncDurationFatalOnExceeded.Override(ctx, &settings.SV, false)
-	p := newPebbleInMem(
-		context.Background(),
-		roachpb.Attributes{},
-		1<<20,   /* cacheSize */
-		512<<20, /* storeSize */
-		vfs.NewMem(),
-		"",
-		settings,
-	)
-	defer p.Close()
-
-	require.Equal(t, uint64(0), p.diskSlowCount)
-	require.Equal(t, uint64(0), p.diskStallCount)
-	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 1 * time.Second})
-	require.Equal(t, uint64(1), p.diskSlowCount)
-	require.Equal(t, uint64(0), p.diskStallCount)
-	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 70 * time.Second})
-	require.Equal(t, uint64(1), p.diskSlowCount)
-	require.Equal(t, uint64(1), p.diskStallCount)
-}
-
-func TestPebbleIterConsistency(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	eng := createTestPebbleEngine()
-	defer eng.Close()
-	ts1 := hlc.Timestamp{WallTime: 1}
-	ts2 := hlc.Timestamp{WallTime: 2}
-	k1 := MVCCKey{[]byte("a"), ts1}
-	require.NoError(t, eng.PutMVCC(k1, []byte("a1")))
-
-	roEngine := eng.NewReadOnly()
-	batch := eng.NewBatch()
-	roEngine2 := eng.NewReadOnly()
-	batch2 := eng.NewBatch()
-
-	require.False(t, eng.ConsistentIterators())
-	require.True(t, roEngine.ConsistentIterators())
-	require.True(t, batch.ConsistentIterators())
-	require.True(t, roEngine2.ConsistentIterators())
-	require.True(t, batch2.ConsistentIterators())
-
-	// Since an iterator is created on pebbleReadOnly, pebbleBatch before
-	// writing a newer version of "a", the newer version will not be visible to
-	// iterators that are created later.
-	roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
-	batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
-	eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
-	// Pin the state for iterators.
-	require.Nil(t, roEngine2.PinEngineStateForIterators())
-	require.Nil(t, batch2.PinEngineStateForIterators())
-
-	// Write a newer version of "a"
-	require.NoError(t, eng.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-
-	checkMVCCIter := func(iter MVCCIterator) {
-		iter.SeekGE(MVCCKey{Key: []byte("a")})
-		valid, err := iter.Valid()
-		require.Equal(t, true, valid)
-		require.NoError(t, err)
-		k := iter.UnsafeKey()
-		require.True(t, k1.Equal(k), "expected %s != actual %s", k1.String(), k.String())
-		iter.Next()
-		valid, err = iter.Valid()
-		require.False(t, valid)
-		require.NoError(t, err)
-		iter.Close()
-	}
-	checkEngineIter := func(iter EngineIterator) {
-		valid, err := iter.SeekEngineKeyGE(EngineKey{Key: []byte("a")})
-		require.Equal(t, true, valid)
-		require.NoError(t, err)
-		k, err := iter.UnsafeEngineKey()
-		require.NoError(t, err)
-		require.True(t, k.IsMVCCKey())
-		mvccKey, err := k.ToMVCCKey()
-		require.NoError(t, err)
-		require.True(
-			t, k1.Equal(mvccKey), "expected %s != actual %s", k1.String(), mvccKey.String())
-		valid, err = iter.NextEngineKey()
-		require.False(t, valid)
-		require.NoError(t, err)
-		iter.Close()
-	}
-
-	checkMVCCIter(roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-
-	checkEngineIter(roEngine.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(roEngine.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(batch.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(batch.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{Prefix: true}))
-
-	checkIterSeesBothValues := func(iter MVCCIterator) {
-		iter.SeekGE(MVCCKey{Key: []byte("a")})
-		count := 0
-		for ; ; iter.Next() {
-			valid, err := iter.Valid()
-			require.NoError(t, err)
-			if !valid {
-				break
-			}
-			count++
-		}
-		require.Equal(t, 2, count)
-		iter.Close()
-	}
-	// The eng iterator will see both values.
-	checkIterSeesBothValues(eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	// The indexed batches will see 2 values since the second one is written to the batch.
-	require.NoError(t, batch.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	require.NoError(t, batch2.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	checkIterSeesBothValues(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkIterSeesBothValues(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
 }
 
 func BenchmarkMVCCKeyCompare(b *testing.B) {
@@ -569,7 +293,7 @@ func BenchmarkMVCCKeyCompare(b *testing.B) {
 	b.ResetTimer()
 	var c int
 	for i, j := 0, 0; i < b.N; i, j = i+1, j+3 {
-		c = EngineKeyCompare(keys[i%len(keys)], keys[j%len(keys)])
+		c = MVCCKeyCompare(keys[i%len(keys)], keys[j%len(keys)])
 	}
 	if testing.Verbose() {
 		fmt.Fprint(ioutil.Discard, c)
@@ -611,7 +335,7 @@ func ts(ts int64) hlc.Timestamp {
 	return hlc.Timestamp{WallTime: ts}
 }
 
-func key(k int) roachpb.Key {
+func formattedKey(k int) roachpb.Key {
 	return []byte(fmt.Sprintf("%05d", k))
 }
 
@@ -633,9 +357,11 @@ func TestSstExportFailureIntentBatching(t *testing.T) {
 
 			require.NoError(t, fillInData(ctx, engine, data))
 
-			destination := &MemFile{}
-			_, _, err := engine.ExportMVCCToSst(ctx, key(10), key(20000), ts(999), ts(2000),
-				true, 0, 0, true, destination)
+			minTs := ts(999)
+			maxTs := ts(2000)
+			endKey := formattedKey(20000)
+			_, _, _, err := engine.ExportToSst(formattedKey(10), formattedKey(20000), minTs, maxTs,
+				true, 0, 0, IterOptions{MinTimestampHint: minTs.Next(), MaxTimestampHint: maxTs, UpperBound: endKey})
 			if len(expectedIntentIndices) == 0 {
 				require.NoError(t, err)
 			} else {
@@ -653,13 +379,13 @@ func TestSstExportFailureIntentBatching(t *testing.T) {
 	}
 
 	// Export range is fixed to k:["00010", "10000"), ts:(999, 2000] for all tests.
-	testDataCount := int(MaxIntentsPerWriteIntentError.Default() + 1)
+	testDataCount := int(maxIntentsPerSstExportError.Default() + 1)
 	testData := make([]testValue, testDataCount*2)
 	expectedErrors := make([]int, testDataCount)
 	for i := 0; i < testDataCount; i++ {
-		testData[i*2] = value(key(i*2+11), "value", ts(1000))
-		testData[i*2+1] = intent(key(i*2+12), "intent", ts(1001))
+		testData[i*2] = value(formattedKey(i*2+11), "value", ts(1000))
+		testData[i*2+1] = intent(formattedKey(i*2+12), "intent", ts(1001))
 		expectedErrors[i] = i*2 + 1
 	}
-	t.Run("Receive no more than limit intents", checkReportedErrors(testData, expectedErrors[:MaxIntentsPerWriteIntentError.Default()]))
+	t.Run("Receive no more than limit intents", checkReportedErrors(testData, expectedErrors[:maxIntentsPerSstExportError.Default()]))
 }

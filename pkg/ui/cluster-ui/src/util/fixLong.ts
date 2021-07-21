@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -19,5 +19,3 @@ export function FixLong(value: Long | number): Long {
   }
   return value as Long;
 }
-
-export const longToInt = (value: number | Long) => Number(FixLong(value));

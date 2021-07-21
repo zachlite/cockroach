@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -18,13 +18,10 @@ import {
   NumericStat,
   flattenStatementStats,
   StatementStatistics,
-  ExecStats,
   combineStatementStats,
 } from "./appStats";
 import IExplainTreePlanNode = protos.cockroach.sql.IExplainTreePlanNode;
 import ISensitiveInfo = protos.cockroach.sql.ISensitiveInfo;
-import { random } from "d3";
-import { exec } from "child_process";
 
 // record is implemented here so we can write the below test as a direct
 // analog of the one in pkg/roachpb/app_stats_test.go.  It's here rather
@@ -115,7 +112,6 @@ describe("flattenStatementStats", () => {
             distSQL: true,
             vec: false,
             opt: true,
-            full_scan: true,
             failed: false,
           },
           node_id: 1,
@@ -130,7 +126,6 @@ describe("flattenStatementStats", () => {
             distSQL: false,
             vec: false,
             opt: false,
-            full_scan: false,
             failed: true,
           },
           node_id: 2,
@@ -149,7 +144,6 @@ describe("flattenStatementStats", () => {
       assert.equal(flattened[i].distSQL, stats[i].key.key_data.distSQL);
       assert.equal(flattened[i].vec, stats[i].key.key_data.vec);
       assert.equal(flattened[i].opt, stats[i].key.key_data.opt);
-      assert.equal(flattened[i].full_scan, stats[i].key.key_data.full_scan);
       assert.equal(flattened[i].failed, stats[i].key.key_data.failed);
       assert.equal(flattened[i].node_id, stats[i].key.node_id);
 
@@ -173,20 +167,7 @@ function randomStat(scale = 1): NumericStat {
   };
 }
 
-function randomExecStats(count = 10): Required<ExecStats> {
-  return {
-    count: Long.fromNumber(randomInt(count)),
-    network_bytes: randomStat(),
-    max_mem_usage: randomStat(),
-    contention_time: randomStat(),
-    network_messages: randomStat(),
-    max_disk_usage: randomStat(),
-  };
-}
-
-function randomStats(
-  sensitiveInfo?: ISensitiveInfo,
-): Required<StatementStatistics> {
+function randomStats(sensitiveInfo?: ISensitiveInfo): StatementStatistics {
   const count = randomInt(1000);
   // tslint:disable:variable-name
   const first_attempt_count = randomInt(count);
@@ -203,18 +184,7 @@ function randomStats(
     run_lat: randomStat(),
     service_lat: randomStat(),
     overhead_lat: randomStat(),
-    bytes_read: randomStat(),
-    rows_read: randomStat(),
     sensitive_info: sensitiveInfo || makeSensitiveInfo(null, null),
-    legacy_last_err: "",
-    legacy_last_err_redacted: "",
-    exec_stats: randomExecStats(count),
-    sql_type: "DDL",
-    last_exec_timestamp: {
-      seconds: Long.fromInt(1599670292),
-      nanos: 111613000,
-    },
-    nodes: [Long.fromInt(1), Long.fromInt(3), Long.fromInt(4)],
   };
 }
 

@@ -16,6 +16,5 @@ interface IChipProps {
   type?: "green" | "lightgreen" | "grey" | "blue" | "lightblue" | "yellow";
 }
 
-export const Chip: React.SFC<IChipProps> = ({ title, type }) => (
-  <span className={`Chip Chip--${type}`}>{title}</span>
-);
+// tslint:disable-next-line: variable-name
+export const Chip: React.SFC <IChipProps> = ({ title, type }) => <span className={`Chip Chip--${type}`}>{title}</span>;

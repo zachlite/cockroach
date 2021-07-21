@@ -54,14 +54,9 @@ func Segmentize(g geo.Geometry, segmentMaxLength float64) (geo.Geometry, error) 
 // segment has a length less than or equal to given maximum segment length.
 // Note: List of points does not consist of end point.
 func segmentizeCoords(a geom.Coord, b geom.Coord, maxSegmentLength float64) ([]float64, error) {
-	if len(a) != len(b) {
-		return nil, errors.Newf("cannot segmentize two coordinates of different dimensions")
-	}
 	if maxSegmentLength <= 0 {
 		return nil, errors.Newf("maximum segment length must be positive")
 	}
-
-	// Only 2D distance is considered for determining number of segments.
 	distanceBetweenPoints := math.Sqrt(math.Pow(a.X()-b.X(), 2) + math.Pow(b.Y()-a.Y(), 2))
 
 	doubleNumberOfSegmentsToCreate := math.Ceil(distanceBetweenPoints / maxSegmentLength)
@@ -80,16 +75,10 @@ func segmentizeCoords(a geom.Coord, b geom.Coord, maxSegmentLength float64) ([]f
 	allSegmentizedCoordinates = append(allSegmentizedCoordinates, a.Clone()...)
 	segmentFraction := 1.0 / float64(numberOfSegmentsToCreate)
 	for pointInserted := 1; pointInserted < numberOfSegmentsToCreate; pointInserted++ {
-		segmentPoint := make([]float64, 0, len(a))
-		for i := 0; i < len(a); i++ {
-			segmentPoint = append(
-				segmentPoint,
-				a[i]*(1-float64(pointInserted)*segmentFraction)+b[i]*(float64(pointInserted)*segmentFraction),
-			)
-		}
 		allSegmentizedCoordinates = append(
 			allSegmentizedCoordinates,
-			segmentPoint...,
+			b.X()*float64(pointInserted)*segmentFraction+a.X()*(1-float64(pointInserted)*segmentFraction),
+			b.Y()*float64(pointInserted)*segmentFraction+a.Y()*(1-float64(pointInserted)*segmentFraction),
 		)
 	}
 

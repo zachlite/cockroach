@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
 	"sort"
 	"testing"
 
@@ -28,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/stretchr/testify/require"
 )
 
@@ -109,7 +109,7 @@ func TestListAndDeleteFiles(t *testing.T) {
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, security.RootUserName())
+		executor, security.RootUser)
 	require.NoError(t, err)
 
 	// Create first test file with multiple chunks.
@@ -160,15 +160,14 @@ func TestReadWriteFile(t *testing.T) {
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, security.RootUserName())
+		executor, security.RootUser)
 	require.NoError(t, err)
 
 	testFileName := "testfile"
 
 	isContentEqual := func(filename string, expected []byte, ft *filetable.FileToTableSystem) bool {
-		reader, size, err := fileTableReadWriter.ReadFile(ctx, filename, 0)
+		reader, err := fileTableReadWriter.ReadFile(ctx, filename)
 		require.NoError(t, err)
-		require.Equal(t, int64(len(expected)), size)
 		got, err := ioutil.ReadAll(reader)
 		require.NoError(t, err)
 		return bytes.Equal(got, expected)
@@ -312,7 +311,7 @@ func TestReadWriteFile(t *testing.T) {
 	// FileTable creation.
 	t.Run("no-db-or-schema-qualified-table-name", func(t *testing.T) {
 		_, err := filetable.NewFileToTableSystem(ctx, "foo",
-			executor, security.RootUserName())
+			executor, security.RootUser)
 		testutils.IsError(err, "could not resolve db or schema name")
 	})
 }
@@ -341,9 +340,8 @@ func TestUserGrants(t *testing.T) {
 	// Operate under non-admin user.
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
-	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, johnUser)
+		executor, "john")
 	require.NoError(t, err)
 
 	// Upload a file to test INSERT privilege.
@@ -352,9 +350,8 @@ func TestUserGrants(t *testing.T) {
 	require.NoError(t, err)
 
 	// Read file to test SELECT privilege.
-	reader, size, err := fileTableReadWriter.ReadFile(ctx, "file1", 0)
+	reader, err := fileTableReadWriter.ReadFile(ctx, "file1")
 	require.NoError(t, err)
-	require.Equal(t, int64(len(expected)), size)
 	got, err := ioutil.ReadAll(reader)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(got, expected))
@@ -424,9 +421,8 @@ func TestDifferentUserDisallowed(t *testing.T) {
 	// Operate under non-admin user john.
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
-	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, johnUser)
+		executor, "john")
 	require.NoError(t, err)
 
 	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter, kvDB)
@@ -481,9 +477,8 @@ func TestDifferentRoleDisallowed(t *testing.T) {
 	// Operate under non-admin user john.
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
-	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, johnUser)
+		executor, "john")
 	require.NoError(t, err)
 
 	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter, kvDB)
@@ -516,16 +511,15 @@ func TestDatabaseScope(t *testing.T) {
 	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
 		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		executor, security.RootUserName())
+		executor, security.RootUser)
 	require.NoError(t, err)
 
 	// Verify defaultdb has the file we wrote.
 	uploadedContent, err := uploadFile(ctx, "file1", 1024, 10,
 		fileTableReadWriter, kvDB)
 	require.NoError(t, err)
-	oldDBReader, oldDBSize, err := fileTableReadWriter.ReadFile(ctx, "file1", 0)
+	oldDBReader, err := fileTableReadWriter.ReadFile(ctx, "file1")
 	require.NoError(t, err)
-	require.Equal(t, int64(len(uploadedContent)), oldDBSize)
 	oldDBContent, err := ioutil.ReadAll(oldDBReader)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(uploadedContent, oldDBContent))
@@ -534,8 +528,8 @@ func TestDatabaseScope(t *testing.T) {
 	_, err = sqlDB.Exec(`CREATE DATABASE newdb`)
 	require.NoError(t, err)
 	newFileTableReadWriter, err := filetable.NewFileToTableSystem(ctx,
-		"newdb.file_table_read_writer", executor, security.RootUserName())
+		"newdb.file_table_read_writer", executor, security.RootUser)
 	require.NoError(t, err)
-	_, _, err = newFileTableReadWriter.ReadFile(ctx, "file1", 0)
-	require.True(t, oserror.IsNotExist(err))
+	_, err = newFileTableReadWriter.ReadFile(ctx, "file1")
+	require.True(t, os.IsNotExist(err))
 }

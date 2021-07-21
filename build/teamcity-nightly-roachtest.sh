@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-source "$(dirname "${0}")/teamcity-support.sh"
-
 # Entry point for the nightly roachtests. These are run from CI and require
 # appropriate secrets for the ${CLOUD} parameter (along with other things,
 # apologies, you're going to have to dig around for them below or even better
@@ -45,20 +43,12 @@ stats_dir="$(date +"%Y%m%d")-${TC_BUILD_ID}"
 
 # Set up a function we'll invoke at the end.
 function upload_stats {
- if tc_release_branch; then
+ if [[ "${TC_BUILD_BRANCH}" == "master" ]]; then
       bucket="cockroach-nightly-${CLOUD}"
       if [[ "${CLOUD}" == "gce" ]]; then
-          # GCE, having been there first, gets an exemption.
+	  # GCE, having been there first, gets an exemption.
           bucket="cockroach-nightly"
       fi
-
-      remote_artifacts_dir="artifacts-${TC_BUILD_BRANCH}"
-      if [[ "${TC_BUILD_BRANCH}" == "master" ]]; then
-        # The master branch is special, as roachperf hard-codes
-        # the location.
-        remote_artifacts_dir="artifacts"
-      fi
-
       # The stats.json files need some path translation:
       #     ${artifacts}/path/to/test/stats.json
       # to
@@ -70,7 +60,7 @@ function upload_stats {
       (cd "${artifacts}" && \
         while IFS= read -r f; do
           if [[ -n "${f}" ]]; then
-            gsutil cp "${f}" "gs://${bucket}/${remote_artifacts_dir}/${stats_dir}/${f}"
+            gsutil cp "${f}" "gs://${bucket}/artifacts/${stats_dir}/${f}"
           fi
         done <<< "$(find . -name stats.json | sed 's/^\.\///')")
   fi

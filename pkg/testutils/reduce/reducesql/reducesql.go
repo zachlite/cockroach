@@ -32,11 +32,9 @@ var SQLPasses = []reduce.Pass{
 	removeWithCTEs,
 	removeWith,
 	removeCreateDefs,
-	removeComputedColumn,
 	removeValuesCols,
 	removeWithSelectExprs,
 	removeSelectAsExprs,
-	removeIndexFlags,
 	removeValuesRows,
 	removeSelectExprs,
 	nullExprs,
@@ -48,7 +46,6 @@ var SQLPasses = []reduce.Pass{
 	removeGroupByExprs,
 	removeCreateNullDefs,
 	removeIndexCols,
-	removeIndexPredicate,
 	removeWindowPartitions,
 	removeDBSchema,
 	removeFroms,
@@ -181,10 +178,6 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 					walk(expr)
 				}
 			case *tree.ColumnTableDef:
-				walk(node.Computed.Expr)
-				for _, expr := range node.CheckExprs {
-					walk(expr)
-				}
 			case *tree.ComparisonExpr:
 				walk(node.Left, node.Right)
 			case *tree.CreateTable:
@@ -197,21 +190,6 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 			case *tree.CTE:
 				walk(node.Stmt)
 			case *tree.DBool:
-			case *tree.Delete:
-				walk(node.Table)
-				if node.With != nil {
-					walk(node.With)
-				}
-				if node.Where != nil {
-					walk(node.Where)
-				}
-				walk(node.OrderBy)
-				if node.Limit != nil {
-					walk(node.Limit)
-				}
-				if node.Returning != nil {
-					walk(node.Returning)
-				}
 			case tree.Exprs:
 				for _, expr := range node {
 					walk(expr)
@@ -223,37 +201,19 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 				}
 				walk(node.Exprs, node.Filter)
 			case *tree.IndexTableDef:
-				walk(node.Predicate)
-			case *tree.Insert:
-				walk(node.Table)
-				if node.Rows != nil {
-					walk(node.Rows)
-				}
-				if node.With != nil {
-					walk(node.With)
-				}
-				if node.Returning != nil {
-					walk(node.Returning)
-				}
 			case *tree.JoinTableExpr:
 				walk(node.Left, node.Right, node.Cond)
-			case *tree.Limit:
-				walk(node.Count)
 			case *tree.NotExpr:
 				walk(node.Expr)
 			case *tree.NumVal:
 			case *tree.OnJoinCond:
 				walk(node.Expr)
-			case *tree.Order:
-				walk(node.Expr, node.Table)
 			case *tree.OrExpr:
 				walk(node.Left, node.Right)
 			case *tree.ParenExpr:
 				walk(node.Expr)
 			case *tree.ParenSelect:
 				walk(node.Select)
-			case *tree.RangeCond:
-				walk(node.Left, node.From, node.To)
 			case *tree.RowsFromExpr:
 				for _, expr := range node.Items {
 					walk(expr)
@@ -263,14 +223,6 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 					walk(node.With)
 				}
 				walk(node.Select)
-				if node.OrderBy != nil {
-					for _, order := range node.OrderBy {
-						walk(order)
-					}
-				}
-				if node.Limit != nil {
-					walk(node.Limit)
-				}
 			case *tree.SelectClause:
 				walk(node.Exprs)
 				if node.Where != nil {
@@ -281,16 +233,6 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 				}
 				for _, table := range node.From.Tables {
 					walk(table)
-				}
-				if node.DistinctOn != nil {
-					for _, distinct := range node.DistinctOn {
-						walk(distinct)
-					}
-				}
-				if node.GroupBy != nil {
-					for _, group := range node.GroupBy {
-						walk(group)
-					}
 				}
 			case tree.SelectExpr:
 				walk(node.Expr)
@@ -305,7 +247,7 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 			case *tree.StrVal:
 			case *tree.Subquery:
 				walk(node.Select)
-			case *tree.TableName, tree.TableName:
+			case *tree.TableName:
 			case *tree.Tuple:
 				for _, expr := range node.Exprs {
 					walk(expr)
@@ -317,24 +259,6 @@ func (w sqlWalker) Transform(s string, i int) (out string, ok bool, err error) {
 				walk(node.Left, node.Right)
 			case tree.UnqualifiedStar:
 			case *tree.UnresolvedName:
-			case *tree.Update:
-				walk(node.Table)
-				if node.Exprs != nil {
-					walk(node.Exprs)
-				}
-				if node.With != nil {
-					walk(node.With)
-				}
-				if node.Where != nil {
-					walk(node.Where)
-				}
-				walk(node.OrderBy)
-				if node.Limit != nil {
-					walk(node.Limit)
-				}
-				if node.Returning != nil {
-					walk(node.Returning)
-				}
 			case *tree.ValuesClause:
 				for _, row := range node.Rows {
 					walk(row)
@@ -689,19 +613,6 @@ var (
 		}
 		return 0
 	})
-	removeIndexFlags = walkSQL("remove index flags", func(xfi int, node interface{}) int {
-		xf := xfi == 0
-		switch node := node.(type) {
-		case *tree.AliasedTableExpr:
-			if node.IndexFlags != nil {
-				if xf {
-					node.IndexFlags = nil
-				}
-				return 1
-			}
-		}
-		return 0
-	})
 	removeWith = walkSQL("remove WITH", func(xfi int, node interface{}) int {
 		xf := xfi == 0
 		switch node := node.(type) {
@@ -747,21 +658,6 @@ var (
 		}
 		return 0
 	})
-	removeComputedColumn = walkSQL("remove computed column", func(xfi int, node interface{}) int {
-		xf := xfi == 0
-		switch node := node.(type) {
-		case *tree.ColumnTableDef:
-			if node.Computed.Computed {
-				if xf {
-					node.Computed.Computed = false
-					node.Computed.Expr = nil
-					node.Computed.Virtual = false
-				}
-				return 1
-			}
-		}
-		return 0
-	})
 	removeCreateNullDefs = walkSQL("remove CREATE NULL defs", func(xfi int, node interface{}) int {
 		xf := xfi == 0
 		switch node := node.(type) {
@@ -788,19 +684,6 @@ var (
 			return removeCol(node)
 		case *tree.UniqueConstraintTableDef:
 			return removeCol(&node.IndexTableDef)
-		}
-		return 0
-	})
-	removeIndexPredicate = walkSQL("remove index predicate", func(xfi int, node interface{}) int {
-		xf := xfi == 0
-		switch node := node.(type) {
-		case *tree.IndexTableDef:
-			if node.Predicate != nil {
-				if xf {
-					node.Predicate = nil
-				}
-				return 1
-			}
 		}
 		return 0
 	})

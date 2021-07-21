@@ -37,33 +37,33 @@ const (
 
 // OIDCEnabled enables or disabled OIDC login for the DB Console.
 var OIDCEnabled = func() *settings.BoolSetting {
-	s := settings.RegisterBoolSetting(
+	s := settings.RegisterPublicBoolSetting(
 		OIDCEnabledSettingName,
 		"enables or disabled OIDC login for the DB Console (this feature is experimental)",
 		false,
-	).WithPublic()
+	)
 	s.SetReportable(true)
 	return s
 }()
 
 // OIDCClientID is the OIDC client id.
 var OIDCClientID = func() *settings.StringSetting {
-	s := settings.RegisterStringSetting(
+	s := settings.RegisterPublicStringSetting(
 		OIDCClientIDSettingName,
 		"sets OIDC client id (this feature is experimental)",
 		"",
-	).WithPublic()
+	)
 	s.SetReportable(true)
 	return s
 }()
 
 // OIDCClientSecret is the OIDC client secret.
 var OIDCClientSecret = func() *settings.StringSetting {
-	s := settings.RegisterStringSetting(
+	s := settings.RegisterPublicStringSetting(
 		OIDCClientSecretSettingName,
 		"sets OIDC client secret (this feature is experimental)",
 		"",
-	).WithPublic()
+	)
 	s.SetReportable(false)
 	return s
 }()
@@ -223,12 +223,12 @@ var OIDCScopes = func() *settings.StringSetting {
 
 // OIDCClaimJSONKey is the key of the claim to extract from the OIDC id_token.
 var OIDCClaimJSONKey = func() *settings.StringSetting {
-	s := settings.RegisterStringSetting(
+	s := settings.RegisterPublicStringSetting(
 		OIDCClaimJSONKeySettingName,
 		"sets JSON key of principal to extract from payload after OIDC authentication completes "+
 			"(usually email or sid) (this feature is experimental)",
 		"",
-	).WithPublic()
+	)
 	return s
 }()
 
@@ -255,23 +255,23 @@ var OIDCPrincipalRegex = func() *settings.StringSetting {
 // OIDCButtonText is a string to display on the button in the DB Console to
 // login with OIDC.
 var OIDCButtonText = func() *settings.StringSetting {
-	s := settings.RegisterStringSetting(
+	s := settings.RegisterPublicStringSetting(
 		OIDCButtonTextSettingName,
 		"text to show on button on DB Console login page to login with your OIDC provider "+
 			"(only shown if OIDC is enabled) (this feature is experimental)",
 		"Login with your OIDC provider",
-	).WithPublic()
+	)
 	return s
 }()
 
 // OIDCAutoLogin is a boolean that enables automatic redirection to OIDC auth in
 // the DB Console.
 var OIDCAutoLogin = func() *settings.BoolSetting {
-	s := settings.RegisterBoolSetting(
+	s := settings.RegisterPublicBoolSetting(
 		OIDCAutoLoginSettingName,
 		"if true, logged-out visitors to the DB Console will be "+
 			"automatically redirected to the OIDC login endpoint (this feature is experimental)",
 		false,
-	).WithPublic()
+	)
 	return s
 }()

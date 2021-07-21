@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/spf13/pflag"
@@ -182,10 +182,9 @@ type StoreSpec struct {
 	// Pebble OPTIONS file but treating any whitespace as a newline:
 	// (Eg, "[Options] delete_range_flush_delay=2s flush_split_bytes=4096")
 	PebbleOptions string
-	// EncryptionOptions is a serialized protobuf set by Go CCL code and passed
-	// through to C CCL code to set up encryption-at-rest.  Must be set if and
-	// only if encryption is enabled, otherwise left empty.
-	EncryptionOptions []byte
+	// ExtraOptions is a serialized protobuf set by Go CCL code and passed through
+	// to C CCL code.
+	ExtraOptions []byte
 }
 
 // String returns a fully parsable version of the store spec.
@@ -224,11 +223,6 @@ func (ss StoreSpec) String() string {
 		buffer.Truncate(l - 1)
 	}
 	return buffer.String()
-}
-
-// IsEncrypted returns whether the StoreSpec has encryption enabled.
-func (ss StoreSpec) IsEncrypted() bool {
-	return len(ss.EncryptionOptions) > 0
 }
 
 // fractionRegex is the regular expression that recognizes whether
@@ -447,7 +441,7 @@ func (ssl StoreSpecList) PriorCriticalAlertError() (err error) {
 		}
 		b, err := ioutil.ReadFile(path)
 		if err != nil {
-			if !oserror.IsNotExist(err) {
+			if !os.IsNotExist(err) {
 				addError(errors.Wrapf(err, "%s", path))
 			}
 			continue
@@ -532,10 +526,6 @@ func (jls *JoinListType) Set(value string) error {
 		addr, port, err := netutil.SplitHostPort(v, "")
 		if err != nil {
 			return err
-		}
-		// Default the port if unspecified.
-		if len(port) == 0 {
-			port = DefaultPort
 		}
 		// Re-join the parts. This guarantees an address that
 		// will be valid for net.SplitHostPort().

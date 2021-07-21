@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -26,6 +25,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
@@ -53,23 +54,21 @@ var maxTimestampAge = settings.RegisterDurationSetting(
 )
 
 func (dsp *DistSQLPlanner) createStatsPlan(
-	planCtx *PlanningCtx,
-	desc catalog.TableDescriptor,
-	reqStats []requestedStat,
-	jobID jobspb.JobID,
-	details jobspb.CreateStatsDetails,
+	planCtx *PlanningCtx, desc *tabledesc.Immutable, reqStats []requestedStat, job *jobs.Job,
 ) (*PhysicalPlan, error) {
 	if len(reqStats) == 0 {
 		return nil, errors.New("no stats requested")
 	}
 
+	details := job.Details().(jobspb.CreateStatsDetails)
+
 	// Calculate the set of columns we need to scan.
 	var colCfg scanColumnsConfig
-	var tableColSet catalog.TableColSet
+	var tableColSet util.FastIntSet
 	for _, s := range reqStats {
 		for _, c := range s.columns {
-			if !tableColSet.Contains(c) {
-				tableColSet.Add(c)
+			if !tableColSet.Contains(int(c)) {
+				tableColSet.Add(int(c))
 				colCfg.wantedColumns = append(colCfg.wantedColumns, tree.ColumnID(c))
 			}
 		}
@@ -81,11 +80,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	if err != nil {
 		return nil, err
 	}
-	var colIdxMap catalog.TableColMap
-	for i, c := range scan.cols {
-		colIdxMap.Set(c.GetID(), i)
-	}
-	sb := span.MakeBuilder(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
+	sb := span.MakeBuilder(planCtx.planner.ExecCfg().Codec, desc, scan.index)
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return nil, err
@@ -117,7 +112,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 			StatName:            s.name,
 		}
 		for i, colID := range s.columns {
-			colIdx, ok := colIdxMap.Get(colID)
+			colIdx, ok := scan.colIdxMap[colID]
 			if !ok {
 				panic("necessary column not scanned")
 			}
@@ -132,9 +127,9 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 			// TODO(mjibson): allow multiple inverted indexes on the same column (i.e.,
 			// with different configurations). See #50655.
 			col := s.columns[0]
-			for _, index := range desc.PublicNonPrimaryIndexes() {
-				if index.GetType() == descpb.IndexDescriptor_INVERTED && index.InvertedColumnID() == col {
-					spec.Index = index.IndexDesc()
+			for _, indexDesc := range desc.GetPublicNonPrimaryIndexes() {
+				if indexDesc.Type == descpb.IndexDescriptor_INVERTED && indexDesc.ColumnIDs[0] == col {
+					spec.Index = &indexDesc
 					break
 				}
 			}
@@ -157,18 +152,13 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		sampler.MaxFractionIdle = details.MaxFractionIdle
 		if s.histogram {
 			sampler.SampleSize = histogramSamples
-			// This could be anything >= 2 to produce a histogram, but the max number
-			// of buckets is probably also a reasonable minimum number of samples. (If
-			// there are fewer rows than this in the table, there will be fewer
-			// samples of course, which is fine.)
-			sampler.MinSampleSize = s.histogramMaxBuckets
 		}
 	}
 
 	// The sampler outputs the original columns plus a rank column, four
 	// sketch columns, and two inverted histogram columns.
-	outTypes := make([]*types.T, 0, len(p.GetResultTypes())+5)
-	outTypes = append(outTypes, p.GetResultTypes()...)
+	outTypes := make([]*types.T, 0, len(p.ResultTypes)+5)
+	outTypes = append(outTypes, p.ResultTypes...)
 	// An INT column for the rank of each row.
 	outTypes = append(outTypes, types.Int)
 	// An INT column indicating the sketch index.
@@ -193,7 +183,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	)
 
 	// Estimate the expected number of rows based on existing stats in the cache.
-	tableStats, err := planCtx.ExtendedEvalCtx.ExecCfg.TableStatsCache.GetTableStats(planCtx.ctx, desc.GetID())
+	tableStats, err := planCtx.planner.execCfg.TableStatsCache.GetTableStats(planCtx.ctx, desc.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,14 +199,18 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		))
 	}
 
+	var jobID int64
+	if job.ID() != nil {
+		jobID = *job.ID()
+	}
+
 	// Set up the final SampleAggregator stage.
 	agg := &execinfrapb.SampleAggregatorSpec{
 		Sketches:         sketchSpecs,
 		InvertedSketches: invSketchSpecs,
 		SampleSize:       sampler.SampleSize,
-		MinSampleSize:    sampler.MinSampleSize,
 		SampledColumnIDs: sampledColumnIDs,
-		TableID:          desc.GetID(),
+		TableID:          desc.ID,
 		JobID:            jobID,
 		RowsExpected:     rowsExpected,
 	}
@@ -237,8 +231,9 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 }
 
 func (dsp *DistSQLPlanner) createPlanForCreateStats(
-	planCtx *PlanningCtx, jobID jobspb.JobID, details jobspb.CreateStatsDetails,
+	planCtx *PlanningCtx, job *jobs.Job,
 ) (*PhysicalPlan, error) {
+	details := job.Details().(jobspb.CreateStatsDetails)
 	reqStats := make([]requestedStat, len(details.ColumnStats))
 	histogramCollectionEnabled := stats.HistogramClusterMode.Get(&dsp.st.SV)
 	for i := 0; i < len(reqStats); i++ {
@@ -256,8 +251,8 @@ func (dsp *DistSQLPlanner) createPlanForCreateStats(
 		}
 	}
 
-	tableDesc := tabledesc.NewBuilder(&details.Table).BuildImmutableTable()
-	return dsp.createStatsPlan(planCtx, tableDesc, reqStats, jobID, details)
+	tableDesc := tabledesc.NewImmutable(details.Table)
+	return dsp.createStatsPlan(planCtx, tableDesc, reqStats, job)
 }
 
 func (dsp *DistSQLPlanner) planAndRunCreateStats(
@@ -266,12 +261,11 @@ func (dsp *DistSQLPlanner) planAndRunCreateStats(
 	planCtx *PlanningCtx,
 	txn *kv.Txn,
 	job *jobs.Job,
-	resultWriter *RowResultWriter,
+	resultRows *RowResultWriter,
 ) error {
 	ctx = logtags.AddTag(ctx, "create-stats-distsql", nil)
 
-	details := job.Details().(jobspb.CreateStatsDetails)
-	physPlan, err := dsp.createPlanForCreateStats(planCtx, job.ID(), details)
+	physPlan, err := dsp.createPlanForCreateStats(planCtx, job)
 	if err != nil {
 		return err
 	}
@@ -280,17 +274,17 @@ func (dsp *DistSQLPlanner) planAndRunCreateStats(
 
 	recv := MakeDistSQLReceiver(
 		ctx,
-		resultWriter,
+		resultRows,
 		tree.DDL,
 		evalCtx.ExecCfg.RangeDescriptorCache,
 		txn,
-		evalCtx.ExecCfg.Clock,
+		func(ts hlc.Timestamp) {
+			evalCtx.ExecCfg.Clock.Update(ts)
+		},
 		evalCtx.Tracing,
-		evalCtx.ExecCfg.ContentionRegistry,
-		nil, /* testingPushCallback */
 	)
 	defer recv.Release()
 
 	dsp.Run(planCtx, txn, physPlan, recv, evalCtx, nil /* finishedSetupFn */)()
-	return resultWriter.Err()
+	return resultRows.Err()
 }

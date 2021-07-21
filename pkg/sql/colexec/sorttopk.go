@@ -16,9 +16,8 @@ import (
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -35,22 +34,21 @@ const (
 // must correspond 1-1 with the columns in the input operator.
 func NewTopKSorter(
 	allocator *colmem.Allocator,
-	input colexecop.Operator,
+	input colexecbase.Operator,
 	inputTypes []*types.T,
 	orderingCols []execinfrapb.Ordering_Column,
-	k uint64,
-) colexecop.ResettableOperator {
+	k int,
+) colexecbase.Operator {
 	return &topKSorter{
 		allocator:    allocator,
-		OneInputNode: colexecop.NewOneInputNode(input),
+		OneInputNode: NewOneInputNode(input),
 		inputTypes:   inputTypes,
 		orderingCols: orderingCols,
 		k:            k,
 	}
 }
 
-var _ colexecop.BufferingInMemoryOperator = &topKSorter{}
-var _ colexecop.Resetter = &topKSorter{}
+var _ colexecbase.BufferingInMemoryOperator = &topKSorter{}
 
 // topKSortState represents the state of the sort operator.
 type topKSortState int
@@ -68,13 +66,12 @@ const (
 )
 
 type topKSorter struct {
-	colexecop.OneInputNode
-	colexecop.InitHelper
+	OneInputNode
 
 	allocator    *colmem.Allocator
 	orderingCols []execinfrapb.Ordering_Column
 	inputTypes   []*types.T
-	k            uint64
+	k            int
 
 	// state is the current state of the sort.
 	state topKSortState
@@ -86,7 +83,7 @@ type topKSorter struct {
 	// comparators stores one comparator per ordering column.
 	comparators []vecComparator
 	// topK stores the top K rows. It is not sorted internally.
-	topK *colexecutils.AppendOnlyBufferedBatch
+	topK *appendOnlyBufferedBatch
 	// heap is a max heap which stores indices into topK.
 	heap []int
 	// sel is a selection vector which specifies an ordering on topK.
@@ -100,12 +97,9 @@ type topKSorter struct {
 	windowedBatch     coldata.Batch
 }
 
-func (t *topKSorter) Init(ctx context.Context) {
-	if !t.InitHelper.Init(ctx) {
-		return
-	}
-	t.Input.Init(t.Ctx)
-	t.topK = colexecutils.NewAppendOnlyBufferedBatch(t.allocator, t.inputTypes, nil /* colsToStore */)
+func (t *topKSorter) Init() {
+	t.input.Init()
+	t.topK = newAppendOnlyBufferedBatch(t.allocator, t.inputTypes, nil /* colsToStore */)
 	t.comparators = make([]vecComparator, len(t.inputTypes))
 	for i, typ := range t.inputTypes {
 		t.comparators[i] = GetVecComparator(typ, 2)
@@ -116,11 +110,11 @@ func (t *topKSorter) Init(ctx context.Context) {
 	t.windowedBatch = coldata.NewMemBatchNoCols(t.inputTypes, coldata.BatchSize())
 }
 
-func (t *topKSorter) Next() coldata.Batch {
+func (t *topKSorter) Next(ctx context.Context) coldata.Batch {
 	for {
 		switch t.state {
 		case topKSortSpooling:
-			t.spool()
+			t.spool(ctx)
 			t.state = topKSortEmitting
 		case topKSortEmitting:
 			output := t.emit()
@@ -139,16 +133,6 @@ func (t *topKSorter) Next() coldata.Batch {
 	}
 }
 
-func (t *topKSorter) Reset(ctx context.Context) {
-	if r, ok := t.Input.(colexecop.Resetter); ok {
-		r.Reset(ctx)
-	}
-	t.state = topKSortSpooling
-	t.firstUnprocessedTupleIdx = 0
-	t.topK.ResetInternalBatch()
-	t.emitted = 0
-}
-
 // spool reads in the entire input, always storing the top K rows it has seen so
 // far in o.topK. This is done by maintaining a max heap of indices into o.topK.
 // Whenever we encounter a row which is smaller than the max row in the heap,
@@ -157,32 +141,30 @@ func (t *topKSorter) Reset(ctx context.Context) {
 // After all the input has been read, we pop everything off the heap to
 // determine the final output ordering. This is used in emit() to output the rows
 // in sorted order.
-func (t *topKSorter) spool() {
+func (t *topKSorter) spool(ctx context.Context) {
 	// Fill up t.topK by spooling up to K rows from the input.
-	t.inputBatch = t.Input.Next()
+	t.inputBatch = t.input.Next(ctx)
 	remainingRows := t.k
 	for remainingRows > 0 && t.inputBatch.Length() > 0 {
 		fromLength := t.inputBatch.Length()
-		if remainingRows < uint64(t.inputBatch.Length()) {
+		if remainingRows < t.inputBatch.Length() {
 			// t.topK will be full after this batch.
-			fromLength = int(remainingRows)
+			fromLength = remainingRows
 		}
 		t.firstUnprocessedTupleIdx = fromLength
-		t.topK.AppendTuples(t.inputBatch, 0 /* startIdx */, fromLength)
-		remainingRows -= uint64(fromLength)
+		t.allocator.PerformOperation(t.topK.ColVecs(), func() {
+			t.topK.append(t.inputBatch, 0 /* startIdx */, fromLength)
+		})
+		remainingRows -= fromLength
 		if fromLength == t.inputBatch.Length() {
-			t.inputBatch = t.Input.Next()
+			t.inputBatch = t.input.Next(ctx)
 			t.firstUnprocessedTupleIdx = 0
 		}
 	}
 	t.updateComparators(topKVecIdx, t.topK)
 
 	// Initialize the heap.
-	if cap(t.heap) < t.topK.Length() {
-		t.heap = make([]int, t.topK.Length())
-	} else {
-		t.heap = t.heap[:t.topK.Length()]
-	}
+	t.heap = make([]int, t.topK.Length())
 	for i := range t.heap {
 		t.heap[i] = i
 	}
@@ -212,7 +194,7 @@ func (t *topKSorter) spool() {
 				t.firstUnprocessedTupleIdx = t.inputBatch.Length()
 			},
 		)
-		t.inputBatch = t.Input.Next()
+		t.inputBatch = t.input.Next(ctx)
 		t.firstUnprocessedTupleIdx = 0
 	}
 
@@ -286,7 +268,7 @@ func (t *topKSorter) updateComparators(vecIdx int, batch coldata.Batch) {
 	}
 }
 
-func (t *topKSorter) ExportBuffered(colexecop.Operator) coldata.Batch {
+func (t *topKSorter) ExportBuffered(colexecbase.Operator) coldata.Batch {
 	topKLen := t.topK.Length()
 	// First, we check whether we have exported all tuples from the topK vector.
 	if t.exportedFromTopK < topKLen {
@@ -306,7 +288,7 @@ func (t *topKSorter) ExportBuffered(colexecop.Operator) coldata.Batch {
 	// Next, we check whether we have exported all tuples from the last read
 	// batch.
 	if t.inputBatch != nil && t.firstUnprocessedTupleIdx+t.exportedFromBatch < t.inputBatch.Length() {
-		colexecutils.MakeWindowIntoBatch(t.windowedBatch, t.inputBatch, t.firstUnprocessedTupleIdx, t.inputTypes)
+		makeWindowIntoBatch(t.windowedBatch, t.inputBatch, t.firstUnprocessedTupleIdx, t.inputTypes)
 		t.exportedFromBatch = t.windowedBatch.Length()
 		return t.windowedBatch
 	}

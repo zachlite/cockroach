@@ -19,13 +19,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/optgen/exprgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/opttester"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/datadriven"
 )
@@ -46,9 +47,9 @@ import (
 //
 //    The supported args (in addition to the ones supported by OptTester):
 //
-//      - vars=(var1 type1, var2 type2,...)
+//      - vars=(type1,type2,...)
 //
-//        Information about columns that the scalar expression can refer to.
+//        Information about IndexedVar columns.
 //
 func TestBuilder(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -57,6 +58,9 @@ func TestBuilder(t *testing.T) {
 		catalog := testcat.New()
 
 		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
+			var varTypes []*types.T
+			var err error
+
 			tester := opttester.New(catalog, d.Input)
 			tester.Flags.ExprFormat = memo.ExprFmtHideMiscProps |
 				memo.ExprFmtHideConstraints |
@@ -72,23 +76,11 @@ func TestBuilder(t *testing.T) {
 			case "build-scalar":
 				// Remove the HideScalars, HideTypes flag for build-scalars.
 				tester.Flags.ExprFormat &= ^(memo.ExprFmtHideScalars | memo.ExprFmtHideTypes)
-
-				ctx := context.Background()
-				semaCtx := tree.MakeSemaContext()
-				evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
-				evalCtx.SessionData.OptimizerUseHistograms = true
-				evalCtx.SessionData.OptimizerUseMultiColStats = true
-				evalCtx.SessionData.LocalityOptimizedSearch = true
-
-				var o xform.Optimizer
-				o.Init(&evalCtx, catalog)
-				var sv testutils.ScalarVars
-
 				for _, arg := range d.CmdArgs {
 					key, vals := arg.Key, arg.Vals
 					switch key {
 					case "vars":
-						err := sv.Init(o.Memo().Metadata(), vals)
+						varTypes, err = exprgen.ParseTypes(vals)
 						if err != nil {
 							d.Fatalf(t, "%v", err)
 						}
@@ -105,6 +97,17 @@ func TestBuilder(t *testing.T) {
 					d.Fatalf(t, "%v", err)
 				}
 
+				ctx := context.Background()
+				semaCtx := tree.MakeSemaContext()
+				evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
+				evalCtx.SessionData.OptimizerUseHistograms = true
+				evalCtx.SessionData.OptimizerUseMultiColStats = true
+
+				var o xform.Optimizer
+				o.Init(&evalCtx, catalog)
+				for i, typ := range varTypes {
+					o.Memo().Metadata().AddColumn(fmt.Sprintf("@%d", i+1), typ)
+				}
 				// Disable normalization rules: we want the tests to check the result
 				// of the build process.
 				o.DisableOptimizations()

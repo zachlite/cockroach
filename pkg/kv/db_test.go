@@ -14,21 +14,13 @@ import (
 	"bytes"
 	"context"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/kvclientutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func setup(t *testing.T) (serverutils.TestServerInterface, *kv.DB) {
@@ -83,19 +75,6 @@ func TestDB_Get(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 
 	result, err := db.Get(context.Background(), "aa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte(""), result.ValueBytes())
-}
-
-func TestDB_GetForUpdate(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	s, db := setup(t)
-	defer s.Stopper().Stop(context.Background())
-
-	result, err := db.GetForUpdate(context.Background(), "aa")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,64 +143,6 @@ func TestDB_CPut(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkResult(t, []byte("4"), result.ValueBytes())
-}
-
-func TestDB_CPutInline(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	s, db := setup(t)
-	defer s.Stopper().Stop(context.Background())
-	ctx := kv.CtxForCPutInline(context.Background())
-
-	if err := db.PutInline(ctx, "aa", "1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.CPutInline(ctx, "aa", "2", kvclientutils.StrToCPutExistingValue("1")); err != nil {
-		t.Fatal(err)
-	}
-	result, err := db.Get(ctx, "aa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte("2"), result.ValueBytes())
-
-	if err = db.CPutInline(ctx, "aa", "3", kvclientutils.StrToCPutExistingValue("1")); err == nil {
-		t.Fatal("expected error from conditional put")
-	}
-	result, err = db.Get(ctx, "aa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte("2"), result.ValueBytes())
-
-	if err = db.CPutInline(ctx, "bb", "4", kvclientutils.StrToCPutExistingValue("1")); err == nil {
-		t.Fatal("expected error from conditional put")
-	}
-	result, err = db.Get(ctx, "bb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte(""), result.ValueBytes())
-
-	if err = db.CPutInline(ctx, "bb", "4", nil); err != nil {
-		t.Fatal(err)
-	}
-	result, err = db.Get(ctx, "bb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkResult(t, []byte("4"), result.ValueBytes())
-
-	if err = db.CPutInline(ctx, "aa", nil, kvclientutils.StrToCPutExistingValue("2")); err != nil {
-		t.Fatal(err)
-	}
-	result, err = db.Get(ctx, "aa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Value != nil {
-		t.Fatalf("expected deleted value, got %x", result.ValueBytes())
-	}
 }
 
 func TestDB_InitPut(t *testing.T) {
@@ -515,94 +436,4 @@ func TestDB_Put_insecure(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkResult(t, []byte("1"), result.ValueBytes())
-}
-
-// Test that all operations on a decommissioned node will return a
-// permission denied error rather than hanging indefinitely due to
-// internal retries.
-func TestDBDecommissionedOperations(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
-		ReplicationMode: base.ReplicationManual, // saves time
-	})
-	defer tc.Stopper().Stop(ctx)
-
-	scratchKey := tc.ScratchRange(t)
-	scratchRange := tc.LookupRangeOrFatal(t, scratchKey)
-	require.Len(t, scratchRange.InternalReplicas, 1)
-	require.Equal(t, tc.Server(0).NodeID(), scratchRange.InternalReplicas[0].NodeID)
-
-	// Decommission server 1.
-	srv := tc.Server(0)
-	decomSrv := tc.Server(1)
-	for _, status := range []livenesspb.MembershipStatus{
-		livenesspb.MembershipStatus_DECOMMISSIONING, livenesspb.MembershipStatus_DECOMMISSIONED,
-	} {
-		require.NoError(t, srv.Decommission(ctx, status, []roachpb.NodeID{decomSrv.NodeID()}))
-	}
-
-	// Run a few different operations, which should all eventually error with
-	// PermissionDenied. We don't need full coverage of methods, since they use
-	// the same sender infrastructure, but should use a few variations to hit
-	// different sender code paths (e.g. with and without txns).
-	db := decomSrv.DB()
-	key := roachpb.Key([]byte("a"))
-	keyEnd := roachpb.Key([]byte("x"))
-	value := []byte{1, 2, 3}
-
-	testcases := []struct {
-		name string
-		op   func() error
-	}{
-		{"Del", func() error {
-			return db.Del(ctx, key)
-		}},
-		{"DelRange", func() error {
-			return db.DelRange(ctx, key, keyEnd)
-		}},
-		{"Get", func() error {
-			_, err := db.Get(ctx, key)
-			return err
-		}},
-		{"GetForUpdate", func() error {
-			_, err := db.GetForUpdate(ctx, key)
-			return err
-		}},
-		{"Put", func() error {
-			return db.Put(ctx, key, value)
-		}},
-		{"Scan", func() error {
-			_, err := db.Scan(ctx, key, keyEnd, 0)
-			return err
-		}},
-		{"TxnGet", func() error {
-			_, err := db.NewTxn(ctx, "").Get(ctx, key)
-			return err
-		}},
-		{"TxnPut", func() error {
-			return db.NewTxn(ctx, "").Put(ctx, key, value)
-		}},
-		{"AdminTransferLease", func() error {
-			return db.AdminTransferLease(ctx, scratchKey, srv.GetFirstStoreID())
-		}},
-	}
-
-	for _, tc := range testcases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			var err error
-			require.Eventually(t, func() bool {
-				err = tc.op()
-				s, ok := status.FromError(errors.UnwrapAll(err))
-				if s == nil || !ok {
-					return false
-				}
-				require.Equal(t, codes.PermissionDenied, s.Code())
-				return true
-			}, 10*time.Second, 100*time.Millisecond, "timed out waiting for gRPC error, got %v", err)
-		})
-	}
 }

@@ -29,9 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -42,9 +40,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/pgtest"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -61,12 +59,6 @@ func TestAnonymizeStatementsForReporting(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	s := cluster.MakeTestingClusterSettings()
-	vt, err := sql.NewVirtualSchemaHolder(context.Background(), s)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	const stmt1s = `
 INSERT INTO sensitive(super, sensible) VALUES('that', 'nobody', 'must', 'see')
 `
@@ -76,7 +68,7 @@ INSERT INTO sensitive(super, sensible) VALUES('that', 'nobody', 'must', 'see')
 	}
 
 	rUnsafe := errors.New("some error")
-	safeErr := sql.WithAnonymizedStatement(rUnsafe, stmt1.AST, vt)
+	safeErr := sql.WithAnonymizedStatement(rUnsafe, stmt1.AST)
 
 	const expMessage = "some error"
 	actMessage := safeErr.Error()
@@ -508,6 +500,8 @@ func TestQueryProgress(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	skip.WithIssue(t, 51356)
+
 	const rows, kvBatchSize = 1000, 50
 
 	defer rowexec.TestingSetScannedRowProgressFrequency(rows / 60)()
@@ -554,25 +548,13 @@ func TestQueryProgress(t *testing.T) {
 
 	db := sqlutils.MakeSQLRunner(rawDB)
 
-	// TODO(yuzefovich): the vectorized cfetcher doesn't emit metadata about
-	// the progress nor do we have an infrastructure to emit such metadata at
-	// the runtime (we can only propagate the metadata during the draining of
-	// the flow which defeats the purpose of the progress meta), so we use the
-	// old row-by-row engine in this test. We should fix that (#55758).
-	db.Exec(t, `SET vectorize=off`)
 	db.Exec(t, `SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false`)
 	db.Exec(t, `CREATE DATABASE t; CREATE TABLE t.test (x INT PRIMARY KEY);`)
 	db.Exec(t, `INSERT INTO t.test SELECT generate_series(1, $1)::INT`, rows)
 	db.Exec(t, `CREATE STATISTICS __auto__ FROM t.test`)
 	const query = `SELECT count(*) FROM t.test WHERE x > $1 and x % 2 = 0`
 
-	// Invalidate the stats cache so that we can be sure to get the latest stats.
-	var tableID descpb.ID
-	ctx := context.Background()
-	require.NoError(t, rawDB.QueryRow(`SELECT id FROM system.namespace WHERE name = 'test'`).Scan(&tableID))
-	s.ExecutorConfig().(sql.ExecutorConfig).TableStatsCache.InvalidateTableStats(ctx, tableID)
-
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	g := ctxgroup.WithContext(ctx)
@@ -922,6 +904,9 @@ func TestTrimSuspendedPortals(t *testing.T) {
 		}
 	}
 
+	// explicitly close portal
+	require.NoError(t, p.SendOneLine(fmt.Sprintf(`Close {"ObjectType": 80,"Name": "%s"}`, portalName)))
+
 	// send commit
 	require.NoError(t, p.SendOneLine(`Query {"String": "COMMIT"}`))
 
@@ -934,7 +919,6 @@ func TestTrimSuspendedPortals(t *testing.T) {
 
 func TestShowLastQueryStatistics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	params := base.TestServerArgs{}
@@ -942,81 +926,60 @@ func TestShowLastQueryStatistics(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	testCases := []struct {
-		stmt                             string
-		usesExecEngine                   bool
-		expectNonTrivialSchemaChangeTime bool
+		stmt           string
+		usesExecEngine bool
 	}{
 		{
-			stmt:                             "CREATE TABLE t(a INT, b INT)",
-			usesExecEngine:                   true,
-			expectNonTrivialSchemaChangeTime: false,
+			stmt:           "CREATE TABLE t(a INT, b INT)",
+			usesExecEngine: true,
 		},
 		{
-			stmt:                             "SHOW SYNTAX 'SELECT * FROM t'",
-			usesExecEngine:                   false,
-			expectNonTrivialSchemaChangeTime: false,
+			stmt:           "SHOW SYNTAX 'SELECT * FROM t'",
+			usesExecEngine: false,
 		},
 		{
-			stmt:                             "PREPARE stmt(INT) AS INSERT INTO t VALUES(1, $1)",
-			usesExecEngine:                   false,
-			expectNonTrivialSchemaChangeTime: false,
-		},
-		{
-			stmt: `CREATE TABLE t1(a INT); 
-INSERT INTO t1 SELECT i FROM generate_series(1, 10000) AS g(i);
-ALTER TABLE t1 ADD COLUMN b INT DEFAULT 1`,
-			usesExecEngine:                   true,
-			expectNonTrivialSchemaChangeTime: true,
+			stmt:           "PREPARE stmt(INT) AS INSERT INTO t VALUES(1, $1)",
+			usesExecEngine: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		if _, err := sqlConn.Exec(tc.stmt); err != nil {
-			require.NoError(t, err, "executing %s  ", tc.stmt)
+			t.Fatalf("executing %s. failed: %v ", tc.stmt, err)
 		}
 
 		rows, err := sqlConn.Query("SHOW LAST QUERY STATISTICS")
-		require.NoError(t, err, "show last query statistics failed")
-		defer rows.Close()
-
-		resultColumns, err := rows.Columns()
-		require.NoError(t, err)
-
-		const expectedNumColumns = 5
-		if len(resultColumns) != expectedNumColumns {
-			t.Fatalf(
-				"unexpected number of columns in result; expected %d, found %d",
-				expectedNumColumns,
-				len(resultColumns),
-			)
+		if err != nil {
+			t.Fatalf("show last query statistics failed: %v", err)
 		}
+		defer rows.Close()
 
 		var parseLatency string
 		var planLatency string
 		var execLatency string
 		var serviceLatency string
-		var postCommitJobsLatency string
 
 		rows.Next()
-		err = rows.Scan(
-			&parseLatency, &planLatency, &execLatency, &serviceLatency, &postCommitJobsLatency,
-		)
-		require.NoError(t, err, "unexpected error while reading last query statistics")
+		if err := rows.Scan(&parseLatency, &planLatency, &execLatency, &serviceLatency); err != nil {
+			t.Fatalf("unexpected error while reading last query statistics: %v", err)
+		}
 
-		parseInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, parseLatency)
-		require.NoError(t, err)
-
-		planInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, planLatency)
-		require.NoError(t, err)
-
-		execInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, execLatency)
-		require.NoError(t, err)
-
-		serviceInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, serviceLatency)
-		require.NoError(t, err)
-
-		postCommitJobsInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, postCommitJobsLatency)
-		require.NoError(t, err)
+		parseInterval, err := tree.ParseDInterval(parseLatency)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planInterval, err := tree.ParseDInterval(planLatency)
+		if err != nil {
+			t.Fatal(err)
+		}
+		execInterval, err := tree.ParseDInterval(execLatency)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serviceInterval, err := tree.ParseDInterval(serviceLatency)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if parseInterval.AsFloat64() <= 0 || parseInterval.AsFloat64() > 1 {
 			t.Fatalf("unexpected parse latency: %v", parseInterval.AsFloat64())
@@ -1026,27 +989,12 @@ ALTER TABLE t1 ADD COLUMN b INT DEFAULT 1`,
 			t.Fatalf("unexpected plan latency: %v", planInterval.AsFloat64())
 		}
 
-		// Service latencies with tests that do schema changes are hard to constrain
-		// a window for, so don't bother.
-		if !tc.expectNonTrivialSchemaChangeTime &&
-			(serviceInterval.AsFloat64() <= 0 || serviceInterval.AsFloat64() > 1) {
+		if serviceInterval.AsFloat64() <= 0 || serviceInterval.AsFloat64() > 1 {
 			t.Fatalf("unexpected service latency: %v", serviceInterval.AsFloat64())
 		}
 
 		if tc.usesExecEngine && (execInterval.AsFloat64() <= 0 || execInterval.AsFloat64() > 1) {
 			t.Fatalf("unexpected execution latency: %v", execInterval.AsFloat64())
-		}
-
-		if !tc.expectNonTrivialSchemaChangeTime &&
-			(postCommitJobsInterval.AsFloat64() < 0 || postCommitJobsInterval.AsFloat64() > 1) {
-			t.Fatalf("unexpected post commit jobs latency: %v", postCommitJobsInterval.AsFloat64())
-		}
-
-		if tc.expectNonTrivialSchemaChangeTime && postCommitJobsInterval.AsFloat64() < 0.1 {
-			t.Fatalf(
-				"expected schema changes to take longer than 0.1 seconds, took: %v",
-				postCommitJobsInterval.AsFloat64(),
-			)
 		}
 
 		if rows.Next() {

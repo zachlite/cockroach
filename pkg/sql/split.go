@@ -15,7 +15,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -27,8 +28,8 @@ import (
 type splitNode struct {
 	optColumnsSlot
 
-	tableDesc      catalog.TableDescriptor
-	index          catalog.Index
+	tableDesc      *tabledesc.Immutable
+	index          *descpb.IndexDescriptor
 	rows           planNode
 	run            splitRun
 	expirationTime hlc.Timestamp
@@ -70,12 +71,12 @@ func (n *splitNode) Next(params runParams) (bool, error) {
 
 func (n *splitNode) Values() tree.Datums {
 	splitEnforcedUntil := tree.DNull
-	if !n.run.lastExpirationTime.IsEmpty() {
+	if (n.run.lastExpirationTime != hlc.Timestamp{}) {
 		splitEnforcedUntil = tree.TimestampToInexactDTimestamp(n.run.lastExpirationTime)
 	}
 	return tree.Datums{
 		tree.NewDBytes(tree.DBytes(n.run.lastSplitKey)),
-		tree.NewDString(catalogkeys.PrettyKey(nil /* valDirs */, n.run.lastSplitKey, 2)),
+		tree.NewDString(keys.PrettyPrint(nil /* valDirs */, n.run.lastSplitKey)),
 		splitEnforcedUntil,
 	}
 }
@@ -87,16 +88,19 @@ func (n *splitNode) Close(ctx context.Context) {
 // getRowKey generates a key that corresponds to a row (or prefix of a row) in a table or index.
 // Both tableDesc and index are required (index can be the primary index).
 func getRowKey(
-	codec keys.SQLCodec, tableDesc catalog.TableDescriptor, index catalog.Index, values []tree.Datum,
+	codec keys.SQLCodec,
+	tableDesc catalog.TableDescriptor,
+	index *descpb.IndexDescriptor,
+	values []tree.Datum,
 ) ([]byte, error) {
-	if index.NumKeyColumns() < len(values) {
-		return nil, pgerror.Newf(pgcode.Syntax, "excessive number of values provided: expected %d, got %d", index.NumKeyColumns(), len(values))
+	if len(index.ColumnIDs) < len(values) {
+		return nil, pgerror.Newf(pgcode.Syntax, "excessive number of values provided: expected %d, got %d", len(index.ColumnIDs), len(values))
 	}
-	var colMap catalog.TableColMap
+	colMap := make(map[descpb.ColumnID]int)
 	for i := range values {
-		colMap.Set(index.GetKeyColumnID(i), i)
+		colMap[index.ColumnIDs[i]] = i
 	}
-	prefix := rowenc.MakeIndexKeyPrefix(codec, tableDesc, index.GetID())
+	prefix := rowenc.MakeIndexKeyPrefix(codec, tableDesc, index.ID)
 	key, _, err := rowenc.EncodePartialIndexKey(
 		tableDesc, index, len(values), colMap, values, prefix,
 	)

@@ -57,27 +57,6 @@ var NamedZonesByID = func() map[uint32]string {
 	return out
 }()
 
-// MultiRegionZoneConfigFields are the fields on a zone configuration which
-// may be set by the system for multi-region objects".
-var MultiRegionZoneConfigFields = []tree.Name{
-	"global_reads",
-	"num_replicas",
-	"num_voters",
-	"constraints",
-	"voter_constraints",
-	"lease_preferences",
-}
-
-// MultiRegionZoneConfigFieldsSet contain the items in
-// MultiRegionZoneConfigFields but in a set form for fast lookup.
-var MultiRegionZoneConfigFieldsSet = func() map[tree.Name]struct{} {
-	ret := make(map[tree.Name]struct{}, len(MultiRegionZoneConfigFields))
-	for _, f := range MultiRegionZoneConfigFields {
-		ret[f] = struct{}{}
-	}
-	return ret
-}()
-
 // ZoneSpecifierFromID creates a tree.ZoneSpecifier for the zone with the
 // given ID.
 func ZoneSpecifierFromID(
@@ -209,7 +188,6 @@ func NewZoneConfig() *ZoneConfig {
 func EmptyCompleteZoneConfig() *ZoneConfig {
 	return &ZoneConfig{
 		NumReplicas:               proto.Int32(0),
-		NumVoters:                 proto.Int32(0),
 		RangeMinBytes:             proto.Int64(0),
 		RangeMaxBytes:             proto.Int64(0),
 		GC:                        &GCPolicy{TTLSeconds: 0},
@@ -236,8 +214,6 @@ func DefaultZoneConfig() ZoneConfig {
 			// understand how to change these settings if needed.
 			TTLSeconds: 25 * 60 * 60,
 		},
-		// The default zone is supposed to have empty VoterConstraints.
-		NullVoterConstraintsIsEmpty: true,
 	}
 }
 
@@ -268,14 +244,7 @@ func DefaultSystemZoneConfigRef() *ZoneConfig {
 func (z *ZoneConfig) IsComplete() bool {
 	return ((z.NumReplicas != nil) && (z.RangeMinBytes != nil) &&
 		(z.RangeMaxBytes != nil) && (z.GC != nil) &&
-		(!z.InheritedVoterConstraints()) && (!z.InheritedConstraints) &&
-		(!z.InheritedLeasePreferences))
-}
-
-// InheritedVoterConstraints determines whether the `VoterConstraints` field is
-// explicitly set on this zone or if it is to be inherited from its parent.
-func (z *ZoneConfig) InheritedVoterConstraints() bool {
-	return len(z.VoterConstraints) == 0 && !z.NullVoterConstraintsIsEmpty
+		(!z.InheritedConstraints) && (!z.InheritedLeasePreferences))
 }
 
 // ValidateTandemFields returns an error if the ZoneConfig to be written
@@ -283,7 +252,6 @@ func (z *ZoneConfig) InheritedVoterConstraints() bool {
 // of cascading zone configs.
 func (z *ZoneConfig) ValidateTandemFields() error {
 	var numConstrainedRepls int32
-	numVotersExplicit := z.NumVoters != nil && *z.NumVoters > 0
 	for _, constraint := range z.Constraints {
 		numConstrainedRepls += constraint.NumReplicas
 	}
@@ -291,26 +259,11 @@ func (z *ZoneConfig) ValidateTandemFields() error {
 	if numConstrainedRepls > 0 && z.NumReplicas == nil {
 		return fmt.Errorf("when per-replica constraints are set, num_replicas must be set as well")
 	}
-
-	var numConstrainedVoters int32
-	for _, constraint := range z.VoterConstraints {
-		numConstrainedVoters += constraint.NumReplicas
-	}
-
-	if (numConstrainedVoters > 0 && z.NumVoters == nil) ||
-		(!numVotersExplicit && len(z.VoterConstraints) > 0) {
-		return fmt.Errorf("when voter_constraints are set, num_voters must be set as well")
-	}
-
 	if (z.RangeMinBytes != nil || z.RangeMaxBytes != nil) &&
 		(z.RangeMinBytes == nil || z.RangeMaxBytes == nil) {
 		return fmt.Errorf("range_min_bytes and range_max_bytes must be set together")
 	}
-	if numVotersExplicit {
-		if !z.InheritedLeasePreferences && z.InheritedVoterConstraints() {
-			return fmt.Errorf("lease preferences can not be set unless the voter_constraints are explicitly set as well")
-		}
-	} else if !z.InheritedLeasePreferences && z.InheritedConstraints {
+	if !z.InheritedLeasePreferences && z.InheritedConstraints {
 		return fmt.Errorf("lease preferences can not be set unless the constraints are explicitly set as well")
 	}
 	return nil
@@ -337,23 +290,7 @@ func (z *ZoneConfig) Validate() error {
 			}
 			return fmt.Errorf("at least one replica is required")
 		case *z.NumReplicas == 2:
-			if !(z.NumVoters != nil && *z.NumVoters > 0) {
-				return fmt.Errorf("at least 3 replicas are required for multi-replica configurations")
-			}
-		}
-	}
-
-	var numVotersExplicit bool
-	if z.NumVoters != nil {
-		numVotersExplicit = true
-		switch {
-		case *z.NumVoters <= 0:
-			return fmt.Errorf("at least one voting replica is required")
-		case *z.NumVoters == 2:
-			return fmt.Errorf("at least 3 voting replicas are required for multi-replica configurations")
-		}
-		if z.NumReplicas != nil && *z.NumVoters > *z.NumReplicas {
-			return fmt.Errorf("num_voters cannot be greater than num_replicas")
+			return fmt.Errorf("at least 3 replicas are required for multi-replica configurations")
 		}
 	}
 
@@ -385,19 +322,6 @@ func (z *ZoneConfig) Validate() error {
 		}
 	}
 
-	for _, constraints := range z.VoterConstraints {
-		for _, constraint := range constraints.Constraints {
-			if constraint.Type == Constraint_DEPRECATED_POSITIVE {
-				return fmt.Errorf("voter_constraints must be of type 'required' (prefixed with a '+')")
-			}
-			// TODO(aayush): Allowing these makes validating `voter_constraints`
-			// against `constraints` harder. Revisit this decision if need be.
-			if constraint.Type == Constraint_PROHIBITED {
-				return fmt.Errorf("voter_constraints cannot contain prohibitive constraints")
-			}
-		}
-	}
-
 	// We only need to further validate constraints if per-replica constraints
 	// are in use. The old style of constraints that apply to all replicas don't
 	// require validation.
@@ -424,48 +348,6 @@ func (z *ZoneConfig) Validate() error {
 		}
 	}
 
-	// If we have per replica constraints inside voter_constraints, make sure
-	// that the number of replicas adds up to less than the number of voters.
-	//
-	// NB: We intentionally allow the number of replicas constrained by
-	// `constraints` plus the number of voters constrained by `voter_constraints`
-	// to exceed num_voters.
-	// For instance, the following would be a valid zone configuration:
-	// num_replicas = 3
-	// num_voters = 3
-	// constraints = {"+region=A": 1, "+region=B": 1, "+region=C": 1}
-	// voter_constraints = {"+ssd": 3}
-	// In the current state of our zone config validation logic, allowing examples
-	// like the one shown above also allows the user to walk themselves into
-	// unsatisfiable zone configurations like the following:
-	// num_replicas = 3
-	// num_voters = 3
-	// constraints = {"+region=A": 2, "+region=B": 1}
-	// voter_constraints = {"+region=C": 2, "+region=D": 1}
-	if numVotersExplicit {
-		if len(z.VoterConstraints) > 1 || (len(z.VoterConstraints) == 1 && z.VoterConstraints[0].NumReplicas != 0) {
-			var numConstrainedRepls int64
-			for _, constraints := range z.VoterConstraints {
-				if constraints.NumReplicas <= 0 {
-					return fmt.Errorf("constraints must apply to at least one replica")
-				}
-				numConstrainedRepls += int64(constraints.NumReplicas)
-			}
-			// NB: These nil checks are not required in production code but they are
-			// for testing as some tests run `Validate()` on incomplete zone configs.
-			if z.NumVoters != nil && numConstrainedRepls > int64(*z.NumVoters) {
-				return fmt.Errorf("the number of replicas specified in voter_constraints (%d) cannot be greater "+
-					"than the number of voters configured for the zone (%d)",
-					numConstrainedRepls, *z.NumVoters)
-			}
-		}
-	}
-
-	//  Validate that `constraints` aren't incompatible with `voter_constraints`.
-	if err := validateVoterConstraintsCompatibility(z.VoterConstraints, z.Constraints); err != nil {
-		return err
-	}
-
 	for _, leasePref := range z.LeasePreferences {
 		if len(leasePref.Constraints) == 0 {
 			return fmt.Errorf("every lease preference must include at least one constraint")
@@ -481,46 +363,12 @@ func (z *ZoneConfig) Validate() error {
 	return nil
 }
 
-// validateVoterConstraintsCompatibility cross-validates `voter_constraints`
-// against `constraints` and ensures that nothing that is prohibited at the
-// overall `constraints` level is required at the `voter_constraints` level,
-// since this sort of incongruity will lead to an unsatisfiable zone
-// configuration.
-func validateVoterConstraintsCompatibility(
-	voterConstraints, overallConstraints []ConstraintsConjunction,
-) error {
-	// We know that prohibitive constraints are not allowed under
-	// `voter_constraints`. Walk through overallConstraints to ensure that none of
-	// the prohibitive constraints conflict with the `required` constraints in
-	// voterConstraints.
-	for _, constraints := range overallConstraints {
-		for _, constraint := range constraints.Constraints {
-			if constraint.Type == Constraint_PROHIBITED {
-				for _, otherConstraints := range voterConstraints {
-					for _, otherConstraint := range otherConstraints.Constraints {
-						conflicting := otherConstraint.Value == constraint.Value && otherConstraint.Key == constraint.Key
-						if conflicting {
-							return fmt.Errorf("prohibitive constraint %s conflicts with voter_constraint %s", constraint, otherConstraint)
-						}
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // InheritFromParent hydrates a zones missing fields from its parent.
 func (z *ZoneConfig) InheritFromParent(parent *ZoneConfig) {
 	// Allow for subzonePlaceholders to inherit fields from parents if needed.
 	if z.NumReplicas == nil || (z.NumReplicas != nil && *z.NumReplicas == 0) {
 		if parent.NumReplicas != nil {
 			z.NumReplicas = proto.Int32(*parent.NumReplicas)
-		}
-	}
-	if z.NumVoters == nil || (z.NumVoters != nil && *z.NumVoters == 0) {
-		if parent.NumVoters != nil {
-			z.NumVoters = proto.Int32(*parent.NumVoters)
 		}
 	}
 	if z.RangeMinBytes == nil {
@@ -545,12 +393,6 @@ func (z *ZoneConfig) InheritFromParent(parent *ZoneConfig) {
 			z.InheritedConstraints = false
 		}
 	}
-	if z.InheritedVoterConstraints() {
-		if !parent.InheritedVoterConstraints() {
-			z.VoterConstraints = parent.VoterConstraints
-			z.NullVoterConstraintsIsEmpty = parent.NullVoterConstraintsIsEmpty
-		}
-	}
 	if z.InheritedLeasePreferences {
 		if !parent.InheritedLeasePreferences {
 			z.LeasePreferences = parent.LeasePreferences
@@ -562,308 +404,40 @@ func (z *ZoneConfig) InheritFromParent(parent *ZoneConfig) {
 // CopyFromZone copies over the specified fields from the other zone.
 func (z *ZoneConfig) CopyFromZone(other ZoneConfig, fieldList []tree.Name) {
 	for _, fieldName := range fieldList {
-		switch fieldName {
-		case "num_replicas":
+		if fieldName == "num_replicas" {
 			z.NumReplicas = nil
 			if other.NumReplicas != nil {
 				z.NumReplicas = proto.Int32(*other.NumReplicas)
 			}
-		case "num_voters":
-			z.NumVoters = nil
-			if other.NumVoters != nil {
-				z.NumVoters = proto.Int32(*other.NumVoters)
-			}
-		case "range_min_bytes":
+		}
+		if fieldName == "range_min_bytes" {
 			z.RangeMinBytes = nil
 			if other.RangeMinBytes != nil {
 				z.RangeMinBytes = proto.Int64(*other.RangeMinBytes)
 			}
-		case "range_max_bytes":
+		}
+		if fieldName == "range_max_bytes" {
 			z.RangeMaxBytes = nil
 			if other.RangeMaxBytes != nil {
 				z.RangeMaxBytes = proto.Int64(*other.RangeMaxBytes)
 			}
-		case "global_reads":
-			z.GlobalReads = nil
-			if other.GlobalReads != nil {
-				z.GlobalReads = proto.Bool(*other.GlobalReads)
-			}
-		case "gc.ttlseconds":
+		}
+		if fieldName == "gc.ttlseconds" {
 			z.GC = nil
 			if other.GC != nil {
 				tempGC := *other.GC
 				z.GC = &tempGC
 			}
-		case "constraints":
+		}
+		if fieldName == "constraints" {
 			z.Constraints = other.Constraints
 			z.InheritedConstraints = other.InheritedConstraints
-		case "voter_constraints":
-			z.VoterConstraints = other.VoterConstraints
-			z.NullVoterConstraintsIsEmpty = other.NullVoterConstraintsIsEmpty
-		case "lease_preferences":
+		}
+		if fieldName == "lease_preferences" {
 			z.LeasePreferences = other.LeasePreferences
 			z.InheritedLeasePreferences = other.InheritedLeasePreferences
 		}
 	}
-}
-
-// DiffWithZoneMismatch indicates a mismatch between zone configurations.
-type DiffWithZoneMismatch struct {
-	// NOTE: the below fields are only set if there is a subzone in the
-	// zone configuration which is mismatching.
-
-	// IndexID represents a subzone with a mismatching index ID.
-	IndexID uint32
-	// PartitionName represents a subzone with a mismatching partitionName.
-	PartitionName string
-
-	// IsMissingSubzone indicates a subzone is missing.
-	IsMissingSubzone bool
-	// IsExtraSubzone indicates we have an extraneous subzone.
-	IsExtraSubzone bool
-	// Field indicates the field which is wrong.
-	Field string
-}
-
-// DiffWithZone diffs all specified fields of the supplied ZoneConfig, with the
-// receiver ZoneConfig. Returns true if all are equal, and false if there is a
-// difference (along with a DiffWithZoneMismatch which represents the first
-// difference found).
-func (z *ZoneConfig) DiffWithZone(
-	other ZoneConfig, fieldList []tree.Name,
-) (bool, DiffWithZoneMismatch, error) {
-	mismatchingNumReplicas := false
-	for _, fieldName := range fieldList {
-		switch fieldName {
-		case "num_replicas":
-			if other.NumReplicas == nil && z.NumReplicas == nil {
-				continue
-			}
-			if z.NumReplicas == nil || other.NumReplicas == nil ||
-				*z.NumReplicas != *other.NumReplicas {
-				// In cases where one of the zone configs are placeholders,
-				// defer the error reporting to below so that we can correctly
-				// report on a subzone difference, should one exist.
-				if z.IsSubzonePlaceholder() || other.IsSubzonePlaceholder() {
-					mismatchingNumReplicas = true
-					continue
-				}
-				return false, DiffWithZoneMismatch{
-					Field: "num_replicas",
-				}, nil
-			}
-		case "num_voters":
-			if other.NumVoters == nil && z.NumVoters == nil {
-				continue
-			}
-			if z.NumVoters == nil || other.NumVoters == nil ||
-				*z.NumVoters != *other.NumVoters {
-				return false, DiffWithZoneMismatch{
-					Field: "num_voters",
-				}, nil
-			}
-		case "range_min_bytes":
-			if other.RangeMinBytes == nil && z.RangeMinBytes == nil {
-				continue
-			}
-			if z.RangeMinBytes == nil || other.RangeMinBytes == nil ||
-				*z.RangeMinBytes != *other.RangeMinBytes {
-				return false, DiffWithZoneMismatch{
-					Field: "range_min_bytes",
-				}, nil
-			}
-		case "range_max_bytes":
-			if other.RangeMaxBytes == nil && z.RangeMaxBytes == nil {
-				continue
-			}
-			if z.RangeMaxBytes == nil || other.RangeMaxBytes == nil ||
-				*z.RangeMaxBytes != *other.RangeMaxBytes {
-				return false, DiffWithZoneMismatch{
-					Field: "range_max_bytes",
-				}, nil
-			}
-		case "global_reads":
-			if other.GlobalReads == nil && z.GlobalReads == nil {
-				continue
-			}
-			if z.GlobalReads == nil || other.GlobalReads == nil ||
-				*z.GlobalReads != *other.GlobalReads {
-				return false, DiffWithZoneMismatch{
-					Field: "global_reads",
-				}, nil
-			}
-		case "gc.ttlseconds":
-			if other.GC == nil && z.GC == nil {
-				continue
-			}
-			if z.GC == nil || other.GC == nil || *z.GC != *other.GC {
-				return false, DiffWithZoneMismatch{
-					Field: "gc.ttlseconds",
-				}, nil
-			}
-		case "constraints":
-			if other.Constraints == nil && z.Constraints == nil {
-				continue
-			}
-			if z.Constraints == nil || other.Constraints == nil {
-				return false, DiffWithZoneMismatch{
-					Field: "constraints",
-				}, nil
-			}
-			for i, c := range z.Constraints {
-				for j, constraint := range c.Constraints {
-					if len(other.Constraints) <= i ||
-						len(other.Constraints[i].Constraints) <= j ||
-						constraint != other.Constraints[i].Constraints[j] {
-						return false, DiffWithZoneMismatch{
-							Field: "constraints",
-						}, nil
-					}
-				}
-			}
-		case "voter_constraints":
-			if other.VoterConstraints == nil && z.VoterConstraints == nil {
-				continue
-			}
-			if z.VoterConstraints == nil || other.VoterConstraints == nil {
-				return false, DiffWithZoneMismatch{
-					Field: "voter_constraints",
-				}, nil
-			}
-			for i, c := range z.VoterConstraints {
-				for j, constraint := range c.Constraints {
-					if len(other.VoterConstraints) <= i ||
-						len(other.VoterConstraints[i].Constraints) <= j ||
-						constraint != other.VoterConstraints[i].Constraints[j] {
-						return false, DiffWithZoneMismatch{
-							Field: "voter_constraints",
-						}, nil
-					}
-				}
-			}
-		case "lease_preferences":
-			if other.LeasePreferences == nil && z.LeasePreferences == nil {
-				continue
-			}
-			if z.LeasePreferences == nil || other.LeasePreferences == nil {
-				return false, DiffWithZoneMismatch{
-					Field: "voter_constraints",
-				}, nil
-			}
-			for i, c := range z.LeasePreferences {
-				for j, constraint := range c.Constraints {
-					if len(other.LeasePreferences) <= i ||
-						len(other.LeasePreferences[i].Constraints) <= j ||
-						constraint != other.LeasePreferences[i].Constraints[j] {
-						return false, DiffWithZoneMismatch{
-							Field: "lease_preferences",
-						}, nil
-					}
-				}
-			}
-		default:
-			return false, DiffWithZoneMismatch{}, errors.AssertionFailedf("unknown zone configuration field %q", fieldName)
-		}
-	}
-
-	// Look into all subzones and ensure they're equal across both zone
-	// configs.
-	// These need to be read in as a map as subzones can be added out-of-order.
-	type subzoneKey struct {
-		indexID       uint32
-		partitionName string
-	}
-	otherSubzonesBySubzoneKey := make(map[subzoneKey]Subzone, len(other.Subzones))
-	for _, o := range other.Subzones {
-		k := subzoneKey{indexID: o.IndexID, partitionName: o.PartitionName}
-		otherSubzonesBySubzoneKey[k] = o
-	}
-	for _, s := range z.Subzones {
-		k := subzoneKey{indexID: s.IndexID, partitionName: s.PartitionName}
-		o, found := otherSubzonesBySubzoneKey[k]
-		if !found {
-			// There can be an extra zone config defined so long as
-			// it doesn't have any fields in the fieldList set.
-			if b, subzoneMismatch, err := s.Config.DiffWithZone(
-				*NewZoneConfig(),
-				fieldList,
-			); err != nil {
-				return b, subzoneMismatch, err
-			} else if !b {
-				return false, DiffWithZoneMismatch{
-					IndexID:        s.IndexID,
-					PartitionName:  s.PartitionName,
-					IsExtraSubzone: true,
-					Field:          subzoneMismatch.Field,
-				}, nil
-			}
-			continue
-		}
-		if b, subzoneMismatch, err := s.Config.DiffWithZone(
-			o.Config,
-			fieldList,
-		); err != nil {
-			return b, subzoneMismatch, err
-		} else if !b {
-			// We should never have subzones nested within subzones.
-			if subzoneMismatch.IndexID > 0 {
-				return false, DiffWithZoneMismatch{}, errors.AssertionFailedf(
-					"unexpected subzone index id %d",
-					subzoneMismatch.IndexID,
-				)
-			}
-			return b, DiffWithZoneMismatch{
-				IndexID:       o.IndexID,
-				PartitionName: o.PartitionName,
-				Field:         subzoneMismatch.Field,
-			}, nil
-		}
-		delete(otherSubzonesBySubzoneKey, k)
-	}
-
-	// Anything remaining in the map can be presumed to be missing.
-	// This is permitted provided that everything in the field list
-	// still matches on an empty zone configuration.
-	for _, o := range otherSubzonesBySubzoneKey {
-		if b, subzoneMismatch, err := NewZoneConfig().DiffWithZone(
-			o.Config,
-			fieldList,
-		); err != nil {
-			return b, subzoneMismatch, err
-		} else if !b {
-			return false, DiffWithZoneMismatch{
-				IndexID:          o.IndexID,
-				PartitionName:    o.PartitionName,
-				IsMissingSubzone: true,
-				Field:            subzoneMismatch.Field,
-			}, nil
-		}
-	}
-	// If we've got a mismatch in the num_replicas field and we haven't found
-	// any other mismatch, report on num_replicas.
-	if mismatchingNumReplicas {
-		return false, DiffWithZoneMismatch{
-			Field: "num_replicas",
-		}, nil
-	}
-	return true, DiffWithZoneMismatch{}, nil
-}
-
-// ClearFieldsOfAllSubzones uses the supplied fieldList and clears those fields
-// from all of the zone config's subzones.
-func (z *ZoneConfig) ClearFieldsOfAllSubzones(fieldList []tree.Name) {
-	newSubzones := z.Subzones[:0]
-	emptyZone := NewZoneConfig()
-	for _, sz := range z.Subzones {
-		// By copying from an empty zone, we'll end up clearing out all of the
-		// fields in the fieldList.
-		sz.Config.CopyFromZone(*emptyZone, fieldList)
-		// If we haven't emptied out the subzone, append it to the new slice.
-		if !sz.Config.Equal(emptyZone) {
-			newSubzones = append(newSubzones, sz)
-		}
-	}
-	z.Subzones = newSubzones
 }
 
 // StoreSatisfiesConstraint checks whether a store satisfies the given constraint.
@@ -924,8 +498,6 @@ func (z *ZoneConfig) IsSubzonePlaceholder() bool {
 	// A ZoneConfig with zero replicas is otherwise invalid, so we repurpose it to
 	// indicate that a ZoneConfig is a placeholder for subzones rather than
 	// introducing a dedicated IsPlaceholder flag.
-	// TODO(aayush): Decide whether its worth introducing a isPlaceholder flag to
-	// clean this up after num_voters is introduced.
 	return z.NumReplicas != nil && *z.NumReplicas == 0
 }
 
@@ -973,37 +545,6 @@ func (z ZoneConfig) GetSubzoneForKeySuffix(keySuffix []byte) (*Subzone, int32) {
 		}
 	}
 	return nil, -1
-}
-
-// GetNumVoters returns the number of voting replicas for the given zone config.
-//
-// This method will panic if called on a ZoneConfig with an uninitialized
-// NumReplicas attribute.
-func (z *ZoneConfig) GetNumVoters() int32 {
-	if z.NumReplicas == nil {
-		panic("NumReplicas must not be nil")
-	}
-	if z.NumVoters != nil && *z.NumVoters != 0 {
-		return *z.NumVoters
-	}
-	return *z.NumReplicas
-}
-
-// GetNumNonVoters returns the number of non-voting replicas as defined in the
-// zone config.
-//
-// This method will panic if called on a ZoneConfig with an uninitialized
-// NumReplicas attribute.
-func (z *ZoneConfig) GetNumNonVoters() int32 {
-	if z.NumReplicas == nil {
-		panic("NumReplicas must not be nil")
-	}
-	if z.NumVoters != nil && *z.NumVoters != 0 {
-		return *z.NumReplicas - *z.NumVoters
-	}
-	// `num_voters` hasn't been explicitly configured. Every replica should be a
-	// voting replica.
-	return 0
 }
 
 // SetSubzone installs subzone into the ZoneConfig, overwriting any existing
@@ -1072,16 +613,6 @@ func (z *ZoneConfig) ReplicaConstraintsCount() int {
 // ReplicaConstraints is part of the cat.Zone interface.
 func (z *ZoneConfig) ReplicaConstraints(i int) cat.ReplicaConstraints {
 	return &z.Constraints[i]
-}
-
-// VoterConstraintsCount is part of the cat.Zone interface.
-func (z *ZoneConfig) VoterConstraintsCount() int {
-	return len(z.VoterConstraints)
-}
-
-// VoterConstraint is part of the cat.Zone interface.
-func (z *ZoneConfig) VoterConstraint(i int) cat.ReplicaConstraints {
-	return &z.VoterConstraints[i]
 }
 
 // LeasePreferenceCount is part of the cat.Zone interface.

@@ -16,20 +16,18 @@ package geos
 
 import (
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/errors"
 )
 
 // #cgo CXXFLAGS: -std=c++14
-// #cgo !windows LDFLAGS: -ldl -lm
+// #cgo !windows LDFLAGS: -ldl
 //
 // #include "geos.h"
 import "C"
@@ -60,9 +58,6 @@ var geosOnce struct {
 	err  error
 	once sync.Once
 }
-
-// PreparedGeometry is an instance of a GEOS PreparedGeometry.
-type PreparedGeometry *C.CR_GEOS_PreparedGeometry
 
 // EnsureInit attempts to start GEOS if it has not been opened already
 // and returns the location if found, and an error if the CR_GEOS is not valid.
@@ -137,12 +132,6 @@ func findLibraryDirectories(flagLibraryDirectoryValue string, crdbBinaryLoc stri
 		),
 		findLibraryDirectoriesInParentingDirectories(cwd)...,
 	)
-	// Account for the libraries to be in a bazel runfile path.
-	if bazel.BuiltWithBazel() {
-		if p, err := bazel.Runfile(path.Join("c-deps", "libgeos", "lib")); err == nil {
-			locs = append(locs, p)
-		}
-	}
 	return locs
 }
 
@@ -272,6 +261,19 @@ func statusToError(s C.CR_GEOS_Status) error {
 		return nil
 	}
 	return &Error{msg: string(cStringToSafeGoBytes(s))}
+}
+
+// WKTToEWKB parses a WKT into WKB using the GEOS library.
+func WKTToEWKB(wkt geopb.WKT, srid geopb.SRID) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(C.CR_GEOS_WKTToEWKB(g, goToCSlice([]byte(wkt)), C.int(srid), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
 }
 
 // BufferParamsJoinStyle maps to the GEOSBufJoinStyles enum in geos_c.h.in.
@@ -431,23 +433,6 @@ func Centroid(ewkb geopb.EWKB) (geopb.EWKB, error) {
 	return cStringToSafeGoBytes(cEWKB), nil
 }
 
-// MinimumBoundingCircle returns minimum bounding circle of an EWKB
-func MinimumBoundingCircle(ewkb geopb.EWKB) (geopb.EWKB, geopb.EWKB, float64, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	var centerEWKB C.CR_GEOS_String
-	var polygonEWKB C.CR_GEOS_String
-	var radius C.double
-
-	if err := statusToError(C.CR_GEOS_MinimumBoundingCircle(g, goToCSlice(ewkb), &radius, &centerEWKB, &polygonEWKB)); err != nil {
-		return nil, nil, 0, err
-	}
-	return cStringToSafeGoBytes(polygonEWKB), cStringToSafeGoBytes(centerEWKB), float64(radius), nil
-
-}
-
 // ConvexHull returns an EWKB which returns the convex hull of the given EWKB.
 func ConvexHull(ewkb geopb.EWKB) (geopb.EWKB, error) {
 	g, err := ensureInitInternal()
@@ -516,19 +501,6 @@ func Intersection(a geopb.EWKB, b geopb.EWKB) (geopb.EWKB, error) {
 		return nil, err
 	}
 	return cStringToSafeGoBytes(cEWKB), nil
-}
-
-// UnaryUnion Returns an EWKB which is a union of input geometry components.
-func UnaryUnion(a geopb.EWKB) (geopb.EWKB, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var unionEWKB C.CR_GEOS_String
-	if err := statusToError(C.CR_GEOS_UnaryUnion(g, goToCSlice(a), &unionEWKB)); err != nil {
-		return nil, err
-	}
-	return cStringToSafeGoBytes(unionEWKB), nil
 }
 
 // Union returns an EWKB which is a union of shapes A and B.
@@ -633,39 +605,6 @@ func ClipByRect(
 	return cStringToSafeGoBytes(cEWKB), nil
 }
 
-//
-// PreparedGeometry
-//
-
-// PrepareGeometry prepares a geometry in GEOS.
-func PrepareGeometry(a geopb.EWKB) (PreparedGeometry, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var ret *C.CR_GEOS_PreparedGeometry
-	if err := statusToError(C.CR_GEOS_Prepare(g, goToCSlice(a), &ret)); err != nil {
-		return nil, err
-	}
-	return PreparedGeometry(ret), nil
-}
-
-// PreparedGeomDestroy destroys a prepared geometry.
-func PreparedGeomDestroy(a PreparedGeometry) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		panic(errors.AssertionFailedf("trying to destroy PreparedGeometry with no GEOS: %v", err))
-	}
-	ap := (*C.CR_GEOS_PreparedGeometry)(unsafe.Pointer(a))
-	if err := statusToError(C.CR_GEOS_PreparedGeometryDestroy(g, ap)); err != nil {
-		panic(errors.AssertionFailedf("PreparedGeometryDestroy returned an error: %v", err))
-	}
-}
-
-//
-// Binary predicates.
-//
-
 // Covers returns whether the EWKB provided by A covers the EWKB provided by B.
 func Covers(a geopb.EWKB, b geopb.EWKB) (bool, error) {
 	g, err := ensureInitInternal()
@@ -739,24 +678,6 @@ func Equals(a geopb.EWKB, b geopb.EWKB) (bool, error) {
 	}
 	var ret C.char
 	if err := statusToError(C.CR_GEOS_Equals(g, goToCSlice(a), goToCSlice(b), &ret)); err != nil {
-		return false, err
-	}
-	return ret == 1, nil
-}
-
-// PreparedIntersects returns whether the EWKB provided by A intersects the EWKB provided by B.
-func PreparedIntersects(a PreparedGeometry, b geopb.EWKB) (bool, error) {
-	// Double check - since PreparedGeometry is actually a pointer to C type.
-	if a == nil {
-		return false, errors.New("provided PreparedGeometry is nil")
-	}
-	g, err := ensureInitInternal()
-	if err != nil {
-		return false, err
-	}
-	var ret C.char
-	ap := (*C.CR_GEOS_PreparedGeometry)(unsafe.Pointer(a))
-	if err := statusToError(C.CR_GEOS_PreparedIntersects(g, ap, goToCSlice(b), &ret)); err != nil {
 		return false, err
 	}
 	return ret == 1, nil
@@ -872,21 +793,6 @@ func HausdorffDistanceDensify(a, b geopb.EWKB, densifyFrac float64) (float64, er
 		return 0, err
 	}
 	return float64(distance), nil
-}
-
-// EqualsExact returns whether two geometry objects are equal with some epsilon
-func EqualsExact(lhs, rhs geopb.EWKB, epsilon float64) (bool, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return false, err
-	}
-	var ret C.char
-	if err := statusToError(
-		C.CR_GEOS_EqualsExact(g, goToCSlice(lhs), goToCSlice(rhs), C.double(epsilon), &ret),
-	); err != nil {
-		return false, err
-	}
-	return ret == 1, nil
 }
 
 //
@@ -1028,71 +934,6 @@ func SharedPaths(a geopb.EWKB, b geopb.EWKB) (geopb.EWKB, error) {
 	var cEWKB C.CR_GEOS_String
 	if err := statusToError(
 		C.CR_GEOS_SharedPaths(g, goToCSlice(a), goToCSlice(b), &cEWKB),
-	); err != nil {
-		return nil, err
-	}
-	return cStringToSafeGoBytes(cEWKB), nil
-}
-
-// Node returns a EWKB containing a set of linestrings using the least possible number of nodes while preserving all of the input ones.
-func Node(a geopb.EWKB) (geopb.EWKB, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var cEWKB C.CR_GEOS_String
-	err = statusToError(C.CR_GEOS_Node(g, goToCSlice(a), &cEWKB))
-	if err != nil {
-		return nil, err
-	}
-	return cStringToSafeGoBytes(cEWKB), nil
-}
-
-// VoronoiDiagram Computes the Voronoi Diagram from the vertices of the supplied EWKBs.
-func VoronoiDiagram(a, env geopb.EWKB, tolerance float64, onlyEdges bool) (geopb.EWKB, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var cEWKB C.CR_GEOS_String
-	flag := 0
-	if onlyEdges {
-		flag = 1
-	}
-	if err := statusToError(
-		C.CR_GEOS_VoronoiDiagram(g, goToCSlice(a), goToCSlice(env), C.double(tolerance), C.int(flag), &cEWKB),
-	); err != nil {
-		return nil, err
-	}
-	return cStringToSafeGoBytes(cEWKB), nil
-}
-
-// MinimumRotatedRectangle Returns a minimum rotated rectangle enclosing a geometry
-func MinimumRotatedRectangle(ewkb geopb.EWKB) (geopb.EWKB, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var cEWKB C.CR_GEOS_String
-	if err := statusToError(
-		C.CR_GEOS_MinimumRotatedRectangle(g, goToCSlice(ewkb), &cEWKB),
-	); err != nil {
-		return nil, err
-	}
-	return cStringToSafeGoBytes(cEWKB), nil
-}
-
-// Snap returns the input EWKB with the vertices snapped to the target
-// EWKB. Tolerance is used to control where snapping is performed.
-// If no snapping occurs then the input geometry is returned unchanged.
-func Snap(input, target geopb.EWKB, tolerance float64) (geopb.EWKB, error) {
-	g, err := ensureInitInternal()
-	if err != nil {
-		return nil, err
-	}
-	var cEWKB C.CR_GEOS_String
-	if err := statusToError(
-		C.CR_GEOS_Snap(g, goToCSlice(input), goToCSlice(target), C.double(tolerance), &cEWKB),
 	); err != nil {
 		return nil, err
 	}

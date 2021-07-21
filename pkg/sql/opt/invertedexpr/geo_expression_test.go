@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
-	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/stretchr/testify/require"
 )
@@ -37,15 +36,14 @@ func TestUnionKeySpansToSpanExpr(t *testing.T) {
 				"factored_union_spans:<start:\"B\\222\" end:\"B\\223\" > " +
 				"factored_union_spans:<start:\"B\\211\" end:\"B\\214\" > > ",
 		},
+		{
+			uks:      nil,
+			expected: "<nil>",
+		},
 	}
 	for _, c := range cases {
-		spanExpr := GeoUnionKeySpansToSpanExpr(c.uks).(*inverted.SpanExpression)
-		require.Equal(t, c.expected, spanExpr.ToProto().String())
+		require.Equal(t, c.expected, GeoUnionKeySpansToSpanExpr(c.uks).ToProto().String())
 	}
-
-	// Test with nil union key spans.
-	expr := GeoUnionKeySpansToSpanExpr(nil)
-	require.Equal(t, inverted.NonInvertedColExpression{}, expr)
 }
 
 func TestRPKeyExprToSpanExpr(t *testing.T) {
@@ -57,6 +55,10 @@ func TestRPKeyExprToSpanExpr(t *testing.T) {
 		err      string
 	}
 	cases := []testCase{
+		{
+			rpx:      nil,
+			expected: "<nil>",
+		},
 		{
 			// Union of two keys.
 			rpx: []geoindex.RPExprElement{geoindex.Key(5), geoindex.Key(10), geoindex.RPSetUnion},
@@ -123,14 +125,9 @@ func TestRPKeyExprToSpanExpr(t *testing.T) {
 		rpx, err := GeoRPKeyExprToSpanExpr(c.rpx)
 		if len(c.err) == 0 {
 			require.NoError(t, err)
-			require.Equal(t, c.expected, rpx.(*inverted.SpanExpression).ToProto().String())
+			require.Equal(t, c.expected, rpx.ToProto().String())
 		} else {
 			require.Equal(t, c.err, err.Error())
 		}
 	}
-
-	// Test with nil RPKeyExpr.
-	expr, err := GeoRPKeyExprToSpanExpr(nil)
-	require.NoError(t, err)
-	require.Equal(t, inverted.NonInvertedColExpression{}, expr)
 }

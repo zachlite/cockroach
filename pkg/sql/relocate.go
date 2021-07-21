@@ -17,8 +17,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -28,11 +29,10 @@ import (
 type relocateNode struct {
 	optColumnsSlot
 
-	relocateLease     bool
-	relocateNonVoters bool
-	tableDesc         catalog.TableDescriptor
-	index             catalog.Index
-	rows              planNode
+	relocateLease bool
+	tableDesc     *tabledesc.Immutable
+	index         *descpb.IndexDescriptor
+	rows          planNode
 
 	run relocateRun
 }
@@ -79,8 +79,7 @@ func (n *relocateNode) Next(params runParams) (bool, error) {
 			)
 		}
 		relocation := data[0].(*tree.DArray)
-		if !n.relocateNonVoters && len(relocation.Array) == 0 {
-			// We cannot remove all voters.
+		if len(relocation.Array) == 0 {
 			return false, errors.Errorf("empty relocation array for EXPERIMENTAL_RELOCATE")
 		}
 
@@ -127,22 +126,12 @@ func (n *relocateNode) Next(params runParams) (bool, error) {
 	}
 	n.run.lastRangeStartKey = rangeDesc.StartKey.AsRawKey()
 
-	existingVoters := rangeDesc.Replicas().Voters().ReplicationTargets()
-	existingNonVoters := rangeDesc.Replicas().NonVoters().ReplicationTargets()
 	if n.relocateLease {
 		if err := params.p.ExecCfg().DB.AdminTransferLease(params.ctx, rowKey, leaseStoreID); err != nil {
 			return false, err
 		}
-	} else if n.relocateNonVoters {
-		if err := params.p.ExecCfg().DB.AdminRelocateRange(
-			params.ctx, rowKey, existingVoters, relocationTargets,
-		); err != nil {
-			return false, err
-		}
 	} else {
-		if err := params.p.ExecCfg().DB.AdminRelocateRange(
-			params.ctx, rowKey, relocationTargets, existingNonVoters,
-		); err != nil {
+		if err := params.p.ExecCfg().DB.AdminRelocateRange(params.ctx, rowKey, relocationTargets); err != nil {
 			return false, err
 		}
 	}

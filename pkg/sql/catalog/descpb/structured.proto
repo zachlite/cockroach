@@ -102,30 +102,11 @@ message ForeignKeyConstraint {
   reserved 10, 11, 12, 13;
 }
 
-// UniqueWithoutIndexConstraint is the representation of a unique constraint
-// that is not enforced by an index. It is stored on the TableDescriptor.
-message UniqueWithoutIndexConstraint {
-  option (gogoproto.equal) = true;
-  optional uint32 table_id = 1 [(gogoproto.nullable) = false,
-                                      (gogoproto.customname) = "TableID",
-                                      (gogoproto.casttype) = "ID"];
-  repeated uint32 column_ids = 2 [(gogoproto.customname) = "ColumnIDs",
-                                        (gogoproto.casttype) = "ColumnID"];
-  optional string name = 3 [(gogoproto.nullable) = false];
-  optional ConstraintValidity validity = 4 [(gogoproto.nullable) = false];
-
-  // Predicate, if it's not empty, indicates that the constraint is a partial
-  // unique constraint with Predicate as the expression. Columns are referred to
-  // in the expression by their name.
-  optional string predicate = 5 [(gogoproto.nullable) = false];
-}
-
 message ColumnDescriptor {
   option (gogoproto.equal) = true;
   optional string name = 1 [(gogoproto.nullable) = false];
   optional uint32 id = 2 [(gogoproto.nullable) = false,
-                          (gogoproto.customname) = "ID",
-                          (gogoproto.casttype) = "ColumnID"];
+      (gogoproto.customname) = "ID", (gogoproto.casttype) = "ColumnID"];
   optional sql.sem.types.T type = 3;
   optional bool nullable = 4 [(gogoproto.nullable) = false];
   reserved 8;
@@ -136,18 +117,7 @@ message ColumnDescriptor {
   // schemaexpr.FormatExpr* functions.
   optional string default_expr = 5;
   reserved 9;
-
-  // A hidden column does not appear in star expansion, but can be referenced in
-  // queries and can be viewed when inspecting a table via SHOW CREATE TABLE. A
-  // column cannot be both hidden and inaccessible.
   optional bool hidden = 6 [(gogoproto.nullable) = false];
-
-  // An inaccessible column does not appear in star expansion and cannot be
-  // referenced in queries. It cannot be viewed when inspecting a table via SHOW
-  // CREATE TABLE and is not shown as an attribute of its table in
-  // pg_catalog.pg_attribute. A column cannot be both hidden and inaccessible.
-  optional bool inaccessible = 17 [(gogoproto.nullable) = false];
-
   reserved 7;
   // Ids of sequences used in this column's DEFAULT expression, in calls to nextval().
   repeated uint32 uses_sequence_ids = 10 [(gogoproto.casttype) = "ID"];
@@ -159,11 +129,6 @@ message ColumnDescriptor {
   // have been serialized in a internal format. Instead, use one of the
   // schemaexpr.FormatExpr* functions.
   optional string compute_expr = 11;
-
-  // A computed column can be stored or virtual.
-  // Virtual can only be true if there is a compute expression.
-  optional bool virtual = 16 [(gogoproto.nullable) = false];
-
   // PGAttributeNum must be accessed through the accessor, since it is set
   // lazily, it is incorrect to access it directly.
   // PGAttributeNum represents a column's number in catalog tables.
@@ -267,7 +232,7 @@ message InterleaveDescriptor {
 // As as example, sample field values for the following table:
 //
 // CREATE TABLE abc (
-//   a INT PRIMARY KEY USING HASH WITH BUCKET_COUNT=10,  // column id: 1
+//   a INT PRIMARY KEY USING HASH WITH BUCKET_COUNT=10,  // column id: 1 
 //   b BYTES
 // );
 //
@@ -277,9 +242,9 @@ message InterleaveDescriptor {
 //   column_names:  ["a"]
 message ShardedDescriptor {
   option (gogoproto.equal) = true;
-
+  
   // IsSharded indicates whether the index in question is a sharded one.
-  optional bool is_sharded = 1 [(gogoproto.nullable) = false];
+  optional bool is_sharded = 1 [(gogoproto.nullable) = false]; 
   // Name is the name of the shard column.
   optional string name = 2 [(gogoproto.nullable) = false];
 
@@ -335,12 +300,6 @@ message PartitioningDescriptor {
   // subpartition, this is offset to start from the end of the parent
   // partition's columns. If NumColumns is 0, then there is no partitioning.
   optional uint32 num_columns = 1 [(gogoproto.nullable) = false];
-  // NumImplicitColumns specifies the number of columns that implicitly prefix a given index.
-  // This occurs if a user specifies a PARTITION BY which is not a prefix of the given index,
-  // in which case the ColumnIDs are added in front of the index and this field denotes
-  // the number of columns added as a prefix.
-  // If NumImplicitColumns is 0, there are no implicit columns defined for the index."
-  optional uint32 num_implicit_columns = 4 [(gogoproto.nullable)=false];
 
   // Exactly one of List or Range is required to be non-empty if NumColumns is
   // non-zero.
@@ -364,33 +323,33 @@ message PartitioningDescriptor {
 //   )
 //
 // Primary index:
-//   name:                   primary
-//   id:                     1
-//   unique:                 true
-//   key_column_names:       k1, k2
-//   key_column_directions:  ASC, ASC
-//   key_column_ids:         1, 2   // k1, k2
+//   name:                primary
+//   id:                  1
+//   unique:              true
+//   column_names:        k1, k2
+//   column_directions:   ASC, ASC
+//   column_ids:          1, 2   // k1, k2
 //
 // [old STORING encoding] Index k1v (k1, v) STORING (w):
-//   name:                   k1v
-//   id:                     2
-//   unique:                 false
-//   key_column_names:       k1, v
-//   key_column_directions:  ASC, ASC
-//   store_column_names:     w
-//   key_column_ids:         1, 4   // k1, v
-//   key_suffix_column_ids:  2, 5   // k2, w
+//   name:                k1v
+//   id:                  2
+//   unique:              false
+//   column_names:        k1, v
+//   column_directions:   ASC, ASC
+//   store_column_names:  w
+//   column_ids:          1, 4   // k1, v
+//   extra_column_ids:    2, 5   // k2, w
 //
 // [new STORING encoding] Index k1v (k1, v) STORING (w):
-//   name:                   k1v
-//   id:                     2
-//   unique:                 false
-//   key_column_names:       k1, v
-//   key_column_directions:  ASC, ASC
-//   store_column_names:     w
-//   key_column_ids:         1, 4   // k1, v
-//   key_suffix_column_ids:  2      // k2
-//   store_column_ids:       5      // w
+//   name:                k1v
+//   id:                  2
+//   unique:              false
+//   column_names:        k1, v
+//   column_directions:   ASC, ASC
+//   store_column_names:  w
+//   column_ids:          1, 4   // k1, v
+//   extra_column_ids:    2      // k2
+//   store_column_ids:    5      // w
 message IndexDescriptor {
   option (gogoproto.equal) = true;
   // The direction of a column in the index.
@@ -414,36 +373,31 @@ message IndexDescriptor {
 
   // An ordered list of column names of which the index is comprised; these
   // columns do not include any additional stored columns (which are in
-  // stored_column_names). This list parallels the key_column_ids list.
-  //
-  // If the index is an inverted index, the last column in the list is
-  // inverted and all others are not.
+  // stored_column_names). This list parallels the column_ids list.
   //
   // Note: if duplicating the storage of the column names here proves to be
   // prohibitive, we could clear this field before saving and reconstruct it
   // after loading.
-  repeated string key_column_names = 4;
+  repeated string column_names = 4;
 
-  // The sort direction of each column in key_column_names.
-  repeated Direction key_column_directions = 8;
+  // The sort direction of each column in column_names.
+  repeated Direction column_directions = 8;
 
   // An ordered list of column names which the index stores in addition to the
   // columns which are explicitly part of the index (STORING clause). Only used
   // for secondary indexes.
   repeated string store_column_names = 5;
 
-  // An ordered list of column IDs of which the index key is comprised. This
-  // list parallels the key_column_names list and does not include any
-  // additional stored columns. If the index is an inverted index, the last
-  // column in the list is inverted and all others are not.
-  repeated uint32 key_column_ids = 6 [(gogoproto.customname) = "KeyColumnIDs",
+  // An ordered list of column IDs of which the index is comprised. This list
+  // parallels the column_names list and does not include any additional stored
+  // columns.
+  repeated uint32 column_ids = 6 [(gogoproto.customname) = "ColumnIDs",
       (gogoproto.casttype) = "ColumnID"];
 
   // An ordered list of IDs for the additional columns associated with the
   // index:
   //  - implicit columns, which are all the primary key columns that are not
-  //    already part of the index, in other words
-  //        PrimaryIndex.key_column_ids - key_column_ids.
+  //    already part of the index (i.e. PrimaryIndex.column_ids - column_ids).
   //  - stored columns (the columns in store_column_names) if this index uses the
   //    old STORING encoding (key-encoded data).
   //
@@ -454,7 +408,7 @@ message IndexDescriptor {
   // unique-ify it).
   // This distinction exists because we want to be able to insert an entry using
   // a single conditional put on the key.
-  repeated uint32 key_suffix_column_ids = 7 [(gogoproto.customname) = "KeySuffixColumnIDs",
+  repeated uint32 extra_column_ids = 7 [(gogoproto.customname) = "ExtraColumnIDs",
       (gogoproto.casttype) = "ColumnID"];
 
   // An ordered list of column IDs that parallels store_column_names if this
@@ -465,7 +419,7 @@ message IndexDescriptor {
 
   // CompositeColumnIDs contains an ordered list of IDs of columns that appear
   // in the index and have a composite encoding. Includes IDs from both
-  // key_column_ids and key_suffix_column_ids.
+  // column_ids and extra_column_ids.
   repeated uint32 composite_column_ids = 13
       [(gogoproto.customname) = "CompositeColumnIDs", (gogoproto.casttype) = "ColumnID"];
 
@@ -549,7 +503,6 @@ message ConstraintToUpdate {
     // validation step, can occur. The check field contains the dummy
     // constraint.
     NOT_NULL = 2;
-    UNIQUE_WITHOUT_INDEX = 3;
   }
   required ConstraintType constraint_type = 1 [(gogoproto.nullable) = false];
   required string name = 2 [(gogoproto.nullable) = false];
@@ -558,7 +511,6 @@ message ConstraintToUpdate {
   optional ForeignKeyConstraint foreign_key = 4 [(gogoproto.nullable) = false];
   reserved 5;
   optional uint32 not_null_column = 6 [(gogoproto.nullable) = false, (gogoproto.casttype) = "ColumnID"];
-  optional UniqueWithoutIndexConstraint unique_without_index_constraint = 7 [(gogoproto.nullable) = false];
 }
 
 // PrimaryKeySwap is a mutation corresponding to the atomic swap phase
@@ -574,35 +526,6 @@ message PrimaryKeySwap {
   // swapped out with the i'th index in new_indexes.
   repeated uint32 old_indexes = 2 [(gogoproto.casttype) = "IndexID"];
   repeated uint32 new_indexes = 3 [(gogoproto.casttype) = "IndexID"];
-  // new_primary_index_name is the name of the primary key when added as a
-  // new constraint to a table without a primary key. In other cases, it is
-  // the empty string.
-  optional string new_primary_index_name = 5 [(gogoproto.nullable) = false];
-
-  message LocalityConfigSwap {
-    option (gogoproto.equal) = true;
-    optional TableDescriptor.LocalityConfig old_locality_config = 1 [(gogoproto.nullable) = false];
-    optional TableDescriptor.LocalityConfig new_locality_config = 2 [(gogoproto.nullable) = false];
-
-    // NewRegionalByRowColumnID is set when we are creating a new column for a
-    // REGIONAL BY ROW table. It is used by NewRegionalByRowColumnDefaultExpr
-    // to identify the column we may have to change DefaultExpr for.
-    optional uint32 new_regional_by_row_column_id = 3 [(gogoproto.casttype) = "ColumnID", (gogoproto.customname) = "NewRegionalByRowColumnID"];
-    // NewRegionalByRowColumnDefaultExpr is the default expression to set when a
-    // REGIONAL BY ROW involving a new crdb_region column is required.
-    // This is required so that the backfill uses a well-known value, but after
-    // the backfill is complete we can set it to use the gateway_region.
-    //
-    // This must be set at mutation creation time, as the schema changer loses
-    // context on what the database is. The default expression should be already
-    // serialized in the same internal format as default_expr on the
-    // ColumnDescriptor.
-    optional string new_regional_by_row_column_default_expr = 4;
-  }
-  // LocalityConfigSwap is set for ALTER TABLE SET LOCALITY when the command
-  // requires PK changes. If set, additional zone configurations are set to
-  // match the new locality config.
-  optional LocalityConfigSwap locality_config_swap = 6;
 }
 
 // ComputedColumnSwap is a mutation corresponding to the atomic swap phase
@@ -969,11 +892,6 @@ message TableDescriptor {
   repeated uint32 dependsOn = 25 [(gogoproto.customname) = "DependsOn",
            (gogoproto.casttype) = "ID"];
 
-  // The IDs of all types that this depends on.
-  // Only ever populated if this descriptor is for a view.
-  repeated uint32 dependsOnTypes = 45 [(gogoproto.customname) = "DependsOnTypes",
-    (gogoproto.casttype) = "ID"];
-
   message Reference {
     option (gogoproto.equal) = true;
     // The ID of the relation that depends on this one.
@@ -987,12 +905,6 @@ message TableDescriptor {
     // relation.
     repeated uint32 column_ids = 3 [(gogoproto.customname) = "ColumnIDs",
              (gogoproto.casttype) = "ColumnID"];
-    // ByID indicates whether the relation is referenced via its name or its ID.
-    // For example, nextval('foo.public.seq') vs. nextval(12345::REGCLASS),
-    // where 12345 is the ID of foo.public.seq
-    // Sequences referenced only by its ID have the ability to be renamed.
-    optional bool by_id = 4 [(gogoproto.nullable) = false,
-      (gogoproto.customname) = "ByID"];
   }
 
   // All references to this table/view from other views and sequences in the system,
@@ -1009,7 +921,6 @@ message TableDescriptor {
 
     // The job id for a mutation job is the id in the system.jobs table of the
     // schema change job executing the mutation referenced by mutation_id.
-    // This is not a jobspb.JobID to avoid a dependency cycle.
     optional int64 job_id = 2 [(gogoproto.nullable) = false,
              (gogoproto.customname) = "JobID"];
   }
@@ -1017,12 +928,6 @@ message TableDescriptor {
   // Mutation jobs queued for execution in a FIFO order. Remains synchronized
   // with the mutations list.
   repeated MutationJob mutationJobs = 27 [(gogoproto.nullable) = false];
-
-  // The job associated with a schema change job run in the new schema changer
-  // (in sql/schemachanger), if one exists. Only one such job can exist at a
-  // time.
-  optional int64 new_schema_change_job_id = 46 [(gogoproto.nullable) = false,
-                                               (gogoproto.customname) = "NewSchemaChangeJobID"];
 
   message SequenceOpts {
     option (gogoproto.equal) = true;
@@ -1050,10 +955,6 @@ message TableDescriptor {
     }
 
     optional SequenceOwner sequence_owner = 6 [(gogoproto.nullable) = false];
-
-    // The number of values (which have already been created in KV)
-    // that a node can cache locally.
-    optional int64 cache_size = 7 [(gogoproto.nullable) = false];
   }
 
   // The presence of sequence_opts indicates that this descriptor is for a sequence.
@@ -1139,65 +1040,11 @@ message TableDescriptor {
   // the referenced table.
   repeated ForeignKeyConstraint inbound_fks = 37 [(gogoproto.nullable) = false, (gogoproto.customname) = "InboundFKs"];
 
-  // UniqueWithoutIndexConstraints contains all the unique constraints defined
-  // on this table that are not enforced by an index.
-  repeated UniqueWithoutIndexConstraint unique_without_index_constraints = 43 [(gogoproto.nullable) = false];
-
   // Temporary table support will be added to CRDB starting from 20.1. The temporary
   // flag is set to true for all temporary tables. All table descriptors created
   // before 20.1 refer to persistent tables, so lack of the flag being set implies
   // the table is persistent.
   optional bool temporary = 39 [(gogoproto.nullable) = false];
-
-  message LocalityConfig {
-    option (gogoproto.equal) = true;
-    // REGIONAL BY TABLE tables have an "implicit" bidirectional dependency with
-    // the multi-region enum. The dependency is described "implicit" because
-    // even though no column on the table uses the multi-region type descriptor
-    // to store the homing region, a value from the type descriptor is stored in
-    // the locality config below (when the table is homed in the non-primary
-    // region).
-    // This changes how type dependencies are constructed for table descriptors.
-    // After the introduction of REGIONAL BY TABLE tables, a column on the table
-    // descriptor using a type is no longer a necessary (note it is still a
-    // sufficient) condition to establish a type dependency. As is the case with
-    // adding and dropping columns, this type dependency must be negotiated. As
-    // such, switching locality patterns or adding new locality configs must be
-    // done so that back references to the multi-region type descriptor are
-    // kept sane.
-    message RegionalByTable {
-      option (gogoproto.equal) = true;
-      // Region is set if the table has an affinity with a non-primary region.
-      optional string region = 1 [(gogoproto.casttype)="RegionName"];
-    }
-    message RegionalByRow {
-      option (gogoproto.equal) = true;
-      // As is set if the table has a REGIONAL BY ROW AS ... set to a specific column.
-      optional string as = 1;
-    }
-    message Global {
-      option (gogoproto.equal) = true;
-    }
-    oneof locality {
-      Global global = 1;
-      RegionalByTable regional_by_table = 2;
-      RegionalByRow regional_by_row = 3;
-    }
-  }
-  optional LocalityConfig locality_config = 42;
-
-  // PartitionAllBy is set if PARTITION ALL BY is set on the table.
-  // This means that all indexes implicitly inherit all partitioning
-  // from the PARTITION ALL BY clause.
-  optional bool partition_all_by = 44 [(gogoproto.nullable)=false];
-}
-
-// SurvivalGoal is the survival goal for a database.
-enum SurvivalGoal {
-  // Survive a zone failure. This is the default.
-  ZONE_FAILURE = 0;
-  // Survive a region failure.
-  REGION_FAILURE = 1;
 }
 
 // DatabaseDescriptor represents a namespace (aka database) and is stored
@@ -1238,22 +1085,6 @@ message DatabaseDescriptor {
 
   optional DescriptorState state = 8 [(gogoproto.nullable) = false];
   optional string offline_reason = 9 [(gogoproto.nullable) = false];
-
-  // RegionConfig stores region configuration for a given database.
-  message RegionConfig {
-    option (gogoproto.equal) = true;
-
-    reserved 1;
-    optional SurvivalGoal survival_goal = 2 [(gogoproto.nullable)=false];
-    optional string primary_region = 3 [(gogoproto.nullable)=false,(gogoproto.casttype)="RegionName"];
-
-    // RegionEnumID represents ID of the type descriptor corresponding to the
-    // region enum for a multi-region database. If the database is not a
-    // multi-region database then this field is 0 and no such region enum exists.
-    optional uint32 region_enum_id = 4 [(gogoproto.nullable) = false, (gogoproto.customname) = "RegionEnumID", (gogoproto.casttype) = "ID"];
-  }
-  // RegionConfig is only set if multi-region controls are set on the database.
-  optional RegionConfig region_config = 10;
 }
 
 // TypeDescriptor represents a user defined type and is stored in a structured
@@ -1307,9 +1138,6 @@ message TypeDescriptor {
     // Represents a user defined type that is just an alias for another type.
     // As of now, it is used only internally.
     ALIAS = 1;
-    // Represents a special multi-region enum type which tracks available regions
-    // as its enum values.
-    MULTIREGION_ENUM = 2;
     // Add more entries as we support more user defined types.
   }
   optional Kind kind = 5 [(gogoproto.nullable) = false];
@@ -1318,8 +1146,7 @@ message TypeDescriptor {
   repeated uint32 referencing_descriptor_ids = 12
     [(gogoproto.casttype) = "ID", (gogoproto.customname) = "ReferencingDescriptorIDs"];
 
-  // The fields below are used only when this type is an ENUM or a
-  // MULTIREGION_ENUM.
+  // The fields below are used only when this type is an ENUM type.
 
   // EnumMember represents a value in an enum.
   message EnumMember {
@@ -1336,39 +1163,15 @@ message TypeDescriptor {
       // representation is disallowed, which prevents writes of the member.
       READ_ONLY = 1;
     }
-
-    enum Direction {
-      // Not used. Corresponds to the ALL capability.
-      NONE = 0;
-      // Enum value is being added.
-      ADD = 1;
-      // Enum value is being removed.
-      REMOVE= 2;
-    }
     optional Capability capability = 3 [(gogoproto.nullable) = false];
-    optional Direction direction = 4 [(gogoproto.nullable) = false];
   }
   // enum_members is the set of values in an enum.
   repeated EnumMember enum_members = 6 [(gogoproto.nullable) = false];
 
-  // The fields below are used only when this type is an ALIAS.
+  // The fields below are used only when this type is an ALIAS type.
 
   // alias is the types.T that this descriptor is an alias for.
   optional sql.sem.types.T alias = 7;
-
-
-  // The fields below are used only when this type is a MULTIREGION_ENUM.
-
-  // RegionConfig stores the multi-region configuration for a type descriptor of
-  // MULTIREGION_ENUM kind.
-  message RegionConfig {
-    option (gogoproto.equal) = true;
-
-    // PrimaryRegion represents the PrimaryRegion for a multi-region enum.
-    optional string primary_region = 1 [(gogoproto.nullable) = false, (gogoproto.casttype)="RegionName"];
-  }
-
-  optional RegionConfig region_config = 16;
 }
 
 // SchemaDescriptor represents a physical schema and is stored in a structured

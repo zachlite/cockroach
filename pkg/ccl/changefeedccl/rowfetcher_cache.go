@@ -11,16 +11,15 @@ package changefeedccl
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -61,7 +60,7 @@ func newRowFetcherCache(
 	return &rowFetcherCache{
 		codec:      codec,
 		leaseMgr:   leaseMgr,
-		collection: descs.NewCollection(settings, leaseMgr, hydratedTables, nil /* virtualSchemas */),
+		collection: descs.NewCollection(ctx, settings, leaseMgr, hydratedTables),
 		db:         db,
 		fetchers:   make(map[idVersion]*row.Fetcher),
 	}
@@ -69,8 +68,8 @@ func newRowFetcherCache(
 
 func (c *rowFetcherCache) TableDescForKey(
 	ctx context.Context, key roachpb.Key, ts hlc.Timestamp,
-) (catalog.TableDescriptor, error) {
-	var tableDesc catalog.TableDescriptor
+) (*tabledesc.Immutable, error) {
+	var tableDesc *tabledesc.Immutable
 	key, err := c.codec.StripTenantPrefix(key)
 	if err != nil {
 		return nil, err
@@ -83,16 +82,18 @@ func (c *rowFetcherCache) TableDescForKey(
 
 		// Retrieve the target TableDescriptor from the lease manager. No caching
 		// is attempted because the lease manager does its own caching.
-		desc, err := c.leaseMgr.Acquire(ctx, ts, tableID)
+		desc, _, err := c.leaseMgr.Acquire(ctx, ts, tableID)
 		if err != nil {
 			// Manager can return all kinds of errors during chaos, but based on
 			// its usage, none of them should ever be terminal.
-			return nil, changefeedbase.MarkRetryableError(err)
+			return nil, MarkRetryableError(err)
 		}
-		tableDesc = desc.Underlying().(catalog.TableDescriptor)
 		// Immediately release the lease, since we only need it for the exact
 		// timestamp requested.
-		desc.Release(ctx)
+		if err := c.leaseMgr.Release(desc); err != nil {
+			return nil, err
+		}
+		tableDesc = desc.(*tabledesc.Immutable)
 		if tableDesc.ContainsUserDefinedTypes() {
 			// If the table contains user defined types, then use the descs.Collection
 			// to retrieve a TableDescriptor with type metadata hydrated. We open a
@@ -106,12 +107,12 @@ func (c *rowFetcherCache) TableDescForKey(
 			if err := c.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 				txn.SetFixedTimestamp(ctx, ts)
 				var err error
-				tableDesc, err = c.collection.GetImmutableTableByID(ctx, txn, tableID, tree.ObjectLookupFlags{})
+				tableDesc, err = c.collection.GetTableVersionByID(ctx, txn, tableID, tree.ObjectLookupFlagsWithRequired())
 				return err
 			}); err != nil {
 				// Manager can return all kinds of errors during chaos, but based on
 				// its usage, none of them should ever be terminal.
-				return nil, changefeedbase.MarkRetryableError(err)
+				return nil, MarkRetryableError(err)
 			}
 			// Immediately release the lease, since we only need it for the exact
 			// timestamp requested.
@@ -119,7 +120,7 @@ func (c *rowFetcherCache) TableDescForKey(
 		}
 
 		// Skip over the column data.
-		for ; skippedCols < tableDesc.GetPrimaryIndex().NumKeyColumns(); skippedCols++ {
+		for ; skippedCols < len(tableDesc.PrimaryIndex.ColumnIDs); skippedCols++ {
 			l, err := encoding.PeekLength(remaining)
 			if err != nil {
 				return nil, err
@@ -138,36 +139,27 @@ func (c *rowFetcherCache) TableDescForKey(
 }
 
 func (c *rowFetcherCache) RowFetcherForTableDesc(
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 ) (*row.Fetcher, error) {
-	idVer := idVersion{id: tableDesc.GetID(), version: tableDesc.GetVersion()}
+	idVer := idVersion{id: tableDesc.ID, version: tableDesc.Version}
 	// Ensure that all user defined types are up to date with the cached
 	// version and the desired version to use the cache. It is safe to use
 	// UserDefinedTypeColsHaveSameVersion if we have a hit because we are
 	// guaranteed that the tables have the same version. Additionally, these
 	// fetchers are always initialized with a single tabledesc.Immutable.
 	if rf, ok := c.fetchers[idVer]; ok &&
-		catalog.UserDefinedTypeColsHaveSameVersion(tableDesc, rf.GetTables()[0].(catalog.TableDescriptor)) {
+		tableDesc.UserDefinedTypeColsHaveSameVersion(rf.GetTables()[0].(*tabledesc.Immutable)) {
 		return rf, nil
 	}
 	// TODO(dan): Allow for decoding a subset of the columns.
-	var colIdxMap catalog.TableColMap
+	colIdxMap := make(map[descpb.ColumnID]int)
 	var valNeededForCol util.FastIntSet
-	for _, col := range tableDesc.PublicColumns() {
-		colIdxMap.Set(col.GetID(), col.Ordinal())
-		valNeededForCol.Add(col.Ordinal())
+	for colIdx := range tableDesc.Columns {
+		colIdxMap[tableDesc.Columns[colIdx].ID] = colIdx
+		valNeededForCol.Add(colIdx)
 	}
 
 	var rf row.Fetcher
-	rfArgs := row.FetcherTableArgs{
-		Spans:            tableDesc.AllIndexSpans(c.codec),
-		Desc:             tableDesc,
-		Index:            tableDesc.GetPrimaryIndex(),
-		ColIdxMap:        colIdxMap,
-		IsSecondaryIndex: false,
-		Cols:             tableDesc.PublicColumns(),
-		ValNeededForCol:  valNeededForCol,
-	}
 	if err := rf.Init(
 		context.TODO(),
 		c.codec,
@@ -177,7 +169,15 @@ func (c *rowFetcherCache) RowFetcherForTableDesc(
 		false, /* isCheck */
 		&c.a,
 		nil, /* memMonitor */
-		rfArgs,
+		row.FetcherTableArgs{
+			Spans:            tableDesc.AllIndexSpans(c.codec),
+			Desc:             tableDesc,
+			Index:            &tableDesc.PrimaryIndex,
+			ColIdxMap:        colIdxMap,
+			IsSecondaryIndex: false,
+			Cols:             tableDesc.Columns,
+			ValNeededForCol:  valNeededForCol,
+		},
 	); err != nil {
 		return nil, err
 	}

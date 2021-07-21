@@ -212,7 +212,7 @@ func isExpectedQueueError(err error) bool {
 // Returns a bool for whether to queue as well as a priority based
 // on how long it's been since last processed.
 func shouldQueueAgain(now, last hlc.Timestamp, minInterval time.Duration) (bool, float64) {
-	if minInterval == 0 || last.IsEmpty() {
+	if minInterval == 0 || last == (hlc.Timestamp{}) {
 		return true, 0
 	}
 	if diff := now.GoTime().Sub(last.GoTime()); diff >= minInterval {
@@ -220,7 +220,7 @@ func shouldQueueAgain(now, last hlc.Timestamp, minInterval time.Duration) (bool,
 		// If there's a non-zero last processed timestamp, adjust the
 		// priority by a multiple of how long it's been since the last
 		// time this replica was processed.
-		if !last.IsEmpty() {
+		if last != (hlc.Timestamp{}) {
 			priority = float64(diff.Nanoseconds()) / float64(minInterval.Nanoseconds())
 		}
 		return true, priority
@@ -242,7 +242,8 @@ type replicaInQueue interface {
 	Desc() *roachpb.RangeDescriptor
 	maybeInitializeRaftGroup(context.Context)
 	redirectOnOrAcquireLease(context.Context) (kvserverpb.LeaseStatus, *roachpb.Error)
-	LeaseStatusAt(context.Context, hlc.ClockTimestamp) kvserverpb.LeaseStatus
+	IsLeaseValid(context.Context, roachpb.Lease, hlc.Timestamp) bool
+	GetLease() (roachpb.Lease, roachpb.Lease)
 }
 
 type queueImpl interface {
@@ -250,7 +251,7 @@ type queueImpl interface {
 	// and returns whether it should be queued and if so, at what priority.
 	// The Replica is guaranteed to be initialized.
 	shouldQueue(
-		context.Context, hlc.ClockTimestamp, *Replica, *config.SystemConfig,
+		context.Context, hlc.Timestamp, *Replica, *config.SystemConfig,
 	) (shouldQueue bool, priority float64)
 
 	// process accepts a replica, and the system config and executes
@@ -542,9 +543,7 @@ type baseQueueHelper struct {
 	bq *baseQueue
 }
 
-func (h baseQueueHelper) MaybeAdd(
-	ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp,
-) {
+func (h baseQueueHelper) MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	h.bq.maybeAdd(ctx, repl, now)
 }
 
@@ -556,7 +555,7 @@ func (h baseQueueHelper) Add(ctx context.Context, repl replicaInQueue, prio floa
 }
 
 type queueHelper interface {
-	MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp)
+	MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp)
 	Add(ctx context.Context, repl replicaInQueue, prio float64)
 }
 
@@ -587,9 +586,7 @@ func (bq *baseQueue) Async(
 // MaybeAddAsync offers the replica to the queue. The queue will only process a
 // certain number of these operations concurrently, and will drop (i.e. treat as
 // a noop) any additional calls.
-func (bq *baseQueue) MaybeAddAsync(
-	ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp,
-) {
+func (bq *baseQueue) MaybeAddAsync(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	bq.Async(ctx, "MaybeAdd", false /* wait */, func(ctx context.Context, h queueHelper) {
 		h.MaybeAdd(ctx, repl, now)
 	})
@@ -604,7 +601,7 @@ func (bq *baseQueue) AddAsync(ctx context.Context, repl replicaInQueue, prio flo
 	})
 }
 
-func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp) {
+func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	ctx = repl.AnnotateCtx(ctx)
 	// Load the system config if it's needed.
 	var cfg *config.SystemConfig
@@ -646,10 +643,10 @@ func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.
 	if bq.needsLease {
 		// Check to see if either we own the lease or do not know who the lease
 		// holder is.
-		st := repl.LeaseStatusAt(ctx, now)
-		if st.IsValid() && !st.OwnedBy(repl.StoreID()) {
+		if lease, _ := repl.GetLease(); repl.IsLeaseValid(ctx, lease, now) &&
+			!lease.OwnedBy(repl.StoreID()) {
 			if log.V(1) {
-				log.Infof(ctx, "needs lease; not adding: %v", st.Lease)
+				log.Infof(ctx, "needs lease; not adding: %+v", lease)
 			}
 			return
 		}
@@ -799,13 +796,12 @@ func (bq *baseQueue) MaybeRemove(rangeID roachpb.RangeID) {
 // stopper signals exit.
 func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 	ctx := bq.AnnotateCtx(context.Background())
-	stop := func() {
-		bq.mu.Lock()
-		bq.mu.stopped = true
-		bq.mu.Unlock()
-	}
-	if err := stopper.RunAsyncTask(ctx, "queue-loop", func(ctx context.Context) {
-		defer stop()
+	stopper.RunWorker(ctx, func(ctx context.Context) {
+		defer func() {
+			bq.mu.Lock()
+			bq.mu.stopped = true
+			bq.mu.Unlock()
+		}()
 
 		// nextTime is initially nil; we don't start any timers until the queue
 		// becomes non-empty.
@@ -817,7 +813,7 @@ func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 		for {
 			select {
 			// Exit on stopper.
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 
 			// Incoming signal sets the next time to process if there were previously
@@ -876,9 +872,7 @@ func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 				}
 			}
 		}
-	}); err != nil {
-		stop()
-	}
+	})
 }
 
 // lastProcessDuration returns the duration of the last processing attempt.
@@ -1096,7 +1090,7 @@ func (bq *baseQueue) finishProcessingReplica(
 
 	// Maybe add replica back into queue, if requested.
 	if requeue {
-		bq.maybeAdd(ctx, repl, bq.store.Clock().NowAsClockTimestamp())
+		bq.maybeAdd(ctx, repl, bq.store.Clock().Now())
 	}
 }
 
@@ -1146,7 +1140,7 @@ func (bq *baseQueue) addToPurgatoryLocked(
 	}
 
 	workerCtx := bq.AnnotateCtx(context.Background())
-	_ = stopper.RunAsyncTask(workerCtx, "purgatory", func(ctx context.Context) {
+	stopper.RunWorker(workerCtx, func(ctx context.Context) {
 		ticker := time.NewTicker(purgatoryReportInterval)
 		for {
 			select {
@@ -1207,7 +1201,7 @@ func (bq *baseQueue) addToPurgatoryLocked(
 				for errStr, count := range errMap {
 					log.Errorf(ctx, "%d replicas failing with %q", count, errStr)
 				}
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 			}
 		}

@@ -34,22 +34,18 @@ statement ok
 set enable_zigzag_join = false
 
 # Verify we scan index v which has the more selective constraint.
-query T retry
+query TTTTT retry
 EXPLAIN (VERBOSE) SELECT * FROM uv WHERE u = 1 AND v = 1
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ columns: (u, v)
-│ estimated row count: 1
-│ filter: u = 1
-│
-└── • scan
-      columns: (u, v)
-      estimated row count: 1 (12% of the table; stats collected <hidden> ago)
-      table: uv@uv_v_idx
-      spans: /1-/2
+·          distribution         full         ·       ·
+·          vectorized           true         ·       ·
+filter     ·                    ·            (u, v)  ·
+ │         estimated row count  1            ·       ·
+ │         filter               u = 1        ·       ·
+ └── scan  ·                    ·            (u, v)  ·
+·          estimated row count  1            ·       ·
+·          table                uv@uv_v_idx  ·       ·
+·          spans                /1-/2        ·       ·
 
 # Verify that injecting different statistics changes the plan.
 statement ok
@@ -68,22 +64,18 @@ ALTER TABLE uv INJECT STATISTICS '[
   }
 ]'
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT * FROM uv WHERE u = 1 AND v = 1
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ columns: (u, v)
-│ estimated row count: 1
-│ filter: v = 1
-│
-└── • scan
-      columns: (u, v)
-      estimated row count: 1 (1.0% of the table; stats collected <hidden> ago)
-      table: uv@uv_u_idx
-      spans: /1-/2
+·          distribution         full         ·       ·
+·          vectorized           true         ·       ·
+filter     ·                    ·            (u, v)  ·
+ │         estimated row count  1            ·       ·
+ │         filter               v = 1        ·       ·
+ └── scan  ·                    ·            (u, v)  ·
+·          estimated row count  1            ·       ·
+·          table                uv@uv_u_idx  ·       ·
+·          spans                /1-/2        ·       ·
 
 # Verify that injecting different statistics with null counts
 # changes the plan.
@@ -105,22 +97,18 @@ ALTER TABLE uv INJECT STATISTICS '[
   }
 ]'
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT * FROM uv WHERE u = 1 AND v = 1
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ columns: (u, v)
-│ estimated row count: 1
-│ filter: v = 1
-│
-└── • scan
-      columns: (u, v)
-      estimated row count: 5 (5.0% of the table; stats collected <hidden> ago)
-      table: uv@uv_u_idx
-      spans: /1-/2
+·          distribution         full         ·       ·
+·          vectorized           true         ·       ·
+filter     ·                    ·            (u, v)  ·
+ │         estimated row count  1            ·       ·
+ │         filter               v = 1        ·       ·
+ └── scan  ·                    ·            (u, v)  ·
+·          estimated row count  5            ·       ·
+·          table                uv@uv_u_idx  ·       ·
+·          spans                /1-/2        ·       ·
 
 statement ok
 ALTER TABLE uv INJECT STATISTICS '[
@@ -140,22 +128,18 @@ ALTER TABLE uv INJECT STATISTICS '[
   }
 ]'
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT * FROM uv WHERE u = 1 AND v = 1
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ columns: (u, v)
-│ estimated row count: 1
-│ filter: u = 1
-│
-└── • scan
-      columns: (u, v)
-      estimated row count: 1 (1.1% of the table; stats collected <hidden> ago)
-      table: uv@uv_v_idx
-      spans: /1-/2
+·          distribution         full         ·       ·
+·          vectorized           true         ·       ·
+filter     ·                    ·            (u, v)  ·
+ │         estimated row count  1            ·       ·
+ │         filter               u = 1        ·       ·
+ └── scan  ·                    ·            (u, v)  ·
+·          estimated row count  1            ·       ·
+·          table                uv@uv_v_idx  ·       ·
+·          spans                /1-/2        ·       ·
 
 statement ok
 ALTER TABLE uv INJECT STATISTICS '[
@@ -218,14 +202,16 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM uv WHERE u < 30 GROUP BY u, v
 distinct-on
  ├── columns: u:1 v:2
  ├── grouping columns: u:1 v:2
+ ├── internal-ordering: +1
  ├── stats: [rows=20.0617284, distinct(1,2)=20.0617284, null(1,2)=0]
- ├── cost: 52.897284
+ ├── cost: 41.7306173
  ├── key: (1,2)
  └── scan uv@uv_u_idx
       ├── columns: u:1 v:2
       ├── constraint: /1/3: (/NULL - /29]
       ├── stats: [rows=33.3333333, distinct(1)=6.66666667, null(1)=0, distinct(1,2)=20.0617284, null(1,2)=0]
-      ├── cost: 51.6766667
+      ├── cost: 40.6766667
+      ├── ordering: +1
       ├── prune: (2)
       └── interesting orderings: (+1) (+2)
 
@@ -238,14 +224,16 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM uv WHERE u < 30 GROUP BY u, v
 distinct-on
  ├── columns: u:1 v:2
  ├── grouping columns: u:1 v:2
+ ├── internal-ordering: +1
  ├── stats: [rows=33.3333333, distinct(1,2)=33.3333333, null(1,2)=0]
- ├── cost: 53.03
+ ├── cost: 41.8633333
  ├── key: (1,2)
  └── scan uv@uv_u_idx
       ├── columns: u:1 v:2
       ├── constraint: /1/3: (/NULL - /29]
       ├── stats: [rows=33.3333333, distinct(1)=6.66666667, null(1)=0, distinct(1,2)=33.3333333, null(1,2)=0]
-      ├── cost: 51.6766667
+      ├── cost: 40.6766667
+      ├── ordering: +1
       ├── prune: (2)
       └── interesting orderings: (+1) (+2)
 
@@ -258,8 +246,9 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM uv WHERE u < 30 GROUP BY u, v
 distinct-on
  ├── columns: u:1 v:2
  ├── grouping columns: u:1 v:2
+ ├── internal-ordering: +1
  ├── stats: [rows=100, distinct(1,2)=100, null(1,2)=0]
- ├── cost: 129.030563
+ ├── cost: 117.53
  ├── key: (1,2)
  └── scan uv@uv_u_idx
       ├── columns: u:1 v:2
@@ -267,7 +256,8 @@ distinct-on
       ├── stats: [rows=100, distinct(1)=20, null(1)=0, distinct(1,2)=100, null(1,2)=0]
       │   histogram(1)=  0 50  0 20  8  5   12  5
       │                <--- 1 --- 2 --- 10 ---- 20
-      ├── cost: 125.01
+      ├── cost: 114.01
+      ├── ordering: +1
       ├── prune: (2)
       └── interesting orderings: (+1) (+2)
 
@@ -280,8 +270,9 @@ EXPLAIN (OPT, VERBOSE) SELECT * FROM uv WHERE u < 30 GROUP BY u, v
 distinct-on
  ├── columns: u:1 v:2
  ├── grouping columns: u:1 v:2
+ ├── internal-ordering: +1
  ├── stats: [rows=25, distinct(1,2)=25, null(1,2)=0]
- ├── cost: 128.28
+ ├── cost: 116.78
  ├── key: (1,2)
  └── scan uv@uv_u_idx
       ├── columns: u:1 v:2
@@ -289,7 +280,8 @@ distinct-on
       ├── stats: [rows=100, distinct(1)=20, null(1)=0, distinct(1,2)=25, null(1,2)=0]
       │   histogram(1)=  0 50  0 20  8  5   12  5
       │                <--- 1 --- 2 --- 10 ---- 20
-      ├── cost: 125.01
+      ├── cost: 114.01
+      ├── ordering: +1
       ├── prune: (2)
       └── interesting orderings: (+1) (+2)
 
@@ -309,20 +301,20 @@ limit
  ├── cardinality: [0 - 1]
  ├── immutable
  ├── stats: [rows=1]
- ├── cost: 111.049999
+ ├── cost: 226.06
  ├── key: ()
  ├── fd: ()-->(1)
  ├── select
  │    ├── columns: j:1
  │    ├── immutable
- │    ├── stats: [rows=10.0000001, distinct(1)=1, null(1)=10]
- │    ├── cost: 111.029999
+ │    ├── stats: [rows=10, distinct(1)=1, null(1)=10]
+ │    ├── cost: 226.04
  │    ├── fd: ()-->(1)
  │    ├── limit hint: 1.00
  │    ├── scan tj
  │    │    ├── columns: j:1
  │    │    ├── stats: [rows=1000, distinct(1)=100, null(1)=10]
- │    │    ├── cost: 110.009999
+ │    │    ├── cost: 216.02
  │    │    ├── limit hint: 100.00
  │    │    └── prune: (1)
  │    └── filters
@@ -340,20 +332,20 @@ limit
  ├── cardinality: [0 - 1]
  ├── immutable
  ├── stats: [rows=1]
- ├── cost: 9.4
+ ├── cost: 9.41
  ├── key: ()
  ├── fd: ()-->(1)
  ├── select
  │    ├── columns: j:1
  │    ├── immutable
  │    ├── stats: [rows=1, distinct(1)=1, null(1)=1]
- │    ├── cost: 9.38
+ │    ├── cost: 9.39
  │    ├── fd: ()-->(1)
  │    ├── limit hint: 1.00
  │    ├── scan tj
  │    │    ├── columns: j:1
  │    │    ├── stats: [rows=5, distinct(1)=4, null(1)=1]
- │    │    ├── cost: 9.31
+ │    │    ├── cost: 9.32
  │    │    ├── limit hint: 5.00
  │    │    └── prune: (1)
  │    └── filters

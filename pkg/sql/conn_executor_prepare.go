@@ -49,11 +49,10 @@ func (ex *connExecutor) execPrepare(
 		ex.deletePreparedStmt(ctx, "")
 	}
 
-	stmt := makeStatement(parseCmd.Statement, ex.generateID())
 	ps, err := ex.addPreparedStmt(
 		ctx,
 		parseCmd.Name,
-		stmt,
+		Statement{Statement: parseCmd.Statement},
 		parseCmd.TypeHints,
 		parseCmd.RawTypeHints,
 		PreparedStatementOriginWire,
@@ -161,17 +160,9 @@ func (ex *connExecutor) prepare(
 
 	var flags planFlags
 	prepare := func(ctx context.Context, txn *kv.Txn) (err error) {
-		ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
+		ex.statsCollector.reset(&ex.server.sqlStats, ex.appStats, &ex.phaseTimes)
 		p := &ex.planner
-		if origin != PreparedStatementOriginSQL {
-			// If the PREPARE command was issued as a SQL statement, then we
-			// have already reset the planner at the very beginning of the
-			// execution (in execStmtInOpenState). We might have also
-			// instrumented the planner to collect execution statistics, and
-			// resetting the planner here would break the assumptions of the
-			// instrumentation.
-			ex.resetPlanner(ctx, p, txn, ex.server.cfg.Clock.PhysicalTime() /* stmtTS */)
-		}
+		ex.resetPlanner(ctx, p, txn, ex.server.cfg.Clock.PhysicalTime() /* stmtTS */)
 
 		if placeholderHints == nil {
 			placeholderHints = make(tree.PlaceholderTypes, stmt.NumPlaceholders)
@@ -214,7 +205,7 @@ func (ex *connExecutor) prepare(
 			return err
 		}
 
-		p.stmt = stmt
+		p.stmt = &stmt
 		p.semaCtx.Annotations = tree.MakeAnnotations(stmt.NumAnnotations)
 		flags, err = ex.populatePrepared(ctx, txn, placeholderHints, p)
 		return err
@@ -231,11 +222,6 @@ func (ex *connExecutor) prepare(
 		if err := ex.server.cfg.DB.Txn(ctx, prepare); err != nil {
 			return nil, err
 		}
-		// Prepare with an implicit transaction will end up creating
-		// a new transaction. Once this transaction is complete,
-		// we can safely release the leases, otherwise we will
-		// incorrectly hold leases for later operations.
-		ex.extraTxnState.descCollection.ReleaseAll(ctx)
 	}
 
 	// Account for the memory used by this prepared statement.
@@ -256,7 +242,7 @@ func (ex *connExecutor) populatePrepared(
 			return 0, err
 		}
 	}
-	stmt := &p.stmt
+	stmt := p.stmt
 	if err := p.semaCtx.Placeholders.Init(stmt.NumPlaceholders, placeholderHints); err != nil {
 		return 0, err
 	}
@@ -367,6 +353,8 @@ func (ex *connExecutor) execBind(
 					"expected %d arguments, got %d", numQArgs, len(bindCmd.Args)))
 		}
 
+		ptCtx := tree.NewParseTimeContext(ex.state.sqlTimestamp.In(ex.sessionData.DataConversion.Location))
+
 		for i, arg := range bindCmd.Args {
 			k := tree.PlaceholderIdx(i)
 			t := ps.InferredTypes[i]
@@ -374,20 +362,7 @@ func (ex *connExecutor) execBind(
 				// nil indicates a NULL argument value.
 				qargs[k] = tree.DNull
 			} else {
-				typ, ok := types.OidToType[t]
-				if !ok {
-					var err error
-					typ, err = ex.planner.ResolveTypeByOID(ctx, t)
-					if err != nil {
-						return nil, err
-					}
-				}
-				d, err := pgwirebase.DecodeDatum(
-					ex.planner.EvalContext(),
-					typ,
-					qArgFormatCodes[i],
-					arg,
-				)
+				d, err := pgwirebase.DecodeOidDatum(ctx, ptCtx, t, qArgFormatCodes[i], arg, &ex.planner)
 				if err != nil {
 					return retErr(pgerror.Wrapf(err, pgcode.ProtocolViolation,
 						"error in argument for %s", k))
@@ -411,15 +386,6 @@ func (ex *connExecutor) execBind(
 		for i := 0; i < numCols; i++ {
 			columnFormatCodes[i] = bindCmd.OutFormats[0]
 		}
-	}
-
-	// This is a huge kludge to deal with the fact that we're resolving types
-	// using a planner with a committed transaction. This ends up being almost
-	// okay because the execution is going to re-acquire leases on these types.
-	// Regardless, holding this lease is worse than not holding it. Users might
-	// expect to get type mismatch errors if a rename of the type occurred.
-	if ex.getTransactionState() == NoTxnStateStr {
-		ex.planner.Descriptors().ReleaseAll(ctx)
 	}
 
 	// Create the new PreparedPortal.

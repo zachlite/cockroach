@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors/oserror"
 )
 
 var (
@@ -153,9 +152,9 @@ func runMetaTest(run testRun) {
 	}
 }
 
-// TestPebbleEquivalence runs the MVCC Metamorphic test suite, and checks
-// for matching outputs by the test suite between different options of Pebble.
-func TestPebbleEquivalence(t *testing.T) {
+// TestRocksPebbleEquivalence runs the MVCC Metamorphic test suite, and checks
+// for matching outputs by the test suite between RocksDB and Pebble.
+func TestRocksPebbleEquivalence(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -174,6 +173,7 @@ func TestPebbleEquivalence(t *testing.T) {
 				seed:     seed,
 				restarts: false,
 				engineSequences: [][]engineImpl{
+					{engineImplRocksDB},
 					{engineImplPebble},
 					{engineImplPebbleManySSTs},
 					{engineImplPebbleVarOpts},
@@ -184,10 +184,10 @@ func TestPebbleEquivalence(t *testing.T) {
 	}
 }
 
-// TestPebbleRestarts runs the MVCC Metamorphic test suite with restarts
+// TestRocksPebbleRestarts runs the MVCC Metamorphic test suite with restarts
 // enabled, and ensures that the output remains the same across different
 // engine sequences with restarts in between.
-func TestPebbleRestarts(t *testing.T) {
+func TestRocksPebbleRestarts(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	// This test times out with the race detector enabled.
@@ -206,9 +206,10 @@ func TestPebbleRestarts(t *testing.T) {
 				seed:     seed,
 				restarts: true,
 				engineSequences: [][]engineImpl{
+					{engineImplRocksDB},
 					{engineImplPebble},
-					{engineImplPebble, engineImplPebble},
-					{engineImplPebble, engineImplPebbleManySSTs, engineImplPebbleVarOpts},
+					{engineImplRocksDB, engineImplPebble},
+					{engineImplRocksDB, engineImplPebbleManySSTs, engineImplPebbleVarOpts},
 				},
 			}
 			runMetaTest(run)
@@ -216,16 +217,16 @@ func TestPebbleRestarts(t *testing.T) {
 	}
 }
 
-// TestPebbleCheck checks whether the output file specified with --check has
+// TestRocksPebbleCheck checks whether the output file specified with --check has
 // matching behavior across rocks/pebble.
-func TestPebbleCheck(t *testing.T) {
+func TestRocksPebbleCheck(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 
 	if *check != "" {
-		if _, err := os.Stat(*check); oserror.IsNotExist(err) {
+		if _, err := os.Stat(*check); os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 
@@ -235,7 +236,9 @@ func TestPebbleCheck(t *testing.T) {
 			checkFile: *check,
 			restarts:  true,
 			engineSequences: [][]engineImpl{
+				{engineImplRocksDB},
 				{engineImplPebble},
+				{engineImplRocksDB, engineImplPebble},
 			},
 		}
 		runMetaTest(run)

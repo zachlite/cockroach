@@ -52,9 +52,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 1,
       createStatement:
-        'CREATE TABLE comments (\n\ttype INT8 NOT NULL,\n\tobject_id INT8 NOT NULL,\n\tsub_id INT8 NOT NULL,\n\tcomment STRING NOT NULL,\n\tCONSTRAINT "primary" PRIMARY KEY (type ASC, object_id ASC, sub_id ASC),\n\tFAMILY "primary" (type, object_id, sub_id),\n\tFAMILY fam_4_comment (comment)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE comments (\n\ttype INT8 NOT NULL,\n\tobject_id INT8 NOT NULL,\n\tsub_id INT8 NOT NULL,\n\tcomment STRING NOT NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (type ASC, object_id ASC, sub_id ASC),\n\tFAMILY \"primary\" (type, object_id, sub_id),\n\tFAMILY fam_4_comment (comment)\n)",
       grants: [
         { user: "admin", privileges: ["DELETE"] },
         { user: "admin", privileges: ["GRANT"] },
@@ -94,9 +92,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 0,
       createStatement:
-        'CREATE TABLE descriptor (\n\tid INT8 NOT NULL,\n\tdescriptor BYTES NULL,\n\tCONSTRAINT "primary" PRIMARY KEY (id ASC),\n\tFAMILY "primary" (id),\n\tFAMILY fam_2_descriptor (descriptor)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE descriptor (\n\tid INT8 NOT NULL,\n\tdescriptor BYTES NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (id ASC),\n\tFAMILY \"primary\" (id),\n\tFAMILY fam_2_descriptor (descriptor)\n)",
       grants: [
         { user: "admin", privileges: ["GRANT"] },
         { user: "admin", privileges: ["SELECT"] },
@@ -129,9 +125,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 1,
       createStatement:
-        'CREATE TABLE eventlog (\n\t"timestamp" TIMESTAMP NOT NULL,\n\t"eventType" STRING NOT NULL,\n\t"targetID" INT8 NOT NULL,\n\t"reportingID" INT8 NOT NULL,\n\tinfo STRING NULL,\n\t"uniqueID" BYTES NOT NULL DEFAULT uuid_v4(),\n\tCONSTRAINT "primary" PRIMARY KEY ("timestamp" ASC, "uniqueID" ASC),\n\tFAMILY "primary" ("timestamp", "uniqueID"),\n\tFAMILY "fam_2_eventType" ("eventType"),\n\tFAMILY "fam_3_targetID" ("targetID"),\n\tFAMILY "fam_4_reportingID" ("reportingID"),\n\tFAMILY fam_5_info (info)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE eventlog (\n\t\"timestamp\" TIMESTAMP NOT NULL,\n\t\"eventType\" STRING NOT NULL,\n\t\"targetID\" INT8 NOT NULL,\n\t\"reportingID\" INT8 NOT NULL,\n\tinfo STRING NULL,\n\t\"uniqueID\" BYTES NOT NULL DEFAULT uuid_v4(),\n\tCONSTRAINT \"primary\" PRIMARY KEY (\"timestamp\" ASC, \"uniqueID\" ASC),\n\tFAMILY \"primary\" (\"timestamp\", \"uniqueID\"),\n\tFAMILY \"fam_2_eventType\" (\"eventType\"),\n\tFAMILY \"fam_3_targetID\" (\"targetID\"),\n\tFAMILY \"fam_4_reportingID\" (\"reportingID\"),\n\tFAMILY fam_5_info (info)\n)",
       grants: [
         { user: "admin", privileges: ["DELETE"] },
         { user: "admin", privileges: ["GRANT"] },
@@ -171,8 +165,6 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       rangeCount: 1,
       createStatement:
         "CREATE TABLE jobs (\n\tid INT8 NOT NULL DEFAULT unique_rowid(),\n\tstatus STRING NOT NULL,\n\tcreated TIMESTAMP NOT NULL DEFAULT now():::TIMESTAMP,\n\tpayload BYTES NOT NULL,\n\tprogress BYTES NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (id ASC),\n\tINDEX jobs_status_created_idx (status ASC, created ASC),\n\tFAMILY fam_0_id_status_created_payload (id, status, created, payload),\n\tFAMILY progress (progress)\n);\nALTER TABLE system.public.jobs CONFIGURE ZONE USING\n\trange_min_bytes = 16777216,\n\trange_max_bytes = 67108864,\n\tgc.ttlseconds = 600,\n\tnum_replicas = 5,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
-      configureZoneStatement:
-        "ALTER TABLE system.public.jobs CONFIGURE ZONE USING\n\trange_min_bytes = 16777216,\n\trange_max_bytes = 67108864,\n\tgc.ttlseconds = 600,\n\tnum_replicas = 5,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
       grants: [
         { user: "admin", privileges: ["DELETE"] },
         { user: "admin", privileges: ["GRANT"] },
@@ -211,9 +203,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 1,
       createStatement:
-        'CREATE TABLE lease (\n\t"descID" INT8 NOT NULL,\n\tversion INT8 NOT NULL,\n\t"nodeID" INT8 NOT NULL,\n\texpiration TIMESTAMP NOT NULL,\n\tCONSTRAINT "primary" PRIMARY KEY ("descID" ASC, version ASC, expiration ASC, "nodeID" ASC),\n\tFAMILY "primary" ("descID", version, "nodeID", expiration)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE lease (\n\t\"descID\" INT8 NOT NULL,\n\tversion INT8 NOT NULL,\n\t\"nodeID\" INT8 NOT NULL,\n\texpiration TIMESTAMP NOT NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (\"descID\" ASC, version ASC, expiration ASC, \"nodeID\" ASC),\n\tFAMILY \"primary\" (\"descID\", version, \"nodeID\", expiration)\n)",
       grants: [
         { user: "admin", privileges: ["DELETE"] },
         { user: "admin", privileges: ["GRANT"] },
@@ -252,9 +242,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 1,
       createStatement:
-        'CREATE TABLE locations (\n\t"localityKey" STRING NOT NULL,\n\t"localityValue" STRING NOT NULL,\n\tlatitude DECIMAL(18,15) NOT NULL,\n\tlongitude DECIMAL(18,15) NOT NULL,\n\tCONSTRAINT "primary" PRIMARY KEY ("localityKey" ASC, "localityValue" ASC),\n\tFAMILY "fam_0_localityKey_localityValue_latitude_longitude" ("localityKey", "localityValue", latitude, longitude)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE locations (\n\t\"localityKey\" STRING NOT NULL,\n\t\"localityValue\" STRING NOT NULL,\n\tlatitude DECIMAL(18,15) NOT NULL,\n\tlongitude DECIMAL(18,15) NOT NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (\"localityKey\" ASC, \"localityValue\" ASC),\n\tFAMILY \"fam_0_localityKey_localityValue_latitude_longitude\" (\"localityKey\", \"localityValue\", latitude, longitude)\n)",
       grants: [
         { user: "admin", privileges: ["DELETE"] },
         { user: "admin", privileges: ["GRANT"] },
@@ -293,9 +281,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       numIndices: 1,
       rangeCount: 1,
       createStatement:
-        'CREATE TABLE namespace (\n\t"parentID" INT8 NOT NULL,\n\tname STRING NOT NULL,\n\tid INT8 NULL,\n\tCONSTRAINT "primary" PRIMARY KEY ("parentID" ASC, name ASC),\n\tFAMILY "primary" ("parentID", name),\n\tFAMILY fam_3_id (id)\n)',
-      configureZoneStatement:
-        "ALTER RANGE default CONFIGURE ZONE USING\n\trange_min_bytes = 134217728,\n\trange_max_bytes = 536870912,\n\tgc.ttlseconds = 90000,\n\tnum_replicas = 3,\n\tconstraints = '[]',\n\tlease_preferences = '[]'",
+        "CREATE TABLE namespace (\n\t\"parentID\" INT8 NOT NULL,\n\tname STRING NOT NULL,\n\tid INT8 NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (\"parentID\" ASC, name ASC),\n\tFAMILY \"primary\" (\"parentID\", name),\n\tFAMILY fam_3_id (id)\n)",
       grants: [
         { user: "admin", privileges: ["GRANT"] },
         { user: "admin", privileges: ["SELECT"] },
@@ -321,7 +307,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
       },
       physicalSize: 0,
     },
-  ].map((ti) => ({ ...ti, detailsAndStatsLoaded: () => true })),
+  ].map(ti => ({ ...ti, detailsAndStatsLoaded: () => true })),
   dbResponse: {
     data: {
       data: {
@@ -364,7 +350,7 @@ export const dbFullfilledProps: DatabaseSummaryProps = {
     { user: "admin", privileges: ["SELECT"] },
     { user: "root", privileges: ["GRANT"] },
     { user: "root", privileges: ["SELECT"] },
-  ].map((ti) => ({ ...ti, toJSON: () => ti })),
+  ].map(ti => ({ ...ti, toJSON: () => ti })),
   setSort: noop,
   sortSetting: {
     ascending: true,

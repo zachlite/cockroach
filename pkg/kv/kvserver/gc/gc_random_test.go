@@ -91,7 +91,7 @@ func TestRunNewVsOld(t *testing.T) {
 		},
 	} {
 		t.Run(fmt.Sprintf("%v@%v,ttl=%v", tc.ds, tc.now, tc.ttl), func(t *testing.T) {
-			eng := storage.NewDefaultInMemForTesting()
+			eng := storage.NewDefaultInMem()
 			defer eng.Close()
 
 			tc.ds.dist(N, rng).setupTest(t, eng, *tc.ds.desc())
@@ -101,7 +101,7 @@ func TestRunNewVsOld(t *testing.T) {
 			policy := zonepb.GCPolicy{TTLSeconds: tc.ttl}
 			newThreshold := CalculateThreshold(tc.now, policy)
 			gcInfoOld, err := runGCOld(ctx, tc.ds.desc(), snap, tc.now,
-				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, policy,
+				newThreshold, intentAgeThreshold, policy,
 				&oldGCer,
 				oldGCer.resolveIntents,
 				oldGCer.resolveIntentsAsync)
@@ -109,7 +109,7 @@ func TestRunNewVsOld(t *testing.T) {
 
 			newGCer := makeFakeGCer()
 			gcInfoNew, err := Run(ctx, tc.ds.desc(), snap, tc.now,
-				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, policy,
+				newThreshold, intentAgeThreshold, policy,
 				&newGCer,
 				newGCer.resolveIntents,
 				newGCer.resolveIntentsAsync)
@@ -136,7 +136,7 @@ func BenchmarkRun(b *testing.B) {
 		snap := eng.NewSnapshot()
 		policy := zonepb.GCPolicy{TTLSeconds: spec.ttl}
 		return runGCFunc(ctx, spec.ds.desc(), snap, spec.now,
-			CalculateThreshold(spec.now, policy), RunOptions{IntentAgeThreshold: intentAgeThreshold},
+			CalculateThreshold(spec.now, policy), intentAgeThreshold,
 			policy,
 			NoopGCer{},
 			func(ctx context.Context, intents []roachpb.Intent) error {
@@ -148,7 +148,7 @@ func BenchmarkRun(b *testing.B) {
 	}
 	makeTest := func(old bool, spec randomRunGCTestSpec) func(b *testing.B) {
 		return func(b *testing.B) {
-			eng := storage.NewDefaultInMemForTesting()
+			eng := storage.NewDefaultInMem()
 			defer eng.Close()
 			ms := spec.ds.dist(b.N, rng).setupTest(b, eng, *spec.ds.desc())
 			b.SetBytes(int64(float64(ms.Total()) / float64(b.N)))
@@ -188,7 +188,6 @@ type fakeGCer struct {
 	gcKeys     map[string]roachpb.GCRequest_GCKey
 	threshold  Threshold
 	intents    []roachpb.Intent
-	batches    [][]roachpb.Intent
 	txnIntents []txnIntents
 }
 
@@ -219,7 +218,6 @@ func (f *fakeGCer) resolveIntentsAsync(_ context.Context, txn *roachpb.Transacti
 
 func (f *fakeGCer) resolveIntents(_ context.Context, intents []roachpb.Intent) error {
 	f.intents = append(f.intents, intents...)
-	f.batches = append(f.batches, intents)
 	return nil
 }
 
@@ -234,7 +232,6 @@ func (f *fakeGCer) normalize() {
 	sort.Slice(f.txnIntents, func(i, j int) bool {
 		return f.txnIntents[i].txn.ID.String() < f.txnIntents[j].txn.ID.String()
 	})
-	f.batches = nil
 }
 
 func intentLess(a, b *roachpb.Intent) bool {

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -36,10 +36,7 @@ describe("StatementsPage", () => {
       > = rootWrapper.find(StatementsPage).first();
       const statementsPageInstance = statementsPageWrapper.instance();
 
-      assert.equal(
-        statementsPageInstance.state.sortSetting.columnTitle,
-        "executionCount",
-      );
+      assert.equal(statementsPageInstance.state.sortSetting.sortKey, 3);
       assert.equal(statementsPageInstance.state.sortSetting.ascending, false);
     });
   });

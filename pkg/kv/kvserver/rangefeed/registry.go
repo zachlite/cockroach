@@ -55,7 +55,7 @@ type registration struct {
 	// Input.
 	span                   roachpb.Span
 	catchupTimestamp       hlc.Timestamp
-	catchupIterConstructor func() storage.SimpleMVCCIterator
+	catchupIterConstructor func() storage.SimpleIterator
 	withDiff               bool
 	metrics                *Metrics
 
@@ -86,7 +86,7 @@ type registration struct {
 func newRegistration(
 	span roachpb.Span,
 	startTS hlc.Timestamp,
-	catchupIterConstructor func() storage.SimpleMVCCIterator,
+	catchupIterConstructor func() storage.SimpleIterator,
 	withDiff bool,
 	bufferSz int,
 	metrics *Metrics,
@@ -295,7 +295,7 @@ func (r *registration) maybeRunCatchupScan() error {
 	startKey := storage.MakeMVCCMetadataKey(r.span.Key)
 	endKey := storage.MakeMVCCMetadataKey(r.span.EndKey)
 
-	// MVCCIterator will encounter historical values for each key in
+	// Iterator will encounter historical values for each key in
 	// reverse-chronological order. To output in chronological order, store
 	// events for the same key until a different key is encountered, then output
 	// the encountered values in reverse. This also allows us to buffer events
@@ -346,13 +346,9 @@ func (r *registration) maybeRunCatchupScan() error {
 				// past the corresponding provisional key-value. To do this,
 				// scan to the timestamp immediately before (i.e. the key
 				// immediately after) the provisional key.
-				//
-				// Make a copy since should not pass an unsafe key from the iterator
-				// that provided it, when asking it to seek.
-				a, unsafeKey.Key = a.Copy(unsafeKey.Key, 0)
 				catchupIter.SeekGE(storage.MVCCKey{
 					Key:       unsafeKey.Key,
-					Timestamp: meta.Timestamp.ToTimestamp().Prev(),
+					Timestamp: hlc.Timestamp(meta.Timestamp).Prev(),
 				})
 				continue
 			}

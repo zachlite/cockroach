@@ -16,132 +16,53 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // SessionData contains session parameters. They are all user-configurable.
 // A SQL Session changes fields in SessionData through sql.sessionDataMutator.
 type SessionData struct {
-	// SessionData contains session parameters that are easily serializable and
-	// are required to be propagated to the remote nodes for the correct
-	// execution of DistSQL flows.
-	sessiondatapb.SessionData
-	// LocalOnlySessionData contains session parameters that don't need to be
-	// propagated to the remote nodes.
-	LocalOnlySessionData
-
-	// All session parameters below must be propagated to the remote nodes but
-	// are not easily serializable. They require custom serialization
-	// (MarshalNonLocal) and deserialization (UnmarshalNonLocal).
-	//
-	// Location indicates the current time zone.
-	Location *time.Location
-	// SearchPath is a list of namespaces to search builtins in.
-	SearchPath SearchPath
-	// SequenceState gives access to the SQL sequences that have been
-	// manipulated by the session.
-	SequenceState *SequenceState
-}
-
-// MarshalNonLocal serializes all non-local parameters from SessionData struct
-// that don't have native protobuf support into proto.
-func MarshalNonLocal(sd *SessionData, proto *sessiondatapb.SessionData) {
-	proto.Location = sd.GetLocation().String()
-	// Populate the search path. Make sure not to include the implicit pg_catalog,
-	// since the remote end already knows to add the implicit pg_catalog if
-	// necessary, and sending it over would make the remote end think that
-	// pg_catalog was explicitly included by the user.
-	proto.SearchPath = sd.SearchPath.GetPathArray()
-	proto.TemporarySchemaName = sd.SearchPath.GetTemporarySchemaName()
-	// Populate the sequences state.
-	latestValues, lastIncremented := sd.SequenceState.Export()
-	if len(latestValues) > 0 {
-		proto.SeqState.LastSeqIncremented = lastIncremented
-		for seqID, latestVal := range latestValues {
-			proto.SeqState.Seqs = append(proto.SeqState.Seqs,
-				&sessiondatapb.SequenceState_Seq{SeqID: seqID, LatestVal: latestVal},
-			)
-		}
-	}
-}
-
-// UnmarshalNonLocal returns a new SessionData based on the serialized
-// representation. Note that only non-local session parameters are populated.
-func UnmarshalNonLocal(proto sessiondatapb.SessionData) (*SessionData, error) {
-	location, err := timeutil.TimeZoneStringToLocation(
-		proto.Location,
-		timeutil.TimeZoneStringToLocationISO8601Standard,
-	)
-	if err != nil {
-		return nil, err
-	}
-	seqState := NewSequenceState()
-	var haveSequences bool
-	for _, seq := range proto.SeqState.Seqs {
-		seqState.RecordValue(seq.SeqID, seq.LatestVal)
-		haveSequences = true
-	}
-	if haveSequences {
-		seqState.SetLastSequenceIncremented(proto.SeqState.LastSeqIncremented)
-	}
-	return &SessionData{
-		SessionData: proto,
-		SearchPath: MakeSearchPath(
-			proto.SearchPath,
-		).WithTemporarySchemaName(
-			proto.TemporarySchemaName,
-		).WithUserSchemaName(proto.UserProto.Decode().Normalized()),
-		SequenceState: seqState,
-		Location:      location,
-	}, nil
-}
-
-// GetLocation returns the session timezone.
-func (s *SessionData) GetLocation() *time.Location {
-	if s == nil || s.Location == nil {
-		return time.UTC
-	}
-	return s.Location
-}
-
-// GetIntervalStyle returns the session interval style.
-func (s *SessionData) GetIntervalStyle() duration.IntervalStyle {
-	if s == nil {
-		return duration.IntervalStyle_POSTGRES
-	}
-	return s.DataConversionConfig.IntervalStyle
-}
-
-// LocalOnlySessionData contains session parameters that only influence the
-// execution on the gateway node and don't need to be propagated to the remote
-// nodes.
-type LocalOnlySessionData struct {
-	// SaveTablesPrefix indicates that a table should be created with the
-	// given prefix for the output of each subexpression in a query. If
-	// SaveTablesPrefix is empty, no tables are created.
-	SaveTablesPrefix string
-	// RemoteAddr is used to generate logging events.
-	RemoteAddr net.Addr
-	// ExperimentalDistSQLPlanningMode indicates whether the experimental
-	// DistSQL planning driven by the optimizer is enabled.
-	ExperimentalDistSQLPlanningMode ExperimentalDistSQLPlanningMode
+	// ApplicationName is the name of the application running the
+	// current session. This can be used for logging and per-application
+	// statistics.
+	ApplicationName string
+	// Database indicates the "current" database for the purpose of
+	// resolving names. See searchAndQualifyDatabase() for details.
+	Database string
+	// DefaultTxnPriority indicates the default priority of newly created
+	// transactions.
+	// NOTE: we'd prefer to use tree.UserPriority here, but doing so would
+	// introduce a package dependency cycle.
+	DefaultTxnPriority int
+	// DefaultReadOnly indicates the default read-only status of newly created
+	// transactions.
+	DefaultReadOnly bool
 	// DistSQLMode indicates whether to run queries using the distributed
 	// execution engine.
 	DistSQLMode DistSQLExecMode
+	// ExperimentalDistSQLPlanningMode indicates whether the experimental
+	// DistSQL planning driven by the optimizer is enabled.
+	ExperimentalDistSQLPlanningMode ExperimentalDistSQLPlanningMode
+	// PartiallyDistributedPlansDisabled indicates whether the partially
+	// distributed plans produced by distSQLSpecExecFactory are disabled. It
+	// should be set to 'true' only in tests that verify that the old and the
+	// new factories return exactly the same physical plans.
+	// TODO(yuzefovich): remove it when deleting old sql.execFactory.
+	PartiallyDistributedPlansDisabled bool
 	// OptimizerFKCascadesLimit is the maximum number of cascading operations that
 	// are run for a single query.
 	OptimizerFKCascadesLimit int
-	// ResultsBufferSize specifies the size at which the pgwire results buffer
-	// will self-flush.
-	ResultsBufferSize int64
-	// NoticeDisplaySeverity indicates the level of Severity to send notices for the given
-	// session.
-	NoticeDisplaySeverity pgnotice.DisplaySeverity
+	// OptimizerUseHistograms indicates whether we should use histograms for
+	// cardinality estimation in the optimizer.
+	OptimizerUseHistograms bool
+	// OptimizerUseMultiColStats indicates whether we should use multi-column
+	// statistics for cardinality estimation in the optimizer.
+	OptimizerUseMultiColStats bool
 	// SerialNormalizationMode indicates how to handle the SERIAL pseudo-type.
 	SerialNormalizationMode SerialNormalizationMode
+	// SearchPath is a list of namespaces to search builtins in.
+	SearchPath SearchPath
 	// DatabaseIDToTempSchemaID stores the temp schema ID for every database that
 	// has created a temporary schema. The mapping is from descpb.ID -> desscpb.ID,
 	// but cannot be stored as such due to package dependencies.
@@ -156,70 +77,57 @@ type LocalOnlySessionData struct {
 	// idle in a transaction before the session is canceled.
 	// If set to 0, there is no timeout.
 	IdleInTransactionSessionTimeout time.Duration
-	// ReorderJoinsLimit indicates the number of joins at which the optimizer should
-	// stop attempting to reorder.
-	ReorderJoinsLimit int
-	// DefaultTxnPriority indicates the default priority of newly created
-	// transactions.
-	// NOTE: we'd prefer to use tree.UserPriority here, but doing so would
-	// introduce a package dependency cycle.
-	DefaultTxnPriority int
-	// DefaultTxnReadOnly indicates the default read-only status of newly
-	// created transactions.
-	DefaultTxnReadOnly bool
-	// DefaultTxnUseFollowerReads indicates whether transactions should be
-	// created by default using an AS OF SYSTEM TIME clause far enough in the
-	// past to facilitate reads against followers. If true, transactions will
-	// also default to being read-only.
-	DefaultTxnUseFollowerReads bool
-	// PartiallyDistributedPlansDisabled indicates whether the partially
-	// distributed plans produced by distSQLSpecExecFactory are disabled. It
-	// should be set to 'true' only in tests that verify that the old and the
-	// new factories return exactly the same physical plans.
-	// TODO(yuzefovich): remove it when deleting old sql.execFactory.
-	PartiallyDistributedPlansDisabled bool
-	// OptimizerUseHistograms indicates whether we should use histograms for
-	// cardinality estimation in the optimizer.
-	OptimizerUseHistograms bool
-	// OptimizerUseMultiColStats indicates whether we should use multi-column
-	// statistics for cardinality estimation in the optimizer.
-	OptimizerUseMultiColStats bool
-	// LocalityOptimizedSearch indicates that the optimizer will try to plan scans
-	// and lookup joins in which local nodes (i.e., nodes in the gateway region)
-	// are searched for matching rows before remote nodes, in the hope that the
-	// execution engine can avoid visiting remote nodes.
-	LocalityOptimizedSearch bool
+	// User is the name of the user logged into the session.
+	User string
 	// SafeUpdates causes errors when the client
 	// sends syntax that may have unwanted side effects.
 	SafeUpdates bool
 	// PreferLookupJoinsForFKs causes foreign key operations to prefer lookup
 	// joins.
 	PreferLookupJoinsForFKs bool
+	// RemoteAddr is used to generate logging events.
+	RemoteAddr net.Addr
 	// ZigzagJoinEnabled indicates whether the optimizer should try and plan a
 	// zigzag join.
 	ZigzagJoinEnabled bool
+	// ReorderJoinsLimit indicates the number of joins at which the optimizer should
+	// stop attempting to reorder.
+	ReorderJoinsLimit int
 	// RequireExplicitPrimaryKeys indicates whether CREATE TABLE statements should
 	// error out if no primary key is provided.
 	RequireExplicitPrimaryKeys bool
+	// SequenceState gives access to the SQL sequences that have been manipulated
+	// by the session.
+	SequenceState *SequenceState
+	// DataConversion gives access to the data conversion configuration.
+	DataConversion DataConversionConfig
+	// VectorizeMode indicates which kinds of queries to use vectorized execution
+	// engine for.
+	VectorizeMode VectorizeExecMode
+	// VectorizeRowCountThreshold indicates the row count above which the
+	// vectorized execution engine will be used if possible.
+	VectorizeRowCountThreshold uint64
 	// ForceSavepointRestart overrides the default SAVEPOINT behavior
 	// for compatibility with certain ORMs. When this flag is set,
 	// the savepoint name will no longer be compared against the magic
 	// identifier `cockroach_restart` in order use a restartable
 	// transaction.
 	ForceSavepointRestart bool
+	// DefaultIntSize specifies the size in bits or bytes (preferred)
+	// of how a "naked" INT type should be parsed.
+	DefaultIntSize int
+	// ResultsBufferSize specifies the size at which the pgwire results buffer
+	// will self-flush.
+	ResultsBufferSize int64
 	// AllowPrepareAsOptPlan must be set to allow use of
 	//   PREPARE name AS OPT PLAN '...'
 	AllowPrepareAsOptPlan bool
+	// SaveTablesPrefix indicates that a table should be created with the
+	// given prefix for the output of each subexpression in a query. If
+	// SaveTablesPrefix is empty, no tables are created.
+	SaveTablesPrefix string
 	// TempTablesEnabled indicates whether temporary tables can be created or not.
 	TempTablesEnabled bool
-	// ImplicitPartitioningEnabled indicates whether implicit column partitioning
-	// can be created.
-	ImplicitColumnPartitioningEnabled bool
-	// DropEnumValueEnabled indicates whether enum values can be dropped.
-	DropEnumValueEnabled bool
-	// OverrideMultiRegionZoneConfigEnabled indicates whether zone configurations can be
-	// modified for multi-region databases and tables/indexes/partitions.
-	OverrideMultiRegionZoneConfigEnabled bool
 	// HashShardedIndexesEnabled indicates whether hash sharded indexes can be created.
 	HashShardedIndexesEnabled bool
 	// DisallowFullTableScans indicates whether queries that plan full table scans
@@ -231,69 +139,36 @@ type LocalOnlySessionData struct {
 	// InsertFastPath is true if the fast path for insert (with VALUES input) may
 	// be used.
 	InsertFastPath bool
+	// InterleavedJoins is true if interleaved joins may be used.
+	InterleavedJoins bool
+	// NoticeDisplaySeverity indicates the level of Severity to send notices for the given
+	// session.
+	NoticeDisplaySeverity pgnotice.DisplaySeverity
 	// AlterColumnTypeGeneralEnabled is true if ALTER TABLE ... ALTER COLUMN ...
 	// TYPE x may be used for general conversions requiring online schema change/
 	AlterColumnTypeGeneralEnabled bool
+
 	// SynchronousCommit is a dummy setting for the synchronous_commit var.
 	SynchronousCommit bool
 	// EnableSeqScan is a dummy setting for the enable_seqscan var.
 	EnableSeqScan bool
-
-	// EnableExpressionIndexes indicates whether creating expression indexes is
-	// allowed.
-	EnableExpressionIndexes bool
-
-	// EnableUniqueWithoutIndexConstraints indicates whether creating unique
-	// constraints without an index is allowed.
-	// TODO(rytaft): remove this once unique without index constraints are fully
-	// supported.
-	EnableUniqueWithoutIndexConstraints bool
-
-	// NewSchemaChangerMode indicates whether to use the new schema changer.
-	NewSchemaChangerMode NewSchemaChangerMode
-
-	// EnableStreamReplication indicates whether to allow setting up a replication
-	// stream.
-	EnableStreamReplication bool
-
-	// SequenceCache stores sequence values which have been cached using the
-	// CACHE sequence option.
-	SequenceCache SequenceCache
-
-	// StubCatalogTablesEnabled allows queries against virtual
-	// tables that are not yet implemented.
-	StubCatalogTablesEnabled bool
 
 	// ExperimentalComputedColumnRewrites allows automatic rewriting of computed
 	// column expressions in CREATE TABLE and ALTER TABLE statements. See the
 	// experimentalComputedColumnRewrites cluster setting for a description of the
 	// format.
 	ExperimentalComputedColumnRewrites string
-
-	///////////////////////////////////////////////////////////////////////////
-	// WARNING: consider whether a session parameter you're adding needs to  //
-	// be propagated to the remote nodes. If so, that parameter should live  //
-	// in the SessionData struct above.                                      //
-	///////////////////////////////////////////////////////////////////////////
 }
 
 // IsTemporarySchemaID returns true if the given ID refers to any of the temp
 // schemas created by the session.
-func (s *SessionData) IsTemporarySchemaID(schemaID uint32) bool {
-	_, exists := s.MaybeGetDatabaseForTemporarySchemaID(schemaID)
-	return exists
-}
-
-// MaybeGetDatabaseForTemporarySchemaID returns the corresponding database and
-// true if the schemaID refers to any of the temp schemas created by this
-// session.
-func (s *SessionData) MaybeGetDatabaseForTemporarySchemaID(schemaID uint32) (uint32, bool) {
-	for dbID, tempSchemaID := range s.DatabaseIDToTempSchemaID {
-		if tempSchemaID == schemaID {
-			return dbID, true
+func (s *SessionData) IsTemporarySchemaID(ID uint32) bool {
+	for _, tempSchemaID := range s.DatabaseIDToTempSchemaID {
+		if tempSchemaID == ID {
+			return true
 		}
 	}
-	return 0, false
+	return false
 }
 
 // GetTemporarySchemaIDForDb returns the schemaID for the temporary schema if
@@ -302,6 +177,56 @@ func (s *SessionData) MaybeGetDatabaseForTemporarySchemaID(schemaID uint32) (uin
 func (s *SessionData) GetTemporarySchemaIDForDb(dbID uint32) (uint32, bool) {
 	schemaID, found := s.DatabaseIDToTempSchemaID[dbID]
 	return schemaID, found
+}
+
+// DataConversionConfig contains the parameters that influence
+// the conversion between SQL data types and strings/byte arrays.
+type DataConversionConfig struct {
+	// Location indicates the current time zone.
+	Location *time.Location
+
+	// BytesEncodeFormat indicates how to encode byte arrays when converting
+	// to string.
+	BytesEncodeFormat lex.BytesEncodeFormat
+
+	// ExtraFloatDigits indicates the number of digits beyond the
+	// standard number to use for float conversions.
+	// This must be set to a value between -15 and 3, inclusive.
+	ExtraFloatDigits int
+}
+
+// GetFloatPrec computes a precision suitable for a call to
+// strconv.FormatFloat() or for use with '%.*g' in a printf-like
+// function.
+func (c *DataConversionConfig) GetFloatPrec() int {
+	// The user-settable parameter ExtraFloatDigits indicates the number
+	// of digits to be used to format the float value. PostgreSQL
+	// combines this with %g.
+	// The formula is <type>_DIG + extra_float_digits,
+	// where <type> is either FLT (float4) or DBL (float8).
+
+	// Also the value "3" in PostgreSQL is special and meant to mean
+	// "all the precision needed to reproduce the float exactly". The Go
+	// formatter uses the special value -1 for this and activates a
+	// separate path in the formatter. We compare >= 3 here
+	// just in case the value is not gated properly in the implementation
+	// of SET.
+	if c.ExtraFloatDigits >= 3 {
+		return -1
+	}
+
+	// CockroachDB only implements float8 at this time and Go does not
+	// expose DBL_DIG, so we use the standard literal constant for
+	// 64bit floats.
+	const StdDoubleDigits = 15
+
+	nDigits := StdDoubleDigits + c.ExtraFloatDigits
+	if nDigits < 1 {
+		// Ensure the value is clamped at 1: printf %g does not allow
+		// values lower than 1. PostgreSQL does this too.
+		nDigits = 1
+	}
+	return nDigits
 }
 
 // ExperimentalDistSQLPlanningMode controls if and when the opt-driven DistSQL
@@ -401,6 +326,66 @@ func DistSQLExecModeFromString(val string) (_ DistSQLExecMode, ok bool) {
 	}
 }
 
+// VectorizeExecMode controls if an when the Executor executes queries using the
+// columnar execution engine.
+// WARNING: When adding a VectorizeExecMode, note that nodes at previous
+// versions might interpret the integer value differently. To avoid this, only
+// append to the list or bump the minimum required distsql version (maybe also
+// take advantage of that to reorder the list as you see fit).
+type VectorizeExecMode int64
+
+const (
+	// VectorizeOff means that columnar execution is disabled.
+	VectorizeOff VectorizeExecMode = iota
+	// Vectorize201Auto means that that any supported queries that use only
+	// streaming operators (i.e. those that do not require any buffering) will
+	// be run using the columnar execution. If any part of a query is not
+	// supported by the vectorized execution engine, the whole query will fall
+	// back to row execution.
+	// This is the default setting in 20.1.
+	Vectorize201Auto
+	// VectorizeOn means that any supported queries will be run using the
+	// columnar execution.
+	VectorizeOn
+	// VectorizeExperimentalAlways means that we attempt to vectorize all
+	// queries; unsupported queries will fail. Mostly used for testing.
+	VectorizeExperimentalAlways
+)
+
+func (m VectorizeExecMode) String() string {
+	switch m {
+	case VectorizeOff:
+		return "off"
+	case Vectorize201Auto:
+		return "201auto"
+	case VectorizeOn:
+		return "on"
+	case VectorizeExperimentalAlways:
+		return "experimental_always"
+	default:
+		return fmt.Sprintf("invalid (%d)", m)
+	}
+}
+
+// VectorizeExecModeFromString converts a string into a VectorizeExecMode. False
+// is returned if the conversion was unsuccessful.
+func VectorizeExecModeFromString(val string) (VectorizeExecMode, bool) {
+	var m VectorizeExecMode
+	switch strings.ToUpper(val) {
+	case "OFF":
+		m = VectorizeOff
+	case "201AUTO":
+		m = Vectorize201Auto
+	case "ON":
+		m = VectorizeOn
+	case "EXPERIMENTAL_ALWAYS":
+		m = VectorizeExperimentalAlways
+	default:
+		return 0, false
+	}
+	return m, true
+}
+
 // SerialNormalizationMode controls if and when the Executor uses DistSQL.
 type SerialNormalizationMode int64
 
@@ -411,18 +396,8 @@ const (
 	// use INT NOT NULL DEFAULT nextval(...).
 	SerialUsesVirtualSequences
 	// SerialUsesSQLSequences means create a regular SQL sequence and
-	// use INT NOT NULL DEFAULT nextval(...). Each call to nextval()
-	// is a distributed call to kv. This minimizes the size of gaps
-	// between successive sequence numbers (which occur due to
-	// node failures or errors), but the multiple kv calls
-	// can impact performance negatively.
+	// use INT NOT NULL DEFAULT nextval(...).
 	SerialUsesSQLSequences
-	// SerialUsesCachedSQLSequences is identical to SerialUsesSQLSequences with
-	// the exception that nodes can cache sequence values. This significantly
-	// reduces contention and distributed calls to kv, which results in better
-	// performance. Gaps between sequences may be larger as a result of cached
-	// values being lost to errors and/or node failures.
-	SerialUsesCachedSQLSequences
 )
 
 func (m SerialNormalizationMode) String() string {
@@ -433,8 +408,6 @@ func (m SerialNormalizationMode) String() string {
 		return "virtual_sequence"
 	case SerialUsesSQLSequences:
 		return "sql_sequence"
-	case SerialUsesCachedSQLSequences:
-		return "sql_sequence_cached"
 	default:
 		return fmt.Sprintf("invalid (%d)", m)
 	}
@@ -449,52 +422,6 @@ func SerialNormalizationModeFromString(val string) (_ SerialNormalizationMode, o
 		return SerialUsesVirtualSequences, true
 	case "SQL_SEQUENCE":
 		return SerialUsesSQLSequences, true
-	case "SQL_SEQUENCE_CACHED":
-		return SerialUsesCachedSQLSequences, true
-	default:
-		return 0, false
-	}
-}
-
-// NewSchemaChangerMode controls if and when the new schema changer (in
-// sql/schemachanger) is in use.
-type NewSchemaChangerMode int64
-
-const (
-	// UseNewSchemaChangerOff means that we never use the new schema changer.
-	UseNewSchemaChangerOff NewSchemaChangerMode = iota
-	// UseNewSchemaChangerOn means that we use the new schema changer for
-	// supported statements in implicit transactions, but fall back to the old
-	// schema changer otherwise.
-	UseNewSchemaChangerOn
-	// UseNewSchemaChangerUnsafeAlways means that we attempt to use the new schema
-	// changer for all statements and return errors for unsupported statements.
-	// Used for testing/development.
-	UseNewSchemaChangerUnsafeAlways
-)
-
-func (m NewSchemaChangerMode) String() string {
-	switch m {
-	case UseNewSchemaChangerOff:
-		return "off"
-	case UseNewSchemaChangerOn:
-		return "on"
-	case UseNewSchemaChangerUnsafeAlways:
-		return "unsafe_always"
-	default:
-		return fmt.Sprintf("invalid (%d)", m)
-	}
-}
-
-// NewSchemaChangerModeFromString converts a string into a NewSchemaChangerMode
-func NewSchemaChangerModeFromString(val string) (_ NewSchemaChangerMode, ok bool) {
-	switch strings.ToUpper(val) {
-	case "OFF":
-		return UseNewSchemaChangerOff, true
-	case "ON":
-		return UseNewSchemaChangerOn, true
-	case "UNSAFE_ALWAYS":
-		return UseNewSchemaChangerUnsafeAlways, true
 	default:
 		return 0, false
 	}

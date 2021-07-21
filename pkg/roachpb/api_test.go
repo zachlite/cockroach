@@ -14,9 +14,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
 )
 
@@ -109,8 +106,7 @@ func TestCombineResponses(t *testing.T) {
 func TestCombinable(t *testing.T) {
 	t.Run("Get", func(t *testing.T) {
 		// Test that GetResponse doesn't have anything to do with combinable.
-		getResp := GetResponse{}
-		if _, ok := interface{}(&getResp).(combinable); ok {
+		if _, ok := interface{}(&GetResponse{}).(combinable); ok {
 			t.Fatalf("GetResponse implements combinable, so presumably all Response types will")
 		}
 	})
@@ -189,11 +185,8 @@ func TestCombinable(t *testing.T) {
 		v1 := &AdminVerifyProtectedTimestampResponse{
 			ResponseHeader: ResponseHeader{},
 			Verified:       false,
-			DeprecatedFailedRanges: []RangeDescriptor{
+			FailedRanges: []RangeDescriptor{
 				{RangeID: 1},
-			},
-			VerificationFailedRanges: []AdminVerifyProtectedTimestampResponse_FailedRange{
-				{RangeID: 1, StartKey: RKeyMin, EndKey: RKeyMax, Reason: "foo"},
 			},
 		}
 
@@ -201,31 +194,24 @@ func TestCombinable(t *testing.T) {
 			t.Fatal("AdminVerifyProtectedTimestampResponse unexpectedly does not implement combinable")
 		}
 		v2 := &AdminVerifyProtectedTimestampResponse{
-			ResponseHeader:         ResponseHeader{},
-			Verified:               true,
-			DeprecatedFailedRanges: nil,
+			ResponseHeader: ResponseHeader{},
+			Verified:       true,
+			FailedRanges:   nil,
 		}
 		v3 := &AdminVerifyProtectedTimestampResponse{
 			ResponseHeader: ResponseHeader{},
 			Verified:       false,
-			DeprecatedFailedRanges: []RangeDescriptor{
+			FailedRanges: []RangeDescriptor{
 				{RangeID: 2},
-			},
-			VerificationFailedRanges: []AdminVerifyProtectedTimestampResponse_FailedRange{
-				{RangeID: 2, StartKey: RKeyMin, EndKey: RKeyMax, Reason: "bar"},
 			},
 		}
 		require.NoError(t, v1.combine(v2))
 		require.NoError(t, v1.combine(v3))
 		require.EqualValues(t, &AdminVerifyProtectedTimestampResponse{
 			Verified: false,
-			DeprecatedFailedRanges: []RangeDescriptor{
+			FailedRanges: []RangeDescriptor{
 				{RangeID: 1},
 				{RangeID: 2},
-			},
-			VerificationFailedRanges: []AdminVerifyProtectedTimestampResponse_FailedRange{
-				{RangeID: 1, StartKey: RKeyMin, EndKey: RKeyMax, Reason: "foo"},
-				{RangeID: 2, StartKey: RKeyMin, EndKey: RKeyMax, Reason: "bar"},
 			},
 		}, v1)
 
@@ -238,7 +224,7 @@ func TestMustSetInner(t *testing.T) {
 	req := RequestUnion{}
 	res := ResponseUnion{}
 
-	// GetRequest is checked first in the generated code for MustSetInner.
+	// GetRequest is checked first in the generated code for SetInner.
 	req.MustSetInner(&GetRequest{})
 	res.MustSetInner(&GetResponse{})
 	req.MustSetInner(&EndTxnRequest{})
@@ -250,13 +236,4 @@ func TestMustSetInner(t *testing.T) {
 	if _, isET := res.GetInner().(*EndTxnResponse); !isET {
 		t.Fatalf("unexpected response union: %+v", res)
 	}
-}
-
-func TestContentionEvent_SafeFormat(t *testing.T) {
-	ce := &ContentionEvent{
-		Key:     Key("foo"),
-		TxnMeta: enginepb.TxnMeta{ID: uuid.FromStringOrNil("51b5ef6a-f18f-4e85-bc3f-c44e33f2bb27")},
-	}
-	const exp = redact.RedactableString(`conflicted with ‹51b5ef6a-f18f-4e85-bc3f-c44e33f2bb27› on ‹"foo"› for 0.000s`)
-	require.Equal(t, exp, redact.Sprint(ce))
 }

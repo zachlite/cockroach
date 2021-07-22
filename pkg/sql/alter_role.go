@@ -16,14 +16,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/authentication"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -89,12 +87,12 @@ func (p *planner) AlterRoleNode(
 func (p *planner) checkPasswordOptionConstraints(
 	ctx context.Context, roleOptions roleoption.List, newUser bool,
 ) error {
-	if !p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.CreateLoginPrivilege) {
+	if !p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.VersionCreateLoginPrivilege) {
 		// TODO(knz): Remove this condition in 21.1.
 		if roleOptions.Contains(roleoption.CREATELOGIN) || roleOptions.Contains(roleoption.NOCREATELOGIN) {
 			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 				`granting CREATELOGIN or NOCREATELOGIN requires all nodes to be upgraded to %s`,
-				clusterversion.ByKey(clusterversion.CreateLoginPrivilege))
+				clusterversion.VersionByKey(clusterversion.VersionCreateLoginPrivilege))
 		}
 	}
 
@@ -148,8 +146,8 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", authentication.UsersTableName),
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", userTableName),
 		normalizedUsername,
 	)
 	if err != nil {
@@ -208,12 +206,6 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		if err != nil {
 			return err
 		}
-		if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-			// Bump user table versions to force a refresh of AuthInfo cache.
-			if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-				return err
-			}
-		}
 	}
 
 	// Get a map of statements to execute for role options and their values.
@@ -244,7 +236,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 			params.ctx,
 			opName,
 			params.p.txn,
-			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			stmt,
 			qargs...,
 		)
@@ -253,24 +245,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		}
 	}
 
-	optStrs := make([]string, len(n.roleOptions))
-	for i := range optStrs {
-		optStrs[i] = n.roleOptions[i].String()
-	}
-
-	if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		// Bump role_options table versions to force a refresh of AuthInfo cache.
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
-	}
-
-	return params.p.logEvent(params.ctx,
-		0, /* no target */
-		&eventpb.AlterRole{
-			RoleName: normalizedUsername.Normalized(),
-			Options:  optStrs,
-		})
+	return nil
 }
 
 func (*alterRoleNode) Next(runParams) (bool, error) { return false, nil }

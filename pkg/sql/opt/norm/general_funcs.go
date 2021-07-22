@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/arith"
@@ -32,12 +33,13 @@ type CustomFuncs struct {
 
 // Init initializes a new CustomFuncs with the given factory.
 func (c *CustomFuncs) Init(f *Factory) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*c = CustomFuncs{
-		f:   f,
-		mem: f.Memo(),
-	}
+	c.f = f
+	c.mem = f.Memo()
+}
+
+// Succeeded returns true if a result expression is not nil.
+func (c *CustomFuncs) Succeeded(result opt.Expr) bool {
+	return result != nil
 }
 
 // ----------------------------------------------------------------------
@@ -266,26 +268,6 @@ func (c *CustomFuncs) RedundantCols(input memo.RelExpr, cols opt.ColSet) opt.Col
 		return opt.ColSet{}
 	}
 	return cols.Difference(reducedCols)
-}
-
-// DuplicateColumnIDs duplicates a table and set of columns IDs in the metadata.
-// It returns the new table's ID and the new set of columns IDs.
-func (c *CustomFuncs) DuplicateColumnIDs(
-	table opt.TableID, cols opt.ColSet,
-) (opt.TableID, opt.ColSet) {
-	md := c.mem.Metadata()
-	tabMeta := md.TableMeta(table)
-	newTableID := md.DuplicateTable(table, c.RemapCols)
-
-	// Build a new set of column IDs from the new TableMeta.
-	var newColIDs opt.ColSet
-	for col, ok := cols.Next(0); ok; col, ok = cols.Next(col + 1) {
-		ord := tabMeta.MetaID.ColumnOrdinal(col)
-		newColID := newTableID.ColumnID(ord)
-		newColIDs.Add(newColID)
-	}
-
-	return newTableID, newColIDs
 }
 
 // RemapCols remaps columns IDs in the input ScalarExpr by replacing occurrences
@@ -566,13 +548,15 @@ func (c *CustomFuncs) sharedProps(e opt.Expr) *props.Shared {
 // OrderingCanProjectCols returns true if the given OrderingChoice can be
 // expressed using only the given columns. Or in other words, at least one
 // column from every ordering group is a member of the given ColSet.
-func (c *CustomFuncs) OrderingCanProjectCols(ordering props.OrderingChoice, cols opt.ColSet) bool {
+func (c *CustomFuncs) OrderingCanProjectCols(
+	ordering physical.OrderingChoice, cols opt.ColSet,
+) bool {
 	return ordering.CanProjectCols(cols)
 }
 
 // OrderingCols returns all non-optional columns that are part of the given
 // OrderingChoice.
-func (c *CustomFuncs) OrderingCols(ordering props.OrderingChoice) opt.ColSet {
+func (c *CustomFuncs) OrderingCols(ordering physical.OrderingChoice) opt.ColSet {
 	return ordering.ColSet()
 }
 
@@ -580,8 +564,8 @@ func (c *CustomFuncs) OrderingCols(ordering props.OrderingChoice) opt.ColSet {
 // not part of the needed column set. Should only be called if
 // OrderingCanProjectCols is true.
 func (c *CustomFuncs) PruneOrdering(
-	ordering props.OrderingChoice, needed opt.ColSet,
-) props.OrderingChoice {
+	ordering physical.OrderingChoice, needed opt.ColSet,
+) physical.OrderingChoice {
 	if ordering.SubsetOfCols(needed) {
 		return ordering
 	}
@@ -592,13 +576,13 @@ func (c *CustomFuncs) PruneOrdering(
 
 // EmptyOrdering returns a pseudo-choice that does not require any
 // ordering.
-func (c *CustomFuncs) EmptyOrdering() props.OrderingChoice {
-	return props.OrderingChoice{}
+func (c *CustomFuncs) EmptyOrdering() physical.OrderingChoice {
+	return physical.OrderingChoice{}
 }
 
 // OrderingIntersects returns true if <ordering1> and <ordering2> have an
 // intersection. See OrderingChoice.Intersection for more information.
-func (c *CustomFuncs) OrderingIntersects(ordering1, ordering2 props.OrderingChoice) bool {
+func (c *CustomFuncs) OrderingIntersects(ordering1, ordering2 physical.OrderingChoice) bool {
 	return ordering1.Intersects(&ordering2)
 }
 
@@ -606,23 +590,23 @@ func (c *CustomFuncs) OrderingIntersects(ordering1, ordering2 props.OrderingChoi
 // called if it is known that an intersection exists.
 // See OrderingChoice.Intersection for more information.
 func (c *CustomFuncs) OrderingIntersection(
-	ordering1, ordering2 props.OrderingChoice,
-) props.OrderingChoice {
+	ordering1, ordering2 physical.OrderingChoice,
+) physical.OrderingChoice {
 	return ordering1.Intersection(&ordering2)
 }
 
 // OrdinalityOrdering returns an ordinality operator's ordering choice.
-func (c *CustomFuncs) OrdinalityOrdering(private *memo.OrdinalityPrivate) props.OrderingChoice {
+func (c *CustomFuncs) OrdinalityOrdering(private *memo.OrdinalityPrivate) physical.OrderingChoice {
 	return private.Ordering
 }
 
 // IsSameOrdering evaluates whether the two orderings are equal.
-func (c *CustomFuncs) IsSameOrdering(first, other props.OrderingChoice) bool {
+func (c *CustomFuncs) IsSameOrdering(first, other physical.OrderingChoice) bool {
 	return first.Equals(&other)
 }
 
 // OrderingImplies returns true if the first OrderingChoice implies the second.
-func (c *CustomFuncs) OrderingImplies(first, second props.OrderingChoice) bool {
+func (c *CustomFuncs) OrderingImplies(first, second physical.OrderingChoice) bool {
 	return first.Implies(&second)
 }
 
@@ -651,11 +635,6 @@ func (c *CustomFuncs) IsFilterFalse(filters memo.FiltersExpr) bool {
 	return filters.IsFalse()
 }
 
-// IsFilterEmpty returns true if filters is empty.
-func (c *CustomFuncs) IsFilterEmpty(filters memo.FiltersExpr) bool {
-	return len(filters) == 0
-}
-
 // IsContradiction returns true if the given filter item contains a
 // contradiction constraint.
 func (c *CustomFuncs) IsContradiction(item *memo.FiltersItem) bool {
@@ -671,13 +650,6 @@ func (c *CustomFuncs) ConcatFilters(left, right memo.FiltersExpr) memo.FiltersEx
 	copy(newFilters, left)
 	copy(newFilters[len(left):], right)
 	return newFilters
-}
-
-// DiffFilters creates new Filters that contains all conditions in left that do
-// not exist in right. If right is empty, the original left filters are
-// returned.
-func (c *CustomFuncs) DiffFilters(left, right memo.FiltersExpr) memo.FiltersExpr {
-	return left.Difference(right)
 }
 
 // RemoveFiltersItem returns a new list that is a copy of the given list, except
@@ -856,7 +828,7 @@ func (c *CustomFuncs) IsUnorderedGrouping(grouping *memo.GroupingPrivate) bool {
 // columns and OrderingChoice. ErrorOnDup will be empty and NullsAreDistinct
 // will be false.
 func (c *CustomFuncs) MakeGrouping(
-	groupingCols opt.ColSet, ordering props.OrderingChoice,
+	groupingCols opt.ColSet, ordering physical.OrderingChoice,
 ) *memo.GroupingPrivate {
 	return &memo.GroupingPrivate{GroupingCols: groupingCols, Ordering: ordering}
 }
@@ -865,7 +837,7 @@ func (c *CustomFuncs) MakeGrouping(
 // grouping columns, OrderingChoice, and ErrorOnDup text. NullsAreDistinct will
 // be false.
 func (c *CustomFuncs) MakeErrorOnDupGrouping(
-	groupingCols opt.ColSet, ordering props.OrderingChoice, errorText string,
+	groupingCols opt.ColSet, ordering physical.OrderingChoice, errorText string,
 ) *memo.GroupingPrivate {
 	return &memo.GroupingPrivate{
 		GroupingCols: groupingCols, Ordering: ordering, ErrorOnDup: errorText,
@@ -887,7 +859,9 @@ func (c *CustomFuncs) ErrorOnDup(private *memo.GroupingPrivate) string {
 
 // ExtractGroupingOrdering returns the ordering associated with the input
 // GroupingPrivate.
-func (c *CustomFuncs) ExtractGroupingOrdering(private *memo.GroupingPrivate) props.OrderingChoice {
+func (c *CustomFuncs) ExtractGroupingOrdering(
+	private *memo.GroupingPrivate,
+) physical.OrderingChoice {
 	return private.Ordering
 }
 
@@ -1060,11 +1034,23 @@ func (c *CustomFuncs) DatumsEqual(first, second tree.Datum) bool {
 // ScanPrivate, so the new ScanPrivate will not have constraints even if the old
 // one did.
 func (c *CustomFuncs) DuplicateScanPrivate(sp *memo.ScanPrivate) *memo.ScanPrivate {
-	table, cols := c.DuplicateColumnIDs(sp.Table, sp.Cols)
+	md := c.mem.Metadata()
+	tabMeta := md.TableMeta(sp.Table)
+	newTableID := md.DuplicateTable(sp.Table, c.RemapCols)
+
+	// Build a new set of column IDs from the new TableMeta.
+	var newColIDs opt.ColSet
+	cols := sp.Cols
+	for col, ok := cols.Next(0); ok; col, ok = cols.Next(col + 1) {
+		ord := tabMeta.MetaID.ColumnOrdinal(col)
+		newColID := newTableID.ColumnID(ord)
+		newColIDs.Add(newColID)
+	}
+
 	return &memo.ScanPrivate{
-		Table:   table,
+		Table:   newTableID,
 		Index:   sp.Index,
-		Cols:    cols,
+		Cols:    newColIDs,
 		Flags:   sp.Flags,
 		Locking: sp.Locking,
 	}

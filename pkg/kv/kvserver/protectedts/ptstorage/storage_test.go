@@ -38,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -502,7 +501,7 @@ func TestCorruptData(t *testing.T) {
 		ie := tc.Server(0).InternalExecutor().(sqlutil.InternalExecutor)
 		affected, err := ie.ExecEx(
 			ctx, "corrupt-data", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
+			sessiondata.InternalExecutorOverride{User: security.NodeUser},
 			"UPDATE system.protected_ts_records SET spans = $1 WHERE id = $2",
 			[]byte("junk"), rec.ID.String())
 		require.NoError(t, err)
@@ -526,7 +525,7 @@ func TestCorruptData(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
 		for _, e := range entries {
-			require.Equal(t, severity.ERROR, e.Severity)
+			require.Equal(t, log.Severity_ERROR, e.Severity)
 		}
 	})
 	t.Run("corrupt hlc timestamp", func(t *testing.T) {
@@ -552,7 +551,7 @@ func TestCorruptData(t *testing.T) {
 		ie := tc.Server(0).InternalExecutor().(sqlutil.InternalExecutor)
 		affected, err := ie.ExecEx(
 			ctx, "corrupt-data", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
+			sessiondata.InternalExecutorOverride{User: security.NodeUser},
 			"UPDATE system.protected_ts_records SET ts = $1 WHERE id = $2",
 			d.String(), rec.ID.String())
 		require.NoError(t, err)
@@ -578,7 +577,7 @@ func TestCorruptData(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
 		for _, e := range entries {
-			require.Equal(t, severity.ERROR, e.Severity)
+			require.Equal(t, log.Severity_ERROR, e.Severity)
 		}
 	})
 }
@@ -663,12 +662,34 @@ func (ie *wrappedInternalExecutor) ExecEx(
 	stmt string,
 	qargs ...interface{},
 ) (int, error) {
+	panic("unimplemented")
+}
+
+func (ie *wrappedInternalExecutor) QueryEx(
+	ctx context.Context,
+	opName string,
+	txn *kv.Txn,
+	session sessiondata.InternalExecutorOverride,
+	stmt string,
+	qargs ...interface{},
+) ([]tree.Datums, error) {
 	if f := ie.getErrFunc(); f != nil {
 		if err := f(stmt); err != nil {
-			return 0, err
+			return nil, err
 		}
 	}
-	return ie.wrapped.ExecEx(ctx, opName, txn, o, stmt, qargs...)
+	return ie.wrapped.QueryEx(ctx, opName, txn, session, stmt, qargs...)
+}
+
+func (ie *wrappedInternalExecutor) QueryWithCols(
+	ctx context.Context,
+	opName string,
+	txn *kv.Txn,
+	o sessiondata.InternalExecutorOverride,
+	statement string,
+	qargs ...interface{},
+) ([]tree.Datums, colinfo.ResultColumns, error) {
+	panic("unimplemented")
 }
 
 func (ie *wrappedInternalExecutor) QueryRowEx(
@@ -687,60 +708,16 @@ func (ie *wrappedInternalExecutor) QueryRowEx(
 	return ie.wrapped.QueryRowEx(ctx, opName, txn, session, stmt, qargs...)
 }
 
+func (ie *wrappedInternalExecutor) Query(
+	ctx context.Context, opName string, txn *kv.Txn, statement string, params ...interface{},
+) ([]tree.Datums, error) {
+	panic("not implemented")
+}
+
 func (ie *wrappedInternalExecutor) QueryRow(
 	ctx context.Context, opName string, txn *kv.Txn, statement string, qargs ...interface{},
 ) (tree.Datums, error) {
 	panic("not implemented")
-}
-
-func (ie *wrappedInternalExecutor) QueryRowExWithCols(
-	ctx context.Context,
-	opName string,
-	txn *kv.Txn,
-	session sessiondata.InternalExecutorOverride,
-	stmt string,
-	qargs ...interface{},
-) (tree.Datums, colinfo.ResultColumns, error) {
-	panic("not implemented")
-}
-
-func (ie *wrappedInternalExecutor) QueryBuffered(
-	ctx context.Context, opName string, txn *kv.Txn, stmt string, qargs ...interface{},
-) ([]tree.Datums, error) {
-	panic("not implemented")
-}
-
-func (ie *wrappedInternalExecutor) QueryBufferedEx(
-	ctx context.Context,
-	opName string,
-	txn *kv.Txn,
-	session sessiondata.InternalExecutorOverride,
-	stmt string,
-	qargs ...interface{},
-) ([]tree.Datums, error) {
-	panic("not implemented")
-}
-
-func (ie *wrappedInternalExecutor) QueryIterator(
-	ctx context.Context, opName string, txn *kv.Txn, stmt string, qargs ...interface{},
-) (sqlutil.InternalRows, error) {
-	panic("not implemented")
-}
-
-func (ie *wrappedInternalExecutor) QueryIteratorEx(
-	ctx context.Context,
-	opName string,
-	txn *kv.Txn,
-	session sessiondata.InternalExecutorOverride,
-	stmt string,
-	qargs ...interface{},
-) (sqlutil.InternalRows, error) {
-	if f := ie.getErrFunc(); f != nil {
-		if err := f(stmt); err != nil {
-			return nil, err
-		}
-	}
-	return ie.wrapped.QueryIteratorEx(ctx, opName, txn, session, stmt, qargs...)
 }
 
 func (ie *wrappedInternalExecutor) getErrFunc() func(statement string) error {

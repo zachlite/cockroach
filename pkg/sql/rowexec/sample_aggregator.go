@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // A sample aggregator processor aggregates results from multiple sampler
@@ -85,6 +86,7 @@ func newSampleAggregator(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	spec *execinfrapb.SampleAggregatorSpec,
+	minSampleSize int,
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
@@ -108,7 +110,7 @@ func newSampleAggregator(
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will disable histogram collection if this limit is not
 	// enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "sample-aggregator-mem")
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "sample-aggregator-mem")
 	rankCol := len(input.OutputTypes()) - 7
 	s := &sampleAggregator{
 		spec:         spec,
@@ -144,8 +146,7 @@ func newSampleAggregator(
 	}
 
 	s.sr.Init(
-		int(spec.SampleSize), int(spec.MinSampleSize), input.OutputTypes()[:rankCol], &s.memAcc,
-		sampleCols,
+		int(spec.SampleSize), minSampleSize, input.OutputTypes()[:rankCol], &s.memAcc, sampleCols,
 	)
 	for i := range spec.InvertedSketches {
 		var sr stats.SampleReservoir
@@ -153,7 +154,7 @@ func newSampleAggregator(
 		// sent as a single DBytes column.
 		var srCols util.FastIntSet
 		srCols.Add(0)
-		sr.Init(int(spec.SampleSize), int(spec.MinSampleSize), bytesRowType, &s.memAcc, srCols)
+		sr.Init(int(spec.SampleSize), minSampleSize, bytesRowType, &s.memAcc, srCols)
 		col := spec.InvertedSketches[i].Columns[0]
 		s.invSr[col] = &sr
 		s.invSketch[col] = &sketchInfo{
@@ -167,7 +168,7 @@ func newSampleAggregator(
 	if err := s.Init(
 		nil, post, input.OutputTypes(), flowCtx, processorID, output, memMonitor,
 		execinfra.ProcStateOpts{
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				s.close()
 				return nil
 			},
@@ -179,21 +180,21 @@ func newSampleAggregator(
 }
 
 func (s *sampleAggregator) pushTrailingMeta(ctx context.Context) {
-	execinfra.SendTraceData(ctx, s.Output)
+	execinfra.SendTraceData(ctx, s.Out.Output())
 }
 
 // Run is part of the Processor interface.
 func (s *sampleAggregator) Run(ctx context.Context) {
-	ctx = s.StartInternal(ctx, sampleAggregatorProcName)
 	s.input.Start(ctx)
+	s.StartInternal(ctx, sampleAggregatorProcName)
 
-	earlyExit, err := s.mainLoop(ctx)
+	earlyExit, err := s.mainLoop(s.Ctx)
 	if err != nil {
-		execinfra.DrainAndClose(ctx, s.Output, err, s.pushTrailingMeta, s.input)
+		execinfra.DrainAndClose(s.Ctx, s.Out.Output(), err, s.pushTrailingMeta, s.input)
 	} else if !earlyExit {
-		s.pushTrailingMeta(ctx)
+		s.pushTrailingMeta(s.Ctx)
 		s.input.ConsumerClosed()
-		s.Output.ProducerDone()
+		s.Out.Close()
 	}
 	s.MoveToDraining(nil /* err */)
 }
@@ -226,10 +227,10 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 		// If it changed by less than 1%, just check for cancellation (which is more
 		// efficient).
 		if fractionCompleted < 1.0 && fractionCompleted < lastReportedFractionCompleted+0.01 {
-			return job.CheckStatus(ctx, nil /* txn */)
+			return job.CheckStatus(ctx)
 		}
 		lastReportedFractionCompleted = fractionCompleted
-		return job.FractionProgressed(ctx, nil /* txn */, jobs.FractionUpdater(fractionCompleted))
+		return job.FractionProgressed(ctx, jobs.FractionUpdater(fractionCompleted))
 	}
 
 	var rowsProcessed uint64
@@ -267,7 +268,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 						sr.Disable()
 					}
 				}
-			} else if !emitHelper(ctx, s.Output, &s.OutputHelper, nil /* row */, meta, s.pushTrailingMeta, s.input) {
+			} else if !emitHelper(ctx, &s.Out, nil /* row */, meta, s.pushTrailingMeta, s.input) {
 				// No cleanup required; emitHelper() took care of it.
 				return true, nil
 			}
@@ -412,10 +413,10 @@ func (s *sampleAggregator) sampleRow(
 func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// Turn off tracing so these writes don't affect the results of EXPLAIN
 	// ANALYZE.
-	if span := tracing.SpanFromContext(ctx); span != nil && span.IsVerbose() {
+	if span := opentracing.SpanFromContext(ctx); span != nil && tracing.IsRecording(span) {
 		// TODO(rytaft): this also hides writes in this function from SQL session
 		// traces.
-		ctx = tracing.ContextWithSpan(ctx, nil)
+		ctx = opentracing.ContextWithSpan(ctx, nil)
 	}
 
 	// TODO(andrei): This method would benefit from a session interface on the

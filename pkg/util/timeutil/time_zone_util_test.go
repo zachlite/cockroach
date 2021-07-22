@@ -20,7 +20,7 @@ import (
 )
 
 func TestTimeZoneStringToLocation(t *testing.T) {
-	aus, err := LoadLocation("Australia/Sydney")
+	aus, err := time.LoadLocation("Australia/Sydney")
 	require.NoError(t, err)
 
 	testCases := []struct {

@@ -100,17 +100,9 @@ func TestRandStep(t *testing.T) {
 			switch o := op.GetValue().(type) {
 			case *GetOperation:
 				if _, ok := keys[string(o.Key)]; ok {
-					if o.ForUpdate {
-						client.GetExistingForUpdate++
-					} else {
-						client.GetExisting++
-					}
+					client.GetExisting++
 				} else {
-					if o.ForUpdate {
-						client.GetMissingForUpdate++
-					} else {
-						client.GetMissing++
-					}
+					client.GetMissing++
 				}
 			case *PutOperation:
 				if _, ok := keys[string(o.Key)]; ok {
@@ -119,11 +111,7 @@ func TestRandStep(t *testing.T) {
 					client.PutMissing++
 				}
 			case *ScanOperation:
-				if o.Reverse && o.ForUpdate {
-					client.ReverseScanForUpdate++
-				} else if o.Reverse {
-					client.ReverseScan++
-				} else if o.ForUpdate {
+				if o.ForUpdate {
 					client.ScanForUpdate++
 				} else {
 					client.Scan++
@@ -168,9 +156,9 @@ func TestRandStep(t *testing.T) {
 			var adds, removes int
 			for _, change := range o.Changes {
 				switch change.ChangeType {
-				case roachpb.ADD_VOTER:
+				case roachpb.ADD_REPLICA:
 					adds++
-				case roachpb.REMOVE_VOTER:
+				case roachpb.REMOVE_REPLICA:
 					removes++
 				}
 			}
@@ -180,13 +168,6 @@ func TestRandStep(t *testing.T) {
 				counts.ChangeReplicas.RemoveReplica++
 			} else if adds == 1 && removes == 1 {
 				counts.ChangeReplicas.AtomicSwapReplica++
-			}
-		case *TransferLeaseOperation:
-			counts.ChangeLease.TransferLease++
-		case *ChangeZoneOperation:
-			switch o.Type {
-			case ChangeZoneType_ToggleGlobalReads:
-				counts.ChangeZone.ToggleGlobalReads++
 			}
 		}
 		updateKeys(step.Op)

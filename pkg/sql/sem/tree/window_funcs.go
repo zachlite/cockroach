@@ -207,9 +207,7 @@ func (wfr *WindowFrameRun) FrameStartIdx(ctx context.Context, evalCtx *EvalConte
 		case OffsetFollowing:
 			offset := MustBeDInt(wfr.StartBoundOffset)
 			idx := wfr.RowIdx + int(offset)
-			if idx >= wfr.PartitionSize() || int(offset) >= wfr.PartitionSize() {
-				// The second part of the condition protects us from an integer
-				// overflow when offset is very large.
+			if idx >= wfr.PartitionSize() {
 				idx = wfr.unboundedFollowing()
 			}
 			return idx, nil
@@ -383,9 +381,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *EvalContext
 		case OffsetFollowing:
 			offset := MustBeDInt(wfr.EndBoundOffset)
 			idx := wfr.RowIdx + int(offset) + 1
-			if idx >= wfr.PartitionSize() || int(offset) >= wfr.PartitionSize() {
-				// The second part of the condition protects us from an integer
-				// overflow when offset is very large.
+			if idx >= wfr.PartitionSize() {
 				idx = wfr.unboundedFollowing()
 			}
 			return idx, nil
@@ -406,7 +402,7 @@ func (wfr *WindowFrameRun) FrameEndIdx(ctx context.Context, evalCtx *EvalContext
 		case OffsetPreceding:
 			offset := MustBeDInt(wfr.EndBoundOffset)
 			peerGroupNum := wfr.CurRowPeerGroupNum - int(offset)
-			if peerGroupNum < wfr.PeerHelper.headPeerGroupNum {
+			if peerGroupNum < 0 {
 				// EndBound's peer group is "outside" of the partition.
 				return 0, nil
 			}
@@ -555,7 +551,7 @@ func (wfr *WindowFrameRun) FullPartitionIsInWindow() bool {
 	precedingConfirmed := wfr.Frame.Bounds.StartBound.BoundType == UnboundedPreceding
 	followingConfirmed := wfr.Frame.Bounds.EndBound.BoundType == UnboundedFollowing
 	if wfr.Frame.Mode == ROWS || wfr.Frame.Mode == GROUPS {
-		// Every peer group in GROUPS mode always contains at least one row, so
+		// Every peer group in GROUPS modealways contains at least one row, so
 		// treating GROUPS as ROWS here is a subset of the cases when we should
 		// return true.
 		if wfr.Frame.Bounds.StartBound.BoundType == OffsetPreceding {

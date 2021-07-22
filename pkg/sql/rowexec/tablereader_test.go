@@ -16,13 +16,11 @@ import (
 	"regexp"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -32,13 +30,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/gogo/protobuf/types"
+	"github.com/opentracing/opentracing-go"
 )
 
 func TestTableReader(t *testing.T) {
@@ -66,14 +64,14 @@ func TestTableReader(t *testing.T) {
 
 	sqlutils.CreateTable(t, sqlDB, "t",
 		"a INT, b INT, sum INT, s STRING, PRIMARY KEY (a,b), INDEX bs (b,s)",
-		19,
+		99,
 		sqlutils.ToRowFn(aFn, bFn, sumFn, sqlutils.RowEnglishFn))
 
 	td := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 
 	makeIndexSpan := func(start, end int) execinfrapb.TableReaderSpan {
 		var span roachpb.Span
-		prefix := roachpb.Key(rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, td, td.PublicNonPrimaryIndexes()[0].GetID()))
+		prefix := roachpb.Key(rowenc.MakeIndexKeyPrefix(keys.SystemSQLCodec, td, td.Indexes[0].ID))
 		span.Key = append(prefix, encoding.EncodeVarintAscending(nil, int64(start))...)
 		span.EndKey = append(span.EndKey, prefix...)
 		span.EndKey = append(span.EndKey, encoding.EncodeVarintAscending(nil, int64(end))...)
@@ -90,21 +88,23 @@ func TestTableReader(t *testing.T) {
 				Spans: []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 			},
 			post: execinfrapb.PostProcessSpec{
+				Filter:        execinfrapb.Expression{Expr: "@3 < 5 AND @2 != 3"}, // sum < 5 && b != 3
 				Projection:    true,
 				OutputColumns: []uint32{0, 1},
 			},
-			expected: "[[0 1] [0 2] [0 3] [0 4] [0 5] [0 6] [0 7] [0 8] [0 9] [1 0] [1 1] [1 2] [1 3] [1 4] [1 5] [1 6] [1 7] [1 8] [1 9]]",
+			expected: "[[0 1] [0 2] [0 4] [1 0] [1 1] [1 2] [2 0] [2 1] [2 2] [3 0] [3 1] [4 0]]",
 		},
 		{
 			spec: execinfrapb.TableReaderSpec{
 				Spans: []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 			},
 			post: execinfrapb.PostProcessSpec{
+				Filter:        execinfrapb.Expression{Expr: "@3 < 5 AND @2 != 3"},
 				Projection:    true,
 				OutputColumns: []uint32{3}, // s
 				Limit:         4,
 			},
-			expected: "[['one'] ['two'] ['three'] ['four']]",
+			expected: "[['one'] ['two'] ['four'] ['one-zero']]",
 		},
 		{
 			spec: execinfrapb.TableReaderSpec{
@@ -114,10 +114,11 @@ func TestTableReader(t *testing.T) {
 				LimitHint: 1,
 			},
 			post: execinfrapb.PostProcessSpec{
+				Filter:        execinfrapb.Expression{Expr: "@1 < 3"}, // sum < 8
 				Projection:    true,
 				OutputColumns: []uint32{0, 1},
 			},
-			expected: "[[1 5] [0 5] [1 4] [0 4]]",
+			expected: "[[2 5] [1 5] [0 5] [2 4] [1 4] [0 4]]",
 		},
 	}
 
@@ -133,7 +134,7 @@ func TestTableReader(t *testing.T) {
 					EvalCtx: &evalCtx,
 					Cfg: &execinfra.ServerConfig{
 						Settings:   s.ClusterSettings(),
-						RangeCache: rangecache.NewRangeCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
+						RangeCache: kvcoord.NewRangeDescriptorCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
 					},
 					Txn:    kv.NewTxn(ctx, s.DB(), s.NodeID()),
 					NodeID: evalCtx.NodeID,
@@ -314,9 +315,9 @@ func TestTableReaderDrain(t *testing.T) {
 
 	td := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 
-	// Run the flow in a verbose trace so that we can test for tracing info.
+	// Run the flow in a snowball trace so that we can test for tracing info.
 	tracer := tracing.NewTracer()
-	ctx, sp := tracing.StartVerboseTrace(context.Background(), tracer, "test flow ctx")
+	ctx, sp := tracing.StartSnowballTrace(context.Background(), tracer, "test flow ctx")
 	defer sp.Finish()
 	st := s.ClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
@@ -352,8 +353,6 @@ func TestTableReaderDrain(t *testing.T) {
 // we properly set the limit on the underlying Fetcher/KVFetcher).
 func TestLimitScans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
 	ctx := context.Background()
 
 	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{
@@ -378,7 +377,7 @@ func TestLimitScans(t *testing.T) {
 		EvalCtx: &evalCtx,
 		Cfg: &execinfra.ServerConfig{
 			Settings:   s.ClusterSettings(),
-			RangeCache: rangecache.NewRangeCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
+			RangeCache: kvcoord.NewRangeDescriptorCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
 		},
 		Txn:    kv.NewTxn(ctx, kvDB, s.NodeID()),
 		NodeID: evalCtx.NodeID,
@@ -393,11 +392,10 @@ func TestLimitScans(t *testing.T) {
 
 	// Now we're going to run the tableReader and trace it.
 	tracer := tracing.NewTracer()
-	sp := tracer.StartSpan("root", tracing.WithForceRealSpan())
-	sp.SetVerbose(true)
-	ctx = tracing.ContextWithSpan(ctx, sp)
+	sp := tracer.StartSpan("root", tracing.Recordable)
+	tracing.StartRecording(sp, tracing.SnowballRecording)
+	ctx = opentracing.ContextWithSpan(ctx, sp)
 	flowCtx.EvalCtx.Context = ctx
-	flowCtx.CollectStats = true
 
 	tr, err := newTableReader(&flowCtx, 0 /* processorID */, &spec, &post, nil /* output */)
 	if err != nil {
@@ -414,7 +412,9 @@ func TestLimitScans(t *testing.T) {
 
 		// Simulate what the DistSQLReceiver does and ingest the trace.
 		if meta != nil && len(meta.TraceData) > 0 {
-			sp.ImportRemoteSpans(meta.TraceData)
+			if err := tracing.ImportRemoteSpans(sp, meta.TraceData); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		if row == nil && meta == nil {
@@ -425,31 +425,22 @@ func TestLimitScans(t *testing.T) {
 		t.Fatalf("expected %d rows, got: %d", limit, rows)
 	}
 
-	skip.UnderMetamorphic(t, "the rest of this test isn't metamorphic: its output "+
-		"depends on the batch size, which varies the number of spans searched.")
-
 	// We're now going to count how many distinct scans we've done. This regex is
 	// specific so that we don't count range resolving requests, and we dedupe
 	// scans from the same key as the DistSender retries scans when it detects
 	// splits.
-	re := regexp.MustCompile(fmt.Sprintf(`querying next range at /Table/%d/1(\S.*)?`, tableDesc.GetID()))
-	spans := sp.GetRecording()
+	re := regexp.MustCompile(fmt.Sprintf(`querying next range at /Table/%d/1(\S.*)?`, tableDesc.ID))
+	spans := tracing.GetRecording(sp)
 	ranges := make(map[string]struct{})
 	for _, span := range spans {
 		if span.Operation == tableReaderProcName {
 			// Verify that stat collection lines up with results.
-			stats := execinfrapb.ComponentStats{}
-			span.Structured(func(item *types.Any, _ time.Time) {
-				if !types.Is(item, &stats) {
-					return
-				}
-				if err := types.UnmarshalAny(item, &stats); err != nil {
-					t.Fatal(err)
-				}
-			})
-
-			if stats.KV.TuplesRead.Value() != limit {
-				t.Fatalf("read %d rows, but stats counted: %s", limit, stats.KV.TuplesRead)
+			trs := TableReaderStats{}
+			if err := types.UnmarshalAny(span.Stats, &trs); err != nil {
+				t.Fatal(err)
+			}
+			if trs.InputStats.NumRows != limit {
+				t.Fatalf("read %d rows, but stats only counted: %d", limit, trs.InputStats.NumRows)
 			}
 		}
 		for _, l := range span.Logs {
@@ -493,7 +484,7 @@ func BenchmarkTableReader(b *testing.B) {
 			EvalCtx: &evalCtx,
 			Cfg: &execinfra.ServerConfig{
 				Settings:   s.ClusterSettings(),
-				RangeCache: rangecache.NewRangeCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
+				RangeCache: kvcoord.NewRangeDescriptorCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper()),
 			},
 			Txn:    kv.NewTxn(ctx, s.DB(), s.NodeID()),
 			NodeID: evalCtx.NodeID,

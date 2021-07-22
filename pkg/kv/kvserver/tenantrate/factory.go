@@ -11,13 +11,10 @@
 package tenantrate
 
 import (
-	"context"
-
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -29,12 +26,13 @@ type TestingKnobs struct {
 
 // LimiterFactory constructs and manages per-tenant Limiters.
 type LimiterFactory struct {
+	settings      *cluster.Settings
 	knobs         TestingKnobs
 	metrics       Metrics
 	systemLimiter systemLimiter
 	mu            struct {
 		syncutil.RWMutex
-		config  Config
+		limits  LimitConfigs
 		tenants map[roachpb.TenantID]*refCountedLimiter
 	}
 }
@@ -46,26 +44,22 @@ type refCountedLimiter struct {
 }
 
 // NewLimiterFactory constructs a new LimiterFactory.
-func NewLimiterFactory(sv *settings.Values, knobs *TestingKnobs) *LimiterFactory {
+func NewLimiterFactory(st *cluster.Settings, knobs *TestingKnobs) *LimiterFactory {
 	rl := &LimiterFactory{
-		metrics: makeMetrics(),
+		settings: st,
+		metrics:  makeMetrics(),
 	}
 	if knobs != nil {
 		rl.knobs = *knobs
 	}
 	rl.mu.tenants = make(map[roachpb.TenantID]*refCountedLimiter)
-	rl.mu.config = ConfigFromSettings(sv)
+	rl.mu.limits = LimitConfigsFromSettings(st)
 	rl.systemLimiter = systemLimiter{
 		tenantMetrics: rl.metrics.tenantMetrics(roachpb.SystemTenantID),
 	}
-	updateFn := func(_ context.Context) {
-		config := ConfigFromSettings(sv)
-		rl.UpdateConfig(config)
+	for _, setOnChange := range settingsSetOnChangeFuncs {
+		setOnChange(&st.SV, rl.updateLimits)
 	}
-	for _, setting := range configSettings {
-		setting.SetOnChange(sv, updateFn)
-	}
-	tenantcostmodel.SetOnChange(sv, updateFn)
 	return rl
 }
 
@@ -92,7 +86,7 @@ func (rl *LimiterFactory) GetTenant(tenantID roachpb.TenantID, closer <-chan str
 			options = append(options, quotapool.WithCloser(closer))
 		}
 		rcLim = new(refCountedLimiter)
-		rcLim.lim.init(rl, tenantID, rl.mu.config, rl.metrics.tenantMetrics(tenantID), options...)
+		rcLim.lim.init(rl, tenantID, rl.mu.limits, rl.metrics.tenantMetrics(tenantID), options...)
 		rl.mu.tenants[tenantID] = rcLim
 	}
 	rcLim.refCount++
@@ -120,15 +114,12 @@ func (rl *LimiterFactory) Release(lim Limiter) {
 	}
 }
 
-// UpdateConfig changes the config of all limiters (existing and future).
-// It is called automatically when a cluster setting is changed. It is also
-// called by tests.
-func (rl *LimiterFactory) UpdateConfig(config Config) {
+func (rl *LimiterFactory) updateLimits() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	rl.mu.config = config
+	rl.mu.limits = LimitConfigsFromSettings(rl.settings)
 	for _, rcLim := range rl.mu.tenants {
-		rcLim.lim.updateConfig(rl.mu.config)
+		rcLim.lim.updateLimits(rl.mu.limits)
 	}
 }
 

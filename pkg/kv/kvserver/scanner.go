@@ -34,7 +34,7 @@ type replicaQueue interface {
 	// MaybeAdd adds the replica to the queue if the replica meets
 	// the queue's inclusion criteria and the queue is not already
 	// too full, etc.
-	MaybeAddAsync(context.Context, replicaInQueue, hlc.ClockTimestamp)
+	MaybeAddAsync(context.Context, replicaInQueue, hlc.Timestamp)
 	// MaybeRemove removes the replica from the queue if it is present.
 	MaybeRemove(roachpb.RangeID)
 	// Name returns the name of the queue.
@@ -62,8 +62,7 @@ type replicaSet interface {
 // prioritized replica queues.
 type replicaScanner struct {
 	log.AmbientContext
-	clock   *hlc.Clock
-	stopper *stop.Stopper
+	clock *hlc.Clock
 
 	targetInterval time.Duration  // Target duration interval for scan loop
 	minIdleTime    time.Duration  // Min idle time for scan loop
@@ -105,7 +104,7 @@ func newReplicaScanner(
 		minIdleTime:    minIdleTime,
 		maxIdleTime:    maxIdleTime,
 		replicas:       replicas,
-		removed:        make(chan *Replica),
+		removed:        make(chan *Replica, 10),
 		setDisabledCh:  make(chan struct{}, 1),
 	}
 	if targetInterval == 0 {
@@ -121,11 +120,11 @@ func (rs *replicaScanner) AddQueues(queues ...replicaQueue) {
 }
 
 // Start spins up the scanning loop.
-func (rs *replicaScanner) Start() {
+func (rs *replicaScanner) Start(stopper *stop.Stopper) {
 	for _, queue := range rs.queues {
-		queue.Start(rs.stopper)
+		queue.Start(stopper)
 	}
-	rs.scanLoop()
+	rs.scanLoop(stopper)
 }
 
 // scanCount returns the number of times the scanner has cycled through
@@ -177,10 +176,7 @@ func (rs *replicaScanner) avgScan() time.Duration {
 // have placed it in. This method should be called by the Store
 // when a replica is removed (e.g. rebalanced or merged).
 func (rs *replicaScanner) RemoveReplica(repl *Replica) {
-	select {
-	case rs.removed <- repl:
-	case <-rs.stopper.ShouldQuiesce():
-	}
+	rs.removed <- repl
 }
 
 // paceInterval returns a duration between iterations to allow us to pace
@@ -209,7 +205,9 @@ func (rs *replicaScanner) paceInterval(start, now time.Time) time.Duration {
 // if repl is not nil. The method returns true when the scanner needs
 // to be stopped. The method also removes a replica from queues when it
 // is signaled via the removed channel.
-func (rs *replicaScanner) waitAndProcess(ctx context.Context, start time.Time, repl *Replica) bool {
+func (rs *replicaScanner) waitAndProcess(
+	ctx context.Context, stopper *stop.Stopper, start time.Time, repl *Replica,
+) bool {
 	waitInterval := rs.paceInterval(start, timeutil.Now())
 	rs.waitTimer.Reset(waitInterval)
 	if log.V(6) {
@@ -230,14 +228,14 @@ func (rs *replicaScanner) waitAndProcess(ctx context.Context, start time.Time, r
 				log.Infof(ctx, "replica scanner processing %s", repl)
 			}
 			for _, q := range rs.queues {
-				q.MaybeAddAsync(ctx, repl, rs.clock.NowAsClockTimestamp())
+				q.MaybeAddAsync(ctx, repl, rs.clock.Now())
 			}
 			return false
 
 		case repl := <-rs.removed:
 			rs.removeReplica(repl)
 
-		case <-rs.stopper.ShouldQuiesce():
+		case <-stopper.ShouldStop():
 			return true
 		}
 	}
@@ -259,9 +257,9 @@ func (rs *replicaScanner) removeReplica(repl *Replica) {
 // scanLoop loops endlessly, scanning through replicas available via
 // the replica set, or until the scanner is stopped. The iteration
 // is paced to complete a full scan in approximately the scan interval.
-func (rs *replicaScanner) scanLoop() {
+func (rs *replicaScanner) scanLoop(stopper *stop.Stopper) {
 	ctx := rs.AnnotateCtx(context.Background())
-	_ = rs.stopper.RunAsyncTask(ctx, "scan-loop", func(ctx context.Context) {
+	stopper.RunWorker(ctx, func(ctx context.Context) {
 		start := timeutil.Now()
 
 		// waitTimer is reset in each call to waitAndProcess.
@@ -269,7 +267,7 @@ func (rs *replicaScanner) scanLoop() {
 
 		for {
 			if rs.GetDisabled() {
-				if done := rs.waitEnabled(); done {
+				if done := rs.waitEnabled(stopper); done {
 					return
 				}
 				continue
@@ -278,12 +276,12 @@ func (rs *replicaScanner) scanLoop() {
 			count := 0
 			rs.replicas.Visit(func(repl *Replica) bool {
 				count++
-				shouldStop = rs.waitAndProcess(ctx, start, repl)
+				shouldStop = rs.waitAndProcess(ctx, stopper, start, repl)
 				return !shouldStop
 			})
 			if count == 0 {
 				// No replicas processed, just wait.
-				shouldStop = rs.waitAndProcess(ctx, start, nil)
+				shouldStop = rs.waitAndProcess(ctx, stopper, start, nil)
 			}
 
 			// waitAndProcess returns true when the system is stopping. Note that this
@@ -311,7 +309,7 @@ func (rs *replicaScanner) scanLoop() {
 
 // waitEnabled loops, removing replicas from the scanner's queues,
 // until scanning is enabled or the stopper signals shutdown,
-func (rs *replicaScanner) waitEnabled() bool {
+func (rs *replicaScanner) waitEnabled(stopper *stop.Stopper) bool {
 	rs.mu.Lock()
 	rs.mu.waitEnabledCount++
 	rs.mu.Unlock()
@@ -326,7 +324,7 @@ func (rs *replicaScanner) waitEnabled() bool {
 		case repl := <-rs.removed:
 			rs.removeReplica(repl)
 
-		case <-rs.stopper.ShouldQuiesce():
+		case <-stopper.ShouldStop():
 			return true
 		}
 	}

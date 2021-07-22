@@ -13,7 +13,6 @@ option go_package = "backupccl";
 import "build/info.proto";
 import "roachpb/api.proto";
 import "roachpb/data.proto";
-import "roachpb/metadata.proto";
 import "sql/stats/table_statistic.proto";
 import "sql/catalog/descpb/structured.proto";
 import "sql/catalog/descpb/tenant.proto";
@@ -46,7 +45,7 @@ message BackupManifest {
     roachpb.Span span = 1 [(gogoproto.nullable) = false];
     string path = 2;
     reserved 3;
-    reserved 4;
+    bytes sha512 = 4;
     reserved 5;
     RowCount entry_counts = 6 [(gogoproto.nullable) = false];
 
@@ -66,7 +65,6 @@ message BackupManifest {
   message Progress {
     repeated File files = 1 [(gogoproto.nullable) = false];
     util.hlc.Timestamp rev_start_time = 2 [(gogoproto.nullable) = false];
-    int32 completed_spans = 3;
   }
 
   util.hlc.Timestamp start_time = 1 [(gogoproto.nullable) = false];
@@ -112,7 +110,6 @@ message BackupManifest {
   int32 node_id = 10 [(gogoproto.customname) = "NodeID",
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
   build.Info build_info = 11 [(gogoproto.nullable) = false];
-  roachpb.Version cluster_version = 25 [(gogoproto.nullable) = false];
 
   bytes id = 18 [(gogoproto.nullable) = false,
                 (gogoproto.customname) = "ID",
@@ -129,7 +126,7 @@ message BackupManifest {
   int32 descriptor_coverage = 22 [
     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/sem/tree.DescriptorCoverage"];
 
-  // NEXT ID: 26
+  // NEXT ID: 25
 }
 
 message BackupPartitionDescriptor{
@@ -167,34 +164,3 @@ message RestoreProgress {
   int64 progressIdx = 2;
   roachpb.Span dataSpan = 3 [(gogoproto.nullable) = false];
 }
-
-message BackupProcessorPlanningTraceEvent {
-  map<int32, int64> node_to_num_spans = 1 [(gogoproto.nullable) = false];
-  int64 total_num_spans = 2;
-}
-
-message BackupProgressTraceEvent {
-  int64 total_num_files = 1;
-  RowCount total_entry_counts = 2 [(gogoproto.nullable) = false];
-  util.hlc.Timestamp revision_start_time = 3 [(gogoproto.nullable) = false];
-}
-
-// BackupExportTraceRequestEvent is the trace event recorded when an
-// ExportRequest has been sent.
-message BackupExportTraceRequestEvent {
-  string span = 1;
-  int32 attempt = 2;
-  string priority = 3;
-  string req_sent_time = 4;
-}
-
-// BackupExportTraceResponseEvent is the trace event recorded when we receive a
-// response from the ExportRequest.
-message BackupExportTraceResponseEvent {
-  string duration = 1;
-  int32 num_files = 2;
-  repeated RowCount file_summaries = 3 [(gogoproto.nullable) = false];
-  bool has_returned_ssts = 4 [(gogoproto.customname) = "HasReturnedSSTs"];
-  string retryable_error = 5;
-}
-

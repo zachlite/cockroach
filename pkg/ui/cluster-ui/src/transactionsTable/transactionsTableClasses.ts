@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -24,6 +24,17 @@ export const tableClasses = {
     barChart: {
       classes: {
         root: statementsTableCx("statements-table__col-latency--bar-chart"),
+      },
+    },
+  },
+  RowsAffectedClasses: {
+    column: statementsTableCx("statements-table__col-rows"),
+    barChart: {
+      classes: {
+        root: statementsTableCx("statements-table__col-rows--bar-chart"),
+        label: statementsTableCx(
+          "statements-table__col-rows--bar-chart__label",
+        ),
       },
     },
   },

@@ -11,14 +11,10 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -42,16 +38,11 @@ import (
 	_ "github.com/cockroachdb/cockroach/pkg/cmd/roachprod/vm/azure"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/vm/gce"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/vm/local"
-	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/flagutil"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 )
 
 var rootCmd = &cobra.Command{
@@ -87,11 +78,9 @@ var (
 	listDetails       bool
 	listJSON          bool
 	listMine          bool
+	clusterType       = "cockroach"
 	secure            = false
-	nodeEnv           = []string{
-		"COCKROACH_ENABLE_RPC_COMPRESSION=false",
-		"COCKROACH_UI_RELEASE_NOTES_SIGNUP_DISMISSED=true",
-	}
+	nodeEnv           = []string{"COCKROACH_ENABLE_RPC_COMPRESSION=false"}
 	nodeArgs          []string
 	tag               string
 	external          = false
@@ -105,7 +94,6 @@ var (
 	sig               = 9
 	waitFlag          = false
 	stageOS           string
-	stageDir          string
 	logsDir           string
 	logsFilter        string
 	logsProgramFilter string
@@ -157,15 +145,22 @@ Available clusters:
 		return nil, err
 	}
 
-	c.Impl = install.Cockroach{}
-	if numRacks > 0 {
-		for i := range c.Localities {
-			rack := fmt.Sprintf("rack=%d", i%numRacks)
-			if c.Localities[i] != "" {
-				rack = "," + rack
+	switch clusterType {
+	case "cockroach":
+		c.Impl = install.Cockroach{}
+		if numRacks > 0 {
+			for i := range c.Localities {
+				rack := fmt.Sprintf("rack=%d", i%numRacks)
+				if c.Localities[i] != "" {
+					rack = "," + rack
+				}
+				c.Localities[i] += rack
 			}
-			c.Localities[i] += rack
 		}
+	case "cassandra":
+		c.Impl = install.Cassandra{}
+	default:
+		return nil, fmt.Errorf("unknown cluster type: %s", clusterType)
 	}
 
 	nodes, err := install.ListNodes(nodeNames, len(c.VMs))
@@ -186,7 +181,7 @@ Available clusters:
 		c.Tag = "/" + tag
 	}
 	c.UseTreeDist = useTreeDist
-	c.Quiet = quiet || !term.IsTerminal(int(os.Stdout.Fd()))
+	c.Quiet = quiet || !terminal.IsTerminal(int(os.Stdout.Fd()))
 	c.MaxConcurrency = maxConcurrency
 	return c, nil
 }
@@ -224,11 +219,7 @@ func verifyClusterName(clusterName string) (string, error) {
 		for _, account := range active {
 			if !seenAccounts[account] {
 				seenAccounts[account] = true
-				cleanAccount := vm.DNSSafeAccount(account)
-				if cleanAccount != account {
-					log.Printf("WARN: using `%s' as username instead of `%s'", cleanAccount, account)
-				}
-				accounts = append(accounts, cleanAccount)
+				accounts = append(accounts, account)
 			}
 		}
 	}
@@ -507,11 +498,6 @@ directory is removed.
 `,
 	Args: cobra.ArbitraryArgs,
 	Run: wrap(func(cmd *cobra.Command, args []string) error {
-		type cloudAndName struct {
-			name  string
-			cloud *cld.Cloud
-		}
-		var cns []cloudAndName
 		switch len(args) {
 		case 0:
 			if !destroyAllMine {
@@ -528,12 +514,19 @@ directory is removed.
 				return err
 			}
 
+			var names []string
 			for name := range cloud.Clusters {
 				if destroyPattern.MatchString(name) {
-					cns = append(cns, cloudAndName{name: name, cloud: cloud})
+					names = append(names, name)
 				}
 			}
+			sort.Strings(names)
 
+			for _, clusterName := range names {
+				if err := destroyCluster(cloud, clusterName); err != nil {
+					return err
+				}
+			}
 		default:
 			if destroyAllMine {
 				return errors.New("--all-mine cannot be combined with cluster names")
@@ -554,19 +547,15 @@ directory is removed.
 						}
 					}
 
-					cns = append(cns, cloudAndName{name: clusterName, cloud: cloud})
+					if err := destroyCluster(cloud, clusterName); err != nil {
+						return err
+					}
 				} else {
 					if err := destroyLocalCluster(); err != nil {
 						return err
 					}
 				}
 			}
-		}
-
-		if err := ctxgroup.GroupWorkers(cmd.Context(), len(cns), func(ctx context.Context, idx int) error {
-			return destroyCluster(cns[idx].cloud, cns[idx].name)
-		}); err != nil {
-			return err
 		}
 		fmt.Println("OK")
 		return nil
@@ -1271,42 +1260,6 @@ var runCmd = &cobra.Command{
 	}),
 }
 
-var resetCmd = &cobra.Command{
-	Use:   "reset <cluster>",
-	Short: "reset *all* VMs in a cluster",
-	Long: `Reset a cloud VM. This may not be implemented for all
-environments and will fall back to a no-op.`,
-	Args: cobra.ExactArgs(1),
-	Run: wrap(func(cmd *cobra.Command, args []string) (retErr error) {
-		if numNodes <= 0 || numNodes >= 1000 {
-			// Upper limit is just for safety.
-			return fmt.Errorf("number of nodes must be in [1..999]")
-		}
-
-		clusterName, err := verifyClusterName(args[0])
-		if err != nil {
-			return err
-		}
-
-		if clusterName == config.Local {
-			return nil
-		}
-
-		cloud, err := cld.ListCloud()
-		if err != nil {
-			return err
-		}
-		c, ok := cloud.Clusters[clusterName]
-		if !ok {
-			return errors.New("cluster not found")
-		}
-
-		return vm.FanOut(c.VMs, func(p vm.Provider, vms vm.List) error {
-			return p.Reset(vms)
-		})
-	}),
-}
-
 var installCmd = &cobra.Command{
 	Use:   "install <cluster> <software>",
 	Short: "install 3rd party software",
@@ -1321,25 +1274,6 @@ var installCmd = &cobra.Command{
 			return err
 		}
 		return install.Install(c, args[1:])
-	}),
-}
-
-var downloadCmd = &cobra.Command{
-	Use:   "download <cluster> <url> <sha256> [DESTINATION]",
-	Short: "download 3rd party tools",
-	Long:  "Downloads 3rd party tools, using a GCS cache if possible.",
-	Args:  cobra.RangeArgs(3, 4),
-	Run: wrap(func(cmd *cobra.Command, args []string) error {
-		c, err := newCluster(args[0])
-		if err != nil {
-			return err
-		}
-		src, sha := args[1], args[2]
-		var dest string
-		if len(args) == 4 {
-			dest = args[3]
-		}
-		return install.Download(c, src, sha, dest)
 	}),
 }
 
@@ -1390,11 +1324,6 @@ Some examples of usage:
 			return errors.Errorf("cannot stage binary on %s", os)
 		}
 
-		dir := "."
-		if stageDir != "" {
-			dir = stageDir
-		}
-
 		applicationName := args[1]
 		versionArg := ""
 		if len(args) == 3 {
@@ -1403,7 +1332,7 @@ Some examples of usage:
 		switch applicationName {
 		case "cockroach":
 			sha, err := install.StageRemoteBinary(
-				c, applicationName, "cockroach/cockroach", versionArg, debugArch, dir,
+				c, applicationName, "cockroach/cockroach", versionArg, debugArch,
 			)
 			if err != nil {
 				return err
@@ -1418,7 +1347,6 @@ Some examples of usage:
 					sha,
 					debugArch,
 					libExt,
-					dir,
 				); err != nil {
 					return err
 				}
@@ -1426,11 +1354,11 @@ Some examples of usage:
 			return nil
 		case "workload":
 			_, err := install.StageRemoteBinary(
-				c, applicationName, "cockroach/workload", versionArg, "" /* arch */, dir,
+				c, applicationName, "cockroach/workload", versionArg, "", /* arch */
 			)
 			return err
 		case "release":
-			return install.StageCockroachRelease(c, versionArg, releaseArch, dir)
+			return install.StageCockroachRelease(c, versionArg, releaseArch)
 		default:
 			return fmt.Errorf("unknown application %s", applicationName)
 		}
@@ -1558,150 +1486,6 @@ var pgurlCmd = &cobra.Command{
 	}),
 }
 
-var pprofOptions = struct {
-	heap         bool
-	open         bool
-	startingPort int
-	duration     time.Duration
-}{}
-
-var pprofCmd = &cobra.Command{
-	Use:     "pprof <cluster>",
-	Args:    cobra.ExactArgs(1),
-	Aliases: []string{"pprof-heap"},
-	Short:   "capture a pprof profile from the specified nodes",
-	Long: `Capture a pprof profile from the specified nodes.
-
-Examples:
-
-    # Capture CPU profile for all nodes in the cluster
-    roachprod pprof CLUSTERNAME
-    # Capture CPU profile for the first node in the cluster for 60 seconds
-    roachprod pprof CLUSTERNAME:1 --duration 60s
-    # Capture a Heap profile for the first node in the cluster
-    roachprod pprof CLUSTERNAME:1 --heap
-    # Same as above
-    roachprod pprof-heap CLUSTERNAME:1
-`,
-	Run: wrap(func(cmd *cobra.Command, args []string) error {
-		c, err := newCluster(args[0])
-		if err != nil {
-			return err
-		}
-
-		var profType string
-		var description string
-		if cmd.CalledAs() == "pprof-heap" || pprofOptions.heap {
-			description = "capturing heap profile"
-			profType = "heap"
-		} else {
-			description = "capturing CPU profile"
-			profType = "profile"
-		}
-
-		outputFiles := []string{}
-		mu := &syncutil.Mutex{}
-		pprofPath := fmt.Sprintf("debug/pprof/%s?seconds=%d", profType, int(pprofOptions.duration.Seconds()))
-
-		minTimeout := 30 * time.Second
-		timeout := 2 * pprofOptions.duration
-		if timeout < minTimeout {
-			timeout = minTimeout
-		}
-
-		httpClient := httputil.NewClientWithTimeout(timeout)
-		startTime := timeutil.Now().Unix()
-		failed, err := c.ParallelE(description, len(c.ServerNodes()), 0, func(i int) ([]byte, error) {
-			host := c.VMs[i]
-			port := install.GetAdminUIPort(c.Impl.NodePort(c, i))
-			scheme := "http"
-			if c.Secure {
-				scheme = "https"
-			}
-			outputFile := fmt.Sprintf("pprof-%s-%d-%s-%04d.out", profType, startTime, c.Name, i+1)
-			outputDir := filepath.Dir(outputFile)
-			file, err := ioutil.TempFile(outputDir, ".pprof")
-			if err != nil {
-				return nil, errors.Wrap(err, "create tmpfile for pprof download")
-			}
-
-			defer func() {
-				err := file.Close()
-				if err != nil && !errors.Is(err, oserror.ErrClosed) {
-					fmt.Fprintf(os.Stderr, "warning: could not close temporary file")
-				}
-				err = os.Remove(file.Name())
-				if err != nil && !oserror.IsNotExist(err) {
-					fmt.Fprintf(os.Stderr, "warning: could not remove temporary file")
-				}
-			}()
-
-			pprofURL := fmt.Sprintf("%s://%s:%d/%s", scheme, host, port, pprofPath)
-			resp, err := httpClient.Get(context.Background(), pprofURL)
-			if err != nil {
-				return nil, err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				return nil, errors.Newf("unexpected status from pprof endpoint: %s", resp.Status)
-			}
-
-			if _, err := io.Copy(file, resp.Body); err != nil {
-				return nil, err
-			}
-			if err := file.Sync(); err != nil {
-				return nil, err
-			}
-			if err := file.Close(); err != nil {
-				return nil, err
-			}
-			if err := os.Rename(file.Name(), outputFile); err != nil {
-				return nil, err
-			}
-
-			mu.Lock()
-			outputFiles = append(outputFiles, outputFile)
-			mu.Unlock()
-			return nil, nil
-		})
-
-		for _, s := range outputFiles {
-			fmt.Printf("Created %s\n", s)
-		}
-
-		if err != nil {
-			sort.Slice(failed, func(i, j int) bool { return failed[i].Index < failed[j].Index })
-			for _, f := range failed {
-				fmt.Fprintf(os.Stderr, "%d: %+v: %s\n", f.Index, f.Err, f.Out)
-			}
-			os.Exit(1)
-		}
-
-		if pprofOptions.open {
-			waitCommands := []*exec.Cmd{}
-			for i, file := range outputFiles {
-				port := pprofOptions.startingPort + i
-				cmd := exec.Command("go", "tool", "pprof",
-					"-http", fmt.Sprintf(":%d", port),
-					file)
-				waitCommands = append(waitCommands, cmd)
-				if err := cmd.Start(); err != nil {
-					return err
-				}
-			}
-
-			for _, cmd := range waitCommands {
-				err := cmd.Wait()
-				if err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}),
-}
-
 var adminurlCmd = &cobra.Command{
 	Use:     "adminurl <cluster>",
 	Aliases: []string{"admin", "adminui"},
@@ -1791,7 +1575,6 @@ func main() {
 	cobra.EnableCommandSorting = false
 	rootCmd.AddCommand(
 		createCmd,
-		resetCmd,
 		destroyCmd,
 		extendCmd,
 		listCmd,
@@ -1812,13 +1595,12 @@ func main() {
 		putCmd,
 		getCmd,
 		stageCmd,
-		downloadCmd,
 		sqlCmd,
 		ipCmd,
 		pgurlCmd,
 		adminurlCmd,
 		logsCmd,
-		pprofCmd,
+
 		cachedHostsCmd,
 	)
 	rootCmd.BashCompletionFunction = fmt.Sprintf(`__custom_func()
@@ -1877,10 +1659,6 @@ func main() {
 			`Ignored if --local-ssd=false is specified.`)
 	createCmd.Flags().IntVarP(&numNodes,
 		"nodes", "n", 4, "Total number of nodes, distributed across all clouds")
-
-	createCmd.Flags().IntVarP(&createVMOpts.OsVolumeSize,
-		"os-volume-size", "", 10, "OS disk volume size in GB")
-
 	createCmd.Flags().StringSliceVarP(&createVMOpts.VMProviders,
 		"clouds", "c", []string{gce.ProviderName},
 		fmt.Sprintf("The cloud provider(s) to use when creating new vm instances: %s", vm.AllProviderNames()))
@@ -1927,15 +1705,6 @@ func main() {
 	pgurlCmd.Flags().BoolVar(
 		&external, "external", false, "return pgurls for external connections")
 
-	pprofCmd.Flags().DurationVar(
-		&pprofOptions.duration, "duration", 30*time.Second, "Duration of profile to capture")
-	pprofCmd.Flags().BoolVar(
-		&pprofOptions.heap, "heap", false, "Capture a heap profile instead of a CPU profile")
-	pprofCmd.Flags().BoolVar(
-		&pprofOptions.open, "open", false, "Open the profile using `go tool pprof -http`")
-	pprofCmd.Flags().IntVar(
-		&pprofOptions.startingPort, "starting-port", 9000, "Initial port to use when opening pprof's HTTP interface")
-
 	ipCmd.Flags().BoolVar(
 		&external, "external", false, "return external IP addresses")
 
@@ -1967,7 +1736,6 @@ func main() {
 	putCmd.Flags().BoolVar(&useTreeDist, "treedist", useTreeDist, "use treedist copy algorithm")
 
 	stageCmd.Flags().StringVar(&stageOS, "os", "", "operating system override for staged binaries")
-	stageCmd.Flags().StringVar(&stageDir, "dir", "", "destination for staged binaries")
 
 	logsCmd.Flags().StringVar(
 		&logsFilter, "filter", "", "re to filter log messages")
@@ -2011,12 +1779,12 @@ func main() {
 				&nodeArgs, "args", "a", nil, "node arguments")
 			cmd.Flags().StringArrayVarP(
 				&nodeEnv, "env", "e", nodeEnv, "node environment variables")
+			cmd.Flags().StringVarP(
+				&clusterType, "type", "t", clusterType, `cluster type ("cockroach" or "cassandra")`)
 			cmd.Flags().BoolVar(
 				&install.StartOpts.Encrypt, "encrypt", encrypt, "start nodes with encryption at rest turned on")
 			cmd.Flags().BoolVar(
 				&install.StartOpts.SkipInit, "skip-init", skipInit, "skip initializing the cluster")
-			cmd.Flags().IntVar(
-				&install.StartOpts.StoreCount, "store-count", 1, "number of stores to start each node with")
 			fallthrough
 		case sqlCmd:
 			cmd.Flags().StringVarP(

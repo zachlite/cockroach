@@ -43,7 +43,6 @@ func TestConstraintConformanceReportIntegration(t *testing.T) {
 	// Under stressrace, replication changes seem to hit 1m deadline errors and
 	// don't make progress.
 	skip.UnderStressRace(t)
-	skip.UnderRace(t, "takes >1min under race")
 
 	ctx := context.Background()
 	tc := serverutils.StartNewTestCluster(t, 5, base.TestClusterArgs{
@@ -563,7 +562,7 @@ func TestZoneChecker(t *testing.T) {
 	}
 	keyScanner := keysutils.MakePrettyScannerForNamedTables(
 		map[string]int{"t1": t1ID} /* tableNameToID */, nil /* idxNameToID */)
-	rngs, err := processSplits(keyScanner, splits, nil /* stores */)
+	rngs, err := processSplits(keyScanner, splits)
 	require.NoError(t, err)
 
 	var zc zoneResolver

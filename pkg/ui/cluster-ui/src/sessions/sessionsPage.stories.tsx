@@ -11,16 +11,16 @@
 import React from "react";
 import { storiesOf } from "@storybook/react";
 
-import { withBackground, withRouterProvider } from "src/storybook/decorators";
 import { SessionsPage } from "./sessionsPage";
 import {
   sessionsPagePropsEmptyFixture,
   sessionsPagePropsFixture,
 } from "./sessionsPage.fixture";
+import { withRouterProvider, withBackgroundFactory } from "src/test-utils";
 
 storiesOf("Sessions Page", module)
   .addDecorator(withRouterProvider)
-  .addDecorator(withBackground)
+  .addDecorator(withBackgroundFactory())
   .add("Overview Page", () => <SessionsPage {...sessionsPagePropsFixture} />)
   .add("Empty Overview Page", () => (
     <SessionsPage {...sessionsPagePropsEmptyFixture} />

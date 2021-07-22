@@ -42,7 +42,7 @@ func (s *statusTrackingExecutor) ExecuteJob(
 
 func (s *statusTrackingExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus Status,
 	_ jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,

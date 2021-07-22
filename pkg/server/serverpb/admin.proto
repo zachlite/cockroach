@@ -16,7 +16,7 @@ import "config/zonepb/zone.proto";
 import "jobs/jobspb/jobs.proto";
 import "server/serverpb/status.proto";
 import "storage/enginepb/mvcc.proto";
-import "kv/kvserver/liveness/livenesspb/liveness.proto";
+import "kv/kvserver/kvserverpb/liveness.proto";
 import "kv/kvserver/kvserverpb/log.proto";
 import "ts/catalog/chart_catalog.proto";
 import "util/metric/metric.proto";
@@ -174,10 +174,6 @@ message TableDetailsResponse {
   // It can be used to find events pertaining to this table by filtering on
   // the 'target_id' field of events.
   int64 descriptor_id = 8 [(gogoproto.customname) = "DescriptorID"];
-  // configure_zone_statement is the output of "SHOW ZONE CONFIGURATION FOR TABLE"
-  // for this table. It is a SQL statement that would re-configure the table's current
-  // zone if executed.
-  string configure_zone_statement = 9;
 }
 
 // TableStatsRequest is a request for detailed, computationally expensive
@@ -347,12 +343,23 @@ message ClusterResponse {
   bool enterprise_enabled = 3;
 }
 
-// DrainRequest instructs the receiving node to drain.
+// DrainRequest requests the server to enter the specified draining mode. The
+// server first deactivates all the modes specified in 'off' and then activates
+// all those in 'on'.
 message DrainRequest {
-  // pre_201_marker represents a field that clients stopped using in 20.1. It's
-  // maintained to reject requests from such clients, since they're not setting
-  // other required fields.
-  repeated int32 pre201_marker= 1;
+  // deprecated_probe_indicator works as follows:
+  // - if nil, it indicates that the request is a probe only and
+  //   the server should not actually drain. This indicator
+  //   is supported for pre-20.1 RPC clients which do not know
+  //   about the skip_drain field below.
+  // - if non-nil, it must be exactly equal to the slice [0, 1].
+  //   Other values result in an error. When non-nil,
+  //   it implies do_drain = true regardless of the value of the
+  //   other field (pre-20.1 clients don't populate the other field).
+  //
+  // This field will be removed in 20.2 in favor of
+  // do_drain below.
+  repeated int32 deprecated_probe_indicator = 1;
   reserved 2;
   // When true, terminates the process after the server has started draining.
   // Setting both shutdown and do_drain to false causes
@@ -369,6 +376,15 @@ message DrainRequest {
 
 // DrainResponse is the response to a successful DrainRequest.
 message DrainResponse {
+  // deprecated_drain_status works as follows:
+  // - if the server is NOT currently draining,
+  //   it will be set to an empty or nil slice.
+  // - a non-nil slice indicates the server is currently
+  //   draining.
+  //
+  // This field exists for the benefit of 19.x clients
+  // and will be removed in 20.2.
+  repeated int32 deprecated_drain_status = 1;
   // is_draining is set to true iff the server is currently draining.
   // This is set to true in response to a request where skip_drain
   // is false; but it can also be set to true in response
@@ -422,8 +438,6 @@ message DrainResponse {
   // The field is only populated if do_drain is true in the
   // request.
   string drain_remaining_description = 4;
-
-  reserved 1;
 }
 
 // DecommissionStatusRequest requests the decommissioning status for the
@@ -440,7 +454,7 @@ message DecommissionStatusRequest {
 message DecommissionRequest {
   repeated int32 node_ids = 1 [(gogoproto.customname) = "NodeIDs",
                                (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
-  kv.kvserver.liveness.livenesspb.MembershipStatus target_membership = 2;
+  cockroach.kv.kvserver.storagepb.MembershipStatus target_membership = 2;
 }
 
 // DecommissionStatusResponse lists decommissioning statuses for a number of NodeIDs.
@@ -452,7 +466,7 @@ message DecommissionStatusResponse {
     // The number of replicas on the node, computed by scanning meta2 ranges.
     int64 replica_count = 3;
     // The membership status of the given node.
-    kv.kvserver.liveness.livenesspb.MembershipStatus membership = 4;
+    cockroach.kv.kvserver.storagepb.MembershipStatus membership = 4;
     bool draining = 5;
   }
   // Status of all affected nodes.
@@ -501,18 +515,15 @@ message SettingsResponse {
 //   a liveness beacon. Absent either of these conditions, an error
 //   code will result.
 //
-// API: PUBLIC
 message HealthRequest {
   // ready specifies whether the client wants to know whether the
   // target node is ready to receive traffic. If a node is unready, an
   // error will be returned.
-  // API: PUBLIC
   bool ready = 1;
 }
 
 // HealthResponse is the response to HealthRequest. It currently does not
 // contain any information.
-// API: PUBLIC
 message HealthResponse {
 }
 
@@ -522,8 +533,8 @@ message LivenessRequest {
 
 // LivenessResponse contains the liveness status of each node on the cluster.
 message LivenessResponse {
-  repeated kv.kvserver.liveness.livenesspb.Liveness livenesses = 1 [(gogoproto.nullable) = false];
-  map<int32, kv.kvserver.liveness.livenesspb.NodeLivenessStatus> statuses = 2 [
+  repeated cockroach.kv.kvserver.storagepb.Liveness livenesses = 1 [(gogoproto.nullable) = false];
+  map<int32, cockroach.kv.kvserver.storagepb.NodeLivenessStatus> statuses = 2 [
     (gogoproto.nullable) = false,
     (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"
   ];
@@ -538,40 +549,34 @@ message JobsRequest {
 
 // JobsResponse contains the job record for each matching job.
 message JobsResponse {
-  repeated JobResponse jobs = 1 [(gogoproto.nullable) = false];
-}
+  message Job {
+    int64 id = 1 [(gogoproto.customname) = "ID"];
+    string type = 2;
+    string description = 3;
+    string statement = 16;
+    string username = 4;
+    repeated uint32 descriptor_ids = 5 [
+      (gogoproto.customname) = "DescriptorIDs",
+      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.ID"
+    ];
+    string status = 6;
+    google.protobuf.Timestamp created = 7 [(gogoproto.stdtime) = true];
+    google.protobuf.Timestamp started = 8 [(gogoproto.stdtime) = true];
+    google.protobuf.Timestamp finished = 9 [(gogoproto.stdtime) = true];
+    google.protobuf.Timestamp modified = 10 [(gogoproto.stdtime) = true];
+    float fraction_completed = 11;
+    string error = 12;
+    // highwater_timestamp is the highwater timestamp returned as normal
+    // timestamp. This is appropriate for display to humans.
+    google.protobuf.Timestamp highwater_timestamp = 13 [(gogoproto.stdtime) = true];
+    // highwater_decimal is the highwater timestamp in the proprietary decimal
+    // form used by logical timestamps internally. This is appropriate to pass
+    // to a "AS OF SYSTEM TIME" SQL statement.
+    string highwater_decimal = 14;
+    string running_status = 15;
+  }
 
-// JobRequest requests system job information for the given job_id.
-message JobRequest {
-  int64 job_id = 1;
-}
-
-// JobResponse contains the job record for a job.
-message JobResponse {
-  int64 id = 1 [(gogoproto.customname) = "ID"];
-  string type = 2;
-  string description = 3;
-  string statement = 16;
-  string username = 4;
-  repeated uint32 descriptor_ids = 5 [
-    (gogoproto.customname) = "DescriptorIDs",
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.ID"
-  ];
-  string status = 6;
-  google.protobuf.Timestamp created = 7 [(gogoproto.stdtime) = true];
-  google.protobuf.Timestamp started = 8 [(gogoproto.stdtime) = true];
-  google.protobuf.Timestamp finished = 9 [(gogoproto.stdtime) = true];
-  google.protobuf.Timestamp modified = 10 [(gogoproto.stdtime) = true];
-  float fraction_completed = 11;
-  string error = 12;
-  // highwater_timestamp is the highwater timestamp returned as normal
-  // timestamp. This is appropriate for display to humans.
-  google.protobuf.Timestamp highwater_timestamp = 13 [(gogoproto.stdtime) = true];
-  // highwater_decimal is the highwater timestamp in the proprietary decimal
-  // form used by logical timestamps internally. This is appropriate to pass
-  // to a "AS OF SYSTEM TIME" SQL statement.
-  string highwater_decimal = 14;
-  string running_status = 15;
+  repeated Job jobs = 1 [(gogoproto.nullable) = false];
 }
 
 // LocationsRequest requests system locality location information.
@@ -719,45 +724,9 @@ message ChartCatalogResponse {
   repeated cockroach.ts.catalog.ChartSection catalog = 1 [(gogoproto.nullable) = false];
 }
 
-// CARequest requests the CA cert anchoring this service.
-message CARequest {
-  // No information needed.
-}
-
-// CAResponse contains a PEM encoded copy of the CA cert for this service.
-message CAResponse {
-  bytes ca_cert = 1;
-}
-
-// CertBundleRequest requests the bundle of initialization CAs for a new node.
-// It provides authentication in the form of a joinToken containing a
-// sharedSecret.
-message CertBundleRequest {
-    string token_id = 1 [(gogoproto.customname) = "TokenID"];
-    bytes shared_secret = 2;
- }
-
-// CertBundleResponse contains a copy of all CAs needed to intialize TLS for
-// a new node.
-message CertBundleResponse {
-  bytes bundle = 1;
-}
-
 // Admin is the gRPC API for the admin UI. Through grpc-gateway, we offer
 // REST-style HTTP endpoints that locally proxy to the gRPC endpoints.
 service Admin {
-  rpc RequestCA(CARequest) returns (CAResponse) {
-    option (google.api.http) = {
-      get : "/_join/v1/ca"
-    };
-  }
-
-  rpc RequestCertBundle(CertBundleRequest) returns (CertBundleResponse) {
-    option (google.api.http) = {
-      get : "/_join/v1/requestbundle"
-    };
-  }
-
   // URL: /_admin/v1/users
   rpc Users(UsersRequest) returns (UsersResponse) {
     option (google.api.http) = {
@@ -865,7 +834,6 @@ service Admin {
   }
 
   // Health returns liveness for the node target of the request.
-  // API: PUBLIC
   rpc Health(HealthRequest) returns (HealthResponse) {
     option (google.api.http) = {
       get: "/_admin/v1/health"
@@ -884,13 +852,6 @@ service Admin {
   rpc Jobs(JobsRequest) returns (JobsResponse) {
     option (google.api.http) = {
       get: "/_admin/v1/jobs"
-    };
-  }
-
-  // Job returns the job record for the job of the given job_id.
-  rpc Job(JobRequest) returns (JobResponse) {
-    option (google.api.http) = {
-      get: "/_admin/v1/jobs/{job_id}"
     };
   }
 

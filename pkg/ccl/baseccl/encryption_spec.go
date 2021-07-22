@@ -15,11 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
+	"github.com/spf13/pflag"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/cliccl/cliflagsccl"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/errors"
-	"github.com/spf13/pflag"
 )
 
 // DefaultRotationPeriod is the rotation period used if not specified.
@@ -210,7 +211,7 @@ func PopulateStoreSpecWithEncryption(
 			if err != nil {
 				return err
 			}
-			storeSpecs.Specs[i].EncryptionOptions = opts
+			storeSpecs.Specs[i].ExtraOptions = opts
 			found = true
 			break
 		}
@@ -221,7 +222,7 @@ func PopulateStoreSpecWithEncryption(
 	return nil
 }
 
-// EncryptionOptionsForStore takes a store directory and returns its EncryptionOptions
+// EncryptionOptionsForStore takes a store directory and returns its ExtraOptions
 // if a matching entry if found in the StoreEncryptionSpecList.
 // The caller should appropriately set UseFileRegistry on a non-nil result.
 func EncryptionOptionsForStore(

@@ -1,20 +1,22 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package roachpb
 
 import (
 	"math"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestAddNumericStats(t *testing.T) {
@@ -82,16 +84,4 @@ func TestAddNumericStats(t *testing.T) {
 	if a != combined {
 		t.Fatalf("a.Add(b) should match add(a, b): %+v vs %+v", a, combined)
 	}
-}
-
-func TestAddExecStats(t *testing.T) {
-	numericStatA := NumericStat{Mean: 354.123, SquaredDiffs: 34.34123}
-	numericStatB := NumericStat{Mean: 9.34354, SquaredDiffs: 75.321}
-	a := ExecStats{Count: 3, NetworkBytes: numericStatA}
-	b := ExecStats{Count: 1, NetworkBytes: numericStatB}
-	expectedNumericStat := AddNumericStats(a.NetworkBytes, b.NetworkBytes, a.Count, b.Count)
-	a.Add(b)
-	require.Equal(t, int64(4), a.Count)
-	epsilon := 0.00000001
-	require.True(t, expectedNumericStat.AlmostEqual(a.NetworkBytes, epsilon), "expected %+v, but found %+v", expectedNumericStat, a.NetworkMessages)
 }

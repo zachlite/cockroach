@@ -8,4 +8,6 @@
 
 package cliccl
 
-import _ "github.com/cockroachdb/cockroach/pkg/ccl/workloadccl/cliccl" // init hooks
+import (
+	_ "github.com/cockroachdb/cockroach/pkg/ccl/workloadccl/cliccl" // init hooks
+)

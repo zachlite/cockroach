@@ -1,72 +1,63 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package optbuilder
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"fmt"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 func (b *Builder) buildExplain(explain *tree.Explain, inScope *scope) (outScope *scope) {
-	if _, ok := explain.Statement.(*tree.Execute); ok {
-		panic(pgerror.New(
-			pgcode.FeatureNotSupported, "EXPLAIN EXECUTE is not supported; use EXPLAIN ANALYZE",
-		))
+	opts, err := explain.ParseOptions()
+	if err != nil {
+		panic(builderError{err})
 	}
 
-	stmtScope := b.buildStmtAtRoot(explain.Statement, nil /* desiredTypes */)
-
+	// We don't allow the statement under Explain to reference outer columns, so we
+	// pass a "blank" scope rather than inScope.
+	stmtScope := b.buildStmt(explain.Statement, &scope{builder: b})
 	outScope = inScope.push()
 
-	switch explain.Mode {
+	var cols sqlbase.ResultColumns
+	switch opts.Mode {
 	case tree.ExplainPlan:
-		telemetry.Inc(sqltelemetry.ExplainPlanUseCounter)
+		if opts.Flags.Contains(tree.ExplainFlagVerbose) || opts.Flags.Contains(tree.ExplainFlagTypes) {
+			cols = sqlbase.ExplainPlanVerboseColumns
+		} else {
+			cols = sqlbase.ExplainPlanColumns
+		}
 
 	case tree.ExplainDistSQL:
-		telemetry.Inc(sqltelemetry.ExplainDistSQLUseCounter)
+		cols = sqlbase.ExplainDistSQLColumns
 
 	case tree.ExplainOpt:
-		if explain.Flags[tree.ExplainFlagVerbose] {
-			telemetry.Inc(sqltelemetry.ExplainOptVerboseUseCounter)
-		} else {
-			telemetry.Inc(sqltelemetry.ExplainOptUseCounter)
-		}
-
-	case tree.ExplainVec:
-		telemetry.Inc(sqltelemetry.ExplainVecUseCounter)
-	case tree.ExplainDDL:
-		if explain.Flags[tree.ExplainFlagDeps] {
-			telemetry.Inc(sqltelemetry.ExplainDDLDeps)
-		} else {
-			telemetry.Inc(sqltelemetry.ExplainDDLStages)
-		}
+		cols = sqlbase.ExplainOptColumns
 
 	default:
-		panic(errors.Errorf("EXPLAIN mode %s not supported", explain.Mode))
+		panic(fmt.Errorf("unsupported EXPLAIN mode: %d", opts.Mode))
 	}
-	b.synthesizeResultColumns(outScope, colinfo.ExplainPlanColumns)
+	b.synthesizeResultColumns(outScope, cols)
 
-	input := stmtScope.expr.(memo.RelExpr)
-	private := memo.ExplainPrivate{
-		Options:  explain.ExplainOptions,
-		ColList:  colsToColList(outScope.cols),
-		Props:    stmtScope.makePhysicalProps(),
-		StmtType: explain.Statement.StatementReturnType(),
+	def := memo.ExplainOpDef{
+		Options: opts,
+		ColList: colsToColList(outScope.cols),
+		Props:   *stmtScope.makePhysicalProps(),
 	}
-	outScope.expr = b.factory.ConstructExplain(input, &private)
+	outScope.group = b.factory.ConstructExplain(stmtScope.group, b.factory.InternExplainOpDef(&def))
 	return outScope
 }

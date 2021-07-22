@@ -1,50 +1,36 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import React from "react";
 import _ from "lodash";
 
 import { LineGraph } from "src/views/cluster/components/linegraph";
-import {
-  Metric,
-  Axis,
-  AxisUnits,
-} from "src/views/shared/components/metricQuery";
+import { Metric, Axis, AxisUnits } from "src/views/shared/components/metricQuery";
 
-import {
-  GraphDashboardProps,
-  nodeDisplayName,
-  storeIDsForNode,
-} from "./dashboardUtils";
-import {
-  CapacityGraphTooltip,
-  LiveBytesGraphTooltip,
-} from "src/views/cluster/containers/nodeGraphs/dashboards/graphTooltips";
+import { GraphDashboardProps, nodeDisplayName, storeIDsForNode } from "./dashboardUtils";
 
 export default function (props: GraphDashboardProps) {
-  const {
-    nodeIDs,
-    nodesSummary,
-    nodeSources,
-    storeSources,
-    tooltipSelection,
-  } = props;
+  const { nodeIDs, nodesSummary, nodeSources, storeSources, tooltipSelection } = props;
 
   return [
     <LineGraph
       title="Capacity"
       sources={storeSources}
-      tooltip={<CapacityGraphTooltip tooltipSelection={tooltipSelection} />}
+      tooltip={`Summary of total and available capacity ${tooltipSelection}.`}
     >
       <Axis units={AxisUnits.Bytes} label="capacity">
-        <Metric name="cr.store.capacity" title="Max" />
+        <Metric name="cr.store.capacity" title="Capacity" />
         <Metric name="cr.store.capacity.available" title="Available" />
         <Metric name="cr.store.capacity.used" title="Used" />
       </Axis>
@@ -53,7 +39,10 @@ export default function (props: GraphDashboardProps) {
     <LineGraph
       title="Live Bytes"
       sources={storeSources}
-      tooltip={<LiveBytesGraphTooltip tooltipSelection={tooltipSelection} />}
+      tooltip={
+        `The amount of Live data used by both applications and the
+           CockroachDB system ${tooltipSelection}. This excludes historical and deleted data.`
+      }
     >
       <Axis units={AxisUnits.Bytes} label="live bytes">
         <Metric name="cr.store.livebytes" title="Live" />
@@ -64,95 +53,58 @@ export default function (props: GraphDashboardProps) {
     <LineGraph
       title="Log Commit Latency: 99th Percentile"
       sources={storeSources}
-      tooltip={`The 99th %ile latency for commits to the Raft Log.
-        This measures essentially an fdatasync to the storage engine's write-ahead log.`}
+      tooltip={`The 99th %ile latency for commits to the Raft Log.`}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, (nid) => (
-          <Metric
-            key={nid}
-            name="cr.store.raft.process.logcommit.latency-p99"
-            title={nodeDisplayName(nodesSummary, nid)}
-            sources={storeIDsForNode(nodesSummary, nid)}
-          />
-        ))}
-      </Axis>
-    </LineGraph>,
-
-    <LineGraph
-      title="Log Commit Latency: 50th Percentile"
-      sources={storeSources}
-      tooltip={`The 50th %ile latency for commits to the Raft Log.
-        This measures essentially an fdatasync to the storage engine's write-ahead log.`}
-    >
-      <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, (nid) => (
-          <Metric
-            key={nid}
-            name="cr.store.raft.process.logcommit.latency-p50"
-            title={nodeDisplayName(nodesSummary, nid)}
-            sources={storeIDsForNode(nodesSummary, nid)}
-          />
-        ))}
+        {
+          _.map(nodeIDs, (nid) => (
+            <Metric
+              key={nid}
+              name="cr.store.raft.process.logcommit.latency-p99"
+              title={nodeDisplayName(nodesSummary, nid)}
+              sources={storeIDsForNode(nodesSummary, nid)}
+            />
+          ))
+        }
       </Axis>
     </LineGraph>,
 
     <LineGraph
       title="Command Commit Latency: 99th Percentile"
       sources={storeSources}
-      tooltip={`The 99th %ile latency for commits of Raft commands.
-        This measures applying a batch to the storage engine
-        (including writes to the write-ahead log), but no fsync.`}
+      tooltip={`The 99th %ile latency for commits of Raft commands.`}
     >
       <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, (nid) => (
-          <Metric
-            key={nid}
-            name="cr.store.raft.process.commandcommit.latency-p99"
-            title={nodeDisplayName(nodesSummary, nid)}
-            sources={storeIDsForNode(nodesSummary, nid)}
-          />
-        ))}
+        {
+          _.map(nodeIDs, (nid) => (
+            <Metric
+              key={nid}
+              name="cr.store.raft.process.commandcommit.latency-p99"
+              title={nodeDisplayName(nodesSummary, nid)}
+              sources={storeIDsForNode(nodesSummary, nid)}
+            />
+          ))
+        }
       </Axis>
     </LineGraph>,
 
     <LineGraph
-      title="Command Commit Latency: 50th Percentile"
+      title="RocksDB Read Amplification"
       sources={storeSources}
-      tooltip={`The 50th %ile latency for commits of Raft commands.
-        This measures applying a batch to the storage engine
-        (including writes to the write-ahead log), but no fsync.`}
-    >
-      <Axis units={AxisUnits.Duration} label="latency">
-        {_.map(nodeIDs, (nid) => (
-          <Metric
-            key={nid}
-            name="cr.store.raft.process.commandcommit.latency-p50"
-            title={nodeDisplayName(nodesSummary, nid)}
-            sources={storeIDsForNode(nodesSummary, nid)}
-          />
-        ))}
-      </Axis>
-    </LineGraph>,
-
-    <LineGraph
-      title="Read Amplification"
-      sources={storeSources}
-      tooltip={`The average number of real read operations executed per logical read operation ${tooltipSelection}.`}
+      tooltip={
+        `RocksDB read amplification statistic; measures the average number of real read operations
+           executed per logical read operation ${tooltipSelection}.`
+      }
     >
       <Axis label="factor">
-        <Metric
-          name="cr.store.rocksdb.read-amplification"
-          title="Read Amplification"
-          aggregateAvg
-        />
+        <Metric name="cr.store.rocksdb.read-amplification" title="Read Amplification" aggregateAvg />
       </Axis>
     </LineGraph>,
 
     <LineGraph
-      title="SSTables"
+      title="RocksDB SSTables"
       sources={storeSources}
-      tooltip={`The number of SSTables in use ${tooltipSelection}.`}
+      tooltip={`The number of RocksDB SSTables in use ${tooltipSelection}.`}
     >
       <Axis label="sstables">
         <Metric name="cr.store.rocksdb.num-sstables" title="SSTables" />
@@ -162,8 +114,10 @@ export default function (props: GraphDashboardProps) {
     <LineGraph
       title="File Descriptors"
       sources={nodeSources}
-      tooltip={`The number of open file descriptors ${tooltipSelection}, compared with the
-          file descriptor limit.`}
+      tooltip={
+        `The number of open file descriptors ${tooltipSelection}, compared with the
+          file descriptor limit.`
+      }
     >
       <Axis label="descriptors">
         <Metric name="cr.node.sys.fd.open" title="Open" />
@@ -172,41 +126,29 @@ export default function (props: GraphDashboardProps) {
     </LineGraph>,
 
     <LineGraph
-      title="Compactions/Flushes"
+      title="RocksDB Compactions/Flushes"
       sources={storeSources}
-      tooltip={`The number of compactions and memtable flushes per second ${tooltipSelection}.`}
+      tooltip={
+        `The number of RocksDB compactions and memtable flushes, per second ${tooltipSelection}.`
+      }
     >
       <Axis label="count">
-        <Metric
-          name="cr.store.rocksdb.compactions"
-          title="Compactions"
-          nonNegativeRate
-        />
-        <Metric
-          name="cr.store.rocksdb.flushes"
-          title="Flushes"
-          nonNegativeRate
-        />
+        <Metric name="cr.store.rocksdb.compactions" title="Compactions" nonNegativeRate />
+        <Metric name="cr.store.rocksdb.flushes" title="Flushes" nonNegativeRate />
       </Axis>
     </LineGraph>,
 
     <LineGraph
       title="Time Series Writes"
       sources={nodeSources}
-      tooltip={`The number of successfully written time series samples, and number of errors attempting
-        to write time series, per second ${tooltipSelection}.`}
+      tooltip={
+        `The number of successfully written time series samples, and number of errors attempting
+        to write time series, per second ${tooltipSelection}.`
+      }
     >
       <Axis label="count">
-        <Metric
-          name="cr.node.timeseries.write.samples"
-          title="Samples Written"
-          nonNegativeRate
-        />
-        <Metric
-          name="cr.node.timeseries.write.errors"
-          title="Errors"
-          nonNegativeRate
-        />
+        <Metric name="cr.node.timeseries.write.samples" title="Samples Written" nonNegativeRate />
+        <Metric name="cr.node.timeseries.write.errors" title="Errors" nonNegativeRate />
       </Axis>
     </LineGraph>,
 
@@ -215,25 +157,18 @@ export default function (props: GraphDashboardProps) {
       sources={nodeSources}
       tooltip={
         <div>
-          The number of bytes written by the time series system per second{" "}
-          {tooltipSelection}.
+          The number of bytes written by the time series system per second {tooltipSelection}.
           <br />
-          Note that this does not reflect the rate at which disk space is
-          consumed by time series; the data is highly compressed on disk. This
-          rate is instead intended to indicate the amount of network traffic and
-          disk activity generated by time series writes.
+          Note that this does not reflect the rate at which disk space is consumed by time series;
+          the data is highly compressed on disk. This rate is instead intended to indicate the
+          amount of network traffic and disk activity generated by time series writes.
           <br />
-          See the "databases" tab to find the current disk usage for time series
-          data.
+          See the "databases" tab to find the current disk usage for time series data.
         </div>
       }
     >
       <Axis units={AxisUnits.Bytes}>
-        <Metric
-          name="cr.node.timeseries.write.bytes"
-          title="Bytes Written"
-          nonNegativeRate
-        />
+        <Metric name="cr.node.timeseries.write.bytes" title="Bytes Written" nonNegativeRate />
       </Axis>
     </LineGraph>,
   ];

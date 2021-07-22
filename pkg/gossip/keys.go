@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package gossip
 
@@ -16,7 +20,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 // separator is used to separate the non-prefix components of a
@@ -28,27 +32,32 @@ const separator = ":"
 // Constants for gossip keys.
 const (
 	// KeyClusterID is the unique UUID for this Cockroach cluster.
-	// The value is a string UUID for the cluster. The cluster ID is
+	// The value is a string UUID for the cluster.  The cluster ID is
 	// gossiped by all nodes that contain a replica of the first range,
 	// and it serves as a check for basic gossip connectivity. The
 	// Gossip.Connected channel is closed when we see this key.
 	KeyClusterID = "cluster-id"
 
 	// KeyStorePrefix is the key prefix for gossiping stores in the network.
-	// The suffix is a store ID and the value is a roachpb.StoreDescriptor.
+	// The suffix is a store ID and the value is roachpb.StoreDescriptor.
 	KeyStorePrefix = "store"
 
-	// KeyNodeIDPrefix is the key prefix for gossiping node id addresses.
-	// The actual key is suffixed with the decimal representation of the
-	// node id (e.g. 'node:1') and the value is a roachpb.NodeDescriptor.
+	// KeyDeadReplicasPrefix is the key prefix for gossiping dead replicas in the
+	// network. The suffix is a store ID and the value is
+	// roachpb.StoreDeadReplicas.
+	KeyDeadReplicasPrefix = "replica-dead"
+
+	// KeyNodeIDPrefix is the key prefix for gossiping node id
+	// addresses. The actual key is suffixed with the decimal
+	// representation of the node id and the value is the host:port
+	// string address of the node. E.g. node:1 => 127.0.0.1:24001
 	KeyNodeIDPrefix = "node"
 
-	// KeyHealthAlertPrefix is the key prefix for gossiping health alerts.
-	// The value is a proto of type HealthCheckResult.
+	// KeyHealthAlertPrefix is the key prefix for gossiping health alerts. The
+	// value is a proto of type HealthCheckResult.
 	KeyNodeHealthAlertPrefix = "health-alert"
 
-	// KeyNodeLivenessPrefix is the key prefix for gossiping node liveness
-	// info.
+	// KeyNodeLivenessPrefix is the key prefix for gossiping node liveness info.
 	KeyNodeLivenessPrefix = "liveness"
 
 	// KeySentinel is a key for gossip which must not expire or
@@ -57,9 +66,10 @@ const (
 	// the range lease for the first range.
 	KeySentinel = "sentinel"
 
-	// KeyFirstRangeDescriptor is the descriptor for the "first" range. The
-	// "first" range contains the meta1 key range, the first level of the
-	// bi-level key addressing scheme. The value is a roachpb.RangeDescriptor.
+	// KeyFirstRangeDescriptor is the descriptor for the "first"
+	// range. The "first" range contains the meta1 key range, the first
+	// level of the bi-level key addressing scheme. The value is a slice
+	// of storage.Replica structs.
 	KeyFirstRangeDescriptor = "first-range"
 
 	// KeySystemConfig is the gossip key for the system DB span.
@@ -84,13 +94,6 @@ const (
 	// client connections a node has open. This is used by other nodes in the
 	// cluster to build a map of the gossip network.
 	KeyGossipClientsPrefix = "gossip-clients"
-
-	// KeyGossipStatementDiagnosticsRequest is the gossip key for new statement
-	// diagnostics requests. The values is the id of the request that generated
-	// the notification, as a little-endian-encoded uint64.
-	// stmtDiagnosticsRequestRegistry listens for notifications and responds by
-	// polling for new requests.
-	KeyGossipStatementDiagnosticsRequest = "stmt-diag-req"
 )
 
 // MakeKey creates a canonical key under which to gossip a piece of
@@ -154,19 +157,9 @@ func MakeStoreKey(storeID roachpb.StoreID) string {
 	return MakeKey(KeyStorePrefix, storeID.String())
 }
 
-// StoreIDFromKey attempts to extract a StoreID from the provided key after
-// stripping the provided prefix. Returns an error if the key is not of the
-// correct type or is not parsable.
-func StoreIDFromKey(storeKey string) (roachpb.StoreID, error) {
-	trimmedKey, err := removePrefixFromKey(storeKey, KeyStorePrefix)
-	if err != nil {
-		return 0, err
-	}
-	storeID, err := strconv.ParseInt(trimmedKey, 10 /* base */, 64 /* bitSize */)
-	if err != nil {
-		return 0, errors.Wrapf(err, "failed parsing StoreID from key %q", storeKey)
-	}
-	return roachpb.StoreID(storeID), nil
+// MakeDeadReplicasKey returns the dead replicas gossip key for the given store.
+func MakeDeadReplicasKey(storeID roachpb.StoreID) string {
+	return MakeKey(KeyDeadReplicasPrefix, storeID.String())
 }
 
 // MakeDistSQLNodeVersionKey returns the gossip key for the given store.
@@ -184,6 +177,22 @@ func MakeDistSQLDrainingKey(nodeID roachpb.NodeID) string {
 // statistic is available for the given table.
 func MakeTableStatAddedKey(tableID uint32) string {
 	return MakeKey(KeyTableStatAddedPrefix, strconv.FormatUint(uint64(tableID), 10 /* base */))
+}
+
+// TableIDFromTableStatAddedKey attempts to extract the table ID from the
+// provided key.
+// The key should have been constructed by MakeTableStatAddedKey.
+// Returns an error if the key is not of the correct type or is not parsable.
+func TableIDFromTableStatAddedKey(key string) (uint32, error) {
+	trimmedKey, err := removePrefixFromKey(key, KeyTableStatAddedPrefix)
+	if err != nil {
+		return 0, err
+	}
+	tableID, err := strconv.ParseUint(trimmedKey, 10 /* base */, 32 /* bitSize */)
+	if err != nil {
+		return 0, errors.Wrapf(err, "failed parsing table ID from key %q", key)
+	}
+	return uint32(tableID), nil
 }
 
 // removePrefixFromKey removes the key prefix and separator and returns what's

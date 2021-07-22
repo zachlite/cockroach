@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
@@ -20,11 +24,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/golang-commonmark/markdown"
+	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/errors"
-	"github.com/golang-commonmark/markdown"
-	"github.com/spf13/cobra"
 )
 
 func init() {
@@ -182,7 +187,7 @@ func generateFunctions(from []string, categorize bool) []byte {
 		}
 		seen[name] = struct{}{}
 		props, fns := builtins.GetBuiltinProperties(name)
-		if !props.ShouldDocument() {
+		if props.Private {
 			continue
 		}
 		for _, fn := range fns {
@@ -196,7 +201,7 @@ func generateFunctions(from []string, categorize bool) []byte {
 			}
 			args := fn.Types.String()
 
-			retType := fn.InferReturnTypeFromInputArgTypes(fn.Types.Types())
+			retType := fn.FixedReturnType()
 			ret := retType.String()
 
 			cat := props.Category
@@ -215,7 +220,7 @@ func generateFunctions(from []string, categorize bool) []byte {
 				info := md.RenderToString([]byte(fn.Info))
 				extra = fmt.Sprintf("<span class=\"funcdesc\">%s</span>", info)
 			}
-			s := fmt.Sprintf("<tr><td><a name=\"%s\"></a><code>%s(%s) &rarr; %s</code></td><td>%s</td></tr>", name, name, linkArguments(args), linkArguments(ret), extra)
+			s := fmt.Sprintf("<tr><td><code>%s(%s) &rarr; %s</code></td><td>%s</td></tr>", name, linkArguments(args), linkArguments(ret), extra)
 			functions[cat] = append(functions[cat], s)
 		}
 	}
@@ -263,19 +268,15 @@ func linkArguments(t string) string {
 
 func linkTypeName(s string) string {
 	s = strings.TrimSuffix(s, "{}")
-	s = strings.TrimSuffix(s, "{*}")
 	name := s
 	switch s {
 	case "timestamptz":
 		s = "timestamp"
-	case "collatedstring":
-		s = "collate"
 	}
 	s = strings.TrimSuffix(s, "[]")
-	s = strings.TrimSuffix(s, "*")
 	switch s {
 	case "int", "decimal", "float", "bool", "date", "timestamp", "interval", "string", "bytes",
-		"inet", "uuid", "collate", "time":
+		"inet", "uuid", "collatedstring", "time":
 		s = fmt.Sprintf("<a href=\"%s.html\">%s</a>", s, name)
 	}
 	return s

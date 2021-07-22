@@ -1,46 +1,48 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package server
 
 import (
 	"context"
-	"net"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/kr/pretty"
+	"github.com/stretchr/testify/require"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil"
-	"github.com/kr/pretty"
-	"github.com/stretchr/testify/require"
 )
 
 func TestParseInitNodeAttributes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	cfg := MakeConfig(context.Background(), cluster.MakeTestingClusterSettings())
+	cfg := MakeConfig(context.TODO(), cluster.MakeTestingClusterSettings())
 	cfg.Attrs = "attr1=val1::attr2=val2"
 	cfg.Stores = base.StoreSpecList{Specs: []base.StoreSpec{{InMemory: true, Size: base.SizeSpec{InBytes: base.MinimumStoreSize * 100}}}}
-	engines, err := cfg.CreateEngines(context.Background())
+	engines, err := cfg.CreateEngines(context.TODO())
 	if err != nil {
 		t.Fatalf("Failed to initialize stores: %s", err)
 	}
 	defer engines.Close()
-	if err := cfg.InitNode(context.Background()); err != nil {
+	if err := cfg.InitNode(); err != nil {
 		t.Fatalf("Failed to initialize node: %s", err)
 	}
 
@@ -53,16 +55,15 @@ func TestParseInitNodeAttributes(t *testing.T) {
 // correctly.
 func TestParseJoinUsingAddrs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	cfg := MakeConfig(context.Background(), cluster.MakeTestingClusterSettings())
-	cfg.JoinList = []string{"localhost:12345", "localhost:23456", "localhost:34567", "localhost"}
+	cfg := MakeConfig(context.TODO(), cluster.MakeTestingClusterSettings())
+	cfg.JoinList = []string{"localhost:12345,,localhost:23456", "localhost:34567"}
 	cfg.Stores = base.StoreSpecList{Specs: []base.StoreSpec{{InMemory: true, Size: base.SizeSpec{InBytes: base.MinimumStoreSize * 100}}}}
-	engines, err := cfg.CreateEngines(context.Background())
+	engines, err := cfg.CreateEngines(context.TODO())
 	if err != nil {
 		t.Fatalf("Failed to initialize stores: %s", err)
 	}
 	defer engines.Close()
-	if err := cfg.InitNode(context.Background()); err != nil {
+	if err := cfg.InitNode(); err != nil {
 		t.Fatalf("Failed to initialize node: %s", err)
 	}
 	r1, err := resolver.NewResolver("localhost:12345")
@@ -77,11 +78,7 @@ func TestParseJoinUsingAddrs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r4, err := resolver.NewResolver("localhost:26257")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := []resolver.Resolver{r1, r2, r3, r4}
+	expected := []resolver.Resolver{r1, r2, r3}
 	if !reflect.DeepEqual(cfg.GossipBootstrapResolvers, expected) {
 		t.Fatalf("Unexpected bootstrap addresses: %v, expected: %v", cfg.GossipBootstrapResolvers, expected)
 	}
@@ -91,7 +88,6 @@ func TestParseJoinUsingAddrs(t *testing.T) {
 // correctly parsed.
 func TestReadEnvironmentVariables(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	resetEnvVar := func() {
 		// Reset all environment variables in case any were already set.
@@ -110,14 +106,17 @@ func TestReadEnvironmentVariables(t *testing.T) {
 		if err := os.Unsetenv("COCKROACH_CONSISTENCY_CHECK_INTERVAL"); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Unsetenv("COCKROACH_CONSISTENCY_CHECK_PANIC_ON_FAILURE"); err != nil {
+			t.Fatal(err)
+		}
 		envutil.ClearEnvCache()
 	}
 	defer resetEnvVar()
 
 	st := cluster.MakeTestingClusterSettings()
 	// Makes sure no values are set when no environment variables are set.
-	cfg := MakeConfig(context.Background(), st)
-	cfgExpected := MakeConfig(context.Background(), st)
+	cfg := MakeConfig(context.TODO(), st)
+	cfgExpected := MakeConfig(context.TODO(), st)
 
 	resetEnvVar()
 	cfg.readEnvironmentVariables()
@@ -173,7 +172,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 
 func TestFilterGossipBootstrapResolvers(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	resolverSpecs := []string{
 		"127.0.0.1:9000",
@@ -188,78 +186,15 @@ func TestFilterGossipBootstrapResolvers(t *testing.T) {
 			resolvers = append(resolvers, resolver)
 		}
 	}
-	cfg := MakeConfig(context.Background(), cluster.MakeTestingClusterSettings())
+	cfg := MakeConfig(context.TODO(), cluster.MakeTestingClusterSettings())
 	cfg.GossipBootstrapResolvers = resolvers
-	cfg.Addr = resolverSpecs[0]
-	cfg.AdvertiseAddr = resolverSpecs[2]
 
-	filtered := cfg.FilterGossipBootstrapResolvers(context.Background())
+	listenAddr := util.MakeUnresolvedAddr("tcp", resolverSpecs[0])
+	advertAddr := util.MakeUnresolvedAddr("tcp", resolverSpecs[2])
+	filtered := cfg.FilterGossipBootstrapResolvers(context.Background(), &listenAddr, &advertAddr)
 	if len(filtered) != 1 {
 		t.Fatalf("expected one resolver; got %+v", filtered)
 	} else if filtered[0].Addr() != resolverSpecs[1] {
 		t.Fatalf("expected resolver to be %q; got %q", resolverSpecs[1], filtered[0].Addr())
 	}
-}
-
-func TestParseBootstrapResolvers(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	cfg := MakeConfig(context.Background(), cluster.MakeTestingClusterSettings())
-	const expectedName = "hello"
-
-	t.Run("nosrv", func(t *testing.T) {
-		// Ensure that a name in the join list becomes a resolver for that name,
-		// when SRV lookups are disabled.
-		cfg.JoinPreferSRVRecords = false
-		cfg.JoinList = append(base.JoinListType(nil), expectedName)
-
-		resolvers, err := cfg.parseGossipBootstrapResolvers(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(resolvers) != 1 {
-			t.Fatalf("expected 1 resolver, got %# v", pretty.Formatter(resolvers))
-		}
-		host, port, err := netutil.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if port == "UNKNOWN" {
-			t.Fatalf("expected port defined in resover: %# v", pretty.Formatter(resolvers))
-		}
-		if host != expectedName {
-			t.Errorf("expected name %q, got %q", expectedName, host)
-		}
-	})
-
-	t.Run("srv", func(t *testing.T) {
-		cfg.JoinPreferSRVRecords = true
-		cfg.JoinList = append(base.JoinListType(nil), "othername")
-
-		defer resolver.TestingOverrideSRVLookupFn(func(service, proto, name string) (string, []*net.SRV, error) {
-			return "cluster", []*net.SRV{{Target: expectedName, Port: 111}}, nil
-		})()
-
-		resolvers, err := cfg.parseGossipBootstrapResolvers(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(resolvers) != 1 {
-			t.Fatalf("expected 1 resolver, got %# v", pretty.Formatter(resolvers))
-		}
-		host, port, err := netutil.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if port == "UNKNOWN" {
-			t.Fatalf("expected port defined in resover: %# v", pretty.Formatter(resolvers))
-		}
-		if port != "111" {
-			t.Fatalf("expected port 111 from SRV, got %q", port)
-		}
-		if host != expectedName {
-			t.Errorf("expected name %q, got %q", expectedName, host)
-		}
-	})
 }

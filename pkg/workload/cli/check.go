@@ -1,12 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License. See the AUTHORS file
+// for names of contributors.
 
 package cli
 
@@ -15,14 +20,15 @@ import (
 	gosql "database/sql"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/workload"
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/cockroachdb/cockroach/pkg/workload"
 )
 
 func init() {
-	AddSubCmd(func(userFacing bool) *cobra.Command {
+	AddSubCmd(func() *cobra.Command {
 		var checkCmd = SetCmdDefaults(&cobra.Command{
 			Use:   `check`,
 			Short: `check a running cluster's data for consistency`,
@@ -67,7 +73,7 @@ func check(gen workload.Generator, urls []string, dbName string) error {
 		fn = hooks.Hooks().CheckConsistency
 	}
 	if fn == nil {
-		return errors.Errorf(`no consistency checks are defined for %s`, gen.Meta().Name)
+		return errors.Errorf(`no consistency checks are defined for %s` + gen.Meta().Name)
 	}
 
 	sqlDB, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))

@@ -1,37 +1,33 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { withRouter } from "react-router-dom";
 
-import { refreshLocations, refreshNodes } from "src/redux/apiReducers";
-import {
-  LocalityTier,
-  LocalityTree,
-  selectLocalityTree,
-} from "src/redux/localities";
-import {
-  LocationTree,
-  selectLocationsRequestStatus,
-  selectLocationTree,
-} from "src/redux/locations";
+import { refreshNodes, refreshLocations } from "src/redux/apiReducers";
+import { CachedDataReducerState } from "src/redux/cachedDataReducer";
+import { selectLocalityTree, LocalityTier, LocalityTree } from "src/redux/localities";
+import { selectLocationsRequestStatus, selectLocationTree, LocationTree } from "src/redux/locations";
 import { selectNodeRequestStatus } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
-import { getNodeLocalityTiers } from "src/util/localities";
 import { findMostSpecificLocation, hasLocation } from "src/util/locations";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import { getNodeLocalityTiers } from "src/util/localities";
+import Loading from "src/views/shared/components/loading";
+
 import "./localities.styl";
-import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 
 function formatCoord(coordinate: number) {
   return coordinate.toFixed(4);
@@ -44,15 +40,13 @@ function renderLocation(locations: LocationTree, tiers: LocalityTier[]) {
     return "";
   }
 
-  return `${formatCoord(location.latitude)}, ${formatCoord(
-    location.longitude,
-  )}`;
+  return `${formatCoord(location.latitude)}, ${formatCoord(location.longitude)}`;
 }
 
 function renderLocalityTree(locations: LocationTree, tree: LocalityTree) {
   let rows: React.ReactNode[] = [];
   const leftIndentStyle = {
-    paddingLeft: `${20 * tree.tiers.length}px`,
+    "padding-left": 20 * tree.tiers.length,
   };
 
   tree.nodes.forEach((node) => {
@@ -61,10 +55,8 @@ function renderLocalityTree(locations: LocationTree, tree: LocalityTree) {
     rows.push(
       <tr>
         <td></td>
-        <td>
-          n{node.desc.node_id} @ {node.desc.address.address_field}
-        </td>
-        <td className="parent-location">{renderLocation(locations, tiers)}</td>
+        <td>n{ node.desc.node_id } @ { node.desc.address.address_field }</td>
+        <td className="parent-location">{ renderLocation(locations, tiers) }</td>
       </tr>,
     );
   });
@@ -75,20 +67,10 @@ function renderLocalityTree(locations: LocationTree, tree: LocalityTree) {
 
       rows.push(
         <tr>
-          <td>
-            <span style={leftIndentStyle}>
-              {key}={value}
-            </span>
-          </td>
+          <td><span style={leftIndentStyle}>{ key }={ value }</span></td>
           <td></td>
-          <td
-            className={
-              hasLocation(locations, { key, value })
-                ? "own-location"
-                : "parent-location"
-            }
-          >
-            {renderLocation(locations, child.tiers)}
+          <td className={hasLocation(locations, { key, value }) ? "own-location" : "parent-location"}>
+            { renderLocation(locations, child.tiers) }
           </td>
         </tr>,
       );
@@ -109,32 +91,26 @@ interface LocalitiesProps {
   refreshNodes: typeof refreshNodes;
 }
 
-export class Localities extends React.Component<LocalitiesProps, {}> {
-  componentDidMount() {
+class Localities extends React.Component<LocalitiesProps, {}> {
+  componentWillMount() {
     this.props.refreshLocations();
     this.props.refreshNodes();
   }
 
-  componentDidUpdate() {
-    this.props.refreshLocations();
-    this.props.refreshNodes();
+  componentWillReceiveProps(props: LocalitiesProps) {
+    props.refreshLocations();
+    props.refreshNodes();
   }
 
   render() {
     return (
       <div>
-        <Helmet title="Localities | Debug" />
-        <section className="section">
-          <h1 className="base-heading">Localities</h1>
-        </section>
+        <Helmet>
+          <title>Localities | Debug</title>
+        </Helmet>
+        <section className="section"><h1>Localities</h1></section>
         <Loading
-          loading={
-            !this.props.localityStatus.data || !this.props.locationStatus.data
-          }
-          error={[
-            this.props.localityStatus.lastError,
-            this.props.locationStatus.lastError,
-          ]}
+          loading={ !this.props.localityStatus.data || !this.props.locationStatus.data }
           render={() => (
             <section className="section">
               <table className="locality-table">
@@ -146,10 +122,7 @@ export class Localities extends React.Component<LocalitiesProps, {}> {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderLocalityTree(
-                    this.props.locationTree,
-                    this.props.localityTree,
-                  )}
+                  { renderLocalityTree(this.props.locationTree, this.props.localityTree) }
                 </tbody>
               </table>
             </section>
@@ -160,19 +133,18 @@ export class Localities extends React.Component<LocalitiesProps, {}> {
   }
 }
 
-const mapStateToProps = (state: AdminUIState) => ({
-  // RootState contains declaration for whole state
-  localityTree: selectLocalityTree(state),
-  localityStatus: selectNodeRequestStatus(state),
-  locationTree: selectLocationTree(state),
-  locationStatus: selectLocationsRequestStatus(state),
-});
+function mapStateToProps(state: AdminUIState) {
+  return {
+    localityTree: selectLocalityTree(state),
+    localityStatus: selectNodeRequestStatus(state),
+    locationTree: selectLocationTree(state),
+    locationStatus: selectLocationsRequestStatus(state),
+  };
+}
 
-const mapDispatchToProps = {
+const actions = {
   refreshLocations,
   refreshNodes,
 };
 
-export default withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(Localities),
-);
+export default connect(mapStateToProps, actions)(Localities);

@@ -1,46 +1,28 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
 // ZoneSpecifier represents a reference to a configurable zone of the keyspace.
 type ZoneSpecifier struct {
 	// Only one of NamedZone, Database or TableOrIndex may be set.
-	NamedZone UnrestrictedName
-	Database  Name
-	// TODO(radu): TableOrIndex abuses TableIndexName: it allows for the case when
-	// an index is not specified, in which case TableOrIndex.Index is empty.
-	TableOrIndex TableIndexName
+	NamedZone    UnrestrictedName
+	Database     Name
+	TableOrIndex TableNameWithIndex
 
 	// Partition is only respected when Table is set.
 	Partition Name
-}
-
-// TelemetryName returns a name fitting for telemetry purposes.
-func (node ZoneSpecifier) TelemetryName() string {
-	if node.NamedZone != "" {
-		return "range"
-	}
-	if node.Database != "" {
-		return "database"
-	}
-	str := ""
-	if node.Partition != "" {
-		str = "partition."
-	}
-	if node.TargetsIndex() {
-		str += "index"
-	} else {
-		str += "table"
-	}
-	return str
 }
 
 // TargetsTable returns whether the zone specifier targets a table or a subzone
@@ -51,16 +33,16 @@ func (node ZoneSpecifier) TargetsTable() bool {
 
 // TargetsIndex returns whether the zone specifier targets an index.
 func (node ZoneSpecifier) TargetsIndex() bool {
-	return node.TargetsTable() && node.TableOrIndex.Index != ""
-}
-
-// TargetsPartition returns whether the zone specifier targets a partition.
-func (node ZoneSpecifier) TargetsPartition() bool {
-	return node.TargetsTable() && node.Partition != ""
+	return node.TargetsTable() && (node.TableOrIndex.Index != "" || node.TableOrIndex.SearchTable)
 }
 
 // Format implements the NodeFormatter interface.
 func (node *ZoneSpecifier) Format(ctx *FmtCtx) {
+	if node.Partition != "" {
+		ctx.WriteString("PARTITION ")
+		ctx.FormatNode(&node.Partition)
+		ctx.WriteString(" OF ")
+	}
 	if node.NamedZone != "" {
 		ctx.WriteString("RANGE ")
 		ctx.FormatNode(&node.NamedZone)
@@ -68,11 +50,6 @@ func (node *ZoneSpecifier) Format(ctx *FmtCtx) {
 		ctx.WriteString("DATABASE ")
 		ctx.FormatNode(&node.Database)
 	} else {
-		if node.Partition != "" {
-			ctx.WriteString("PARTITION ")
-			ctx.FormatNode(&node.Partition)
-			ctx.WriteString(" OF ")
-		}
 		if node.TargetsIndex() {
 			ctx.WriteString("INDEX ")
 		} else {
@@ -95,7 +72,7 @@ func (node *ShowZoneConfig) Format(ctx *FmtCtx) {
 	if node.ZoneSpecifier == (ZoneSpecifier{}) {
 		ctx.WriteString("SHOW ZONE CONFIGURATIONS")
 	} else {
-		ctx.WriteString("SHOW ZONE CONFIGURATION FROM ")
+		ctx.WriteString("SHOW ZONE CONFIGURATION FOR ")
 		ctx.FormatNode(&node.ZoneSpecifier)
 	}
 }
@@ -104,9 +81,6 @@ func (node *ShowZoneConfig) Format(ctx *FmtCtx) {
 // statement.
 type SetZoneConfig struct {
 	ZoneSpecifier
-	// AllIndexes indicates that the zone configuration should be applied across
-	// all of a tables indexes. (ALTER PARTITION ... OF INDEX <tablename>@*)
-	AllIndexes bool
 	SetDefault bool
 	YAMLConfig Expr
 	Options    KVOptions
@@ -128,18 +102,6 @@ func (node *SetZoneConfig) Format(ctx *FmtCtx) {
 		}
 	} else {
 		ctx.WriteString("USING ")
-		kvOptions := node.Options
-		comma := ""
-		for _, kv := range kvOptions {
-			ctx.WriteString(comma)
-			comma = ", "
-			ctx.FormatNode(&kv.Key)
-			if kv.Value != nil {
-				ctx.WriteString(` = `)
-				ctx.FormatNode(kv.Value)
-			} else {
-				ctx.WriteString(` = COPY FROM PARENT`)
-			}
-		}
+		ctx.FormatNode(&node.Options)
 	}
 }

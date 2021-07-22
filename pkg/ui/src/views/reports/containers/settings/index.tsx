@@ -1,25 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { withRouter } from "react-router-dom";
 
 import * as protos from "src/js/protos";
 import { refreshSettings } from "src/redux/apiReducers";
-import { AdminUIState } from "src/redux/state";
-import { Loading } from "@cockroachlabs/cluster-ui";
-import "./index.styl";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
+import { AdminUIState } from "src/redux/state";
+import Loading from "src/views/shared/components/loading";
 
 interface SettingsOwnProps {
   settings: CachedDataReducerState<protos.cockroach.server.serverpb.SettingsResponse>;
@@ -31,84 +33,75 @@ type SettingsProps = SettingsOwnProps;
 /**
  * Renders the Cluster Settings Report page.
  */
-export class Settings extends React.Component<SettingsProps, {}> {
+class Settings extends React.Component<SettingsProps, {}> {
   refresh(props = this.props) {
-    props.refreshSettings(
-      new protos.cockroach.server.serverpb.SettingsRequest(),
-    );
+    props.refreshSettings(new protos.cockroach.server.serverpb.SettingsRequest());
   }
 
-  componentDidMount() {
+  componentWillMount() {
     // Refresh settings query when mounting.
     this.refresh();
   }
 
-  renderTable(wantPublic: boolean) {
+  renderTable() {
     if (_.isNil(this.props.settings.data)) {
       return null;
     }
 
     const { key_values } = this.props.settings.data;
-    const data: any = _.keys(key_values);
 
     return (
       <table className="settings-table">
         <thead>
           <tr className="settings-table__row settings-table__row--header">
-            <th className="settings-table__cell settings-table__cell--header">
-              Setting
-            </th>
-            <th className="settings-table__cell settings-table__cell--header">
-              Value
-            </th>
-            <th className="settings-table__cell settings-table__cell--header">
-              Description
-            </th>
+            <th className="settings-table__cell settings-table__cell--header">Setting</th>
+            <th className="settings-table__cell settings-table__cell--header">Value</th>
+            <th className="settings-table__cell settings-table__cell--header">Description</th>
           </tr>
         </thead>
         <tbody>
-          {_.chain(data)
-            .filter((key) => key_values[key].public === wantPublic)
-            .sort()
-            .map((key: number) => (
-              <tr key={key} className="settings-table__row">
-                <td className="settings-table__cell">{key}</td>
-                <td className="settings-table__cell">
-                  {key_values[key].value}
-                </td>
-                <td className="settings-table__cell">
-                  {key_values[key].description}
-                </td>
-              </tr>
-            ))
-            .value()}
+          {
+            _.chain(_.keys(key_values))
+              .sort()
+              .map(key => (
+                <tr key={key} className="settings-table__row">
+                  <td className="settings-table__cell">{key}</td>
+                  <td className="settings-table__cell">{key_values[key].value}</td>
+                  <td className="settings-table__cell">{key_values[key].description}</td>
+                </tr>
+              ))
+              .value()
+          }
         </tbody>
       </table>
     );
   }
 
   render() {
+    if (!_.isNil(this.props.settings.lastError)) {
+      return (
+        <div className="section">
+          <h1>Cluster Settings</h1>
+          <h2>Error loading Cluster Settings</h2>
+          {this.props.settings.lastError}
+        </div>
+      );
+    }
+
     return (
       <div className="section">
-        <Helmet title="Cluster Settings | Debug" />
-        <h1 className="base-heading">Cluster Settings</h1>
+        <Helmet>
+          <title>Cluster Settings | Debug</title>
+        </Helmet>
+        <h1>Cluster Settings</h1>
+        <h2></h2>
         <Loading
           loading={!this.props.settings.data}
-          error={this.props.settings.lastError}
+          className="loading-image loading-image__spinner-left loading-image__spinner-left__padded"
           render={() => (
             <div>
-              <p className="settings-note">
-                Note that some settings have been redacted for security
-                purposes.
-              </p>
-              {this.renderTable(true)}
-              <h3>Reserved settings</h3>
-              <p className="settings-note">
-                Note that changes to the following settings can yield
-                unpredictable or negative effects on the entire cluster. Use at
-                your own risk.
-              </p>
-              {this.renderTable(false)}
+              <p>Note that some settings have been redacted for security purposes.</p>
+              {this.renderTable()}
             </div>
           )}
         />
@@ -117,16 +110,14 @@ export class Settings extends React.Component<SettingsProps, {}> {
   }
 }
 
-const mapStateToProps = (state: AdminUIState) => ({
-  // RootState contains declaration for whole state
-  settings: state.cachedData.settings,
-});
+function mapStateToProps(state: AdminUIState) {
+  return {
+    settings: state.cachedData.settings,
+  };
+}
 
-const mapDispatchToProps = {
-  // actionCreators returns objects with type and payload
+const actions = {
   refreshSettings,
 };
 
-export default withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(Settings),
-);
+export default connect(mapStateToProps, actions)(Settings);

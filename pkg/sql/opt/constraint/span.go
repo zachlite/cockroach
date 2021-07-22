@@ -1,20 +1,21 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package constraint
 
 import (
 	"bytes"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/errors"
 )
 
 // SpanBoundary specifies whether a span endpoint is inclusive or exclusive of
@@ -52,7 +53,7 @@ type Span struct {
 	// startBoundary indicates whether the span contains the start key value.
 	startBoundary SpanBoundary
 
-	// endBoundary indicates whether the span contains the end key value.
+	// endBoundary indicates whether the span contains the the end key value.
 	endBoundary SpanBoundary
 }
 
@@ -64,43 +65,7 @@ var UnconstrainedSpan = Span{}
 // before Set is called. Unconstrained spans cannot be used in constraints,
 // since the absence of a constraint is equivalent to an unconstrained span.
 func (sp *Span) IsUnconstrained() bool {
-	startUnconstrained := sp.start.IsEmpty() || (sp.start.IsNull() && sp.startBoundary == IncludeBoundary)
-	endUnconstrained := sp.end.IsEmpty()
-
-	return startUnconstrained && endUnconstrained
-}
-
-// HasSingleKey is true if the span contains exactly one key. This is true when
-// the start key is the same as the end key, and both boundaries are inclusive.
-func (sp *Span) HasSingleKey(evalCtx *tree.EvalContext) bool {
-	l := sp.start.Length()
-	if l == 0 || l != sp.end.Length() {
-		return false
-	}
-	if sp.startBoundary != IncludeBoundary || sp.endBoundary != IncludeBoundary {
-		return false
-	}
-	for i, n := 0, l; i < n; i++ {
-		if sp.start.Value(i).Compare(evalCtx, sp.end.Value(i)) != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// Prefix returns the length of the longest prefix of values for which the
-// span has the same start and end values. For example, [/1/1/1 - /1/1/2]
-// has prefix 2.
-func (sp *Span) Prefix(evalCtx *tree.EvalContext) int {
-	start := sp.StartKey()
-	end := sp.EndKey()
-
-	for prefix := 0; ; prefix++ {
-		if start.Length() <= prefix || end.Length() <= prefix ||
-			start.Value(prefix).Compare(evalCtx, end.Value(prefix)) != 0 {
-			return prefix
-		}
-	}
+	return sp.start.IsEmpty() && sp.end.IsEmpty()
 }
 
 // StartKey returns the start key.
@@ -130,21 +95,17 @@ func (sp *Span) EndBoundary() SpanBoundary {
 func (sp *Span) Init(start Key, startBoundary SpanBoundary, end Key, endBoundary SpanBoundary) {
 	if start.IsEmpty() && startBoundary == ExcludeBoundary {
 		// Enforce one representation for empty boundary.
-		panic(errors.AssertionFailedf("an empty start boundary must be inclusive"))
+		panic("an empty start boundary must be inclusive")
 	}
 	if end.IsEmpty() && endBoundary == ExcludeBoundary {
 		// Enforce one representation for empty boundary.
-		panic(errors.AssertionFailedf("an empty end boundary must be inclusive"))
+		panic("an empty end boundary must be inclusive")
 	}
 
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*sp = Span{
-		start:         start,
-		startBoundary: startBoundary,
-		end:           end,
-		endBoundary:   endBoundary,
-	}
+	sp.start = start
+	sp.startBoundary = startBoundary
+	sp.end = end
+	sp.endBoundary = endBoundary
 }
 
 // Compare returns an integer indicating the ordering of the two spans. The
@@ -330,205 +291,6 @@ func (sp *Span) PreferInclusive(keyCtx *KeyContext) {
 func (sp *Span) CutFront(numCols int) {
 	sp.start = sp.start.CutFront(numCols)
 	sp.end = sp.end.CutFront(numCols)
-}
-
-// KeyCount returns the number of distinct keys between specified-length
-// prefixes of the start and end keys. Returns zero and false if the operation
-// is not possible. Requirements:
-//   1. The given prefix length must be at least 1.
-//   2. The boundaries must be inclusive.
-//   3. The start and end keys must have at least prefixLength values.
-//   4. The start and end keys be equal up to index [prefixLength-2].
-//   5. The datums at index [prefixLength-1] must be of the same type and:
-//      a. countable, or
-//      b. have the same value (in which case the distinct count is 1).
-//
-// Example:
-//
-//    [/'ASIA'/1/'postfix' - /'ASIA'/2].KeyCount(keyCtx, length=2) => 2, true
-//
-// Note that any extra key values beyond the given length are simply ignored.
-// Therefore, the above example will produce equivalent results if postfixes are
-// removed:
-//
-//    ['ASIA'/1 - /'ASIA'/2].KeyCount(keyCtx, length=2) => 2, true
-//
-func (sp *Span) KeyCount(keyCtx *KeyContext, prefixLength int) (int64, bool) {
-	if prefixLength < 1 {
-		// The length must be at least one because distinct count is undefined for
-		// empty keys.
-		return 0, false
-	}
-
-	startKey := sp.start
-	endKey := sp.end
-	if startKey.Length() < prefixLength || endKey.Length() < prefixLength {
-		// Both keys must have at least 'prefixLength' values.
-		return 0, false
-	}
-	if sp.startBoundary == ExcludeBoundary && startKey.Length() == prefixLength {
-		// Bounds must be inclusive if the prefix length equals the key length.
-		return 0, false
-	}
-	if sp.endBoundary == ExcludeBoundary && endKey.Length() == prefixLength {
-		// Bounds must be inclusive if the prefix length equals the key length.
-		return 0, false
-	}
-
-	// All the datums up to index [prefixLength-2] must be equal.
-	for i := 0; i <= (prefixLength - 2); i++ {
-		if startKey.Value(i).ResolvedType() != endKey.Value(i).ResolvedType() {
-			// The datums must be of the same type.
-			return 0, false
-		}
-		if keyCtx.Compare(i, startKey.Value(i), endKey.Value(i)) != 0 {
-			// The datums must be equal.
-			return 0, false
-		}
-	}
-
-	thisVal := startKey.Value(prefixLength - 1)
-	otherVal := endKey.Value(prefixLength - 1)
-
-	if !thisVal.ResolvedType().Equivalent(otherVal.ResolvedType()) {
-		// The datums at index [prefixLength-1] must be of the same type.
-		return 0, false
-	}
-	if keyCtx.Compare(prefixLength-1, thisVal, otherVal) == 0 {
-		// If the datums are equal, the distinct count is 1.
-		return 1, true
-	}
-
-	// If the last columns are countable, return the distinct count between them.
-	var start, end int64
-
-	switch t := thisVal.(type) {
-	case *tree.DInt:
-		otherDInt, otherOk := tree.AsDInt(otherVal)
-		if otherOk {
-			start = int64(*t)
-			end = int64(otherDInt)
-		}
-
-	case *tree.DOid:
-		otherDOid, otherOk := tree.AsDOid(otherVal)
-		if otherOk {
-			start = int64((*t).DInt)
-			end = int64(otherDOid.DInt)
-		}
-
-	case *tree.DDate:
-		otherDDate, otherOk := otherVal.(*tree.DDate)
-		if otherOk {
-			if !t.IsFinite() || !otherDDate.IsFinite() {
-				// One of the DDates isn't finite, so we can't extract a distinct count.
-				return 0, false
-			}
-			start = int64((*t).PGEpochDays())
-			end = int64(otherDDate.PGEpochDays())
-		}
-
-	case *tree.DEnum:
-		otherDEnum, otherOk := otherVal.(*tree.DEnum)
-		if otherOk {
-			startIdx, err := t.EnumTyp.EnumGetIdxOfPhysical(t.PhysicalRep)
-			if err != nil {
-				panic(err)
-			}
-			endIdx, err := t.EnumTyp.EnumGetIdxOfPhysical(otherDEnum.PhysicalRep)
-			if err != nil {
-				panic(err)
-			}
-			start, end = int64(startIdx), int64(endIdx)
-		}
-
-	default:
-		// Uncountable type.
-		return 0, false
-	}
-
-	if keyCtx.Columns.Get(prefixLength - 1).Descending() {
-		// Normalize delta according to the key ordering.
-		start, end = end, start
-	}
-
-	if start > end {
-		// Incorrect ordering.
-		return 0, false
-	}
-
-	delta := end - start
-	if delta < 0 {
-		// Overflow or underflow.
-		return 0, false
-	}
-	return delta + 1, true
-}
-
-// Split returns a Spans object that describes an equivalent set of rows to the
-// original Span. For each individual Span in the new Spans object, prefixes of
-// the start and end keys up to the given prefixLength will span a single key.
-//
-// Returns nil and false if unsuccessful. The operation is unsuccessful if the
-// number of distinct prefix-keys of specified length in the original span
-// cannot be obtained. Postfixes of the original keys beyond the given prefix
-// length will be concatenated with the start key of the first span and end key
-// of the last span respectively.
-//
-// Example:
-//
-//    [/'ASIA'/1/'post' - /'ASIA'/3/'fix'].Split(keyCtx, length=2, limit=10)
-//    =>
-//    (
-//      [/'ASIA'/1/'post' - /'ASIA'/1],
-//      [/'ASIA'/2 - /'ASIA'/2],
-//      [/'ASIA'/3 - /'ASIA'/3/'fix'],
-//    ),
-//    true
-//
-func (sp *Span) Split(keyCtx *KeyContext, prefixLength int) (spans *Spans, ok bool) {
-	keyCount, ok := sp.KeyCount(keyCtx, prefixLength)
-	if !ok {
-		// The key count could not be determined.
-		return nil, false
-	}
-	spans = &Spans{}
-	if keyCount == 1 {
-		// The start and end prefix keys are already equal.
-		spans.InitSingleSpan(sp)
-		return spans, true
-	}
-	spans.Alloc(int(keyCount))
-	startPostFix := sp.StartKey().CutFront(prefixLength)
-	endPostFix := sp.EndKey().CutFront(prefixLength)
-	currKey := sp.StartKey().CutBack(startPostFix.Length())
-	for i, ok := 0, true; i < int(keyCount); i++ {
-		if !ok {
-			return nil, false
-		}
-		start := currKey
-		end := currKey
-		startBoundary := IncludeBoundary
-		endBoundary := IncludeBoundary
-		if i == 0 {
-			// Start key of the first span.
-			start = currKey.Concat(startPostFix)
-			startBoundary = sp.startBoundary
-		}
-		if i == int(keyCount-1) {
-			// End key of the last span.
-			end = currKey.Concat(endPostFix)
-			endBoundary = sp.endBoundary
-		}
-		spans.Append(&Span{
-			start:         start,
-			end:           end,
-			startBoundary: startBoundary,
-			endBoundary:   endBoundary,
-		})
-		currKey, ok = currKey.Next(keyCtx)
-	}
-	return spans, true
 }
 
 func (sp *Span) startExt() KeyExtension {

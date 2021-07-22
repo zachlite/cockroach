@@ -19,7 +19,7 @@ case "${cmd}" in
     gcloud "$@"
     ;;
     create)
-    if [[ "${COCKROACH_DEV_LICENSE:-}" ]]; then
+    if [[ "$COCKROACH_DEV_LICENSE" ]]; then
       echo "Using dev license key from \$COCKROACH_DEV_LICENSE"
     else
       echo -n "Enter your dev license key (if any): "
@@ -56,33 +56,16 @@ case "${cmd}" in
     ;;
     start)
     gcloud compute instances start "${NAME}"
-    echo "waiting for node to finish starting..."
     # Wait for vm and sshd to start up.
-    retry gcloud compute ssh "${NAME}" --command=true || true
-    # SSH into the node, since that's probably why we started it.
-    gcloud compute ssh "${NAME}" --ssh-flag="-A" "$@"
+    retry gcloud compute ssh "${NAME}" --command=true
     ;;
     stop)
-    read -r -p "This will stop the VM. Are you sure? [yes] " response
-    # Convert to lowercase.
-    response=$(echo "$response" | tr '[:upper:]' '[:lower:]')
-    if [[ $response != "yes" ]]; then
-      echo Aborting
-      exit 1
-    fi
     gcloud compute instances stop "${NAME}"
     ;;
     delete|destroy)
-    read -r -p "This will delete the VM! Are you sure? [yes] " response
-    # Convert to lowercase.
-    response=$(echo "$response" | tr '[:upper:]' '[:lower:]')
-    if [[ $response != "yes" ]]; then
-      echo Aborting
-      exit 1
-    fi
     status=0
-    gcloud compute firewall-rules delete "${NAME}-mosh" --quiet || status=$((status+1))
-    gcloud compute instances delete "${NAME}" --quiet || status=$((status+1))
+    gcloud compute firewall-rules delete "${NAME}-mosh" || status=$((status+1))
+    gcloud compute instances delete "${NAME}" || status=$((status+1))
     exit ${status}
     ;;
     ssh)
@@ -132,15 +115,10 @@ case "${cmd}" in
     gcloud compute config-ssh --ssh-config-file "$tmpfile" > /dev/null
     unison "$host" "ssh://${NAME}.${CLOUDSDK_COMPUTE_ZONE}.${CLOUDSDK_CORE_PROJECT}/$worker" \
       -sshargs "-F ${tmpfile}" -auto -prefer "$host" -repeat watch \
-      -ignore 'Path .git' \
       -ignore 'Path bin*' \
       -ignore 'Path build/builder_home' \
       -ignore 'Path pkg/sql/parser/gen' \
-      -ignore 'Path pkg/ui/node_modules' \
-      -ignore 'Path pkg/ui/.cache-loader' \
       -ignore 'Path cockroach-data' \
-      -ignore 'Name *.d' \
-      -ignore 'Name *.o' \
       -ignore 'Name zcgo_flags*.go'
     ;;
     *)

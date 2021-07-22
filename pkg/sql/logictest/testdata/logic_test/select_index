@@ -1,3 +1,5 @@
+# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata
+
 statement ok
 CREATE TABLE t (
   a INT PRIMARY KEY,
@@ -436,6 +438,16 @@ SET tracing=on, kv; SELECT * FROM noncover WHERE b = 2; SET tracing=off
 ----
 1 2 3 4
 
+# Verify that the index join span created doesn't include any potential child
+# interleaved tables. We look only for spans with the primary prefix to avoid
+# inconsistency between the fakedist and local test configurations.
+
+query T rowsort
+SELECT message FROM [SHOW KV TRACE FOR SESSION]
+WHERE message LIKE 'Scan /Table/65/1%'
+----
+Scan /Table/65/1/1{-/#}
+
 # Subset of output columns, not including tested column.
 query II
 SELECT a, d FROM noncover WHERE b=2
@@ -622,24 +634,3 @@ SELECT * FROM t38878 WHERE (k1 = 'd' AND k2 = 'x') OR k1 = 'b' OR (k1 > 'b' AND 
 b  v  2
 c  w  3
 d  x  4
-
-# Regression test for #47976 (optimizer OOM and timeouts with many ORs).
-statement ok
-CREATE TABLE t47976 (
-  k INT PRIMARY KEY,
-  a INT,
-  b FLOAT,
-  c INT,
-  INDEX (a),
-  INDEX (b),
-  INDEX (c)
-)
-
-statement ok
-SELECT k FROM t47976 WHERE
-  (a >= 6 OR b < 8 OR c IN (23, 27, 53)) AND
-  (a = 1 OR b >= 12 OR c IS NULL) AND
-  (a < 1 OR b = 6.8 OR c = 12) AND
-  (a > 4 OR b <= 5.23 OR c IN (1, 2, 3)) AND
-  (a = 12 OR b = 15.23 OR c = 14) AND
-  (a > 58 OR b < 0 OR c >= 13)

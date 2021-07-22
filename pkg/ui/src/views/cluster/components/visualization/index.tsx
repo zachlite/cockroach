@@ -1,18 +1,24 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import React from "react";
 import classNames from "classnames";
+
+import { ToolTipWrapper } from "src/views/shared/components/toolTip";
+
 import "./visualizations.styl";
 import spinner from "assets/spinner.gif";
-import { Tooltip } from "antd";
 
 interface VisualizationProps {
   title: string;
@@ -36,49 +42,46 @@ interface VisualizationProps {
  */
 export default class extends React.Component<VisualizationProps, {}> {
   render() {
-    const { title, subtitle, tooltip, stale } = this.props;
-    const vizClasses = classNames("visualization", {
-      "visualization--faded": stale || false,
-    });
-    const contentClasses = classNames("visualization__content", {
-      "visualization--loading": this.props.loading,
-    });
-
-    let titleClass = "visualization__title";
-    if (tooltip) {
-      titleClass += " visualization__underline";
-    }
-
-    const chartSubtitle = subtitle ? (
-      <span className="visualization__subtitle">{subtitle}</span>
-    ) : null;
-
-    const chartTitle: React.ReactNode = (
-      <div>
-        <span className={titleClass}>{title}</span>
-        {chartSubtitle}
-      </div>
+    const { title, tooltip, stale } = this.props;
+    const vizClasses = classNames(
+      "visualization",
+      { "visualization--faded": stale || false },
+    );
+    const contentClasses = classNames(
+      "visualization__content",
+      { "visualization--loading": this.props.loading },
     );
 
-    let tooltipNode: React.ReactNode = chartTitle;
-
+    let tooltipNode: React.ReactNode = "";
     if (tooltip) {
       tooltipNode = (
-        <Tooltip placement="bottom" title={tooltip}>
-          {chartTitle}
-        </Tooltip>
+        <div className="visualization__tooltip">
+          <ToolTipWrapper text={tooltip}>
+            <div className="visualization__tooltip-hover-area">
+              <div className="visualization__info-icon">i</div>
+            </div>
+          </ToolTipWrapper>
+        </div>
       );
     }
 
     return (
       <div className={vizClasses}>
-        <div className="visualization__header">{tooltipNode}</div>
+        <div className="visualization__header">
+          <span className="visualization__title">
+            {title}
+          </span>
+          {
+            this.props.subtitle ?
+              <span className="visualization__subtitle">{this.props.subtitle}</span>
+              : null
+          }
+          {
+            tooltipNode
+          }
+        </div>
         <div className={contentClasses}>
-          {this.props.loading ? (
-            <img className="visualization__spinner" src={spinner} />
-          ) : (
-            this.props.children
-          )}
+          {this.props.loading ? <img className="visualization__spinner" src={spinner} /> :  this.props.children }
         </div>
       </div>
     );

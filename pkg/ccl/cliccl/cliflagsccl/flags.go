@@ -15,10 +15,14 @@ var (
 	EnterpriseEncryption = cliflags.FlagInfo{
 		Name: "enterprise-encryption",
 		Description: `
-<PRE>Specify encryption options for one of the stores on a node. If multiple
-stores exist, the flag must be specified for each store.
+<PRE>
+*** Valid enterprise licenses only ***
 
-A valid enterprise license is required to use this functionality.
+WARNING: encryption at rest is an experimental feature.
+
+Enable encryption at rest for a store.
+
+TODO(mberhault): fill in description.
 
 </PRE>
 Key files must be of size 32 bytes + AES key size, such as:
@@ -38,7 +42,8 @@ Valid fields:
 </PRE>
 example:
 <PRE>
-  --enterprise-encryption=path=cockroach-data,key=/keys/aes-128.key,old-key=plain</PRE>
+  --enterprise-encryption=path=cockroach-data,key=/keys/aes-128.key,old-key=plain
+</PRE>
 `,
 	}
 )

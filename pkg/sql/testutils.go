@@ -1,30 +1,27 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/errors"
 )
 
 // CreateTestTableDescriptor converts a SQL string to a table for test purposes.
@@ -32,59 +29,36 @@ import (
 // other tables.
 func CreateTestTableDescriptor(
 	ctx context.Context,
-	parentID, id descpb.ID,
+	parentID, id sqlbase.ID,
 	schema string,
-	privileges *descpb.PrivilegeDescriptor,
-) (*tabledesc.Mutable, error) {
+	privileges *sqlbase.PrivilegeDescriptor,
+) (sqlbase.TableDescriptor, error) {
 	st := cluster.MakeTestingClusterSettings()
 	stmt, err := parser.ParseOne(schema)
 	if err != nil {
-		return nil, err
+		return sqlbase.TableDescriptor{}, err
 	}
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(false /* privileged */)
 	evalCtx := tree.MakeTestingEvalContext(st)
-	switch n := stmt.AST.(type) {
-	case *tree.CreateTable:
-		db := dbdesc.NewInitial(parentID, "test", security.RootUserName())
-		desc, err := NewTableDesc(
-			ctx,
-			nil, /* txn */
-			nil, /* vs */
-			st,
-			n,
-			db,
-			schemadesc.GetPublicSchema(),
-			id,
-			nil,             /* regionConfig */
-			hlc.Timestamp{}, /* creationTime */
-			privileges,
-			nil, /* affected */
-			&semaCtx,
-			&evalCtx,
-			&sessiondata.SessionData{
-				LocalOnlySessionData: sessiondata.LocalOnlySessionData{
-					EnableUniqueWithoutIndexConstraints: true,
-					HashShardedIndexesEnabled:           true,
-				},
-			}, /* sessionData */
-			tree.PersistencePermanent,
-		)
-		return desc, err
-	case *tree.CreateSequence:
-		desc, err := NewSequenceTableDesc(
-			ctx,
-			n.Name.Table(),
-			n.Options,
-			parentID, keys.PublicSchemaID, id,
-			hlc.Timestamp{}, /* creationTime */
-			privileges,
-			tree.PersistencePermanent,
-			nil,   /* params */
-			false, /* isMultiRegion */
-		)
-		return desc, err
-	default:
-		return nil, errors.Errorf("unexpected AST %T", stmt.AST)
+	return MakeTableDesc(
+		ctx,
+		nil, /* txn */
+		nil, /* vt */
+		st,
+		stmt.(*tree.CreateTable),
+		parentID, id,
+		hlc.Timestamp{}, /* creationTime */
+		privileges,
+		nil, /* affected */
+		&semaCtx,
+		&evalCtx,
+	)
+}
+
+func makeTestingExtendedEvalContext(st *cluster.Settings) extendedEvalContext {
+	return extendedEvalContext{
+		EvalContext: tree.MakeTestingEvalContext(st),
+		Tracing:     &SessionTracing{},
 	}
 }
 
@@ -102,13 +76,13 @@ func MakeStmtBufReader(buf *StmtBuf) StmtBufReader {
 
 // CurCmd returns the current command in the buffer.
 func (r StmtBufReader) CurCmd() (Command, error) {
-	cmd, _ /* pos */, err := r.buf.CurCmd()
+	cmd, _ /* pos */, err := r.buf.curCmd()
 	return cmd, err
 }
 
 // AdvanceOne moves the cursor one position over.
 func (r *StmtBufReader) AdvanceOne() {
-	r.buf.AdvanceOne()
+	r.buf.advanceOne()
 }
 
 // SeekToNextBatch skips to the beginning of the next batch of commands.
@@ -127,8 +101,7 @@ func (dsp *DistSQLPlanner) Exec(
 		return err
 	}
 	p := localPlanner.(*planner)
-	p.stmt = makeStatement(stmt, ClusterWideID{} /* queryID */)
-	if err := p.makeOptimizerPlan(ctx); err != nil {
+	if err := p.makePlan(ctx, Statement{AST: stmt}); err != nil {
 		return err
 	}
 	rw := newCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
@@ -138,20 +111,22 @@ func (dsp *DistSQLPlanner) Exec(
 	recv := MakeDistSQLReceiver(
 		ctx,
 		rw,
-		stmt.AST.StatementReturnType(),
+		stmt.StatementType(),
 		execCfg.RangeDescriptorCache,
+		execCfg.LeaseHolderCache,
 		p.txn,
-		execCfg.Clock,
+		func(ts hlc.Timestamp) {
+			_ = execCfg.Clock.Update(ts)
+		},
 		p.ExtendedEvalContext().Tracing,
-		execCfg.ContentionRegistry,
-		nil, /* testingPushCallback */
 	)
-	defer recv.Release()
 
 	evalCtx := p.ExtendedEvalContext()
-	planCtx := execCfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, p, p.txn, distribute)
+	planCtx := execCfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, p.txn)
+	planCtx.isLocal = !distribute
+	planCtx.planner = p
 	planCtx.stmtType = recv.stmtType
 
-	dsp.PlanAndRun(ctx, evalCtx, planCtx, p.txn, p.curPlan.main, recv)()
-	return rw.Err()
+	dsp.PlanAndRun(ctx, evalCtx, &planCtx, p.txn, p.curPlan.plan, recv)
+	return nil
 }

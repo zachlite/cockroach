@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
@@ -15,13 +19,12 @@ import (
 	gosql "database/sql"
 	"testing"
 
+	"github.com/lib/pq"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/lib/pq"
 )
 
 // lowMemoryBudget is the memory budget used to test builtins are recording
@@ -29,7 +32,7 @@ import (
 // initial database connection, but small enough to overflow easily. It's set
 // to be comfortably large enough that the server can start up with a bit of
 // extra space to overflow.
-const lowMemoryBudget = 800000
+const lowMemoryBudget = 500000
 
 // rowSize is the length of the string present in each row of the table created
 // by createTableWithLongStrings.
@@ -63,7 +66,6 @@ CREATE TABLE d.t (a STRING)
 // record their memory usage as they build up their result.
 func TestAggregatesMonitorMemory(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	// By avoiding printing the aggregate results we prevent anything
 	// besides the aggregate itself from being able to catch the
@@ -85,9 +87,7 @@ func TestAggregatesMonitorMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := sqlDB.Exec(statement)
-
-		if pqErr := (*pq.Error)(nil); !errors.As(err, &pqErr) || pgcode.MakeCode(string(pqErr.Code)) != pgcode.OutOfMemory {
+		if _, err := sqlDB.Exec(statement); err.(*pq.Error).Code != pgerror.CodeOutOfMemoryError {
 			t.Fatalf("Expected \"%s\" to consume too much memory", statement)
 		}
 	}
@@ -95,8 +95,6 @@ func TestAggregatesMonitorMemory(t *testing.T) {
 
 func TestEvaluatedMemoryIsChecked(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
 	// We select the LENGTH here and elsewhere because if we passed the result of
 	// REPEAT up as a result, the memory error would be caught there even if
 	// REPEAT was not doing its accounting.
@@ -112,10 +110,9 @@ func TestEvaluatedMemoryIsChecked(t *testing.T) {
 			})
 			defer s.Stopper().Stop(context.Background())
 
-			_, err := sqlDB.Exec(
+			if _, err := sqlDB.Exec(
 				statement,
-			)
-			if pqErr := (*pq.Error)(nil); !errors.As(err, &pqErr) || pgcode.MakeCode(string(pqErr.Code)) != pgcode.ProgramLimitExceeded {
+			); err.(*pq.Error).Code != pgerror.CodeProgramLimitExceededError {
 				t.Errorf("Expected \"%s\" to OOM, but it didn't", statement)
 			}
 		})

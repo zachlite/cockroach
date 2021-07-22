@@ -12,35 +12,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/baseccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/cliccl/cliflagsccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl/enginepbccl"
 	"github.com/cockroachdb/cockroach/pkg/cli"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/spf13/cobra"
 )
 
 // Defines CCL-specific debug commands, adds the encryption flag to debug commands in
 // `pkg/cli/debug.go`, and registers a callback to generate encryption options.
-
-const (
-	// These constants are defined in libroach. They should NOT be changed.
-	plaintextKeyID       = "plain"
-	keyRegistryFilename  = "COCKROACHDB_DATA_KEYS"
-	fileRegistryFilename = "COCKROACHDB_REGISTRY"
-)
 
 var encryptionStatusOpts struct {
 	activeStoreIDOnly bool
@@ -62,27 +51,11 @@ and exits.
 		RunE: cli.MaybeDecorateGRPCError(runEncryptionStatus),
 	}
 
-	encryptionActiveKeyCmd := &cobra.Command{
-		Use:   "encryption-active-key <directory>",
-		Short: "return ID of the active store key",
-		Long: `
-Display the algorithm and key ID of the active store key for existing data directory 'directory'.
-Does not require knowing the key.
-
-Some sample outputs:
-Plaintext:            # encryption not enabled
-AES128_CTR:be235...   # AES-128 encryption with store key ID
-`,
-		Args: cobra.ExactArgs(1),
-		RunE: cli.MaybeDecorateGRPCError(runEncryptionActiveKey),
-	}
-
-	// Add commands to the root debug command.
-	// We can't add them to the lists of commands (eg: DebugCmdsForRocksDB) as cli init() is called before us.
+	// Add it to the root debug command. We can't add it to the lists of commands (eg: DebugCmdsForRocksDB)
+	// as cli init() is called before us.
 	cli.DebugCmd.AddCommand(encryptionStatusCmd)
-	cli.DebugCmd.AddCommand(encryptionActiveKeyCmd)
 
-	// Add the encryption flag to commands that need it.
+	// Add the encryption flag.
 	f := encryptionStatusCmd.Flags()
 	cli.VarFlag(f, &storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
 	// And other flags.
@@ -95,25 +68,19 @@ AES128_CTR:be235...   # AES-128 encryption with store key ID
 		cli.VarFlag(cmd.Flags(), &storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
 	}
 
-	// init has already run in cli/debug.go since this package imports it, so
-	// DebugPebbleCmd already has all its subcommands. We could traverse those
-	// here. But we don't need to by using PersistentFlags.
-	cli.VarFlag(cli.DebugPebbleCmd.PersistentFlags(),
-		&storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
-
 	cli.PopulateRocksDBConfigHook = fillEncryptionOptionsForStore
 }
 
 // fillEncryptionOptionsForStore fills the RocksDBConfig fields
 // based on the --enterprise-encryption flag value.
-func fillEncryptionOptionsForStore(cfg *base.StorageConfig) error {
+func fillEncryptionOptionsForStore(cfg *engine.RocksDBConfig) error {
 	opts, err := baseccl.EncryptionOptionsForStore(cfg.Dir, storeEncryptionSpecs)
 	if err != nil {
 		return err
 	}
 
 	if opts != nil {
-		cfg.EncryptionOptions = opts
+		cfg.ExtraOptions = opts
 		cfg.UseFileRegistry = true
 	}
 	return nil
@@ -169,7 +136,7 @@ func runEncryptionStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if len(registries.KeyRegistry) == 0 {
+	if len(registries.FileRegistry) == 0 || len(registries.KeyRegistry) == 0 {
 		return nil
 	}
 
@@ -192,7 +159,7 @@ func runEncryptionStatus(cmd *cobra.Command, args []string) error {
 	fileKeyMap := make(map[string][]string)
 
 	for name, entry := range fileRegistry.Files {
-		keyID := plaintextKeyID
+		keyID := "plain"
 
 		if entry.EnvType != enginepb.EnvType_Plaintext && len(entry.EncryptionSettings) > 0 {
 			var setting enginepbccl.EncryptionSettings
@@ -211,7 +178,7 @@ func runEncryptionStatus(cmd *cobra.Command, args []string) error {
 
 	for _, dataKey := range keyRegistry.DataKeys {
 		info := dataKey.Info
-		parentKey := plaintextKeyID
+		parentKey := "plain"
 		if len(info.ParentKeyId) > 0 {
 			parentKey = info.ParentKeyId
 		}
@@ -281,57 +248,4 @@ func runEncryptionStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func runEncryptionActiveKey(cmd *cobra.Command, args []string) error {
-	keyType, keyID, err := getActiveEncryptionkey(args[0])
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("%s:%s\n", keyType, keyID)
-	return nil
-}
-
-// getActiveEncryptionkey opens the file registry directly, bypassing rocksdb.
-// This allows looking up the active encryption key ID without knowing it.
-func getActiveEncryptionkey(dir string) (string, string, error) {
-	registryFile := filepath.Join(dir, fileRegistryFilename)
-
-	// If the data directory does not exist, we return an error.
-	if _, err := os.Stat(dir); err != nil {
-		return "", "", errors.Wrapf(err, "data directory %s does not exist", dir)
-	}
-
-	// Open the file registry. Return plaintext if it does not exist.
-	contents, err := ioutil.ReadFile(registryFile)
-	if err != nil {
-		if oserror.IsNotExist(err) {
-			return enginepbccl.EncryptionType_Plaintext.String(), "", nil
-		}
-		return "", "", errors.Wrapf(err, "could not open registry file %s", registryFile)
-	}
-
-	var fileRegistry enginepb.FileRegistry
-	if err := protoutil.Unmarshal(contents, &fileRegistry); err != nil {
-		return "", "", err
-	}
-
-	// Find the entry for the key registry file.
-	entry, ok := fileRegistry.Files[keyRegistryFilename]
-	if !ok {
-		return "", "", fmt.Errorf("key registry file %s was not found in the file registry", keyRegistryFilename)
-	}
-
-	if entry.EnvType == enginepb.EnvType_Plaintext || len(entry.EncryptionSettings) == 0 {
-		// Plaintext: no encryption settings to unmarshal.
-		return enginepbccl.EncryptionType_Plaintext.String(), "", nil
-	}
-
-	var setting enginepbccl.EncryptionSettings
-	if err := protoutil.Unmarshal(entry.EncryptionSettings, &setting); err != nil {
-		return "", "", fmt.Errorf("could not unmarshal encryption settings for %s: %v", keyRegistryFilename, err)
-	}
-
-	return setting.EncryptionType.String(), setting.KeyId, nil
 }

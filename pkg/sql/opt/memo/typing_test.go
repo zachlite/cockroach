@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package memo_test
 
@@ -17,20 +21,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 )
 
 func TestTyping(t *testing.T) {
-	runDataDrivenTest(t, "testdata/typing",
-		memo.ExprFmtHideMiscProps|
-			memo.ExprFmtHideConstraints|
-			memo.ExprFmtHideFuncDeps|
-			memo.ExprFmtHideRuleProps|
-			memo.ExprFmtHideStats|
-			memo.ExprFmtHideCost|
-			memo.ExprFmtHideQualifications|
-			memo.ExprFmtHideScalars,
-	)
+	runDataDrivenTest(t, "testdata/typing", memo.ExprFmtHideAll)
 }
 
 func TestBinaryOverloadExists(t *testing.T) {
@@ -40,12 +35,14 @@ func TestBinaryOverloadExists(t *testing.T) {
 		}
 	}
 
+	arrType := types.TArray{Typ: types.Int}
+
 	test(true, memo.BinaryOverloadExists(opt.MinusOp, types.Date, types.Int))
 	test(true, memo.BinaryOverloadExists(opt.MinusOp, types.Date, types.Unknown))
 	test(true, memo.BinaryOverloadExists(opt.MinusOp, types.Unknown, types.Int))
 	test(false, memo.BinaryOverloadExists(opt.MinusOp, types.Int, types.Date))
-	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.IntArray, types.Int))
-	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.Unknown, types.IntArray))
+	test(true, memo.BinaryOverloadExists(opt.ConcatOp, arrType, types.Int))
+	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.Unknown, arrType))
 }
 
 func TestBinaryAllowsNullArgs(t *testing.T) {
@@ -55,10 +52,12 @@ func TestBinaryAllowsNullArgs(t *testing.T) {
 		}
 	}
 
+	arrType := types.TArray{Typ: types.Int}
+
 	test(false, memo.BinaryAllowsNullArgs(opt.PlusOp, types.Int, types.Int))
 	test(false, memo.BinaryAllowsNullArgs(opt.PlusOp, types.Int, types.Unknown))
-	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.IntArray, types.Int))
-	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.Unknown, types.IntArray))
+	test(true, memo.BinaryOverloadExists(opt.ConcatOp, arrType, types.Int))
+	test(true, memo.BinaryOverloadExists(opt.ConcatOp, types.Unknown, arrType))
 }
 
 // TestTypingUnaryAssumptions ensures that unary overloads conform to certain
@@ -140,18 +139,9 @@ func TestTypingBinaryAssumptions(t *testing.T) {
 
 // TestTypingComparisonAssumptions ensures that comparison overloads conform to
 // certain assumptions we're making in the type inference code:
-//   1. All comparison ops will be present in tree.CmpOps after being mapped
-//      with NormalizeComparison.
-//   2. The overload can be inferred from the operator type and the data
+//   1. The overload can be inferred from the operator type and the data
 //      types of its operands.
 func TestTypingComparisonAssumptions(t *testing.T) {
-	for _, op := range opt.ComparisonOperators {
-		newOp, _, _ := memo.NormalizeComparison(op)
-		comp := opt.ComparisonOpReverseMap[newOp]
-		if _, ok := tree.CmpOps[comp]; !ok {
-			t.Errorf("could not find overload for %v", op)
-		}
-	}
 	for name, overloads := range tree.CmpOps {
 		for i, overload := range overloads {
 			op := overload.(*tree.CmpOp)
@@ -181,10 +171,8 @@ func TestTypingComparisonAssumptions(t *testing.T) {
 //   3. The return type for min/max aggregates is same as type of argument.
 func TestTypingAggregateAssumptions(t *testing.T) {
 	for _, name := range builtins.AllAggregateBuiltinNames {
-		if name == builtins.AnyNotNull ||
-			name == "percentile_disc" ||
-			name == "percentile_cont" {
-			// These are treated as special cases.
+		if name == builtins.AnyNotNull {
+			// any_not_null is treated as a special case.
 			continue
 		}
 		_, overloads := builtins.GetBuiltinProperties(name)
@@ -204,22 +192,14 @@ func TestTypingAggregateAssumptions(t *testing.T) {
 
 			// Check for fixed return types.
 			retType := overload.ReturnType(nil)
-
-			// As per rule 3, max and min have slightly different rules. We allow
-			// max and min to have non-fixed return types to allow defining aggregate
-			// overloads that have container types as arguments.
-			if name == "min" || name == "max" {
-				// Evaluate the return typer.
-				types := overload.Types.Types()
-				retType = overload.InferReturnTypeFromInputArgTypes(types)
-				if retType != types[0] {
-					t.Errorf("return type differs from arg type for %s: %+v", name, overload.Types.Types())
-				}
-				continue
-			}
-
 			if retType == tree.UnknownReturnType {
 				t.Errorf("return type is not fixed for %s: %+v", name, overload.Types.Types())
+			}
+
+			if name == "min" || name == "max" {
+				if retType != overload.Types.Types()[0] {
+					t.Errorf("return type differs from arg type for %s: %+v", name, overload.Types.Types())
+				}
 			}
 		}
 	}

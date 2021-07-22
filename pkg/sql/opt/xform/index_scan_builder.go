@@ -1,22 +1,23 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package xform
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
-	"github.com/cockroachdb/errors"
 )
 
 // indexScanBuilder composes a constrained, limited scan over a table index.
@@ -24,248 +25,157 @@ import (
 // be used to scan a non-covering index. For example, in order to construct:
 //
 //   (IndexJoin
-//     (Select (Scan $scanPrivate) $filters)
-//     $indexJoinPrivate
+//     (Select (Scan $scanDef) $filter)
+//     $indexJoinDef
 //   )
 //
 // make the following calls:
 //
 //   var sb indexScanBuilder
-//   sb.Init(c, tabID)
-//   sb.SetScan(scanPrivate)
-//   sb.AddSelect(filters)
-//   sb.AddIndexJoin(cols)
-//   expr := sb.Build()
+//   sb.init(c, tabID)
+//   sb.setScan(scanDef)
+//   sb.addSelect(filter)
+//   sb.addIndexJoin(cols)
+//   expr := sb.build()
 //
 type indexScanBuilder struct {
-	c                     *CustomFuncs
-	f                     *norm.Factory
-	mem                   *memo.Memo
-	tabID                 opt.TableID
-	scanPrivate           memo.ScanPrivate
-	constProjections      memo.ProjectionsExpr
-	innerFilters          memo.FiltersExpr
-	outerFilters          memo.FiltersExpr
-	invertedFilterPrivate memo.InvertedFilterPrivate
-	indexJoinPrivate      memo.IndexJoinPrivate
+	c            *CustomFuncs
+	f            *norm.Factory
+	mem          *memo.Memo
+	tabID        opt.TableID
+	pkCols       opt.ColSet
+	scanDef      memo.PrivateID
+	innerFilter  memo.GroupID
+	outerFilter  memo.GroupID
+	indexJoinDef memo.PrivateID
 }
 
-// Init initializes an indexScanBuilder.
-func (b *indexScanBuilder) Init(c *CustomFuncs, tabID opt.TableID) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*b = indexScanBuilder{
-		c:     c,
-		f:     c.e.f,
-		mem:   c.e.mem,
-		tabID: tabID,
-	}
+func (b *indexScanBuilder) init(c *CustomFuncs, tabID opt.TableID) {
+	b.c = c
+	b.f = c.e.f
+	b.mem = c.e.mem
+	b.tabID = tabID
 }
 
-// SetScan constructs a standalone Scan expression. As a side effect, it clears
-// any expressions added during previous invocations of the builder. SetScan
-// makes a copy of scanPrivate so that it doesn't escape.
-func (b *indexScanBuilder) SetScan(scanPrivate *memo.ScanPrivate) {
-	*b = indexScanBuilder{
-		c:           b.c,
-		f:           b.f,
-		mem:         b.mem,
-		tabID:       b.tabID,
-		scanPrivate: *scanPrivate,
-	}
-}
-
-// AddConstProjections wraps the input expression with a Project expression with
-// the given constant projection expressions.
-func (b *indexScanBuilder) AddConstProjections(proj memo.ProjectionsExpr) {
-	if len(proj) != 0 {
-		if b.hasConstProjections() {
-			panic(errors.AssertionFailedf("cannot call AddConstProjections twice"))
-		}
-		if b.hasInnerFilters() || b.hasOuterFilters() {
-			panic(errors.AssertionFailedf("cannot call AddConstProjections after filters are added"))
-		}
-		b.constProjections = proj
-	}
-}
-
-// AddInvertedFilter wraps the input expression with an InvertedFilter
-// expression having the given span expression.
-func (b *indexScanBuilder) AddInvertedFilter(
-	spanExpr *inverted.SpanExpression,
-	pfState *invertedexpr.PreFiltererStateForInvertedFilterer,
-	invertedCol opt.ColumnID,
-) {
-	if spanExpr != nil {
-		if b.hasInvertedFilter() {
-			panic(errors.AssertionFailedf("cannot call AddInvertedFilter twice"))
-		}
-		if b.hasIndexJoin() {
-			panic(errors.AssertionFailedf("cannot call AddInvertedFilter after index join is added"))
-		}
-		b.invertedFilterPrivate = memo.InvertedFilterPrivate{
-			InvertedExpression: spanExpr,
-			PreFiltererState:   pfState,
-			InvertedColumn:     invertedCol,
+// primaryKeyCols returns the columns from the scanned table's primary index.
+func (b *indexScanBuilder) primaryKeyCols() opt.ColSet {
+	// Ensure that pkCols set is initialized with the primary index columns.
+	if b.pkCols.Empty() {
+		primaryIndex := b.c.e.mem.Metadata().Table(b.tabID).Index(opt.PrimaryIndex)
+		for i, cnt := 0, primaryIndex.KeyColumnCount(); i < cnt; i++ {
+			b.pkCols.Add(int(b.tabID.ColumnID(primaryIndex.Column(i).Ordinal)))
 		}
 	}
+	return b.pkCols
 }
 
-// AddSelect wraps the input expression with a Select expression having the
+// setScan constructs a standalone Scan expression. As a side effect, it clears
+// any expressions added during previous invocations of the builder.
+func (b *indexScanBuilder) setScan(def memo.PrivateID) {
+	b.scanDef = def
+	b.innerFilter = 0
+	b.outerFilter = 0
+	b.indexJoinDef = 0
+}
+
+// addSelect wraps the input expression with a Select expression having the
 // given filter.
-func (b *indexScanBuilder) AddSelect(filters memo.FiltersExpr) {
-	if len(filters) != 0 {
-		if !b.hasIndexJoin() {
-			if b.hasInnerFilters() {
-				panic(errors.AssertionFailedf("cannot call AddSelect methods twice before index join is added"))
+func (b *indexScanBuilder) addSelect(filter memo.GroupID) {
+	if filter != 0 {
+		if b.indexJoinDef == 0 {
+			if b.innerFilter != 0 {
+				panic("cannot call addSelect methods twice before index join is added")
 			}
-			b.innerFilters = filters
+			b.innerFilter = filter
 		} else {
-			if b.hasOuterFilters() {
-				panic(errors.AssertionFailedf("cannot call AddSelect methods twice after index join is added"))
+			if b.outerFilter != 0 {
+				panic("cannot call addSelect methods twice after index join is added")
 			}
-			b.outerFilters = filters
+			b.outerFilter = filter
 		}
 	}
 }
 
-// AddSelectAfterSplit first splits the given filter into two parts: a filter
+// addSelectAfterSplit first splits the given filter into two parts: a filter
 // that only involves columns in the given set, and a remaining filter that
 // includes everything else. The filter that is bound by the columns becomes a
 // Select expression that wraps the input expression, and the remaining filter
 // is returned (or 0 if there is no remaining filter).
-func (b *indexScanBuilder) AddSelectAfterSplit(
-	filters memo.FiltersExpr, cols opt.ColSet,
-) (remainingFilters memo.FiltersExpr) {
-	if len(filters) == 0 {
-		return nil
+func (b *indexScanBuilder) addSelectAfterSplit(
+	filter memo.GroupID, cols opt.ColSet,
+) (remainingFilter memo.GroupID) {
+	if filter == 0 {
+		return 0
 	}
 
-	if b.c.FiltersBoundBy(filters, cols) {
+	filterCols := b.c.OuterCols(filter)
+	if filterCols.SubsetOf(cols) {
 		// Filter is fully bound by the cols, so add entire filter.
-		b.AddSelect(filters)
-		return nil
+		b.addSelect(filter)
+		return 0
 	}
 
 	// Try to split filter.
-	boundConditions := b.c.ExtractBoundConditions(filters, cols)
-	if len(boundConditions) == 0 {
+	conditions := b.mem.NormExpr(filter).AsFilters().Conditions()
+	boundConditions := b.c.ExtractBoundConditions(conditions, cols)
+	if boundConditions.Length == 0 {
 		// None of the filter conjuncts can be bound by the cols, so no expression
 		// can be added.
-		return filters
+		return filter
 	}
 
 	// Add conditions which are fully bound by the cols and return the rest.
-	b.AddSelect(boundConditions)
-	return b.c.ExtractUnboundConditions(filters, cols)
+	b.addSelect(b.f.ConstructFilters(boundConditions))
+	return b.f.ConstructFilters(b.c.ExtractUnboundConditions(conditions, cols))
 }
 
-// AddIndexJoin wraps the input expression with an IndexJoin expression that
+// addIndexJoin wraps the input expression with an IndexJoin expression that
 // produces the given set of columns by lookup in the primary index.
-func (b *indexScanBuilder) AddIndexJoin(cols opt.ColSet) {
-	if b.hasIndexJoin() {
-		panic(errors.AssertionFailedf("cannot call AddIndexJoin twice"))
+func (b *indexScanBuilder) addIndexJoin(cols opt.ColSet) {
+	if b.indexJoinDef != 0 {
+		panic("cannot call addIndexJoin twice")
 	}
-	if b.hasOuterFilters() {
-		panic(errors.AssertionFailedf("cannot call AddIndexJoin after an outer filter has been added"))
+	if b.outerFilter != 0 {
+		panic("cannot add index join after an outer filter has been added")
 	}
-	b.indexJoinPrivate = memo.IndexJoinPrivate{
+	b.indexJoinDef = b.mem.InternIndexJoinDef(&memo.IndexJoinDef{
 		Table: b.tabID,
 		Cols:  cols,
-	}
+	})
 }
 
-// Build constructs the final memo expression by composing together the various
+// build constructs the final memo expression by composing together the various
 // expressions that were specified by previous calls to various add methods.
-func (b *indexScanBuilder) Build(grp memo.RelExpr) {
+func (b *indexScanBuilder) build() memo.Expr {
 	// 1. Only scan.
-	if !b.hasConstProjections() && !b.hasInnerFilters() && !b.hasInvertedFilter() && !b.hasIndexJoin() {
-		b.mem.AddScanToGroup(&memo.ScanExpr{ScanPrivate: b.scanPrivate}, grp)
-		return
+	if b.innerFilter == 0 && b.indexJoinDef == 0 {
+		return memo.Expr(memo.MakeScanExpr(b.scanDef))
 	}
 
-	input := b.f.ConstructScan(&b.scanPrivate)
-
-	// 2. Wrap input in a Project if constant projections were added.
-	if b.hasConstProjections() {
-		if !b.hasInnerFilters() && !b.hasInvertedFilter() && !b.hasIndexJoin() {
-			b.mem.AddProjectToGroup(&memo.ProjectExpr{
-				Input:       input,
-				Projections: b.constProjections,
-				Passthrough: b.scanPrivate.Cols,
-			}, grp)
-			return
+	// 2. Wrap scan in inner filter if it was added.
+	input := b.f.ConstructScan(b.scanDef)
+	if b.innerFilter != 0 {
+		if b.indexJoinDef == 0 {
+			return memo.Expr(memo.MakeSelectExpr(input, b.innerFilter))
 		}
 
-		input = b.f.ConstructProject(input, b.constProjections, b.scanPrivate.Cols)
+		input = b.f.ConstructSelect(input, b.innerFilter)
 	}
 
-	// 3. Wrap input in inner filter if it was added.
-	if b.hasInnerFilters() {
-		if !b.hasInvertedFilter() && !b.hasIndexJoin() {
-			b.mem.AddSelectToGroup(&memo.SelectExpr{Input: input, Filters: b.innerFilters}, grp)
-			return
+	// 3. Wrap input in index join if it was added.
+	if b.indexJoinDef != 0 {
+		if b.outerFilter == 0 {
+			return memo.Expr(memo.MakeIndexJoinExpr(input, b.indexJoinDef))
 		}
 
-		input = b.f.ConstructSelect(input, b.innerFilters)
+		input = b.f.ConstructIndexJoin(input, b.indexJoinDef)
 	}
 
-	// 4. Wrap input in inverted filter if it was added.
-	if b.hasInvertedFilter() {
-		if !b.hasIndexJoin() {
-			invertedFilter := &memo.InvertedFilterExpr{
-				Input: input, InvertedFilterPrivate: b.invertedFilterPrivate,
-			}
-			b.mem.AddInvertedFilterToGroup(invertedFilter, grp)
-			return
-		}
-
-		input = b.f.ConstructInvertedFilter(input, &b.invertedFilterPrivate)
+	// 4. Wrap input in outer filter (which must exist at this point).
+	if b.outerFilter == 0 {
+		// indexJoinDef == 0: outerFilter == 0 handled by #1 and #2 above.
+		// indexJoinDef != 0: outerFilter == 0 handled by #3 above.
+		panic("outer filter cannot be 0 at this point")
 	}
-
-	// 5. Wrap input in index join if it was added.
-	if b.hasIndexJoin() {
-		if !b.hasOuterFilters() {
-			indexJoin := &memo.IndexJoinExpr{Input: input, IndexJoinPrivate: b.indexJoinPrivate}
-			b.mem.AddIndexJoinToGroup(indexJoin, grp)
-			return
-		}
-
-		input = b.f.ConstructIndexJoin(input, &b.indexJoinPrivate)
-	}
-
-	// 6. Wrap input in outer filter (which must exist at this point).
-	if !b.hasOuterFilters() {
-		// indexJoinDef == 0: outerFilters == 0 handled by #1-4 above.
-		// indexJoinDef != 0: outerFilters == 0 handled by #5 above.
-		panic(errors.AssertionFailedf("outer filter cannot be 0 at this point"))
-	}
-	b.mem.AddSelectToGroup(&memo.SelectExpr{Input: input, Filters: b.outerFilters}, grp)
-}
-
-// hasConstProjections returns true if constant projections have been added to
-// the builder.
-func (b *indexScanBuilder) hasConstProjections() bool {
-	return len(b.constProjections) != 0
-}
-
-// hasInnerFilters returns true if inner filters have been added to the builder.
-func (b *indexScanBuilder) hasInnerFilters() bool {
-	return len(b.innerFilters) != 0
-}
-
-// hasOuterFilters returns true if outer filters have been added to the builder.
-func (b *indexScanBuilder) hasOuterFilters() bool {
-	return len(b.outerFilters) != 0
-}
-
-// hasInvertedFilter returns true if inverted filters have been added to the
-// builder.
-func (b *indexScanBuilder) hasInvertedFilter() bool {
-	return b.invertedFilterPrivate.InvertedColumn != 0
-}
-
-// hasIndexJoin returns true if an index join has been added to the builder.
-func (b *indexScanBuilder) hasIndexJoin() bool {
-	return b.indexJoinPrivate.Table != 0
+	return memo.Expr(memo.MakeSelectExpr(input, b.outerFilter))
 }

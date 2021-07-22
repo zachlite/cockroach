@@ -1,146 +1,77 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License. See the AUTHORS file
+// for names of contributors.
 
 package main
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/ioutil"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/version"
-	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"github.com/stretchr/testify/require"
 )
 
-const OwnerUnitTest registry.Owner = `unowned`
-
-const defaultParallelism = 10
-
-func mkReg(t *testing.T) testRegistryImpl {
-	t.Helper()
-	r, err := makeTestRegistry(spec.GCE, "", "", false /* preferSSD */)
-	require.NoError(t, err)
-	return r
-}
-
-func TestMatchOrSkip(t *testing.T) {
-	testCases := []struct {
-		filter       []string
-		name         string
-		tags         []string
-		expected     bool
-		expectedSkip string
-	}{
-		{nil, "foo", nil, true, ""},
-		{nil, "foo", []string{"bar"}, true, "[tag:default] does not match [bar]"},
-		{[]string{"tag:b"}, "foo", []string{"bar"}, true, ""},
-		{[]string{"tag:b"}, "foo", nil, true, "[tag:b] does not match [default]"},
-		{[]string{"tag:default"}, "foo", nil, true, ""},
-		{[]string{"tag:f"}, "foo", []string{"bar"}, true, "[tag:f] does not match [bar]"},
-		{[]string{"f"}, "foo", []string{"bar"}, true, "[tag:default] does not match [bar]"},
-		{[]string{"f"}, "bar", []string{"bar"}, false, ""},
-		{[]string{"f", "tag:b"}, "foo", []string{"bar"}, true, ""},
-		{[]string{"f", "tag:f"}, "foo", []string{"bar"}, true, "[tag:f] does not match [bar]"},
-	}
-	for _, c := range testCases {
-		t.Run("", func(t *testing.T) {
-			f := registry.NewTestFilter(c.filter)
-			spec := &registry.TestSpec{Name: c.name, Owner: OwnerUnitTest, Tags: c.tags}
-			if value := spec.MatchOrSkip(f); c.expected != value {
-				t.Fatalf("expected %t, but found %t", c.expected, value)
-			} else if value && c.expectedSkip != spec.Skip {
-				t.Fatalf("expected %s, but found %s", c.expectedSkip, spec.Skip)
-			}
-		})
-	}
-}
-
-func nilLogger() *logger.Logger {
-	lcfg := logger.Config{
-		Stdout: ioutil.Discard,
-		Stderr: ioutil.Discard,
-	}
-	l, err := lcfg.NewLogger("" /* path */)
-	if err != nil {
-		panic(err)
-	}
-	return l
-}
-
-func TestRunnerRun(t *testing.T) {
-	ctx := context.Background()
-	r := mkReg(t)
-	r.Add(registry.TestSpec{
-		Name:    "pass",
-		Owner:   OwnerUnitTest,
-		Run:     func(ctx context.Context, t test.Test, c cluster.Cluster) {},
-		Cluster: r.MakeClusterSpec(0),
+func TestRegistryRun(t *testing.T) {
+	r := newRegistry()
+	r.out = ioutil.Discard
+	r.Add(testSpec{
+		Name:   "pass",
+		Stable: true,
+		Run: func(ctx context.Context, t *test, c *cluster) {
+		},
 	})
-	r.Add(registry.TestSpec{
-		Name:  "fail",
-		Owner: OwnerUnitTest,
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+	r.Add(testSpec{
+		Name:   "fail",
+		Stable: true,
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			t.Fatal("failed")
 		},
-		Cluster: r.MakeClusterSpec(0),
+	})
+	r.Add(testSpec{
+		Name:   "fail-unstable",
+		Stable: false,
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			t.Fatal("failed")
+		},
 	})
 
 	testCases := []struct {
-		filters []string
-		expErr  string
+		filters  []string
+		expected int
 	}{
-		{nil, "some tests failed"},
-		{[]string{"pass"}, ""},
-		{[]string{"fail"}, "some tests failed"},
-		{[]string{"pass|fail"}, "some tests failed"},
-		{[]string{"pass", "fail"}, "some tests failed"},
-		{[]string{"notests"}, "no test"},
+		{nil, 1},
+		{[]string{"pass"}, 0},
+		{[]string{"fail"}, 1},
+		{[]string{"fail-unstable"}, 0},
+		{[]string{"pass|fail"}, 1},
+		{[]string{"pass", "fail"}, 1},
 	}
 	for _, c := range testCases {
 		t.Run("", func(t *testing.T) {
-			tests := testsToRun(ctx, r, registry.NewTestFilter(c.filters))
-			cr := newClusterRegistry()
-			runner := newTestRunner(cr, r.buildVersion)
-
-			lopt := loggingOpt{
-				l:            nilLogger(),
-				tee:          logger.NoTee,
-				stdout:       ioutil.Discard,
-				stderr:       ioutil.Discard,
-				artifactsDir: "",
-			}
-			copt := clustersOpt{
-				typ:                       roachprodCluster,
-				user:                      "test_user",
-				cpuQuota:                  1000,
-				keepClustersOnTestFailure: false,
-			}
-			err := runner.Run(ctx, tests, 1, /* count */
-				defaultParallelism, copt, testOpts{}, lopt)
-
-			if !testutils.IsError(err, c.expErr) {
-				t.Fatalf("expected err: %q, but found %v. Filters: %s", c.expErr, err, c.filters)
+			code := r.Run(c.filters)
+			if c.expected != code {
+				t.Fatalf("expected %d, but found %d", c.expected, code)
 			}
 		})
 	}
@@ -163,90 +94,315 @@ func (b *syncedBuffer) String() string {
 	return b.buf.String()
 }
 
-func TestRunnerTestTimeout(t *testing.T) {
-	ctx := context.Background()
-
-	cr := newClusterRegistry()
-	runner := newTestRunner(cr, version.Version{})
-
+func TestRegistryStatus(t *testing.T) {
 	var buf syncedBuffer
-	lopt := loggingOpt{
-		l:            nilLogger(),
-		tee:          logger.NoTee,
-		stdout:       &buf,
-		stderr:       &buf,
-		artifactsDir: "",
+	waitingRE := regexp.MustCompile(`(?m)^.*status: waiting.*worker?.*worker?.*$`)
+	cleaningUpRE := regexp.MustCompile(`(?m)^.*status: cleaning up \(.*\)$`)
+
+	r := newRegistry()
+	r.out = &buf
+	r.statusInterval = 20 * time.Millisecond
+	r.Add(testSpec{
+		Name:   `status`,
+		Stable: true,
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			t.Status("waiting")
+			var wg sync.WaitGroup
+			for i := 0; i < 2; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					t.WorkerStatus("worker", i)
+					defer t.WorkerStatus()
+					for i := 0.0; i < 1.0; i += 0.01 {
+						t.WorkerProgress(i)
+						time.Sleep(r.statusInterval)
+						if waitingRE.MatchString(buf.String()) {
+							break
+						}
+					}
+				}(i)
+			}
+			wg.Wait()
+			t.Status("cleaning up")
+			for i := 0.0; i < 1.0; i += 0.01 {
+				t.Progress(i)
+				time.Sleep(r.statusInterval)
+				if cleaningUpRE.MatchString(buf.String()) {
+					break
+				}
+			}
+		},
+	})
+	r.Run([]string{"status"})
+
+	status := buf.String()
+	if !waitingRE.MatchString(status) {
+		t.Fatalf("unable to find \"waiting\" status:\n%s", status)
 	}
-	copt := clustersOpt{
-		typ:                       roachprodCluster,
-		user:                      "test_user",
-		cpuQuota:                  1000,
-		keepClustersOnTestFailure: false,
+	if !cleaningUpRE.MatchString(status) {
+		t.Fatalf("unable to find \"cleaning up\" status:\n%s", status)
 	}
-	test := registry.TestSpec{
+	if testing.Verbose() {
+		fmt.Println(status)
+	}
+}
+
+func TestRegistryStatusUnknown(t *testing.T) {
+	var buf syncedBuffer
+	unknownRE := regexp.MustCompile(`(?m)^.*status: \?\?\? \(.*\)$`)
+
+	r := newRegistry()
+	r.out = &buf
+	r.statusInterval = 20 * time.Millisecond
+
+	r.Add(testSpec{
+		Name:   `status`,
+		Stable: true,
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			for i := 0; i < 100; i++ {
+				time.Sleep(r.statusInterval)
+				if unknownRE.MatchString(buf.String()) {
+					break
+				}
+			}
+		},
+	})
+	r.Run([]string{"status"})
+
+	status := buf.String()
+	if !unknownRE.MatchString(status) {
+		t.Fatalf("unable to find \"waiting\" status:\n%s", status)
+	}
+	if testing.Verbose() {
+		fmt.Println(status)
+	}
+}
+
+func TestRegistryRunTimeout(t *testing.T) {
+	var buf syncedBuffer
+	timeoutRE := regexp.MustCompile(`(?m)^.*test timed out \(.*\)$`)
+
+	r := newRegistry()
+	r.out = &buf
+
+	r.Add(testSpec{
 		Name:    `timeout`,
-		Owner:   OwnerUnitTest,
 		Timeout: 10 * time.Millisecond,
-		Cluster: spec.MakeClusterSpec(spec.GCE, "", 0),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
+		Stable:  true,
+		Run: func(ctx context.Context, t *test, c *cluster) {
 			<-ctx.Done()
 		},
-	}
-	err := runner.Run(ctx, []registry.TestSpec{test}, 1, /* count */
-		defaultParallelism, copt, testOpts{}, lopt)
-	if !testutils.IsError(err, "some tests failed") {
-		t.Fatalf("expected error \"some tests failed\", got: %v", err)
-	}
+	})
+	r.Run([]string{"timeout"})
 
 	out := buf.String()
-	timeoutRE := regexp.MustCompile(`(?m)^.*test timed out \(.*\)$`)
 	if !timeoutRE.MatchString(out) {
 		t.Fatalf("unable to find \"timed out\" message:\n%s", out)
 	}
 }
 
-func TestRegistryPrepareSpec(t *testing.T) {
-	dummyRun := func(context.Context, test.Test, cluster.Cluster) {}
+func TestRegistryRunSubTestFailed(t *testing.T) {
+	var buf syncedBuffer
+	failedRE := regexp.MustCompile(`(?m)^.*--- FAIL: parent \(.*$`)
 
-	var listTests = func(t *registry.TestSpec) []string {
-		return []string{t.Name}
+	r := newRegistry()
+	r.out = &buf
+	r.Add(testSpec{
+		Name:   "parent",
+		Stable: true,
+		SubTests: []testSpec{{
+			Name:   "child",
+			Stable: true,
+			Run: func(ctx context.Context, t *test, c *cluster) {
+				t.Fatal("failed")
+			},
+		}},
+	})
+
+	r.Run([]string{"."})
+	out := buf.String()
+	if !failedRE.MatchString(out) {
+		t.Fatalf("unable to find \"FAIL: parent\" message:\n%s", out)
+	}
+}
+
+func TestRegistryRunClusterExpired(t *testing.T) {
+	defer func(l, v bool, n string) {
+		local, testingSkipValidation, clusterName = l, v, n
+	}(local, testingSkipValidation, clusterName)
+	local, testingSkipValidation, clusterName = true, true, "local"
+
+	var buf syncedBuffer
+	expiredRE := regexp.MustCompile(`(?m)^.*cluster expired \(.*\)$`)
+
+	r := newRegistry()
+	r.out = &buf
+
+	r.Add(testSpec{
+		Name:   `expired`,
+		Stable: true,
+		Nodes:  nodes(1, nodeLifetimeOption(time.Second)),
+		Run: func(ctx context.Context, t *test, c *cluster) {
+			panic("not reached")
+		},
+	})
+	r.Run([]string{"expired"})
+
+	out := buf.String()
+	if !expiredRE.MatchString(out) {
+		t.Fatalf("unable to find \"cluster expired\" message:\n%s", out)
+	}
+}
+
+func TestRegistryVerifyClusterName(t *testing.T) {
+	testCases := []struct {
+		testNames   []string
+		expectedErr string
+	}{
+		{[]string{"hello"}, ""},
+		{[]string{"HELLO", "hello"}, "have equivalent nightly cluster names"},
+		{[]string{"hel+lo", "hel++lo"}, "have equivalent nightly cluster names"},
+		{[]string{"hello+"}, "must match regex"},
+		{[]string{strings.Repeat("y", 46)}, ""},
+		{[]string{strings.Repeat("y", 47)}, "must match regex"},
+	}
+	for _, c := range testCases {
+		t.Run("", func(t *testing.T) {
+			r := newRegistry()
+			var err error
+			for _, n := range c.testNames {
+				err = r.verifyClusterName(n)
+			}
+			if !testutils.IsError(err, c.expectedErr) {
+				t.Fatalf("expected %s, but found %v", c.expectedErr, err)
+			}
+		})
+	}
+}
+
+func TestRegistryPrepareSpec(t *testing.T) {
+	dummyRun := func(context.Context, *test, *cluster) {}
+
+	var listTests func(t *testSpec) []string
+	listTests = func(t *testSpec) []string {
+		r := []string{t.Name}
+		for i := range t.SubTests {
+			r = append(r, listTests(&t.SubTests[i])...)
+		}
+		return r
 	}
 
 	testCases := []struct {
-		spec          registry.TestSpec
+		spec          testSpec
 		expectedErr   string
 		expectedTests []string
 	}{
 		{
-			registry.TestSpec{
-				Name:    "a",
-				Owner:   OwnerUnitTest,
-				Run:     dummyRun,
-				Cluster: spec.MakeClusterSpec(spec.GCE, "", 0),
+			testSpec{
+				Name: "a",
+				Run:  dummyRun,
 			},
 			"",
 			[]string{"a"},
 		},
 		{
-			registry.TestSpec{
-				Name:    "illegal *[]",
-				Owner:   OwnerUnitTest,
-				Run:     dummyRun,
-				Cluster: spec.MakeClusterSpec(spec.GCE, "", 0),
+			testSpec{
+				Name: "a",
+				SubTests: []testSpec{{
+					Name: "b",
+					Run:  dummyRun,
+				}},
 			},
-			`illegal \*\[\]: Name must match this regexp: `,
+			"",
+			[]string{"a", "a/b"},
+		},
+		{
+			testSpec{
+				Name: "a",
+				Run:  dummyRun,
+				SubTests: []testSpec{{
+					Name: "b",
+					Run:  dummyRun,
+				}},
+			},
+			"a: must specify only one of Run or SubTests",
+			nil,
+		},
+		{
+			testSpec{
+				Name: "a",
+				SubTests: []testSpec{{
+					Name: "b",
+				}},
+			},
+			"a/b: must specify only one of Run or SubTests",
+			nil,
+		},
+		{
+			testSpec{
+				Name: "a",
+				SubTests: []testSpec{{
+					Name: "b",
+					Run:  dummyRun,
+					SubTests: []testSpec{{
+						Name: "c",
+						Run:  dummyRun,
+					}},
+				}},
+			},
+			"b: must specify only one of Run or SubTests",
+			nil,
+		},
+		{
+			testSpec{
+				Name: "a",
+				SubTests: []testSpec{{
+					Name:  "b",
+					Nodes: nodes(1),
+					Run:   dummyRun,
+				}},
+			},
+			"a/b: subtest may not provide cluster specification",
+			nil,
+		},
+		{
+			testSpec{
+				Name:       "a",
+				MinVersion: "v2.1.0",
+				Run:        dummyRun,
+			},
+			"",
+			[]string{"a"},
+		},
+		{
+			testSpec{
+				Name:       "a",
+				MinVersion: "foo",
+				Run:        dummyRun,
+			},
+			"a: unable to parse min-version: foo",
+			nil,
+		},
+		{
+			testSpec{
+				Name:    "a",
+				Timeout: time.Second,
+				SubTests: []testSpec{{
+					Name: "b",
+					Run:  dummyRun,
+				}},
+			},
+			"a: timeouts only apply to tests specifying Run",
 			nil,
 		},
 	}
 	for _, c := range testCases {
 		t.Run("", func(t *testing.T) {
-			r, err := makeTestRegistry(spec.GCE, "", "", false /* preferSSD */)
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = r.prepareSpec(&c.spec)
+			r := newRegistry()
+			err := r.prepareSpec(&c.spec, 0)
 			if !testutils.IsError(err, c.expectedErr) {
-				t.Fatalf("expected %q, but found %q", c.expectedErr, err.Error())
+				t.Fatalf("expected %s, but found %v", c.expectedErr, err)
 			}
 			if c.expectedErr == "" {
 				tests := listTests(&c.spec)
@@ -259,35 +415,44 @@ func TestRegistryPrepareSpec(t *testing.T) {
 	}
 }
 
-func runExitCodeTest(t *testing.T, injectedError error) error {
-	ctx := context.Background()
-	t.Helper()
-	cr := newClusterRegistry()
-	runner := newTestRunner(cr, version.Version{})
-	r := mkReg(t)
-	r.Add(registry.TestSpec{
-		Name:    "boom",
-		Owner:   OwnerUnitTest,
-		Cluster: spec.MakeClusterSpec(spec.GCE, "", 0),
-		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
-			if injectedError != nil {
-				t.Fatal(injectedError)
-			}
-		},
-	})
-	tests := testsToRun(ctx, r, registry.NewTestFilter(nil))
-	lopt := loggingOpt{
-		l:            nilLogger(),
-		tee:          logger.NoTee,
-		stdout:       ioutil.Discard,
-		stderr:       ioutil.Discard,
-		artifactsDir: "",
+func TestRegistryMinVersion(t *testing.T) {
+	testCases := []struct {
+		buildVersion string
+		expectedA    bool
+		expectedB    bool
+	}{
+		{"1.1.0", false, false},
+		{"2.0.0", true, false},
+		{"2.1.0", true, true},
 	}
-	return runner.Run(ctx, tests, 1, 1, clustersOpt{}, testOpts{}, lopt)
-}
-
-func TestExitCode(t *testing.T) {
-	require.NoError(t, runExitCodeTest(t, nil /* test passes */))
-	err := runExitCodeTest(t, errors.New("boom"))
-	require.True(t, errors.Is(err, errTestsFailed))
+	for _, c := range testCases {
+		t.Run(c.buildVersion, func(t *testing.T) {
+			var buf syncedBuffer
+			var runA, runB bool
+			r := newRegistry()
+			r.out = &buf
+			r.Add(testSpec{
+				Name:       "a",
+				MinVersion: "2.0.0",
+				Run: func(ctx context.Context, t *test, c *cluster) {
+					runA = true
+				},
+			})
+			r.Add(testSpec{
+				Name:       "b",
+				MinVersion: "2.1.0",
+				Run: func(ctx context.Context, t *test, c *cluster) {
+					runB = true
+				},
+			})
+			if err := r.setBuildVersion(c.buildVersion); err != nil {
+				t.Fatal(err)
+			}
+			r.Run(nil)
+			if c.expectedA != runA || c.expectedB != runB {
+				t.Fatalf("expected %t,%t, but got %t,%t\n%s",
+					c.expectedA, c.expectedB, runA, runB, buf.String())
+			}
+		})
+	}
 }

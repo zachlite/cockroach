@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package props_test
 
@@ -15,57 +19,51 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
 func TestColStatsMap(t *testing.T) {
 	testcases := []struct {
-		cols     []opt.ColumnID
+		cols     []int
 		remove   bool
 		clear    bool
 		expected string
 	}{
-		{cols: []opt.ColumnID{1}, expected: "(1)"},
-		{cols: []opt.ColumnID{1}, expected: "(1)"},
-		{cols: []opt.ColumnID{2}, expected: "(1)+(2)"},
-		{cols: []opt.ColumnID{1, 2}, expected: "(1)+(2)+(1,2)"},
-		{cols: []opt.ColumnID{1, 2}, expected: "(1)+(2)+(1,2)"},
-		{cols: []opt.ColumnID{2}, expected: "(1)+(2)+(1,2)"},
-		{cols: []opt.ColumnID{1}, remove: true, expected: "(2)"},
+		{cols: []int{1}, expected: "(1)"},
+		{cols: []int{1}, expected: "(1)"},
+		{cols: []int{2}, expected: "(1)+(2)"},
+		{cols: []int{1, 2}, expected: "(1)+(2)+(1,2)"},
+		{cols: []int{1, 2}, expected: "(1)+(2)+(1,2)"},
+		{cols: []int{2}, expected: "(1)+(2)+(1,2)"},
+		{cols: []int{1}, remove: true, expected: "(2)"},
 
 		// Add after removing.
-		{cols: []opt.ColumnID{2, 3}, expected: "(2)+(2,3)"},
-		{cols: []opt.ColumnID{2, 3, 4}, expected: "(2)+(2,3)+(2-4)"},
-		{cols: []opt.ColumnID{3}, expected: "(2)+(2,3)+(2-4)+(3)"},
-		{cols: []opt.ColumnID{3, 4}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)"},
-		{cols: []opt.ColumnID{5, 7}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)+(5,7)"},
-		{cols: []opt.ColumnID{5}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)+(5,7)+(5)"},
-		{cols: []opt.ColumnID{3, 4}, remove: true, expected: "(2)+(5,7)+(5)"},
+		{cols: []int{2, 3}, expected: "(2)+(2,3)"},
+		{cols: []int{2, 3, 4}, expected: "(2)+(2,3)+(2-4)"},
+		{cols: []int{3}, expected: "(2)+(2,3)+(2-4)+(3)"},
+		{cols: []int{3, 4}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)"},
+		{cols: []int{5, 7}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)+(5,7)"},
+		{cols: []int{5}, expected: "(2)+(2,3)+(2-4)+(3)+(3,4)+(5,7)+(5)"},
+		{cols: []int{3, 4}, remove: true, expected: "(2)+(5,7)+(5)"},
 
 		// Add after clearing.
-		{cols: []opt.ColumnID{}, clear: true, expected: ""},
-		{cols: []opt.ColumnID{5}, expected: "(5)"},
-		{cols: []opt.ColumnID{1}, expected: "(5)+(1)"},
-		{cols: []opt.ColumnID{1, 5}, expected: "(5)+(1)+(1,5)"},
-		{cols: []opt.ColumnID{5, 6}, expected: "(5)+(1)+(1,5)+(5,6)"},
-		{cols: []opt.ColumnID{2}, expected: "(5)+(1)+(1,5)+(5,6)+(2)"},
-		{cols: []opt.ColumnID{1, 2}, expected: "(5)+(1)+(1,5)+(5,6)+(2)+(1,2)"},
+		{cols: []int{}, clear: true, expected: ""},
+		{cols: []int{5}, expected: "(5)"},
+		{cols: []int{1}, expected: "(5)+(1)"},
+		{cols: []int{1, 5}, expected: "(5)+(1)+(1,5)"},
+		{cols: []int{5, 6}, expected: "(5)+(1)+(1,5)+(5,6)"},
+		{cols: []int{2}, expected: "(5)+(1)+(1,5)+(5,6)+(2)"},
+		{cols: []int{1, 2}, expected: "(5)+(1)+(1,5)+(5,6)+(2)+(1,2)"},
 
 		// Remove node, where remaining nodes still require prefix tree index.
-		{cols: []opt.ColumnID{6}, remove: true, expected: "(5)+(1)+(1,5)+(2)+(1,2)"},
-		{cols: []opt.ColumnID{3, 4}, expected: "(5)+(1)+(1,5)+(2)+(1,2)+(3,4)"},
+		{cols: []int{6}, remove: true, expected: "(5)+(1)+(1,5)+(2)+(1,2)"},
+		{cols: []int{3, 4}, expected: "(5)+(1)+(1,5)+(2)+(1,2)+(3,4)"},
 	}
 
-	tcStats := make([]props.ColStatsMap, len(testcases))
-	// First calculate the stats for all steps, making copies every time. This
-	// also tests that the stats are copied correctly and there is no aliasing.
-	for tcIdx, tc := range testcases {
-		stats := &tcStats[tcIdx]
-		if tcIdx > 0 {
-			stats.CopyFrom(&tcStats[tcIdx-1])
-		}
-		cols := opt.MakeColSet(tc.cols...)
+	var stats props.ColStatsMap
+	for _, tc := range testcases {
+		cols := util.MakeFastIntSet(tc.cols...)
 		if !tc.remove {
 			if tc.clear {
 				stats.Clear()
@@ -75,10 +73,7 @@ func TestColStatsMap(t *testing.T) {
 		} else {
 			stats.RemoveIntersecting(cols)
 		}
-	}
 
-	for tcIdx, tc := range testcases {
-		stats := &tcStats[tcIdx]
 		var b strings.Builder
 		for i := 0; i < stats.Count(); i++ {
 			get := stats.Get(i)

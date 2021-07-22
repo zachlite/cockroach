@@ -1,13 +1,3 @@
-// Copyright 2019 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 // Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in licenses/BSD-golang.txt.
@@ -332,12 +322,8 @@ func (m *IntMap) Range(f func(key int64, value unsafe.Pointer) bool) {
 		m.mu.Lock()
 		read = m.getRead()
 		if read.amended {
-			// Don't let read escape directly, otherwise it will allocate even
-			// when read.amended is false. Instead, constrain the allocation to
-			// just this branch.
-			newRead := &readOnly{m: m.dirty}
-			atomic.StorePointer(&m.read, unsafe.Pointer(newRead))
-			read = *newRead
+			read = readOnly{m: m.dirty}
+			atomic.StorePointer(&m.read, unsafe.Pointer(&read))
 			m.dirty = nil
 			m.misses = 0
 		}

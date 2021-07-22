@@ -1,86 +1,163 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 type lookupJoinNode struct {
 	input planNode
 	table *scanNode
 
-	// joinType is either INNER, LEFT_OUTER, LEFT_SEMI, or LEFT_ANTI.
-	joinType descpb.JoinType
+	// joinType is either INNER or LEFT_OUTER.
+	joinType sqlbase.JoinType
 
-	// eqCols represents the part of the join condition used to perform
-	// the lookup into the index. It should only be set when lookupExpr is empty.
-	// eqCols identifies the columns from the input which are used for the
+	// keyCols identifies the columns from the input which are used for the
 	// lookup. These correspond to a prefix of the index columns (of the index we
 	// are looking up into).
-	eqCols []int
+	keyCols []int
 
-	// eqColsAreKey is true when each lookup can return at most one row.
-	eqColsAreKey bool
-
-	// lookupExpr represents the part of the join condition used to perform
-	// the lookup into the index. It should only be set when eqCols is empty.
-	// lookupExpr is used instead of eqCols when the lookup condition is
-	// more complicated than a simple equality between input columns and index
-	// columns. In this case, lookupExpr specifies the expression that will be
-	// used to construct the spans for each lookup.
-	lookupExpr tree.TypedExpr
-
-	// If remoteLookupExpr is set, this is a locality optimized lookup join. In
-	// this case, lookupExpr contains the lookup join conditions targeting ranges
-	// located on local nodes (relative to the gateway region), and
-	// remoteLookupExpr contains the lookup join conditions targeting remote
-	// nodes. The optimizer will only plan a locality optimized lookup join if it
-	// is known that each lookup returns at most one row. This fact allows the
-	// execution engine to use the local conditions in lookupExpr first, and if a
-	// match is found locally for each input row, there is no need to search
-	// remote nodes. If a local match is not found for all input rows, the
-	// execution engine uses remoteLookupExpr to search remote nodes.
-	remoteLookupExpr tree.TypedExpr
-
-	// columns are the produced columns, namely the input columns and (unless the
-	// join type is semi or anti join) the columns in the table scanNode.
-	columns colinfo.ResultColumns
+	// columns are the produced columns, namely the input clumns and the
+	// columns in the table scanNode.
+	columns sqlbase.ResultColumns
 
 	// onCond is any ON condition to be used in conjunction with the implicit
-	// equality condition on eqCols or the conditions in lookupExpr.
+	// equality condition on keyCols.
 	onCond tree.TypedExpr
 
-	isSecondJoinInPairedJoiner bool
+	props physicalProps
 
-	reqOrdering ReqOrdering
+	run lookupJoinRun
 }
 
+// lookupJoinRun is the state for the local execution path for lookup join.
+//
+// We have no local execution path; we fall back on doing a full table scan and
+// using the joinNode to do the join. Note that this can be significantly worse
+// than not having lookup joins at all, because no filters are being pushed into
+// the scan as constraints.
+//
+// This path is temporary and only exists to avoid failures (especially in logic
+// tests) when DistSQL is not being used.
+type lookupJoinRun struct {
+	n *joinNode
+}
+
+// startExec is part of the execStartable interface.
 func (lj *lookupJoinNode) startExec(params runParams) error {
-	panic("lookupJoinNode cannot be run in local mode")
+	// Make sure the table node has a span (full scan).
+	var err error
+	lj.table.spans, err = spansFromConstraint(lj.table.desc, lj.table.index, nil /* constraint */)
+	if err != nil {
+		return err
+	}
+
+	// Create a joinNode that joins the input and the table. Note that startExec
+	// will be called on lj.input and lj.table.
+
+	leftSrc := planDataSource{
+		info: &sqlbase.DataSourceInfo{SourceColumns: planColumns(lj.input)},
+		plan: lj.input,
+	}
+
+	indexColIDs := lj.table.index.ColumnIDs
+	if !lj.table.index.Unique {
+		// Add implicit key columns.
+		indexColIDs = append(indexColIDs, lj.table.index.ExtraColumnIDs...)
+	}
+
+	// The lookup side may not output all the index columns on which we are doing
+	// the lookup. We need them to be produced so that we can refer to them in the
+	// join predicate. So we find any such instances and adjust the scan node
+	// accordingly.
+	for i := range lj.keyCols {
+		colID := indexColIDs[i]
+		if _, ok := lj.table.colIdxMap[colID]; !ok {
+			// Tricky case: the lookup join doesn't output this column so we can't
+			// refer to it; we have to add it.
+			n := lj.table
+			colPos := len(n.cols)
+			var colDesc *sqlbase.ColumnDescriptor
+			for i := range n.desc.Columns {
+				if n.desc.Columns[i].ID == colID {
+					colDesc = &n.desc.Columns[i]
+					break
+				}
+			}
+			n.cols = append(n.cols, *colDesc)
+			n.resultColumns = append(
+				n.resultColumns,
+				leftSrc.info.SourceColumns[lj.keyCols[i]],
+			)
+			n.colIdxMap[colID] = colPos
+			n.valNeededForCol.Add(colPos)
+			n.run.row = make([]tree.Datum, len(n.cols))
+			n.filterVars = tree.MakeIndexedVarHelper(n, len(n.cols))
+			// startExec was already called for the node, run it again.
+			if err := n.startExec(params); err != nil {
+				return err
+			}
+		}
+	}
+
+	rightSrc := planDataSource{
+		info: &sqlbase.DataSourceInfo{SourceColumns: planColumns(lj.table)},
+		plan: lj.table,
+	}
+
+	pred, _, err := params.p.makeJoinPredicate(
+		context.TODO(), leftSrc.info, rightSrc.info, lj.joinType, nil, /* cond */
+	)
+	if err != nil {
+		return err
+	}
+
+	// Program the equalities implied by keyCols.
+	for i := range lj.keyCols {
+		colID := indexColIDs[i]
+		pred.addEquality(leftSrc.info, lj.keyCols[i], rightSrc.info, lj.table.colIdxMap[colID])
+	}
+
+	onAndExprs := splitAndExpr(params.EvalContext(), lj.onCond, nil /* exprs */)
+	for _, e := range onAndExprs {
+		if e != tree.DBoolTrue && !pred.tryAddEqualityFilter(e, leftSrc.info, rightSrc.info) {
+			pred.onCond = mergeConj(pred.onCond, e)
+		}
+	}
+	lj.run.n = params.p.makeJoinNode(leftSrc, rightSrc, pred)
+	return lj.run.n.startExec(params)
 }
 
 func (lj *lookupJoinNode) Next(params runParams) (bool, error) {
-	panic("lookupJoinNode cannot be run in local mode")
+	return lj.run.n.Next(params)
 }
 
 func (lj *lookupJoinNode) Values() tree.Datums {
-	panic("lookupJoinNode cannot be run in local mode")
+	// Chop off any values we may have tacked onto the table scanNode.
+	return lj.run.n.Values()[:len(lj.columns)]
 }
 
 func (lj *lookupJoinNode) Close(ctx context.Context) {
-	lj.input.Close(ctx)
-	lj.table.Close(ctx)
+	if lj.run.n != nil {
+		lj.run.n.Close(ctx)
+	} else {
+		lj.input.Close(ctx)
+		lj.table.Close(ctx)
+	}
 }

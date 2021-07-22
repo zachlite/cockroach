@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package ts
 
@@ -17,11 +21,12 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
+
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 // timeSeriesSpan represents a queryed time span for a single time series. This
@@ -549,7 +554,7 @@ func (db *DB) queryChunk(
 	diskTimespan := timespan
 	diskTimespan.expand(mem.InterpolationLimitNanos)
 
-	var data []kv.KeyValue
+	var data []client.KeyValue
 	var err error
 	if len(query.Sources) == 0 {
 		data, err = db.readAllSourcesFromDatabase(ctx, query.Name, diskResolution, diskTimespan)
@@ -829,10 +834,10 @@ func (db *DB) readFromDatabase(
 	diskResolution Resolution,
 	timespan QueryTimespan,
 	sources []string,
-) ([]kv.KeyValue, error) {
+) ([]client.KeyValue, error) {
 	// Iterate over all key timestamps which may contain data for the given
 	// sources, based on the given start/end time and the resolution.
-	b := &kv.Batch{}
+	b := &client.Batch{}
 	startTimestamp := diskResolution.normalizeToSlab(timespan.StartNanos)
 	kd := diskResolution.SlabDuration()
 	for currentTimestamp := startTimestamp; currentTimestamp <= timespan.EndNanos; currentTimestamp += kd {
@@ -844,7 +849,7 @@ func (db *DB) readFromDatabase(
 	if err := db.db.Run(ctx, b); err != nil {
 		return nil, err
 	}
-	var rows []kv.KeyValue
+	var rows []client.KeyValue
 	for _, result := range b.Results {
 		row := result.Rows[0]
 		if row.Value == nil {
@@ -861,7 +866,7 @@ func (db *DB) readFromDatabase(
 // keys, rather than by timespan.
 func (db *DB) readAllSourcesFromDatabase(
 	ctx context.Context, seriesName string, diskResolution Resolution, timespan QueryTimespan,
-) ([]kv.KeyValue, error) {
+) ([]client.KeyValue, error) {
 	// Based on the supplied timestamps and resolution, construct start and
 	// end keys for a scan that will return every key with data relevant to
 	// the query. Query slightly before and after the actual queried range
@@ -872,7 +877,7 @@ func (db *DB) readAllSourcesFromDatabase(
 	endKey := MakeDataKey(
 		seriesName, "" /* source */, diskResolution, timespan.EndNanos,
 	).PrefixEnd()
-	b := &kv.Batch{}
+	b := &client.Batch{}
 	b.Scan(startKey, endKey)
 
 	if err := db.db.Run(ctx, b); err != nil {
@@ -884,7 +889,7 @@ func (db *DB) readAllSourcesFromDatabase(
 // convertKeysToSpans converts a batch of KeyValues queried from disk into a
 // map of data spans organized by source.
 func convertKeysToSpans(
-	ctx context.Context, data []kv.KeyValue, acc *mon.BoundAccount,
+	ctx context.Context, data []client.KeyValue, acc *mon.BoundAccount,
 ) (map[string]timeSeriesSpan, error) {
 	sourceSpans := make(map[string]timeSeriesSpan)
 	for _, row := range data {

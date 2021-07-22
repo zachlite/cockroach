@@ -1,3 +1,5 @@
+# LogicTest: local local-opt fakedist fakedist-opt fakedist-metadata local-parallel-stmts
+
 ## Basic creation
 
 query TT
@@ -84,13 +86,13 @@ SELECT NULL::JSON
 ----
 NULL
 
-statement error arrays of jsonb not allowed.*\nHINT:.*\n.*23468
+statement error arrays of jsonb not allowed
 SELECT ARRAY['"hello"'::JSON]
 
-statement error arrays of jsonb not allowed.*\nHINT:.*\n.*23468
+statement error arrays of JSONB not allowed
 SELECT '{}'::JSONB[]
 
-statement error arrays of jsonb not allowed.*\nHINT:.*\n.*23468
+statement error arrays of JSONB not allowed
 CREATE TABLE x (y JSONB[])
 
 statement ok
@@ -131,28 +133,6 @@ SELECT bar FROM foo WHERE bar ? 'a'
 ----
 {"a": "b"}
 
-query BBBBBBB
-VALUES (
-  '"hello"'::JSONB   ? 'hello',
-  '"hello"'::JSONB   ? 'goodbye',
-  '"hello"'::JSONB   ? 'ello',
-  '"hello"'::JSONB   ? 'h',
-  'true'::JSONB      ? 'true',
-  '1'::JSONB         ? '1',
-  'null'::JSONB      ? 'null'
-)
-----
-true  false  false  false  false  false  false
-
-query T
-SELECT bar FROM foo WHERE bar ? 'hello'
-----
-"hello"
-
-query T
-SELECT bar FROM foo WHERE bar ? 'goodbye'
-----
-
 query T
 SELECT bar FROM foo WHERE bar ?| ARRAY['a','b']
 ----
@@ -168,9 +148,10 @@ SELECT bar FROM foo WHERE bar ?| ARRAY['a', null]
 ----
 {"a": "b"}
 
-query T
-SELECT bar FROM foo WHERE bar ?| ARRAY[null, null]::STRING[]
-----
+# TODO(justin): #29355
+# query T
+# SELECT bar FROM foo WHERE bar ?| ARRAY[null, null]::STRING[]
+# ----
 
 query T
 SELECT bar FROM foo WHERE bar ?& ARRAY['a', null]
@@ -182,10 +163,10 @@ SELECT bar FROM foo WHERE bar->'a' = '"b"'::JSON
 ----
 {"a": "b"}
 
-statement error pgcode 0A000 can't order by column type jsonb.*\nHINT.*\n.*35706
+statement error pgcode 0A000 can't order by column type jsonb
 SELECT bar FROM foo ORDER BY bar
 
-statement error pgcode 0A000 column k is of type jsonb and thus is not indexable
+statement error pgcode 0A000 column k is of type JSONB and thus is not indexable
 CREATE TABLE pk (k JSON PRIMARY KEY)
 
 query T rowsort
@@ -335,7 +316,7 @@ NULL
 query T
 SELECT pg_typeof('{"a": 1}'::JSONB->>'a')
 ----
-text
+string
 
 query T
 SELECT '{"a": 1, "b": 2}'::JSONB->>'b'
@@ -361,56 +342,6 @@ query T
 SELECT '[1, 2, 3]'::JSONB->>3
 ----
 NULL
-
-query TTTT
-SELECT 'null'::jsonb->-2, 'null'::jsonb->-1, 'null'::jsonb->0, 'null'::jsonb->1
-----
-NULL  null  null  NULL
-
-query TTTT
-SELECT 'true'::jsonb->-2, 'true'::jsonb->-1, 'true'::jsonb->0, 'true'::jsonb->1
-----
-NULL  true  true  NULL
-
-query TTTT
-SELECT 'false'::jsonb->-2, 'false'::jsonb->-1, 'false'::jsonb->0, 'false'::jsonb->1
-----
-NULL  false  false  NULL
-
-query TTTT
-SELECT '"foo"'::jsonb->-2, '"foo"'::jsonb->-1, '"foo"'::jsonb->0, '"foo"'::jsonb->1
-----
-NULL  "foo"  "foo"  NULL
-
-query TTTT
-SELECT '123'::jsonb->-2, '123'::jsonb->-1, '123'::jsonb->0, '123'::jsonb->1
-----
-NULL  123  123  NULL
-
-query TTTT
-SELECT 'null'::jsonb->>-2, 'null'::jsonb->>-1, 'null'::jsonb->>0, 'null'::jsonb->>1
-----
-NULL  NULL  NULL  NULL
-
-query TTTT
-SELECT 'true'::jsonb->>-2, 'true'::jsonb->>-1, 'true'::jsonb->>0, 'true'::jsonb->>1
-----
-NULL  true  true  NULL
-
-query TTTT
-SELECT 'false'::jsonb->>-2, 'false'::jsonb->>-1, 'false'::jsonb->>0, 'false'::jsonb->>1
-----
-NULL  false  false  NULL
-
-query TTTT
-SELECT '"foo"'::jsonb->>-2, '"foo"'::jsonb->>-1, '"foo"'::jsonb->>0, '"foo"'::jsonb->>1
-----
-NULL  foo  foo  NULL
-
-query TTTT
-SELECT '123'::jsonb->>-2, '123'::jsonb->>-1, '123'::jsonb->>0, '123'::jsonb->>1
-----
-NULL  123  123  NULL
 
 query T
 SELECT '{"a": 1}'::JSONB#>'{a}'::STRING[]
@@ -739,12 +670,6 @@ SELECT '{"b": [], "c": {"a": "b"}}'::JSONB - array['a'];
 ----
 {"b": [], "c": {"a": "b"}}
 
-# Regression test for #34756.
-query T
-SELECT '{"b": [], "c": {"a": "b"}}'::JSONB - array['foo', NULL]
-----
-{"b": [], "c": {"a": "b"}}
-
 statement error pgcode 22P02 a path element is not an integer: foo
 SELECT '{"a": {"b": ["foo"]}}'::JSONB #- ARRAY['a', 'b', 'foo']
 
@@ -768,75 +693,3 @@ a  b
 
 statement ok
 DROP TABLE json_family
-
-# Regression tests for #49143. Correctly handle cases where the -> operator
-# results in NULL when both arguments are non-NULL.
-subtest regression_49143
-
-statement ok
-CREATE TABLE t49143 (k INT PRIMARY KEY, j JSON);
-INSERT INTO t49143 VALUES
-  (0, '[]'),
-  (1, '[1]'),
-  (2, '[2]'),
-  (3, '[[1, 2], [3, 4]]'),
-  (4, '[[5, 6], [7, 8]]'),
-  (5, '{}'),
-  (6, '{"a": 1}'),
-  (7, '{"b": 1}'),
-  (8, '{"b": 2}'),
-  (9, '{"b": [1, 2]}'),
-  (10, '{"b": [3, 4]}');
-
-query T
-SELECT j FROM t49143 WHERE NOT (j->0 = '2') ORDER BY k
-----
-[1]
-[[1, 2], [3, 4]]
-[[5, 6], [7, 8]]
-
-query T
-SELECT j FROM t49143 WHERE NOT (j->'b' = '1') ORDER BY k
-----
-{"b": 2}
-{"b": [1, 2]}
-{"b": [3, 4]}
-
-query T
-SELECT j FROM t49143 WHERE NOT (j -> 0 @> '[1]') ORDER BY k
-----
-[1]
-[2]
-[[5, 6], [7, 8]]
-
-query T
-SELECT j FROM t49143 WHERE NOT (j -> 'b' @> '[1]') ORDER BY k
-----
-{"b": 1}
-{"b": 2}
-{"b": [3, 4]}
-
-# Regression tests for #57165 (wrong type conversion in the vectorized engine).
-subtest regression_57165
-
-statement ok
-CREATE TABLE t57165(j JSON, s STRING);
-INSERT INTO t57165 VALUES ('{"foo": "bar"}', 'foo'), ('{"bar": "foo"}', 'bar')
-
-query TT
-SELECT j - 'foo' AS a, j - 'bar' AS b FROM t57165 ORDER BY rowid
-----
-{}              {"foo": "bar"}
-{"bar": "foo"}  {}
-
-query TT
-SELECT '{"foo": "bar"}' - s AS a, '{"bar": "foo"}' - s AS b FROM t57165 ORDER BY rowid
-----
-{}              {"bar": "foo"}
-{"foo": "bar"}  {}
-
-query T
-SELECT j - s FROM t57165
-----
-{}
-{}

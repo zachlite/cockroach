@@ -11,6 +11,5 @@ print "connected"
 
 while True:
     c = client_socket.recv(1)
-    if c:
-        sys.stdout.write("%c" % c)
-        sys.stdout.flush()
+    sys.stdout.write("%c" % c)
+    sys.stdout.flush()

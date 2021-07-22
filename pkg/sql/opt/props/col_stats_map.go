@@ -1,18 +1,21 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package props
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
-	"github.com/cockroachdb/errors"
 )
 
 const (
@@ -127,7 +130,7 @@ func (m *ColStatsMap) Lookup(cols opt.ColSet) (colStat *ColumnStatistic, ok bool
 
 	// Use the prefix tree index to look up the column statistic.
 	val := colStatVal{prefix: 0, pos: -1}
-	curr := opt.ColumnID(0)
+	curr := 0
 	for {
 		curr, ok = cols.Next(curr + 1)
 		if !ok {
@@ -143,7 +146,7 @@ func (m *ColStatsMap) Lookup(cols opt.ColSet) (colStat *ColumnStatistic, ok bool
 		}
 
 		// Fetch index entry for next prefix+col combo.
-		key := colStatKey{prefix: val.prefix, id: curr}
+		key := colStatKey{prefix: val.prefix, id: opt.ColumnID(curr)}
 		val, ok = m.index[key]
 		if !ok {
 			// No entry exists, so lookup fails.
@@ -168,7 +171,7 @@ func (m *ColStatsMap) Add(cols opt.ColSet) (_ *ColumnStatistic, added bool) {
 	}
 
 	if cols.Empty() {
-		panic(errors.AssertionFailedf("stats cols should never be empty"))
+		panic("stats cols should never be empty")
 	}
 
 	// Fast path for case where there are only a few stats in the map.
@@ -244,10 +247,10 @@ func (m *ColStatsMap) addToIndex(cols opt.ColSet, pos int) {
 	}
 
 	prefix := prefixID(0)
-	prev := opt.ColumnID(0)
+	prev := 0
 	curr, _ := cols.Next(prev)
 	for {
-		key := colStatKey{prefix: prefix, id: curr}
+		key := colStatKey{prefix: prefix, id: opt.ColumnID(curr)}
 		val, ok := m.index[key]
 		if ok {
 			// Index entry exists, so get its prefix value.
@@ -278,22 +281,5 @@ func (m *ColStatsMap) rebuildIndex() {
 	m.index = nil
 	for i := 0; i < m.Count(); i++ {
 		m.addToIndex(m.Get(i).Cols, i)
-	}
-}
-
-// CopyFrom sets this map to a deep copy of another map, which can be modified
-// independently.
-func (m *ColStatsMap) CopyFrom(other *ColStatsMap) {
-	m.initial = other.initial
-	m.other = append([]ColumnStatistic(nil), other.other...)
-	m.count = other.count
-	m.unique = other.unique
-
-	m.index = nil
-	if other.index != nil {
-		m.index = make(map[colStatKey]colStatVal, len(other.index))
-		for k, v := range other.index {
-			m.index[k] = v
-		}
 	}
 }

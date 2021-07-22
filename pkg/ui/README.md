@@ -1,8 +1,8 @@
-# DB Console
+# Admin UI
 
-This directory contains the client-side code for CockroachDB's web-based DB 
-Console, which provides details about a cluster's performance and health. See the
-[DB Console docs](https://www.cockroachlabs.com/docs/stable/ui-overview.html)
+This directory contains the client-side code for CockroachDB's web-based admin
+UI, which provides details about a cluster's performance and health. See the
+[Admin UI docs](https://www.cockroachlabs.com/docs/stable/explore-the-admin-ui.html)
 for an expanded overview.
 
 ## Getting Started
@@ -16,19 +16,19 @@ you'll be able to access the UI at <http://localhost:8080>.
 Our UI is compiled using a collection of tools that depends on
 [Node.js](https://nodejs.org/) and are managed with
 [Yarn](https://yarnpkg.com), a package manager that offers more deterministic
-package installation than NPM. LTS versions of NodeJS and Yarn v1.x.x are known
-to work. [Chrome](https://www.google.com/chrome/), Google's internet browser.
-Unit tests are run using Chrome's "Headless" mode.
+package installation than NPM. NodeJS 6.x and Yarn 1.7.0 are known to work.
+[Chrome](https://www.google.com/chrome/), Google's internet browser. Unit tests
+are run using Chrome's "Headless" mode.
 
 With Node and Yarn installed, bootstrap local development by running `make` in
 this directory. This will run `yarn install` to install our Node dependencies,
 run the tests, and compile the assets. Asset compilation happens in two steps.
 First, [Webpack](https://webpack.github.io) runs the TypeScript compiler and CSS
 preprocessor to assemble assets into the `dist` directory. Then, we package
-those assets into `bindata.go` using
-[go-bindata](https://github.com/kevinburke/go-bindata). When you later run `make
-build` in the parent directory, `bindata.go` is linked into the `cockroach`
-binary so that it can serve the DB Console when you run `cockroach start`.
+those assets into `embedded.go` using
+[go-bindata](https://github.com/jteeuwen/go-bindata). When you later run `make
+build` in the parent directory, `embedded.go` is linked into the `cockroach`
+binary so that it can serve the admin UI when you run `cockroach start`.
 
 ## Developing
 
@@ -41,24 +41,16 @@ We've created a simple NodeJS proxy to accomplish this. This server serves all
 requests for web resources (JavaScript, HTML, CSS) out of the code in this
 directory, while proxying all API requests to the specified CockroachDB node.
 
-To use this proxy, in Cockroach's root directory run:
-```shell
-$ make ui-watch TARGET=<target-cluster-http-uri>
-```
+To use this proxy, run
 
-or, in `pkg/ui` run:
 ```shell
 $ make watch TARGET=<target-cluster-http-uri>
 ```
 
 then navigate to `http://localhost:3000` to access the UI.
 
-To proxy to a cluster started up in secure mode, in Cockroach's root directory run:
-```shell
-$ make ui-watch-secure TARGET=<target-cluster-https-uri>
-```
+To proxy to a cluster started up in secure mode, use:
 
-or, in `pkg/ui` run:
 ```shell
 $ make watch-secure TARGET=<target-cluster-https-uri>
 ```
@@ -76,14 +68,6 @@ seem completely unrelated to your changes, try removing `yarn.installed` and
 
 Be sure to also commit modifications resulting from dependency changes, like
 updates to `package.json` and `yarn.lock`.
-
-### Working with the `cluster-ui` dependency
-
-Many page-level components have been extracted into a
-separate repository for sharing with other applications.
-You can read all about this division in the [README for the
-package](https://github.com/cockroachdb/ui/blob/master/packages/cluster-ui/README.md)
-which describes a dev workflow that fits well with this package.
 
 ### DLLs for speedy builds
 
@@ -129,36 +113,6 @@ To run the tests outside of CI:
 ```shell
 $ make test
 ```
-
-## Viewing bundle statistics
-
-The regular build also produces a webpage with a report on the bundle size.
-Build the app, then take a look with:
-
-```shell
-$ make build
-$ open pkg/ui/dist/stats.ccl.html
-```
-
-Or, to view the OSS bundle:
-
-```shell
-$ make buildoss
-$ open pkg/ui/dist/stats.oss.html
-```
-
-## Bundling fonts
-
-To comply with the SIL Open Font License, we have reproducible builds of our WOFF
-font bundles based on the original TTF files sourced from Google Fonts.
-
-To rebuild the font bundles (perhaps to bring in an updated version of a typeface),
-simply run `make fonts` in the UI directory (or `make ui-fonts` elsewhere).  This
-requires `fontforge` to be available on your system.  Then validate the updated
-fonts and commit them.
-
-To add a new typeface, edit the script `scripts/font-gen` to fetch and convert it,
-and then add it to `styl/base/typography.styl` to pull it into the bundle.
 
 ## Managing dependencies
 

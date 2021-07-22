@@ -2,7 +2,6 @@ TESTS := $(wildcard test*.sh)
 BASH ?= /usr/bin/env bash
 PYTHON ?= python
 NOTESCRIPT := $(PWD)/../release-notes.py
-TDIR := $(shell pwd)
 
 all: test
 
@@ -16,7 +15,7 @@ test: $(TESTS:.sh=.test)
 	@echo
 	@echo "**** Testing for $* ****"
 	@echo
-	$(BASH) $(TDIR)/$*.sh $(NOTESCRIPT)
+	$(BASH) $*.sh $(NOTESCRIPT)
 
 clean:
 	rm -f *.graph.txt *.notes.txt

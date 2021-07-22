@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package encoding
 
@@ -18,24 +22,18 @@ import (
 	"math"
 	"reflect"
 	"strconv"
-	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/cockroachdb/apd/v2"
-	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
-	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/apd"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/encoding/encodingtype"
 	"github.com/cockroachdb/cockroach/pkg/util/ipaddr"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
-	"github.com/cockroachdb/cockroach/pkg/util/timetz"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
 )
 
 const (
@@ -77,42 +75,6 @@ const (
 	jsonEmptyArray    = jsonInvertedIndex + 1
 	jsonEmptyObject   = jsonEmptyArray + 1
 
-	bitArrayMarker             = jsonEmptyObject + 1
-	bitArrayDescMarker         = bitArrayMarker + 1
-	bitArrayDataTerminator     = 0x00
-	bitArrayDataDescTerminator = 0xff
-
-	timeTZMarker  = bitArrayDescMarker + 1
-	geoMarker     = timeTZMarker + 1
-	geoDescMarker = geoMarker + 1
-
-	// Markers and terminators for key encoding Datum arrays in sorted order.
-	// For the arrayKeyMarker and other types like bytes and bit arrays, it
-	// might be unclear why we have a separate marker for the ascending and
-	// descending cases. This is necessary because the terminators for these
-	// encodings are different depending on the direction the data is encoded
-	// in. In order to safely decode a set of bytes without knowing the direction
-	// of the encoding, we must store this information in the marker. Otherwise,
-	// we would not know what terminator to look for when decoding this format.
-	arrayKeyMarker           = geoDescMarker + 1
-	arrayKeyDescendingMarker = arrayKeyMarker + 1
-
-	box2DMarker            = arrayKeyDescendingMarker + 1
-	geoInvertedIndexMarker = box2DMarker + 1
-
-	emptyArray = geoInvertedIndexMarker + 1
-
-	arrayKeyTerminator           byte = 0x00
-	arrayKeyDescendingTerminator byte = 0xFF
-	// We use different null encodings for nulls within key arrays.
-	// Doing this allows for the terminator to be less/greater than
-	// the null value within arrays. These byte values overlap with
-	// encodedNotNull, encodedNotNullDesc, and interleavedSentinel,
-	// but they can only exist within an encoded array key. Because
-	// of the context, they cannot be ambiguous with these other bytes.
-	ascendingNullWithinArrayKey  byte = 0x01
-	descendingNullWithinArrayKey byte = 0xFE
-
 	// IntMin is chosen such that the range of int tags does not overlap the
 	// ascii character set that is frequently used in testing.
 	IntMin      = 0x80 // 128
@@ -136,19 +98,14 @@ const (
 	// without table descriptors.
 	interleavedSentinel = 0xfe
 	encodedNullDesc     = 0xff
-
-	// offsetSecsToMicros is a constant that allows conversion from seconds
-	// to microseconds for offsetSecs type calculations (e.g. for TimeTZ).
-	offsetSecsToMicros = 1000000
 )
 
 const (
 	// EncodedDurationMaxLen is the largest number of bytes used when encoding a
 	// Duration.
 	EncodedDurationMaxLen = 1 + 3*binary.MaxVarintLen64 // 3 varints are encoded.
-	// EncodedTimeTZMaxLen is the largest number of bytes used when encoding a
-	// TimeTZ.
-	EncodedTimeTZMaxLen = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen32
+	// BytesDescMarker is exported for testing.
+	BytesDescMarker = bytesDescMarker
 )
 
 // Direction for ordering results.
@@ -162,6 +119,18 @@ const (
 )
 
 const escapeLength = 2
+
+// Reverse returns the opposite direction.
+func (d Direction) Reverse() Direction {
+	switch d {
+	case Ascending:
+		return Descending
+	case Descending:
+		return Ascending
+	default:
+		panic(fmt.Sprintf("Invalid direction %d", d))
+	}
+}
 
 // EncodeUint32Ascending encodes the uint32 value using a big-endian 4 byte
 // representation. The bytes are appended to the supplied buffer and
@@ -243,12 +212,9 @@ func DecodeUint64Descending(b []byte) ([]byte, uint64, error) {
 	return leftover, ^v, err
 }
 
-// MaxVarintLen is the maximum length of a value encoded using any of:
-// - EncodeVarintAscending
-// - EncodeVarintDescending
-// - EncodeUvarintAscending
-// - EncodeUvarintDescending
-const MaxVarintLen = 9
+const (
+	maxVarintSize = 9
+)
 
 // EncodeVarintAscending encodes the int64 value using a variable length
 // (length-prefixed) representation. The length is encoded as a single
@@ -312,17 +278,17 @@ func getVarintLen(b []byte) (int, error) {
 	return length, nil
 }
 
-// DecodeVarintAscending decodes a value encoded by EncodeVarintAscending.
+// DecodeVarintAscending decodes a value encoded by EncodeVaringAscending.
 func DecodeVarintAscending(b []byte) ([]byte, int64, error) {
 	if len(b) == 0 {
-		return nil, 0, errors.Errorf("insufficient bytes to decode varint value")
+		return nil, 0, errors.Errorf("insufficient bytes to decode uvarint value")
 	}
 	length := int(b[0]) - intZero
 	if length < 0 {
 		length = -length
 		remB := b[1:]
 		if len(remB) < length {
-			return nil, 0, errors.Errorf("insufficient bytes to decode varint value: %q", remB)
+			return nil, 0, errors.Errorf("insufficient bytes to decode uvarint value: %q", remB)
 		}
 		var v int64
 		// Use the ones-complement of each encoded byte in order to build
@@ -344,7 +310,7 @@ func DecodeVarintAscending(b []byte) ([]byte, int64, error) {
 	return remB, int64(v), nil
 }
 
-// DecodeVarintDescending decodes a int64 value which was encoded
+// DecodeVarintDescending decodes a uint64 value which was encoded
 // using EncodeVarintDescending.
 func DecodeVarintDescending(b []byte) ([]byte, int64, error) {
 	leftover, v, err := DecodeVarintAscending(b)
@@ -455,7 +421,7 @@ func EncLenUvarintDescending(v uint64) int {
 	return 2 + highestByteIndex(v)
 }
 
-// DecodeUvarintAscending decodes a uint64 encoded uint64 from the input
+// DecodeUvarintAscending decodes a varint encoded uint64 from the input
 // buffer. The remainder of the input buffer and the decoded uint64
 // are returned.
 func DecodeUvarintAscending(b []byte) ([]byte, uint64, error) {
@@ -522,11 +488,8 @@ type escapes struct {
 }
 
 var (
-	ascendingBytesEscapes  = escapes{escape, escapedTerm, escaped00, escapedFF, bytesMarker}
-	descendingBytesEscapes = escapes{^escape, ^escapedTerm, ^escaped00, ^escapedFF, bytesDescMarker}
-
-	ascendingGeoEscapes  = escapes{escape, escapedTerm, escaped00, escapedFF, geoMarker}
-	descendingGeoEscapes = escapes{^escape, ^escapedTerm, ^escaped00, ^escapedFF, geoDescMarker}
+	ascendingEscapes  = escapes{escape, escapedTerm, escaped00, escapedFF, bytesMarker}
+	descendingEscapes = escapes{^escape, ^escapedTerm, ^escaped00, ^escapedFF, bytesDescMarker}
 )
 
 // EncodeBytesAscending encodes the []byte value using an escape-based
@@ -535,7 +498,7 @@ var (
 // encoded value. The encoded bytes are append to the supplied buffer
 // and the resulting buffer is returned.
 func EncodeBytesAscending(b []byte, data []byte) []byte {
-	return encodeBytesAscendingWithTerminatorAndPrefix(b, data, ascendingBytesEscapes.escapedTerm, bytesMarker)
+	return encodeBytesAscendingWithTerminatorAndPrefix(b, data, ascendingEscapes.escapedTerm, bytesMarker)
 }
 
 // encodeBytesAscendingWithTerminatorAndPrefix encodes the []byte value using an escape-based
@@ -594,7 +557,7 @@ func EncodeBytesDescending(b []byte, data []byte) []byte {
 // are appended to r. The remainder of the input buffer and the
 // decoded []byte are returned.
 func DecodeBytesAscending(b []byte, r []byte) ([]byte, []byte, error) {
-	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */)
+	return decodeBytesInternal(b, r, ascendingEscapes, true)
 }
 
 // DecodeBytesDescending decodes a []byte value from the input buffer
@@ -607,7 +570,7 @@ func DecodeBytesDescending(b []byte, r []byte) ([]byte, []byte, error) {
 	if r == nil {
 		r = []byte{}
 	}
-	b, r, err := decodeBytesInternal(b, r, descendingBytesEscapes, true /* expectMarker */)
+	b, r, err := decodeBytesInternal(b, r, descendingEscapes, true)
 	onesComplement(r)
 	return b, r, err
 }
@@ -707,11 +670,8 @@ func prettyPrintInvertedIndexKey(b []byte) (string, []byte, error) {
 	}
 }
 
-// UnsafeConvertStringToBytes converts a string to a byte array to be used with
-// string encoding functions. Note that the output byte array should not be
-// modified if the input string is expected to be used again - doing so could
-// violate Go semantics.
-func UnsafeConvertStringToBytes(s string) []byte {
+// unsafeConvertStringToBytes converts a string to a byte array to be used with string encoding functions.
+func unsafeConvertStringToBytes(s string) []byte {
 	if len(s) == 0 {
 		return nil
 	}
@@ -730,7 +690,7 @@ func UnsafeConvertStringToBytes(s string) []byte {
 // EncodeBytes for details. The encoded bytes are append to the supplied buffer
 // and the resulting buffer is returned.
 func EncodeStringAscending(b []byte, s string) []byte {
-	return encodeStringAscendingWithTerminatorAndPrefix(b, s, ascendingBytesEscapes.escapedTerm, bytesMarker)
+	return encodeStringAscendingWithTerminatorAndPrefix(b, s, ascendingEscapes.escapedTerm, bytesMarker)
 }
 
 // encodeStringAscendingWithTerminatorAndPrefix encodes the string value using an escape-based encoding. See
@@ -740,7 +700,7 @@ func EncodeStringAscending(b []byte, s string) []byte {
 func encodeStringAscendingWithTerminatorAndPrefix(
 	b []byte, s string, terminator byte, prefix byte,
 ) []byte {
-	unsafeString := UnsafeConvertStringToBytes(s)
+	unsafeString := unsafeConvertStringToBytes(s)
 	return encodeBytesAscendingWithTerminatorAndPrefix(b, unsafeString, terminator, prefix)
 }
 
@@ -749,7 +709,7 @@ func encodeStringAscendingWithTerminatorAndPrefix(
 // while at the same time giving us a sentinel to identify JSON keys. The end parameter is used
 // to determine if this is the last key in a a JSON path. If it is we don't add a separator after it.
 func EncodeJSONKeyStringAscending(b []byte, s string, end bool) []byte {
-	str := UnsafeConvertStringToBytes(s)
+	str := unsafeConvertStringToBytes(s)
 
 	if end {
 		return encodeBytesAscendingWithoutTerminatorOrPrefix(b, str)
@@ -770,11 +730,6 @@ func AddJSONPathTerminator(b []byte) []byte {
 // EncodeJSONEmptyObject returns a byte array b with a byte to signify an empty JSON object.
 func EncodeJSONEmptyObject(b []byte) []byte {
 	return append(b, escape, escapedTerm, jsonEmptyObject)
-}
-
-// EncodeEmptyArray returns a byte array b with a byte to signify an empty array.
-func EncodeEmptyArray(b []byte) []byte {
-	return append(b, emptyArray)
 }
 
 // EncodeStringDescending is the descending version of EncodeStringAscending.
@@ -837,98 +792,6 @@ func EncodeJSONAscending(b []byte) []byte {
 	return append(b, jsonInvertedIndex)
 }
 
-// Geo inverted keys are formatted as:
-// geoInvertedIndexMarker + EncodeUvarintAscending(cellid) + encoded-bbox
-// We don't have a single function to do the whole encoding since a shape is typically
-// indexed under multiple cellids, but has a single bbox. So the caller can more
-// efficiently
-// - append geoInvertedIndex to construct the prefix.
-// - encode the bbox once
-// - iterate over the cellids and append the encoded cellid to the prefix and then the
-//   previously encoded bbox.
-
-// EncodeGeoInvertedAscending appends the geoInvertedIndexMarker.
-func EncodeGeoInvertedAscending(b []byte) []byte {
-	return append(b, geoInvertedIndexMarker)
-}
-
-// Currently only the lowest bit is used to define the encoding kind and the
-// remaining 7 bits are unused.
-type geoInvertedBBoxEncodingKind byte
-
-const (
-	geoInvertedFourFloats geoInvertedBBoxEncodingKind = iota
-	geoInvertedTwoFloats
-)
-
-// MaxGeoInvertedBBoxLen is the maximum length of the encoded bounding box for
-// geo inverted keys.
-const MaxGeoInvertedBBoxLen = 1 + 4*uint64AscendingEncodedLength
-
-// EncodeGeoInvertedBBox encodes the bounding box for the geo inverted index.
-func EncodeGeoInvertedBBox(b []byte, loX, loY, hiX, hiY float64) []byte {
-	encodeTwoFloats := loX == hiX && loY == hiY
-	if encodeTwoFloats {
-		b = append(b, byte(geoInvertedTwoFloats))
-		b = EncodeUntaggedFloatValue(b, loX)
-		b = EncodeUntaggedFloatValue(b, loY)
-	} else {
-		b = append(b, byte(geoInvertedFourFloats))
-		b = EncodeUntaggedFloatValue(b, loX)
-		b = EncodeUntaggedFloatValue(b, loY)
-		b = EncodeUntaggedFloatValue(b, hiX)
-		b = EncodeUntaggedFloatValue(b, hiY)
-	}
-	return b
-}
-
-// DecodeGeoInvertedKey decodes the bounding box from the geo inverted key.
-// The cellid is skipped in the decoding.
-func DecodeGeoInvertedKey(b []byte) (loX, loY, hiX, hiY float64, remaining []byte, err error) {
-	// Minimum: 1 byte marker + 1 byte cell length +
-	//          1 byte bbox encoding kind + 16 bytes for 2 floats
-	if len(b) < 3+2*uint64AscendingEncodedLength {
-		return 0, 0, 0, 0, b,
-			errors.Errorf("inverted key length %d too small", len(b))
-	}
-	if b[0] != geoInvertedIndexMarker {
-		return 0, 0, 0, 0, b, errors.Errorf("marker is not geoInvertedIndexMarker")
-	}
-	b = b[1:]
-	var cellLen int
-	if cellLen, err = getVarintLen(b); err != nil {
-		return 0, 0, 0, 0, b, err
-	}
-	if len(b) < cellLen+17 {
-		return 0, 0, 0, 0, b,
-			errors.Errorf("insufficient length for encoded bbox in inverted key: %d", len(b)-cellLen)
-	}
-	encodingKind := geoInvertedBBoxEncodingKind(b[cellLen])
-	if encodingKind != geoInvertedTwoFloats && encodingKind != geoInvertedFourFloats {
-		return 0, 0, 0, 0, b,
-			errors.Errorf("unknown encoding kind for bbox in inverted key: %d", encodingKind)
-	}
-	b = b[cellLen+1:]
-	if b, loX, err = DecodeUntaggedFloatValue(b); err != nil {
-		return 0, 0, 0, 0, b, err
-	}
-	if b, loY, err = DecodeUntaggedFloatValue(b); err != nil {
-		return 0, 0, 0, 0, b, err
-	}
-	if encodingKind == geoInvertedFourFloats {
-		if b, hiX, err = DecodeUntaggedFloatValue(b); err != nil {
-			return 0, 0, 0, 0, b, err
-		}
-		if b, hiY, err = DecodeUntaggedFloatValue(b); err != nil {
-			return 0, 0, 0, 0, b, err
-		}
-	} else {
-		hiX = loX
-		hiY = loY
-	}
-	return loX, loY, hiX, hiY, b, nil
-}
-
 // EncodeNullDescending is the descending equivalent of EncodeNullAscending.
 func EncodeNullDescending(b []byte) []byte {
 	return append(b, encodedNullDesc)
@@ -939,14 +802,6 @@ func EncodeNullDescending(b []byte) []byte {
 // EncodeFloat, EncodeBytes or EncodeString.
 func EncodeNotNullAscending(b []byte) []byte {
 	return append(b, encodedNotNull)
-}
-
-// EncodeJSONObjectSpanStartAscending encodes the first possible value for JSON
-// objects, which is \x00\xff. Non-objects (i.e., scalars and arrays) will
-// start with \x00\x01 or \x00\x03 (see AddJSONPathTerminator and
-// EncodeArrayAscending), so all objects will be ordered after them.
-func EncodeJSONObjectSpanStartAscending(b []byte) []byte {
-	return append(b, escape, escaped00)
 }
 
 // EncodeArrayAscending encodes a value used to signify membership of an array for JSON objects.
@@ -1035,7 +890,7 @@ func DecodeIfInterleavedSentinel(b []byte) ([]byte, bool) {
 // EncodeTimeAscending encodes a time value, appends it to the supplied buffer,
 // and returns the final buffer. The encoding is guaranteed to be ordered
 // Such that if t1.Before(t2) then after EncodeTime(b1, t1), and
-// EncodeTime(b2, t2), Compare(b1, b2) < 0. The time zone offset not
+// EncodeTime(b2, t1), Compare(b1, b2) < 0. The time zone offset not
 // included in the encoding.
 func EncodeTimeAscending(b []byte, t time.Time) []byte {
 	return encodeTime(b, t.Unix(), int64(t.Nanosecond()))
@@ -1089,236 +944,6 @@ func decodeTime(b []byte) (r []byte, sec int64, nsec int64, err error) {
 		return b, 0, 0, err
 	}
 	return b, sec, nsec, nil
-}
-
-// EncodeBox2DAscending encodes a bounding box in ascending order.
-func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
-	b = append(b, box2DMarker)
-	b = EncodeFloatAscending(b, box.LoX)
-	b = EncodeFloatAscending(b, box.HiX)
-	b = EncodeFloatAscending(b, box.LoY)
-	b = EncodeFloatAscending(b, box.HiY)
-	return b, nil
-}
-
-// EncodeBox2DDescending encodes a bounding box in descending order.
-func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
-	b = append(b, box2DMarker)
-	b = EncodeFloatDescending(b, box.LoX)
-	b = EncodeFloatDescending(b, box.HiX)
-	b = EncodeFloatDescending(b, box.LoY)
-	b = EncodeFloatDescending(b, box.HiY)
-	return b, nil
-}
-
-// DecodeBox2DAscending decodes a box2D object in ascending order.
-func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
-	if PeekType(b) != Box2D {
-		return nil, box, errors.Errorf("did not find Box2D marker")
-	}
-
-	b = b[1:]
-	var err error
-	b, box.LoX, err = DecodeFloatAscending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.HiX, err = DecodeFloatAscending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.LoY, err = DecodeFloatAscending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.HiY, err = DecodeFloatAscending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	return b, box, nil
-}
-
-// DecodeBox2DDescending decodes a box2D object in descending order.
-func DecodeBox2DDescending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
-	if PeekType(b) != Box2D {
-		return nil, box, errors.Errorf("did not find Box2D marker")
-	}
-
-	b = b[1:]
-	var err error
-	b, box.LoX, err = DecodeFloatDescending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.HiX, err = DecodeFloatDescending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.LoY, err = DecodeFloatDescending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	b, box.HiY, err = DecodeFloatDescending(b)
-	if err != nil {
-		return nil, box, err
-	}
-	return b, box, nil
-}
-
-// EncodeGeoAscending encodes a geopb.SpatialObject value in ascending order and
-// returns the new buffer.
-// It is sorted by the given curve index, followed by the bytes of the spatial object.
-func EncodeGeoAscending(b []byte, curveIndex uint64, so *geopb.SpatialObject) ([]byte, error) {
-	b = append(b, geoMarker)
-	b = EncodeUint64Ascending(b, curveIndex)
-
-	data, err := protoutil.Marshal(so)
-	if err != nil {
-		return nil, err
-	}
-	b = encodeBytesAscendingWithTerminator(b, data, ascendingGeoEscapes.escapedTerm)
-	return b, nil
-}
-
-// EncodeGeoDescending encodes a geopb.SpatialObject value in descending order and
-// returns the new buffer.
-// It is sorted by the given curve index, followed by the bytes of the spatial object.
-func EncodeGeoDescending(b []byte, curveIndex uint64, so *geopb.SpatialObject) ([]byte, error) {
-	b = append(b, geoDescMarker)
-	b = EncodeUint64Descending(b, curveIndex)
-
-	data, err := protoutil.Marshal(so)
-	if err != nil {
-		return nil, err
-	}
-	n := len(b)
-	b = encodeBytesAscendingWithTerminator(b, data, ascendingGeoEscapes.escapedTerm)
-	onesComplement(b[n:])
-	return b, nil
-}
-
-// DecodeGeoAscending decodes a geopb.SpatialObject value that was encoded
-// in ascending order back into a geopb.SpatialObject. The so parameter
-// must already be empty/reset.
-func DecodeGeoAscending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
-	if PeekType(b) != Geo {
-		return nil, errors.Errorf("did not find Geo marker")
-	}
-	b = b[1:]
-	var err error
-	b, _, err = DecodeUint64Ascending(b)
-	if err != nil {
-		return nil, err
-	}
-
-	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, ascendingGeoEscapes, false /* expectMarker */)
-	if err != nil {
-		return b, err
-	}
-	// Not using protoutil.Unmarshal since the call to so.Reset() will waste the
-	// pre-allocated EWKB.
-	err = so.Unmarshal(pbBytes)
-	return b, err
-}
-
-// DecodeGeoDescending decodes a geopb.SpatialObject value that was encoded
-// in descending order back into a geopb.SpatialObject. The so parameter
-// must already be empty/reset.
-func DecodeGeoDescending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
-	if PeekType(b) != GeoDesc {
-		return nil, errors.Errorf("did not find Geo marker")
-	}
-	b = b[1:]
-	var err error
-	b, _, err = DecodeUint64Descending(b)
-	if err != nil {
-		return nil, err
-	}
-
-	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, descendingGeoEscapes, false /* expectMarker */)
-	if err != nil {
-		return b, err
-	}
-	onesComplement(pbBytes)
-	// Not using protoutil.Unmarshal since the call to so.Reset() will waste the
-	// pre-allocated EWKB.
-	err = so.Unmarshal(pbBytes)
-	return b, err
-}
-
-// EncodeTimeTZAscending encodes a timetz.TimeTZ value and appends it to
-// the supplied buffer and returns the final buffer.
-// The encoding is guaranteed to be ordered such that if t1.Before(t2)
-// then after encodeTimeTZ(b1, t1) and encodeTimeTZ(b2, t2),
-// Compare(b1, b2) < 0.
-// The time zone offset is included in the encoding.
-func EncodeTimeTZAscending(b []byte, t timetz.TimeTZ) []byte {
-	// Do not use TimeOfDay's add function, as it loses 24:00:00 encoding.
-	return encodeTimeTZ(b, int64(t.TimeOfDay)+int64(t.OffsetSecs)*offsetSecsToMicros, t.OffsetSecs)
-}
-
-// EncodeTimeTZDescending is the descending version of EncodeTimeTZAscending.
-func EncodeTimeTZDescending(b []byte, t timetz.TimeTZ) []byte {
-	// Do not use TimeOfDay's add function, as it loses 24:00:00 encoding.
-	return encodeTimeTZ(b, ^(int64(t.TimeOfDay) + int64(t.OffsetSecs)*offsetSecsToMicros), ^t.OffsetSecs)
-}
-
-func encodeTimeTZ(b []byte, unixMicros int64, offsetSecs int32) []byte {
-	b = append(b, timeTZMarker)
-	b = EncodeVarintAscending(b, unixMicros)
-	b = EncodeVarintAscending(b, int64(offsetSecs))
-	return b
-}
-
-// DecodeTimeTZAscending decodes a timetz.TimeTZ value which was encoded
-// using encodeTimeTZ. The remainder of the input buffer and the decoded
-// timetz.TimeTZ are returned.
-func DecodeTimeTZAscending(b []byte) ([]byte, timetz.TimeTZ, error) {
-	b, unixMicros, offsetSecs, err := decodeTimeTZ(b)
-	if err != nil {
-		return nil, timetz.TimeTZ{}, err
-	}
-	// Do not use timeofday.FromInt, as it loses 24:00:00 encoding.
-	return b, timetz.TimeTZ{
-		TimeOfDay:  timeofday.TimeOfDay(unixMicros - int64(offsetSecs)*offsetSecsToMicros),
-		OffsetSecs: offsetSecs,
-	}, nil
-}
-
-// DecodeTimeTZDescending is the descending version of DecodeTimeTZAscending.
-func DecodeTimeTZDescending(b []byte) ([]byte, timetz.TimeTZ, error) {
-	b, unixMicros, offsetSecs, err := decodeTimeTZ(b)
-	if err != nil {
-		return nil, timetz.TimeTZ{}, err
-	}
-	// Do not use timeofday.FromInt, as it loses 24:00:00 encoding.
-	return b, timetz.TimeTZ{
-		TimeOfDay:  timeofday.TimeOfDay(^unixMicros - int64(^offsetSecs)*offsetSecsToMicros),
-		OffsetSecs: ^offsetSecs,
-	}, nil
-}
-
-func decodeTimeTZ(b []byte) ([]byte, int64, int32, error) {
-	if PeekType(b) != TimeTZ {
-		return nil, 0, 0, errors.Errorf("did not find marker")
-	}
-	b = b[1:]
-	var err error
-	var unixMicros int64
-	b, unixMicros, err = DecodeVarintAscending(b)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	var offsetSecs int64
-	b, offsetSecs, err = DecodeVarintAscending(b)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	return b, unixMicros, int32(offsetSecs), nil
 }
 
 // EncodeDurationAscending encodes a duration.Duration value, appends it to the
@@ -1406,146 +1031,10 @@ func DecodeDurationDescending(b []byte) ([]byte, duration.Duration, error) {
 	return b, d, nil
 }
 
-// EncodeBitArrayAscending encodes a bitarray.BitArray value, appends it to the
-// supplied buffer, and returns the final buffer. The encoding is guaranteed to
-// be ordered such that if t1.Compare(t2) < 0 (or = 0 or > 0) then bytes.Compare
-// will order them the same way after encoding.
-//
-// The encoding uses varint encoding for each word of the backing
-// array. This is a trade-off. The alternative is to encode the entire
-// backing word array as a byte array, using byte array encoding and escaped
-// special bytes (via  `encodeBytesAscendingWithoutTerminatorOrPrefix`).
-// There are two arguments against this alternative:
-// - the bytes must be encoded big endian, but the most common architectures
-//   running CockroachDB are little-endian, so the bytes would need
-//   to be reordered prior to encoding.
-// - when decoding or skipping over a value, the decoding/sizing loop
-//   would need to look at every byte of the encoding to find the
-//   terminator.
-// In contrast, the chosen encoding using varints is endianness-agnostic
-// and enables fast decoding/skipping thanks ot the tag bytes.
-func EncodeBitArrayAscending(b []byte, d bitarray.BitArray) []byte {
-	b = append(b, bitArrayMarker)
-	words, lastBitsUsed := d.EncodingParts()
-	for _, w := range words {
-		b = EncodeUvarintAscending(b, w)
-	}
-	b = append(b, bitArrayDataTerminator)
-	b = EncodeUvarintAscending(b, lastBitsUsed)
-	return b
-}
-
-// EncodeBitArrayDescending is the descending version of EncodeBitArrayAscending.
-func EncodeBitArrayDescending(b []byte, d bitarray.BitArray) []byte {
-	b = append(b, bitArrayDescMarker)
-	words, lastBitsUsed := d.EncodingParts()
-	for _, w := range words {
-		b = EncodeUvarintDescending(b, w)
-	}
-	b = append(b, bitArrayDataDescTerminator)
-	b = EncodeUvarintDescending(b, lastBitsUsed)
-	return b
-}
-
-// DecodeBitArrayAscending decodes a bit array which was encoded using
-// EncodeBitArrayAscending. The remainder of the input buffer and the
-// decoded bit array are returned.
-func DecodeBitArrayAscending(b []byte) ([]byte, bitarray.BitArray, error) {
-	if PeekType(b) != BitArray {
-		return nil, bitarray.BitArray{}, errors.Errorf("did not find marker %x", b)
-	}
-	b = b[1:]
-
-	// First compute the length.
-	numWords, _, err := getBitArrayWordsLen(b, bitArrayDataTerminator)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	// Decode the words.
-	words := make([]uint64, numWords)
-	for i := range words {
-		b, words[i], err = DecodeUvarintAscending(b)
-		if err != nil {
-			return b, bitarray.BitArray{}, err
-		}
-	}
-	// Decode the final part.
-	if len(b) == 0 || b[0] != bitArrayDataTerminator {
-		return b, bitarray.BitArray{}, errBitArrayTerminatorMissing
-	}
-	b = b[1:]
-	b, lastVal, err := DecodeUvarintAscending(b)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	ba, err := bitarray.FromEncodingParts(words, lastVal)
-	return b, ba, err
-}
-
-var errBitArrayTerminatorMissing = errors.New("cannot find bit array data terminator")
-
-// getBitArrayWordsLen returns the number of bit array words in the
-// encoded bytes and the size in bytes of the encoded word array
-// (excluding the terminator byte).
-func getBitArrayWordsLen(b []byte, term byte) (int, int, error) {
-	bSearch := b
-	numWords := 0
-	sz := 0
-	for {
-		if len(bSearch) == 0 {
-			return 0, 0, errors.Errorf("slice too short for bit array (%d)", len(b))
-		}
-		if bSearch[0] == term {
-			break
-		}
-		vLen, err := getVarintLen(bSearch)
-		if err != nil {
-			return 0, 0, err
-		}
-		bSearch = bSearch[vLen:]
-		numWords++
-		sz += vLen
-	}
-	return numWords, sz, nil
-}
-
-// DecodeBitArrayDescending is the descending version of DecodeBitArrayAscending.
-func DecodeBitArrayDescending(b []byte) ([]byte, bitarray.BitArray, error) {
-	if PeekType(b) != BitArrayDesc {
-		return nil, bitarray.BitArray{}, errors.Errorf("did not find marker %x", b)
-	}
-	b = b[1:]
-
-	// First compute the length.
-	numWords, _, err := getBitArrayWordsLen(b, bitArrayDataDescTerminator)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	// Decode the words.
-	words := make([]uint64, numWords)
-	for i := range words {
-		b, words[i], err = DecodeUvarintDescending(b)
-		if err != nil {
-			return b, bitarray.BitArray{}, err
-		}
-	}
-	// Decode the final part.
-	if len(b) == 0 || b[0] != bitArrayDataDescTerminator {
-		return b, bitarray.BitArray{}, errBitArrayTerminatorMissing
-	}
-	b = b[1:]
-	b, lastVal, err := DecodeUvarintDescending(b)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	ba, err := bitarray.FromEncodingParts(words, lastVal)
-	return b, ba, err
-}
-
 // Type represents the type of a value encoded by
 // Encode{Null,NotNull,Varint,Uvarint,Float,Bytes}.
 //go:generate stringer -type=Type
-type Type encodingtype.T
+type Type int
 
 // Type values.
 // TODO(dan, arjun): Make this into a proto enum.
@@ -1573,39 +1062,10 @@ const (
 	SentinelType      = 15
 	JSON         Type = 15
 	Tuple        Type = 16
-	BitArray     Type = 17
-	BitArrayDesc Type = 18 // BitArray encoded descendingly
-	TimeTZ       Type = 19
-	Geo          Type = 20
-	GeoDesc      Type = 21
-	ArrayKeyAsc  Type = 22 // Array key encoding
-	ArrayKeyDesc Type = 23 // Array key encoded descendingly
-	Box2D        Type = 24
 )
-
-// typMap maps an encoded type byte to a decoded Type. It's got 256 slots, one
-// for every possible byte value.
-var typMap [256]Type
-
-func init() {
-	buf := []byte{0}
-	for i := range typMap {
-		buf[0] = byte(i)
-		typMap[i] = slowPeekType(buf)
-	}
-}
 
 // PeekType peeks at the type of the value encoded at the start of b.
 func PeekType(b []byte) Type {
-	if len(b) >= 1 {
-		return typMap[b[0]]
-	}
-	return Unknown
-}
-
-// slowPeekType is the old implementation of PeekType. It's used to generate
-// the lookup table for PeekType.
-func slowPeekType(b []byte) Type {
 	if len(b) >= 1 {
 		m := b[0]
 		switch {
@@ -1613,28 +1073,12 @@ func slowPeekType(b []byte) Type {
 			return Null
 		case m == encodedNotNull, m == encodedNotNullDesc:
 			return NotNull
-		case m == arrayKeyMarker:
-			return ArrayKeyAsc
-		case m == arrayKeyDescendingMarker:
-			return ArrayKeyDesc
 		case m == bytesMarker:
 			return Bytes
 		case m == bytesDescMarker:
 			return BytesDesc
-		case m == bitArrayMarker:
-			return BitArray
-		case m == bitArrayDescMarker:
-			return BitArrayDesc
 		case m == timeMarker:
 			return Time
-		case m == timeTZMarker:
-			return TimeTZ
-		case m == geoMarker:
-			return Geo
-		case m == box2DMarker:
-			return Box2D
-		case m == geoDescMarker:
-			return GeoDesc
 		case m == byte(Array):
 			return Array
 		case m == byte(True):
@@ -1681,55 +1125,9 @@ func getMultiNonsortingVarintLen(b []byte, num int) (int, error) {
 	return p, nil
 }
 
-// getArrayLength returns the length of a key encoded array. The input
-// must have had the array type marker stripped from the front.
-func getArrayLength(buf []byte, dir Direction) (int, error) {
-	result := 0
-	for {
-		if len(buf) == 0 {
-			return 0, errors.AssertionFailedf("invalid array encoding (unterminated)")
-		}
-		if IsArrayKeyDone(buf, dir) {
-			// Increment to include the terminator byte.
-			result++
-			break
-		}
-		next, err := PeekLength(buf)
-		if err != nil {
-			return 0, err
-		}
-		// Shift buf over by the encoded data amount.
-		buf = buf[next:]
-		result += next
-	}
-	return result, nil
-}
-
-// peekBox2DLength peeks to look at the length of a box2d encoding.
-func peekBox2DLength(b []byte) (int, error) {
-	length := 0
-	curr := b
-	for i := 0; i < 4; i++ {
-		if len(curr) == 0 {
-			return 0, errors.Newf("slice too short for box2d")
-		}
-		switch curr[0] {
-		case floatNaN, floatNaNDesc, floatZero:
-			length++
-			curr = curr[1:]
-		case floatNeg, floatPos:
-			length += 9
-			curr = curr[9:]
-		default:
-			return 0, errors.Newf("unexpected marker for box2d: %x", curr[0])
-		}
-	}
-	return length, nil
-}
-
 // PeekLength returns the length of the encoded value at the start of b.  Note:
 // if this function succeeds, it's not a guarantee that decoding the value will
-// succeed. PeekLength is meant to be used on key encoded data only.
+// succeed.
 func PeekLength(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, errors.Errorf("empty slice")
@@ -1737,74 +1135,18 @@ func PeekLength(b []byte) (int, error) {
 	m := b[0]
 	switch m {
 	case encodedNull, encodedNullDesc, encodedNotNull, encodedNotNullDesc,
-		floatNaN, floatNaNDesc, floatZero, decimalZero, byte(True), byte(False),
-		emptyArray:
+		floatNaN, floatNaNDesc, floatZero, decimalZero, byte(True), byte(False):
 		// interleavedSentinel also falls into this path. Since it
 		// contains the same byte value as encodedNotNullDesc, it
 		// cannot be included explicitly in the case statement.
-		// ascendingNullWithinArrayKey and descendingNullWithinArrayKey also
-		// contain the same byte values as encodedNotNull and encodedNotNullDesc
-		// respectively.
 		return 1, nil
-	case bitArrayMarker, bitArrayDescMarker:
-		terminator := byte(bitArrayDataTerminator)
-		if m == bitArrayDescMarker {
-			terminator = bitArrayDataDescTerminator
-		}
-		_, n, err := getBitArrayWordsLen(b[1:], terminator)
-		if err != nil {
-			return 1 + n, err
-		}
-		m, err := getVarintLen(b[n+2:])
-		if err != nil {
-			return 1 + n + m + 1, err
-		}
-		return 1 + n + m + 1, nil
-	case arrayKeyMarker, arrayKeyDescendingMarker:
-		dir := Ascending
-		if m == arrayKeyDescendingMarker {
-			dir = Descending
-		}
-		length, err := getArrayLength(b[1:], dir)
-		return 1 + length, err
 	case bytesMarker:
-		return getBytesLength(b, ascendingBytesEscapes)
-	case box2DMarker:
-		if len(b) == 0 {
-			return 0, errors.Newf("slice too short for box2d")
-		}
-		length, err := peekBox2DLength(b[1:])
-		if err != nil {
-			return 0, err
-		}
-		return 1 + length, nil
-	case geoInvertedIndexMarker:
-		return getGeoInvertedIndexKeyLength(b)
-	case geoMarker:
-		// Expect to reserve at least 8 bytes for int64.
-		if len(b) < 8 {
-			return 0, errors.Errorf("slice too short for spatial object (%d)", len(b))
-		}
-		ret, err := getBytesLength(b[8:], ascendingGeoEscapes)
-		if err != nil {
-			return 0, err
-		}
-		return 8 + ret, nil
+		return getBytesLength(b, ascendingEscapes)
 	case jsonInvertedIndex:
 		return getJSONInvertedIndexKeyLength(b)
 	case bytesDescMarker:
-		return getBytesLength(b, descendingBytesEscapes)
-	case geoDescMarker:
-		// Expect to reserve at least 8 bytes for int64.
-		if len(b) < 8 {
-			return 0, errors.Errorf("slice too short for spatial object (%d)", len(b))
-		}
-		ret, err := getBytesLength(b[8:], descendingGeoEscapes)
-		if err != nil {
-			return 0, err
-		}
-		return 8 + ret, nil
-	case timeMarker, timeTZMarker:
+		return getBytesLength(b, descendingEscapes)
+	case timeMarker:
 		return GetMultiVarintLen(b, 2)
 	case durationBigNegMarker, durationMarker, durationBigPosMarker:
 		return GetMultiVarintLen(b, 3)
@@ -1854,7 +1196,7 @@ func PrettyPrintValue(valDirs []Direction, b []byte, sep string) string {
 
 func prettyPrintValueImpl(valDirs []Direction, b []byte, sep string) (string, bool) {
 	allDecoded := true
-	var buf strings.Builder
+	var buf bytes.Buffer
 	for len(b) > 0 {
 		// If there are more values than encoding directions specified,
 		// valDir will contain the 0 value of Direction.
@@ -1869,13 +1211,9 @@ func prettyPrintValueImpl(valDirs []Direction, b []byte, sep string) (string, bo
 		bb, s, err := prettyPrintFirstValue(valDir, b)
 		if err != nil {
 			allDecoded = false
-			buf.WriteString(sep)
-			buf.WriteByte('?')
-			buf.WriteByte('?')
-			buf.WriteByte('?')
+			fmt.Fprintf(&buf, "%s???", sep)
 		} else {
-			buf.WriteString(sep)
-			buf.WriteString(s)
+			fmt.Fprintf(&buf, "%s%s", sep, s)
 		}
 		b = bb
 	}
@@ -1896,7 +1234,7 @@ func prettyPrintValueImpl(valDirs []Direction, b []byte, sep string) (string, bo
 //  - For non-table keys, we never have NotNull.
 //  - For table keys, we always explicitly pass in Ascending and Descending for
 //    all key values, including NotNulls. The only case we do not pass in
-//    direction is during a SHOW RANGES ON TABLE parent and there exists
+//    direction is during a SHOW EXPERIMENTAL_RANGES ON TABLE parent and there exists
 //    an interleaved split key. Note that interleaved keys cannot have NotNull
 //    values except for the interleaved sentinel.
 //
@@ -1904,13 +1242,13 @@ func prettyPrintValueImpl(valDirs []Direction, b []byte, sep string) (string, bo
 // non-table keys encode values with Ascending.
 //
 // The only case where we end up defaulting direction for table keys is for
-// interleaved split keys in SHOW RANGES ON TABLE parent. Since
+// interleaved split keys in SHOW EXPERIMENTAL_RANGES ON TABLE parent. Since
 // interleaved prefixes are defined on the primary key (and primary key values
 // are always encoded Ascending), this will always print out the correct key
 // even if we don't have directions for the child index's columns.
 func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 	var err error
-	switch typ := PeekType(b); typ {
+	switch PeekType(b) {
 	case Null:
 		b, _ = DecodeIfNull(b)
 		return b, "NULL", nil
@@ -1920,46 +1258,6 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 		return b[1:], "False", nil
 	case Array:
 		return b[1:], "Arr", nil
-	case ArrayKeyAsc, ArrayKeyDesc:
-		encDir := Ascending
-		if typ == ArrayKeyDesc {
-			encDir = Descending
-		}
-		var build strings.Builder
-		buf, err := ValidateAndConsumeArrayKeyMarker(b, encDir)
-		if err != nil {
-			return nil, "", err
-		}
-		build.WriteString("ARRAY[")
-		first := true
-		// Use the array key decoding logic, but instead of calling out
-		// to DecodeTableKey, just make a recursive call.
-		for {
-			if len(buf) == 0 {
-				return nil, "", errors.AssertionFailedf("invalid array (unterminated)")
-			}
-			if IsArrayKeyDone(buf, encDir) {
-				buf = buf[1:]
-				break
-			}
-			var next string
-			if IsNextByteArrayEncodedNull(buf, dir) {
-				next = "NULL"
-				buf = buf[1:]
-			} else {
-				buf, next, err = prettyPrintFirstValue(dir, buf)
-				if err != nil {
-					return nil, "", err
-				}
-			}
-			if !first {
-				build.WriteString(",")
-			}
-			build.WriteString(next)
-			first = false
-		}
-		build.WriteString("]")
-		return buf, build.String(), nil
 	case NotNull:
 		// The tag can be either encodedNotNull or encodedNotNullDesc. The
 		// latter can be an interleaved sentinel.
@@ -2004,20 +1302,6 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 			return b, "", err
 		}
 		return b, d.String(), nil
-	case BitArray:
-		if dir == Descending {
-			return b, "", errors.Errorf("descending bit column dir but ascending bit array encoding")
-		}
-		var d bitarray.BitArray
-		b, d, err = DecodeBitArrayAscending(b)
-		return b, "B" + d.String(), err
-	case BitArrayDesc:
-		if dir == Ascending {
-			return b, "", errors.Errorf("ascending bit column dir but descending bit array encoding")
-		}
-		var d bitarray.BitArray
-		b, d, err = DecodeBitArrayDescending(b)
-		return b, "B" + d.String(), err
 	case Bytes:
 		if dir == Descending {
 			return b, "", errors.Errorf("descending bytes column dir but ascending bytes encoding")
@@ -2050,17 +1334,6 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 			return b, "", err
 		}
 		return b, t.UTC().Format(time.RFC3339Nano), nil
-	case TimeTZ:
-		var t timetz.TimeTZ
-		if dir == Descending {
-			b, t, err = DecodeTimeTZDescending(b)
-		} else {
-			b, t, err = DecodeTimeTZAscending(b)
-		}
-		if err != nil {
-			return b, "", err
-		}
-		return b, t.String(), nil
 	case Duration:
 		var d duration.Duration
 		if dir == Descending {
@@ -2071,7 +1344,7 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 		if err != nil {
 			return b, "", err
 		}
-		return b, d.StringNanos(), nil
+		return b, d.String(), nil
 	default:
 		if len(b) >= 1 {
 			switch b[0] {
@@ -2089,8 +1362,6 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 				return b[1:], "[]", nil
 			case jsonEmptyObject:
 				return b[1:], "{}", nil
-			case emptyArray:
-				return b[1:], "[]", nil
 			}
 		}
 		// This shouldn't ever happen, but if it does, return an empty slice.
@@ -2139,9 +1410,9 @@ func UndoPrefixEnd(b []byte) (_ []byte, ok bool) {
 	return out, true
 }
 
-// MaxNonsortingVarintLen is the maximum length of an EncodeNonsortingVarint
+// NonsortingVarintMaxLen is the maximum length of an EncodeNonsortingVarint
 // encoded value.
-const MaxNonsortingVarintLen = binary.MaxVarintLen64
+const NonsortingVarintMaxLen = binary.MaxVarintLen64
 
 // EncodeNonsortingStdlibVarint encodes an int value using encoding/binary, appends it
 // to the supplied buffer, and returns the final buffer.
@@ -2162,9 +1433,9 @@ func DecodeNonsortingStdlibVarint(b []byte) (remaining []byte, length int, value
 	return b[length:], length, value, nil
 }
 
-// MaxNonsortingUvarintLen is the maximum length of an EncodeNonsortingUvarint
+// NonsortingUvarintMaxLen is the maximum length of an EncodeNonsortingUvarint
 // encoded value.
-const MaxNonsortingUvarintLen = 10
+const NonsortingUvarintMaxLen = 10
 
 // EncodeNonsortingUvarint encodes a uint64, appends it to the supplied buffer,
 // and returns the final buffer. The encoding used is similar to
@@ -2353,54 +1624,6 @@ func EncodeUntaggedTimeValue(appendTo []byte, t time.Time) []byte {
 	return EncodeNonsortingStdlibVarint(appendTo, int64(t.Nanosecond()))
 }
 
-// EncodeTimeTZValue encodes a timetz.TimeTZ value with its value tag, appends it to
-// the supplied buffer, and returns the final buffer.
-func EncodeTimeTZValue(appendTo []byte, colID uint32, t timetz.TimeTZ) []byte {
-	appendTo = EncodeValueTag(appendTo, colID, TimeTZ)
-	return EncodeUntaggedTimeTZValue(appendTo, t)
-}
-
-// EncodeUntaggedTimeTZValue encodes a time.Time value, appends it to the supplied buffer,
-// and returns the final buffer.
-func EncodeUntaggedTimeTZValue(appendTo []byte, t timetz.TimeTZ) []byte {
-	appendTo = EncodeNonsortingStdlibVarint(appendTo, int64(t.TimeOfDay))
-	return EncodeNonsortingStdlibVarint(appendTo, int64(t.OffsetSecs))
-}
-
-// EncodeBox2DValue encodes a geopb.BoundingBox with its value tag, appends it to
-// the supplied buffer and returns the final buffer.
-func EncodeBox2DValue(appendTo []byte, colID uint32, b geopb.BoundingBox) ([]byte, error) {
-	appendTo = EncodeValueTag(appendTo, colID, Box2D)
-	return EncodeUntaggedBox2DValue(appendTo, b)
-}
-
-// EncodeUntaggedBox2DValue encodes a geopb.BoundingBox value, appends it to the supplied buffer,
-// and returns the final buffer.
-func EncodeUntaggedBox2DValue(appendTo []byte, b geopb.BoundingBox) ([]byte, error) {
-	appendTo = EncodeFloatAscending(appendTo, b.LoX)
-	appendTo = EncodeFloatAscending(appendTo, b.HiX)
-	appendTo = EncodeFloatAscending(appendTo, b.LoY)
-	appendTo = EncodeFloatAscending(appendTo, b.HiY)
-	return appendTo, nil
-}
-
-// EncodeGeoValue encodes a geopb.SpatialObject value with its value tag, appends it to
-// the supplied buffer, and returns the final buffer.
-func EncodeGeoValue(appendTo []byte, colID uint32, so *geopb.SpatialObject) ([]byte, error) {
-	appendTo = EncodeValueTag(appendTo, colID, Geo)
-	return EncodeUntaggedGeoValue(appendTo, so)
-}
-
-// EncodeUntaggedGeoValue encodes a geopb.SpatialObject value, appends it to the supplied buffer,
-// and returns the final buffer.
-func EncodeUntaggedGeoValue(appendTo []byte, so *geopb.SpatialObject) ([]byte, error) {
-	bytes, err := protoutil.Marshal(so)
-	if err != nil {
-		return nil, err
-	}
-	return EncodeUntaggedBytesValue(appendTo, bytes), nil
-}
-
 // EncodeDecimalValue encodes an apd.Decimal value with its value tag, appends
 // it to the supplied buffer, and returns the final buffer.
 func EncodeDecimalValue(appendTo []byte, colID uint32, d *apd.Decimal) []byte {
@@ -2437,27 +1660,7 @@ func EncodeDurationValue(appendTo []byte, colID uint32, d duration.Duration) []b
 func EncodeUntaggedDurationValue(appendTo []byte, d duration.Duration) []byte {
 	appendTo = EncodeNonsortingStdlibVarint(appendTo, d.Months)
 	appendTo = EncodeNonsortingStdlibVarint(appendTo, d.Days)
-	return EncodeNonsortingStdlibVarint(appendTo, d.Nanos())
-}
-
-// EncodeBitArrayValue encodes a bit array value with its value tag,
-// appends it to the supplied buffer, and returns the final buffer.
-func EncodeBitArrayValue(appendTo []byte, colID uint32, d bitarray.BitArray) []byte {
-	appendTo = EncodeValueTag(appendTo, colID, BitArray)
-	return EncodeUntaggedBitArrayValue(appendTo, d)
-}
-
-// EncodeUntaggedBitArrayValue encodes a bit array value, appends it to the
-// supplied buffer, and returns the final buffer.
-func EncodeUntaggedBitArrayValue(appendTo []byte, d bitarray.BitArray) []byte {
-	bitLen := d.BitLen()
-	words, _ := d.EncodingParts()
-
-	appendTo = EncodeNonsortingUvarint(appendTo, uint64(bitLen))
-	for _, w := range words {
-		appendTo = EncodeUint64Ascending(appendTo, w)
-	}
-	return appendTo
+	return EncodeNonsortingStdlibVarint(appendTo, d.Nanos)
 }
 
 // EncodeUUIDValue encodes a uuid.UUID value with its value tag, appends it to
@@ -2634,31 +1837,6 @@ func DecodeUntaggedTimeValue(b []byte) (remaining []byte, t time.Time, err error
 	return b, timeutil.Unix(sec, nsec), nil
 }
 
-// DecodeTimeTZValue decodes a value encoded by EncodeTimeTZValue.
-func DecodeTimeTZValue(b []byte) (remaining []byte, t timetz.TimeTZ, err error) {
-	b, err = decodeValueTypeAssert(b, TimeTZ)
-	if err != nil {
-		return b, timetz.TimeTZ{}, err
-	}
-	return DecodeUntaggedTimeTZValue(b)
-}
-
-// DecodeUntaggedTimeTZValue decodes a value encoded by EncodeUntaggedTimeTZValue.
-func DecodeUntaggedTimeTZValue(b []byte) (remaining []byte, t timetz.TimeTZ, err error) {
-	var timeOfDayMicros int64
-	b, _, timeOfDayMicros, err = DecodeNonsortingStdlibVarint(b)
-	if err != nil {
-		return b, timetz.TimeTZ{}, err
-	}
-	var offsetSecs int64
-	b, _, offsetSecs, err = DecodeNonsortingStdlibVarint(b)
-	if err != nil {
-		return b, timetz.TimeTZ{}, err
-	}
-	// Do not use timeofday.FromInt as it truncates 24:00 into 00:00.
-	return b, timetz.MakeTimeTZ(timeofday.TimeOfDay(timeOfDayMicros), int32(offsetSecs)), nil
-}
-
 // DecodeDecimalValue decodes a value encoded by EncodeDecimalValue.
 func DecodeDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err error) {
 	b, err = decodeValueTypeAssert(b, Decimal)
@@ -2666,45 +1844,6 @@ func DecodeDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err error) {
 		return b, apd.Decimal{}, err
 	}
 	return DecodeUntaggedDecimalValue(b)
-}
-
-// DecodeUntaggedBox2DValue decodes a value encoded by EncodeUntaggedBox2DValue.
-func DecodeUntaggedBox2DValue(b []byte) (remaining []byte, box geopb.BoundingBox, err error) {
-	box = geopb.BoundingBox{}
-	remaining = b
-
-	remaining, box.LoX, err = DecodeFloatAscending(remaining)
-	if err != nil {
-		return b, box, err
-	}
-	remaining, box.HiX, err = DecodeFloatAscending(remaining)
-	if err != nil {
-		return b, box, err
-	}
-	remaining, box.LoY, err = DecodeFloatAscending(remaining)
-	if err != nil {
-		return b, box, err
-	}
-	remaining, box.HiY, err = DecodeFloatAscending(remaining)
-	if err != nil {
-		return b, box, err
-	}
-	return remaining, box, err
-}
-
-// DecodeUntaggedGeoValue decodes a value encoded by EncodeUntaggedGeoValue into
-// the provided geopb.SpatialObject reference. The so parameter must already be
-// empty/reset.
-func DecodeUntaggedGeoValue(b []byte, so *geopb.SpatialObject) (remaining []byte, err error) {
-	var data []byte
-	remaining, data, err = DecodeUntaggedBytesValue(b)
-	if err != nil {
-		return b, err
-	}
-	// Not using protoutil.Unmarshal since the call to so.Reset() will waste the
-	// pre-allocated EWKB.
-	err = so.Unmarshal(data)
-	return remaining, err
 }
 
 // DecodeUntaggedDecimalValue decodes a value encoded by EncodeUntaggedDecimalValue.
@@ -2716,19 +1855,6 @@ func DecodeUntaggedDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err 
 	}
 	d, err = DecodeNonsortingDecimal(b[:int(i)], nil)
 	return b[int(i):], d, err
-}
-
-// DecodeIntoUntaggedDecimalValue is like DecodeUntaggedDecimalValue except it
-// writes the new Decimal into the input apd.Decimal pointer, which must be
-// non-nil.
-func DecodeIntoUntaggedDecimalValue(d *apd.Decimal, b []byte) (remaining []byte, err error) {
-	var i uint64
-	b, _, i, err = DecodeNonsortingStdlibUvarint(b)
-	if err != nil {
-		return b, err
-	}
-	err = DecodeIntoNonsortingDecimal(d, b[:int(i)], nil)
-	return b[int(i):], err
 }
 
 // DecodeDurationValue decodes a value encoded by EncodeUntaggedDurationValue.
@@ -2755,41 +1881,12 @@ func DecodeUntaggedDurationValue(b []byte) (remaining []byte, d duration.Duratio
 	if err != nil {
 		return b, duration.Duration{}, err
 	}
-	return b, duration.DecodeDuration(months, days, nanos), nil
-}
-
-// DecodeBitArrayValue decodes a value encoded by EncodeUntaggedBitArrayValue.
-func DecodeBitArrayValue(b []byte) (remaining []byte, d bitarray.BitArray, err error) {
-	b, err = decodeValueTypeAssert(b, BitArray)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	return DecodeUntaggedBitArrayValue(b)
-}
-
-// DecodeUntaggedBitArrayValue decodes a value encoded by EncodeUntaggedBitArrayValue.
-func DecodeUntaggedBitArrayValue(b []byte) (remaining []byte, d bitarray.BitArray, err error) {
-	var bitLen uint64
-	b, _, bitLen, err = DecodeNonsortingUvarint(b)
-	if err != nil {
-		return b, bitarray.BitArray{}, err
-	}
-	words, lastBitsUsed := bitarray.EncodingPartsForBitLen(uint(bitLen))
-	for i := range words {
-		var val uint64
-		b, val, err = DecodeUint64Ascending(b)
-		if err != nil {
-			return b, bitarray.BitArray{}, err
-		}
-		words[i] = val
-	}
-	ba, err := bitarray.FromEncodingParts(words, lastBitsUsed)
-	return b, ba, err
+	return b, duration.Duration{Months: months, Days: days, Nanos: nanos}, nil
 }
 
 const uuidValueEncodedLength = 16
 
-var _ [uuidValueEncodedLength]byte = uuid.UUID{} // Assert that uuid.UUID is length 16.
+var _ [uuidValueEncodedLength]byte = (uuid.UUID{}).UUID // Assert that "github.com/satori/go.uuid" is length 16.
 
 // DecodeUUIDValue decodes a value encoded by EncodeUUIDValue.
 func DecodeUUIDValue(b []byte) (remaining []byte, u uuid.UUID, err error) {
@@ -2876,22 +1973,9 @@ func PeekValueLengthWithOffsetsAndType(b []byte, dataOffset int, typ Type) (leng
 		return dataOffset + n, err
 	case Float:
 		return dataOffset + floatValueEncodedLength, nil
-	case Bytes, Array, JSON, Geo:
+	case Bytes, Array, JSON:
 		_, n, i, err := DecodeNonsortingUvarint(b)
 		return dataOffset + n + int(i), err
-	case Box2D:
-		length, err := peekBox2DLength(b)
-		if err != nil {
-			return 0, err
-		}
-		return dataOffset + length, nil
-	case BitArray:
-		_, n, bitLen, err := DecodeNonsortingUvarint(b)
-		if err != nil {
-			return 0, err
-		}
-		numWords, _ := bitarray.SizesForBitLen(uint(bitLen))
-		return dataOffset + n + int(numWords)*8, err
 	case Tuple:
 		rem, l, numTuples, err := DecodeNonsortingUvarint(b)
 		if err != nil {
@@ -2909,7 +1993,7 @@ func PeekValueLengthWithOffsetsAndType(b []byte, dataOffset int, typ Type) (leng
 	case Decimal:
 		_, n, i, err := DecodeNonsortingStdlibUvarint(b)
 		return dataOffset + n + int(i), err
-	case Time, TimeTZ:
+	case Time:
 		n, err := getMultiNonsortingVarintLen(b, 2)
 		return dataOffset + n, err
 	case Duration:
@@ -3000,27 +2084,13 @@ func PrettyPrintValueEncoded(b []byte) ([]byte, string, error) {
 			return b, "", err
 		}
 		return b, t.UTC().Format(time.RFC3339Nano), nil
-	case TimeTZ:
-		var t timetz.TimeTZ
-		b, t, err = DecodeTimeTZValue(b)
-		if err != nil {
-			return b, "", err
-		}
-		return b, t.String(), nil
 	case Duration:
 		var d duration.Duration
 		b, d, err = DecodeDurationValue(b)
 		if err != nil {
 			return b, "", err
 		}
-		return b, d.StringNanos(), nil
-	case BitArray:
-		var d bitarray.BitArray
-		b, d, err = DecodeBitArrayValue(b)
-		if err != nil {
-			return b, "", err
-		}
-		return b, "B" + d.String(), nil
+		return b, d.String(), nil
 	case UUID:
 		var u uuid.UUID
 		b, u, err = DecodeUUIDValue(b)
@@ -3100,96 +2170,4 @@ func getJSONInvertedIndexKeyLength(buf []byte) (int, error) {
 
 		return len + valLen, nil
 	}
-}
-
-func getGeoInvertedIndexKeyLength(buf []byte) (int, error) {
-	// Minimum: 1 byte marker + 1 byte cell length +
-	//          1 byte bbox encoding kind + 16 bytes for 2 floats
-	if len(buf) < 3+2*uint64AscendingEncodedLength {
-		return 0, errors.Errorf("buf length %d too small", len(buf))
-	}
-	var cellLen int
-	var err error
-	if cellLen, err = getVarintLen(buf[1:]); err != nil {
-		return 0, err
-	}
-	encodingKind := geoInvertedBBoxEncodingKind(buf[1+cellLen])
-	floatsLen := 4 * uint64AscendingEncodedLength
-	if encodingKind == geoInvertedTwoFloats {
-		floatsLen = 2 * uint64AscendingEncodedLength
-	}
-	return 1 + cellLen + 1 + floatsLen, nil
-}
-
-// EncodeArrayKeyMarker adds the array key encoding marker to buf and
-// returns the new buffer.
-func EncodeArrayKeyMarker(buf []byte, dir Direction) []byte {
-	switch dir {
-	case Ascending:
-		return append(buf, arrayKeyMarker)
-	case Descending:
-		return append(buf, arrayKeyDescendingMarker)
-	default:
-		panic("invalid direction")
-	}
-}
-
-// EncodeArrayKeyTerminator adds the array key terminator to buf and
-// returns the new buffer.
-func EncodeArrayKeyTerminator(buf []byte, dir Direction) []byte {
-	switch dir {
-	case Ascending:
-		return append(buf, arrayKeyTerminator)
-	case Descending:
-		return append(buf, arrayKeyDescendingTerminator)
-	default:
-		panic("invalid direction")
-	}
-}
-
-// EncodeNullWithinArrayKey encodes NULL within a key encoded array.
-func EncodeNullWithinArrayKey(buf []byte, dir Direction) []byte {
-	switch dir {
-	case Ascending:
-		return append(buf, ascendingNullWithinArrayKey)
-	case Descending:
-		return append(buf, descendingNullWithinArrayKey)
-	default:
-		panic("invalid direction")
-	}
-}
-
-// IsNextByteArrayEncodedNull returns if the first byte in the input
-// is the NULL encoded byte within an array key.
-func IsNextByteArrayEncodedNull(buf []byte, dir Direction) bool {
-	expected := ascendingNullWithinArrayKey
-	if dir == Descending {
-		expected = descendingNullWithinArrayKey
-	}
-	return buf[0] == expected
-}
-
-// ValidateAndConsumeArrayKeyMarker checks that the marker at the front
-// of buf is valid for an array of the given direction, and consumes it
-// if so. It returns an error if the tag is invalid.
-func ValidateAndConsumeArrayKeyMarker(buf []byte, dir Direction) ([]byte, error) {
-	typ := PeekType(buf)
-	expected := ArrayKeyAsc
-	if dir == Descending {
-		expected = ArrayKeyDesc
-	}
-	if typ != expected {
-		return nil, errors.Newf("invalid type found %s", typ)
-	}
-	return buf[1:], nil
-}
-
-// IsArrayKeyDone returns if the first byte in the input is the array
-// terminator for the input direction.
-func IsArrayKeyDone(buf []byte, dir Direction) bool {
-	expected := arrayKeyTerminator
-	if dir == Descending {
-		expected = arrayKeyDescendingTerminator
-	}
-	return buf[0] == expected
 }

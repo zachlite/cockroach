@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 //
 // The parallel_test adds an orchestration layer on top of the logic_test code
 // with the capability of running multiple test data files in parallel.
@@ -28,23 +32,20 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v2"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
+	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/gogo/protobuf/proto"
-	yaml "gopkg.in/yaml.v2"
 )
 
 var (
@@ -61,7 +62,7 @@ type parallelTest struct {
 func (t *parallelTest) close() {
 	t.clients = nil
 	if t.cluster != nil {
-		t.cluster.Stopper().Stop(context.Background())
+		t.cluster.Stopper().Stop(context.TODO())
 	}
 }
 
@@ -71,15 +72,13 @@ func (t *parallelTest) processTestFile(path string, nodeIdx int, db *gosql.DB, c
 	}
 
 	// Set up a dummy logicTest structure to use that code.
-	rng, _ := randutil.NewPseudoRand()
 	l := &logicTest{
-		rootT:   t.T,
+		t:       t.T,
 		cluster: t.cluster,
 		nodeIdx: nodeIdx,
 		db:      db,
 		user:    security.RootUser,
 		verbose: testing.Verbose() || log.V(1),
-		rng:     rng,
 	}
 	if err := l.processTestFile(path, testClusterConfig{}); err != nil {
 		log.Errorf(context.Background(), "error processing %s: %s", path, err)
@@ -91,7 +90,7 @@ func (t *parallelTest) getClient(nodeIdx, clientIdx int) *gosql.DB {
 	for len(t.clients[nodeIdx]) <= clientIdx {
 		// Add a client.
 		pgURL, cleanupFunc := sqlutils.PGUrl(t.T,
-			t.cluster.Server(nodeIdx).ServingSQLAddr(),
+			t.cluster.Server(nodeIdx).ServingAddr(),
 			"TestParallel",
 			url.User(security.RootUser))
 		db, err := gosql.Open("postgres", pgURL.String())
@@ -140,7 +139,7 @@ func (t *parallelTest) run(dir string) {
 	}
 
 	if spec.SkipReason != "" {
-		skip.IgnoreLint(t, spec.SkipReason)
+		t.Skip(spec.SkipReason)
 	}
 
 	log.Infof(t.ctx, "Running test %s", dir)
@@ -148,7 +147,7 @@ func (t *parallelTest) run(dir string) {
 		log.Infof(t.ctx, "spec: %+v", spec)
 	}
 
-	t.setup(context.Background(), &spec)
+	t.setup(&spec)
 	defer t.close()
 
 	for runListIdx, runList := range spec.Run {
@@ -175,7 +174,7 @@ func (t *parallelTest) run(dir string) {
 	}
 }
 
-func (t *parallelTest) setup(ctx context.Context, spec *parTestSpec) {
+func (t *parallelTest) setup(spec *parTestSpec) {
 	if spec.ClusterSize == 0 {
 		spec.ClusterSize = 1
 	}
@@ -184,16 +183,23 @@ func (t *parallelTest) setup(ctx context.Context, spec *parTestSpec) {
 		log.Infof(t.ctx, "Cluster Size: %d", spec.ClusterSize)
 	}
 
-	t.cluster = serverutils.StartNewTestCluster(t, spec.ClusterSize, base.TestClusterArgs{})
+	args := base.TestClusterArgs{
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				SQLExecutor: &sql.ExecutorTestingKnobs{
+					CheckStmtStringChange: true,
+				},
+			},
+		},
+	}
+	t.cluster = serverutils.StartTestCluster(t, spec.ClusterSize, args)
 
 	for i := 0; i < t.cluster.NumServers(); i++ {
 		server := t.cluster.Server(i)
 		mode := sessiondata.DistSQLOff
 		st := server.ClusterSettings()
 		st.Manual.Store(true)
-		sql.DistSQLClusterExecMode.Override(ctx, &st.SV, int64(mode))
-		// Disable automatic stats - they can interfere with the test shutdown.
-		stats.AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+		sql.DistSQLClusterExecMode.Override(&st.SV, int64(mode))
 	}
 
 	t.clients = make([][]*gosql.DB, spec.ClusterSize)
@@ -206,9 +212,9 @@ func (t *parallelTest) setup(ctx context.Context, spec *parTestSpec) {
 		if testing.Verbose() || log.V(1) {
 			log.Infof(t.ctx, "Setting range split size: %d", spec.RangeSplitSize)
 		}
-		zoneCfg := zonepb.DefaultZoneConfig()
-		zoneCfg.RangeMaxBytes = proto.Int64(int64(spec.RangeSplitSize))
-		zoneCfg.RangeMinBytes = proto.Int64(*zoneCfg.RangeMaxBytes / 2)
+		zoneCfg := config.DefaultZoneConfig()
+		zoneCfg.RangeMaxBytes = int64(spec.RangeSplitSize)
+		zoneCfg.RangeMinBytes = zoneCfg.RangeMaxBytes / 2
 		buf, err := protoutil.Marshal(&zoneCfg)
 		if err != nil {
 			t.Fatal(err)
@@ -233,13 +239,6 @@ func (t *parallelTest) setup(ctx context.Context, spec *parTestSpec) {
 
 func TestParallel(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
-	skip.UnderRace(t, "takes >1 min under race")
-	// Note: there is special code in teamcity-trigger/main.go to run this package
-	// with less concurrency in the nightly stress runs. If you see problems
-	// please make adjustments there.
-	// As of 6/4/2019, the logic tests never complete under race.
-	skip.UnderStressRace(t, "logic tests and race detector don't mix: #37993")
 
 	glob := *paralleltestdata
 	paths, err := filepath.Glob(glob)

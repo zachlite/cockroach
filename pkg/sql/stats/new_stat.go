@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package stats
 
@@ -14,53 +18,24 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/gossip"
-	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
-// InsertNewStats inserts a slice of statistics at the current time into the
-// system table.
-func InsertNewStats(
-	ctx context.Context,
-	executor sqlutil.InternalExecutor,
-	txn *kv.Txn,
-	tableStats []*TableStatisticProto,
-) error {
-	var err error
-	for _, statistic := range tableStats {
-		err = InsertNewStat(
-			ctx,
-			executor,
-			txn,
-			statistic.TableID,
-			statistic.Name,
-			statistic.ColumnIDs,
-			int64(statistic.RowCount),
-			int64(statistic.DistinctCount),
-			int64(statistic.NullCount),
-			statistic.HistogramData,
-		)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// InsertNewStat inserts a new statistic in the system table.
-// The caller is responsible for calling GossipTableStatAdded to notify the stat
-// caches.
+// InsertNewStat inserts a new statistic in the system table and updates the
+// gossip key to notify the stat caches.
 func InsertNewStat(
 	ctx context.Context,
+	g *gossip.Gossip,
 	executor sqlutil.InternalExecutor,
-	txn *kv.Txn,
-	tableID descpb.ID,
+	txn *client.Txn,
+	tableID sqlbase.ID,
 	name string,
-	columnIDs []descpb.ColumnID,
+	columnIDs []sqlbase.ColumnID,
 	rowCount, distinctCount, nullCount int64,
 	h *HistogramData,
 ) error {
@@ -84,7 +59,7 @@ func InsertNewStat(
 		}
 	}
 
-	_, err := executor.Exec(
+	if _, err := executor.Exec(
 		ctx, "insert-statistic", txn,
 		`INSERT INTO system.table_statistics (
 					"tableID",
@@ -102,18 +77,17 @@ func InsertNewStat(
 		distinctCount,
 		nullCount,
 		histogramVal,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+
+	// TODO(radu): we need to clear out old stats that are superseded.
+	return GossipTableStatAdded(g, tableID)
 }
 
 // GossipTableStatAdded causes the statistic caches for this table to be
 // invalidated.
-//
-// Note that we no longer use gossip to keep the cache up-to-date, but we still
-// send the updates for mixed-version clusters during upgrade.
-//
-// TODO(radu): remove this in 22.1.
-func GossipTableStatAdded(g *gossip.Gossip, tableID descpb.ID) error {
+func GossipTableStatAdded(g *gossip.Gossip, tableID sqlbase.ID) error {
 	// TODO(radu): perhaps use a TTL here to avoid having a key per table floating
 	// around forever (we would need the stat cache to evict old entries
 	// automatically though).

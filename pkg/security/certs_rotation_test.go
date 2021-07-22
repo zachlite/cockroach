@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 // +build !windows
 
@@ -15,28 +19,20 @@ package security_test
 import (
 	"context"
 	gosql "database/sql"
-	"encoding/json"
 	"io/ioutil"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
 
+	"github.com/pkg/errors"
+	"golang.org/x/sys/unix"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"golang.org/x/sys/unix"
 )
 
 // TestRotateCerts tests certs rotation in the server.
@@ -44,8 +40,6 @@ import (
 // of triggering a certificate refresh.
 func TestRotateCerts(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.ScopeWithoutShowLogs(t).Close(t)
-
 	// Do not mock cert access for this test.
 	security.ResetAssetLoader()
 	defer ResetTest()
@@ -72,7 +66,7 @@ func TestRotateCerts(t *testing.T) {
 		DisableWebSessionAuthentication: true,
 	}
 	s, _, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	// Client test function.
 	clientTest := func(httpClient http.Client) error {
@@ -94,7 +88,7 @@ func TestRotateCerts(t *testing.T) {
 
 	// Create a client by calling sql.Open which loads the certificates but do not use it yet.
 	createTestClient := func() *gosql.DB {
-		pgUrl := makeSecurePGUrl(s.ServingSQLAddr(), security.RootUser, certsDir, security.EmbeddedCACert, security.EmbeddedRootCert, security.EmbeddedRootKey)
+		pgUrl := makeSecurePGUrl(s.ServingAddr(), security.RootUser, certsDir, security.EmbeddedCACert, security.EmbeddedRootCert, security.EmbeddedRootKey)
 		goDB, err := gosql.Open("postgres", pgUrl)
 		if err != nil {
 			t.Fatal(err)
@@ -109,8 +103,7 @@ func TestRotateCerts(t *testing.T) {
 	// Test client with the same certs.
 	clientContext := testutils.NewNodeTestBaseContext()
 	clientContext.SSLCertsDir = certsDir
-	firstSCtx := rpc.MakeSecurityContext(clientContext, security.CommandTLSSettings{}, roachpb.SystemTenantID)
-	firstClient, err := firstSCtx.GetHTTPClient()
+	firstClient, err := clientContext.GetHTTPClient()
 	if err != nil {
 		t.Fatalf("could not create http client: %v", err)
 	}
@@ -140,9 +133,7 @@ func TestRotateCerts(t *testing.T) {
 	// Fails on crypto errors.
 	clientContext = testutils.NewNodeTestBaseContext()
 	clientContext.SSLCertsDir = certsDir
-
-	secondSCtx := rpc.MakeSecurityContext(clientContext, security.CommandTLSSettings{}, roachpb.SystemTenantID)
-	secondClient, err := secondSCtx.GetHTTPClient()
+	secondClient, err := clientContext.GetHTTPClient()
 	if err != nil {
 		t.Fatalf("could not create http client: %v", err)
 	}
@@ -167,7 +158,6 @@ func TestRotateCerts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	beforeReload := timeutil.Now()
 	t.Log("issuing SIGHUP")
 	if err := unix.Kill(unix.Getpid(), unix.SIGHUP); err != nil {
 		t.Fatal(err)
@@ -185,43 +175,6 @@ func TestRotateCerts(t *testing.T) {
 			}
 			return nil
 		})
-
-	// Check that the structured event was logged.
-	// We use SucceedsSoon here because there may be a delay between
-	// the moment SIGHUP is processed and certs are reloaded, and
-	// the moment the structured logging event is actually
-	// written to the log file.
-	testutils.SucceedsSoon(t, func() error {
-		log.Flush()
-		entries, err := log.FetchEntriesFromFiles(beforeReload.UnixNano(),
-			math.MaxInt64, 10000, cmLogRe, log.WithMarkedSensitiveData)
-		if err != nil {
-			t.Fatal(err)
-		}
-		foundEntry := false
-		for _, e := range entries {
-			if !strings.Contains(e.Message, "certs_reload") {
-				continue
-			}
-			foundEntry = true
-			// TODO(knz): Remove this when crdb-v2 becomes the new format.
-			e.Message = strings.TrimPrefix(e.Message, "Structured entry:")
-			// crdb-v2 starts json with an equal sign.
-			e.Message = strings.TrimPrefix(e.Message, "=")
-			jsonPayload := []byte(e.Message)
-			var ev eventpb.CertsReload
-			if err := json.Unmarshal(jsonPayload, &ev); err != nil {
-				t.Errorf("unmarshalling %q: %v", e.Message, err)
-			}
-			if ev.Success != true || ev.ErrorMessage != "" {
-				t.Errorf("incorrect event: expected success with no error, got %+v", ev)
-			}
-		}
-		if !foundEntry {
-			return errors.New("structured entry for certs_reload not found in log")
-		}
-		return nil
-	})
 
 	// Nothing changed in the first SQL client: the connection is already established.
 	if _, err := firstSQLClient.Exec("SELECT 1"); err != nil {
@@ -248,8 +201,7 @@ func TestRotateCerts(t *testing.T) {
 	// This is HTTP and succeeds because we do not ask for or verify client certificates.
 	clientContext = testutils.NewNodeTestBaseContext()
 	clientContext.SSLCertsDir = certsDir
-	thirdSCtx := rpc.MakeSecurityContext(clientContext, security.CommandTLSSettings{}, roachpb.SystemTenantID)
-	thirdClient, err := thirdSCtx.GetHTTPClient()
+	thirdClient, err := clientContext.GetHTTPClient()
 	if err != nil {
 		t.Fatalf("could not create http client: %v", err)
 	}
@@ -288,5 +240,3 @@ func TestRotateCerts(t *testing.T) {
 			return nil
 		})
 }
-
-var cmLogRe = regexp.MustCompile(`event_log\.go`)

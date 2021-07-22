@@ -1,19 +1,21 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package settings
 
 import (
-	"context"
-
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 // StringSetting is the interface of a setting variable that will be
@@ -25,7 +27,7 @@ type StringSetting struct {
 	common
 }
 
-var _ extendedSetting = &StringSetting{}
+var _ Setting = &StringSetting{}
 
 func (s *StringSetting) String(sv *Values) string {
 	return s.Get(sv)
@@ -46,14 +48,6 @@ func (*StringSetting) Typ() string {
 	return "s"
 }
 
-// Default returns default value for setting.
-func (s *StringSetting) Default() string {
-	return s.defaultValue
-}
-
-// Defeat the linter.
-var _ = (*StringSetting).Default
-
 // Get retrieves the string value in the setting.
 func (s *StringSetting) Get(sv *Values) string {
 	loaded := sv.getGeneric(s.slotIdx)
@@ -73,32 +67,20 @@ func (s *StringSetting) Validate(sv *Values, v string) error {
 	return nil
 }
 
-// Override sets the setting to the given value, assuming
-// it passes validation.
-func (s *StringSetting) Override(ctx context.Context, sv *Values, v string) {
-	_ = s.set(ctx, sv, v)
-}
-
-func (s *StringSetting) set(ctx context.Context, sv *Values, v string) error {
+func (s *StringSetting) set(sv *Values, v string) error {
 	if err := s.Validate(sv, v); err != nil {
 		return err
 	}
 	if s.Get(sv) != v {
-		sv.setGeneric(ctx, s.slotIdx, v)
+		sv.setGeneric(s.slotIdx, v)
 	}
 	return nil
 }
 
-func (s *StringSetting) setToDefault(ctx context.Context, sv *Values) {
-	if err := s.set(ctx, sv, s.defaultValue); err != nil {
+func (s *StringSetting) setToDefault(sv *Values) {
+	if err := s.set(sv, s.defaultValue); err != nil {
 		panic(err)
 	}
-}
-
-// WithPublic sets public visibility and can be chained.
-func (s *StringSetting) WithPublic() *StringSetting {
-	s.SetVisibility(Public)
-	return s
 }
 
 // RegisterStringSetting defines a new setting with type string.
@@ -120,10 +102,6 @@ func RegisterValidatedStringSetting(
 		defaultValue: defaultValue,
 		validateFn:   validateFn,
 	}
-	// By default all string settings are considered to perhaps contain
-	// PII and are thus non-reportable (to exclude them from telemetry
-	// reports).
-	setting.SetReportable(false)
 	register(key, desc, setting)
 	return setting
 }

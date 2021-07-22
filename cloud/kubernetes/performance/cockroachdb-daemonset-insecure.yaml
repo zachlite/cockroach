@@ -46,16 +46,13 @@ spec:
       app: cockroachdb
   maxUnavailable: 1
 ---
-apiVersion: apps/v1
+apiVersion: extensions/v1beta1
 kind: DaemonSet
 metadata:
   name: cockroachdb
   labels:
     app: cockroachdb
 spec:
-  selector:
-    matchLabels:
-      app: cockroachdb
   template:
     metadata:
       labels:
@@ -81,7 +78,7 @@ spec:
       hostNetwork: true
       containers:
       - name: cockroachdb
-        image: cockroachdb/cockroach:v21.1.5
+        image: cockroachdb/cockroach:v2.0.5
         imagePullPolicy: IfNotPresent
         # TODO: If you configured taints to give CockroachDB exclusive access to nodes, feel free
         # to remove the requests and limits sections. If you didn't, you'll need to change these to
@@ -107,14 +104,13 @@ spec:
         - containerPort: 8080
           hostPort: 8080
           name: http
-# We recommend that you do not configure a liveness probe on a production environment, as this can impact the availability of production databases.
-#       livenessProbe:
-#         httpGet:
-#           path: "/health"
-#           port: http
-#           scheme: HTTP
-#         initialDelaySeconds: 30
-#         periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: "/health"
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: "/health?ready=1"
@@ -126,14 +122,11 @@ spec:
         volumeMounts:
         - name: datadir
           mountPath: /cockroach/cockroach-data
-        env:
-        - name: COCKROACH_CHANNEL
-          value: kubernetes-insecure
         command:
           - "/bin/bash"
           - "-ecx"
           # TODO: Replace "YOUR_IP_ADDR1_HERE,YOUR_IP_ADDR2_HERE,YOUR_IP_ADDR3_HERE" with a list of a few of the IP addresses of the machines on which CockroachDB will be running.
-          - "exec /cockroach/cockroach start --logtostderr --insecure --http-addr 0.0.0.0 --cache 25% --max-sql-memory 25% --join=YOUR_IP_ADDR1_HERE,YOUR_IP_ADDR2_HERE,YOUR_IP_ADDR3_HERE"
+          - "exec /cockroach/cockroach start --logtostderr --insecure --http-host 0.0.0.0 --cache 25% --max-sql-memory 25% --join=YOUR_IP_ADDR1_HERE,YOUR_IP_ADDR2_HERE,YOUR_IP_ADDR3_HERE"
       terminationGracePeriodSeconds: 60
       volumes:
       - name: datadir

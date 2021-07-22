@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 // Package pgconnect provides a way to get byte encodings from a simple query.
 package pgconnect
@@ -18,8 +22,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgproto3/v2"
+	"github.com/jackc/pgx/pgproto3"
+	"github.com/pkg/errors"
 )
 
 // Connect connects to the postgres-compatible server at addr with specified
@@ -39,22 +43,21 @@ func Connect(
 	}
 	defer conn.Close()
 
-	fe := pgproto3.NewFrontend(pgproto3.NewChunkReader(conn), conn)
+	fe, err := pgproto3.NewFrontend(conn, conn)
+	if err != nil {
+		return nil, errors.Wrap(err, "new frontend")
+	}
 
 	send := make(chan pgproto3.FrontendMessage)
 	recv := make(chan pgproto3.BackendMessage)
 	var res []byte
-	// Use go routines to divide up work in order to improve debugging. These
-	// aren't strictly necessary, but they make it easy to print when messages
-	// are received.
 	g := ctxgroup.WithContext(ctx)
-	// The send chan sends messages to the server.
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(send)
 		for {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-g.Done:
+				return g.Err()
 			case msg := <-send:
 				err := fe.Send(msg)
 				if err != nil {
@@ -63,9 +66,6 @@ func Connect(
 			}
 		}
 	})
-	// The recv go routine receives messages from the server and puts them on
-	// the recv chan. It makes a copy of them when it does since the next message
-	// received will otherwise use the same pointer.
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(recv)
 		for {
@@ -83,23 +83,22 @@ func Connect(
 			dup := y.Interface().(pgproto3.BackendMessage)
 
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-g.Done:
+				return g.Err()
 			case recv <- dup:
 			}
 		}
 	})
-	// The main go routine executing the logic.
 	g.GoCtx(func(ctx context.Context) error {
 		send <- &pgproto3.StartupMessage{
-			ProtocolVersion: 196608, // Version 3.0
+			ProtocolVersion: 196608,
 			Parameters: map[string]string{
 				"user": user,
 			},
 		}
 		{
 			r := <-recv
-			if _, ok := r.(*pgproto3.AuthenticationOk); !ok {
+			if msg, ok := r.(*pgproto3.Authentication); !ok || msg.Type != 0 {
 				return errors.Errorf("unexpected: %#v\n", r)
 			}
 		}

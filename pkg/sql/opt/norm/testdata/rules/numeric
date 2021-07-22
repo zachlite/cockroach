@@ -1,13 +1,21 @@
 exec-ddl
 CREATE TABLE a (k INT PRIMARY KEY, i INT, f FLOAT, d DECIMAL, t TIME)
 ----
+TABLE a
+ ├── k int not null
+ ├── i int
+ ├── f float
+ ├── d decimal
+ ├── t time
+ └── INDEX primary
+      └── k int not null
 
 # --------------------------------------------------
 # FoldPlusZero, FoldZeroPlus
 # --------------------------------------------------
 
 # Add columns to prevent NormalizeVar from swapping left and right.
-norm expect=(FoldPlusZero,FoldZeroPlus)
+opt expect=(FoldPlusZero,FoldZeroPlus)
 SELECT
     (a.i + a.i) + 0 AS r, 0 + (a.i + a.i) AS s,
     (a.f + a.f) + 0 AS t, 0 + (a.f + a.f) AS u,
@@ -15,48 +23,23 @@ SELECT
 FROM a
 ----
 project
- ├── columns: r:8 s:9 t:10 u:11 v:12 w:13
- ├── immutable
+ ├── columns: r:6(int) s:7(int) t:8(float) u:9(float) v:10(decimal) w:11(decimal)
  ├── scan a
- │    └── columns: i:2 f:3 d:4
- └── projections
-      ├── i:2 + i:2 [as=r:8, outer=(2), immutable]
-      ├── i:2 + i:2 [as=s:9, outer=(2), immutable]
-      ├── f:3 + f:3 [as=t:10, outer=(3), immutable]
-      ├── f:3 + f:3 [as=u:11, outer=(3), immutable]
-      ├── d:4 + d:4 [as=v:12, outer=(4), immutable]
-      └── d:4 + d:4 [as=w:13, outer=(4), immutable]
-
-
-# Regression test for #35113.
-norm expect=FoldPlusZero
-SELECT i + 0::decimal FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
-
-norm expect=FoldZeroPlus
-SELECT 0::decimal + i FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
+ │    └── columns: i:2(int) f:3(float) d:4(decimal)
+ └── projections [outer=(2-4)]
+      ├── i + i [type=int, outer=(2)]
+      ├── i + i [type=int, outer=(2)]
+      ├── f + f [type=float, outer=(3)]
+      ├── f + f [type=float, outer=(3)]
+      ├── d + d [type=decimal, outer=(4)]
+      └── d + d [type=decimal, outer=(4)]
 
 # --------------------------------------------------
 # FoldMinusZero
 # --------------------------------------------------
 
 # Add columns to prevent NormalizeVar from swapping left and right.
-norm expect=FoldMinusZero
+opt expect=FoldMinusZero
 SELECT
     (a.i + a.i) - 0 AS r,
     (a.f + a.f) - 0 AS s,
@@ -64,44 +47,36 @@ SELECT
 FROM a
 ----
 project
- ├── columns: r:8 s:9 t:10
- ├── immutable
+ ├── columns: r:6(int) s:7(float) t:8(decimal)
  ├── scan a
- │    └── columns: i:2 f:3 d:4
- └── projections
-      ├── i:2 + i:2 [as=r:8, outer=(2), immutable]
-      ├── f:3 + f:3 [as=s:9, outer=(3), immutable]
-      └── d:4 + d:4 [as=t:10, outer=(4), immutable]
-
-# Regression test for #35113.
-norm expect=FoldMinusZero
-SELECT i - 0::decimal FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
+ │    └── columns: i:2(int) f:3(float) d:4(decimal)
+ └── projections [outer=(2-4)]
+      ├── i + i [type=int, outer=(2)]
+      ├── f + f [type=float, outer=(3)]
+      └── d + d [type=decimal, outer=(4)]
 
 # Regression test for #35612.
-norm expect-not=FoldMinusZero
+opt expect-not=FoldMinusZero
 SELECT '[123]'::jsonb - 0
 ----
-values
- ├── columns: "?column?":1!null
+project
+ ├── columns: "?column?":1(jsonb!null)
  ├── cardinality: [1 - 1]
  ├── key: ()
  ├── fd: ()-->(1)
- └── ('[]',)
+ ├── values
+ │    ├── cardinality: [1 - 1]
+ │    ├── key: ()
+ │    └── tuple [type=tuple]
+ └── projections
+      └── const: '[]' [type=jsonb]
 
 # --------------------------------------------------
 # FoldMultOne, FoldOneMult
 # --------------------------------------------------
 
 # Add columns to prevent NormalizeVar from swapping left and right.
-norm expect=(FoldMultOne,FoldOneMult)
+opt expect=(FoldMultOne,FoldOneMult)
 SELECT
     (a.i + a.i) * 1 AS r, 1 * (a.i + a.i) AS s,
     (a.f + a.f) * 1 AS t, 1 * (a.f + a.f) AS u,
@@ -109,46 +84,22 @@ SELECT
 FROM a
 ----
 project
- ├── columns: r:8 s:9 t:10 u:11 v:12 w:13
- ├── immutable
+ ├── columns: r:6(int) s:7(int) t:8(float) u:9(float) v:10(decimal) w:11(decimal)
  ├── scan a
- │    └── columns: i:2 f:3 d:4
- └── projections
-      ├── i:2 + i:2 [as=r:8, outer=(2), immutable]
-      ├── i:2 + i:2 [as=s:9, outer=(2), immutable]
-      ├── f:3 + f:3 [as=t:10, outer=(3), immutable]
-      ├── f:3 + f:3 [as=u:11, outer=(3), immutable]
-      ├── d:4 + d:4 [as=v:12, outer=(4), immutable]
-      └── d:4 + d:4 [as=w:13, outer=(4), immutable]
-
-# Regression test for #35113.
-norm expect=FoldMultOne
-SELECT i * 1::decimal FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
-
-norm expect=FoldOneMult
-SELECT 1::decimal * i FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
+ │    └── columns: i:2(int) f:3(float) d:4(decimal)
+ └── projections [outer=(2-4)]
+      ├── i + i [type=int, outer=(2)]
+      ├── i + i [type=int, outer=(2)]
+      ├── f + f [type=float, outer=(3)]
+      ├── f + f [type=float, outer=(3)]
+      ├── d + d [type=decimal, outer=(4)]
+      └── d + d [type=decimal, outer=(4)]
 
 # --------------------------------------------------
 # FoldDivOne
 # --------------------------------------------------
 
-norm expect=FoldDivOne
+opt expect=FoldDivOne
 SELECT
     a.i / 1 AS r,
     a.f / 1 AS s,
@@ -156,42 +107,18 @@ SELECT
 FROM a
 ----
 project
- ├── columns: r:8 s:9 t:10
- ├── immutable
+ ├── columns: r:6(decimal) s:7(float) t:8(decimal)
  ├── scan a
- │    └── columns: i:2 f:3 d:4
- └── projections
-      ├── i:2::DECIMAL [as=r:8, outer=(2), immutable]
-      ├── f:3 [as=s:9, outer=(3)]
-      └── d:4 [as=t:10, outer=(4)]
-
-# Regression test for #35113.
-norm expect=FoldDivOne
-SELECT i / 1::decimal FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
-
-norm expect=FoldDivOne
-SELECT i / 1::int8 FROM a
-----
-project
- ├── columns: "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2::DECIMAL [as="?column?":8, outer=(2), immutable]
+ │    └── columns: i:2(int) f:3(float) d:4(decimal)
+ └── projections [outer=(2-4)]
+      ├── variable: i [type=int, outer=(2)]
+      ├── variable: f [type=float, outer=(3)]
+      └── variable: d [type=decimal, outer=(4)]
 
 # --------------------------------------------------
 # InvertMinus
 # --------------------------------------------------
-norm expect=InvertMinus
+opt expect=InvertMinus
 SELECT
     -(a.f - a.f) AS r,
     -(a.d - a.i) AS s,
@@ -199,24 +126,23 @@ SELECT
 FROM a
 ----
 project
- ├── columns: r:8 s:9 t:10
- ├── immutable
+ ├── columns: r:6(float) s:7(decimal) t:8(interval)
  ├── scan a
- │    └── columns: i:2 f:3 d:4 a.t:5
- └── projections
-      ├── f:3 - f:3 [as=r:8, outer=(3), immutable]
-      ├── i:2 - d:4 [as=s:9, outer=(2,4), immutable]
-      └── a.t:5 - a.t:5 [as=t:10, outer=(5), immutable]
+ │    └── columns: i:2(int) f:3(float) d:4(decimal) a.t:5(time)
+ └── projections [outer=(2-5)]
+      ├── f - f [type=float, outer=(3)]
+      ├── i - d [type=decimal, outer=(2,4)]
+      └── a.t - a.t [type=interval, outer=(5)]
 
 # --------------------------------------------------
 # EliminateUnaryMinus
 # --------------------------------------------------
-norm expect=EliminateUnaryMinus
+opt expect=EliminateUnaryMinus
 SELECT -(-a.i::int) AS r FROM a
 ----
 project
- ├── columns: r:8
+ ├── columns: r:6(int)
  ├── scan a
- │    └── columns: i:2
- └── projections
-      └── i:2 [as=r:8, outer=(2)]
+ │    └── columns: i:2(int)
+ └── projections [outer=(2)]
+      └── variable: i [type=int, outer=(2)]

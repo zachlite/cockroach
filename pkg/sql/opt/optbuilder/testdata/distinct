@@ -12,115 +12,134 @@ CREATE TABLE xyz (
   FAMILY (z)
 )
 ----
+TABLE xyz
+ ├── x int not null
+ ├── y int
+ ├── z float
+ ├── INDEX primary
+ │    └── x int not null
+ ├── INDEX xy
+ │    ├── x int not null
+ │    └── y int
+ └── INDEX zyx
+      ├── z float
+      ├── y int
+      └── x int not null
 
 build
 SELECT y, z FROM xyz
 ----
 project
- ├── columns: y:2 z:3
+ ├── columns: y:2(int) z:3(float)
  └── scan xyz
-      └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT y, z FROM xyz
 ----
 distinct-on
- ├── columns: y:2 z:3
- ├── grouping columns: y:2 z:3
+ ├── columns: y:2(int) z:3(float)
+ ├── grouping columns: y:2(int) z:3(float)
  └── project
-      ├── columns: y:2 z:3
+      ├── columns: y:2(int) z:3(float)
       └── scan xyz
-           └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT y FROM (SELECT DISTINCT y, z FROM xyz)
 ----
 project
- ├── columns: y:2
+ ├── columns: y:2(int)
  └── distinct-on
-      ├── columns: y:2 z:3
-      ├── grouping columns: y:2 z:3
+      ├── columns: y:2(int) z:3(float)
+      ├── grouping columns: y:2(int) z:3(float)
       └── project
-           ├── columns: y:2 z:3
+           ├── columns: y:2(int) z:3(float)
            └── scan xyz
-                └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+                └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT y, z FROM xyz ORDER BY z
 ----
-sort
- ├── columns: y:2 z:3
+distinct-on
+ ├── columns: y:2(int) z:3(float)
+ ├── grouping columns: y:2(int) z:3(float)
  ├── ordering: +3
- └── distinct-on
-      ├── columns: y:2 z:3
-      ├── grouping columns: y:2 z:3
+ └── sort
+      ├── columns: y:2(int) z:3(float)
+      ├── ordering: +3
       └── project
-           ├── columns: y:2 z:3
+           ├── columns: y:2(int) z:3(float)
            └── scan xyz
-                └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+                └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT y, z FROM xyz ORDER BY y
 ----
-sort
- ├── columns: y:2 z:3
+distinct-on
+ ├── columns: y:2(int) z:3(float)
+ ├── grouping columns: y:2(int) z:3(float)
  ├── ordering: +2
- └── distinct-on
-      ├── columns: y:2 z:3
-      ├── grouping columns: y:2 z:3
+ └── sort
+      ├── columns: y:2(int) z:3(float)
+      ├── ordering: +2
       └── project
-           ├── columns: y:2 z:3
+           ├── columns: y:2(int) z:3(float)
            └── scan xyz
-                └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+                └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT y, z FROM xyz ORDER BY y, z
 ----
 distinct-on
- ├── columns: y:2 z:3
- ├── grouping columns: y:2 z:3
+ ├── columns: y:2(int) z:3(float)
+ ├── grouping columns: y:2(int) z:3(float)
  ├── ordering: +2,+3
  └── sort
-      ├── columns: y:2 z:3
+      ├── columns: y:2(int) z:3(float)
       ├── ordering: +2,+3
       └── project
-           ├── columns: y:2 z:3
+           ├── columns: y:2(int) z:3(float)
            └── scan xyz
-                └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+                └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT y + x AS r FROM xyz ORDER by (y + x)
 ----
 distinct-on
- ├── columns: r:6
- ├── grouping columns: r:6
- ├── ordering: +6
+ ├── columns: r:4(int)
+ ├── grouping columns: r:4(int)
+ ├── ordering: +4
  └── sort
-      ├── columns: r:6
-      ├── ordering: +6
+      ├── columns: r:4(int)
+      ├── ordering: +4
       └── project
-           ├── columns: r:6
+           ├── columns: r:4(int)
            ├── scan xyz
-           │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           │    └── columns: x:1(int!null) y:2(int) z:3(float)
            └── projections
-                └── y:2 + x:1 [as=r:6]
+                └── plus [type=int]
+                     ├── variable: y [type=int]
+                     └── variable: x [type=int]
 
 build
 SELECT DISTINCT y + x AS r FROM xyz ORDER BY y + x
 ----
 distinct-on
- ├── columns: r:6
- ├── grouping columns: r:6
- ├── ordering: +6
+ ├── columns: r:4(int)
+ ├── grouping columns: r:4(int)
+ ├── ordering: +4
  └── sort
-      ├── columns: r:6
-      ├── ordering: +6
+      ├── columns: r:4(int)
+      ├── ordering: +4
       └── project
-           ├── columns: r:6
+           ├── columns: r:4(int)
            ├── scan xyz
-           │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           │    └── columns: x:1(int!null) y:2(int) z:3(float)
            └── projections
-                └── y:2 + x:1 [as=r:6]
+                └── plus [type=int]
+                     ├── variable: y [type=int]
+                     └── variable: x [type=int]
 
 build
 SELECT DISTINCT y + z FROM xyz ORDER BY y + z
@@ -128,7 +147,9 @@ SELECT DISTINCT y + z FROM xyz ORDER BY y + z
 error (22023): unsupported binary operator: <int> + <float>
 
 # This query causes an error in Postgres, and the optimizer has followed
-# that lead.
+# that lead. However, it is supported by the heuristic planner in CockroachDB
+# with the semantics:
+#   SELECT y AS w FROM t GROUP BY y ORDER BY min(z);
 build
 SELECT DISTINCT y AS w FROM xyz ORDER by z
 ----
@@ -138,158 +159,168 @@ build
 SELECT DISTINCT y AS w FROM xyz ORDER by y
 ----
 sort
- ├── columns: w:2
+ ├── columns: w:2(int)
  ├── ordering: +2
  └── distinct-on
-      ├── columns: y:2
-      ├── grouping columns: y:2
+      ├── columns: y:2(int)
+      ├── grouping columns: y:2(int)
       └── project
-           ├── columns: y:2
+           ├── columns: y:2(int)
            └── scan xyz
-                └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+                └── columns: x:1(int!null) y:2(int) z:3(float)
 
 build
 SELECT DISTINCT (y,z) AS r FROM xyz
 ----
 distinct-on
- ├── columns: r:6
- ├── grouping columns: r:6
+ ├── columns: r:4(tuple{int, float})
+ ├── grouping columns: r:4(tuple{int, float})
  └── project
-      ├── columns: r:6
+      ├── columns: r:4(tuple{int, float})
       ├── scan xyz
-      │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: x:1(int!null) y:2(int) z:3(float)
       └── projections
-           └── (y:2, z:3) [as=r:6]
+           └── tuple [type=tuple{int, float}]
+                ├── variable: y [type=int]
+                └── variable: z [type=float]
 
 build
 SELECT count(*) FROM (SELECT DISTINCT y FROM xyz)
 ----
 scalar-group-by
- ├── columns: count:6!null
+ ├── columns: count:4(int)
  ├── project
  │    └── distinct-on
- │         ├── columns: y:2
- │         ├── grouping columns: y:2
+ │         ├── columns: y:2(int)
+ │         ├── grouping columns: y:2(int)
  │         └── project
- │              ├── columns: y:2
+ │              ├── columns: y:2(int)
  │              └── scan xyz
- │                   └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+ │                   └── columns: x:1(int!null) y:2(int) z:3(float)
  └── aggregations
-      └── count-rows [as=count_rows:6]
+      └── count-rows [type=int]
 
 build
 SELECT DISTINCT x FROM xyz WHERE x > 0
 ----
 distinct-on
- ├── columns: x:1!null
- ├── grouping columns: x:1!null
+ ├── columns: x:1(int!null)
+ ├── grouping columns: x:1(int!null)
  └── project
-      ├── columns: x:1!null
+      ├── columns: x:1(int!null)
       └── select
-           ├── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           ├── columns: x:1(int!null) y:2(int) z:3(float)
            ├── scan xyz
-           │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
-           └── filters
-                └── x:1 > 0
+           │    └── columns: x:1(int!null) y:2(int) z:3(float)
+           └── filters [type=bool]
+                └── gt [type=bool]
+                     ├── variable: x [type=int]
+                     └── const: 0 [type=int]
 
 build
 SELECT DISTINCT z FROM xyz WHERE x > 0
 ----
 distinct-on
- ├── columns: z:3
- ├── grouping columns: z:3
+ ├── columns: z:3(float)
+ ├── grouping columns: z:3(float)
  └── project
-      ├── columns: z:3
+      ├── columns: z:3(float)
       └── select
-           ├── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           ├── columns: x:1(int!null) y:2(int) z:3(float)
            ├── scan xyz
-           │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
-           └── filters
-                └── x:1 > 0
+           │    └── columns: x:1(int!null) y:2(int) z:3(float)
+           └── filters [type=bool]
+                └── gt [type=bool]
+                     ├── variable: x [type=int]
+                     └── const: 0 [type=int]
 
 build
 SELECT DISTINCT max(x) FROM xyz GROUP BY x
 ----
 distinct-on
- ├── columns: max:6!null
- ├── grouping columns: max:6!null
+ ├── columns: max:4(int)
+ ├── grouping columns: max:4(int)
  └── project
-      ├── columns: max:6!null
+      ├── columns: max:4(int)
       └── group-by
-           ├── columns: x:1!null max:6!null
-           ├── grouping columns: x:1!null
+           ├── columns: x:1(int!null) max:4(int)
+           ├── grouping columns: x:1(int!null)
            ├── project
-           │    ├── columns: x:1!null
+           │    ├── columns: x:1(int!null)
            │    └── scan xyz
-           │         └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+           │         └── columns: x:1(int!null) y:2(int) z:3(float)
            └── aggregations
-                └── max [as=max:6]
-                     └── x:1
+                └── max [type=int]
+                     └── variable: x [type=int]
 
 build
 SELECT DISTINCT x+y AS r FROM xyz
 ----
 distinct-on
- ├── columns: r:6
- ├── grouping columns: r:6
+ ├── columns: r:4(int)
+ ├── grouping columns: r:4(int)
  └── project
-      ├── columns: r:6
+      ├── columns: r:4(int)
       ├── scan xyz
-      │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: x:1(int!null) y:2(int) z:3(float)
       └── projections
-           └── x:1 + y:2 [as=r:6]
+           └── plus [type=int]
+                ├── variable: x [type=int]
+                └── variable: y [type=int]
 
 build
 SELECT DISTINCT 3 r FROM xyz
 ----
 distinct-on
- ├── columns: r:6!null
- ├── grouping columns: r:6!null
+ ├── columns: r:4(int!null)
+ ├── grouping columns: r:4(int!null)
  └── project
-      ├── columns: r:6!null
+      ├── columns: r:4(int!null)
       ├── scan xyz
-      │    └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: x:1(int!null) y:2(int) z:3(float)
       └── projections
-           └── 3 [as=r:6]
+           └── const: 3 [type=int]
 
 build
 SELECT DISTINCT 3 r
 ----
 distinct-on
- ├── columns: r:1!null
- ├── grouping columns: r:1!null
+ ├── columns: r:1(int!null)
+ ├── grouping columns: r:1(int!null)
  └── project
-      ├── columns: r:1!null
+      ├── columns: r:1(int!null)
       ├── values
-      │    └── ()
+      │    └── tuple [type=tuple]
       └── projections
-           └── 3 [as=r:1]
+           └── const: 3 [type=int]
 
 build
 SELECT DISTINCT max(z), x+y AS r, 3 AS s FROM xyz GROUP BY x, y HAVING y > 4
 ----
 distinct-on
- ├── columns: max:6 r:7!null s:8!null
- ├── grouping columns: max:6 r:7!null s:8!null
+ ├── columns: max:4(float) r:5(int) s:6(int!null)
+ ├── grouping columns: max:4(float) r:5(int) s:6(int!null)
  └── project
-      ├── columns: r:7!null s:8!null max:6
+      ├── columns: r:5(int) s:6(int!null) max:4(float)
       ├── select
-      │    ├── columns: x:1!null y:2!null max:6
+      │    ├── columns: x:1(int!null) y:2(int!null) max:4(float)
       │    ├── group-by
-      │    │    ├── columns: x:1!null y:2 max:6
-      │    │    ├── grouping columns: x:1!null y:2
-      │    │    ├── project
-      │    │    │    ├── columns: x:1!null y:2 z:3
-      │    │    │    └── scan xyz
-      │    │    │         └── columns: x:1!null y:2 z:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    │    ├── columns: x:1(int!null) y:2(int) max:4(float)
+      │    │    ├── grouping columns: x:1(int!null) y:2(int)
+      │    │    ├── scan xyz
+      │    │    │    └── columns: x:1(int!null) y:2(int) z:3(float)
       │    │    └── aggregations
-      │    │         └── max [as=max:6]
-      │    │              └── z:3
-      │    └── filters
-      │         └── y:2 > 4
+      │    │         └── max [type=float]
+      │    │              └── variable: z [type=float]
+      │    └── filters [type=bool]
+      │         └── gt [type=bool]
+      │              ├── variable: y [type=int]
+      │              └── const: 4 [type=int]
       └── projections
-           ├── x:1 + y:2 [as=r:7]
-           └── 3 [as=s:8]
+           ├── plus [type=int]
+           │    ├── variable: x [type=int]
+           │    └── variable: y [type=int]
+           └── const: 3 [type=int]
 
 exec-ddl
 CREATE TABLE abcd (
@@ -301,19 +332,34 @@ CREATE TABLE abcd (
   UNIQUE INDEX (d, b)
 )
 ----
+TABLE abcd
+ ├── a int not null
+ ├── b int not null
+ ├── c int not null
+ ├── d int not null
+ ├── INDEX primary
+ │    ├── a int not null
+ │    ├── b int not null
+ │    └── c int not null
+ └── INDEX secondary
+      ├── d int not null
+      ├── b int not null
+      ├── a int not null (storing)
+      └── c int not null (storing)
 
 build
 SELECT DISTINCT 1 AS x, d, b FROM abcd ORDER BY d, b
 ----
-sort
- ├── columns: x:7!null d:4!null b:2!null
+distinct-on
+ ├── columns: x:5(int!null) d:4(int!null) b:2(int!null)
+ ├── grouping columns: b:2(int!null) d:4(int!null) x:5(int!null)
  ├── ordering: +4,+2
- └── distinct-on
-      ├── columns: b:2!null d:4!null x:7!null
-      ├── grouping columns: b:2!null d:4!null x:7!null
+ └── sort
+      ├── columns: b:2(int!null) d:4(int!null) x:5(int!null)
+      ├── ordering: +4,+2
       └── project
-           ├── columns: x:7!null b:2!null d:4!null
+           ├── columns: x:5(int!null) b:2(int!null) d:4(int!null)
            ├── scan abcd
-           │    └── columns: a:1!null b:2!null c:3!null d:4!null crdb_internal_mvcc_timestamp:5 tableoid:6
+           │    └── columns: a:1(int!null) b:2(int!null) c:3(int!null) d:4(int!null)
            └── projections
-                └── 1 [as=x:7]
+                └── const: 1 [type=int]

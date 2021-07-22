@@ -1,20 +1,25 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package gossip
 
 import (
+	"bytes"
+	"fmt"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/redact"
 )
 
 // Metrics contains gossip metrics used per node and server.
@@ -37,7 +42,7 @@ func makeMetrics() Metrics {
 }
 
 func (m Metrics) String() string {
-	return redact.StringWithoutMarkers(m.Snapshot())
+	return m.Snapshot().String()
 }
 
 // Snapshot returns a snapshot of the metrics.
@@ -52,81 +57,54 @@ func (m Metrics) Snapshot() MetricSnap {
 }
 
 func (m MetricSnap) String() string {
-	return redact.StringWithoutMarkers(m)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (m MetricSnap) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("infos %d/%d sent/received, bytes %dB/%dB sent/received",
-		m.InfosSent, m.InfosReceived,
-		m.BytesSent, m.BytesReceived)
+	s := fmt.Sprintf("infos %d/%d sent/received, bytes %dB/%dB sent/received",
+		m.InfosSent, m.InfosReceived, m.BytesSent, m.BytesReceived)
 	if m.ConnsRefused > 0 {
-		w.Printf(", refused %d conns", m.ConnsRefused)
+		s += fmt.Sprintf(", refused %d conns", m.ConnsRefused)
 	}
+	return s
 }
 
 func (c OutgoingConnStatus) String() string {
-	return redact.StringWithoutMarkers(c)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (c OutgoingConnStatus) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("%d: %s (%s: %s)",
-		c.NodeID, c.Address,
-		roundSecs(time.Duration(c.AgeNanos)), c.MetricSnap)
+	return fmt.Sprintf("%d: %s (%s: %s)",
+		c.NodeID, c.Address, roundSecs(time.Duration(c.AgeNanos)), c.MetricSnap)
 }
 
 func (c ClientStatus) String() string {
-	return redact.StringWithoutMarkers(c)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (c ClientStatus) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("gossip client (%d/%d cur/max conns)\n",
-		len(c.ConnStatus), c.MaxConns)
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "gossip client (%d/%d cur/max conns)\n", len(c.ConnStatus), c.MaxConns)
 	for _, conn := range c.ConnStatus {
-		w.Printf("  %s\n", conn)
+		fmt.Fprintf(&buf, "  %s\n", conn)
 	}
+	return buf.String()
 }
 
 func (c ConnStatus) String() string {
-	return redact.StringWithoutMarkers(c)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (c ConnStatus) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("%d: %s (%s)", c.NodeID, c.Address,
-		roundSecs(time.Duration(c.AgeNanos)))
+	return fmt.Sprintf("%d: %s (%s)", c.NodeID, c.Address, roundSecs(time.Duration(c.AgeNanos)))
 }
 
 func (s ServerStatus) String() string {
-	return redact.StringWithoutMarkers(s)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (s ServerStatus) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("gossip server (%d/%d cur/max conns, %s)\n",
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "gossip server (%d/%d cur/max conns, %s)\n",
 		len(s.ConnStatus), s.MaxConns, s.MetricSnap)
 	for _, conn := range s.ConnStatus {
-		w.Printf("  %s\n", conn)
+		fmt.Fprintf(&buf, "  %s\n", conn)
 	}
+	return buf.String()
 }
 
 func (c Connectivity) String() string {
-	return redact.StringWithoutMarkers(c)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (c Connectivity) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("gossip connectivity\n")
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "gossip connectivity\n")
 	if c.SentinelNodeID != 0 {
-		w.Printf("  n%d [sentinel];\n", c.SentinelNodeID)
+		fmt.Fprintf(&buf, "  n%d [sentinel];\n", c.SentinelNodeID)
 	}
 	if len(c.ClientConns) > 0 {
-		w.SafeRune(' ')
+		fmt.Fprintf(&buf, " ")
 		for _, conn := range c.ClientConns {
-			w.Printf(" n%d -> n%d;", conn.SourceID, conn.TargetID)
+			fmt.Fprintf(&buf, " n%d -> n%d;", conn.SourceID, conn.TargetID)
 		}
-		w.SafeRune('\n')
+		fmt.Fprintf(&buf, "\n")
 	}
+	return buf.String()
 }

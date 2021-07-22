@@ -1,22 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
-import "github.com/cockroachdb/cockroach/pkg/util/ring"
+import (
+	"github.com/cockroachdb/cockroach/pkg/util/ring"
+)
 
 // PeerGroupChecker can check if a pair of row indices within a partition are
-// in the same peer group. It also returns an error if it occurs while checking
-// the peer groups.
+// in the same peer group.
 type PeerGroupChecker interface {
-	InSameGroup(i, j int) (bool, error)
+	InSameGroup(i, j int) bool
 }
 
 // peerGroup contains information about a single peer group.
@@ -43,9 +48,8 @@ type PeerGroupsIndicesHelper struct {
 }
 
 // Init computes all peer groups necessary to perform calculations of a window
-// function over the first row of the partition. It returns any error if it
-// occurs.
-func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGroupChecker) error {
+// function over the first row of the partition.
+func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGroupChecker) {
 	// We first reset the helper to reuse the same one for all partitions when
 	// computing a particular window function.
 	p.groups.Reset()
@@ -58,7 +62,7 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 	p.peerGrouper = peerGrouper
 	startIdxOfFirstPeerGroupWithinFrame := 0
 	if wfr.Frame != nil && wfr.Frame.Mode == GROUPS && wfr.Frame.Bounds.StartBound.BoundType == OffsetFollowing {
-		// In GROUPS mode with OFFSET_FOLLOWING as a start bound, 'peerGroupOffset'
+		// In GROUPS mode with OFFSET_PRECEDING as a start bound, 'peerGroupOffset'
 		// number of peer groups needs to be processed upfront before we get to
 		// peer groups that will be within a frame of the first row.
 		// If start bound is of type:
@@ -81,9 +85,7 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 			p.groups.AddLast(group)
 			for ; group.firstPeerIdx+group.rowCount < wfr.PartitionSize(); group.rowCount++ {
 				idx := group.firstPeerIdx + group.rowCount
-				if sameGroup, err := p.peerGrouper.InSameGroup(idx-1, idx); err != nil {
-					return err
-				} else if !sameGroup {
+				if !p.peerGrouper.InSameGroup(idx, idx-1) {
 					break
 				}
 			}
@@ -93,7 +95,7 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 		if group.firstPeerIdx == wfr.PartitionSize() {
 			// Frame starts after all peer groups of the partition.
 			p.allPeerGroupsSkipped = true
-			return nil
+			return
 		}
 
 		startIdxOfFirstPeerGroupWithinFrame = group.firstPeerIdx
@@ -104,15 +106,13 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 	p.groups.AddLast(group)
 	for ; group.firstPeerIdx+group.rowCount < wfr.PartitionSize(); group.rowCount++ {
 		idx := group.firstPeerIdx + group.rowCount
-		if sameGroup, err := p.peerGrouper.InSameGroup(idx-1, idx); err != nil {
-			return err
-		} else if !sameGroup {
+		if !p.peerGrouper.InSameGroup(idx, idx-1) {
 			break
 		}
 	}
 	if group.firstPeerIdx+group.rowCount == wfr.PartitionSize() {
 		p.allRowsProcessed = true
-		return nil
+		return
 	}
 
 	if wfr.Frame != nil && wfr.Frame.Mode == GROUPS && wfr.Frame.Bounds.EndBound != nil && wfr.Frame.Bounds.EndBound.BoundType == OffsetFollowing {
@@ -130,9 +130,7 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 			p.groups.AddLast(group)
 			for ; group.firstPeerIdx+group.rowCount < wfr.PartitionSize(); group.rowCount++ {
 				idx := group.firstPeerIdx + group.rowCount
-				if sameGroup, err := p.peerGrouper.InSameGroup(idx-1, idx); err != nil {
-					return err
-				} else if !sameGroup {
+				if !p.peerGrouper.InSameGroup(idx, idx-1) {
 					break
 				}
 			}
@@ -142,17 +140,15 @@ func (p *PeerGroupsIndicesHelper) Init(wfr *WindowFrameRun, peerGrouper PeerGrou
 			p.allRowsProcessed = true
 		}
 	}
-	return nil
 }
 
 // Update should be called after a window function has been computed over all
 // rows in wfr.CurRowPeerGroupNum peer group. If not all rows have been already
-// processed, it computes the next peer group. It returns any error if it
-// occurs.
-func (p *PeerGroupsIndicesHelper) Update(wfr *WindowFrameRun) error {
+// processed, it computes the next peer group.
+func (p *PeerGroupsIndicesHelper) Update(wfr *WindowFrameRun) {
 	if p.allPeerGroupsSkipped {
 		// No peer groups to process.
-		return nil
+		return
 	}
 
 	// nextPeerGroupStartIdx is the index of the first row that we haven't
@@ -180,7 +176,7 @@ func (p *PeerGroupsIndicesHelper) Update(wfr *WindowFrameRun) error {
 
 	if p.allRowsProcessed {
 		// No more peer groups to process.
-		return nil
+		return
 	}
 
 	// Compute the next peer group that is just entering the frame.
@@ -188,21 +184,25 @@ func (p *PeerGroupsIndicesHelper) Update(wfr *WindowFrameRun) error {
 	p.groups.AddLast(peerGroup)
 	for ; peerGroup.firstPeerIdx+peerGroup.rowCount < wfr.PartitionSize(); peerGroup.rowCount++ {
 		idx := peerGroup.firstPeerIdx + peerGroup.rowCount
-		if sameGroup, err := p.peerGrouper.InSameGroup(idx-1, idx); err != nil {
-			return err
-		} else if !sameGroup {
+		if !p.peerGrouper.InSameGroup(idx, idx-1) {
 			break
 		}
 	}
 	if peerGroup.firstPeerIdx+peerGroup.rowCount == wfr.PartitionSize() {
 		p.allRowsProcessed = true
 	}
-	return nil
 }
 
 // GetFirstPeerIdx returns index of the first peer within peer group of number
 // peerGroupNum (counting from 0).
 func (p *PeerGroupsIndicesHelper) GetFirstPeerIdx(peerGroupNum int) int {
+	if p.allPeerGroupsSkipped {
+		// Special case: we have skipped all peer groups in Init, so the frame is
+		// always empty. It happens only with frames like GROUPS 100 FOLLOWING
+		// which (if we have less than 100 peer groups total) behaves exactly like
+		// GROUPS UNBOUNDED FOLLOWING (if it were allowed).
+		return p.unboundedFollowing
+	}
 	posInBuffer := peerGroupNum - p.headPeerGroupNum
 	if posInBuffer < 0 || p.groups.Len() < posInBuffer {
 		panic("peerGroupNum out of bounds")
@@ -213,6 +213,12 @@ func (p *PeerGroupsIndicesHelper) GetFirstPeerIdx(peerGroupNum int) int {
 // GetRowCount returns the number of rows within peer group of number
 // peerGroupNum (counting from 0).
 func (p *PeerGroupsIndicesHelper) GetRowCount(peerGroupNum int) int {
+	if p.allPeerGroupsSkipped {
+		// Special case: we have skipped all peer groups in Init, so the frame is
+		// always empty. It happens only with frames like GROUPS 100 FOLLOWING
+		// if we have less than 100 peer groups total.
+		return 0
+	}
 	posInBuffer := peerGroupNum - p.headPeerGroupNum
 	if posInBuffer < 0 || p.groups.Len() < posInBuffer {
 		panic("peerGroupNum out of bounds")

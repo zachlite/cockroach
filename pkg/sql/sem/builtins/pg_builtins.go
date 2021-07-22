@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package builtins
 
@@ -15,24 +19,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/lib/pq/oid"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/coltypes"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ipaddr"
-	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // This file contains builtin functions that we implement primarily for
@@ -52,8 +49,7 @@ func makeNotUsableFalseBuiltin() builtinDefinition {
 				Fn: func(*tree.EvalContext, tree.Datums) (tree.Datum, error) {
 					return tree.DBoolFalse, nil
 				},
-				Info:       notUsableInfo,
-				Volatility: tree.VolatilityVolatile,
+				Info: notUsableInfo,
 			},
 		},
 	}
@@ -61,7 +57,7 @@ func makeNotUsableFalseBuiltin() builtinDefinition {
 
 // typeBuiltinsHaveUnderscore is a map to keep track of which types have i/o
 // builtins with underscores in between their type name and the i/o builtin
-// name, like date_in vs int8in. There seems to be no other way to
+// name, like date_in vs int8int. There seems to be no other way to
 // programmatically determine whether or not this underscore is present, hence
 // the existence of this map.
 var typeBuiltinsHaveUnderscore = map[oid.Oid]struct{}{
@@ -69,41 +65,20 @@ var typeBuiltinsHaveUnderscore = map[oid.Oid]struct{}{
 	types.AnyArray.Oid():    {},
 	types.Date.Oid():        {},
 	types.Time.Oid():        {},
-	types.TimeTZ.Oid():      {},
 	types.Decimal.Oid():     {},
 	types.Interval.Oid():    {},
-	types.Jsonb.Oid():       {},
-	types.Uuid.Oid():        {},
-	types.VarBit.Oid():      {},
-	types.Geometry.Oid():    {},
-	types.Geography.Oid():   {},
-	types.Box2D.Oid():       {},
-	oid.T_bit:               {},
+	types.JSON.Oid():        {},
+	types.UUID.Oid():        {},
 	types.Timestamp.Oid():   {},
 	types.TimestampTZ.Oid(): {},
-	types.AnyTuple.Oid():    {},
+	types.FamTuple.Oid():    {},
 }
-
-// UpdatableCommand matches update operations in postgres.
-type UpdatableCommand tree.DInt
-
-// The following constants are the values for UpdatableCommand enumeration.
-const (
-	UpdateCommand UpdatableCommand = 2 + iota
-	InsertCommand
-	DeleteCommand
-)
-
-var (
-	nonUpdatableEvents = tree.NewDInt(0)
-	allUpdatableEvents = tree.NewDInt((1 << UpdateCommand) | (1 << InsertCommand) | (1 << DeleteCommand))
-)
 
 // PGIOBuiltinPrefix returns the string prefix to a type's IO functions. This
 // is either the type's postgres display name or the type's postgres display
 // name plus an underscore, depending on the type.
-func PGIOBuiltinPrefix(typ *types.T) string {
-	builtinPrefix := typ.PGName()
+func PGIOBuiltinPrefix(typ types.T) string {
+	builtinPrefix := strings.ToLower(oid.TypeName[typ.Oid()])
 	if _, ok := typeBuiltinsHaveUnderscore[typ.Oid()]; ok {
 		return builtinPrefix + "_"
 	}
@@ -113,22 +88,15 @@ func PGIOBuiltinPrefix(typ *types.T) string {
 // initPGBuiltins adds all of the postgres builtins to the Builtins map.
 func initPGBuiltins() {
 	for k, v := range pgBuiltins {
-		if _, exists := builtins[k]; exists {
-			panic("duplicate builtin: " + k)
-		}
 		v.props.Category = categoryCompatibility
 		builtins[k] = v
 	}
 
 	// Make non-array type i/o builtins.
 	for _, typ := range types.OidToType {
-		// Skip most array types. We're doing them separately below.
-		switch typ.Oid() {
-		case oid.T_int2vector, oid.T_oidvector:
-		default:
-			if typ.Family() == types.ArrayFamily {
-				continue
-			}
+		// Skip array types. We're doing them separately below.
+		if typ != types.Any && typ != types.IntVector && typ != types.OidVector && typ.Equivalent(types.AnyArray) {
+			continue
 		}
 		builtinPrefix := PGIOBuiltinPrefix(typ)
 		for name, builtin := range makeTypeIOBuiltins(builtinPrefix, typ) {
@@ -142,21 +110,17 @@ func initPGBuiltins() {
 	for name, builtin := range makeTypeIOBuiltins("anyarray_", types.AnyArray) {
 		builtins[name] = builtin
 	}
-	// Make enum type i/o builtins.
-	for name, builtin := range makeTypeIOBuiltins("enum_", types.AnyEnum) {
-		builtins[name] = builtin
-	}
 
 	// Make crdb_internal.create_regfoo builtins.
-	for _, typ := range []*types.T{types.RegType, types.RegProc, types.RegProcedure, types.RegClass, types.RegNamespace} {
-		typName := typ.SQLStandardName()
+	for _, typ := range []types.TOid{types.RegType, types.RegProc, types.RegProcedure, types.RegClass, types.RegNamespace} {
+		typName := typ.SQLName()
 		builtins["crdb_internal.create_"+typName] = makeCreateRegDef(typ)
 	}
 }
 
-var errUnimplemented = pgerror.New(pgcode.FeatureNotSupported, "unimplemented")
+var errUnimplemented = pgerror.NewError(pgerror.CodeFeatureNotSupportedError, "unimplemented")
 
-func makeTypeIOBuiltin(argTypes tree.TypeList, returnType *types.T) builtinDefinition {
+func makeTypeIOBuiltin(argTypes tree.TypeList, returnType types.T) builtinDefinition {
 	return builtinDefinition{
 		props: tree.FunctionProperties{
 			Category: categoryCompatibility,
@@ -168,12 +132,7 @@ func makeTypeIOBuiltin(argTypes tree.TypeList, returnType *types.T) builtinDefin
 				Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
 					return nil, errUnimplemented
 				},
-				Info:       notUsableInfo,
-				Volatility: tree.VolatilityVolatile,
-				// Ignore validity checks for typeio builtins. We don't
-				// implement these anyway, and they are very hard to special
-				// case.
-				IgnoreVolatilityCheck: true,
+				Info: notUsableInfo,
 			},
 		},
 	}
@@ -183,7 +142,7 @@ func makeTypeIOBuiltin(argTypes tree.TypeList, returnType *types.T) builtinDefin
 // every type: typein, typeout, typerecv, and typsend. All 4 builtins are no-op,
 // and only supported because ORMs sometimes use their names to form a map for
 // client-side type encoding and decoding. See issue #12526 for more details.
-func makeTypeIOBuiltins(builtinPrefix string, typ *types.T) map[string]builtinDefinition {
+func makeTypeIOBuiltins(builtinPrefix string, typ types.T) map[string]builtinDefinition {
 	typname := typ.String()
 	return map[string]builtinDefinition{
 		builtinPrefix + "send": makeTypeIOBuiltin(tree.ArgTypes{{typname, typ}}, types.Bytes),
@@ -254,12 +213,11 @@ func makePGGetIndexDef(argTypes tree.ArgTypes) tree.Overload {
 				return tree.NewDString(""), nil
 			}
 			if len(r) > 1 {
-				return nil, errors.AssertionFailedf("pg_get_indexdef query has more than 1 result row: %+v", r)
+				return nil, pgerror.NewAssertionErrorf("pg_get_indexdef query has more than 1 result row: %+v", r)
 			}
 			return r[0], nil
 		},
-		Info:       notUsableInfo,
-		Volatility: tree.VolatilityStable,
+		Info: notUsableInfo,
 	}
 }
 
@@ -282,8 +240,7 @@ func makePGGetViewDef(argTypes tree.ArgTypes) tree.Overload {
 			}
 			return r[0], nil
 		},
-		Info:       notUsableInfo,
-		Volatility: tree.VolatilityStable,
+		Info: notUsableInfo,
 	}
 }
 
@@ -301,12 +258,11 @@ func makePGGetConstraintDef(argTypes tree.ArgTypes) tree.Overload {
 				return nil, err
 			}
 			if len(r) == 0 {
-				return nil, pgerror.Newf(pgcode.InvalidParameterValue, "unknown constraint (OID=%s)", args[0])
+				return nil, pgerror.NewErrorf(pgerror.CodeInvalidParameterValueError, "unknown constraint (OID=%s)", args[0])
 			}
 			return r[0], nil
 		},
-		Info:       notUsableInfo,
-		Volatility: tree.VolatilityStable,
+		Info: notUsableInfo,
 	}
 }
 
@@ -314,10 +270,10 @@ func makePGGetConstraintDef(argTypes tree.ArgTypes) tree.Overload {
 // accept multiple types.
 type argTypeOpts []struct {
 	Name string
-	Typ  []*types.T
+	Typ  []types.T
 }
 
-var strOrOidTypes = []*types.T{types.String, types.Oid}
+var strOrOidTypes = []types.T{types.String, types.Oid}
 
 // makePGPrivilegeInquiryDef constructs all variations of a specific PG access
 // privilege inquiry function. Each variant has a different signature.
@@ -330,7 +286,7 @@ var strOrOidTypes = []*types.T{types.String, types.Oid}
 func makePGPrivilegeInquiryDef(
 	infoDetail string,
 	objSpecArgs argTypeOpts,
-	fn func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error),
+	fn func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error),
 ) builtinDefinition {
 	// Collect the different argument type variations.
 	//
@@ -376,45 +332,40 @@ func makePGPrivilegeInquiryDef(
 			Types:      argType,
 			ReturnType: tree.FixedReturnType(types.Bool),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				var user security.SQLUsername
+				var user string
 				if withUser {
-					arg := tree.UnwrapDatum(ctx, args[0])
-					userS, err := getNameForArg(ctx, arg, "pg_roles", "rolname")
+					var err error
+					user, err = getNameForArg(ctx, args[0], "pg_roles", "rolname")
 					if err != nil {
 						return nil, err
 					}
-					// Note: the username in pg_roles is already normalized, so
-					// we can safely turn it into a SQLUsername without
-					// re-normalization.
-					user = security.MakeSQLUsernameFromPreNormalizedString(userS)
-					if user.Undefined() {
-						if _, ok := arg.(*tree.DOid); ok {
+					if user == "" {
+						if _, ok := args[0].(*tree.DOid); ok {
 							// Postgres returns falseifn no matching user is
 							// found when given an OID.
 							return tree.DBoolFalse, nil
 						}
-						return nil, pgerror.Newf(pgcode.UndefinedObject,
-							"role %s does not exist", arg)
+						return nil, pgerror.NewErrorf(pgerror.CodeUndefinedObjectError,
+							"role %s does not exist", args[0])
 					}
 
 					// Remove the first argument.
 					args = args[1:]
 				} else {
-					if ctx.SessionData.User().Undefined() {
+					if len(ctx.SessionData.User) == 0 {
 						// Wut... is this possible?
 						return tree.DNull, nil
 					}
-					user = ctx.SessionData.User()
+					user = ctx.SessionData.User
 				}
 				return fn(ctx, args, user)
 			},
-			Info:       fmt.Sprintf(infoFmt, infoDetail),
-			Volatility: tree.VolatilityStable,
+			Info: fmt.Sprintf(infoFmt, infoDetail),
 		})
 	}
 	return builtinDefinition{
 		props: tree.FunctionProperties{
-			DistsqlBlocklist: true,
+			DistsqlBlacklist: true,
 		},
 		overloads: variants,
 	}
@@ -431,7 +382,7 @@ func getNameForArg(ctx *tree.EvalContext, arg tree.Datum, pgTable, pgCol string)
 	case *tree.DOid:
 		query = fmt.Sprintf("SELECT %s FROM pg_catalog.%s WHERE oid = $1 LIMIT 1", pgCol, pgTable)
 	default:
-		return "", errors.AssertionFailedf("unexpected arg type %T", t)
+		log.Fatalf(ctx.Ctx(), "unexpected arg type %T", t)
 	}
 	r, err := ctx.InternalExecutor.QueryRow(ctx.Ctx(), "get-name-for-arg", ctx.Txn, query, arg)
 	if err != nil || r == nil {
@@ -446,17 +397,17 @@ func getNameForArg(ctx *tree.EvalContext, arg tree.Datum, pgTable, pgCol string)
 func getTableNameForArg(ctx *tree.EvalContext, arg tree.Datum) (*tree.TableName, error) {
 	switch t := arg.(type) {
 	case *tree.DString:
-		tn, err := parser.ParseQualifiedTableName(string(*t))
+		tn, err := ctx.Planner.ParseQualifiedTableName(ctx.Ctx(), string(*t))
 		if err != nil {
 			return nil, err
 		}
-		if _, err := ctx.Planner.ResolveTableName(ctx.Ctx(), tn); err != nil {
+		if err := ctx.Planner.ResolveTableName(ctx.Ctx(), tn); err != nil {
 			return nil, err
 		}
 		if ctx.SessionData.Database != "" && ctx.SessionData.Database != string(tn.CatalogName) {
 			// Postgres does not allow cross-database references in these
 			// functions, so we don't either.
-			return nil, pgerror.Newf(pgcode.FeatureNotSupported,
+			return nil, pgerror.NewErrorf(pgerror.CodeFeatureNotSupportedError,
 				"cross-database references are not implemented: %s", tn)
 		}
 		return tn, nil
@@ -475,8 +426,9 @@ func getTableNameForArg(ctx *tree.EvalContext, arg tree.Datum) (*tree.TableName,
 		tn := tree.MakeTableNameWithSchema(db, schema, table)
 		return &tn, nil
 	default:
-		return nil, errors.AssertionFailedf("unexpected arg type %T", t)
+		log.Fatalf(ctx.Ctx(), "unexpected arg type %T", t)
 	}
+	return nil, nil
 }
 
 // TODO(nvanbenschoten): give this a comment.
@@ -505,7 +457,7 @@ func parsePrivilegeStr(arg tree.Datum, availOpts pgPrivList) (tree.Datum, error)
 	// Check that all privileges are allowed.
 	for _, priv := range privs {
 		if _, ok := availOpts[priv]; !ok {
-			return nil, pgerror.Newf(pgcode.InvalidParameterValue,
+			return nil, pgerror.NewErrorf(pgerror.CodeInvalidParameterValueError,
 				"unrecognized privilege type: %q", priv)
 		}
 	}
@@ -513,7 +465,7 @@ func parsePrivilegeStr(arg tree.Datum, availOpts pgPrivList) (tree.Datum, error)
 	for _, priv := range privs {
 		d, err := availOpts[priv](false /* withGrantOpt */)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "error checking privilege %q", priv)
 		}
 		switch d {
 		case tree.DNull, tree.DBoolFalse:
@@ -521,8 +473,7 @@ func parsePrivilegeStr(arg tree.Datum, availOpts pgPrivList) (tree.Datum, error)
 		case tree.DBoolTrue:
 			continue
 		default:
-			return nil, errors.AssertionFailedf(
-				"unexpected privilege check result %v", d)
+			panic(fmt.Sprintf("unexpected privilege check result %v", d))
 		}
 	}
 	return tree.DBoolTrue, nil
@@ -535,43 +486,24 @@ func parsePrivilegeStr(arg tree.Datum, availOpts pgPrivList) (tree.Datum, error)
 // privilege check should also test whether the privilege is held with grant
 // option.
 func evalPrivilegeCheck(
-	ctx *tree.EvalContext,
-	schema string,
-	infoTable string,
-	user security.SQLUsername,
-	pred string,
-	priv privilege.Kind,
-	withGrantOpt bool,
+	ctx *tree.EvalContext, infoTable, user, pred string, priv privilege.Kind, withGrantOpt bool,
 ) (tree.Datum, error) {
 	privChecks := []privilege.Kind{priv}
 	if withGrantOpt {
 		privChecks = append(privChecks, privilege.GRANT)
 	}
-
-	allRoleMemberships, err := ctx.Planner.MemberOfWithAdminOption(ctx.Context, user)
-	if err != nil {
-		return nil, err
-	}
-
-	// Slice containing all roles user is a direct and indirect member of.
-	allRoles := []string{security.PublicRole, user.Normalized()}
-	for role := range allRoleMemberships {
-		allRoles = append(allRoles, role.Normalized())
-	}
-
 	for _, p := range privChecks {
 		query := fmt.Sprintf(`
 			SELECT bool_or(privilege_type IN ('%s', '%s')) IS TRUE
-			FROM %s.%s WHERE grantee = ANY ($1) AND %s`,
-			privilege.ALL, p, schema, infoTable, pred)
+			FROM information_schema.%s WHERE grantee IN ($1, $2) AND %s`,
+			privilege.ALL, p, infoTable, pred)
+		// TODO(mberhault): "public" is a constant defined in sql/sqlbase, but importing that
+		// would cause a dependency cycle sqlbase -> sem/transform -> sem/builtins -> sqlbase
 		r, err := ctx.InternalExecutor.QueryRow(
-			ctx.Ctx(), "eval-privilege-check", ctx.Txn, query, allRoles,
+			ctx.Ctx(), "eval-privilege-check", ctx.Txn, query, "public", user,
 		)
 		if err != nil {
 			return nil, err
-		}
-		if r == nil {
-			return nil, errors.AssertionFailedf("failed to evaluate privilege check")
 		}
 		switch r[0] {
 		case tree.DBoolFalse:
@@ -579,13 +511,13 @@ func evalPrivilegeCheck(
 		case tree.DBoolTrue:
 			continue
 		default:
-			return nil, errors.AssertionFailedf("unexpected privilege check result %v", r[0])
+			panic(fmt.Sprintf("unexpected privilege check result %v", r[0]))
 		}
 	}
 	return tree.DBoolTrue, nil
 }
 
-func makeCreateRegDef(typ *types.T) builtinDefinition {
+func makeCreateRegDef(typ types.TOid) builtinDefinition {
 	return makeBuiltin(defProps(),
 		tree.Overload{
 			Types: tree.ArgTypes{
@@ -594,10 +526,9 @@ func makeCreateRegDef(typ *types.T) builtinDefinition {
 			},
 			ReturnType: tree.FixedReturnType(typ),
 			Fn: func(_ *tree.EvalContext, d tree.Datums) (tree.Datum, error) {
-				return tree.NewDOidWithName(tree.MustBeDInt(d[0]), typ, string(tree.MustBeDString(d[1]))), nil
+				return tree.NewDOidWithName(tree.MustBeDInt(d[0]), coltypes.OidTypeToColType(typ), string(tree.MustBeDString(d[1]))), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityImmutable,
+			Info: notUsableInfo,
 		},
 	)
 }
@@ -611,8 +542,7 @@ var pgBuiltins = map[string]builtinDefinition{
 			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
 				return tree.NewDInt(-1), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -629,26 +559,7 @@ var pgBuiltins = map[string]builtinDefinition{
 				}
 				return tree.DNull, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// Here getdatabaseencoding just returns UTF8 because,
-	// CockroachDB supports just UTF8 for now.
-	"getdatabaseencoding": makeBuiltin(
-		tree.FunctionProperties{Category: categorySystemInfo},
-		tree.Overload{
-			Types:      tree.ArgTypes{},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				// We only support UTF-8 right now.
-				// If we allow more encodings, we must also change the virtual schema
-				// entry for pg_catalog.pg_database.
-				return datEncodingUTF8ShortName, nil
-			},
-			Info:       "Returns the current encoding name used by the database.",
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -668,8 +579,7 @@ var pgBuiltins = map[string]builtinDefinition{
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return args[0], nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 		tree.Overload{
 			Types: tree.ArgTypes{
@@ -681,134 +591,30 @@ var pgBuiltins = map[string]builtinDefinition{
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return args[0], nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
 	// pg_get_constraintdef functions like SHOW CREATE CONSTRAINT would if we
 	// supported that statement.
-	"pg_get_constraintdef": makeBuiltin(tree.FunctionProperties{DistsqlBlocklist: true},
+	"pg_get_constraintdef": makeBuiltin(tree.FunctionProperties{DistsqlBlacklist: true},
 		makePGGetConstraintDef(tree.ArgTypes{
 			{"constraint_oid", types.Oid}, {"pretty_bool", types.Bool}}),
 		makePGGetConstraintDef(tree.ArgTypes{{"constraint_oid", types.Oid}}),
 	),
 
-	// pg_get_partkeydef is only provided for compatibility and always returns
-	// NULL. It is supposed to return the PARTITION BY clause of a table's
-	// CREATE statement.
-	"pg_get_partkeydef": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return tree.DNull, nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// pg_get_function_result returns the types of the result of an builtin
-	// function. Multi-return builtins currently are returned as anyelement, which
-	// is a known incompatibility with Postgres.
-	// https://www.postgresql.org/docs/11/functions-info.html
-	"pg_get_function_result": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"func_oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				funcOid := tree.MustBeDOid(args[0])
-				t, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "pg_get_function_result",
-					ctx.Txn,
-					`SELECT prorettype::REGTYPE::TEXT FROM pg_proc WHERE oid=$1`, int(funcOid.DInt))
-				if err != nil {
-					return nil, err
-				}
-				if len(t) == 0 {
-					return tree.NewDString(""), nil
-				}
-				return t[0], nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// pg_get_function_identity_arguments returns the argument list necessary to
-	// identify a function, in the form it would need to appear in within ALTER
-	// FUNCTION, for instance. This form omits default values.
-	// https://www.postgresql.org/docs/11/functions-info.html
-	"pg_get_function_identity_arguments": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"func_oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				funcOid := tree.MustBeDOid(args[0])
-				t, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "pg_get_function_identity_arguments",
-					ctx.Txn,
-					`SELECT array_agg(unnest(proargtypes)::REGTYPE::TEXT) FROM pg_proc WHERE oid=$1`, int(funcOid.DInt))
-				if err != nil {
-					return nil, err
-				}
-				if len(t) == 0 || t[0] == tree.DNull {
-					return tree.NewDString(""), nil
-				}
-				arr := tree.MustBeDArray(t[0])
-				var sb strings.Builder
-				for i, elem := range arr.Array {
-					if i > 0 {
-						sb.WriteString(", ")
-					}
-					if elem == tree.DNull {
-						// This shouldn't ever happen, but let's be safe about it.
-						sb.WriteString("NULL")
-						continue
-					}
-					str, ok := tree.AsDString(elem)
-					if !ok {
-						// This also shouldn't happen.
-						sb.WriteString(elem.String())
-						continue
-					}
-					sb.WriteString(string(str))
-				}
-				return tree.NewDString(sb.String()), nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
 	// pg_get_indexdef functions like SHOW CREATE INDEX would if we supported that
 	// statement.
-	"pg_get_indexdef": makeBuiltin(tree.FunctionProperties{DistsqlBlocklist: true},
+	"pg_get_indexdef": makeBuiltin(tree.FunctionProperties{DistsqlBlacklist: true},
 		makePGGetIndexDef(tree.ArgTypes{{"index_oid", types.Oid}}),
 		makePGGetIndexDef(tree.ArgTypes{{"index_oid", types.Oid}, {"column_no", types.Int}, {"pretty_bool", types.Bool}}),
 	),
 
 	// pg_get_viewdef functions like SHOW CREATE VIEW but returns the same format as
 	// PostgreSQL leaving out the actual 'CREATE VIEW table_name AS' portion of the statement.
-	"pg_get_viewdef": makeBuiltin(tree.FunctionProperties{DistsqlBlocklist: true},
+	"pg_get_viewdef": makeBuiltin(tree.FunctionProperties{DistsqlBlacklist: true},
 		makePGGetViewDef(tree.ArgTypes{{"view_oid", types.Oid}}),
 		makePGGetViewDef(tree.ArgTypes{{"view_oid", types.Oid}, {"pretty_bool", types.Bool}}),
-	),
-
-	// pg_my_temp_schema returns the OID of session's temporary schema, or 0 if
-	// none. CockroachDB doesn't support this, so it always returns 0.
-	// https://www.postgresql.org/docs/11/functions-info.html
-	"pg_my_temp_schema": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{},
-			ReturnType: tree.FixedReturnType(types.Oid),
-			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
-				return tree.NewDOid(0), nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
 	),
 
 	// TODO(bram): Make sure the reported type is correct for tuples. See #25523.
@@ -817,14 +623,13 @@ var pgBuiltins = map[string]builtinDefinition{
 			Types:      tree.ArgTypes{{"val", types.Any}},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return tree.NewDString(args[0].ResolvedType().SQLStandardName()), nil
+				return tree.NewDString(args[0].ResolvedType().String()), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
-	"pg_get_userbyid": makeBuiltin(tree.FunctionProperties{DistsqlBlocklist: true},
+	"pg_get_userbyid": makeBuiltin(tree.FunctionProperties{DistsqlBlacklist: true},
 		tree.Overload{
 			Types: tree.ArgTypes{
 				{"role_oid", types.Oid},
@@ -844,12 +649,11 @@ var pgBuiltins = map[string]builtinDefinition{
 				}
 				return t[0], nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
-	"pg_sequence_parameters": makeBuiltin(tree.FunctionProperties{DistsqlBlocklist: true},
+	"pg_sequence_parameters": makeBuiltin(tree.FunctionProperties{DistsqlBlacklist: true},
 		// pg_sequence_parameters is an undocumented Postgres builtin that returns
 		// information about a sequence given its OID. It's nevertheless used by
 		// at least one UI tool, so we provide an implementation for compatibility.
@@ -869,7 +673,7 @@ var pgBuiltins = map[string]builtinDefinition{
 					return nil, err
 				}
 				if len(r) == 0 {
-					return nil, pgerror.Newf(pgcode.UndefinedTable, "unknown sequence (OID=%s)", args[0])
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedTableError, "unknown sequence (OID=%s)", args[0])
 				}
 				seqstart, seqmin, seqmax, seqincrement, seqcycle, seqcache, seqtypid := r[0], r[1], r[2], r[3], r[4], r[5], r[6]
 				seqcycleStr := "t"
@@ -878,54 +682,28 @@ var pgBuiltins = map[string]builtinDefinition{
 				}
 				return tree.NewDString(fmt.Sprintf("(%s,%s,%s,%s,%s,%s,%s)", seqstart, seqmin, seqmax, seqincrement, seqcycleStr, seqcache, seqtypid)), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
-	"format_type": makeBuiltin(tree.FunctionProperties{NullableArgs: true, DistsqlBlocklist: true},
+	"format_type": makeBuiltin(tree.FunctionProperties{NullableArgs: true},
 		tree.Overload{
 			Types:      tree.ArgTypes{{"type_oid", types.Oid}, {"typemod", types.Int}},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				// See format_type.c in Postgres.
 				oidArg := args[0]
 				if oidArg == tree.DNull {
 					return tree.DNull, nil
 				}
-				maybeTypmod := args[1]
-				oid := oid.Oid(int(oidArg.(*tree.DOid).DInt))
-				typ, ok := types.OidToType[oid]
+				typ, ok := types.OidToType[oid.Oid(int(oidArg.(*tree.DOid).DInt))]
 				if !ok {
-					// If the type wasn't statically known, try looking it up as a user
-					// defined type.
-					var err error
-					typ, err = ctx.Planner.ResolveTypeByOID(ctx.Context, oid)
-					if err != nil {
-						// If the error is a descriptor does not exist error, then swallow it.
-						unknown := tree.NewDString(fmt.Sprintf("unknown (OID=%s)", oidArg))
-						switch {
-						case errors.Is(err, catalog.ErrDescriptorNotFound):
-							return unknown, nil
-						case pgerror.GetPGCode(err) == pgcode.UndefinedObject:
-							return unknown, nil
-						default:
-							return nil, err
-						}
-					}
+					return tree.NewDString(fmt.Sprintf("unknown (OID=%s)", oidArg)), nil
 				}
-				var hasTypmod bool
-				var typmod int
-				if maybeTypmod != tree.DNull {
-					hasTypmod = true
-					typmod = int(tree.MustBeDInt(maybeTypmod))
-				}
-				return tree.NewDString(typ.SQLStandardNameWithTypmod(hasTypmod, typmod)), nil
+				return tree.NewDString(typ.SQLName()), nil
 			},
 			Info: "Returns the SQL name of a data type that is " +
 				"identified by its type OID and possibly a type modifier. " +
 				"Currently, the type modifier is ignored.",
-			Volatility: tree.VolatilityStable,
 		},
 	),
 
@@ -933,38 +711,10 @@ var pgBuiltins = map[string]builtinDefinition{
 		tree.Overload{
 			Types:      tree.ArgTypes{{"table_oid", types.Oid}, {"column_number", types.Int}},
 			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				if *args[1].(*tree.DInt) == 0 {
-					// column ID 0 never exists, and we don't want the query
-					// below to pick up the table comment by accident.
-					return tree.DNull, nil
-				}
-				// Note: the following is equivalent to:
-				//
-				// SELECT description FROM pg_catalog.pg_description
-				//  WHERE objoid=$1 AND objsubid=$2 LIMIT 1
-				//
-				// TODO(jordanlewis): Really we'd like to query this directly
-				// on pg_description and let predicate push-down do its job.
-				r, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "pg_get_coldesc",
-					ctx.Txn,
-					`
-SELECT COALESCE(c.comment, pc.comment) FROM system.comments c
-FULL OUTER JOIN crdb_internal.predefined_comments pc
-ON pc.object_id=c.object_id AND pc.sub_id=c.sub_id AND pc.type = c.type
-WHERE c.type=$1::int AND c.object_id=$2::int AND c.sub_id=$3::int LIMIT 1
-`, keys.ColumnCommentType, args[0], args[1])
-				if err != nil {
-					return nil, err
-				}
-				if len(r) == 0 {
-					return tree.DNull, nil
-				}
-				return r[0], nil
+			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
+				return tree.DNull, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -972,23 +722,18 @@ WHERE c.type=$1::int AND c.object_id=$2::int AND c.sub_id=$3::int LIMIT 1
 		tree.Overload{
 			Types:      tree.ArgTypes{{"object_oid", types.Oid}},
 			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return getPgObjDesc(ctx, "", int(args[0].(*tree.DOid).DInt))
+			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
+				return tree.DNull, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 		tree.Overload{
 			Types:      tree.ArgTypes{{"object_oid", types.Oid}, {"catalog_name", types.String}},
 			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return getPgObjDesc(ctx,
-					string(tree.MustBeDString(args[1])),
-					int(args[0].(*tree.DOid).DInt),
-				)
+			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
+				return tree.DNull, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -999,8 +744,7 @@ WHERE c.type=$1::int AND c.object_id=$2::int AND c.sub_id=$3::int LIMIT 1
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.NewDOid(*args[0].(*tree.DInt)), nil
 			},
-			Info:       "Converts an integer to an OID.",
-			Volatility: tree.VolatilityImmutable,
+			Info: "Converts an integer to an OID.",
 		},
 	),
 
@@ -1008,37 +752,10 @@ WHERE c.type=$1::int AND c.object_id=$2::int AND c.sub_id=$3::int LIMIT 1
 		tree.Overload{
 			Types:      tree.ArgTypes{{"object_oid", types.Oid}, {"catalog_name", types.String}},
 			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				catalogName := string(tree.MustBeDString(args[1]))
-				objOid := int(args[0].(*tree.DOid).DInt)
-
-				classOid, ok := getCatalogOidForComments(catalogName)
-				if !ok {
-					// No such catalog - return null, matching pg.
-					return tree.DNull, nil
-				}
-
-				r, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "pg_get_shobjdesc", ctx.Txn,
-					fmt.Sprintf(`
-SELECT description
-  FROM pg_catalog.pg_shdescription
- WHERE objoid = %[1]d
-   AND classoid = %[2]d
- LIMIT 1`,
-						objOid,
-						classOid,
-					))
-				if err != nil {
-					return nil, err
-				}
-				if len(r) == 0 {
-					return tree.DNull, nil
-				}
-				return r[0], nil
+			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
+				return tree.DNull, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1049,8 +766,7 @@ SELECT description
 			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
 				return tree.DBoolTrue, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityVolatile,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1061,8 +777,7 @@ SELECT description
 			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
 				return tree.DBoolTrue, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityVolatile,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1075,179 +790,39 @@ SELECT description
 			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
 				return tree.NewDString("UTF8"), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
-	// pg_function_is_visible returns true if the input oid corresponds to a
-	// builtin function that is part of the databases on the search path.
-	// CockroachDB doesn't have a concept of namespaced functions, so this is
-	// always true if the builtin exists at all, and NULL otherwise.
-	// https://www.postgresql.org/docs/9.6/static/functions-info.html
-	"pg_function_is_visible": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.Bool),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				oid := tree.MustBeDOid(args[0])
-				t, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "pg_function_is_visible",
-					ctx.Txn,
-					"SELECT * from pg_proc WHERE oid=$1 LIMIT 1", int(oid.DInt))
-				if err != nil {
-					return nil, err
-				}
-				if t != nil {
-					return tree.DBoolTrue, nil
-				}
-				return tree.DNull, nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
 	// pg_table_is_visible returns true if the input oid corresponds to a table
-	// that is part of the schemas on the search path.
+	// that is part of the databases on the search path.
 	// https://www.postgresql.org/docs/9.6/static/functions-info.html
 	"pg_table_is_visible": makeBuiltin(defProps(),
 		tree.Overload{
 			Types:      tree.ArgTypes{{"oid", types.Oid}},
 			ReturnType: tree.FixedReturnType(types.Bool),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				oidArg := tree.MustBeDOid(args[0])
-				isVisible, exists, err := ctx.Planner.IsTableVisible(
-					ctx.Context, ctx.SessionData.Database, ctx.SessionData.SearchPath, oid.Oid(oidArg.DInt),
-				)
+				oid := args[0]
+				t, err := ctx.InternalExecutor.QueryRow(
+					ctx.Ctx(), "pg_table_is_visible",
+					ctx.Txn,
+					"SELECT nspname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON c.relnamespace=n.oid "+
+						"WHERE c.oid=$1 AND nspname=ANY(current_schemas(true));", oid)
 				if err != nil {
 					return nil, err
 				}
-				if !exists {
-					return tree.DNull, nil
-				}
-				return tree.MakeDBool(tree.DBool(isVisible)), nil
+				return tree.MakeDBool(tree.DBool(t != nil)), nil
 			},
-			Info:       "Returns whether the table with the given OID belongs to one of the schemas on the search path.",
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// pg_type_is_visible returns true if the input oid corresponds to a type
-	// that is part of the databases on the search path, or NULL if no such type
-	// exists. CockroachDB doesn't support the notion of type visibility, so we
-	// always return true for any type oid that we support, and NULL for those
-	// that we don't.
-	// https://www.postgresql.org/docs/9.6/static/functions-info.html
-	"pg_type_is_visible": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.Bool),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				oidArg := tree.MustBeDOid(args[0])
-				isVisible, exists, err := ctx.Planner.IsTypeVisible(
-					ctx.Context, ctx.SessionData.Database, ctx.SessionData.SearchPath, oid.Oid(oidArg.DInt),
-				)
-				if err != nil {
-					return nil, err
-				}
-				if !exists {
-					return tree.DNull, nil
-				}
-				return tree.MakeDBool(tree.DBool(isVisible)), nil
-			},
-			Info:       "Returns whether the type with the given OID belongs to one of the schemas on the search path.",
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	"pg_relation_is_updatable": makeBuiltin(
-		defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"reloid", types.Oid}, {"include_triggers", types.Bool}},
-			ReturnType: tree.FixedReturnType(types.Int4),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				oidArg := tree.MustBeDOid(args[0])
-				oid := int(oidArg.DInt)
-				table, err := ctx.Planner.GetImmutableTableInterfaceByID(ctx.Ctx(), oid)
-				if err != nil {
-					// For postgres compatibility, it is expected that rather returning
-					// an error this return nonUpdatableEvents (Zero) because there could
-					// be oid references on deleted tables.
-					if sqlerrors.IsUndefinedRelationError(err) {
-						return nonUpdatableEvents, nil
-					}
-					return nonUpdatableEvents, err
-				}
-				tableDesc, ok := table.(catalog.TableDescriptor)
-				if !ok || !tableDesc.IsTable() || tableDesc.IsVirtualTable() {
-					return nonUpdatableEvents, nil
-				}
-
-				// pg_relation_is_updatable was created for compatibility. This
-				// should return the update events the relation supports, but as crdb
-				// does not support updatable views or foreign tables, right now this
-				// basically return allEvents or none.
-				return allUpdatableEvents, nil
-			},
-			Info:       `Returns the update events the relation supports.`,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	"pg_column_is_updatable": makeBuiltin(
-		defProps(),
-		tree.Overload{
-			Types: tree.ArgTypes{
-				{"reloid", types.Oid},
-				{"attnum", types.Int2},
-				{"include_triggers", types.Bool},
-			},
-			ReturnType: tree.FixedReturnType(types.Bool),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				oidArg := tree.MustBeDOid(args[0])
-				attNumArg := tree.MustBeDInt(args[1])
-				oid := int(oidArg.DInt)
-				attNum := uint32(attNumArg)
-				if attNumArg < 0 {
-					// System columns are not updatable.
-					return tree.DBoolFalse, nil
-				}
-				table, err := ctx.Planner.GetImmutableTableInterfaceByID(ctx.Ctx(), oid)
-				if err != nil {
-					if sqlerrors.IsUndefinedRelationError(err) {
-						// For postgres compatibility, it is expected that rather returning
-						// an error this return nonUpdatableEvents (Zero) because there could
-						// be oid references on deleted tables.
-						return tree.DBoolFalse, nil
-					}
-					return tree.DBoolFalse, err
-				}
-				tableDesc, ok := table.(catalog.TableDescriptor)
-				if !ok || !tableDesc.IsTable() || tableDesc.IsVirtualTable() {
-					return tree.DBoolFalse, nil
-				}
-
-				column, err := tableDesc.FindColumnWithID(descpb.ColumnID(attNum))
-				if err != nil {
-					if sqlerrors.IsUndefinedColumnError(err) {
-						// When column does not exist postgres returns true.
-						return tree.DBoolTrue, nil
-					}
-					return tree.DBoolFalse, err
-				}
-
-				// pg_column_is_updatable was created for compatibility. This
-				// will return true if is a table (not virtual) and column is not
-				// a computed column.
-				return tree.MakeDBool(tree.DBool(!column.IsComputed())), nil
-			},
-			Info:       `Returns whether the given column can be updated.`,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
 	"pg_sleep": makeBuiltin(
-		tree.FunctionProperties{},
+		tree.FunctionProperties{
+			// pg_sleep is marked as impure so it doesn't get executed during
+			// normalization.
+			Impure: true,
+		},
 		tree.Overload{
 			Types:      tree.ArgTypes{{"seconds", types.Float}},
 			ReturnType: tree.FixedReturnType(types.Bool),
@@ -1264,7 +839,6 @@ SELECT description
 			Info: "pg_sleep makes the current session's process sleep until " +
 				"seconds seconds have elapsed. seconds is a value of type " +
 				"double precision, so fractional-second delays can be specified.",
-			Volatility: tree.VolatilityVolatile,
 		},
 	),
 
@@ -1297,25 +871,52 @@ SELECT description
 	"has_any_column_privilege": makePGPrivilegeInquiryDef(
 		"any column of table",
 		argTypeOpts{{"table", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			tableArg := tree.UnwrapDatum(ctx, args[0])
-			specifier, err := tableHasPrivilegeSpecifier(tableArg)
+			tn, err := getTableNameForArg(ctx, tableArg)
 			if err != nil {
 				return nil, err
+			}
+			pred := ""
+			retNull := false
+			if tn == nil {
+				// Postgres returns NULL if no matching table is found
+				// when given an OID.
+				retNull = true
+			} else {
+				pred = fmt.Sprintf(
+					"table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
+					tn.CatalogName, tn.SchemaName, tn.TableName)
 			}
 
 			return parsePrivilegeStr(args[1], pgPrivList{
 				"SELECT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"INSERT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.INSERT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.INSERT, withGrantOpt)
 				},
 				"UPDATE": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.UPDATE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.UPDATE, withGrantOpt)
 				},
 				"REFERENCES": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 			})
 		},
@@ -1323,40 +924,77 @@ SELECT description
 
 	"has_column_privilege": makePGPrivilegeInquiryDef(
 		"column",
-		argTypeOpts{{"table", strOrOidTypes}, {"column", []*types.T{types.String, types.Int}}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		argTypeOpts{{"table", strOrOidTypes}, {"column", []types.T{types.String, types.Int}}},
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			tableArg := tree.UnwrapDatum(ctx, args[0])
-			specifier, err := tableHasPrivilegeSpecifier(tableArg)
+			tn, err := getTableNameForArg(ctx, tableArg)
 			if err != nil {
 				return nil, err
 			}
-			// Note that we only verify the column exists for has_column_privilege.
-			colArg := tree.UnwrapDatum(ctx, args[1])
-			switch t := colArg.(type) {
-			case *tree.DString:
-				// When colArg is a string, it specifies the attribute name.
-				n := tree.Name(*t)
-				specifier.ColumnName = &n
-			case *tree.DInt:
-				// When colArg is an integer, it specifies the attribute number.
-				attNum := uint32(*t)
-				specifier.ColumnAttNum = &attNum
-			default:
-				return nil, errors.AssertionFailedf("unexpected arg type %T", t)
+			pred := ""
+			retNull := false
+			if tn == nil {
+				// Postgres returns NULL if no matching table is found
+				// when given an OID.
+				retNull = true
+			} else {
+				pred = fmt.Sprintf(
+					"table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
+					tn.CatalogName, tn.SchemaName, tn.TableName)
+
+				// Verify that the column exists in the table.
+				var colPred string
+				colArg := tree.UnwrapDatum(ctx, args[1])
+				switch t := colArg.(type) {
+				case *tree.DString:
+					colPred = "column_name = $1"
+				case *tree.DInt:
+					colPred = "ordinal_position = $1"
+				default:
+					log.Fatalf(ctx.Ctx(), "expected arg type %T", t)
+				}
+
+				if r, err := ctx.InternalExecutor.QueryRow(
+					ctx.Ctx(), "has-column-privilege",
+					ctx.Txn,
+					fmt.Sprintf(`
+					SELECT column_name FROM information_schema.columns
+					WHERE %s AND %s`, pred, colPred), colArg); err != nil {
+					return nil, err
+				} else if r == nil {
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedColumnError,
+						"column %s of relation %s does not exist", colArg, tableArg)
+				}
 			}
 
 			return parsePrivilegeStr(args[2], pgPrivList{
 				"SELECT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"INSERT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.INSERT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.INSERT, withGrantOpt)
 				},
 				"UPDATE": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.UPDATE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.UPDATE, withGrantOpt)
 				},
 				"REFERENCES": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 			})
 		},
@@ -1365,7 +1003,7 @@ SELECT description
 	"has_database_privilege": makePGPrivilegeInquiryDef(
 		"database",
 		argTypeOpts{{"database", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			dbArg := tree.UnwrapDatum(ctx, args[0])
 			db, err := getNameForArg(ctx, dbArg, "pg_database", "datname")
 			if err != nil {
@@ -1375,7 +1013,7 @@ SELECT description
 			if db == "" {
 				switch dbArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.InvalidCatalogName,
+					return nil, pgerror.NewErrorf(pgerror.CodeInvalidCatalogNameError,
 						"database %s does not exist", dbArg)
 				case *tree.DOid:
 					// Postgres returns NULL if no matching language is found
@@ -1384,39 +1022,35 @@ SELECT description
 				}
 			}
 
-			databasePrivilegePred := fmt.Sprintf("database_name = '%s'", db)
+			pred := fmt.Sprintf("table_catalog = '%s'", db)
 			return parsePrivilegeStr(args[1], pgPrivList{
 				"CREATE": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, `"".crdb_internal`,
-						"cluster_database_privileges", user, databasePrivilegePred,
-						privilege.CREATE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "schema_privileges",
+						user, pred, privilege.CREATE, withGrantOpt)
 				},
 				"CONNECT": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, `"".crdb_internal`,
-						"cluster_database_privileges", user, databasePrivilegePred,
-						privilege.CONNECT, withGrantOpt)
+					// All users have CONNECT privileges for all databases.
+					return tree.DBoolTrue, nil
 				},
 				"TEMPORARY": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, `"".crdb_internal`,
-						"cluster_database_privileges", user, databasePrivilegePred,
-						privilege.CREATE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "schema_privileges",
+						user, pred, privilege.CREATE, withGrantOpt)
 				},
 				"TEMP": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, `"".crdb_internal`,
-						"cluster_database_privileges", user, databasePrivilegePred,
-						privilege.CREATE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "schema_privileges",
+						user, pred, privilege.CREATE, withGrantOpt)
 				},
 			})
 		},
@@ -1425,7 +1059,7 @@ SELECT description
 	"has_foreign_data_wrapper_privilege": makePGPrivilegeInquiryDef(
 		"foreign-data wrapper",
 		argTypeOpts{{"fdw", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			fdwArg := tree.UnwrapDatum(ctx, args[0])
 			fdw, err := getNameForArg(ctx, fdwArg, "pg_foreign_data_wrapper", "fdwname")
 			if err != nil {
@@ -1434,7 +1068,7 @@ SELECT description
 			if fdw == "" {
 				switch fdwArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.UndefinedObject,
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedObjectError,
 						"foreign-data wrapper %s does not exist", fdwArg)
 				case *tree.DOid:
 					// Unlike most of the functions, Postgres does not return
@@ -1454,7 +1088,7 @@ SELECT description
 	"has_function_privilege": makePGPrivilegeInquiryDef(
 		"function",
 		argTypeOpts{{"function", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			oidArg := tree.UnwrapDatum(ctx, args[0])
 			// When specifying a function by a text string rather than by OID,
 			// the allowed input is the same as for the regprocedure data type.
@@ -1462,7 +1096,7 @@ SELECT description
 			switch t := oidArg.(type) {
 			case *tree.DString:
 				var err error
-				oid, err = tree.PerformCast(ctx, t, types.RegProcedure)
+				oid, err = tree.PerformCast(ctx, t, coltypes.RegProcedure)
 				if err != nil {
 					return nil, err
 				}
@@ -1496,7 +1130,7 @@ SELECT description
 	"has_language_privilege": makePGPrivilegeInquiryDef(
 		"language",
 		argTypeOpts{{"language", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			langArg := tree.UnwrapDatum(ctx, args[0])
 			lang, err := getNameForArg(ctx, langArg, "pg_language", "lanname")
 			if err != nil {
@@ -1506,7 +1140,7 @@ SELECT description
 			if lang == "" {
 				switch langArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.UndefinedObject,
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedObjectError,
 						"language %s does not exist", langArg)
 				case *tree.DOid:
 					// Postgres returns NULL if no matching language is found
@@ -1530,7 +1164,7 @@ SELECT description
 	"has_schema_privilege": makePGPrivilegeInquiryDef(
 		"schema",
 		argTypeOpts{{"schema", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			schemaArg := tree.UnwrapDatum(ctx, args[0])
 			schema, err := getNameForArg(ctx, schemaArg, "pg_namespace", "nspname")
 			if err != nil {
@@ -1540,7 +1174,7 @@ SELECT description
 			if schema == "" {
 				switch schemaArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.InvalidSchemaName,
+					return nil, pgerror.NewErrorf(pgerror.CodeInvalidSchemaNameError,
 						"schema %s does not exist", schemaArg)
 				case *tree.DOid:
 					// Postgres returns NULL if no matching schema is found
@@ -1560,17 +1194,15 @@ SELECT description
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, "information_schema",
-						"schema_privileges", user, pred,
-						privilege.CREATE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "schema_privileges",
+						user, pred, privilege.CREATE, withGrantOpt)
 				},
 				"USAGE": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, "information_schema",
-						"schema_privileges", user, pred,
-						privilege.USAGE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "schema_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 			})
 		},
@@ -1579,7 +1211,7 @@ SELECT description
 	"has_sequence_privilege": makePGPrivilegeInquiryDef(
 		"sequence",
 		argTypeOpts{{"sequence", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			seqArg := tree.UnwrapDatum(ctx, args[0])
 			tn, err := getTableNameForArg(ctx, seqArg)
 			if err != nil {
@@ -1598,16 +1230,16 @@ SELECT description
 					ctx.Txn,
 					`SELECT sequence_name FROM information_schema.sequences `+
 						`WHERE sequence_catalog = $1 AND sequence_schema = $2 AND sequence_name = $3`,
-					tn.CatalogName, tn.SchemaName, tn.ObjectName); err != nil {
+					tn.CatalogName, tn.SchemaName, tn.TableName); err != nil {
 					return nil, err
 				} else if r == nil {
-					return nil, pgerror.Newf(pgcode.WrongObjectType,
+					return nil, pgerror.NewErrorf(pgerror.CodeWrongObjectTypeError,
 						"%s is not a sequence", seqArg)
 				}
 
 				pred = fmt.Sprintf(
 					"table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
-					tn.CatalogName, tn.SchemaName, tn.ObjectName)
+					tn.CatalogName, tn.SchemaName, tn.TableName)
 			}
 
 			return parsePrivilegeStr(args[1], pgPrivList{
@@ -1615,25 +1247,22 @@ SELECT description
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, "information_schema",
-						"table_privileges", user, pred,
-						privilege.SELECT, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"SELECT": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, "information_schema",
-						"table_privileges", user, pred,
-						privilege.SELECT, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"UPDATE": func(withGrantOpt bool) (tree.Datum, error) {
 					if retNull {
 						return tree.DNull, nil
 					}
-					return evalPrivilegeCheck(ctx, "information_schema",
-						"table_privileges", user, pred,
-						privilege.UPDATE, withGrantOpt)
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.UPDATE, withGrantOpt)
 				},
 			})
 		},
@@ -1642,7 +1271,7 @@ SELECT description
 	"has_server_privilege": makePGPrivilegeInquiryDef(
 		"foreign server",
 		argTypeOpts{{"server", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			serverArg := tree.UnwrapDatum(ctx, args[0])
 			server, err := getNameForArg(ctx, serverArg, "pg_foreign_server", "srvname")
 			if err != nil {
@@ -1651,7 +1280,7 @@ SELECT description
 			if server == "" {
 				switch serverArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.UndefinedObject,
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedObjectError,
 						"server %s does not exist", serverArg)
 				case *tree.DOid:
 					// Unlike most of the functions, Postgres does not return
@@ -1671,34 +1300,73 @@ SELECT description
 	"has_table_privilege": makePGPrivilegeInquiryDef(
 		"table",
 		argTypeOpts{{"table", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			tableArg := tree.UnwrapDatum(ctx, args[0])
-			specifier, err := tableHasPrivilegeSpecifier(tableArg)
+			tn, err := getTableNameForArg(ctx, tableArg)
 			if err != nil {
 				return nil, err
+			}
+			pred := ""
+			retNull := false
+			if tn == nil {
+				// Postgres returns NULL if no matching table is found
+				// when given an OID.
+				retNull = true
+			} else {
+				pred = fmt.Sprintf(
+					"table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'",
+					tn.CatalogName, tn.SchemaName, tn.TableName)
 			}
 
 			return parsePrivilegeStr(args[1], pgPrivList{
 				"SELECT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"INSERT": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.INSERT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.INSERT, withGrantOpt)
 				},
 				"UPDATE": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.UPDATE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.UPDATE, withGrantOpt)
 				},
 				"DELETE": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.DELETE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.DELETE, withGrantOpt)
 				},
 				"TRUNCATE": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.DELETE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.DELETE, withGrantOpt)
 				},
 				"REFERENCES": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.SELECT, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.SELECT, withGrantOpt)
 				},
 				"TRIGGER": func(withGrantOpt bool) (tree.Datum, error) {
-					return hasPrivilege(ctx, specifier, user, privilege.CREATE, withGrantOpt)
+					if retNull {
+						return tree.DNull, nil
+					}
+					return evalPrivilegeCheck(ctx, "table_privileges",
+						user, pred, privilege.CREATE, withGrantOpt)
 				},
 			})
 		},
@@ -1707,7 +1375,7 @@ SELECT description
 	"has_tablespace_privilege": makePGPrivilegeInquiryDef(
 		"tablespace",
 		argTypeOpts{{"tablespace", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			tablespaceArg := tree.UnwrapDatum(ctx, args[0])
 			tablespace, err := getNameForArg(ctx, tablespaceArg, "pg_tablespace", "spcname")
 			if err != nil {
@@ -1716,7 +1384,7 @@ SELECT description
 			if tablespace == "" {
 				switch tablespaceArg.(type) {
 				case *tree.DString:
-					return nil, pgerror.Newf(pgcode.UndefinedObject,
+					return nil, pgerror.NewErrorf(pgerror.CodeUndefinedObjectError,
 						"tablespace %s does not exist", tablespaceArg)
 				case *tree.DOid:
 					// Unlike most of the functions, Postgres does not return
@@ -1736,7 +1404,7 @@ SELECT description
 	"has_type_privilege": makePGPrivilegeInquiryDef(
 		"type",
 		argTypeOpts{{"type", strOrOidTypes}},
-		func(ctx *tree.EvalContext, args tree.Datums, user security.SQLUsername) (tree.Datum, error) {
+		func(ctx *tree.EvalContext, args tree.Datums, user string) (tree.Datum, error) {
 			oidArg := tree.UnwrapDatum(ctx, args[0])
 			// When specifying a type by a text string rather than by OID, the
 			// allowed input is the same as for the regtype data type.
@@ -1744,7 +1412,7 @@ SELECT description
 			switch t := oidArg.(type) {
 			case *tree.DString:
 				var err error
-				oid, err = tree.PerformCast(ctx, t, types.RegType)
+				oid, err = tree.PerformCast(ctx, t, coltypes.RegType)
 				if err != nil {
 					return nil, err
 				}
@@ -1775,54 +1443,6 @@ SELECT description
 		},
 	),
 
-	// See https://www.postgresql.org/docs/10/functions-admin.html#FUNCTIONS-ADMIN-SET
-	"current_setting": makeBuiltin(
-		tree.FunctionProperties{
-			Category:         categorySystemInfo,
-			DistsqlBlocklist: true,
-		},
-		tree.Overload{
-			Types:      tree.ArgTypes{{"setting_name", types.String}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return getSessionVar(ctx, string(tree.MustBeDString(args[0])), false /* missingOk */)
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-		tree.Overload{
-			Types:      tree.ArgTypes{{"setting_name", types.String}, {"missing_ok", types.Bool}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return getSessionVar(ctx, string(tree.MustBeDString(args[0])), bool(tree.MustBeDBool(args[1])))
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// See https://www.postgresql.org/docs/10/functions-admin.html#FUNCTIONS-ADMIN-SET
-	"set_config": makeBuiltin(
-		tree.FunctionProperties{
-			Category:         categorySystemInfo,
-			DistsqlBlocklist: true,
-		},
-		tree.Overload{
-			Types:      tree.ArgTypes{{"setting_name", types.String}, {"new_value", types.String}, {"is_local", types.Bool}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				varName := string(tree.MustBeDString(args[0]))
-				err := setSessionVar(ctx, varName, string(tree.MustBeDString(args[1])), bool(tree.MustBeDBool(args[2])))
-				if err != nil {
-					return nil, err
-				}
-				return getSessionVar(ctx, varName, false /* missingOk */)
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityVolatile,
-		},
-	),
-
 	// inet_{client,server}_{addr,port} return either an INet address or integer
 	// port that corresponds to either the client or server side of the current
 	// session's connection.
@@ -1841,8 +1461,7 @@ SELECT description
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.NewDIPAddr(tree.DIPAddr{IPAddr: ipaddr.IPAddr{}}), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1853,8 +1472,7 @@ SELECT description
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.DZero, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1865,8 +1483,7 @@ SELECT description
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.NewDIPAddr(tree.DIPAddr{IPAddr: ipaddr.IPAddr{}}), nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
 
@@ -1877,151 +1494,7 @@ SELECT description
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.DZero, nil
 			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
+			Info: notUsableInfo,
 		},
 	),
-
-	// pg_column_size(any) - number of bytes used to store a particular value
-	// (possibly compressed)
-
-	// Database Object Size Functions, see: https://www.postgresql.org/docs/9.4/functions-admin.html
-	"pg_column_size": makeBuiltin(defProps(),
-		tree.Overload{
-			Types: tree.VariadicType{
-				VarType: types.Any,
-			},
-			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				var totalSize int
-				for _, arg := range args {
-					encodeTableValue, err := rowenc.EncodeTableValue(nil, descpb.ColumnID(encoding.NoColumnID), arg, nil)
-					if err != nil {
-						return tree.DNull, err
-					}
-					totalSize += len(encodeTableValue)
-				}
-				return tree.NewDInt(tree.DInt(totalSize)), nil
-			},
-			Info:       "Return size in bytes of the column provided as an argument",
-			Volatility: tree.VolatilityImmutable,
-		}),
-}
-
-func getSessionVar(ctx *tree.EvalContext, settingName string, missingOk bool) (tree.Datum, error) {
-	if ctx.SessionAccessor == nil {
-		return nil, errors.AssertionFailedf("session accessor not set")
-	}
-	ok, s, err := ctx.SessionAccessor.GetSessionVar(ctx.Context, settingName, missingOk)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return tree.DNull, nil
-	}
-	return tree.NewDString(s), nil
-}
-
-func setSessionVar(ctx *tree.EvalContext, settingName, newVal string, isLocal bool) error {
-	if ctx.SessionAccessor == nil {
-		return errors.AssertionFailedf("session accessor not set")
-	}
-	if isLocal {
-		return unimplemented.NewWithIssuef(32562, "transaction-scoped settings are not supported")
-	}
-	return ctx.SessionAccessor.SetSessionVar(ctx.Context, settingName, newVal)
-}
-
-// getCatalogOidForComments returns the "catalog table oid" (the oid of a
-// catalog table like pg_database, in the pg_class table) for an input catalog
-// name (like pg_class or pg_database). It returns false if there is no such
-// catalog table.
-func getCatalogOidForComments(catalogName string) (id int, ok bool) {
-	switch catalogName {
-	case "pg_class":
-		return catconstants.PgCatalogClassTableID, true
-	case "pg_database":
-		return catconstants.PgCatalogDatabaseTableID, true
-	default:
-		// We currently only support comments on pg_class objects
-		// (columns, tables) in this context.
-		// see a different name, matching pg.
-		return 0, false
-	}
-}
-
-// getPgObjDesc queries pg_description for object comments. catalog_name, if not
-// empty, provides a constraint on which "system catalog" the comment is in.
-// System catalogs are things like pg_class, pg_type, pg_database, and so on.
-func getPgObjDesc(ctx *tree.EvalContext, catalogName string, oid int) (tree.Datum, error) {
-	classOidFilter := ""
-	if catalogName != "" {
-		classOid, ok := getCatalogOidForComments(catalogName)
-		if !ok {
-			// Return NULL for no comment if we can't find the catalog, matching pg.
-			return tree.DNull, nil
-		}
-		classOidFilter = fmt.Sprintf("AND classoid = %d", classOid)
-	}
-	r, err := ctx.InternalExecutor.QueryRow(
-		ctx.Ctx(), "pg_get_objdesc", ctx.Txn,
-		fmt.Sprintf(`
-SELECT description
-  FROM pg_catalog.pg_description
- WHERE objoid = %[1]d
-   AND objsubid = 0
-   %[2]s
- LIMIT 1`,
-			oid,
-			classOidFilter,
-		))
-	if err != nil {
-		return nil, err
-	}
-	if len(r) == 0 {
-		return tree.DNull, nil
-	}
-	return r[0], nil
-}
-
-// hasPrivilege returns whether the given specifier has the given privilege.
-func hasPrivilege(
-	ctx *tree.EvalContext,
-	specifier tree.HasPrivilegeSpecifier,
-	user security.SQLUsername,
-	kind privilege.Kind,
-	withGrantOpt bool,
-) (tree.Datum, error) {
-	ret, err := ctx.Planner.HasPrivilege(
-		ctx.Context,
-		specifier,
-		user,
-		kind,
-		withGrantOpt,
-	)
-	if err != nil {
-		// When an OID is specified and the relation is not found, we return NULL.
-		if specifier.TableOID != nil && sqlerrors.IsUndefinedRelationError(err) {
-			return tree.DNull, nil
-		}
-		return nil, err
-	}
-	return tree.MakeDBool(tree.DBool(ret)), nil
-}
-
-// tableHasPrivilegeSpecifier returns the HasPrivilegeSpecifier for
-// the given table.
-func tableHasPrivilegeSpecifier(tableArg tree.Datum) (tree.HasPrivilegeSpecifier, error) {
-	var specifier tree.HasPrivilegeSpecifier
-	switch t := tableArg.(type) {
-	case *tree.DString:
-		s := string(*t)
-		specifier.TableName = &s
-	case *tree.DOid:
-		oid := oid.Oid(t.DInt)
-		specifier.TableOID = &oid
-	default:
-		return specifier, errors.AssertionFailedf("unknown privilege specifier: %#v", tableArg)
-	}
-	return specifier, nil
 }

@@ -1,4 +1,4 @@
-# LogicTest: 5node
+# LogicTest: 5node-dist-opt
 
 # First, we set up two data tables:
 #   - NumToSquare maps integers from 1 to 100 to their squares
@@ -13,6 +13,10 @@ INSERT INTO NumToSquare SELECT i, i*i FROM generate_series(1, 100) AS g(i)
 statement ok
 CREATE TABLE NumToStr (y INT PRIMARY KEY, str STRING)
 
+# Prevent the merge queue from immediately discarding our splits.
+statement ok
+SET CLUSTER SETTING kv.range_merge.queue_enabled = false;
+
 # Split into five parts.
 statement ok
 ALTER TABLE NumToStr SPLIT AT SELECT (i * 100 * 100 / 5)::int FROM generate_series(1, 4) AS g(i)
@@ -24,13 +28,13 @@ ALTER TABLE NumToStr EXPERIMENTAL_RELOCATE
 
 # Verify data placement.
 query TTTI colnames
-SELECT start_key, end_key, replicas, lease_holder FROM [SHOW RANGES FROM TABLE NumToSquare]
+SELECT start_key, end_key, replicas, lease_holder FROM [SHOW EXPERIMENTAL_RANGES FROM TABLE NumToSquare]
 ----
 start_key  end_key  replicas  lease_holder
 NULL       NULL     {1}       1
 
-query TTTI colnames,rowsort
-SELECT start_key, end_key, replicas, lease_holder FROM [SHOW RANGES FROM TABLE NumToStr]
+query TTTI colnames
+SELECT start_key, end_key, replicas, lease_holder FROM [SHOW EXPERIMENTAL_RANGES FROM TABLE NumToStr]
 ----
 start_key  end_key  replicas  lease_holder
 NULL       /2000    {1}       1
@@ -46,177 +50,60 @@ NULL       /2000    {1}       1
 # Query with a restricted span.
 
 query T
-EXPLAIN (DISTSQL) SELECT 5, 2+y, * FROM NumToStr WHERE y <= 10 ORDER BY str
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT 5, 2+y, * FROM NumToStr WHERE y <= 10 ORDER BY str]
 ----
-distribution: full
-vectorized: true
-·
-• render
-│
-└── • sort
-    │ order: +str
-    │
-    └── • scan
-          missing stats
-          table: numtostr@primary
-          spans: [ - /10]
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkFFL-0AQxN__n2LZ_4valeQiBTkQojZioLY1CahoHmKylECai3cXsJR8d2mC2AoVfZzZm5kft0HzVqHE4HExvQxncDQJ4yS-nx5DHEyD6wTGBB6MYE1wAjfR_A7qdmWVsRoeboMogDW8tK57ll-AcGEeTYIIrp7AWI2EtSp4lq3YoHxGgSlho1XOxii9tTb9g7B4R-kSlnXT2q2dEuZKM8oN2tJWjBKT7LXiiLOCteMiYcE2K6u-9hPHb3S5yvQaCeMmq42EU0e4zn9MO0LV2q9yY7MloxQd_R4gVtqydsT-tu-NkDDiumAtYSylDGfJOYEvRt6OIPC9gxjeXzAiNo2qDe9hHGp2u5SQiyUPf21Uq3NeaJX3M4Oc97neKNjY4SoGEdbDaQu4GxY_hr1v4bT79xEAAP__JNjA3g==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkDFrwzAQhff-ivDWCGKZdtHk1Uta3GzFg2odwWDrzOkMLcH_vdga0hRS2k33Tu97j7sgcqCjHynBvcGiNZiEO0qJZZXyhzp8wBUGfZxmXeXWoGMhuAu014HgcPLvAzXkA8mhgEEg9f2wYSfpRy-fVZxH5aQCg4ZiIHG7J-dcfTyZXWX35fVtdlWJdjHgWa-RSf2Z4Oxi_l7rlUVJDva2UfW4v4sv_4NvKE0cE93g75GLpTWgcKZ82cSzdPQi3G0xeXzefJsQKGne2jzUMa_Wgt_N9ldz-cPcLg9fAQAA___0cqP4
 
 # Query which requires a full table scan.
 query T
-EXPLAIN (DISTSQL) SELECT 5, 2 + y, * FROM NumToStr WHERE y % 1000 = 0 ORDER BY str
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT 5, 2 + y, * FROM NumToStr WHERE y % 1000 = 0 ORDER BY str]
 ----
-distribution: full
-vectorized: true
-·
-• render
-│
-└── • sort
-    │ order: +str
-    │
-    └── • filter
-        │ filter: (y % 1000) = 0
-        │
-        └── • scan
-              missing stats
-              table: numtostr@primary
-              spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy0lWGL2jAYx9_vU4QHBne7SJu09TQwcNv1mOD0VoVtDF90NhyCNl0SYSJ-99FWvVM0yXS-s63_5_nlxx-yAvV7Bgzi70-9D90-unnoDkfDr71bNIx78acRijCi6A4tMXqHHpPBF5Qv5looLdG3z3ESo5sleouI7_u36D3y0SB5iBP08QdSWgKGXGS8n865AvYTCGCggCEADCFgiGCMoZBiwpUSsvzLqgp0sz_AfAzTvFjo8vUYw0RIDmwFeqpnHBiM0l8znvA049LzAUPGdTqdVWu2gJ1CTuepXAKGYZHmiqGGR33fh_Eag1jol-FKp88cGFljd4DH6UxzyaUX7W-v3zN00yEbMYyxbn_Uqvxsfp9EoP-CMBRSc-mRg_N36N3J-cHJ-S9jhcy45NmxoUcg-qIhCo8cWEh4npUWos2BMeqQO_rqAaMOPUkZ7lES9yYQ1yZURWh4oXsdLBS7OjSvVwcLwrYO5Nw6UHfR1Fl0WIluuou2UOxE319PtAVhK5qeKzpwFx04i25Wolvuoi0UO9Gt64m2IGxFB-eKDt1Fh86iS8UNR8cWgJ3j9vUcWxC2jsP_cYkcmZ9wVYhc8b3xpyb75Q3Ds2de30hKLOSEP0kxqdbUj4MqV73IuNL1V1I_dPP6Uwn4OkyMYWoOU2M42AuTw3Bgxm6aV4fGdGQOR8awZXPzkkPfG8Mt8-aWMdw2h9uXYBNLx2wlM7eMWGpGLuoZsRQttCw3N41YqkbMXTtkH6_f_A0AAP__W-z62Q==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzMlMtq8zAQhff_U5iBH1qiEku2cxEUvCpkk5Y0u-KFaw3B4FhGkqEl5N2LL5A6JLJJuvBOtzPn8I2YA-RS4Dreowb-ARQIMCDgAQEfCAQQESiUTFBrqaonjWAlvoC7BNK8KE11HBFIpELgBzCpyRA4bOPPDDcYC1RTFwgINHGa1TaFSvex-g7zcm-kNgoIvKSZQcWdh5A6_x3qui7nfLXePjrPTrsEAhvMRfUqaE6IE9IJO62JEzKIjgRkaU7BtIl3CJweyfDw71IZVNOgmzv0J1fLs6vlT1WlEqhQXCp6IcNaPsliSrvsrtl7HXs6vDV0dK3pCd-2ZnZra9hwNmx0bHrCt2zmt7LxhrPxRsemJ3zLZnErG384G390bHrCt2yWfzHuLpTfoC5krnHQJHOrWYhih83s1LJUCb4pmdQ2zfa11tUHArVpbmmzWeXNVRXwt5haxawjpudiZnfusfasat8u9u_JHVjFM7vz7B7nuVW8sDsv7nFe2nvl9nwT-yc7946O_34CAAD__12t7jY=
 
 # Query with a restricted span + filter.
 query T
-EXPLAIN (DISTSQL) SELECT str FROM NumToStr WHERE y < 10 AND str LIKE '%e%' ORDER BY y
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT str FROM NumToStr WHERE y < 10 AND str LIKE '%e%' ORDER BY y]
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ filter: str LIKE '%e%'
-│
-└── • scan
-      missing stats
-      table: numtostr@primary
-      spans: [ - /9]
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyUUE9L-0AQvf8-xTA_SltYSVJP7qnVphqMSU0CKppDTIYSSLNxdwOWku8umyC2QkWP7715f5g9qrcKObqPa3_hBTBZenES3_tTiF3fvUpAaQmrKLyDut1qYdDDjRu5MNnBS2vb5zk49hQWwRImRvS9WxfGIxqNpxBGSzeCyyfYIcNaFBRkW1LIn9HBlGEjRU5KCWmofX_gFe_IbYZl3bTa0CnDXEhCvkdd6oqQY5K9VhRRVpC0bGRYkM7Kqo_9nDhvZLnNpKmNm6xWHM6sC-s_ph1D0eqvbKWzDSF3Ovb7_lVZaZIkLee4fOA5zGcHT-Ccx0nkBdfIMGy1UU-umP1lRUSqEbWiow2nku0uZUjFhoZPK9HKnNZS5H3NAMPe1xMFKT2ozgC8epDMwEOz86N59s2cdv8-AgAA__9ZOcVt
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMjzFrwzAUhPf-CnMQsghqd9SUpS2mJSlutqJBtR5BYEvm6Qlagv57sTWUDoWMd590d--KEB0d7UwJ-gMdjMLCcaSUIq9WfdC7L-hWwYcly2obhTEyQV8hXiaCxtl-TjSQdcT3LRQcifXTFruwny1_H0KeJSZhKDz5SYh1c3hoXvuXx2a_o91ea_1-HvrjMxROWVYKUxRilt_eJPZC0F1Rt28bKC0xJPoz67_kthgFcheq96eYeaQ3juNWU-Vp-7cZjpJU2lXRh4qKKXc_AQAA___YHXLQ
 
 # Query which requires a full table scan.
 query T
-EXPLAIN (DISTSQL) SELECT str FROM NumToStr WHERE y % 1000 = 0 AND str LIKE '%i%' ORDER BY y
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT str FROM NumToStr WHERE y % 1000 = 0 AND str LIKE '%i%' ORDER BY y]
 ----
-distribution: full
-vectorized: true
-·
-• filter
-│ filter: ((y % 1000) = 0) AND (str LIKE '%i%')
-│
-└── • scan
-      missing stats
-      table: numtostr@primary
-      spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMlGGL2jAYx9_vU4QH5CqLmNTqeYGBt9nbyly9VWEbwxedfTgK2nRJhB3idx9tN--Usw34wntnEv_9__p7Sragf69AgP_9fnIbhMQZB7P57OukTWb-xP8wJ9oochdNv5BsszayWH375Ec-cZxH0iKcMdYm7whrk9twTJzifBJ89slVK21dtck0GvsRef-DPAKFTCYYxmvUIH4CBwouUOgBBQ8o9GFBIVdyiVpLVfxlWwaC5A8IRiHN8o0pthcUllIhiC2Y1KwQBMzjXyuMME5QdRlQSNDE6aqs-U89ylW6jlWBMcvjTAvS6bqMMVjsKMiNeXq4NvEDguA7ag9wl64MKlTd_mF7tS-I44z4P1tCiCCcD0tp-9-lu5H7TJ0QYjaPgvBj-yShe5LwCUyqBBUmh1Qj_hYWuxdeI5QdmXf5kcLpxggyck9y9A44uP2ouO2oykl1up79vBoo9vMaXGxerr0n19qTV3oa2HtqoNh7ur6Yp569p561p0HpaWjvqYFi72l4MU-evSfP2lNhqGOpqAFgr-jmVVyRLxBGqHOZaTzgO_VkVtyfmDxgdd9quVFLvFdyWdZUy2mZKzcS1KY65dUiyKqjAvB5mNeG3YMwPw679c0N1b3atFcf9s7h7teGB_XNg3Oar2vDw_rm4TnNN_WzYg2fSf1Hdty92L35GwAA__-sYBlG
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzMlE2rm0AYhff9FcOBkIROiTOaLgYKFvqBtJiSZldcWOclCMaRmRFagv-9RKG5Xm7u9ZKNO-fj4Zxn4PWM2mhK8xM5qF8Q4JDgCMERgWOLjKOxpiDnjL1cGYBE_4EKOMq6af1lO-MojCWoM3zpK4LCIf9d0Z5yTXYTgEOTz8uqj2lsecrt37huT944b8Hxpaw8WcVWq1iwBRNBECilkvSwZh_Y_8-P6Se2iiX7nnz7zJaLcrFUSv087JP06xocu9YrFkseC2Qdh2n9tZ7z-ZGgRMdvKFybG6vJkh53juVbZN0Tnql5Z5rNdnT7VrocpYvpDyhm-oByuoKcqUI4XSGcqUI0XSGaqcILP5M9ucbUjiZNWXAZU9JHGsbamdYW9MOaoo8Zlrue6zc0OT-cimGR1P1RX_AhLJ6F34_g4DEs70kO74Gje-Dtq-Cse_MvAAD__yjQ8xE=
 
 #
 # -- Join tests --
 #
 
 query T
-EXPLAIN (DISTSQL) SELECT x, str FROM NumToSquare JOIN NumToStr ON y = xsquared
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT x, str FROM NumToSquare JOIN NumToStr ON y = xsquared]
 ----
-distribution: full
-vectorized: true
-·
-• hash join
-│ equality: (xsquared) = (y)
-│ right cols are key
-│
-├── • scan
-│     missing stats
-│     table: numtosquare@primary
-│     spans: FULL SCAN
-│
-└── • scan
-      missing stats
-      table: numtostr@primary
-      spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8ld-K2kAUh-_7FMO52oVZzCRR18BCSmupi9WtelEouciaqQY0k52ZgCK-e0my4KrpTNJRL_Pnm3PO94M5OxBvK_Cg_-tl-HkwQndfB9PZ9OfwHk37w_6XGdpgJCRH3ybjHyjJ1pKJtyzkFD2PB6P3F5Kj8Qht0RPalB8jwJCwiI7CNRXg_QYCGGzA4AAGFzC0IcCQcjanQjCe_7IrgEG0Ac_CECdpJvPXAYY54xS8HchYrih4MAtfV3RCw4jylgUYIirDeFWU-dCfn_J4HfItYJimYSI89ADBHgPL5PvRhxNft2gZiuXxWb4NwT7AIGS4oOCRPf6_FklVi5JX9NeyLctq2CQ5atL-Z5OHc7KE8YiWGR1OCnJS90vFpN9DsXxmcUJ5q3Pc2or-kXe-ff_E48VS3vnkHjCMM-khn2DfPZnzMINjMENFgyP2wNIWIafTVtZ2j2qT-iHbdUMuMn5ouZdNmtw26e41krbr23Zq23YL253L2rZva_vxGrad-rbd2rY7he3Hy9p2bmu7dw3bbn3b7dq2c89Nd5pKtHtb0cS69r6oqD-hImWJoLW2gZVPQKMFLY0IlvE5feFsXpQpH8cFV9zAERWy_GqXD4Ok_JQ3WB9um8BdE7hnAhOipkkDY3YzuG0Cd03gngl8YuyMtk9p6yPtqHU7Spgc-7ZOadckLDWsCUsNa8JSw5qw1LAurLZJWB0T3WpYo1sNa3SrYY1uNazT3TXR_WiiWw1rdKthjW41rNGthnW6eya6SZNleX6HNtmWTWnd5d9kXzaldc7J2fZQSg_2n_4GAAD__8eN5D4=
+https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lc9q20AQh-99ijCnBLZYs5LiWFDQsekhKaG3ooNiTW2BrVV3V9AQ_O5FVsGV7M5KXayj_nw7M98PZt-hUgU95XsykHwHBAESBIQgIAIBMWQCaq3WZIzS7S8d8Fj8giQQUFZ1Y9vXmYC10gTJO9jS7ggS-Ja_7uiF8oL0IgABBdm83B3L1Lrc5_otrZq9VeZnk2uC7CBANfbPeadjXt9utrnZ9g9IJWSHTICx-YYgwYP4v76Q68vqiU1hryn5z6ZO5zSV0gVpKnonZS3p-uXCZJ9zs_2iyor04r7f2o5-2NtU3n3S5WZrb1O8AwHPjU1uUhRpNJjzNEPoMcOFBp_UR1UvEIfTXqwd9Wrj-FDlbKHivKEurxGqHC82nE2snFfswzXEhuPFRrOJDecVu7qG2Gi82Hg2sdG8YjG49oK_UP-FTK0qQ6PWd9BOQMWGOiNGNXpNX7VaH8t0j89H7rhHCzK2-yq7h8eq-9Q2OB6OfeClD7zygRF5GicYk9Pg2Ade-sArH3hg7IyWQzr4mw553SELY993MKQjn7B42BEWDzvC4mFHWDzsCiv2CeveRzcPO3TzsEM3Dzt087BL99JH94OPbh526OZhh24edujmYZfulY9unHJZnu_QKbflVNq1_Kfcl1Npl3M8uz1Y6dnhw-8AAAD__3ZSr0E=
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT x, str FROM NumToSquare JOIN NumToStr ON x = y WHERE x % 2 = 0
 ----
-distribution: full
-vectorized: true
-·
-• project
-│ columns: (x, str)
-│ estimated row count: 333 (missing stats)
-│
-└── • merge join (inner)
-    │ columns: (x, y, str)
-    │ estimated row count: 333 (missing stats)
-    │ equality: (x) = (y)
-    │ left cols are key
-    │ right cols are key
-    │ merge ordering: +"(x=y)"
-    │
-    ├── • filter
-    │   │ columns: (x)
-    │   │ ordering: +x
-    │   │ estimated row count: 333 (missing stats)
-    │   │ filter: (x % 2) = 0
-    │   │
-    │   └── • scan
-    │         columns: (x)
-    │         ordering: +x
-    │         estimated row count: 1,000 (missing stats)
-    │         table: numtosquare@primary
-    │         spans: FULL SCAN
-    │
-    └── • filter
-        │ columns: (y, str)
-        │ ordering: +y
-        │ estimated row count: 333 (missing stats)
-        │ filter: (y % 2) = 0
-        │
-        └── • scan
-              columns: (y, str)
-              ordering: +y
-              estimated row count: 1,000 (missing stats)
-              table: numtostr@primary
-              spans: FULL SCAN
+render          ·               ·                    (x, str)     ·
+ │              render 0        x                    ·            ·
+ │              render 1        str                  ·            ·
+ └── join       ·               ·                    (x, y, str)  ·
+      │         type            inner                ·            ·
+      │         equality        (x) = (y)            ·            ·
+      │         mergeJoinOrder  +"(x=y)"             ·            ·
+      ├── scan  ·               ·                    (x)          +x
+      │         table           numtosquare@primary  ·            ·
+      │         spans           ALL                  ·            ·
+      │         filter          (x % 2) = 0          ·            ·
+      └── scan  ·               ·                    (y, str)     +y
+·               table           numtostr@primary     ·            ·
+·               spans           ALL                  ·            ·
+·               filter          (y % 2) = 0          ·            ·
 
 query T
-EXPLAIN (DISTSQL) SELECT x, str FROM NumToSquare JOIN NumToStr ON x = y WHERE x % 2 = 0
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT x, str FROM NumToSquare JOIN NumToStr ON x = y WHERE x % 2 = 0]
 ----
-distribution: full
-vectorized: true
-·
-• merge join
-│ equality: (x) = (y)
-│ left cols are key
-│ right cols are key
-│
-├── • filter
-│   │ filter: (x % 2) = 0
-│   │
-│   └── • scan
-│         missing stats
-│         table: numtosquare@primary
-│         spans: FULL SCAN
-│
-└── • filter
-    │ filter: (y % 2) = 0
-    │
-    └── • scan
-          missing stats
-          table: numtostr@primary
-          spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzEluFr2kAYxr_vrzheGFh6Yi6JmgYKjs0yS6udChsMP6TmZgM2sXcXsJT-7yNJ12jUu8sO67fkkufe557f62tegD8twYf-r7ubL4MhanwbTKaTHzdnaNK_6X-dojVGXDB0NR7dojh9FAl_SgNG0fVoMHxbEAyNhmiNLtEz-vm9P-6jxhp9RvYZukQWYIiTkA6DR8rB_w0EMNiAwQEMLmBowwzDiiVzynnCsldecsEgXINvYYjiVSqy5RmGecIo-C8gIrGk4MM0uF_SMQ1CylpZoZCKIFrmZTas9lYsegzYM2CYrIKY-6gJGEap8FGPwOwVQ5KKsggXwYKCT16xvpGraCkoo6xFtl0U6z5q9EgWiO_7g-HUy3N5u67UL7e8f0YPAX_Y3i_3W3q063jcDMveF5Zge5Jq2ZZlHQzJ-a-Quh8aknvQY7lPGicspIyGWzvNMuW_V_a9AD1yXtSqnvWWsgW9TqI464lK2kv6RzR65PzskkWLh-KybEjccw7G3TY4yh6Tw6SZrFqkWz303tqdrdpEv9cc3V7LW63ZcvUbTuHiveG8EzYcOUHDOcdpOFsfuqsN3c2hd_ShK1y8Q784IXT7BNDd40B39KG3taF3cuiePnSFi_L_1zohdecE1NvHoe7qU-9oU894NzWBKwyUwD_2i8s9aPKjgHeO_zGxx8KY8lUSc6r1qWBlh6Dhgha58CRlc3rHknleprgd5bp8IaRcFE9JcTOIi0eZwU0xqYrJptjdEpN6Ys9ETIiR2sg46crVtjRwRx64UyNwu57YMxFXAq-rNjJeCXxH7UoDb8tpteU_D0-OqyNVd-XirglruVjBWi5WsVaojYyrWHsmrC_krC3FLNyZpHV4KdQKYAq1iphKbuZdxYzszNM60Ih8nhLFQCVGE1WhVlEzm6kquZl3JTWjsUoUc7WjoLYzWGtRk6tV1ORqJTWF3My7ktrOeJVSm71--hsAAP__o1BXlA==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzMlV9r2zwUh-_fT2EOvNBSjVj-0zSCgq8GGSwdpXfDF258lhgcy5NkWCn57sPWRmYnk-yJhNzFsR6fc34P6LxDxXNcZTuUwL4CBQIBEAiBQAQEYkgJ1IKvUUou2iMaWOY_gPkEiqpuVPt3SmDNBQJ7B1WoEoHBS_Za4jNmOYqZDwRyVFlRdmVqUewy8ZZUzU5x-b3JBAKBj0WpUDDvJqHe_17AGFuuXm69R8_XP4HAU6OYl1BI9wR4o34VP9R8ffO2mdz2q3XnUwJSZRsERvfk34agpiGUGDOBS9_BX_s-fKepuMhRYN77UtqSv4-cOgAJvdO1hvN_RrHBT7yoUMzu-0yJ39RNQu9uH0Wx2eqfB0UkCQfTHiYJHSY50eOKf-D1jNLhzCdrR73adLz94Jrs08vbn5_HfjDeQHhNBoLLG3g4j4FwvIHomgyElzewOI-BaLyB-JoMRJc3QP3zL6ETLTyjrHklcdSK8dshMN-gzkXyRqzxi-Drrox-fOq47iLPUSr9NtAPy0q_ahscD8cu8NwFXrjAlJppOiGxYBocu8BzF3jhAg8SO6KDIe3_SYfmuEMjTPt5-0M6cpFlhi2yzLBFlhm2yDLDNlmxi6x7l7jNsCVuM2yJ2wxb4jbDtrjnLnE_uMRthi1xm2FL3GbYErcZtsW9cImbTlmWx3folG05lbZd_lP25VTaljk92h7G0NP9fz8DAAD___Wz59Q=
 
 #
 # -- Aggregation tests --
@@ -224,202 +111,94 @@ Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzEluFr2kAYxr_vr
 
 # Sum the numbers in the NumToStr table.
 query T
-EXPLAIN (DISTSQL) SELECT sum(y) FROM NumToStr
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT sum(y) FROM NumToStr]
 ----
-distribution: full
-vectorized: true
-·
-• group (scalar)
-│
-└── • scan
-      missing stats
-      table: numtostr@primary
-      spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyslF1r2zAUhu_3K8y5SkAhlu24qa9StgwCadPFGQyGL7ToYAKJ5UkyrIT892GZUTu0shrv0h-vnveRxDmD-n2EBJY_ntcPqydv9GWV7tJv67GXLtfLzztPVafRy9j7ut08ekV10kJpCQQKwfGJnVBB8hMoEAiAQAgEIiAwg4xAKcUelRKy_uVsAiv-BxKfwKEoK12_zgjshURIzqAP-oiQwI79OuIWGUc59YEAR80OR4P5h1-U8nBi8gUIpCUrVOJNpoHv139vKp14CwrZhYCo9CtGaZYjJPRC3Ks85LnEnGkhp7Nuk_T742hBx-9igncxr6tXhZAcJfLO0tnFXoT6H2sSdppQ972nrntvtn4yjW45gJ4-Le94yAEE7tqBs3ZktONbtHv6tLTvhmiH7tqhs3ZstOe3aPf0aWnPh2hH7tqRs3YtPPmwcU-VlvH9_xowb2C2qEpRKLwaNG-v7NcDCHmOzbRSopJ7fJZibzDN48bkzAuOSjdfafOwKppPdcF2mFrDQSdMr8OBndyDDq3pyB6OhvSeWcOxnRwPId9Zw3M7eT6EfG8_K7_nmtgv2TU7u3z6GwAA___56Ne0
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyslE1vozAQhu_7K1bvaVeyFAzki1P2mMM2VdqeKg4uHiGkBCPbSK0i_nsFHAJRYqjgaJt3nnmMNRfkStKTOJNB9A4OBh8MARhCMCwRMxRaJWSM0vUnbWAvPxF5DFlelLbejhkSpQnRBTazJ0KEV_FxoiMJSXrhgUGSFdmpwRQ6Owv9tcvLs1XGajAcShv93nHEFYMq7bWssSIlRLxi49H_0lRTKqzSi2Wf_PL2_8-O_32I8R9irtXLXGlJmmSvdFy5G-HezzoJep3w8XfNZ77rAXRHcTXlrv3xhv7MhgPojuF6imEw3jCY2XAA3THcTDEMxxuGMxsOoDuG27kmwh3MkUyhckM3k-F-Za-eGCRTaseLUaVO6FmrpMG0y0OTazYkGdue8naxz9ujusFumDvDfi_Mb8O-mzyADpzp0B0Op_S9dIZXbvJqCnntDG_c5M0U8tb9r7yBZ-J-ZLfsuPr1HQAA__8CqbEl
 
 # Count the rows in the NumToStr table.
 query T
-EXPLAIN (DISTSQL) SELECT count(*) FROM NumToStr
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT count(*) FROM NumToStr]
 ----
-distribution: full
-vectorized: true
-·
-• group (scalar)
-│
-└── • scan
-      missing stats
-      table: numtostr@primary
-      spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyslF2Lm0AUhu_7K-RcJWVC_Iqb9WqXbQpCVrfRpYUii9WDBJIZOzNCS8h_LyplTUjGIe6lH6_P-3iGcwDxewc-rH68rB-D0Jh8CeIk_raeGvFqvXpKjJzVVE4-T42vm-jZoPVeMiE5EKCswDDbowD_J1hAwAYCDhBwgcACUgIVZzkKwXjzyqENBMUf8E0CW1rVsrmdEsgZR_APILdyh-BDkv3a4QazAvncBAIFymy7azH_8Q8V3-4z_hcIxFVGhW_M5rZpNm9HtfSNkFGE9EiA1fIdJGRWIvjWkeiXeSxLjmUmGZ8vTrs8Ra9h8raJvseT6VWWfZX1jqgp4wVyLE6-nx7VbayzXxO_Pr8FYTJ5sK63cU7aWPpjsHTH0E5hNndvm8VAo569N3oWtr69rW3vtvbebfYDjXr2d6PtHX17R9vea-2Xt9kPNOrZL0fbu_r2rrZ94z27QXygTE_8_kMX0AXWBkXFqMCzRXT5y2azoLAosdtmgtU8xxfO8hbTXUZtrr1RoJDdU6u7CGj3qCnYD1vKsH0Sts7Dtpo8gHaUaVcddsf0XijDnprsjSHfKcNLNXk5hnyvnpU5cEzUh-ycnR4__QsAAP__YDroHw==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyslE2LszAQx-_Pp3iYUxcCNWrfPHXZUw-rS1_YwyLFNYMIbSJJhF2K331RD1Vpo6DHJP7zm98Y5gZcMPSjKyrwvoACARsIOEDABQILCAlkUsSolJDlJ3Vgx37AswikPMt1uR0SiIVE8G6gU31B8OAYfV9wjxFDObeAAEMdpZcKk8n0GsnfLc-vWigtgUCQa--_LzhCWBAQub5frHSUIHi0IMPhr0kiMYm0kPNFm_0WnPzjeR98HmYvT1n2U9YdkXMhGUpkrfvDwlwN7bTicHo_7_zjbEufV-O0qqHD204nb3sPvCG6HN12e7ioPbloD7whuhot6gwXdSYX7YE3RNejRd3hou7koj3whuhm0onxgLVHlQmusDM5Ht9slRMFWYL1-FEilzF-SBFXmHoZVLlqg6HS9SmtFzteH5UFNsPUGLZbYdoN22ZyD9oxpl1z2B1T98IYXprJyzHklTG8NpPXY8gb87-yep6J-ZF12WHx7y8AAP__2avBCw==
 
 # Count how many numbers contain the digit 5.
 query T
-EXPLAIN (DISTSQL) SELECT count(*) FROM NumToStr WHERE str LIKE '%five%'
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT count(*) FROM NumToStr WHERE str LIKE '%five%']
 ----
-distribution: full
-vectorized: true
-·
-• group (scalar)
-│
-└── • filter
-    │ filter: str LIKE '%five%'
-    │
-    └── • scan
-          missing stats
-          table: numtostr@primary
-          spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy0lVFv2jwUhu-_XxEdqSr9ZAROAgVfUXXpFo2GLknVSROqMnKGIkHMHGfahPjvUxKVAip2SsYdcfL6PPh5Ja8h-7kABs7Xh_GN6xmtD24QBl_GV0bgjJ3b0JjxPJWt_6-MO39yb6T5UvJMCuPpk-M7RvFr7H52jMuLH8kvvLgEAimP0YuWmAH7BhQImEDAAgI2EOjBlMBK8BlmGRfFJ-sy4Ma_gXUJJOkql8XylMCMCwS2BpnIBQKDMPq-QB-jGEWnCwRilFGyKMe8YI1WIllG4g8QCFZRmjGj3TG73eLrSS6ZMTJhuiHAc_k6JpPRHIHRDamPcpcsJAoUnd4-R7XOjBHdPxbGWBD6rvfxBcTjKR5FMd-DcjOfC5xHkosOPTiV28mjFz77k6egdXV0mHV02OuMPOUiRoHx3v7TjQbn4HCCx_tn1wtbI3qcxt6jofULQesWouxDu2Of0goNz7YV_fO3QoOyq4E2boVZ34NZ24Ndeuif4kHDs_VwfX4PGpRdD2ZjD1Z9D1ZtD_3Sw-AUDxqerYfB-T1oUHY9WI092PU92LU9FAba71agQdkqGJ5fgQZlV4H9Ty-qN4b5mK14muHBhfX2zt3iIsN4jtWtl_FczPBB8Fk5pnqclLlyIcZMVm9p9eCm1asCcDdMlWFTHTaVYWsvTA_Dlhq7rx5tK9M9dbinDGsm95v86WtleKCePFCGh-rwsAk21XRMVzJ1y6imZrRRz6imaLZmuLppVFM1qu7aIft089_fAAAA__-w0Sxc
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzElF2LnDAUhu_7K4YDy24hsBN1ZmdzNaW0RdpqcVx6UWSx5lQEx0gSS8vify_qxarMRMGCl368eV6eE84LFIKjF59RAfsBFAhYQMAGAg4Q2EFEoJQiQaWEbH7pAi7_A2xLICvKSjevIwKJkAjsBXSmcwQGYfwzxwBjjvJ-CwQ46jjLW0wps3Ms_x6L6qyF0hIIfMxyjZJtjtbmi_v5w-b25lf2G29uGWOnMHC9T0DArzTbeKJAiGoCotKvcKXjFIHRmswv-C5NJaaxFvJ-N-z33n_ywufA_366e3uVZV1lvSKqQkiOEvng_Kg2t6EjXaenr8-uF94d6fU29qANnT8auspoJgr2ZOwXj8aaL8NaRcZEwZ6Mh8Uy7Pky7FVkTBTsyTgsluHMl-GsImOiYE_G43_dYBdYAapSFApHm-zyydtmwyFPsVuHSlQywW9SJC2me_TbXPuCo9LdV9o9uEX3qSnYD1Nj2BqE6ThsmckTaNuYdsxhZ0nvnTG8N5P3S8gPxvDBTD4sIT-aZ7WduCbmSzZmR_WbfwEAAP__sAnyEQ==
 
 #
 # -- Limit tests --
 #
 
 query T
-EXPLAIN (DISTSQL) SELECT y FROM NumToStr LIMIT 5
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT y FROM NumToStr LIMIT 5]
 ----
-distribution: full
-vectorized: true
-·
-• scan
-  missing stats
-  table: numtostr@primary
-  spans: LIMITED SCAN
-  limit: 5
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyMj0FL_DAUxO__TxHm9Bcibg97yWlFVwh0t2vbgyA9xOaxBNqkJq_gUvrdZVtEPAgeZyaZ37wJ6b2Dwv7llN_ro_j_qKu6es5vRLXP9w-1uIinsjgIP_YcEkeR64OuxRYSPlg6mp4S1CsyNBJDDC2lFOLVmpYH2n5AbSScH0a-2o1EGyJBTWDHHUGhNm8dlWQsxbsNJCyxcd1S-4XdDdH1Jl4gUQ3GJyVuIVGMrMQug0Tuesdii2aWCCN_sxKbM0Fls_z7npLSEHyiH1N-a97MjQTZM603pzDGlk4xtAtmlcXybzEsJV7TbBXar9HczP8-AwAA___5z4BX
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMjzFLBEEMhXt_xfHqgLuFzVTXHognh51sMe6EY2B3siQZUI7573I7hVgIlu-95H3JDUUSv8SVDeEdIybCpjKzmejd6gOn9IkwEHLZqt_tiTCLMsINnn1hBLzFj4UvHBPr4wBCYo952Ws3zWvUr2Opq4u5gnCuHg7HEYTnvGY_PGFqBKn-AzCPV0YYG_3_iAvbJsX4F_-v5qFNBE5X7o-aVJ35VWXeMV2e973dSGze07GLU-lRm9rDdwAAAP__KwVtCg==
 
 query T
-EXPLAIN (DISTSQL) SELECT y FROM NumToStr ORDER BY y LIMIT 5
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT y FROM NumToStr ORDER BY y LIMIT 5]
 ----
-distribution: full
-vectorized: true
-·
-• scan
-  missing stats
-  table: numtostr@primary
-  spans: LIMITED SCAN
-  limit: 5
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyMj0FLxDAUhO_-isecFCJuD3vJadWtUOhu17YHRXqIzWMJtElNUnBZ-t9lW0Q8CB5nJpn53hnho4NE-nLI77M9XW-zqq6e8xuq0jx9rOlET2WxIzv20YXoqSi3aUkPr3SiPNtlNa0hYJ3mveo5QL4hQSMweNdyCM5frPP8INOfkCsBY4cxXuxGoHWeIc-IJnYMiVq9d1yy0uzvVhDQHJXp5tpvgs3gTa_8CQLVoGyQdAuBYoySNgkEctObSGs0k4Ab489WiOrIkMkk_s9TchicDfwL5a_m1dQIsD7ycnNwo2_54F07zyyymP_NhuYQlzRZRGaXaGqmq68AAAD__6v2g0c=
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMjzFLBEEMhXt_xfHqgLuFzVTXHognh51sMe6EY2B3siQZUI7573I7hVgIlu-95H3JDUUSv8SVDeEdIybCpjKzmejd6gOn9IkwEHLZqt_tiTCLMsINnn1hBLzFj4UvHBPr4wBCYo952Ws3zWvUr2Opq4u5gnCuHg7HEYTnvGY_PGFqBKn-AzCPV0YYG_3_iAvbJsX4F_-v5qFNBE5X7o-aVJ35VWXeMV2e973dSGze07GLU-lRm9rDdwAAAP__KwVtCg==
 
 # Test that the correct node is chosen in a reverse scan with multiple spans.
 query T
-EXPLAIN (DISTSQL) SELECT y FROM NumToStr WHERE y < 1000 OR y > 9000 ORDER BY y DESC LIMIT 5
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT y FROM NumToStr WHERE y < 1000 OR y > 9000 ORDER BY y DESC LIMIT 5]
 ----
-distribution: full
-vectorized: true
-·
-• revscan
-  missing stats
-  table: numtostr@primary
-  spans: [ - /999] [/9001 - ]
-  limit: 5
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyMkMGrm0AQxu_9K4bpJYENrik5uKe0iaWCiakKbWk9bHVIBXXt7gqV4P9e1Pa95MHLe8f5Zn7ffDMXNL8rFOh_PYXvgyMs9kGSJp_DJSR-6O9S6OFjHB2g6WqrjNXw5ZMf-7Do4UfH-bscXM75EqL4QSLw_kl7P4YP36CHvZ_sIAwOQQobZNiogo6yJoPiO7rIcIMZw1arnIxRepQv01BQ_EHBGZZN29lRzhjmShOKC9rSVoQCj2qlWmd0KcjKsprGBoaqs4-QsfJMKNYDuzJ27xun8mdFMcmCtMNv7PH_M7atLmupe2SYtLIxAlaO53nOW5BNAS4o-4s0Mow6K2A7ZgzLurSwwecSujcJXzg9JtOqxtCrbudDxpCKM83vNarTOZ20yqc1cxlN3CQUZOzcXc9F0MytMeA17N6F-RM4G978DQAA__-fu8Vt
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMkDFrwzAQhff-ivBmldiBLJqyBkpSQrfiQbWOILB9QneCluD_XmQNTQpNM967-57e0wUTezq4kQT2HS0MtugMYuKeRDgVuR7t_SdsYxCmmLXInUHPiWAv0KADweLAzxzXxcWTujAsZ7MBZ_2BRN2ZYDezuTJu7xu_uY-BTuQ8pXVzY4-YwujS127Ko7JogsExq13tSoyXMAZdbfFXiPYmxD_tTiSRJ6GH6jVzZ0D-TPUHhXPq6TVxvzxTx-PCLYIn0brd1GE_1VUJeA23d-HmF9zNT98BAAD___cAnxU=
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT x FROM (SELECT x, 2*x, x+1 FROM NumToSquare)
 ----
-distribution: full
-vectorized: true
-·
-• scan
-  columns: (x)
-  estimated row count: 1,000 (missing stats)
-  table: numtosquare@primary
-  spans: FULL SCAN
+scan  ·      ·                    (x)  ·
+·     table  numtosquare@primary  ·    ·
+·     spans  ALL                  ·    ·
 
 # Verifies that unused renders don't cause us to do rendering instead of a
 # simple projection.
 query T
-EXPLAIN (DISTSQL) SELECT x FROM (SELECT x, 2*x, x+1 FROM NumToSquare)
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT x FROM (SELECT x, 2*x, x+1 FROM NumToSquare)]
 ----
-distribution: full
-vectorized: true
-·
-• scan
-  missing stats
-  table: numtosquare@primary
-  spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyMT81K9EAQvH9PMdRp93PEjcc5regKgbhZkxwEyWHMNEsgmcnOD0RC3l2SQdSD4Kmpqu6q6gnu0kHg8HLK7tIj2zykZVU-Z1tWHrLDfcVG9ljkT2zzCTm7Zf-XMbIrlkRRh94bdwnS0hYc2ig6yp4cxCsS1ByDNQ05Z-xCTetCqkaIHUerh-AXuuZojCWICb71HUGgkm8dFSQV2ZsdOBR52Xar7bfI_WDbXtp3cJSD1E6wa3DkwQu2T1DPHCb4rxDn5Zkgkpn_vUhBbjDa0Y8Ovznv5pqD1Jnis84E29DJmmaNiTBf71ZCkfNRTSJIdZTmev73EQAA___Tc4Tr
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMj7FqxDAQRPt8RZhaELtVde01uXCkCyoUazgMtuTsriDh0L8HW0VIEUg5M9J77B25JD7HlQr_hhHBYZMyUbXIXvUH5_QJPzjMeau218FhKkL4O2y2hfB4je8Lr4yJ8jTAIdHivBzYTeY1ytcp19WKftQohMOlmn88jQjNoVT7IavFG-HH5v5vv1K3kpW_xH-RhxYcmG7sF2qpMvFFynRoerwc_44iUa2vYw_n3KcW2sN3AAAA___R0mt-
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT y, str, repeat('test', y) AS res FROM NumToStr ORDER BY res
 ----
-distribution: full
-vectorized: true
-·
-• sort
-│ columns: (y, str, res)
-│ ordering: +res
-│ estimated row count: 1,000 (missing stats)
-│ order: +res
-│
-└── • render
-    │ columns: (res, y, str)
-    │ estimated row count: 1,000 (missing stats)
-    │ render res: repeat('test', y)
-    │ render y: y
-    │ render str: str
-    │
-    └── • scan
-          columns: (y, str)
-          estimated row count: 1,000 (missing stats)
-          table: numtostr@primary
-          spans: FULL SCAN
+render               ·         ·                  (y, str, res)  ·
+ │                   render 0  y                  ·              ·
+ │                   render 1  str                ·              ·
+ │                   render 2  res                ·              ·
+ └── sort            ·         ·                  (res, y, str)  +res
+      │              order     +res               ·              ·
+      └── render     ·         ·                  (res, y, str)  ·
+           │         render 0  repeat('test', y)  ·              ·
+           │         render 1  y                  ·              ·
+           │         render 2  str                ·              ·
+           └── scan  ·         ·                  (y, str)       ·
+·                    table     numtostr@primary   ·              ·
+·                    spans     ALL                ·              ·
 
-query T
+query TTTTT
 EXPLAIN (VERBOSE) SELECT y, str, repeat('test', y) AS res FROM NumToStr ORDER BY res LIMIT 10
 ----
-distribution: full
-vectorized: true
-·
-• limit
-│ columns: (y, str, res)
-│ estimated row count: 10 (missing stats)
-│ count: 10
-│
-└── • sort
-    │ columns: (res, y, str)
-    │ ordering: +res
-    │ estimated row count: 1,000 (missing stats)
-    │ order: +res
-    │
-    └── • render
-        │ columns: (res, y, str)
-        │ estimated row count: 1,000 (missing stats)
-        │ render res: repeat('test', y)
-        │ render y: y
-        │ render str: str
-        │
-        └── • scan
-              columns: (y, str)
-              estimated row count: 1,000 (missing stats)
-              table: numtostr@primary
-              spans: FULL SCAN
+render                    ·         ·                  (y, str, res)  ·
+ │                        render 0  y                  ·              ·
+ │                        render 1  str                ·              ·
+ │                        render 2  res                ·              ·
+ └── limit                ·         ·                  (res, y, str)  +res
+      │                   count     10                 ·              ·
+      └── sort            ·         ·                  (res, y, str)  +res
+           │              order     +res               ·              ·
+           └── render     ·         ·                  (res, y, str)  ·
+                │         render 0  repeat('test', y)  ·              ·
+                │         render 1  y                  ·              ·
+                │         render 2  str                ·              ·
+                └── scan  ·         ·                  (y, str)       ·
+·                         table     numtostr@primary   ·              ·
+·                         spans     ALL                ·              ·
 
 # Regression test for #20481.
 query T
-EXPLAIN (DISTSQL) SELECT count(*) FROM (SELECT 1 AS one FROM NumToSquare WHERE x > 10 ORDER BY xsquared LIMIT 10)
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT count(*) FROM (SELECT 1 AS one FROM NumToSquare WHERE x > 10 ORDER BY xsquared LIMIT 10)]
 ----
-distribution: full
-vectorized: true
-·
-• group (scalar)
-│
-└── • limit
-    │ count: 10
-    │
-    └── • sort
-        │ order: +xsquared
-        │
-        └── • scan
-              missing stats
-              table: numtosquare@primary
-              spans: [/11 - ]
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkU1r20AQhu_9FcOc7HaLd-XbnuImKhUoViqppKUVZSsNQiDtKvsBLkb_vVgqNC7YJMd9Z555XtgjuqceJcZfH9JdsofVXVKUxed0DUWcxrcl1CZov3q7ho95dg-rv6mAXQFG05LqMHjjnoKyBI-f4jyGA_wInG8JBIcsv4tz-PANDstKA2lyn5Qg-BoZatPQXg3kUH5HgRXD0ZqanDP2FB3nhaQ5oOQMOz0Gf4orhrWxhPKIvvM9ocRS_eopJ9WQ3XBk2JBXXT-ffdbvZrTdoOxvZFiMSjsJGyHeYzUxNMH_u-68agmlmNjLGxTGerIbcS6_id4hwyx4CXujCRmm3dB5EPyiNXqNdde2llrljd1E5-bb7Mu-_Jlnj8VqfdG1fY0rJzca7ejMc-kynyqG1LS0_KMzwdb0YE09a5ZnNnNz0JDzy1Qsj0Qvo1PB57C4CkfX4egqvP0PrqY3fwIAAP__BvUB3w==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkTFr8zAQhvfvV4SbvlJBLGfTlNIpUOKSpHQopqjWYQSxzj2doCX4v5dYQ5uCTTPee3reR3AnCORwazuMYF5AQ62gZ2owRuJzlB9s3AeYQoEPfZJzXCtoiBHMCcTLEcHAwb4dcYfWIS8LUOBQrD-OtT37zvLnOqROKL4nywj1oICSfPdFsS2C0YP6u3NPLMhLfalbl7egoEpiFlsKCAoefOdloYtJa3mN9a5tGVsrxMvy0nxfPW0Pr7vqef__ZtK1usa1w9hTiHjhmWouhloBuhbz5SIlbvCRqRk1eaxGbgwcRslbnYdNyKvzB3_CehYu5-FyFl79guvh31cAAAD__3GW2fY=

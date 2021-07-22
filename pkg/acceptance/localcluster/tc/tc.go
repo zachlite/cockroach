@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 // Package tc contains utility methods for using the Linux tc (traffic control)
 // command to mess with the network links between cockroach nodes running on
@@ -25,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -98,13 +102,16 @@ func (c *Controller) AddLatency(srcIP, dstIP string, latency time.Duration) erro
 
 // CleanUp resets all interfaces back to their default tc policies.
 func (c *Controller) CleanUp() error {
-	var err error
+	var errs []string
 	for _, ifce := range c.interfaces {
-		out, thisErr := exec.Command("sudo", strings.Split(fmt.Sprintf("tc qdisc del dev %s root", ifce), " ")...).Output()
+		out, err := exec.Command("sudo", strings.Split(fmt.Sprintf("tc qdisc del dev %s root", ifce), " ")...).Output()
 		if err != nil {
-			err = errors.CombineErrors(err, errors.Wrapf(
-				thisErr, "failed to remove tc rules for %q -- you may have to remove them manually: %s", ifce, out))
+			errs = append(errs, errors.Wrapf(
+				err, "failed to remove tc rules for %q -- you may have to remove them manually: %s", ifce, out).Error())
 		}
 	}
-	return err
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
 }

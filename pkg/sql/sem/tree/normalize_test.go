@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree_test
 
@@ -18,14 +22,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 )
 
 func TestContainsVars(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	testData := []struct {
 		expr     string
 		expected bool
@@ -53,16 +53,14 @@ func TestContainsVars(t *testing.T) {
 }
 
 func TestNormalizeExpr(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	defer tree.MockNameTypes(map[string]*types.T{
+	defer tree.MockNameTypes(map[string]types.T{
 		"a":  types.Int,
 		"b":  types.Int,
 		"c":  types.Int,
 		"d":  types.Bool,
 		"s":  types.String,
-		"j":  types.Jsonb,
-		"jv": types.Jsonb,
+		"j":  types.JSON,
+		"jv": types.JSON,
 	})()
 	testData := []struct {
 		expr     string
@@ -70,13 +68,7 @@ func TestNormalizeExpr(t *testing.T) {
 	}{
 		{`(a)`, `a`},
 		{`((((a))))`, `a`},
-		// These expression previously always mapped INT2/INT4 to INT8, but after
-		// unifying the type system, they now produce better results. Leaving the
-		// tests here to make sure they don't regress. See
-		// https://github.com/cockroachdb/cockroach/issues/32639
-		{`CAST(NULL AS INT2)`, `CAST(NULL AS INT2)`},
-		{`CAST(NULL AS INT4)`, `CAST(NULL AS INT4)`},
-		{`CAST(NULL AS INT8)`, `CAST(NULL AS INT8)`},
+		{`CAST(NULL AS INTEGER)`, `CAST(NULL AS INT)`},
 		{`+a`, `a`},
 		{`-(-a)`, `a`},
 		{`-+-a`, `a`},
@@ -97,7 +89,6 @@ func TestNormalizeExpr(t *testing.T) {
 		{`12 BETWEEN 24 AND 36`, `false`},
 		{`12 BETWEEN 10 AND 20`, `true`},
 		{`10 BETWEEN a AND 20`, `a <= 10`},
-		{`(1 + 2) BETWEEN b AND c`, `(b <= 3) AND (c >= 3)`},
 		{`a BETWEEN b AND c`, `(a >= b) AND (a <= c)`},
 		{`a BETWEEN SYMMETRIC b AND c`, `((a >= b) AND (a <= c)) OR ((a >= c) AND (a <= b))`},
 		{`a NOT BETWEEN b AND c`, `(a < b) OR (a > c)`},
@@ -132,8 +123,6 @@ func TestNormalizeExpr(t *testing.T) {
 		{`1 IN (3, 2, 1)`, `true`},
 		{`a IN (3, 2, 1)`, `a IN (1, 2, 3)`},
 		{`1 IN (1, 2, a)`, `1 IN (1, 2, a)`},
-		{`NULL IN ()`, `false`},
-		{`NULL NOT IN ()`, `true`},
 		{`NULL IN (1, 2, 3)`, `NULL`},
 		{`a IN (NULL)`, `NULL`},
 		{`a IN (NULL, NULL)`, `NULL`},
@@ -187,7 +176,6 @@ func TestNormalizeExpr(t *testing.T) {
 		{`clock_timestamp()`, `clock_timestamp()`},
 		{`now()`, `now()`},
 		{`current_timestamp()`, `current_timestamp()`},
-		{`current_timestamp(5)`, `current_timestamp(5)`},
 		{`transaction_timestamp()`, `transaction_timestamp()`},
 		{`statement_timestamp()`, `statement_timestamp()`},
 		{`cluster_logical_timestamp()`, `cluster_logical_timestamp()`},
@@ -195,7 +183,7 @@ func TestNormalizeExpr(t *testing.T) {
 		{`crdb_internal.force_error('a', 'b')`, `crdb_internal.force_error('a', 'b')`},
 		{`crdb_internal.force_panic('a')`, `crdb_internal.force_panic('a')`},
 		{`crdb_internal.force_log_fatal('a')`, `crdb_internal.force_log_fatal('a')`},
-		{`crdb_internal.force_retry('1 day'::interval)`, `crdb_internal.force_retry('1 day')`},
+		{`crdb_internal.force_retry('1 day'::interval)`, `crdb_internal.force_retry('1d')`},
 		{`crdb_internal.no_constant_folding(123)`, `crdb_internal.no_constant_folding(123)`},
 		{`crdb_internal.set_vmodule('a')`, `crdb_internal.set_vmodule('a')`},
 		{`uuid_v4()`, `uuid_v4()`},
@@ -234,8 +222,8 @@ func TestNormalizeExpr(t *testing.T) {
 		{`NULL IS DISTINCT FROM NULL`, `false`},
 		{`1 IS NOT DISTINCT FROM NULL`, `false`},
 		{`1 IS DISTINCT FROM NULL`, `true`},
-		{`d IS NOT DISTINCT FROM NULL`, `d IS NOT DISTINCT FROM NULL`},
-		{`d IS DISTINCT FROM NULL`, `d IS DISTINCT FROM NULL`},
+		{`d IS NOT DISTINCT FROM NULL`, `d IS NULL`},
+		{`d IS DISTINCT FROM NULL`, `d IS NOT NULL`},
 		{`NULL IS NOT DISTINCT FROM TRUE`, `false`},
 		{`NULL IS DISTINCT FROM TRUE`, `true`},
 		{`false IS NOT DISTINCT FROM TRUE`, `false`},
@@ -246,13 +234,13 @@ func TestNormalizeExpr(t *testing.T) {
 		{`false IS DISTINCT FROM FALSE`, `false`},
 		{`NULL IS NOT DISTINCT FROM 1`, `false`},
 		{`NULL IS DISTINCT FROM 1`, `true`},
-		{`NULL IS NOT DISTINCT FROM d`, `d IS NOT DISTINCT FROM NULL`},
-		{`NULL IS DISTINCT FROM d`, `d IS DISTINCT FROM NULL`},
+		{`NULL IS NOT DISTINCT FROM d`, `d IS NULL`},
+		{`NULL IS DISTINCT FROM d`, `d IS NOT NULL`},
 		// #15454: ensure that operators are pretty-printed correctly after normalization.
-		{`(random() + 1.0)::INT8`, `(random() + 1.0)::INT8`},
-		{`('a' || left('b', random()::INT8)) COLLATE en`, `('a' || left('b', random()::INT8)) COLLATE en`},
+		{`(random() + 1.0)::INT`, `(random() + 1.0)::INT`},
+		{`('a' || left('b', random()::INT)) COLLATE en`, `('a' || left('b', random()::INT)) COLLATE en`},
 		{`NULL COLLATE en`, `CAST(NULL AS STRING) COLLATE en`},
-		{`(1.0 + random()) IS OF (INT8)`, `(1.0 + random()) IS OF (INT8)`},
+		{`(1.0 + random()) IS OF (INT)`, `(1.0 + random()) IS OF (INT)`},
 		// #14687: ensure that negative divisors flip the inequality when rotating.
 		{`1 < a / -2`, `a < -2`},
 		{`1 <= a / -2`, `a <= -2`},
@@ -279,15 +267,14 @@ func TestNormalizeExpr(t *testing.T) {
 		{`(ROW (a) AS a)`, `((a,) AS a)`}, // Tuple
 	}
 
-	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
+	semaCtx := tree.MakeSemaContext(true /* privileged */)
 	for _, d := range testData {
 		t.Run(d.expr, func(t *testing.T) {
 			expr, err := parser.ParseExpr(d.expr)
 			if err != nil {
 				t.Fatalf("%s: %v", d.expr, err)
 			}
-			typedExpr, err := expr.TypeCheck(ctx, &semaCtx, types.Any)
+			typedExpr, err := expr.TypeCheck(&semaCtx, types.Any)
 			if err != nil {
 				t.Fatalf("%s: %v", d.expr, err)
 			}

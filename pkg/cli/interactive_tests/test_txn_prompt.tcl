@@ -91,7 +91,7 @@ end_test
 
 start_test "Test that prompt becomes ERROR upon txn error."
 send "select a;\r"
-eexpect "ERROR: column \"a\" does not exist"
+eexpect "pq: column \"a\" does not exist"
 eexpect root@
 eexpect "ERROR>"
 end_test
@@ -121,9 +121,9 @@ send "BEGIN; SAVEPOINT cockroach_restart;\r\r"
 eexpect SAVEPOINT
 eexpect root@
 send "SELECT crdb_internal.force_retry('1s':::INTERVAL);\r"
-eexpect "ERROR: restart transaction"
+eexpect "pq: restart transaction"
 eexpect root@
-eexpect "ERROR>"
+eexpect "RETRY>"
 end_test
 
 start_test "Test that prompt reverts to OPEN at beginning of new attempt."

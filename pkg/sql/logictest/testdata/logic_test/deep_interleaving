@@ -1,3 +1,5 @@
+# LogicTest: local local-opt fakedist fakedist-opt fakedist-metadata
+
 # Test querying deeply interleaved tables.
 
 statement ok

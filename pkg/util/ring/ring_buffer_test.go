@@ -1,119 +1,74 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package ring
 
 import (
+	"fmt"
 	"math/rand"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
-const maxCount = 100
+const maxCount = 1000
 
 func testRingBuffer(t *testing.T, count int) {
 	var buffer Buffer
 	naiveBuffer := make([]interface{}, 0, count)
 	for elementIdx := 0; elementIdx < count; elementIdx++ {
-		switch rand.Intn(4) {
-		case 0:
+		if buffer.Len() != len(naiveBuffer) {
+			t.Errorf("Ring buffer returned incorrect Len: expected %v, found %v", len(naiveBuffer), buffer.Len())
+			panic("")
+		}
+
+		op := rand.Float64()
+		if op < 0.35 {
 			buffer.AddFirst(elementIdx)
 			naiveBuffer = append([]interface{}{elementIdx}, naiveBuffer...)
-		case 1:
+		} else if op < 0.70 {
 			buffer.AddLast(elementIdx)
 			naiveBuffer = append(naiveBuffer, elementIdx)
-		case 2:
+		} else if op < 0.85 {
 			if len(naiveBuffer) > 0 {
 				buffer.RemoveFirst()
-				// NB: shift to preserve length.
-				copy(naiveBuffer, naiveBuffer[1:])
-				naiveBuffer = naiveBuffer[:len(naiveBuffer)-1]
+				naiveBuffer = naiveBuffer[1:]
 			}
-		case 3:
+		} else {
 			if len(naiveBuffer) > 0 {
 				buffer.RemoveLast()
 				naiveBuffer = naiveBuffer[:len(naiveBuffer)-1]
 			}
-		default:
-			t.Fatal("unexpected")
 		}
 
-		require.Equal(t, len(naiveBuffer), buffer.Len())
 		for pos, el := range naiveBuffer {
 			res := buffer.Get(pos)
-			require.Equal(t, el, res)
+			if res != el {
+				panic(fmt.Sprintf("Ring buffer returned incorrect value in position %v: expected %+v, found %+v", pos, el, res))
+			}
 		}
 		if len(naiveBuffer) > 0 {
-			require.Equal(t, naiveBuffer[0], buffer.GetFirst())
-			require.Equal(t, naiveBuffer[len(naiveBuffer)-1], buffer.GetLast())
+			if buffer.GetFirst() != naiveBuffer[0] {
+				panic(fmt.Sprintf("Ring buffer returned incorrect value of the first element: expected %+v, found %+v", naiveBuffer[0], buffer.GetFirst()))
+			}
+			if buffer.GetLast() != naiveBuffer[len(naiveBuffer)-1] {
+				panic(fmt.Sprintf("Ring buffer returned incorrect value of the last element: expected %+v, found %+v", naiveBuffer[len(naiveBuffer)-1], buffer.GetLast()))
+			}
 		}
 	}
 }
 
 func TestRingBuffer(t *testing.T) {
 	for count := 1; count <= maxCount; count++ {
-		t.Run("Parallel", func(t *testing.T) {
-			t.Parallel() // SAFE FOR TESTING
-			testRingBuffer(t, count)
-		})
+		testRingBuffer(t, count)
 	}
-}
-
-func TestRingBufferCapacity(t *testing.T) {
-	var b Buffer
-
-	require.Panics(t, func() { b.Reserve(-1) })
-	require.Equal(t, 0, b.Len())
-	require.Equal(t, 0, b.Cap())
-
-	b.Reserve(0)
-	require.Equal(t, 0, b.Len())
-	require.Equal(t, 0, b.Cap())
-
-	b.AddFirst("a")
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 1, b.Cap())
-	require.Panics(t, func() { b.Reserve(0) })
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 1, b.Cap())
-	b.Reserve(1)
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 1, b.Cap())
-	b.Reserve(2)
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 2, b.Cap())
-
-	b.AddLast("z")
-	require.Equal(t, 2, b.Len())
-	require.Equal(t, 2, b.Cap())
-	require.Panics(t, func() { b.Reserve(1) })
-	require.Equal(t, 2, b.Len())
-	require.Equal(t, 2, b.Cap())
-	b.Reserve(2)
-	require.Equal(t, 2, b.Len())
-	require.Equal(t, 2, b.Cap())
-	b.Reserve(9)
-	require.Equal(t, 2, b.Len())
-	require.Equal(t, 9, b.Cap())
-
-	b.RemoveFirst()
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 9, b.Cap())
-	b.Reserve(1)
-	require.Equal(t, 1, b.Len())
-	require.Equal(t, 9, b.Cap())
-	b.RemoveLast()
-	require.Equal(t, 0, b.Len())
-	require.Equal(t, 9, b.Cap())
-	b.Reserve(0)
-	require.Equal(t, 0, b.Len())
-	require.Equal(t, 9, b.Cap())
 }

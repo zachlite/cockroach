@@ -1,3 +1,5 @@
+# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata
+
 query TI colnames
 SELECT * FROM (VALUES ('a'), ('b')) WITH ORDINALITY AS x(name, i)
 ----
@@ -31,7 +33,7 @@ SELECT max(ordinality) FROM foo WITH ORDINALITY
 ----
 2
 
-query TITI rowsort
+query TITI
 SELECT * FROM foo WITH ORDINALITY AS a, foo WITH ORDINALITY AS b
 ----
 a 1 a 1
@@ -45,26 +47,11 @@ SELECT * FROM (SELECT x||x FROM foo) WITH ORDINALITY
 aa 1
 bb 2
 
-query TII rowsort
+query TII
 SELECT * FROM (SELECT x, ordinality*2 FROM foo WITH ORDINALITY AS a) JOIN foo WITH ORDINALITY AS b USING(x)
 ----
 a 2 1
 b 4 2
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x DESC) WITH ORDINALITY LIMIT 1
-----
-b 1
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x) WITH ORDINALITY ORDER BY x DESC LIMIT 1
-----
-b 2
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x) WITH ORDINALITY ORDER BY ordinality DESC LIMIT 1
-----
-b 2
 
 statement ok
 INSERT INTO foo(x) VALUES ('c')
@@ -97,9 +84,3 @@ true
 # Regression test for #33659
 statement ok
 TABLE [SHOW ZONE CONFIGURATIONS] WITH ORDINALITY
-
-# Regression test for #41760
-query TI
-SELECT * FROM (SELECT * FROM foo LIMIT 1) WITH ORDINALITY
-----
-a 1

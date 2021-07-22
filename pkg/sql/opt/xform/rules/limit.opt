@@ -2,6 +2,7 @@
 # limit.opt contains exploration rules for the Limit and Offset operators.
 # =============================================================================
 
+
 # GenerateLimitedScans generates a set of limited Scan operators, one for each
 # matching index on the scanned table. If the secondary index cannot provide all
 # the output columns, an IndexJoin is introduced to supply them. Pushing a limit
@@ -10,88 +11,42 @@
 # a Limit operator.
 [GenerateLimitedScans, Explore]
 (Limit
-    (Scan $scanPrivate:* & (IsCanonicalScan $scanPrivate))
-    (Const $limit:* & (IsPositiveInt $limit))
+    (Scan $def:* & (IsCanonicalScan $def))
+    (Const $limit:* & (IsPositiveLimit $limit))
     $ordering:*
 )
 =>
-(GenerateLimitedScans $scanPrivate $limit $ordering)
+(GenerateLimitedScans $def $limit $ordering)
 
-# PushLimitIntoFilteredScan constructs a new Scan operator that adds a hard row
-# limit to an existing Scan operator that already has a constraint or scans a
-# partial index. The scan operator always applies the limit after any
-# constraint.
-#
-# Note that PushLimitIntoFilteredScan does not push limits into inverted index
-# scans. Inverted index scans are not guaranteed to produce a specific number of
-# result rows because they contain multiple entries for a single row indexed.
-# Therefore, they cannot be considered for limited scans.
-[PushLimitIntoFilteredScan, Explore]
+# PushLimitIntoConstrainedScan constructs a new Scan operator that adds a hard
+# row limit to an existing Scan operator that already has a constraint
+# associated with it (added by the ConstrainScans rule). The Scan operator
+# always applies the limit after any constraint.
+[PushLimitIntoConstrainedScan, Explore]
 (Limit
-    (Scan $scanPrivate:*)
-    (Const $limit:* & (IsPositiveInt $limit))
-    $ordering:* & (CanLimitFilteredScan $scanPrivate $ordering)
+    (Scan $def:*)
+    (Const $limit:* & (IsPositiveLimit $limit))
+    $ordering:* & (CanLimitConstrainedScan $def $ordering)
 )
 =>
-(Scan (LimitScanPrivate $scanPrivate $limit $ordering))
+(Scan (LimitScanDef $def $limit $ordering))
 
-# PushLimitIntoIndexJoin pushes a limit through an index join. Since index
-# lookup can be expensive, it's always better to discard rows beforehand.
+# PushLimitIntoIndexJoin pushes a limit through an index join and constructs a
+# new Scan operator that incorporates it. Since index lookup can be expensive,
+# it's always better to discard rows beforehand.
 #
 # TODO(radu): we can similarly push Offset too.
 [PushLimitIntoIndexJoin, Explore]
 (Limit
-    (IndexJoin $input:* $indexJoinPrivate:*)
-    $limitExpr:(Const $limit:* & (IsPositiveInt $limit))
-    $ordering:* &
-        (OrderingCanProjectCols
-            $ordering
-            $cols:(OutputCols $input)
-        )
+    (IndexJoin
+      (Scan $scanDef:*)
+      $indexJoinDef:*
+    )
+    (Const $limit:* & (IsPositiveLimit $limit))
+    $ordering:* & (CanLimitConstrainedScan $scanDef $ordering)
 )
 =>
 (IndexJoin
-    (Limit $input $limitExpr (PruneOrdering $ordering $cols))
-    $indexJoinPrivate
+  (Scan (LimitScanDef $scanDef $limit $ordering))
+  $indexJoinDef
 )
-
-# SplitLimitedScanIntoUnionScans splits a non-inverted scan under a limit into a
-# union-all of limited scans over disjoint intervals. Example:
-#
-#    CREATE TABLE tab (region STRING, data INT NOT NULL, INDEX (region, data));
-#
-#    SELECT data
-#    FROM tab
-#    WHERE region='ASIA' OR region='EUROPE'
-#    ORDER BY data DESC
-#    LIMIT 1;
-#
-#    =>
-#
-#    SELECT data
-#    FROM (SELECT * FROM tab WHERE region='ASIA' ORDER BY data LIMIT 1)
-#    UNION ALL (SELECT * FROM tab WHERE region='EUROPE' ORDER BY data LIMIT 1)
-#    ORDER BY data
-#    LIMIT 1;
-#
-# See the SplitLimitedScanIntoUnionScans function in xform/custom_funcs for
-# details.
-[SplitLimitedScanIntoUnionScans, Explore]
-(Limit
-    $scan:(Scan $scanPrivate:*) &
-        ^(ScanIsLimited $scanPrivate) &
-        ^(ScanIsInverted $scanPrivate)
-    $limitExpr:(Const $limit:*) & (IsPositiveInt $limit)
-    $ordering:* &
-        (Let
-            ($unionScans $ok):(SplitLimitedScanIntoUnionScans
-                $ordering
-                $scan
-                $scanPrivate
-                $limit
-            )
-            $ok
-        )
-)
-=>
-(Limit $unionScans $limitExpr $ordering)

@@ -1,3 +1,10 @@
+# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata
+
+query error duplicate column name: "rowid"
+CREATE TABLE t (
+  rowid INT
+)
+
 statement ok
 CREATE TABLE t (
   a INT,
@@ -55,10 +62,10 @@ SELECT rowid FROM t WHERE a = 10
 query TTBTTTB
 SHOW COLUMNS FROM t
 ----
-a      INT8    true   NULL            ·  {primary}  false
-b      INT8    true   NULL            ·  {primary}  false
-rowid  INT8    false  unique_rowid()  ·  {primary}  true
-c      STRING  true   NULL            ·  {primary}  false
+a      INT     true   NULL            ·  {}           false
+b      INT     true   NULL            ·  {}           false
+rowid  INT     false  unique_rowid()  ·  {"primary"}  true
+c      STRING  true   NULL            ·  {}           false
 
 statement ok
 CREATE INDEX a_idx ON t (a)

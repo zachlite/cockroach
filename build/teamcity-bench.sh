@@ -10,14 +10,13 @@ export TMPDIR=$PWD/artifacts/bench
 mkdir -p "$TMPDIR"
 
 tc_start_block "Compile C dependencies"
-# Buffer noisy output and only print it on failure.
-run build/builder.sh make -Otarget c-deps &> artifacts/bench-c-build.log || (cat artifacts/bench-c-build.log && false)
-rm artifacts/bench-c-build.log
+run build/builder.sh make -Otarget c-deps
 tc_end_block "Compile C dependencies"
 
 tc_start_block "Run Benchmarks"
-echo "Test parsing does not work here, see https://youtrack.jetbrains.com/issue/TW-63449"
-echo "Consult artifacts/failures.txt instead"
-run_json_test build/builder.sh stdbuf -oL -eL \
-  make benchshort GOTESTFLAGS=-json TESTFLAGS='-v'
+run build/builder.sh \
+	stdbuf -oL -eL \
+	make benchshort TESTFLAGS='-v' 2>&1 \
+	| tee artifacts/bench.log \
+	| go-test-teamcity
 tc_end_block "Run Benchmarks"

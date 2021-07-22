@@ -1,27 +1,34 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License. See the AUTHORS file
+// for names of contributors.
 
 package tpcc
 
 import (
-	"context"
+	gosql "database/sql"
+	"math/rand"
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
+
+	"context"
+
+	"fmt"
+
 	"github.com/cockroachdb/cockroach-go/crdb"
-	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/workload"
-	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/pgtype"
-	"golang.org/x/exp/rand"
 )
 
 // From the TPCC spec, section 2.6:
@@ -42,7 +49,7 @@ type orderStatusData struct {
 	cBalance   float64
 	oID        int
 	oEntryD    time.Time
-	oCarrierID pgtype.Int8
+	oCarrierID gosql.NullInt64
 
 	items []orderItem
 }
@@ -54,71 +61,16 @@ type customerData struct {
 	cMiddle  string
 }
 
-type orderStatus struct {
-	config *tpcc
-	mcp    *workload.MultiConnPool
-	sr     workload.SQLRunner
+type orderStatus struct{}
 
-	selectByCustID   workload.StmtHandle
-	selectByLastName workload.StmtHandle
-	selectOrder      workload.StmtHandle
-	selectItems      workload.StmtHandle
+var _ tpccTx = orderStatus{}
 
-	a bufalloc.ByteAllocator
-}
+func (o orderStatus) run(
+	ctx context.Context, config *tpcc, db *gosql.DB, wID int,
+) (interface{}, error) {
+	atomic.AddUint64(&config.auditor.orderStatusTransactions, 1)
 
-var _ tpccTx = &orderStatus{}
-
-func createOrderStatus(
-	ctx context.Context, config *tpcc, mcp *workload.MultiConnPool,
-) (tpccTx, error) {
-	o := &orderStatus{
-		config: config,
-		mcp:    mcp,
-	}
-
-	// Select by customer id.
-	o.selectByCustID = o.sr.Define(`
-		SELECT c_balance, c_first, c_middle, c_last
-		FROM customer
-		WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3`,
-	)
-
-	// Pick the middle row, rounded up, from the selection by last name.
-	o.selectByLastName = o.sr.Define(`
-		SELECT c_id, c_balance, c_first, c_middle
-		FROM customer
-		WHERE c_w_id = $1 AND c_d_id = $2 AND c_last = $3
-		ORDER BY c_first ASC`,
-	)
-
-	// Select the customer's order.
-	o.selectOrder = o.sr.Define(`
-		SELECT o_id, o_entry_d, o_carrier_id
-		FROM "order"
-		WHERE o_w_id = $1 AND o_d_id = $2 AND o_c_id = $3
-		ORDER BY o_id DESC
-		LIMIT 1`,
-	)
-
-	// Select the items from the customer's order.
-	o.selectItems = o.sr.Define(`
-		SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d
-		FROM order_line
-		WHERE ol_w_id = $1 AND ol_d_id = $2 AND ol_o_id = $3`,
-	)
-
-	if err := o.sr.Init(ctx, "order-status", mcp, config.connFlags); err != nil {
-		return nil, err
-	}
-
-	return o, nil
-}
-
-func (o *orderStatus) run(ctx context.Context, wID int) (interface{}, error) {
-	atomic.AddUint64(&o.config.auditor.orderStatusTransactions, 1)
-
-	rng := rand.New(rand.NewSource(uint64(timeutil.Now().UnixNano())))
+	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
 
 	d := orderStatusData{
 		dID: rng.Intn(10) + 1,
@@ -127,32 +79,43 @@ func (o *orderStatus) run(ctx context.Context, wID int) (interface{}, error) {
 	// 2.6.1.2: The customer is randomly selected 60% of the time by last name
 	// and 40% by number.
 	if rng.Intn(100) < 60 {
-		d.cLast = string(o.config.randCLast(rng, &o.a))
-		atomic.AddUint64(&o.config.auditor.orderStatusByLastName, 1)
+		d.cLast = randCLast(rng)
+		atomic.AddUint64(&config.auditor.orderStatusByLastName, 1)
 	} else {
-		d.cID = o.config.randCustomerID(rng)
+		d.cID = randCustomerID(rng)
 	}
 
-	tx, err := o.mcp.Get().BeginEx(ctx, o.config.txOpts)
-	if err != nil {
-		return nil, err
-	}
-	if err := crdb.ExecuteInTx(
-		ctx, (*workload.PgxTx)(tx),
-		func() error {
+	if err := crdb.ExecuteTx(
+		ctx,
+		db,
+		config.txOpts,
+		func(tx *gosql.Tx) error {
 			// 2.6.2.2 explains this entire transaction.
 
 			// Select the customer
 			if d.cID != 0 {
 				// Case 1: select by customer id
-				if err := o.selectByCustID.QueryRowTx(
-					ctx, tx, wID, d.dID, d.cID,
+				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+					SELECT c_balance, c_first, c_middle, c_last
+					FROM customer
+					WHERE c_w_id = %[1]d AND c_d_id = %[2]d AND c_id = %[3]d`,
+					wID, d.dID, d.cID),
 				).Scan(&d.cBalance, &d.cFirst, &d.cMiddle, &d.cLast); err != nil {
 					return errors.Wrap(err, "select by customer idfail")
 				}
 			} else {
 				// Case 2: Pick the middle row, rounded up, from the selection by last name.
-				rows, err := o.selectByLastName.QueryTx(ctx, tx, wID, d.dID, d.cLast)
+				indexStr := "@customer_idx"
+				if config.usePostgres {
+					indexStr = ""
+				}
+				queryStr := fmt.Sprintf(`
+					SELECT c_id, c_balance, c_first, c_middle
+					FROM customer%[1]s
+					WHERE c_w_id = %[2]d AND c_d_id = %[3]d AND c_last = '%[4]s'
+					ORDER BY c_first ASC`,
+					indexStr, wID, d.dID, d.cLast)
+				rows, err := tx.QueryContext(ctx, queryStr)
 				if err != nil {
 					return errors.Wrap(err, "select by last name fail")
 				}
@@ -171,9 +134,13 @@ func (o *orderStatus) run(ctx context.Context, wID int) (interface{}, error) {
 				}
 				rows.Close()
 				if len(customers) == 0 {
-					return errors.New("found no customers matching query orderStatus.selectByLastName")
+					return fmt.Errorf("found no customers matching query: %s", queryStr)
 				}
-				cIdx := (len(customers) - 1) / 2
+				cIdx := len(customers) / 2
+				if len(customers)%2 == 0 {
+					cIdx--
+				}
+
 				c := customers[cIdx]
 				d.cID = c.cID
 				d.cBalance = c.cBalance
@@ -182,14 +149,23 @@ func (o *orderStatus) run(ctx context.Context, wID int) (interface{}, error) {
 			}
 
 			// Select the customer's order.
-			if err := o.selectOrder.QueryRowTx(
-				ctx, tx, wID, d.dID, d.cID,
+			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT o_id, o_entry_d, o_carrier_id
+				FROM "order"
+				WHERE o_w_id = %[1]d AND o_d_id = %[2]d AND o_c_id = %[3]d
+				ORDER BY o_id DESC
+				LIMIT 1`,
+				wID, d.dID, d.cID),
 			).Scan(&d.oID, &d.oEntryD, &d.oCarrierID); err != nil {
 				return errors.Wrap(err, "select order fail")
 			}
 
 			// Select the items from the customer's order.
-			rows, err := o.selectItems.QueryTx(ctx, tx, wID, d.dID, d.oID)
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d
+				FROM order_line
+				WHERE ol_w_id = %[1]d AND ol_d_id = %[2]d AND ol_o_id = %[3]d`,
+				wID, d.dID, d.oID))
 			if err != nil {
 				return errors.Wrap(err, "select items fail")
 			}

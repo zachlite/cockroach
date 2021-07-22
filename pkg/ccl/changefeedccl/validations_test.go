@@ -15,43 +15,31 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/bank"
-	"github.com/cockroachdb/cockroach/pkg/workload/workloadsql"
-	"github.com/stretchr/testify/require"
 )
 
-func TestCatchupScanOrdering(t *testing.T) {
+func TestValidations(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	defer utilccl.TestingEnableEnterprise()()
 
-	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {
+	testFn := func(t *testing.T, db *gosql.DB, f testfeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(db)
+
 		t.Run("bank", func(t *testing.T) {
 			ctx := context.Background()
 			const numRows, numRanges, payloadBytes, maxTransfer = 10, 10, 10, 999
-			gen := bank.FromConfig(numRows, numRows, payloadBytes, numRanges)
-			var l workloadsql.InsertsDataLoader
-			if _, err := workloadsql.Setup(ctx, db, gen, l); err != nil {
+			gen := bank.FromConfig(numRows, payloadBytes, numRanges)
+			if _, err := workload.Setup(ctx, db, gen, 0, 0); err != nil {
 				t.Fatal(err)
 			}
 
-			var nowString string
-			require.NoError(t, db.QueryRow("SELECT cluster_logical_timestamp()").Scan(&nowString))
-
-			existingChangeCount := 50
-			for i := 0; i < existingChangeCount; i++ {
-				if err := randomBankTransfer(numRows, maxTransfer, db); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			bankFeed := feed(t, f, `CREATE CHANGEFEED FOR bank WITH updated, cursor=$1`, nowString)
-			defer closeFeed(t, bankFeed)
+			bank := f.Feed(t, `CREATE CHANGEFEED FOR bank WITH updated, resolved`)
+			defer bank.Close(t)
 
 			var done int64
 			g := ctxgroup.WithContext(ctx)
@@ -61,32 +49,59 @@ func TestCatchupScanOrdering(t *testing.T) {
 						return nil
 					}
 
-					if err := randomBankTransfer(numRows, maxTransfer, db); err != nil {
+					// TODO(dan): This bit is copied from the bank workload. It's
+					// currently much easier to do this than to use the real Ops,
+					// which is silly. Fixme.
+					from := rand.Intn(numRows)
+					to := rand.Intn(numRows)
+					for from == to {
+						to = rand.Intn(numRows)
+					}
+					amount := rand.Intn(maxTransfer)
+					if _, err := db.Exec(`UPDATE bank
+					SET balance = CASE id WHEN $1 THEN balance-$3 WHEN $2 THEN balance+$3 END
+					WHERE id IN ($1, $2)
+				`, from, to, amount); err != nil {
 						return err
 					}
 				}
 			})
 
-			v := cdctest.NewOrderValidator(`bank`)
-			seenChanges := 0
+			const requestedResolved = 5
+			var numResolved, rowsSinceResolved int
+
+			v := Validators{
+				NewOrderValidator(`bank`),
+				NewFingerprintValidator(db, `bank`, `fprint`, bank.Partitions()),
+			}
+			sqlDB.Exec(t, `CREATE TABLE fprint (id INT PRIMARY KEY, balance INT, payload STRING)`)
 			for {
-				m, err := bankFeed.Next()
-				if err != nil {
-					t.Fatal(err)
-				} else if len(m.Key) > 0 || len(m.Value) > 0 {
-					updated, _, err := cdctest.ParseJSONValueTimestamps(m.Value)
+				_, partition, key, value, resolved, ok := bank.Next(t)
+				if !ok {
+					t.Fatal(`expected more rows`)
+				} else if key != nil {
+					updated, _, err := ParseJSONValueTimestamps(value)
 					if err != nil {
 						t.Fatal(err)
 					}
-					err = v.NoteRow(m.Partition, string(m.Key), string(m.Value), updated)
+					v.NoteRow(partition, string(key), string(value), updated)
+					rowsSinceResolved++
+				} else if resolved != nil {
+					_, resolved, err := ParseJSONValueTimestamps(resolved)
 					if err != nil {
 						t.Fatal(err)
 					}
-					seenChanges++
-					if seenChanges >= 200 {
-						atomic.StoreInt64(&done, 1)
-						break
+					if rowsSinceResolved > 0 || true {
+						if err := v.NoteResolved(partition, resolved); err != nil {
+							t.Fatal(err)
+						}
+						numResolved++
+						if numResolved > requestedResolved {
+							atomic.StoreInt64(&done, 1)
+							break
+						}
 					}
+					rowsSinceResolved = 0
 				}
 			}
 			for _, f := range v.Failures() {
@@ -98,27 +113,6 @@ func TestCatchupScanOrdering(t *testing.T) {
 			}
 		})
 	}
-	// Tenant tests skipped because of:
-	// validations_test.go:40: executing ALTER TABLE bank SPLIT AT
-	// VALUES (5): pq: unimplemented: operation is unsupported in
-	// multi-tenancy mode
-	t.Run(`sinkless`, sinklessTest(testFn, feedTestNoTenants))
-	t.Run(`enterprise`, enterpriseTest(testFn, feedTestNoTenants))
-}
-
-// TODO(dan): This bit is copied from the bank workload. It's
-// currently much easier to do this than to use the real Ops,
-// which is silly. Fixme.
-func randomBankTransfer(numRows, maxTransfer int, db *gosql.DB) error {
-	from := rand.Intn(numRows)
-	to := rand.Intn(numRows)
-	for from == to {
-		to = rand.Intn(numRows)
-	}
-	amount := rand.Intn(maxTransfer)
-	_, err := db.Exec(`UPDATE bank
-					SET balance = CASE id WHEN $1 THEN balance-$3 WHEN $2 THEN balance+$3 END
-					WHERE id IN ($1, $2)
-				`, from, to, amount)
-	return err
+	t.Run(`sinkless`, sinklessTest(testFn))
+	t.Run(`enterprise`, enterpriseTest(testFn))
 }

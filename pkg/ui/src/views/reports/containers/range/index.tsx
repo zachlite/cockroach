@@ -1,19 +1,23 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import Long from "long";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
+import { RouterState } from "react-router";
 
 import * as protos from "src/js/protos";
 import {
@@ -34,7 +38,6 @@ import LogTable from "src/views/reports/containers/range/logTable";
 import AllocatorOutput from "src/views/reports/containers/range/allocator";
 import RangeInfo from "src/views/reports/containers/range/rangeInfo";
 import LeaseTable from "src/views/reports/containers/range/leaseTable";
-import { getMatchParamByName } from "src/util/query";
 
 interface RangeOwnProps {
   range: CachedDataReducerState<protos.cockroach.server.serverpb.RangeResponse>;
@@ -45,7 +48,7 @@ interface RangeOwnProps {
   refreshRangeLog: typeof refreshRangeLog;
 }
 
-type RangeProps = RangeOwnProps & RouteComponentProps;
+type RangeProps = RangeOwnProps & RouterState;
 
 function ErrorPage(props: {
   rangeID: string;
@@ -54,32 +57,29 @@ function ErrorPage(props: {
 }) {
   return (
     <div className="section">
-      <h1 className="base-heading">Range Report for r{props.rangeID}</h1>
-      <h2 className="base-heading">{props.errorText}</h2>
+      <h1>Range Report for r{props.rangeID}</h1>
+      <h2>{props.errorText}</h2>
       <ConnectionsTable range={props.range} />
     </div>
   );
 }
 
 function rangeRequestFromProps(props: RangeProps) {
-  const rangeId = getMatchParamByName(props.match, rangeIDAttr);
   return new protos.cockroach.server.serverpb.RangeRequest({
-    range_id: Long.fromString(rangeId),
+    range_id: Long.fromString(props.params[rangeIDAttr]),
   });
 }
 
 function allocatorRequestFromProps(props: RangeProps) {
-  const rangeId = getMatchParamByName(props.match, rangeIDAttr);
   return new protos.cockroach.server.serverpb.AllocatorRangeRequest({
-    range_id: Long.fromString(rangeId),
+    range_id: Long.fromString(props.params[rangeIDAttr]),
   });
 }
 
 function rangeLogRequestFromProps(props: RangeProps) {
-  const rangeId = getMatchParamByName(props.match, rangeIDAttr);
   // TODO(bram): Remove this limit once #18159 is resolved.
   return new protos.cockroach.server.serverpb.RangeLogRequest({
-    range_id: Long.fromString(rangeId),
+    range_id: Long.fromString(props.params[rangeIDAttr]),
     limit: -1,
   });
 }
@@ -87,27 +87,27 @@ function rangeLogRequestFromProps(props: RangeProps) {
 /**
  * Renders the Range Report page.
  */
-export class Range extends React.Component<RangeProps, {}> {
+class Range extends React.Component<RangeProps, {}> {
   refresh(props = this.props) {
     props.refreshRange(rangeRequestFromProps(props));
     props.refreshAllocatorRange(allocatorRequestFromProps(props));
     props.refreshRangeLog(rangeLogRequestFromProps(props));
   }
 
-  componentDidMount() {
+  componentWillMount() {
     // Refresh nodes status query when mounting.
     this.refresh();
   }
 
-  componentDidUpdate(prevProps: RangeProps) {
-    if (!_.isEqual(this.props.location, prevProps.location)) {
-      this.refresh(this.props);
+  componentWillReceiveProps(nextProps: RangeProps) {
+    if (this.props.location !== nextProps.location) {
+      this.refresh(nextProps);
     }
   }
 
   render() {
-    const { range, match } = this.props;
-    const rangeID = getMatchParamByName(match, rangeIDAttr);
+    const rangeID = this.props.params[rangeIDAttr];
+    const { range } = this.props;
 
     // A bunch of quick error cases.
     if (!_.isNil(range) && !_.isNil(range.lastError)) {
@@ -139,13 +139,11 @@ export class Range extends React.Component<RangeProps, {}> {
     }
 
     // Did we get any responses?
-    if (
-      !_.some(range.data.responses_by_node_id, (resp) => resp.infos.length > 0)
-    ) {
+    if (!_.some(range.data.responses_by_node_id, resp => resp.infos.length > 0)) {
       return (
         <ErrorPage
           rangeID={rangeID}
-          errorText={`No results found, perhaps r${rangeID} doesn't exist.`}
+          errorText={`No results found, perhaps r${this.props.params[rangeIDAttr]} doesn't exist.`}
           range={range}
         />
       );
@@ -154,17 +152,17 @@ export class Range extends React.Component<RangeProps, {}> {
     // Collect all the infos and sort them, putting the leader (or the replica
     // with the highest term, first.
     const infos = _.orderBy(
-      _.flatMap(range.data.responses_by_node_id, (resp) => {
+      _.flatMap(range.data.responses_by_node_id, resp => {
         if (resp.response && _.isEmpty(resp.error_message)) {
           return resp.infos;
         }
         return [];
       }),
       [
-        (info) => RangeInfo.IsLeader(info),
-        (info) => FixLong(info.raft_state.applied).toNumber(),
-        (info) => FixLong(info.raft_state.hard_state.term).toNumber(),
-        (info) => {
+        info => RangeInfo.IsLeader(info),
+        info => FixLong(info.raft_state.applied).toNumber(),
+        info => FixLong(info.raft_state.hard_state.term).toNumber(),
+        info => {
           const localReplica = RangeInfo.GetLocalReplica(info);
           return _.isNil(localReplica) ? 0 : localReplica.replica_id;
         },
@@ -174,17 +172,17 @@ export class Range extends React.Component<RangeProps, {}> {
 
     // Gather all replica IDs.
     const replicas = _.chain(infos)
-      .flatMap((info) => info.state.state.desc.internal_replicas)
-      .sortBy((rep) => rep.replica_id)
-      .sortedUniqBy((rep) => rep.replica_id)
+      .flatMap(info => info.state.state.desc.replicas)
+      .sortBy(rep => rep.replica_id)
+      .sortedUniqBy(rep => rep.replica_id)
       .value();
 
     return (
       <div className="section">
-        <Helmet title={`r${responseRangeID.toString()} Range | Debug`} />
-        <h1 className="base-heading">
-          Range Report for r{responseRangeID.toString()}
-        </h1>
+        <Helmet>
+          <title>{ `r${responseRangeID.toString()} Range | Debug` }</title>
+        </Helmet>
+        <h1>Range Report for r{responseRangeID.toString()}</h1>
         <RangeTable infos={infos} replicas={replicas} />
         <LeaseTable info={_.head(infos)} />
         <ConnectionsTable range={range} />
@@ -194,22 +192,19 @@ export class Range extends React.Component<RangeProps, {}> {
     );
   }
 }
-const mapStateToProps = (state: AdminUIState, props: RangeProps) => ({
-  range: state.cachedData.range[rangeRequestKey(rangeRequestFromProps(props))],
-  allocator:
-    state.cachedData.allocatorRange[
-      allocatorRangeRequestKey(allocatorRequestFromProps(props))
-    ],
-  rangeLog:
-    state.cachedData.rangeLog[
-      rangeLogRequestKey(rangeLogRequestFromProps(props))
-    ],
-});
 
-const mapDispatchToProps = {
+function mapStateToProps(state: AdminUIState, props: RangeProps) {
+  return {
+    range: state.cachedData.range[rangeRequestKey(rangeRequestFromProps(props))],
+    allocator: state.cachedData.allocatorRange[allocatorRangeRequestKey(allocatorRequestFromProps(props))],
+    rangeLog: state.cachedData.rangeLog[rangeLogRequestKey(rangeLogRequestFromProps(props))],
+  };
+}
+
+const actions = {
   refreshRange,
   refreshAllocatorRange,
   refreshRangeLog,
 };
 
-export default withRouter(connect(mapStateToProps, mapDispatchToProps)(Range));
+export default connect(mapStateToProps, actions)(Range);

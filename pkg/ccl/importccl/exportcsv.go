@@ -10,127 +10,167 @@ package importccl
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/errors"
 )
 
+// exportHeader is the header for EXPORT stmt results.
+var exportHeader = sqlbase.ResultColumns{
+	{Name: "filename", Typ: types.String},
+	{Name: "rows", Typ: types.Int},
+	{Name: "bytes", Typ: types.Int},
+}
+
+const (
+	exportOptionDelimiter = "delimiter"
+	exportOptionNullAs    = "nullas"
+	exportOptionChunkSize = "chunk_rows"
+	exportOptionFileName  = "filename"
+)
+
+var exportOptionExpectValues = map[string]sql.KVStringOptValidate{
+	exportOptionChunkSize: sql.KVStringOptRequireValue,
+	exportOptionDelimiter: sql.KVStringOptRequireValue,
+	exportOptionFileName:  sql.KVStringOptRequireValue,
+	exportOptionNullAs:    sql.KVStringOptRequireValue,
+}
+
+const exportChunkSizeDefault = 100000
 const exportFilePatternPart = "%part%"
 const exportFilePatternDefault = exportFilePatternPart + ".csv"
 
-// csvExporter data structure to augment the compression
-// and csv writer, encapsulating the internals to make
-// exporting oblivious for the consumers.
-type csvExporter struct {
-	compressor *gzip.Writer
-	buf        *bytes.Buffer
-	csvWriter  *csv.Writer
-}
-
-// Write append record to csv file.
-func (c *csvExporter) Write(record []string) error {
-	return c.csvWriter.Write(record)
-}
-
-// Close closes the compressor writer which
-// appends archive footers.
-func (c *csvExporter) Close() error {
-	if c.compressor != nil {
-		return c.compressor.Close()
-	}
-	return nil
-}
-
-// Flush flushes both csv and compressor writer if
-// initialized.
-func (c *csvExporter) Flush() error {
-	c.csvWriter.Flush()
-	if c.compressor != nil {
-		return c.compressor.Flush()
-	}
-	return nil
-}
-
-// ResetBuffer resets the buffer and compressor state.
-func (c *csvExporter) ResetBuffer() {
-	c.buf.Reset()
-	if c.compressor != nil {
-		// Brings compressor to its initial state.
-		c.compressor.Reset(c.buf)
-	}
-}
-
-// Bytes results in the slice of bytes with compressed content.
-func (c *csvExporter) Bytes() []byte {
-	return c.buf.Bytes()
-}
-
-// Len returns length of the buffer with content.
-func (c *csvExporter) Len() int {
-	return c.buf.Len()
-}
-
-func (c *csvExporter) FileName(spec execinfrapb.CSVWriterSpec, part string) string {
-	pattern := exportFilePatternDefault
-	if spec.NamePattern != "" {
-		pattern = spec.NamePattern
+// exportPlanHook implements sql.PlanHook.
+func exportPlanHook(
+	ctx context.Context, stmt tree.Statement, p sql.PlanHookState,
+) (sql.PlanHookRowFn, sqlbase.ResultColumns, []sql.PlanNode, error) {
+	exportStmt, ok := stmt.(*tree.Export)
+	if !ok {
+		return nil, nil, nil, nil
 	}
 
-	fileName := strings.Replace(pattern, exportFilePatternPart, part, -1)
-	// TODO: add suffix based on compressor type
-	if c.compressor != nil {
-		fileName += ".gz"
+	fileFn, err := p.TypeAsString(exportStmt.File, "EXPORT")
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	return fileName
-}
 
-func newCSVExporter(sp execinfrapb.CSVWriterSpec) *csvExporter {
-	buf := bytes.NewBuffer([]byte{})
-	var exporter *csvExporter
-	switch sp.CompressionCodec {
-	case execinfrapb.FileCompression_Gzip:
-		{
-			writer := gzip.NewWriter(buf)
-			exporter = &csvExporter{
-				compressor: writer,
-				buf:        buf,
-				csvWriter:  csv.NewWriter(writer),
+	if exportStmt.FileFormat != "CSV" {
+		return nil, nil, nil, errors.Errorf("unsupported export format: %q", exportStmt.FileFormat)
+	}
+
+	optsFn, err := p.TypeAsStringOpts(exportStmt.Options, exportOptionExpectValues)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	sel, err := p.Select(ctx, exportStmt.Query, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	fn := func(ctx context.Context, plans []sql.PlanNode, resultsCh chan<- tree.Datums) error {
+		ctx, span := tracing.ChildSpan(ctx, exportStmt.StatementTag())
+		defer tracing.FinishSpan(span)
+
+		if err := utilccl.CheckEnterpriseEnabled(
+			p.ExecCfg().Settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "EXPORT",
+		); err != nil {
+			return err
+		}
+
+		if err := p.RequireSuperUser(ctx, "EXPORT"); err != nil {
+			return err
+		}
+
+		if !p.ExtendedEvalContext().TxnImplicit {
+			return errors.Errorf("EXPORT cannot be used inside a transaction")
+		}
+
+		file, err := fileFn()
+		if err != nil {
+			return err
+		}
+
+		opts, err := optsFn()
+		if err != nil {
+			return err
+		}
+
+		csvOpts := roachpb.CSVOptions{}
+
+		if override, ok := opts[exportOptionDelimiter]; ok {
+			csvOpts.Comma, err = util.GetSingleRune(override)
+			if err != nil {
+				return pgerror.NewError(pgerror.CodeInvalidParameterValueError, "invalid delimiter")
 			}
 		}
-	default:
-		{
-			exporter = &csvExporter{
-				buf:       buf,
-				csvWriter: csv.NewWriter(buf),
+
+		if override, ok := opts[exportOptionNullAs]; ok {
+			csvOpts.NullEncoding = &override
+		}
+
+		chunk := exportChunkSizeDefault
+		if override, ok := opts[exportOptionChunkSize]; ok {
+			chunk, err = strconv.Atoi(override)
+			if err != nil {
+				return pgerror.NewError(pgerror.CodeInvalidParameterValueError, err.Error())
+			}
+			if chunk < 1 {
+				return pgerror.NewError(pgerror.CodeInvalidParameterValueError, "invalid csv chunk size")
 			}
 		}
+
+		out := distsqlrun.ProcessorCoreUnion{CSVWriter: &distsqlrun.CSVWriterSpec{
+			Destination: file,
+			NamePattern: exportFilePatternDefault,
+			Options:     csvOpts,
+			ChunkRows:   int64(chunk),
+		}}
+
+		rows := sqlbase.NewRowContainer(
+			p.ExtendedEvalContext().Mon.MakeBoundAccount(), sqlbase.ColTypeInfoFromColTypes(sql.ExportPlanResultTypes), 0,
+		)
+		rw := sql.NewRowResultWriter(rows)
+
+		if err := sql.PlanAndRunExport(
+			ctx, p.DistSQLPlanner(), p.ExecCfg(), p.Txn(), p.ExtendedEvalContext(), plans[0], out, rw,
+		); err != nil {
+			return err
+		}
+		for i := 0; i < rows.Len(); i++ {
+			resultsCh <- rows.At(i)
+		}
+		rows.Close(ctx)
+		return rw.Err()
 	}
-	if sp.Options.Comma != 0 {
-		exporter.csvWriter.Comma = sp.Options.Comma
-	}
-	return exporter
+
+	return fn, exportHeader, []sql.PlanNode{sel}, nil
 }
 
 func newCSVWriterProcessor(
-	flowCtx *execinfra.FlowCtx,
+	flowCtx *distsqlrun.FlowCtx,
 	processorID int32,
-	spec execinfrapb.CSVWriterSpec,
-	input execinfra.RowSource,
-	output execinfra.RowReceiver,
-) (execinfra.Processor, error) {
+	spec distsqlrun.CSVWriterSpec,
+	input distsqlrun.RowSource,
+	output distsqlrun.RowReceiver,
+) (distsqlrun.Processor, error) {
 	c := &csvWriter{
 		flowCtx:     flowCtx,
 		processorID: processorID,
@@ -138,69 +178,67 @@ func newCSVWriterProcessor(
 		input:       input,
 		output:      output,
 	}
-	semaCtx := tree.MakeSemaContext()
-	if err := c.out.Init(&execinfrapb.PostProcessSpec{}, c.OutputTypes(), &semaCtx, flowCtx.NewEvalCtx()); err != nil {
+	if err := c.out.Init(&distsqlrun.PostProcessSpec{}, sql.ExportPlanResultTypes, flowCtx.NewEvalCtx(), output); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
 type csvWriter struct {
-	flowCtx     *execinfra.FlowCtx
+	flowCtx     *distsqlrun.FlowCtx
 	processorID int32
-	spec        execinfrapb.CSVWriterSpec
-	input       execinfra.RowSource
-	out         execinfra.ProcOutputHelper
-	output      execinfra.RowReceiver
+	spec        distsqlrun.CSVWriterSpec
+	input       distsqlrun.RowSource
+	out         distsqlrun.ProcOutputHelper
+	output      distsqlrun.RowReceiver
 }
 
-var _ execinfra.Processor = &csvWriter{}
+var _ distsqlrun.Processor = &csvWriter{}
 
-func (sp *csvWriter) OutputTypes() []*types.T {
-	res := make([]*types.T, len(colinfo.ExportColumns))
-	for i := range res {
-		res[i] = colinfo.ExportColumns[i].Typ
-	}
-	return res
+func (sp *csvWriter) OutputTypes() []sqlbase.ColumnType {
+	return sql.ExportPlanResultTypes
 }
 
-func (sp *csvWriter) MustBeStreaming() bool {
-	return false
-}
-
-func (sp *csvWriter) Run(ctx context.Context) {
+func (sp *csvWriter) Run(ctx context.Context, wg *sync.WaitGroup) {
 	ctx, span := tracing.ChildSpan(ctx, "csvWriter")
-	defer span.Finish()
+	defer tracing.FinishSpan(span)
+
+	if wg != nil {
+		defer wg.Done()
+	}
 
 	err := func() error {
-		typs := sp.input.OutputTypes()
+		pattern := exportFilePatternDefault
+		if sp.spec.NamePattern != "" {
+			pattern = sp.spec.NamePattern
+		}
+
+		types := sp.input.OutputTypes()
 		sp.input.Start(ctx)
-		input := execinfra.MakeNoMetadataRowSource(sp.input, sp.output)
+		input := distsqlrun.MakeNoMetadataRowSource(sp.input, sp.output)
 
-		alloc := &rowenc.DatumAlloc{}
+		alloc := &sqlbase.DatumAlloc{}
 
-		writer := newCSVExporter(sp.spec)
-
-		var nullsAs string
+		var buf bytes.Buffer
+		writer := csv.NewWriter(&buf)
+		if sp.spec.Options.Comma != 0 {
+			writer.Comma = sp.spec.Options.Comma
+		}
+		nullsAs := ""
 		if sp.spec.Options.NullEncoding != nil {
 			nullsAs = *sp.spec.Options.NullEncoding
 		}
-		f := tree.NewFmtCtx(tree.FmtExport)
+		f := tree.NewFmtCtxWithBuf(tree.FmtParseDatums)
 		defer f.Close()
 
-		csvRow := make([]string, len(typs))
+		csvRow := make([]string, len(types))
 
 		chunk := 0
 		done := false
 		for {
 			var rows int64
-			writer.ResetBuffer()
+			buf.Reset()
 			for {
-				// If the bytes.Buffer sink exceeds the target size of a CSV file, we
-				// flush before exporting any additional rows.
-				if int64(writer.buf.Len()) >= sp.spec.ChunkSize {
-					break
-				}
 				if sp.spec.ChunkRows > 0 && rows >= sp.spec.ChunkRows {
 					break
 				}
@@ -216,18 +254,13 @@ func (sp *csvWriter) Run(ctx context.Context) {
 
 				for i, ed := range row {
 					if ed.IsNull() {
-						if sp.spec.Options.NullEncoding != nil {
-							csvRow[i] = nullsAs
-							continue
-						} else {
-							return errors.New("NULL value encountered during EXPORT, " +
-								"use `WITH nullas` to specify the string representation of NULL")
-						}
+						csvRow[i] = nullsAs
+						continue
 					}
-					if err := ed.EnsureDecoded(typs[i], alloc); err != nil {
+					if err := ed.EnsureDecoded(&types[i], alloc); err != nil {
 						return err
 					}
-					ed.Datum.Format(f)
+					ed.Datum.Format(&f.FmtCtx)
 					csvRow[i] = f.String()
 					f.Reset()
 				}
@@ -238,59 +271,46 @@ func (sp *csvWriter) Run(ctx context.Context) {
 			if rows < 1 {
 				break
 			}
-			if err := writer.Flush(); err != nil {
-				return errors.Wrap(err, "failed to flush csv writer")
-			}
+			writer.Flush()
 
-			conf, err := cloud.ExternalStorageConfFromURI(sp.spec.Destination, sp.spec.User())
+			conf, err := storageccl.ExportStorageConfFromURI(sp.spec.Destination)
 			if err != nil {
 				return err
 			}
-			es, err := sp.flowCtx.Cfg.ExternalStorage(ctx, conf)
+			es, err := storageccl.MakeExportStorage(ctx, conf, sp.flowCtx.Settings)
 			if err != nil {
 				return err
 			}
 			defer es.Close()
 
-			nodeID, err := sp.flowCtx.EvalCtx.NodeID.OptionalNodeIDErr(47970)
-			if err != nil {
-				return err
-			}
+			size := buf.Len()
 
-			part := fmt.Sprintf("n%d.%d", nodeID, chunk)
+			part := fmt.Sprintf("n%d.%d", sp.flowCtx.EvalCtx.NodeID, chunk)
 			chunk++
-			filename := writer.FileName(sp.spec, part)
-			// Close writer to ensure buffer and any compression footer is flushed.
-			err = writer.Close()
-			if err != nil {
-				return errors.Wrapf(err, "failed to close exporting writer")
-			}
-
-			size := writer.Len()
-
-			if err := cloud.WriteFile(ctx, es, filename, bytes.NewReader(writer.Bytes())); err != nil {
+			filename := strings.Replace(pattern, exportFilePatternPart, part, -1)
+			if err := es.WriteFile(ctx, filename, bytes.NewReader(buf.Bytes())); err != nil {
 				return err
 			}
-			res := rowenc.EncDatumRow{
-				rowenc.DatumToEncDatum(
-					types.String,
+			res := sqlbase.EncDatumRow{
+				sqlbase.DatumToEncDatum(
+					sqlbase.ColumnType{SemanticType: sqlbase.ColumnType_STRING},
 					tree.NewDString(filename),
 				),
-				rowenc.DatumToEncDatum(
-					types.Int,
+				sqlbase.DatumToEncDatum(
+					sqlbase.ColumnType{SemanticType: sqlbase.ColumnType_INT},
 					tree.NewDInt(tree.DInt(rows)),
 				),
-				rowenc.DatumToEncDatum(
-					types.Int,
+				sqlbase.DatumToEncDatum(
+					sqlbase.ColumnType{SemanticType: sqlbase.ColumnType_INT},
 					tree.NewDInt(tree.DInt(size)),
 				),
 			}
 
-			cs, err := sp.out.EmitRow(ctx, res, sp.output)
+			cs, err := sp.out.EmitRow(ctx, res)
 			if err != nil {
 				return err
 			}
-			if cs != execinfra.NeedMoreRows {
+			if cs != distsqlrun.NeedMoreRows {
 				// TODO(dt): presumably this is because our recv already closed due to
 				// another error... so do we really need another one?
 				return errors.New("unexpected closure of consumer")
@@ -304,10 +324,11 @@ func (sp *csvWriter) Run(ctx context.Context) {
 	}()
 
 	// TODO(dt): pick up tracing info in trailing meta
-	execinfra.DrainAndClose(
+	distsqlrun.DrainAndClose(
 		ctx, sp.output, err, func(context.Context) {} /* pushTrailingMeta */, sp.input)
 }
 
 func init() {
-	rowexec.NewCSVWriterProcessor = newCSVWriterProcessor
+	sql.AddPlanHook(exportPlanHook)
+	distsqlrun.NewCSVWriterProcessor = newCSVWriterProcessor
 }

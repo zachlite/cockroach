@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package opt
 
@@ -45,14 +49,6 @@ func (c OrderingColumn) Ascending() bool {
 // Descending returns true if the ordering on this column is descending.
 func (c OrderingColumn) Descending() bool {
 	return c < 0
-}
-
-// RemapColumn returns a new OrderingColumn that uses a ColumnID from the 'to'
-// table. The original ColumnID must be from the 'from' table.
-func (c OrderingColumn) RemapColumn(from, to TableID) OrderingColumn {
-	ord := from.ColumnOrdinal(c.ID())
-	newColID := to.ColumnID(ord)
-	return MakeOrderingColumn(newColID, c.Descending())
 }
 
 func (c OrderingColumn) String() string {
@@ -100,9 +96,33 @@ func (o Ordering) Format(buf *bytes.Buffer) {
 func (o Ordering) ColSet() ColSet {
 	var colSet ColSet
 	for _, col := range o {
-		colSet.Add(col.ID())
+		colSet.Add(int(col.ID()))
 	}
 	return colSet
+}
+
+// Provides returns true if the required ordering is a prefix of this ordering.
+func (o Ordering) Provides(required Ordering) bool {
+	if len(o) < len(required) {
+		return false
+	}
+
+	for i := range required {
+		if o[i] != required[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// CommonPrefix returns the longest ordering that is a prefix of both orderings.
+func (o Ordering) CommonPrefix(other Ordering) Ordering {
+	for i := range o {
+		if i >= len(other) || o[i] != other[i] {
+			return o[:i]
+		}
+	}
+	return o
 }
 
 // Equals returns true if the two orderings are identical.
@@ -117,4 +137,84 @@ func (o Ordering) Equals(rhs Ordering) bool {
 		}
 	}
 	return true
+}
+
+// OrderingSet is a set of orderings, with the restriction that no ordering
+// is a prefix of another ordering in the set.
+type OrderingSet []Ordering
+
+// Copy returns a copy of the set which can be independently modified.
+func (os OrderingSet) Copy() OrderingSet {
+	res := make(OrderingSet, len(os))
+	copy(res, os)
+	return res
+}
+
+// Add an ordering to the list, checking whether it is a prefix of another
+// ordering (or vice-versa).
+func (os *OrderingSet) Add(o Ordering) {
+	if len(o) == 0 {
+		panic("empty ordering")
+	}
+	for i := range *os {
+		prefix := (*os)[i].CommonPrefix(o)
+		if len(prefix) == len(o) {
+			// o is equal to, or a prefix of os[i]. Do nothing.
+			return
+		}
+		if len(prefix) == len((*os)[i]) {
+			// os[i] is a prefix of o; replace it.
+			(*os)[i] = o
+			return
+		}
+	}
+	*os = append(*os, o)
+}
+
+// RestrictToPrefix keeps only the orderings that have the required ordering as
+// a prefix.
+func (os *OrderingSet) RestrictToPrefix(required Ordering) {
+	res := (*os)[:0]
+	for _, o := range *os {
+		if o.Provides(required) {
+			res = append(res, o)
+		}
+	}
+	*os = res
+}
+
+// RestrictToCols keeps only the orderings (or prefixes of them) that refer to
+// columns in the given set.
+func (os *OrderingSet) RestrictToCols(cols ColSet) {
+	old := *os
+	*os = old[:0]
+	for _, o := range old {
+		// Find the longest prefix of the ordering that contains
+		// only columns in the set.
+		prefix := 0
+		for _, c := range o {
+			if !cols.Contains(int(c.ID())) {
+				break
+			}
+			prefix++
+		}
+		if prefix > 0 {
+			// This function appends at most one element; it is ok to operate on the
+			// same slice.
+			os.Add(o[:prefix])
+		}
+	}
+}
+
+func (os OrderingSet) String() string {
+	var buf bytes.Buffer
+	for i, o := range os {
+		if i > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteByte('(')
+		buf.WriteString(o.String())
+		buf.WriteByte(')')
+	}
+	return buf.String()
 }

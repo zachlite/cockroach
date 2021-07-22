@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 
@@ -110,26 +114,21 @@ export interface LayoutCell<T> {
  * `isCollapsed: true`.
  *
  */
-export function layoutTreeHorizontal<T>(
-  root: TreeNode<T>,
-  collapsedPaths: TreePath[],
-): Layout<T> {
+export function layoutTreeHorizontal<T>(root: TreeNode<T>, collapsedPaths: TreePath[]): Layout<T> {
   const height = expandedHeight(root, collapsedPaths);
   return recur(root, []);
 
   function recur(node: TreeNode<T>, pathToThis: TreePath): Layout<T> {
     const heightUnderThis = height - pathToThis.length;
 
-    const placeholdersLayout: Layout<T> = repeat(heightUnderThis, [
-      {
-        width: 1,
-        path: pathToThis,
-        data: node.data,
-        isPlaceholder: true,
-        isCollapsed: false,
-        isLeaf: false,
-      },
-    ]);
+    const placeholdersLayout: Layout<T> = repeat(heightUnderThis, [{
+      width: 1,
+      path: pathToThis,
+      data: node.data,
+      isPlaceholder: true,
+      isCollapsed: false,
+      isLeaf: false,
+    }]);
 
     // Put placeholders above this cell if it's a leaf.
     if (isLeaf(node)) {
@@ -162,9 +161,9 @@ export function layoutTreeHorizontal<T>(
       ]);
     }
 
-    const childLayouts = node.children.map((childNode) =>
-      recur(childNode, [...pathToThis, childNode.name]),
-    );
+    const childLayouts = node.children.map((childNode) => (
+      recur(childNode, [...pathToThis, childNode.name])
+    ));
 
     const childrenLayout = horizontalConcatLayouts(childLayouts);
 
@@ -177,7 +176,10 @@ export function layoutTreeHorizontal<T>(
       isLeaf: false,
     };
 
-    return verticalConcatLayouts([layoutFromCell(currentCell), childrenLayout]);
+    return verticalConcatLayouts([
+      layoutFromCell(currentCell),
+      childrenLayout,
+    ]);
   }
 }
 
@@ -199,7 +201,7 @@ function horizontalConcatLayouts<T>(layouts: Layout<T>[]): Layout<T> {
   if (layouts.length === 0) {
     return [];
   }
-  const output = _.range(layouts[0].length).map(() => []);
+  const output = _.range(layouts[0].length).map(() => ([]));
 
   _.forEach(layouts, (childLayout) => {
     _.forEach(childLayout, (row, rowIdx) => {
@@ -234,7 +236,9 @@ function verticalConcatLayouts<T>(layouts: Layout<T>[]): Layout<T> {
 }
 
 function layoutFromCell<T>(cell: LayoutCell<T>): Layout<T> {
-  return [[cell]];
+  return [
+    [cell],
+  ];
 }
 
 export interface FlattenedNode<T> {
@@ -343,7 +347,7 @@ function nodeAtPath<T>(root: TreeNode<T>, path: TreePath): TreeNode<T> {
     return root;
   }
   const pathSegment = path[0];
-  const child = root.children.find((c) => c.name === pathSegment);
+  const child = root.children.find((c) => (c.name === pathSegment));
   if (child === undefined) {
     throw new Error(`not found: ${path}`);
   }
@@ -357,10 +361,7 @@ function nodeAtPath<T>(root: TreeNode<T>, path: TreePath): TreeNode<T> {
  * If `f` returns false, the traversal stops. Otherwise, the traversal
  * continues.
  */
-function visitNodes<T>(
-  root: TreeNode<T>,
-  f: (node: TreeNode<T>, path: TreePath) => boolean,
-) {
+function visitNodes<T>(root: TreeNode<T>, f: (node: TreeNode<T>, path: TreePath) => boolean) {
   function recur(node: TreeNode<T>, path: TreePath) {
     const continueTraversal = f(node, path);
     if (!continueTraversal) {
@@ -379,10 +380,7 @@ function visitNodes<T>(
  * expandedHeight returns the height of the "uncollapsed" part of the tree,
  * i.e. the height of the tree where collapsed internal nodes count as leaf nodes.
  */
-function expandedHeight<T>(
-  root: TreeNode<T>,
-  collapsedPaths: TreePath[],
-): number {
+function expandedHeight<T>(root: TreeNode<T>, collapsedPaths: TreePath[]): number {
   let maxHeight = 0;
   visitNodes(root, (_node, path) => {
     const depth = path.length;
@@ -415,10 +413,7 @@ function expandedHeight<T>(
  *     ['a', 'b', 'd'] ]
  *
  */
-function getLeafPathsUnderPath<T>(
-  root: TreeNode<T>,
-  path: TreePath,
-): TreePath[] {
+function getLeafPathsUnderPath<T>(root: TreeNode<T>, path: TreePath): TreePath[] {
   const atPath = nodeAtPath(root, path);
   const output: TreePath[] = [];
   visitNodes(atPath, (node, subPath) => {
@@ -442,8 +437,8 @@ function getLeafPathsUnderPath<T>(
  *   {a: 2, b: 'b'},
  * ]
  */
-function cartProd<A, B>(as: A[], bs: B[]): { a: A; b: B }[] {
-  const output: { a: A; b: B }[] = [];
+function cartProd<A, B>(as: A[], bs: B[]): {a: A, b: B}[] {
+  const output: {a: A, b: B}[] = [];
   as.forEach((a) => {
     bs.forEach((b) => {
       output.push({ a, b });

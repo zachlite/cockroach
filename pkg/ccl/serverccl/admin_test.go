@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/stretchr/testify/require"
 )
 
 var adminPrefix = "/_admin/v1/"
@@ -29,7 +28,7 @@ var adminPrefix = "/_admin/v1/"
 func TestAdminAPIDataDistributionPartitioning(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 
 	firstServer := testCluster.Server(0)
@@ -57,8 +56,8 @@ func TestAdminAPIDataDistributionPartitioning(t *testing.T) {
 
 	// Assert that we get all roachblog zone configs back.
 	expectedZoneConfigNames := map[string]struct{}{
-		"PARTITION eu OF INDEX roachblog.public.comments@primary": {},
-		"PARTITION us OF INDEX roachblog.public.comments@primary": {},
+		"roachblog.comments.eu": {},
+		"roachblog.comments.us": {},
 	}
 
 	var resp serverpb.DataDistributionResponse
@@ -68,25 +67,11 @@ func TestAdminAPIDataDistributionPartitioning(t *testing.T) {
 
 	actualZoneConfigNames := map[string]struct{}{}
 	for name := range resp.ZoneConfigs {
-		if strings.Contains(name, "roachblog") {
+		if strings.HasPrefix(name, "roachblog.") {
 			actualZoneConfigNames[name] = struct{}{}
 		}
 	}
 	if !reflect.DeepEqual(actualZoneConfigNames, expectedZoneConfigNames) {
 		t.Fatalf("expected zone config names %v; got %v", expectedZoneConfigNames, actualZoneConfigNames)
 	}
-}
-
-// TestAdminAPIChartCatalog verifies that an error doesn't happen.
-func TestAdminAPIChartCatalog(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
-	defer testCluster.Stopper().Stop(context.Background())
-
-	firstServer := testCluster.Server(0)
-
-	var resp serverpb.ChartCatalogResponse
-	err := serverutils.GetJSONProto(firstServer, adminPrefix+"chartcatalog", &resp)
-	require.NoError(t, err)
 }

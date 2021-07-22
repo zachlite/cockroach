@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
@@ -15,7 +19,7 @@ import * as protos from "src/js/protos";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { FixLong } from "src/util/fixLong";
 import Print from "src/views/reports/containers/range/print";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import Loading from "src/views/shared/components/loading";
 import { TimestampToMoment } from "src/util/convert";
 
 interface LogTableProps {
@@ -24,21 +28,16 @@ interface LogTableProps {
 }
 
 function printLogEventType(
-  eventType: protos.cockroach.kv.kvserver.storagepb.RangeLogEventType,
+  eventType: protos.cockroach.storage.RangeLogEventType,
 ) {
   switch (eventType) {
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType.add_voter:
-      return "Add Voter";
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType.remove_voter:
-      return "Remove Voter";
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType.add_non_voter:
-      return "Add Non-Voter";
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType
-      .remove_non_voter:
-      return "Remove Non-Voter";
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType.split:
+    case protos.cockroach.storage.RangeLogEventType.add:
+      return "Add";
+    case protos.cockroach.storage.RangeLogEventType.remove:
+      return "Remove";
+    case protos.cockroach.storage.RangeLogEventType.split:
       return "Split";
-    case protos.cockroach.kv.kvserver.storagepb.RangeLogEventType.merge:
+    case protos.cockroach.storage.RangeLogEventType.merge:
       return "Merge";
     default:
       return "Unknown";
@@ -81,10 +80,7 @@ export default class LogTable extends React.Component<LogTableProps, {}> {
   ) {
     return (
       <ul className="log-entries-list">
-        {this.renderLogInfoDescriptor(
-          "Updated Range Descriptor",
-          info.updated_desc,
-        )}
+        {this.renderLogInfoDescriptor("Updated Range Descriptor", info.updated_desc)}
         {this.renderLogInfoDescriptor("New Range Descriptor", info.new_desc)}
         {this.renderLogInfoDescriptor("Added Replica", info.added_replica)}
         {this.renderLogInfoDescriptor("Removed Replica", info.removed_replica)}
@@ -94,68 +90,57 @@ export default class LogTable extends React.Component<LogTableProps, {}> {
     );
   }
 
-  renderContent = () => {
+  render() {
     const { log } = this.props;
+
+    if (log && !_.isEmpty(log.lastError)) {
+      return (
+        <div>
+          <h2>Range Log</h2>
+          There was an error retrieving the range log:
+          {log.lastError}
+        </div>
+      );
+    }
 
     // Sort by descending timestamp.
     const events = _.orderBy(
       log && log.data && log.data.events,
-      (event) => TimestampToMoment(event.event.timestamp).valueOf(),
+      event => TimestampToMoment(event.event.timestamp).valueOf(),
       "desc",
     );
 
     return (
-      <table className="log-table">
-        <tbody>
-          <tr className="log-table__row log-table__row--header">
-            <th className="log-table__cell log-table__cell--header">
-              Timestamp
-            </th>
-            <th className="log-table__cell log-table__cell--header">Store</th>
-            <th className="log-table__cell log-table__cell--header">
-              Event Type
-            </th>
-            <th className="log-table__cell log-table__cell--header">Range</th>
-            <th className="log-table__cell log-table__cell--header">
-              Other Range
-            </th>
-            <th className="log-table__cell log-table__cell--header">Info</th>
-          </tr>
-          {_.map(events, (event, key) => (
-            <tr key={key} className="log-table__row">
-              <td className="log-table__cell log-table__cell--date">
-                {Print.Timestamp(event.event.timestamp)}
-              </td>
-              <td className="log-table__cell">s{event.event.store_id}</td>
-              <td className="log-table__cell">
-                {printLogEventType(event.event.event_type)}
-              </td>
-              <td className="log-table__cell">
-                {this.renderRangeID(event.event.range_id)}
-              </td>
-              <td className="log-table__cell">
-                {this.renderRangeID(event.event.other_range_id)}
-              </td>
-              <td className="log-table__cell">
-                {this.renderLogInfo(event.pretty_info)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    );
-  };
-
-  render() {
-    const { log } = this.props;
-
-    return (
       <div>
-        <h2 className="base-heading">Range Log</h2>
+        <h2>Range Log</h2>
         <Loading
           loading={!log || log.inFlight}
-          error={log && log.lastError}
-          render={this.renderContent}
+          render={() => (
+            <table className="log-table">
+              <tbody>
+                <tr className="log-table__row log-table__row--header">
+                  <th className="log-table__cell log-table__cell--header">Timestamp</th>
+                  <th className="log-table__cell log-table__cell--header">Store</th>
+                  <th className="log-table__cell log-table__cell--header">Event Type</th>
+                  <th className="log-table__cell log-table__cell--header">Range</th>
+                  <th className="log-table__cell log-table__cell--header">Other Range</th>
+                  <th className="log-table__cell log-table__cell--header">Info</th>
+                </tr>
+                {_.map(events, (event, key) => (
+                  <tr key={key} className="log-table__row">
+                    <td className="log-table__cell log-table__cell--date">
+                      {Print.Timestamp(event.event.timestamp)}
+                    </td>
+                    <td className="log-table__cell">s{event.event.store_id}</td>
+                    <td className="log-table__cell">{printLogEventType(event.event.event_type)}</td>
+                    <td className="log-table__cell">{this.renderRangeID(event.event.range_id)}</td>
+                    <td className="log-table__cell">{this.renderRangeID(event.event.other_range_id)}</td>
+                    <td className="log-table__cell">{this.renderLogInfo(event.pretty_info)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         />
       </div>
     );

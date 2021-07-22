@@ -1,31 +1,33 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package extract
 
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/rsg/yacc"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
@@ -64,7 +66,7 @@ func GenerateRRJar(jar string, bnf []byte) ([]byte, error) {
 }
 
 // GenerateRRNet generates the RR XHTML from a EBNF file.
-func GenerateRRNet(bnf []byte, railroadAPITimeout time.Duration) ([]byte, error) {
+func GenerateRRNet(bnf []byte) ([]byte, error) {
 	rrLock.Lock()
 	defer rrLock.Unlock()
 
@@ -78,8 +80,7 @@ func GenerateRRNet(bnf []byte, railroadAPITimeout time.Duration) ([]byte, error)
 	v.Add("options", "factoring")
 	v.Add("options", "inline")
 
-	httpClient := httputil.NewClientWithTimeout(railroadAPITimeout)
-	resp, err := httpClient.Post(context.TODO(), rrAddr, "application/x-www-form-urlencoded", strings.NewReader(v.Encode()))
+	resp, err := http.Post(rrAddr, "application/x-www-form-urlencoded", strings.NewReader(v.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -97,11 +98,10 @@ func GenerateRRNet(bnf []byte, railroadAPITimeout time.Duration) ([]byte, error)
 // GenerateBNF Opens or downloads the .y file at addr and returns at as an EBNF
 // file. Unimplemented branches are removed. Resulting empty nodes and their
 // uses are further removed. Empty nodes are elided.
-func GenerateBNF(addr string, bnfAPITimeout time.Duration) (ebnf []byte, err error) {
+func GenerateBNF(addr string) (ebnf []byte, err error) {
 	var b []byte
 	if strings.HasPrefix(addr, "http") {
-		httpClient := httputil.NewClientWithTimeout(bnfAPITimeout)
-		resp, err := httpClient.Get(context.TODO(), addr)
+		resp, err := http.Get(addr)
 		if err != nil {
 			return nil, err
 		}

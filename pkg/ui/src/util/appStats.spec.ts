@@ -1,27 +1,21 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import { assert } from "chai";
 import Long from "long";
 
-import * as protos from "src/js/protos";
-import {
-  addNumericStats,
-  NumericStat,
-  flattenStatementStats,
-  StatementStatistics,
-  ExecStats,
-  combineStatementStats,
-} from "./appStats";
-import IExplainTreePlanNode = protos.cockroach.sql.IExplainTreePlanNode;
-import ISensitiveInfo = protos.cockroach.sql.ISensitiveInfo;
+import { addNumericStats, NumericStat, flattenStatementStats, StatementStatistics, combineStatementStats } from "./appStats";
 
 // record is implemented here so we can write the below test as a direct
 // analog of the one in pkg/roachpb/app_stats_test.go.  It's here rather
@@ -57,19 +51,19 @@ describe("addNumericStats", () => {
     const b = emptyStats();
     const ab = emptyStats();
 
-    aData.forEach((v) => {
+    aData.forEach(v => {
       countA++;
       sumA += v;
       record(a, countA, v);
     });
 
-    bData.forEach((v) => {
+    bData.forEach(v => {
       countB++;
       sumB += v;
       record(b, countB, v);
     });
 
-    bData.concat(aData).forEach((v) => {
+    bData.concat(aData).forEach(v => {
       countAB++;
       sumAB += v;
       record(ab, countAB, v);
@@ -100,9 +94,7 @@ describe("flattenStatementStats", () => {
             query: "SELECT * FROM foobar",
             app: "foobar",
             distSQL: true,
-            vec: false,
             opt: true,
-            full_scan: true,
             failed: false,
           },
           node_id: 1,
@@ -115,9 +107,7 @@ describe("flattenStatementStats", () => {
             query: "UPDATE foobar SET name = 'baz' WHERE id = 42",
             app: "bazzer",
             distSQL: false,
-            vec: false,
             opt: false,
-            full_scan: false,
             failed: true,
           },
           node_id: 2,
@@ -134,9 +124,7 @@ describe("flattenStatementStats", () => {
       assert.equal(flattened[i].statement, stats[i].key.key_data.query);
       assert.equal(flattened[i].app, stats[i].key.key_data.app);
       assert.equal(flattened[i].distSQL, stats[i].key.key_data.distSQL);
-      assert.equal(flattened[i].vec, stats[i].key.key_data.vec);
       assert.equal(flattened[i].opt, stats[i].key.key_data.opt);
-      assert.equal(flattened[i].full_scan, stats[i].key.key_data.full_scan);
       assert.equal(flattened[i].failed, stats[i].key.key_data.failed);
       assert.equal(flattened[i].node_id, stats[i].key.node_id);
 
@@ -160,10 +148,12 @@ function randomStat(scale: number = 1): NumericStat {
   };
 }
 
-function randomStats(sensitiveInfo?: ISensitiveInfo): StatementStatistics {
+function randomStats(): StatementStatistics {
   const count = randomInt(1000);
+  // tslint:disable:variable-name
   const first_attempt_count = randomInt(count);
   const max_retries = randomInt(count - first_attempt_count);
+  // tslint:enable:variable-name
 
   return {
     count: Long.fromNumber(count),
@@ -175,60 +165,8 @@ function randomStats(sensitiveInfo?: ISensitiveInfo): StatementStatistics {
     run_lat: randomStat(),
     service_lat: randomStat(),
     overhead_lat: randomStat(),
-    bytes_read: randomStat(),
-    rows_read: randomStat(),
-    sensitive_info: sensitiveInfo || makeSensitiveInfo(null, null),
-    exec_stats: randomExecStats(),
-    sql_type: "DDL",
-    nodes: [Long.fromInt(1), Long.fromInt(2)],
-    last_exec_timestamp: {
-      seconds: Long.fromInt(1599670292),
-      nanos: 111613000,
-    },
-  };
-}
-
-function randomExecStats(max_count: number = 10): Required<ExecStats> {
-  const count = randomInt(max_count);
-  return {
-    count: Long.fromNumber(count),
-    network_bytes: randomStat(),
-    max_mem_usage: randomStat(),
-    contention_time: randomStat(),
-    network_messages: randomStat(),
-    max_disk_usage: randomStat(),
-  };
-}
-
-function randomString(length: number = 10): string {
-  const possible =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let text = "";
-  for (let i = 0; i < length; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
-}
-
-function randomPlanDescription(): IExplainTreePlanNode {
-  return {
-    name: randomString(),
-    attrs: [
-      {
-        key: randomString(),
-        value: randomString(),
-      },
-    ],
-  };
-}
-
-function makeSensitiveInfo(
-  lastErr: string,
-  planDescription: IExplainTreePlanNode,
-): ISensitiveInfo {
-  return {
-    last_err: lastErr,
-    most_recent_plan_description: planDescription,
+    last_err: "",
+    last_err_redacted: "",
   };
 }
 
@@ -242,174 +180,49 @@ describe("combineStatementStats", () => {
     const ac = combineStatementStats([a, c]);
     const bc = combineStatementStats([b, c]);
 
+    // tslint:disable:variable-name
     const ab_c = combineStatementStats([ab, c]);
     const ac_b = combineStatementStats([ac, b]);
     const bc_a = combineStatementStats([bc, a]);
+    // tslint:enable:variable-name
 
     assert.equal(ab_c.count.toString(), ac_b.count.toString());
     assert.equal(ab_c.count.toString(), bc_a.count.toString());
-    assert.equal(
-      ab_c.exec_stats.count.toString(),
-      ac_b.exec_stats.count.toString(),
-    );
-    assert.equal(
-      ab_c.exec_stats.count.toString(),
-      bc_a.exec_stats.count.toString(),
-    );
 
-    assert.equal(
-      ab_c.first_attempt_count.toString(),
-      ac_b.first_attempt_count.toString(),
-    );
-    assert.equal(
-      ab_c.first_attempt_count.toString(),
-      bc_a.first_attempt_count.toString(),
-    );
+    assert.equal(ab_c.first_attempt_count.toString(), ac_b.first_attempt_count.toString());
+    assert.equal(ab_c.first_attempt_count.toString(), bc_a.first_attempt_count.toString());
 
     assert.equal(ab_c.max_retries.toString(), ac_b.max_retries.toString());
     assert.equal(ab_c.max_retries.toString(), bc_a.max_retries.toString());
 
     assert.approximately(ab_c.num_rows.mean, ac_b.num_rows.mean, 0.0000001);
     assert.approximately(ab_c.num_rows.mean, bc_a.num_rows.mean, 0.0000001);
-    assert.approximately(
-      ab_c.num_rows.squared_diffs,
-      ac_b.num_rows.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.num_rows.squared_diffs,
-      bc_a.num_rows.squared_diffs,
-      0.0000001,
-    );
+    assert.approximately(ab_c.num_rows.squared_diffs, ac_b.num_rows.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.num_rows.squared_diffs, bc_a.num_rows.squared_diffs, 0.0000001);
 
     assert.approximately(ab_c.parse_lat.mean, ac_b.parse_lat.mean, 0.0000001);
     assert.approximately(ab_c.parse_lat.mean, bc_a.parse_lat.mean, 0.0000001);
-    assert.approximately(
-      ab_c.parse_lat.squared_diffs,
-      ac_b.parse_lat.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.parse_lat.squared_diffs,
-      bc_a.parse_lat.squared_diffs,
-      0.0000001,
-    );
+    assert.approximately(ab_c.parse_lat.squared_diffs, ac_b.parse_lat.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.parse_lat.squared_diffs, bc_a.parse_lat.squared_diffs, 0.0000001);
 
     assert.approximately(ab_c.plan_lat.mean, ac_b.plan_lat.mean, 0.0000001);
     assert.approximately(ab_c.plan_lat.mean, bc_a.plan_lat.mean, 0.0000001);
-    assert.approximately(
-      ab_c.plan_lat.squared_diffs,
-      ac_b.plan_lat.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.plan_lat.squared_diffs,
-      bc_a.plan_lat.squared_diffs,
-      0.0000001,
-    );
+    assert.approximately(ab_c.plan_lat.squared_diffs, ac_b.plan_lat.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.plan_lat.squared_diffs, bc_a.plan_lat.squared_diffs, 0.0000001);
 
     assert.approximately(ab_c.run_lat.mean, ac_b.run_lat.mean, 0.0000001);
     assert.approximately(ab_c.run_lat.mean, bc_a.run_lat.mean, 0.0000001);
-    assert.approximately(
-      ab_c.run_lat.squared_diffs,
-      ac_b.run_lat.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.run_lat.squared_diffs,
-      bc_a.run_lat.squared_diffs,
-      0.0000001,
-    );
+    assert.approximately(ab_c.run_lat.squared_diffs, ac_b.run_lat.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.run_lat.squared_diffs, bc_a.run_lat.squared_diffs, 0.0000001);
 
-    assert.approximately(
-      ab_c.service_lat.mean,
-      ac_b.service_lat.mean,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.service_lat.mean,
-      bc_a.service_lat.mean,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.service_lat.squared_diffs,
-      ac_b.service_lat.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.service_lat.squared_diffs,
-      bc_a.service_lat.squared_diffs,
-      0.0000001,
-    );
+    assert.approximately(ab_c.service_lat.mean, ac_b.service_lat.mean, 0.0000001);
+    assert.approximately(ab_c.service_lat.mean, bc_a.service_lat.mean, 0.0000001);
+    assert.approximately(ab_c.service_lat.squared_diffs, ac_b.service_lat.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.service_lat.squared_diffs, bc_a.service_lat.squared_diffs, 0.0000001);
 
-    assert.approximately(
-      ab_c.overhead_lat.mean,
-      ac_b.overhead_lat.mean,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.overhead_lat.mean,
-      bc_a.overhead_lat.mean,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.overhead_lat.squared_diffs,
-      ac_b.overhead_lat.squared_diffs,
-      0.0000001,
-    );
-    assert.approximately(
-      ab_c.overhead_lat.squared_diffs,
-      bc_a.overhead_lat.squared_diffs,
-      0.0000001,
-    );
-  });
-
-  describe("when sensitiveInfo has data", () => {
-    it("uses first non-empty property from each statementStat", () => {
-      const error1 = randomString();
-      const error2 = randomString();
-      const plan1 = randomPlanDescription();
-      const plan2 = randomPlanDescription();
-
-      const empty = makeSensitiveInfo(null, null);
-      const a = makeSensitiveInfo(error1, null);
-      const b = makeSensitiveInfo(null, plan1);
-      const c = makeSensitiveInfo(error2, plan2);
-
-      assertSensitiveInfoInCombineStatementStats([empty], empty);
-      assertSensitiveInfoInCombineStatementStats([a], a);
-      assertSensitiveInfoInCombineStatementStats([b], b);
-      assertSensitiveInfoInCombineStatementStats([c], c);
-
-      assertSensitiveInfoInCombineStatementStats([empty, a], a);
-      assertSensitiveInfoInCombineStatementStats([empty, b], b);
-      assertSensitiveInfoInCombineStatementStats([empty, c], c);
-      assertSensitiveInfoInCombineStatementStats([a, empty], a);
-      assertSensitiveInfoInCombineStatementStats([b, empty], b);
-      assertSensitiveInfoInCombineStatementStats([c, empty], c);
-
-      assertSensitiveInfoInCombineStatementStats([a, b, c], {
-        last_err: a.last_err,
-        most_recent_plan_description: b.most_recent_plan_description,
-      });
-      assertSensitiveInfoInCombineStatementStats([a, c, b], {
-        last_err: a.last_err,
-        most_recent_plan_description: c.most_recent_plan_description,
-      });
-      assertSensitiveInfoInCombineStatementStats([b, c, a], {
-        last_err: c.last_err,
-        most_recent_plan_description: b.most_recent_plan_description,
-      });
-      assertSensitiveInfoInCombineStatementStats([c, a, b], c);
-
-      function assertSensitiveInfoInCombineStatementStats(
-        input: ISensitiveInfo[],
-        expected: ISensitiveInfo,
-      ) {
-        const stats = input.map((sensitiveInfo) => randomStats(sensitiveInfo));
-        const result = combineStatementStats(stats);
-        assert.deepEqual(result.sensitive_info, expected);
-      }
-    });
+    assert.approximately(ab_c.overhead_lat.mean, ac_b.overhead_lat.mean, 0.0000001);
+    assert.approximately(ab_c.overhead_lat.mean, bc_a.overhead_lat.mean, 0.0000001);
+    assert.approximately(ab_c.overhead_lat.squared_diffs, ac_b.overhead_lat.squared_diffs, 0.0000001);
+    assert.approximately(ab_c.overhead_lat.squared_diffs, bc_a.overhead_lat.squared_diffs, 0.0000001);
   });
 });

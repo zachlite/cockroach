@@ -1,3 +1,5 @@
+# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata fakedist-disk
+
 statement ok
 CREATE TABLE tb(unused INT); INSERT INTO tb VALUES (1)
 
@@ -24,14 +26,13 @@ subtest unlabeled_tuple
 query TT colnames
 SELECT (1, 2, 'hello', NULL, NULL) AS t, (true, NULL, (false, 6.6, false)) AS u FROM tb
 ----
-t              u
-(1,2,hello,,)  (t,,"(f,6.6,f)")
+t                u
+(1,2,"hello",,)  (t,,"(f,6.6,f)")
 
 query T
 SELECT (1, e'hello\nworld')
 ----
-(1,"hello
-world")
+(1,"hello\012world")
 
 query BBBBBBBBB colnames
 SELECT
@@ -672,39 +673,8 @@ SELECT ((1, 2, 'hello', NULL, NULL) AS a1, b2, c3, d4, e5) AS r,
        ((true, NULL, (false, 6.6, false)) AS a1, b2, c3) AS s
   FROM tb
 ----
-r              s
-(1,2,hello,,)  (t,,"(f,6.6,f)")
-
-# Duplicate tuple labels are allowed (but access fails when a duplicated label is accessed,
-# see the labeled_tuple_column_access_errors subtest)
-query T colnames
-SELECT ((1, '2') AS a, a) FROM tb
-----
-?column?
-(1,2)
-
-query T
-SELECT ((1, '2', true) AS a, a, b) FROM tb
-----
-(1,2,t)
-
-query T
-SELECT ((1, '2', true) AS a, b, a) FROM tb
-----
-(1,2,t)
-
-query T
-SELECT ((1, 'asd', true) AS b, a, a) FROM tb
-----
-(1,asd,t)
-
-query TT colnames
-SELECT ((1, 2, 'hello', NULL, NULL) AS a, a, a, a, a) AS r,
-       ((true, NULL, (false, 6.6, false)) AS a, a, a) AS s
-  FROM tb
-----
-r              s
-(1,2,hello,,)  (t,,"(f,6.6,f)")
+r                s
+(1,2,"hello",,)  (t,,"(f,6.6,f)")
 
 # Comparing tuples
 query BBB colnames
@@ -764,6 +734,19 @@ SELECT ((1, '2') AS a) FROM tb
 query error pq: mismatch in tuple definition: 1 expressions, 2 labels
 SELECT (ROW(1) AS a, b) FROM tb
 
+# Tuple labels must be different
+query error pq: found duplicate tuple label: "a"
+SELECT ((1, '2') AS a, a) FROM tb
+
+query error pq: found duplicate tuple label: "a"
+SELECT ((1, '2', true) AS a, a, b) FROM tb
+
+query error pq: found duplicate tuple label: "a"
+SELECT ((1, '2', true) AS a, b, a) FROM tb
+
+query error pq: found duplicate tuple label: "a"
+SELECT ((1, '2', true) AS b, a, a) FROM tb
+
 # But inner tuples can reuse labels
 query T colnames
 SELECT ((
@@ -779,7 +762,7 @@ SELECT ((
  FROM tb
 ----
 r
-("(""(1,2,3)"",""(4,5)"",""(6)"")","(7,8)","(9)")
+("(""(1,""""2"""",3)"",""(4,""""5"""")"",""(6)"")","(7,8)","(""9"")")
 
 subtest labeled_tuple_column_access
 
@@ -808,34 +791,18 @@ query error pq: could not identify column "x" in tuple{int AS a, int AS b, int A
 SELECT (((1,2,3) AS a,b,c)).x FROM tb
 
 # Missing extra parentheses
-query error at or near ".": syntax error
+query error pq: syntax error at or near "."
 SELECT ((1,2,3) AS a,b,c).x FROM tb
 
-query error at or near ".": syntax error
+query error pq: syntax error at or near "."
 SELECT ((1,2,3) AS a,b,c).* FROM tb
-
-# Accessing duplicate labels
-query error pq: column reference "a" is ambiguous
-SELECT (((1,2,3) AS a,b,a)).a FROM tb
-
-query error pq: column reference "unnest" is ambiguous
-SELECT ((unnest(ARRAY[1,2], ARRAY[1,2]))).unnest;
 
 # No labels
 query error pq: type tuple{int, int, int} is not composite
 SELECT ((1,2,3)).x FROM tb
 
-query I colnames
-SELECT ((1,2,3)).@2 FROM tb
-----
-?column?
-2
-
-query III colnames
+query error pq: type tuple{int, int, int} is not composite
 SELECT ((1,2,3)).* FROM tb
-----
-?column?  ?column?  ?column?
-1         2         3
 
 # Accessing all the columns
 
@@ -854,7 +821,7 @@ a  b  c
 query T
 SELECT (((ROW(1,'2',true) AS a,b,c)).*, 456) FROM tb
 ----
-("(1,2,t)",456)
+("(1,""2"",t)",456)
 
 query I colnames
 SELECT ((ROW(1) AS a)).* FROM tb
@@ -914,23 +881,10 @@ a  b
 1  one
 2  two
 
-query I rowsort
+
+# Pending #26719
+query error pq: column "t" does not exist
 SELECT (t).a FROM t
-----
-1
-2
-
-query T rowsort
-SELECT t FROM t
-----
-(1,one)
-(2,two)
-
-query T rowsort
-SELECT row_to_json(t) FROM t
-----
-{"a": 1, "b": "one"}
-{"a": 2, "b": "two"}
 
 statement ok
 DROP TABLE t
@@ -939,32 +893,3 @@ query B
 SELECT (1, 2, 3) IS NULL AS r
 ----
 false
-
-subtest regression_for_34262
-
-query B
-SELECT () = ()
-----
-true
-
-# Regression tests for #58439. Ensure there are no errors when accessing columns
-# of a null tuple.
-subtest regression_58439
-
-statement ok
-CREATE TABLE t58439 (a INT, b INT);
-INSERT INTO t58439 VALUES (1, 10), (2, 20), (3, 30);
-
-query II
-SELECT (ARRAY[t58439.*][0]).* FROM t58439
-----
-NULL  NULL
-NULL  NULL
-NULL  NULL
-
-query II
-SELECT (ARRAY[t58439.*][2]).* FROM t58439
-----
-NULL  NULL
-NULL  NULL
-NULL  NULL

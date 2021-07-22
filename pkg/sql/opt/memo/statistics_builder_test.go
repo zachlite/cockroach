@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package memo
 
@@ -19,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
 // Most of the functionality in statistics.go is tested by the data-driven
@@ -30,7 +35,6 @@ import (
 // by the optimizer.
 func TestGetStatsFromConstraint(t *testing.T) {
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
-	evalCtx.SessionData.OptimizerUseMultiColStats = true
 
 	catalog := testcat.New()
 	if _, err := catalog.ExecuteDDL(
@@ -89,46 +93,49 @@ func TestGetStatsFromConstraint(t *testing.T) {
 
 	var mem Memo
 	mem.Init(&evalCtx)
-	tn := tree.NewUnqualifiedTableName("sel")
-	tab := catalog.Table(tn)
-	tabID := mem.Metadata().AddTable(tab, tn)
+	tab := catalog.Table(tree.NewUnqualifiedTableName("sel"))
+	tabID := mem.Metadata().AddTable(tab)
 
 	// Test that applyConstraintSet correctly updates the statistics from
-	// constraint set cs.
-	statsFunc := func(cs *constraint.Set, expectedStats string) {
+	// constraint set cs, and selectivity is calculated correctly.
+	statsFunc := func(cs *constraint.Set, expectedStats string, expectedSelectivity float64) {
 		t.Helper()
 
 		var cols opt.ColSet
 		for i := 0; i < tab.ColumnCount(); i++ {
-			cols.Add(tabID.ColumnID(i))
+			cols.Add(int(tabID.ColumnID(i)))
 		}
 
 		sb := &statisticsBuilder{}
 		sb.init(&evalCtx, mem.Metadata())
 
 		// Make the scan.
-		scan := mem.MemoizeScan(&ScanPrivate{Table: tabID, Cols: cols})
+		def := &ScanOpDef{Table: tabID, Cols: cols}
+		scan := MakeScanExpr(mem.InternScanOpDef(def))
+		scanGroup := mem.MemoizeNormExpr(&evalCtx, Expr(scan)).Group()
+
+		// Make the filter.
+		filter := MakeTrueExpr()
+		filterGroup := mem.MemoizeNormExpr(&evalCtx, Expr(filter)).Group()
 
 		// Make the select.
-		sel := mem.MemoizeSelect(scan, TrueFilter)
-
+		sel := MakeSelectExpr(scanGroup, filterGroup)
+		selGroup := mem.newGroup(Expr(sel))
+		ev := MakeNormExprView(&mem, selGroup.id)
 		relProps := &props.Relational{Cardinality: props.AnyCardinality}
-		relProps.NotNullCols = cs.ExtractNotNullCols(&evalCtx)
 		s := &relProps.Stats
 		s.Init(relProps)
 
 		// Calculate distinct counts.
-		sb.applyConstraintSet(cs, true /* tight */, sel, relProps, &relProps.Stats)
+		numUnappliedConjuncts := sb.applyConstraintSet(cs, ev, relProps)
 
 		// Calculate row count and selectivity.
-		s.RowCount = scan.Relational().Stats.RowCount
-		s.ApplySelectivity(sb.selectivityFromMultiColDistinctCounts(cols, sel, s))
-
-		// Update null counts.
-		sb.updateNullCountsFromNotNullCols(relProps.NotNullCols, s)
+		s.RowCount = mem.GroupProperties(scanGroup).Relational.Stats.RowCount
+		s.ApplySelectivity(sb.selectivityFromDistinctCounts(cols, ev, s))
+		s.ApplySelectivity(sb.selectivityFromUnappliedConjuncts(numUnappliedConjuncts))
 
 		// Check if the statistics match the expected value.
-		testStats(t, s, expectedStats)
+		testStats(t, s, expectedStats, expectedSelectivity)
 	}
 
 	c1 := constraint.ParseConstraint(&evalCtx, "/1: [/2 - /5] [/8 - /10]")
@@ -136,11 +143,9 @@ func TestGetStatsFromConstraint(t *testing.T) {
 	c3 := constraint.ParseConstraint(&evalCtx, "/3: [/6 - /6]")
 	c12 := constraint.ParseConstraint(&evalCtx, "/1/2/3: [/1/2 - /1/3] [/1/4 - /1]")
 	c123 := constraint.ParseConstraint(&evalCtx, "/1/2/3: [/1/2/3 - /1/2/3] [/1/2/5 - /1/2/8]")
-	c123n := constraint.ParseConstraint(&evalCtx, "/1/2/3: [/1/2/NULL - /1/2/3] [/1/2/5 - /1/2/8]")
 	c32 := constraint.ParseConstraint(&evalCtx, "/3/-2: [/5/3 - /5/2]")
 	c321 := constraint.ParseConstraint(&evalCtx, "/-3/2/1: [/5/3/1 - /5/3/4] [/3/5/1 - /3/5/4]")
 	c312 := constraint.ParseConstraint(&evalCtx, "/3/1/-2: [/5/3/8 - /5/3/6] [/9/5/4 - /9/5/1]")
-	c312n := constraint.ParseConstraint(&evalCtx, "/3/1/-2: [/5/3/8 - /5/3/6] [/9/5/4 - /9/5/NULL]")
 
 	// /4/5: [/'apple'/'cherry' - /'apple'/'mango']
 	appleCherry := constraint.MakeCompositeKey(tree.NewDString("apple"), tree.NewDString("cherry"))
@@ -155,87 +160,119 @@ func TestGetStatsFromConstraint(t *testing.T) {
 	cs1 := constraint.SingleConstraint(&c1)
 	statsFunc(
 		cs1,
-		"[rows=140000000, distinct(1)=7, null(1)=0]",
+		"[rows=140000000, distinct(1)=7]",
+		7.0/500,
 	)
 
 	cs2 := constraint.SingleConstraint(&c2)
 	statsFunc(
 		cs2,
-		"[rows=3.33333333e+09, distinct(2)=166.666667, null(2)=0]",
+		"[rows=3.33333333e+09]",
+		1.0/3,
 	)
 
 	cs3 := constraint.SingleConstraint(&c3)
 	statsFunc(
 		cs3,
-		"[rows=20000000, distinct(3)=1, null(3)=0]",
+		"[rows=20000000, distinct(3)=1]",
+		1.0/500,
 	)
 
 	cs12 := constraint.SingleConstraint(&c12)
 	statsFunc(
 		cs12,
-		"[rows=20000000, distinct(1)=1, null(1)=0]",
+		"[rows=20000000, distinct(1)=1]",
+		1.0/500,
 	)
 
 	cs123 := constraint.SingleConstraint(&c123)
 	statsFunc(
 		cs123,
-		"[rows=36040, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(3)=5, null(3)=0, distinct(1,2)=1, null(1,2)=0, distinct(1-3)=5, null(1-3)=0]",
-	)
-
-	cs123n := constraint.SingleConstraint(&c123n)
-	statsFunc(
-		cs123n,
-		"[rows=40000, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(1,2)=1, null(1,2)=0]",
+		"[rows=400, distinct(1)=1, distinct(2)=1, distinct(3)=5]",
+		5.0/125000000,
 	)
 
 	cs32 := constraint.SingleConstraint(&c32)
 	statsFunc(
 		cs32,
-		"[rows=80000, distinct(2)=2, null(2)=0, distinct(3)=1, null(3)=0, distinct(2,3)=2, null(2,3)=0]",
+		"[rows=80000, distinct(2)=2, distinct(3)=1]",
+		2.0/250000,
 	)
 
 	cs321 := constraint.SingleConstraint(&c321)
 	statsFunc(
 		cs321,
-		"[rows=160000, distinct(2)=2, null(2)=0, distinct(3)=2, null(3)=0, distinct(2,3)=4, null(2,3)=0]",
+		"[rows=160000, distinct(2)=2, distinct(3)=2]",
+		4.0/250000,
 	)
 
 	cs312 := constraint.SingleConstraint(&c312)
 	statsFunc(
 		cs312,
-		"[rows=24490654.6, distinct(1)=2, null(1)=0, distinct(2)=7, null(2)=0, distinct(3)=2, null(3)=0, distinct(1-3)=26.9394737, null(1-3)=0]",
-	)
-
-	cs312n := constraint.SingleConstraint(&c312n)
-	statsFunc(
-		cs312n,
-		"[rows=160000, distinct(1)=2, null(1)=0, distinct(3)=2, null(3)=0, distinct(1,3)=4, null(1,3)=0]",
+		"[rows=2240, distinct(1)=2, distinct(2)=7, distinct(3)=2]",
+		28.0/125000000,
 	)
 
 	cs := cs3.Intersect(&evalCtx, cs123)
 	statsFunc(
 		cs,
-		"[rows=909098.909, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(3)=1, null(3)=0, distinct(1-3)=1, null(1-3)=0]",
+		"[rows=80, distinct(1)=1, distinct(2)=1, distinct(3)=1]",
+		1.0/125000000,
 	)
 
 	cs = cs32.Intersect(&evalCtx, cs123)
 	statsFunc(
 		cs,
-		"[rows=909098.909, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0, distinct(3)=1, null(3)=0, distinct(1-3)=1, null(1-3)=0]",
+		"[rows=80, distinct(1)=1, distinct(2)=1, distinct(3)=1]",
+		1.0/125000000,
 	)
 
 	cs45 := constraint.SingleSpanConstraint(&keyCtx45, &sp45)
 	statsFunc(
 		cs45,
-		"[rows=1e+09, distinct(4)=1, null(4)=0]",
+		"[rows=1e+09, distinct(4)=1]",
+		1.0/10,
 	)
 }
 
-func testStats(t *testing.T, s *props.Statistics, expectedStats string) {
+func TestTranslateColSet(t *testing.T) {
+	test := func(t *testing.T, colSetIn opt.ColSet, from opt.ColList, to opt.ColList, expected opt.ColSet) {
+		t.Helper()
+
+		actual := translateColSet(colSetIn, from, to)
+		if !actual.Equals(expected) {
+			t.Fatalf("\nexpected: %s\nactual  : %s", expected, actual)
+		}
+	}
+
+	colSetIn, from, to := util.MakeFastIntSet(1, 2, 3), opt.ColList{1, 2, 3}, opt.ColList{4, 5, 6}
+	test(t, colSetIn, from, to, util.MakeFastIntSet(4, 5, 6))
+
+	colSetIn, from, to = util.MakeFastIntSet(2, 3), opt.ColList{1, 2, 3}, opt.ColList{4, 5, 6}
+	test(t, colSetIn, from, to, util.MakeFastIntSet(5, 6))
+
+	// colSetIn and colSetOut might not be the same length.
+	colSetIn, from, to = util.MakeFastIntSet(1, 2), opt.ColList{1, 1, 2}, opt.ColList{4, 5, 6}
+	test(t, colSetIn, from, to, util.MakeFastIntSet(4, 5, 6))
+
+	colSetIn, from, to = util.MakeFastIntSet(1, 2, 3), opt.ColList{1, 2, 3}, opt.ColList{4, 5, 4}
+	test(t, colSetIn, from, to, util.MakeFastIntSet(4, 5))
+
+	colSetIn, from, to = util.MakeFastIntSet(2), opt.ColList{1, 2, 2}, opt.ColList{4, 5, 6}
+	test(t, colSetIn, from, to, util.MakeFastIntSet(5, 6))
+}
+
+func testStats(
+	t *testing.T, s *props.Statistics, expectedStats string, expectedSelectivity float64,
+) {
 	t.Helper()
 
 	actual := s.String()
 	if actual != expectedStats {
 		t.Fatalf("\nexpected: %s\nactual  : %s", expectedStats, actual)
+	}
+
+	if s.Selectivity != expectedSelectivity {
+		t.Fatalf("\nexpected: %f\nactual  : %f", expectedSelectivity, s.Selectivity)
 	}
 }

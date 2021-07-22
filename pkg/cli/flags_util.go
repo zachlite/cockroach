@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package cli
 
@@ -21,24 +25,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
-	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/keysutil"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble/vfs"
 	humanize "github.com/dustin/go-humanize"
-	"github.com/spf13/pflag"
+	"github.com/elastic/gosigar"
+	"github.com/pkg/errors"
 )
 
 type localityList []roachpb.LocalityAddress
 
-var _ pflag.Value = &localityList{}
-
 // Type implements the pflag.Value interface.
 func (l *localityList) Type() string { return "localityList" }
 
-// String implements the pflag.Value interface.
+// String implements the pflag.Value interface.=
 func (l *localityList) String() string {
 	string := ""
 	for _, loc := range []roachpb.LocalityAddress(*l) {
@@ -48,7 +48,7 @@ func (l *localityList) String() string {
 	return string
 }
 
-// Set implements the pflag.Value interface.
+// String implements the pflag.Value interface.
 func (l *localityList) Set(value string) error {
 	*l = []roachpb.LocalityAddress{}
 
@@ -81,6 +81,24 @@ func (l *localityList) Set(value string) error {
 
 // This file contains definitions for data types suitable for use by
 // the flag+pflag packages.
+
+// statementsValue is an implementation of pflag.Value that appends any
+// argument to a slice.
+type statementsValue []string
+
+// Type implements the pflag.Value interface.
+func (s *statementsValue) Type() string { return "statementsValue" }
+
+// String implements the pflag.Value interface.
+func (s *statementsValue) String() string {
+	return strings.Join(*s, ";")
+}
+
+// Set implements the pflag.Value interface.
+func (s *statementsValue) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 
 type dumpMode int
 
@@ -121,14 +139,14 @@ func (m *dumpMode) Set(s string) error {
 	return nil
 }
 
-type mvccKey storage.MVCCKey
+type mvccKey engine.MVCCKey
 
 // Type implements the pflag.Value interface.
 func (k *mvccKey) Type() string { return "engine.MVCCKey" }
 
 // String implements the pflag.Value interface.
 func (k *mvccKey) String() string {
-	return storage.MVCCKey(*k).String()
+	return engine.MVCCKey(*k).String()
 }
 
 // Set implements the pflag.Value interface.
@@ -153,9 +171,9 @@ func (k *mvccKey) Set(value string) error {
 		if err != nil {
 			return err
 		}
-		newK, err := storage.DecodeMVCCKey(b)
+		newK, err := engine.DecodeKey(b)
 		if err != nil {
-			encoded := gohex.EncodeToString(storage.EncodeKey(storage.MakeMVCCMetadataKey(roachpb.Key(b))))
+			encoded := gohex.EncodeToString(engine.EncodeKey(engine.MakeMVCCMetadataKey(roachpb.Key(b))))
 			return errors.Wrapf(err, "perhaps this is just a hex-encoded key; you need an "+
 				"encoded MVCCKey (i.e. with a timestamp component); here's one with a zero timestamp: %s",
 				encoded)
@@ -166,20 +184,19 @@ func (k *mvccKey) Set(value string) error {
 		if err != nil {
 			return err
 		}
-		*k = mvccKey(storage.MakeMVCCMetadataKey(roachpb.Key(unquoted)))
+		*k = mvccKey(engine.MakeMVCCMetadataKey(roachpb.Key(unquoted)))
 	case human:
-		scanner := keysutil.MakePrettyScanner(nil /* tableParser */)
-		key, err := scanner.Scan(keyStr)
+		key, err := keys.UglyPrint(keyStr)
 		if err != nil {
 			return err
 		}
-		*k = mvccKey(storage.MakeMVCCMetadataKey(key))
+		*k = mvccKey(engine.MakeMVCCMetadataKey(key))
 	case rangeID:
 		fromID, err := parseRangeID(keyStr)
 		if err != nil {
 			return err
 		}
-		*k = mvccKey(storage.MakeMVCCMetadataKey(keys.MakeRangeIDPrefix(fromID)))
+		*k = mvccKey(engine.MakeMVCCMetadataKey(keys.MakeRangeIDPrefix(fromID)))
 	default:
 		return fmt.Errorf("unknown key type %s", typ)
 	}
@@ -235,6 +252,7 @@ type nodeDecommissionWaitType int
 
 const (
 	nodeDecommissionWaitAll nodeDecommissionWaitType = iota
+	nodeDecommissionWaitLive
 	nodeDecommissionWaitNone
 )
 
@@ -246,11 +264,12 @@ func (s *nodeDecommissionWaitType) String() string {
 	switch *s {
 	case nodeDecommissionWaitAll:
 		return "all"
+	case nodeDecommissionWaitLive:
+		return "live"
 	case nodeDecommissionWaitNone:
 		return "none"
-	default:
-		panic("unexpected node decommission wait type (possible values: all, none)")
 	}
+	return ""
 }
 
 // Set implements the pflag.Value interface.
@@ -258,11 +277,74 @@ func (s *nodeDecommissionWaitType) Set(value string) error {
 	switch value {
 	case "all":
 		*s = nodeDecommissionWaitAll
+	case "live":
+		*s = nodeDecommissionWaitLive
 	case "none":
 		*s = nodeDecommissionWaitNone
 	default:
 		return fmt.Errorf("invalid node decommission parameter: %s "+
-			"(possible values: all, none)", value)
+			"(possible values: all, live, none)", value)
+	}
+	return nil
+}
+
+type tableDisplayFormat int
+
+const (
+	tableDisplayTSV tableDisplayFormat = iota
+	tableDisplayCSV
+	tableDisplayTable
+	tableDisplayRecords
+	tableDisplaySQL
+	tableDisplayHTML
+	tableDisplayRaw
+	tableDisplayLastFormat
+)
+
+// Type implements the pflag.Value interface.
+func (f *tableDisplayFormat) Type() string { return "string" }
+
+// String implements the pflag.Value interface.
+func (f *tableDisplayFormat) String() string {
+	switch *f {
+	case tableDisplayTSV:
+		return "tsv"
+	case tableDisplayCSV:
+		return "csv"
+	case tableDisplayTable:
+		return "table"
+	case tableDisplayRecords:
+		return "records"
+	case tableDisplaySQL:
+		return "sql"
+	case tableDisplayHTML:
+		return "html"
+	case tableDisplayRaw:
+		return "raw"
+	}
+	return ""
+}
+
+// Set implements the pflag.Value interface.
+func (f *tableDisplayFormat) Set(s string) error {
+	switch s {
+	case "tsv":
+		*f = tableDisplayTSV
+	case "csv":
+		*f = tableDisplayCSV
+	case "table":
+		*f = tableDisplayTable
+	case "records":
+		*f = tableDisplayRecords
+	case "sql":
+		*f = tableDisplaySQL
+	case "html":
+		*f = tableDisplayHTML
+	case "raw":
+		*f = tableDisplayRaw
+	default:
+		return fmt.Errorf("invalid table display format: %s "+
+			"(possible values: tsv, csv, table, records, sql, html, raw)", s)
 	}
 	return nil
 }
@@ -290,6 +372,7 @@ func (s *nodeDecommissionWaitType) Set(value string) error {
 // known once other flags are parsed (e.g. --max-disk-temp-storage=10% depends
 // on --store).
 type bytesOrPercentageValue struct {
+	val  *int64
 	bval *humanizeutil.BytesValue
 
 	origVal string
@@ -315,15 +398,15 @@ func memoryPercentResolver(percent int) (int64, error) {
 //
 // An error is returned if dir does not exist.
 func diskPercentResolverFactory(dir string) (percentResolverFunc, error) {
-	du, err := vfs.Default.GetDiskUsage(dir)
-	if err != nil {
+	fileSystemUsage := gosigar.FileSystemUsage{}
+	if err := fileSystemUsage.Get(dir); err != nil {
 		return nil, err
 	}
-	if du.TotalBytes > math.MaxInt64 {
+	if fileSystemUsage.Total > math.MaxInt64 {
 		return nil, fmt.Errorf("unsupported disk size %s, max supported size is %s",
-			humanize.IBytes(du.TotalBytes), humanizeutil.IBytes(math.MaxInt64))
+			humanize.IBytes(fileSystemUsage.Total), humanizeutil.IBytes(math.MaxInt64))
 	}
-	deviceCapacity := int64(du.TotalBytes)
+	deviceCapacity := int64(fileSystemUsage.Total)
 
 	return func(percent int) (int64, error) {
 		return (deviceCapacity * int64(percent)) / 100, nil
@@ -338,7 +421,11 @@ func diskPercentResolverFactory(dir string) (percentResolverFunc, error) {
 func newBytesOrPercentageValue(
 	v *int64, percentResolver func(percent int) (int64, error),
 ) *bytesOrPercentageValue {
+	if v == nil {
+		v = new(int64)
+	}
 	return &bytesOrPercentageValue{
+		val:             v,
 		bval:            humanizeutil.NewBytesValue(v),
 		percentResolver: percentResolver,
 	}
@@ -389,6 +476,7 @@ func (b *bytesOrPercentageValue) Resolve(v *int64, percentResolver percentResolv
 		return nil
 	}
 	b.percentResolver = percentResolver
+	b.val = v
 	b.bval = humanizeutil.NewBytesValue(v)
 	return b.Set(b.origVal)
 }

@@ -4,47 +4,38 @@
 -
 CREATE TABLE t (
 	a
-		INT8
+		INT
 )
-	INTERLEAVE IN PARENT p2 (
-		i,
-		test
-	) RESTRICT
-
-10:
-----------
-CREATE TABLE t (
-	a INT8
-)
-	INTERLEAVE IN PARENT p2 (
-		i,
-		test
-	) RESTRICT
-
-16:
-----------------
-CREATE TABLE t (
-	a INT8
-) INTERLEAVE IN PARENT p2 (
+INTERLEAVE IN PARENT p2 (
 	i,
 	test
-  ) RESTRICT
+) RESTRICT
 
-44:
---------------------------------------------
+9:
+---------
 CREATE TABLE t (
-	a INT8
-) INTERLEAVE IN PARENT p2 (i, test) RESTRICT
+	a INT
+)
+INTERLEAVE IN PARENT p2 (
+	i,
+	test
+) RESTRICT
 
-49:
--------------------------------------------------
-CREATE TABLE t (a INT8) INTERLEAVE IN PARENT p2 (
-							i,
-							test
-                        ) RESTRICT
+22:
+----------------------
+CREATE TABLE t (a INT)
+INTERLEAVE IN PARENT p2 (
+	i,
+	test
+) RESTRICT
 
-66:
-------------------------------------------------------------------
-CREATE TABLE t (a INT8) INTERLEAVE IN PARENT p2 (i, test) RESTRICT
+42:
+------------------------------------------
+CREATE TABLE t (a INT)
+INTERLEAVE IN PARENT p2 (i, test) RESTRICT
+
+65:
+-----------------------------------------------------------------
+CREATE TABLE t (a INT) INTERLEAVE IN PARENT p2 (i, test) RESTRICT
 
 

@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import React from "react";
 import _ from "lodash";
@@ -16,50 +20,22 @@ import moment from "moment";
 
 import * as protos from "src/js/protos";
 import { NanoToMilli } from "src/util/convert";
-import {
-  BytesFitScale,
-  ComputeByteScale,
-  ComputeDurationScale,
-  DurationFitScale,
-} from "src/util/format";
+import { Bytes, ComputeByteScale, ComputeDurationScale, Duration } from "src/util/format";
 
 import {
-  AxisProps,
-  AxisUnits,
-  MetricProps,
-  QueryTimeInfo,
+  MetricProps, AxisProps, AxisUnits, QueryTimeInfo,
 } from "src/views/shared/components/metricQuery";
-import uPlot from "uplot";
 
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
 
 // Global set of colors for graph series.
 const seriesPalette = [
-  "#475872",
-  "#FFCD02",
-  "#F16969",
-  "#4E9FD1",
-  "#49D990",
-  "#D77FBF",
-  "#87326D",
-  "#A3415B",
-  "#B59153",
-  "#C9DB6D",
-  "#203D9B",
-  "#748BF2",
-  "#91C8F2",
-  "#FF9696",
-  "#EF843C",
-  "#DCCD4B",
+  "#5F6C87", "#F2BE2C", "#F16969", "#4E9FD1", "#49D990", "#D77FBF", "#87326D", "#A3415B",
+  "#B59153", "#C9DB6D", "#203D9B", "#748BF2", "#91C8F2", "#FF9696", "#EF843C", "#DCCD4B",
 ];
 
 // Chart margins to match design.
-export const CHART_MARGINS: nvd3.Margin = {
-  top: 30,
-  right: 20,
-  bottom: 20,
-  left: 55,
-};
+export const CHART_MARGINS: nvd3.Margin = {top: 30, right: 20, bottom: 20, left: 55};
 
 // Maximum number of series we will show in the legend. If there are more we hide the legend.
 const MAX_LEGEND_SERIES: number = 4;
@@ -71,14 +47,14 @@ const Y_AXIS_TICK_COUNT: number = 3;
 const X_AXIS_TICK_COUNT: number = 10;
 
 // A tuple of numbers for the minimum and maximum values of an axis.
-export type Extent = [number, number];
+type Extent = [number, number];
 
 /**
  * AxisDomain is a class that describes the domain of a graph axis; this
  * includes the minimum/maximum extend, tick values, and formatting information
  * for axis values as displayed in various contexts.
  */
-export class AxisDomain {
+class AxisDomain {
   // the values at the ends of the axis.
   extent: Extent;
   // numbers at which an intermediate tick should be displayed on the axis.
@@ -100,10 +76,10 @@ export class AxisDomain {
     const min = extent[0];
     const max = extent[1];
     if (alignMinMax) {
-      const alignedMin = min - (min % increment);
+      const alignedMin = min - min % increment;
       let alignedMax = max;
       if (max % increment !== 0) {
-        alignedMax = max - (max % increment) + increment;
+        alignedMax = max - max % increment + increment;
       }
       this.extent = [alignedMin, alignedMax];
     } else {
@@ -111,30 +87,15 @@ export class AxisDomain {
     }
 
     this.ticks = [];
-    for (
-      let nextTick = min - (min % increment) + increment;
-      nextTick < this.extent[1];
-      nextTick += increment
-    ) {
+    for (let nextTick = min - min % increment + increment;
+         nextTick < this.extent[1];
+         nextTick += increment) {
       this.ticks.push(nextTick);
     }
   }
 }
 
-const countIncrementTable = [
-  0.1,
-  0.2,
-  0.25,
-  0.3,
-  0.4,
-  0.5,
-  0.6,
-  0.7,
-  0.75,
-  0.8,
-  0.9,
-  1.0,
-];
+const countIncrementTable = [0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0];
 
 // computeNormalizedIncrement computes a human-friendly increment between tick
 // values on an axis with a range of the given size. The provided size is taken
@@ -146,8 +107,7 @@ const countIncrementTable = [
 // "Human-friendly" increments are taken from the supplied countIncrementTable,
 // which should include decimal values between 0 and 1.
 function computeNormalizedIncrement(
-  range: number,
-  incrementTbl: number[] = countIncrementTable,
+  range: number, incrementTbl: number[] = countIncrementTable,
 ) {
   if (range === 0) {
     throw new Error("cannot compute tick increment with zero range");
@@ -207,7 +167,7 @@ function ComputeCountAxisDomain(extent: Extent): AxisDomain {
   return axisDomain;
 }
 
-export function ComputeByteAxisDomain(extent: Extent): AxisDomain {
+function ComputeByteAxisDomain(extent: Extent): AxisDomain {
   // Compute an appropriate unit for the maximum value to be displayed.
   const scale = ComputeByteScale(extent[1]);
   const prefixFactor = scale.value;
@@ -216,7 +176,7 @@ export function ComputeByteAxisDomain(extent: Extent): AxisDomain {
 
   axisDomain.label = scale.units;
 
-  axisDomain.guideFormat = BytesFitScale(scale.units);
+  axisDomain.guideFormat = Bytes;
   return axisDomain;
 }
 
@@ -228,13 +188,15 @@ function ComputeDurationAxisDomain(extent: Extent): AxisDomain {
 
   axisDomain.label = scale.units;
 
-  axisDomain.guideFormat = DurationFitScale(scale.units);
+  axisDomain.guideFormat = Duration;
   return axisDomain;
 }
 
 const percentIncrementTable = [0.25, 0.5, 0.75, 1.0];
 
-function ComputePercentageAxisDomain(min: number, max: number) {
+function ComputePercentageAxisDomain(
+  min: number, max: number,
+) {
   const range = max - min;
   const increment = computeNormalizedIncrement(range, percentIncrementTable);
   const axisDomain = new AxisDomain([min, max], increment);
@@ -258,9 +220,7 @@ const timeIncrementDurations = [
   moment.duration(24, "h"),
   moment.duration(1, "week"),
 ];
-const timeIncrements: number[] = _.map(timeIncrementDurations, (inc) =>
-  inc.asMilliseconds(),
-);
+const timeIncrements = _.map(timeIncrementDurations, (inc) => inc.asMilliseconds());
 
 function ComputeTimeAxisDomain(extent: Extent): AxisDomain {
   // Compute increment; for time scales, this is taken from a table of allowed
@@ -293,18 +253,13 @@ function ComputeTimeAxisDomain(extent: Extent): AxisDomain {
   };
 
   axisDomain.guideFormat = (num) => {
-    return moment(num).utc().format("HH:mm:ss on MMM Do, YYYY");
+    return moment(num).utc().format("HH:mm:ss [<span class=\"legend-subtext\">on</span>] MMM Do, YYYY");
   };
   return axisDomain;
 }
 
-export function calculateYAxisDomain(
-  axisUnits: AxisUnits,
-  data: TSResponse,
-): AxisDomain {
-  const resultDatapoints = _.flatMap(data.results, (result) =>
-    _.map(result.datapoints, (dp) => dp.value),
-  );
+function calculateYAxisDomain(axisUnits: AxisUnits, data: TSResponse): AxisDomain {
+  const resultDatapoints = _.flatMap(data.results, (result) => _.map(result.datapoints, (dp) => dp.value));
   // TODO(couchand): Remove these random datapoints when NVD3 is gone.
   const allDatapoints = resultDatapoints.concat([0, 1]);
   const yExtent = d3.extent(allDatapoints);
@@ -321,22 +276,19 @@ export function calculateYAxisDomain(
   }
 }
 
-export function calculateXAxisDomain(timeInfo: QueryTimeInfo): AxisDomain {
-  const xExtent: Extent = [
-    NanoToMilli(timeInfo.start.toNumber()),
-    NanoToMilli(timeInfo.end.toNumber()),
-  ];
+function calculateXAxisDomain(timeInfo: QueryTimeInfo): AxisDomain {
+  const xExtent: Extent = [NanoToMilli(timeInfo.start.toNumber()), NanoToMilli(timeInfo.end.toNumber())];
   return ComputeTimeAxisDomain(xExtent);
 }
 
-export type formattedSeries = {
-  values: protos.cockroach.ts.tspb.ITimeSeriesDatapoint[];
-  key: string;
-  area: boolean;
-  fillOpacity: number;
+type formattedSeries = {
+  values: protos.cockroach.ts.tspb.ITimeSeriesDatapoint[],
+  key: string,
+  area: boolean,
+  fillOpacity: number,
 };
 
-export function formatMetricData(
+function formatMetricData(
   metrics: React.ReactElement<MetricProps>[],
   data: TSResponse,
 ): formattedSeries[] {
@@ -378,19 +330,19 @@ function filterInvalidDatapoints(
 }
 
 export function InitLineChart(chart: nvd3.LineChart) {
-  chart
-    .x(
-      (d: protos.cockroach.ts.tspb.TimeSeriesDatapoint) =>
-        new Date(NanoToMilli(d && d.timestamp_nanos.toNumber())),
-    )
-    .y((d: protos.cockroach.ts.tspb.TimeSeriesDatapoint) => d && d.value)
-    .useInteractiveGuideline(true)
-    .showLegend(true)
-    .showYAxis(true)
-    .color(seriesPalette)
-    .margin(CHART_MARGINS);
-  chart.xAxis.showMaxMin(false);
-  chart.yAxis.showMaxMin(true).axisLabelDistance(-10);
+    chart
+      .x((d: protos.cockroach.ts.tspb.TimeSeriesDatapoint) => new Date(NanoToMilli(d && d.timestamp_nanos.toNumber())))
+      .y((d: protos.cockroach.ts.tspb.TimeSeriesDatapoint) => d && d.value)
+      .useInteractiveGuideline(true)
+      .showLegend(true)
+      .showYAxis(true)
+      .color(seriesPalette)
+      .margin(CHART_MARGINS);
+    chart.xAxis
+      .showMaxMin(false);
+    chart.yAxis
+      .showMaxMin(true)
+      .axisLabelDistance(-10);
 }
 
 /**
@@ -403,6 +355,7 @@ export function ConfigureLineChart(
   axis: React.ReactElement<AxisProps>,
   data: TSResponse,
   timeInfo: QueryTimeInfo,
+  hoverTime?: moment.Moment,
 ) {
   chart.showLegend(metrics.length > 1 && metrics.length <= MAX_LEGEND_SERIES);
   let formattedData: formattedSeries[];
@@ -438,8 +391,7 @@ export function ConfigureLineChart(
   try {
     d3.select(svgEl)
       .datum(formattedData)
-      .transition()
-      .duration(500)
+      .transition().duration(500)
       .call(chart);
 
     // Reduce radius of circles in the legend, if present. This is done through
@@ -448,27 +400,11 @@ export function ConfigureLineChart(
   } catch (e) {
     console.log("Error rendering graph: ", e);
   }
-}
 
-/**
- * ConfigureLinkedGuide renders the linked guideline for a chart.
- */
-export function ConfigureLinkedGuideline(
-  chart: nvd3.LineChart,
-  svgEl: SVGElement,
-  axis: React.ReactElement<AxisProps>,
-  data: TSResponse,
-  hoverTime: moment.Moment,
-) {
-  if (data) {
-    const xScale = chart.xAxis.scale();
-    const yScale = chart.yAxis.scale();
-    const yAxisDomain = calculateYAxisDomain(axis.props.units, data);
-    const yExtent: Extent = data
-      ? [yScale(yAxisDomain.extent[0]), yScale(yAxisDomain.extent[1])]
-      : [0, 1];
-    updateLinkedGuideline(svgEl, xScale, yExtent, hoverTime);
-  }
+  const xScale = chart.xAxis.scale();
+  const yScale = chart.yAxis.scale();
+  const yExtent: Extent = data ? [yScale(yAxisDomain.extent[0]), yScale(yAxisDomain.extent[1])] : [0, 1];
+  updateLinkedGuideline(svgEl, xScale, yExtent, hoverTime);
 }
 
 // updateLinkedGuideline is responsible for maintaining "linked" guidelines on
@@ -476,12 +412,7 @@ export function ConfigureLinkedGuideline(
 // coordinate on different graphs currently visible on the same page. This
 // allows the user to visually correlate a single X-axis coordinate across
 // multiple visible graphs.
-function updateLinkedGuideline(
-  svgEl: SVGElement,
-  x: d3.scale.Linear<number, number>,
-  yExtent: Extent,
-  hoverTime?: moment.Moment,
-) {
+function updateLinkedGuideline(svgEl: SVGElement, x: d3.scale.Linear<number, number>, yExtent: Extent, hoverTime?: moment.Moment) {
   // Construct a data array for use by d3; this allows us to use d3's
   // "enter()/exit()" functions to cleanly add and remove the guideline.
   const data = !_.isNil(hoverTime) ? [x(hoverTime.valueOf())] : [];
@@ -497,8 +428,7 @@ function updateLinkedGuideline(
     return;
   }
 
-  const container = wrapper
-    .selectAll("g.linked-guideline__container")
+  const container = wrapper.selectAll("g.linked-guideline__container")
     .data(data);
 
   // If there is no guideline on the currently hovered graph, data is empty
@@ -510,174 +440,17 @@ function updateLinkedGuideline(
   // If there is a guideline on the currently hovered graph, this enter
   // statement will add a linked guideline element to the current graph (if it
   // does not already exist).
-  container
-    .enter()
+  container.enter()
     .append("g")
-    .attr("class", "linked-guideline__container")
-    .append("line")
-    .attr("class", "linked-guideline__line");
+      .attr("class", "linked-guideline__container")
+      .append("line")
+        .attr("class", "linked-guideline__line");
 
   // Update linked guideline (if present) to match the necessary attributes of
   // the current guideline.
-  container
-    .select(".linked-guideline__line")
+  container.select(".linked-guideline__line")
     .attr("x1", (d) => d)
     .attr("x2", (d) => d)
     .attr("y1", () => yExtent[0])
     .attr("y2", () => yExtent[1]);
-}
-
-// configureUPlotLineChart constructs the uplot Options object based on
-// information about the metrics, axis, and data that we'd like to plot.
-// Most of the settings are defined as functions instead of static values
-// in order to take advantage of auto-updating behavior built into uPlot
-// when we send new data to the uPlot object. This will ensure that all
-// axis labeling and extent settings get updated properly.
-export function configureUPlotLineChart(
-  metrics: React.ReactElement<MetricProps>[],
-  axis: React.ReactElement<AxisProps>,
-  data: TSResponse,
-  setTimeRange: (startMillis: number, endMillis: number) => void,
-  getLatestXAxisDomain: () => AxisDomain,
-  getLatestYAxisDomain: () => AxisDomain,
-): uPlot.Options {
-  const formattedRaw = formatMetricData(metrics, data);
-  // Copy palette over since we mutate it in the `series` function
-  // below to cycle through the colors. This ensures that we always
-  // start from the same color for each graph so a single-series
-  // graph will always have the first color, etc.
-  const strokeColors = [...seriesPalette];
-
-  const tooltipPlugin = () => {
-    return {
-      hooks: {
-        init: (self: uPlot) => {
-          const over: HTMLElement = self.root.querySelector(".u-over");
-          const legend: HTMLElement = self.root.querySelector(".u-legend");
-
-          // apply class to stick a legend to the bottom of a chart if it has more than 10 series
-          if (self.series.length > 10) {
-            legend.classList.add("u-legend--place-bottom");
-          }
-
-          // Show/hide legend when we enter/exit the bounds of the graph
-          over.onmouseenter = () => {
-            legend.style.display = "block";
-          };
-
-          over.onmouseleave = () => {
-            legend.style.display = "none";
-          };
-        },
-        setCursor: (self: uPlot) => {
-          // Place legend to the right of the mouse pointer
-          const legend: HTMLElement = self.root.querySelector(".u-legend");
-          if (self.cursor.left > 0 && self.cursor.top > 0) {
-            // TODO(davidh): This placement is not aware of the viewport edges
-            legend.style.left = self.cursor.left + 100 + "px";
-            legend.style.top = self.cursor.top - 10 + "px";
-          }
-        },
-      },
-    };
-  };
-
-  // Please see https://github.com/leeoniya/uPlot/tree/master/docs for
-  // information on how to construct this object.
-  return {
-    width: 947,
-    height: 300,
-    // TODO(davidh): Enable sync-ed guidelines once legend is redesigned
-    // currently, if you enable this with a hovering legend, the FPS
-    // gets quite choppy on large clusters.
-    // cursor: {
-    //   sync: {
-    //     // graphs with matching keys will get their guidelines
-    //     // sync-ed so we just use the same key for the page
-    //     key: "sync-everything",
-    //   },
-    // },
-    legend: {
-      show: true,
-
-      // This setting sets the default legend behavior to isolate
-      // a series when it's clicked in the legend.
-      isolate: true,
-    },
-    // By default, uPlot expects unix seconds in the x axis.
-    // This setting defaults it to milliseconds which our
-    // internal functions already supported.
-    ms: 1,
-    // These settings govern how the individual series are
-    // drawn and how their values are displayed in the legend.
-    series: [
-      {
-        value: (_u, rawValue) => getLatestXAxisDomain().guideFormat(rawValue),
-      },
-      // Generate a series object for reach of our results
-      // picking colors from our palette.
-      ...formattedRaw.map((result) => {
-        const color = strokeColors.shift();
-        strokeColors.push(color);
-        return {
-          show: true,
-          scale: "yAxis",
-          width: 1,
-          label: result.key,
-          stroke: color,
-          points: {
-            show: false,
-          },
-          // value determines how these values show up in the legend
-          value: (_u: uPlot, rawValue: number) =>
-            getLatestYAxisDomain().guideFormat(rawValue),
-        };
-      }),
-    ],
-    axes: [
-      {
-        values: (_u, vals) => vals.map(getLatestXAxisDomain().tickFormat),
-        splits: () => getLatestXAxisDomain().ticks,
-      },
-      {
-        // This label will get overridden in the linegraph's update
-        // callback when we change the y Axis domain.
-        label:
-          axis.props.label +
-          (getLatestYAxisDomain().label
-            ? ` (${getLatestYAxisDomain().label})`
-            : ""),
-        values: (_u, vals) => vals.map(getLatestYAxisDomain().tickFormat),
-        splits: () => {
-          const domain = getLatestYAxisDomain();
-          return [domain.extent[0], ...domain.ticks, domain.extent[1]];
-        },
-        scale: "yAxis",
-      },
-    ],
-    scales: {
-      x: {
-        range: () => getLatestXAxisDomain().extent,
-      },
-      yAxis: {
-        range: () => getLatestYAxisDomain().extent,
-      },
-    },
-    plugins: [tooltipPlugin()],
-    hooks: {
-      // setSelect is a hook that fires when a selection is made on the graph
-      // by dragging a range to zoom.
-      setSelect: [
-        (self) => {
-          // From what I understand, `self.select` contains the pixel edges
-          // of the user's selection. Then I use the `posToIdx` to tell me
-          // what the xAxis range is of the pixels.
-          setTimeRange(
-            self.data[0][self.posToIdx(self.select.left)],
-            self.data[0][self.posToIdx(self.select.left + self.select.width)],
-          );
-        },
-      ],
-    },
-  };
 }

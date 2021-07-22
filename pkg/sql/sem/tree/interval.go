@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
@@ -16,11 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/errors"
 )
 
 type intervalLexer struct {
@@ -67,8 +69,8 @@ func (l *intervalLexer) consumeNum() (int64, bool, float64) {
 		// Try to convert.
 		value, err := strconv.ParseFloat(l.str[start:l.offset], 64)
 		if err != nil {
-			l.err = pgerror.Newf(
-				pgcode.InvalidDatetimeFormat, "interval: %v", err)
+			l.err = pgerror.NewErrorf(
+				pgerror.CodeInvalidDatetimeFormatError, "interval: %v", err)
 			return 0, false, 0
 		}
 		decPart = value
@@ -76,8 +78,8 @@ func (l *intervalLexer) consumeNum() (int64, bool, float64) {
 
 	// Ensure we have something.
 	if offset == l.offset {
-		l.err = pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: missing number at position %d: %q", offset, l.str)
+		l.err = pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: missing number at position %d: %q", offset, l.str)
 		return 0, false, 0
 	}
 
@@ -96,25 +98,21 @@ func (l *intervalLexer) consumeInt() int64 {
 	start := l.offset
 
 	// Advance offset to prepare a valid argument to ParseInt().
-	if l.offset < len(l.str) && (l.str[l.offset] == '-' || l.str[l.offset] == '+') {
+	if l.offset < len(l.str) && l.str[l.offset] == '-' {
 		l.offset++
 	}
 	for ; l.offset < len(l.str) && l.str[l.offset] >= '0' && l.str[l.offset] <= '9'; l.offset++ {
 	}
-	// Check if we have something like ".X".
-	if start == l.offset && len(l.str) > (l.offset+1) && l.str[l.offset] == '.' {
-		return 0
-	}
 
 	x, err := strconv.ParseInt(l.str[start:l.offset], 10, 64)
 	if err != nil {
-		l.err = pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: %v", err)
+		l.err = pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: %v", err)
 		return 0
 	}
 	if start == l.offset {
-		l.err = pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: missing number at position %d: %q", start, l.str)
+		l.err = pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: missing number at position %d: %q", start, l.str)
 		return 0
 	}
 	return x
@@ -136,8 +134,8 @@ func (l *intervalLexer) consumeUnit(skipCharacter byte) string {
 	}
 
 	if offset == l.offset {
-		l.err = pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: missing unit at position %d: %q", offset, l.str)
+		l.err = pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: missing unit at position %d: %q", offset, l.str)
 		return ""
 	}
 	return l.str[offset:l.offset]
@@ -154,16 +152,16 @@ func (l *intervalLexer) consumeSpaces() {
 
 // ISO Units.
 var isoDateUnitMap = map[string]duration.Duration{
-	"D": duration.MakeDuration(0, 1, 0),
-	"W": duration.MakeDuration(0, 7, 0),
-	"M": duration.MakeDuration(0, 0, 1),
-	"Y": duration.MakeDuration(0, 0, 12),
+	"D": {Days: 1},
+	"W": {Days: 7},
+	"M": {Months: 1},
+	"Y": {Months: 12},
 }
 
 var isoTimeUnitMap = map[string]duration.Duration{
-	"S": duration.MakeDuration(time.Second.Nanoseconds(), 0, 0),
-	"M": duration.MakeDuration(time.Minute.Nanoseconds(), 0, 0),
-	"H": duration.MakeDuration(time.Hour.Nanoseconds(), 0, 0),
+	"S": {Nanos: time.Second.Nanoseconds()},
+	"M": {Nanos: time.Minute.Nanoseconds()},
+	"H": {Nanos: time.Hour.Nanoseconds()},
 }
 
 const errInvalidSQLDuration = "invalid input syntax for type interval %s"
@@ -178,14 +176,14 @@ const (
 )
 
 func newInvalidSQLDurationError(s string) error {
-	return pgerror.Newf(pgcode.InvalidDatetimeFormat, errInvalidSQLDuration, s)
+	return pgerror.NewErrorf(pgerror.CodeInvalidDatetimeFormatError, errInvalidSQLDuration, s)
 }
 
 // Parses a SQL standard interval string.
-// See the following links for examples:
+// See the following links for exampels:
 //  - http://www.postgresql.org/docs/9.1/static/datatype-datetime.html#DATATYPE-INTERVAL-INPUT-EXAMPLES
 //  - http://www.ibm.com/support/knowledgecenter/SSGU8G_12.1.0/com.ibm.esqlc.doc/ids_esqlc_0190.htm
-func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Duration, error) {
+func sqlStdToDuration(s string) (duration.Duration, error) {
 	var d duration.Duration
 	parts := strings.Fields(s)
 	if len(parts) > 3 || len(parts) == 0 {
@@ -203,34 +201,19 @@ func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Durati
 	for i := len(parts) - 1; i >= 0; i-- {
 		// Parses leading sign
 		part := parts[i]
-
-		consumeNeg := func(str string) (newStr string, mult int64, ok bool) {
-			neg := false
-			// Consumes [-+]
-			if str != "" {
-				c := str[0]
-				if c == '-' || c == '+' {
-					neg = c == '-'
-					str = str[1:]
-				}
+		neg := false
+		// Consumes [-+]
+		if part != "" {
+			c := part[0]
+			if c == '-' || c == '+' {
+				neg = c == '-'
+				part = part[1:]
 			}
-			if len(str) == 0 {
-				return str, 0, false
-			}
-			if str[0] == '-' || str[0] == '+' {
-				return str, 0, false
-			}
-
-			mult = 1
-			if neg {
-				mult = -1
-			}
-			return str, mult, true
 		}
-
-		var mult int64
-		var ok bool
-		if part, mult, ok = consumeNeg(part); !ok {
+		if len(part) == 0 {
+			return d, newInvalidSQLDurationError(s)
+		}
+		if part[0] == '-' || part[0] == '+' {
 			return d, newInvalidSQLDurationError(s)
 		}
 
@@ -246,87 +229,42 @@ func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Durati
 			//
 			// Instead of supporting unit changing based on int or float, use the
 			// following rules:
-			// - If there is a float at the front, it represents D:(<apply below rules).
-			// - Two fields is H:M or M:S.fff (unless using MINUTE TO SECOND, then M:S).
-			// - Three fields is H:M:S(.fff)?.
+			// - One field is S.
+			// - Two fields is H:M.
+			// - Three fields is H:M:S.
+			// - All fields support both int and float.
 			hms := strings.Split(part, ":")
-
-			// If the first element is blank or is a float, it represents a day.
-			// Take it to days, and simplify logic below to a H:M:S scenario.
-			firstComponentIsFloat := strings.Contains(hms[0], ".")
-			if firstComponentIsFloat || hms[0] == "" {
-				// Negatives are not permitted in this format.
-				// Also, there must be more units in front.
-				if mult != 1 || len(hms) == 1 {
-					return d, newInvalidSQLDurationError(s)
-				}
-				if firstComponentIsFloat {
-					days, err := strconv.ParseFloat(hms[0], 64)
-					if err != nil {
-						return d, newInvalidSQLDurationError(s)
-					}
-					d = d.Add(duration.MakeDuration(0, 1, 0).MulFloat(days))
-				}
-
-				hms = hms[1:]
-				if hms[0], mult, ok = consumeNeg(hms[0]); !ok {
-					return d, newInvalidSQLDurationError(s)
-				}
+			var err error
+			var dur time.Duration
+			// Support such as `HH:` and `HH:MM:` as postgres do. Set the last part to "0".
+			if hms[len(hms)-1] == "" {
+				hms[len(hms)-1] = "0"
 			}
-
-			// Postgres fills in the blanks of all H:M:S as if they were zero.
-			for i := 0; i < len(hms); i++ {
-				if hms[i] == "" {
-					hms[i] = "0"
-				}
-			}
-
-			var hours, mins int64
-			var secs float64
-
 			switch len(hms) {
 			case 2:
-				// If we find a decimal, it must be the m:s.ffffff format
-				var err error
-				if strings.Contains(hms[1], ".") || itm.DurationField.IsMinuteToSecond() {
-					if mins, err = strconv.ParseInt(hms[0], 10, 64); err != nil {
-						return d, newInvalidSQLDurationError(s)
-					}
-					if secs, err = strconv.ParseFloat(hms[1], 64); err != nil {
-						return d, newInvalidSQLDurationError(s)
-					}
-				} else {
-					if hours, err = strconv.ParseInt(hms[0], 10, 64); err != nil {
-						return d, newInvalidSQLDurationError(s)
-					}
-					if mins, err = strconv.ParseInt(hms[1], 10, 64); err != nil {
-						return d, newInvalidSQLDurationError(s)
-					}
+				toParse := hms[0] + "h" + hms[1] + "m"
+				if neg {
+					toParse = "-" + toParse
 				}
+				dur, err = time.ParseDuration(toParse)
 			case 3:
-				var err error
-				if hours, err = strconv.ParseInt(hms[0], 10, 64); err != nil {
-					return d, newInvalidSQLDurationError(s)
+				// Support such as `HH::SS` as postgres do. Set minute part to 0.
+				// TODO(hainesc): `:1:2 -> 1 hour 2 min` as postgres do?
+				if hms[1] == "" {
+					hms[1] = "0"
 				}
-				if mins, err = strconv.ParseInt(hms[1], 10, 64); err != nil {
-					return d, newInvalidSQLDurationError(s)
+				toParse := hms[0] + "h" + hms[1] + "m" + hms[2] + "s"
+				if neg {
+					toParse = "-" + toParse
 				}
-				if secs, err = strconv.ParseFloat(hms[2], 64); err != nil {
-					return d, newInvalidSQLDurationError(s)
-				}
+				dur, err = time.ParseDuration(toParse)
 			default:
 				return d, newInvalidSQLDurationError(s)
 			}
-
-			// None of these units can be negative, as we explicitly strip the negative
-			// unit from the very beginning.
-			if hours < 0 || mins < 0 || secs < 0 {
-				return d, newInvalidSQLDurationError(s)
+			if err != nil {
+				return d, makeParseError(part, types.Interval, err)
 			}
-
-			d = d.Add(duration.MakeDuration(time.Hour.Nanoseconds(), 0, 0).Mul(mult * hours))
-			d = d.Add(duration.MakeDuration(time.Minute.Nanoseconds(), 0, 0).Mul(mult * mins))
-			d = d.Add(duration.MakeDuration(time.Second.Nanoseconds(), 0, 0).MulFloat(float64(mult) * secs))
+			d = d.Add(duration.Duration{Nanos: dur.Nanoseconds()})
 		} else if strings.ContainsRune(part, '-') {
 			// Try to parse as Year-Month.
 			if parsedIdx >= yearMonthParsed {
@@ -342,17 +280,11 @@ func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Durati
 			var month int
 			var errMonth error
 			if yms[1] != "" {
-				// postgres technically supports decimals here, but it seems to be buggy
-				// due to the way it is parsed on their side.
-				// e.g. `select interval '0-2.1'` is different to select interval `'0-2.1 01:00'` --
-				// it seems the ".1" represents either a day or a constant, which we cannot
-				// replicate because we use spaces for divisors, but also seems like something
-				// we shouldn't sink too much time into looking at supporting.
 				month, errMonth = strconv.Atoi(yms[1])
 			}
 			if errYear == nil && errMonth == nil {
-				delta := duration.MakeDuration(0, 0, 1).Mul(int64(year)*12 + int64(month))
-				if mult < 0 {
+				delta := duration.Duration{Months: 1}.Mul(int64(year)*12 + int64(month))
+				if neg {
 					d = d.Sub(delta)
 				} else {
 					d = d.Add(delta)
@@ -360,38 +292,34 @@ func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Durati
 			} else {
 				return d, newInvalidSQLDurationError(s)
 			}
+
 		} else if value, err := strconv.ParseFloat(part, 64); err == nil {
-			// We cannot specify '<Day> <Second>'::interval as two floats,
-			// but we can in the DAY TO HOUR format, where it is '<Day> <Hour>'.
-			if floatParsed && !itm.DurationField.IsDayToHour() {
+			// Try to parse as Day or Second.
+			var dur time.Duration
+			var err error
+			// Make sure 'Day Second'::interval invalid.
+			if floatParsed {
 				return d, newInvalidSQLDurationError(s)
 			}
 			floatParsed = true
 			if parsedIdx == nothingParsed {
-				// It must be <DurationType> part because nothing has been parsed.
-				switch itm.DurationField.DurationType {
-				case types.IntervalDurationType_YEAR:
-					d = d.Add(duration.MakeDuration(0, 0, 12).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_MONTH:
-					d = d.Add(duration.MakeDuration(0, 0, 1).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_DAY:
-					d = d.Add(duration.MakeDuration(0, 1, 0).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_HOUR:
-					d = d.Add(duration.MakeDuration(time.Hour.Nanoseconds(), 0, 0).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_MINUTE:
-					d = d.Add(duration.MakeDuration(time.Minute.Nanoseconds(), 0, 0).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_SECOND, types.IntervalDurationType_UNSET:
-					d = d.Add(duration.MakeDuration(time.Second.Nanoseconds(), 0, 0).MulFloat(value * float64(mult)))
-				case types.IntervalDurationType_MILLISECOND:
-					d = d.Add(duration.MakeDuration(time.Millisecond.Nanoseconds(), 0, 0).MulFloat(value * float64(mult)))
-				default:
-					return d, errors.AssertionFailedf("unhandled DurationField constant %#v", itm.DurationField)
+				// It must be 'Second' part because nothing has been parsed.
+				toParse := part + "s"
+				if neg {
+					toParse = "-" + toParse
 				}
+				dur, err = time.ParseDuration(toParse)
+
+				if err != nil {
+					return d, newInvalidSQLDurationError(s)
+				}
+				d = d.Add(duration.Duration{Nanos: dur.Nanoseconds()})
 				parsedIdx = hmsParsed
 			} else if parsedIdx == hmsParsed {
 				// Day part.
-				delta := duration.MakeDuration(0, 1, 0).MulFloat(value)
-				if mult < 0 {
+				// TODO(hainesc): support float value in day part?
+				delta := duration.Duration{Days: 1}.Mul(int64(value))
+				if neg {
 					d = d.Sub(delta)
 				} else {
 					d = d.Add(delta)
@@ -400,8 +328,6 @@ func sqlStdToDuration(s string, itm types.IntervalTypeMetadata) (duration.Durati
 			} else {
 				return d, newInvalidSQLDurationError(s)
 			}
-		} else {
-			return d, newInvalidSQLDurationError(s)
 		}
 	}
 	return d, nil
@@ -429,7 +355,7 @@ func iso8601ToDuration(s string) (duration.Duration, error) {
 			l.offset++
 		}
 
-		v, hasDecimal, vp := l.consumeNum()
+		v := l.consumeInt()
 		u := l.consumeUnit('T')
 		if l.err != nil {
 			return d, l.err
@@ -437,16 +363,9 @@ func iso8601ToDuration(s string) (duration.Duration, error) {
 
 		if unit, ok := unitMap[u]; ok {
 			d = d.Add(unit.Mul(v))
-			if hasDecimal {
-				var err error
-				d, err = addFrac(d, unit, vp)
-				if err != nil {
-					return d, err
-				}
-			}
 		} else {
-			return d, pgerror.Newf(
-				pgcode.InvalidDatetimeFormat,
+			return d, pgerror.NewErrorf(
+				pgerror.CodeInvalidDatetimeFormatError,
 				"interval: unknown unit %s in ISO-8601 duration %s", u, s)
 		}
 	}
@@ -470,18 +389,18 @@ var unitMap = func(
 	}
 	return units
 }(map[string]duration.Duration{
-	// Use DecodeDuration here because ns is the only unit for which we do not
-	// want to round nanoseconds since it is only used for multiplication.
-	"microsecond": duration.MakeDuration(time.Microsecond.Nanoseconds(), 0, 0),
-	"millisecond": duration.MakeDuration(time.Millisecond.Nanoseconds(), 0, 0),
-	"second":      duration.MakeDuration(time.Second.Nanoseconds(), 0, 0),
-	"minute":      duration.MakeDuration(time.Minute.Nanoseconds(), 0, 0),
-	"hour":        duration.MakeDuration(time.Hour.Nanoseconds(), 0, 0),
-	"day":         duration.MakeDuration(0, 1, 0),
-	"week":        duration.MakeDuration(0, 7, 0),
-	"month":       duration.MakeDuration(0, 0, 1),
-	"year":        duration.MakeDuration(0, 0, 12),
+	"nanosecond":  {Nanos: time.Nanosecond.Nanoseconds()},
+	"microsecond": {Nanos: time.Microsecond.Nanoseconds()},
+	"millisecond": {Nanos: time.Millisecond.Nanoseconds()},
+	"second":      {Nanos: time.Second.Nanoseconds()},
+	"minute":      {Nanos: time.Minute.Nanoseconds()},
+	"hour":        {Nanos: time.Hour.Nanoseconds()},
+	"day":         {Days: 1},
+	"week":        {Days: 7},
+	"month":       {Months: 1},
+	"year":        {Months: 12},
 }, map[string][]string{
+	"nanosecond": {"ns", "nsec", "nsecs", "nsecond", "nseconds"},
 	// Include PostgreSQL's unit keywords for compatibility; see
 	// https://github.com/postgres/postgres/blob/a01d0fa1d889cc2003e1941e8b98707c4d701ba9/src/backend/utils/adt/datetime.c#L175-L240
 	//
@@ -501,39 +420,23 @@ var unitMap = func(
 // parseDuration parses a duration in the "traditional" Postgres
 // format (e.g. '1 day 2 hours', '1 day 03:02:04', etc.) or golang
 // format (e.g. '1d2h', '1d3h2m4s', etc.)
-func parseDuration(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (duration.Duration, error) {
+func parseDuration(s string) (duration.Duration, error) {
 	var d duration.Duration
 	l := intervalLexer{str: s, offset: 0, err: nil}
 	l.consumeSpaces()
 
 	if l.offset == len(l.str) {
-		return d, pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: invalid input syntax: %q", l.str)
+		return d, pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: invalid input syntax: %q", l.str)
 	}
-
-	// If we have strictly one negative at the beginning belonging to a
-	// in SQL Standard parsing, treat everything as negative.
-	isSQLStandardNegative :=
-		style == duration.IntervalStyle_SQL_STANDARD &&
-			(l.offset+1) < len(l.str) && l.str[l.offset] == '-' &&
-			!strings.ContainsAny(l.str[l.offset+1:], "+-")
-	if isSQLStandardNegative {
-		l.offset++
-	}
-
 	for l.offset != len(l.str) {
-		// To support -00:XX:XX we record the sign here since -0 doesn't exist
-		// as an int64.
-		sign := l.str[l.offset] == '-'
 		// Parse the next number.
 		v, hasDecimal, vp := l.consumeNum()
 		l.consumeSpaces()
 
 		if l.offset < len(l.str) && l.str[l.offset] == ':' && !hasDecimal {
 			// Special case: HH:MM[:SS.ffff] or MM:SS.ffff
-			delta, err := l.parseShortDuration(v, sign, itm)
+			delta, err := l.parseShortDuration(v)
 			if err != nil {
 				return d, err
 			}
@@ -548,150 +451,99 @@ func parseDuration(
 			// A regular number followed by a unit, such as "9 day".
 			d = d.Add(unit.Mul(v))
 			if hasDecimal {
-				var err error
-				d, err = addFrac(d, unit, vp)
-				if err != nil {
-					return d, err
-				}
+				d = addFrac(d, unit, vp)
 			}
 			continue
 		}
 
-		if l.err != nil {
-			return d, l.err
-		}
 		if u != "" {
-			return d, pgerror.Newf(
-				pgcode.InvalidDatetimeFormat, "interval: unknown unit %q in duration %q", u, s)
+			return d, pgerror.NewErrorf(
+				pgerror.CodeInvalidDatetimeFormatError, "interval: unknown unit %q in duration %q", u, s)
 		}
-		return d, pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: missing unit at position %d: %q", l.offset, s)
-	}
-	if isSQLStandardNegative {
-		return duration.MakeDuration(
-			-d.Nanos(),
-			-d.Days,
-			-d.Months,
-		), l.err
+		return d, pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: missing unit at position %d: %q", l.offset, s)
 	}
 	return d, l.err
 }
 
-func (l *intervalLexer) parseShortDuration(
-	h int64, hasSign bool, itm types.IntervalTypeMetadata,
-) (duration.Duration, error) {
+func (l *intervalLexer) parseShortDuration(h int64) (duration.Duration, error) {
 	sign := int64(1)
-	if hasSign {
+	if h < 0 {
 		sign = -1
 	}
 	// postgresToDuration() has rewound the cursor to just after the
 	// first number, so that we can check here there are no unwanted
 	// spaces.
 	if l.str[l.offset] != ':' {
-		return duration.Duration{}, pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: invalid format %s", l.str[l.offset:])
+		return duration.Duration{}, pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: invalid format %s", l.str[l.offset:])
 	}
 	l.offset++
 	// Parse the second number.
 	m, hasDecimal, mp := l.consumeNum()
 
 	if m < 0 {
-		return duration.Duration{}, pgerror.Newf(
-			pgcode.InvalidDatetimeFormat, "interval: invalid format: %s", l.str)
+		return duration.Duration{}, pgerror.NewErrorf(
+			pgerror.CodeInvalidDatetimeFormatError, "interval: invalid format: %s", l.str)
 	}
 	// We have three possible formats:
-	// - MM:SS.ffffff
-	// - HH:MM (or MM:SS for MINUTE TO SECOND)
-	// - HH:MM:SS[.ffffff]
+	// - MM:SS.mmmmm
+	// - HH:MM
+	// - HH:MM:SS[.mmmmm]
 	//
 	// The top format has the "h" field parsed above actually
 	// represent minutes. Get this out of the way first.
 	if hasDecimal {
 		l.consumeSpaces()
-		return duration.MakeDuration(
-			h*time.Minute.Nanoseconds()+
+		return duration.Duration{
+			Nanos: h*time.Minute.Nanoseconds() +
 				sign*(m*time.Second.Nanoseconds()+
-					floatToNanos(mp)),
-			0,
-			0,
-		), nil
+					int64(mp*float64(time.Second.Nanoseconds()))),
+		}, nil
 	}
 
-	// Remaining formats.
+	// Remaining formats
 	var s int64
 	var sp float64
-	hasSecondsComponent := false
 	if l.offset != len(l.str) && l.str[l.offset] == ':' {
-		hasSecondsComponent = true
 		// The last :NN part.
 		l.offset++
 		s, _, sp = l.consumeNum()
 		if s < 0 {
-			return duration.Duration{}, pgerror.Newf(
-				pgcode.InvalidDatetimeFormat, "interval: invalid format: %s", l.str)
+			return duration.Duration{}, pgerror.NewErrorf(
+				pgerror.CodeInvalidDatetimeFormatError, "interval: invalid format: %s", l.str)
 		}
 	}
 
 	l.consumeSpaces()
-
-	if !hasSecondsComponent && itm.DurationField.IsMinuteToSecond() {
-		return duration.MakeDuration(
-			h*time.Minute.Nanoseconds()+sign*(m*time.Second.Nanoseconds()),
-			0,
-			0,
-		), nil
-	}
-	return duration.MakeDuration(
-		h*time.Hour.Nanoseconds()+
+	return duration.Duration{
+		Nanos: h*time.Hour.Nanoseconds() +
 			sign*(m*time.Minute.Nanoseconds()+
 				int64(mp*float64(time.Minute.Nanoseconds()))+
 				s*time.Second.Nanoseconds()+
-				floatToNanos(sp)),
-		0,
-		0,
-	), nil
+				int64(sp*float64(time.Second.Nanoseconds()))),
+	}, nil
 }
 
 // addFrac increases the duration given as first argument by the unit
 // given as second argument multiplied by the factor in the third
 // argument. For computing fractions there are 30 days to a month and
 // 24 hours to a day.
-func addFrac(d duration.Duration, unit duration.Duration, f float64) (duration.Duration, error) {
+func addFrac(d duration.Duration, unit duration.Duration, f float64) duration.Duration {
 	if unit.Months > 0 {
 		f = f * float64(unit.Months)
 		d.Months += int64(f)
-		switch unit.Months {
-		case 1:
-			f = math.Mod(f, 1) * 30
-			d.Days += int64(f)
-			f = math.Mod(f, 1) * 24
-			d.SetNanos(d.Nanos() + int64(float64(time.Hour.Nanoseconds())*f))
-		case 12:
-			// Nothing to do: Postgres limits the precision of fractional years to
-			// months. Do not continue to add precision to the interval.
-			// See issue #55226 for more details on this.
-		default:
-			return duration.Duration{}, errors.AssertionFailedf("unhandled unit type %v", unit)
-		}
+		f = math.Mod(f, 1) * 30
+		d.Days += int64(f)
+		f = math.Mod(f, 1) * 24
+		d.Nanos += int64(float64(time.Hour.Nanoseconds()) * f)
 	} else if unit.Days > 0 {
 		f = f * float64(unit.Days)
 		d.Days += int64(f)
 		f = math.Mod(f, 1) * 24
-		d.SetNanos(d.Nanos() + int64(float64(time.Hour.Nanoseconds())*f))
+		d.Nanos += int64(float64(time.Hour.Nanoseconds()) * f)
 	} else {
-		d.SetNanos(d.Nanos() + int64(float64(unit.Nanos())*f))
+		d.Nanos += int64(float64(unit.Nanos) * f)
 	}
-	return d, nil
-}
-
-// floatToNanos converts a fractional number representing nanoseconds to the
-// number of integer nanoseconds. For example: ".354874219" to "354874219"
-// or ".123" to "123000000". This function takes care to round correctly
-// when a naive conversion would incorrectly truncate due to floating point
-// inaccuracies. This function should match the semantics of rint() from
-// Postgres. See:
-// https://git.postgresql.org/gitweb/?p=postgresql.git;a=blob;f=src/backend/utils/adt/timestamp.c;h=449164ae7e5b00f6580771017888d4922685a73c;hb=HEAD#l1511
-// https://git.postgresql.org/gitweb/?p=postgresql.git;a=blob;f=src/port/rint.c;h=d59d9ab774307b7db2f7cb2347815a30da563fc5;hb=HEAD
-func floatToNanos(f float64) int64 {
-	return int64(math.Round(f * float64(time.Second.Nanoseconds())))
+	return d
 }

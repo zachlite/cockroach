@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 // This file contains tests for pgwire that need to be in the sql package.
 
@@ -18,31 +22,26 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/lib/pq"
+	"github.com/pkg/errors"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/lib/pq"
 )
 
 // Test that abruptly closing a pgwire connection releases all leases held by
 // that session.
 func TestPGWireConnectionCloseReleasesLeases(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, _, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
-	ctx := context.Background()
+	ctx := context.TODO()
 	defer s.Stopper().Stop(ctx)
-	url, cleanupConn := sqlutils.PGUrl(t, s.ServingSQLAddr(), "SetupServer", url.User(security.RootUser))
+	url, cleanupConn := sqlutils.PGUrl(t, s.ServingAddr(), "SetupServer", url.User(security.RootUser))
 	defer cleanupConn()
 	conn, err := pq.Open(url.String())
 	if err != nil {
@@ -68,39 +67,31 @@ func TestPGWireConnectionCloseReleasesLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Verify that there are no leases held.
-	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
-
-	lm := s.LeaseManager().(*lease.Manager)
-
+	tableDesc := sqlbase.GetTableDescriptor(kvDB, "test", "t")
+	lm := s.LeaseManager().(*LeaseManager)
 	// Looking for a table state validates that there used to be a lease on the
 	// table.
-	var leases int
-	lm.VisitLeases(func(
-		desc catalog.Descriptor, dropped bool, refCount int, expiration tree.DTimestamp,
-	) (wantMore bool) {
-		if desc.GetID() == tableDesc.GetID() {
-			leases++
-		}
-		return true
-	})
-	if leases != 1 {
-		t.Fatalf("expected one lease, found: %d", leases)
+	ts := lm.findTableState(tableDesc.ID, false /* create */)
+	if ts == nil {
+		t.Fatal("table state not found")
 	}
-
+	ts.mu.Lock()
+	leases := ts.mu.active.data
+	ts.mu.Unlock()
+	if len(leases) != 1 {
+		t.Fatalf("expected one lease, found: %d", len(leases))
+	}
 	// Wait for the lease to be released.
 	testutils.SucceedsSoon(t, func() error {
-		var totalRefCount int
-		lm.VisitLeases(func(
-			desc catalog.Descriptor, dropped bool, refCount int, expiration tree.DTimestamp,
-		) (wantMore bool) {
-			if desc.GetID() == tableDesc.GetID() {
-				totalRefCount += refCount
-			}
-			return true
-		})
-		if totalRefCount != 0 {
+		ts.mu.Lock()
+		defer ts.mu.Unlock()
+		tv := ts.mu.active.data[0]
+		tv.mu.Lock()
+		defer tv.mu.Unlock()
+		refcount := tv.mu.refcount
+		if refcount != 0 {
 			return errors.Errorf(
-				"expected lease to be unused, found refcount: %d", totalRefCount)
+				"expected lease to be unused, found refcount: %d", refcount)
 		}
 		return nil
 	})

@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package ts
 
@@ -16,7 +20,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -181,8 +185,6 @@ func TestToInternal(t *testing.T) {
 // sample period; earlier samples are discarded.
 func TestDiscardEarlierSamples(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	// TODO(ajkr): this should also run on Pebble. Maybe combine it into the merge_test.go tests or prove
-	// it is redundant with the tests there.
 	ts := tsd("test.series", "",
 		tsdp(5*time.Hour+5*time.Minute, -1.0),
 		tsdp(5*time.Hour+5*time.Minute, -2.0),
@@ -192,7 +194,7 @@ func TestDiscardEarlierSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := storage.MergeInternalTimeSeriesData(false /* usePartialMerge */, internal...)
+	out, err := engine.MergeInternalTimeSeriesData(true /* mergeIntoNil */, false /* usePartialMerge */, internal...)
 	if err != nil {
 		t.Fatal(err)
 	}

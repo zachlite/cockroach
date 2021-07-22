@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import d3 from "d3";
 import React from "react";
@@ -17,46 +21,29 @@ type Chart<T> = (sel: d3.Selection<T>) => void;
  * createChartComponent wraps a D3 reusable chart in a React component.
  * See https://bost.ocks.org/mike/chart/
  */
-export default function createChartComponent<T>(
-  containerTy: string,
-  chart: Chart<T>,
-) {
+export default function createChartComponent<T>(containerTy: string, chart: Chart<T>) {
   return class WrappedChart extends React.Component<T> {
-    containerEl: React.RefObject<Element> = React.createRef();
+    containerEl: Element;
 
     componentDidMount() {
-      this.redraw();
-      this.addResizeHandler();
-    }
-
-    componentWillUnmount() {
-      this.removeResizeHandler();
+      d3.select(this.containerEl)
+        .datum(this.props)
+        .call(chart);
     }
 
     shouldComponentUpdate(props: T) {
-      this.redraw(props);
+      d3.select(this.containerEl)
+        .datum(props)
+        .call(chart);
 
       return false;
     }
 
-    redraw(props: T = this.props) {
-      d3.select(this.containerEl.current).datum(props).call(chart);
-    }
-
-    handleResize = () => {
-      this.redraw();
-    };
-
-    addResizeHandler() {
-      window.addEventListener("resize", this.handleResize);
-    }
-
-    removeResizeHandler() {
-      window.removeEventListener("resize", this.handleResize);
-    }
-
     render() {
-      return React.createElement(containerTy, { ref: this.containerEl });
+      return React.createElement(
+        containerTy,
+        { ref: (el) => this.containerEl = el },
+      );
     }
   };
 }

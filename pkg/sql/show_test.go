@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql_test
 
@@ -16,34 +20,59 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+
+	"github.com/cockroachdb/apd"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/require"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/kr/pretty"
 )
 
 func TestShowCreateTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
-	testCases := []sqltestutils.ShowCreateTableTestCase{
+	params, _ := tests.CreateTestServerParams()
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+
+	if _, err := sqlDB.Exec(`
+		CREATE DATABASE d;
+		SET DATABASE = d;
+		CREATE TABLE items (
+			a int,
+			b int,
+			c int unique,
+			primary key (a, b)
+		);
+		CREATE DATABASE o;
+		CREATE TABLE o.foo(x int primary key);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		stmt   string
+		expect string // empty means identical to stmt
+	}{
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i INT8,
+			stmt: `CREATE TABLE %s (
+	i INT,
 	s STRING NULL,
 	v FLOAT NOT NULL,
 	t TIMESTAMP DEFAULT now():::TIMESTAMP,
@@ -51,82 +80,74 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
 	t TIMESTAMP NULL DEFAULT now():::TIMESTAMP,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s),
-	CONSTRAINT check_i CHECK (i > 0:::INT8)
+	CONSTRAINT check_i CHECK (i > 0)
 )`,
 		},
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i INT8 CHECK (i > 0),
+			stmt: `CREATE TABLE %s (
+	i INT CHECK (i > 0),
 	s STRING NULL,
 	v FLOAT NOT NULL,
 	t TIMESTAMP DEFAULT now():::TIMESTAMP,
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
 	t TIMESTAMP NULL DEFAULT now():::TIMESTAMP,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s),
-	CONSTRAINT check_i CHECK (i > 0:::INT8)
+	CONSTRAINT check_i CHECK (i > 0)
 )`,
 		},
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i INT8 NULL,
+			stmt: `CREATE TABLE %s (
+	i INT NULL,
 	s STRING NULL,
 	CONSTRAINT ck CHECK (i > 0),
 	FAMILY "primary" (i, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL,
 	s STRING NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, rowid),
 	FAMILY fam_1_s (s),
-	CONSTRAINT ck CHECK (i > 0:::INT8)
+	CONSTRAINT ck CHECK (i > 0)
 )`,
 		},
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i INT8 PRIMARY KEY
+			stmt: `CREATE TABLE %s (
+	i INT PRIMARY KEY
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NOT NULL,
+			expect: `CREATE TABLE %s (
+	i INT NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (i ASC),
 	FAMILY "primary" (i)
 )`,
 		},
 		{
-			CreateStatement: `
-				CREATE TABLE %s (i INT8, f FLOAT, s STRING, d DATE,
+			stmt: `
+				CREATE TABLE %s (i INT, f FLOAT, s STRING, d DATE,
 				  FAMILY "primary" (i, f, d, rowid),
 				  FAMILY fam_1_s (s));
 				CREATE INDEX idx_if on %[1]s (f, i) STORING (s, d);
 				CREATE UNIQUE INDEX on %[1]s (d);
 			`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL,
 	f FLOAT8 NULL,
 	s STRING NULL,
 	d DATE NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	INDEX idx_if (f ASC, i ASC) STORING (s, d),
 	UNIQUE INDEX %[1]s_d_key (d ASC),
 	FAMILY "primary" (i, f, d, rowid),
@@ -134,28 +155,21 @@ func TestShowCreateTable(t *testing.T) {
 )`,
 		},
 		{
-			CreateStatement: `CREATE TABLE %s (
-	"te""st" INT8 NOT NULL,
-	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
-	FAMILY "primary" ("te""st")
-)`,
-			Expect: `CREATE TABLE public.%s (
-	"te""st" INT8 NOT NULL,
+			stmt: `CREATE TABLE %s (
+	"te""st" INT NOT NULL,
 	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
 	FAMILY "primary" ("te""st")
 )`,
 		},
 		{
-			CreateStatement: `CREATE TABLE %s (
-	a int8,
-	b int8,
+			stmt: `CREATE TABLE %s (
+	a int,
+	b int,
 	index c(a asc, b desc)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	a INT8 NULL,
-	b INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+			expect: `CREATE TABLE %s (
+	a INT NULL,
+	b INT NULL,
 	INDEX c (a ASC, b DESC),
 	FAMILY "primary" (a, b, rowid)
 )`,
@@ -163,154 +177,139 @@ func TestShowCreateTable(t *testing.T) {
 		// Check that FK dependencies inside the current database
 		// have their db name omitted.
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i int8,
-	j int8,
+			stmt: `CREATE TABLE %s (
+	i int,
+	j int,
 	FOREIGN KEY (i, j) REFERENCES items (a, b),
 	k int REFERENCES items (c)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
-	j INT8 NULL,
-	k INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b),
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c),
-	FAMILY "primary" (i, j, k, rowid)
-)`,
-		},
-		// Check that FK dependencies using MATCH FULL on a non-composite key still
-		// show
-		{
-			CreateStatement: `CREATE TABLE %s (
-	i int8,
-	j int8,
-	k int REFERENCES items (c) MATCH FULL,
-	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH FULL
-)`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL,
-	j INT8 NULL,
-	k INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) MATCH FULL,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) MATCH FULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL,
+	j INT NULL,
+	k INT NULL,
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items (a, b),
+	INDEX t7_auto_index_fk_i_ref_items (i ASC, j ASC),
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES items (c),
+	INDEX t7_auto_index_fk_k_ref_items (k ASC),
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
 		// Check that FK dependencies outside of the current database
 		// have their db name prefixed.
 		{
-			CreateStatement: `CREATE TABLE %s (
-	x INT8,
+			stmt: `CREATE TABLE %s (
+	x INT,
 	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.foo (x)
 )`,
-			Expect: `CREATE TABLE public.%s (
-	x INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.public.foo(x),
+			expect: `CREATE TABLE %s (
+	x INT NULL,
+	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.public.foo (x),
+	INDEX t8_auto_index_fk_ref (x ASC),
 	FAMILY "primary" (x, rowid)
 )`,
 		},
 		// Check that FK dependencies using SET NULL or SET DEFAULT
 		// are pretty-printed properly. Regression test for #32529.
 		{
-			CreateStatement: `CREATE TABLE %s (
-	i int8 DEFAULT 123,
-	j int8 DEFAULT 123,
+			stmt: `CREATE TABLE %s (
+	i int DEFAULT 123,
+	j int DEFAULT 123,
 	FOREIGN KEY (i, j) REFERENCES items (a, b) ON DELETE SET DEFAULT,
-	k int8 REFERENCES items (c) ON DELETE SET NULL
+	k int REFERENCES items (c) ON DELETE SET NULL
 )`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL DEFAULT 123:::INT8,
-	j INT8 NULL DEFAULT 123:::INT8,
-	k INT8 NULL,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) ON DELETE SET NULL,
+			expect: `CREATE TABLE %s (
+	i INT NULL DEFAULT 123:::INT,
+	j INT NULL DEFAULT 123:::INT,
+	k INT NULL,
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items (a, b) ON DELETE SET DEFAULT,
+	INDEX t9_auto_index_fk_i_ref_items (i ASC, j ASC),
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES items (c) ON DELETE SET NULL,
+	INDEX t9_auto_index_fk_k_ref_items (k ASC),
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
 		// Check that INTERLEAVE dependencies inside the current database
 		// have their db name omitted.
 		{
-			CreateStatement: `CREATE TABLE %s (
-	a INT8,
-	b INT8,
+			stmt: `CREATE TABLE %s (
+	a INT,
+	b INT,
 	PRIMARY KEY (a, b)
 ) INTERLEAVE IN PARENT items (a, b)`,
-			Expect: `CREATE TABLE public.%s (
-	a INT8 NOT NULL,
-	b INT8 NOT NULL,
+			expect: `CREATE TABLE %s (
+	a INT NOT NULL,
+	b INT NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (a ASC, b ASC),
 	FAMILY "primary" (a, b)
-) INTERLEAVE IN PARENT public.items (a, b)`,
+) INTERLEAVE IN PARENT items (a, b)`,
 		},
 		// Check that INTERLEAVE dependencies outside of the current
 		// database are prefixed by their db name.
 		{
-			CreateStatement: `CREATE TABLE %s (
-	x INT8 PRIMARY KEY
+			stmt: `CREATE TABLE %s (
+	x INT PRIMARY KEY
 ) INTERLEAVE IN PARENT o.foo (x)`,
-			Expect: `CREATE TABLE public.%s (
-	x INT8 NOT NULL,
+			expect: `CREATE TABLE %s (
+	x INT NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (x ASC),
 	FAMILY "primary" (x)
 ) INTERLEAVE IN PARENT o.public.foo (x)`,
 		},
-		// Check that FK dependencies using MATCH FULL and MATCH SIMPLE are both
-		// pretty-printed properly.
-		{
-			CreateStatement: `CREATE TABLE %s (
-	i int DEFAULT 1,
-	j int DEFAULT 2,
-	k int DEFAULT 3,
-	l int DEFAULT 4,
-	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH SIMPLE ON DELETE SET DEFAULT,
-	FOREIGN KEY (k, l) REFERENCES items (a, b) MATCH FULL ON UPDATE CASCADE
-)`,
-			Expect: `CREATE TABLE public.%s (
-	i INT8 NULL DEFAULT 1:::INT8,
-	j INT8 NULL DEFAULT 2:::INT8,
-	k INT8 NULL DEFAULT 3:::INT8,
-	l INT8 NULL DEFAULT 4:::INT8,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k, l) REFERENCES public.items(a, b) MATCH FULL ON UPDATE CASCADE,
-	FAMILY "primary" (i, j, k, l, rowid)
-)`,
-		},
-		// Check hash sharded indexes are round trippable.
-		{
-			CreateStatement: `CREATE TABLE %s (
-				a INT,
-				INDEX (a) USING HASH WITH BUCKET_COUNT = 8
-			)`,
-			Expect: `CREATE TABLE public.%s (
-	a INT8 NULL,
-	crdb_internal_a_shard_8 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(COALESCE(CAST(a AS STRING), '':::STRING)), 8:::INT8)) STORED,
-	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-	INDEX t14_a_idx (a ASC) USING HASH WITH BUCKET_COUNT = 8,
-	FAMILY "primary" (a, crdb_internal_a_shard_8, rowid)
-)`,
-		},
 	}
-	sqltestutils.ShowCreateTableTest(t, "" /* extraQuerySetup */, testCases)
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("%d/%s", i, strings.Replace(test.stmt, "\n", "", -1)), func(t *testing.T) {
+			name := fmt.Sprintf("t%d", i)
+			if test.expect == "" {
+				test.expect = test.stmt
+			}
+			stmt := fmt.Sprintf(test.stmt, name)
+			expect := fmt.Sprintf(test.expect, name)
+			if _, err := sqlDB.Exec(stmt); err != nil {
+				t.Fatal(err)
+			}
+			row := sqlDB.QueryRow(fmt.Sprintf("SHOW CREATE TABLE %s", name))
+			var scanName, create string
+			if err := row.Scan(&scanName, &create); err != nil {
+				t.Fatal(err)
+			}
+			if scanName != name {
+				t.Fatalf("expected table name %s, got %s", name, scanName)
+			}
+			if create != expect {
+				t.Fatalf("statement: %s\ngot: %s\nexpected: %s", stmt, create, expect)
+			}
+			if _, err := sqlDB.Exec(fmt.Sprintf("DROP TABLE %s", name)); err != nil {
+				t.Fatal(err)
+			}
+			// Re-insert to make sure it's round-trippable.
+			name += "_2"
+			expect = fmt.Sprintf(test.expect, name)
+			if _, err := sqlDB.Exec(expect); err != nil {
+				t.Fatalf("reinsert failure: %s: %s", expect, err)
+			}
+			row = sqlDB.QueryRow(fmt.Sprintf("SHOW CREATE TABLE %s", name))
+			if err := row.Scan(&scanName, &create); err != nil {
+				t.Fatal(err)
+			}
+			if create != expect {
+				t.Fatalf("round trip statement: %s\ngot: %s", expect, create)
+			}
+			if _, err := sqlDB.Exec(fmt.Sprintf("DROP TABLE %s", name)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestShowCreateView(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	if testing.Short() {
+		t.Skip("short #26969")
+	}
 
 	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	if _, err := sqlDB.Exec(`
 		CREATE DATABASE d;
@@ -326,35 +325,35 @@ func TestShowCreateView(t *testing.T) {
 	}{
 		{
 			`CREATE VIEW %s AS SELECT i, s, v, t FROM t`,
-			`CREATE VIEW public.%s (i, s, v, t) AS SELECT i, s, v, t FROM d.public.t`,
+			`CREATE VIEW %s (i, s, v, t) AS SELECT i, s, v, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT i, s, t FROM t`,
-			`CREATE VIEW public.%s (i, s, t) AS SELECT i, s, t FROM d.public.t`,
+			`CREATE VIEW %s (i, s, t) AS SELECT i, s, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT t.i, t.s, t.t FROM t`,
-			`CREATE VIEW public.%s (i, s, t) AS SELECT t.i, t.s, t.t FROM d.public.t`,
+			`CREATE VIEW %s (i, s, t) AS SELECT t.i, t.s, t.t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT foo.i, foo.s, foo.t FROM t AS foo WHERE foo.i > 3`,
-			`CREATE VIEW public.%s (i, s, t) AS SELECT foo.i, foo.s, foo.t FROM d.public.t AS foo WHERE foo.i > 3`,
+			`CREATE VIEW %s (i, s, t) AS SELECT foo.i, foo.s, foo.t FROM d.public.t AS foo WHERE foo.i > 3`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT count(*) FROM t`,
-			`CREATE VIEW public.%s (count) AS SELECT count(*) FROM d.public.t`,
+			`CREATE VIEW %s (count) AS SELECT count(*) FROM d.public.t`,
 		},
 		{
-			`CREATE VIEW %s AS SELECT s, count(*) FROM t GROUP BY s HAVING count(*) > 3:::INT8`,
-			`CREATE VIEW public.%s (s, count) AS SELECT s, count(*) FROM d.public.t GROUP BY s HAVING count(*) > 3:::INT8`,
+			`CREATE VIEW %s AS SELECT s, count(*) FROM t GROUP BY s HAVING count(*) > 3:::INT`,
+			`CREATE VIEW %s (s, count) AS SELECT s, count(*) FROM d.public.t GROUP BY s HAVING count(*) > 3:::INT`,
 		},
 		{
 			`CREATE VIEW %s (a, b, c, d) AS SELECT i, s, v, t FROM t`,
-			`CREATE VIEW public.%s (a, b, c, d) AS SELECT i, s, v, t FROM d.public.t`,
+			`CREATE VIEW %s (a, b, c, d) AS SELECT i, s, v, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s (a, b) AS SELECT i, v FROM t`,
-			`CREATE VIEW public.%s (a, b) AS SELECT i, v FROM d.public.t`,
+			`CREATE VIEW %s (a, b) AS SELECT i, v FROM d.public.t`,
 		},
 	}
 	for i, test := range tests {
@@ -401,11 +400,10 @@ func TestShowCreateView(t *testing.T) {
 
 func TestShowCreateSequence(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	if _, err := sqlDB.Exec(`
 		CREATE DATABASE d;
@@ -420,27 +418,19 @@ func TestShowCreateSequence(t *testing.T) {
 	}{
 		{
 			`CREATE SEQUENCE %s`,
-			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 1`,
+			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 1`,
 		},
 		{
 			`CREATE SEQUENCE %s INCREMENT BY 5`,
-			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 5 START 1`,
+			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 5 START 1`,
 		},
 		{
 			`CREATE SEQUENCE %s START WITH 5`,
-			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 5`,
+			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 5`,
 		},
 		{
 			`CREATE SEQUENCE %s INCREMENT 5 MAXVALUE 10000 START 10 MINVALUE 0`,
-			`CREATE SEQUENCE public.%s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10`,
-		},
-		{
-			`CREATE SEQUENCE %s INCREMENT 5 MAXVALUE 10000 START 10 MINVALUE 0 CACHE 1`,
-			`CREATE SEQUENCE public.%s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10`,
-		},
-		{
-			`CREATE SEQUENCE %s INCREMENT 5 MAXVALUE 10000 START 10 MINVALUE 0 CACHE 10`,
-			`CREATE SEQUENCE public.%s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10 CACHE 10`,
+			`CREATE SEQUENCE %s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10`,
 		},
 	}
 	for i, test := range tests {
@@ -487,7 +477,6 @@ func TestShowCreateSequence(t *testing.T) {
 
 func TestShowQueries(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	const multiByte = "💩"
 	const selectBase = "SELECT * FROM "
@@ -521,10 +510,11 @@ func TestShowQueries(t *testing.T) {
 	found := false
 	var failure error
 
-	execKnobs.StatementFilter = func(ctx context.Context, _ *sessiondata.SessionData, stmt string, err error) {
+	execKnobs.StatementFilter = func(ctx context.Context, stmt string, err error) {
 		if stmt == selectStmt {
 			found = true
 			const showQuery = "SELECT node_id, (now() - start)::FLOAT8, query FROM [SHOW CLUSTER QUERIES]"
+			const showVersionQuery = "SHOW CLUSTER SETTING version"
 
 			rows, err := conn1.Query(showQuery)
 			if err != nil {
@@ -532,16 +522,27 @@ func TestShowQueries(t *testing.T) {
 			}
 			defer rows.Close()
 
-			var stmts []string
+			count := 0
 			for rows.Next() {
+				count++
+
 				var nodeID int
-				var stmt string
+				var sql string
 				var delta float64
-				if err := rows.Scan(&nodeID, &delta, &stmt); err != nil {
+				if err := rows.Scan(&nodeID, &delta, &sql); err != nil {
 					failure = err
 					return
 				}
-				stmts = append(stmts, stmt)
+				switch sql {
+				case showQuery, showVersionQuery, expectedSelectStmt:
+				default:
+					failure = fmt.Errorf(
+						"unexpected query in SHOW QUERIES: %+q, expected: %+q",
+						sql,
+						expectedSelectStmt,
+					)
+					return
+				}
 				if nodeID < 1 || nodeID > 2 {
 					failure = fmt.Errorf("invalid node ID: %d", nodeID)
 					return
@@ -561,19 +562,14 @@ func TestShowQueries(t *testing.T) {
 				return
 			}
 
-			foundSelect := false
-			for _, stmt := range stmts {
-				if stmt == expectedSelectStmt {
-					foundSelect = true
-				}
-			}
-			if !foundSelect {
-				failure = fmt.Errorf("original query not found in SHOW QUERIES. expected: %s\nactual: %v", selectStmt, stmts)
+			if expectedCount := 2; count != expectedCount {
+				failure = fmt.Errorf("unexpected number of running queries: %d, expected %d", count, expectedCount)
+				return
 			}
 		}
 	}
 
-	tc := serverutils.StartNewTestCluster(t, 2, /* numNodes */
+	tc := serverutils.StartTestCluster(t, 2, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -583,7 +579,7 @@ func TestShowQueries(t *testing.T) {
 				},
 			},
 		})
-	defer tc.Stopper().Stop(context.Background())
+	defer tc.Stopper().Stop(context.TODO())
 
 	conn1 = tc.ServerConn(0)
 	conn2 = tc.ServerConn(1)
@@ -604,7 +600,7 @@ func TestShowQueries(t *testing.T) {
 	// Now check the behavior on error.
 	tc.StopServer(1)
 
-	rows, err := conn1.Query(`SELECT node_id, query FROM [SHOW ALL CLUSTER QUERIES]`)
+	rows, err := conn1.Query(`SELECT node_id, query FROM [SHOW CLUSTER QUERIES]`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,124 +630,13 @@ func TestShowQueries(t *testing.T) {
 	}
 }
 
-func TestShowQueriesFillsInValuesForPlaceholders(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const applicationName = "application"
-	var applicationConnection *gosql.DB
-	var operatorConnection *gosql.DB
-
-	recordedQueries := make(map[string]string)
-
-	testServerArgs := base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			SQLExecutor: &sql.ExecutorTestingKnobs{
-				// Record the results of SHOW QUERIES for each statement run on the applicationConnection,
-				// so that we can make assertions on them below.
-				StatementFilter: func(ctx context.Context, session *sessiondata.SessionData, stmt string, err error) {
-					// Only observe queries when we're in an application session,
-					// to limit concurrent access to the recordedQueries map.
-					if session.ApplicationName == applicationName {
-						// Only select queries run by the test application itself,
-						// so that we filter out the SELECT query FROM [SHOW QUERIES] statement.
-						// (It's the "grep shows up in `ps | grep foo`" problem.)
-						// And we can assume that there will be only one result row because we do not run
-						// the below test cases in parallel.
-						row := operatorConnection.QueryRow(
-							"SELECT query FROM [SHOW QUERIES] WHERE application_name = $1", applicationName,
-						)
-						var query string
-						err := row.Scan(&query)
-						if err != nil {
-							t.Fatal(err)
-						}
-						recordedQueries[stmt] = query
-					}
-				},
-			},
-		},
-	}
-
-	tc := serverutils.StartNewTestCluster(t, 3,
-		base.TestClusterArgs{
-			ReplicationMode: base.ReplicationManual,
-			ServerArgs:      testServerArgs,
-		},
-	)
-
-	defer tc.Stopper().Stop(context.Background())
-
-	applicationConnection = tc.ServerConn(0)
-	operatorConnection = tc.ServerConn(1)
-
-	// Mark all queries on this connection as coming from the application,
-	// so we can identify them in our filter above.
-	_, err := applicationConnection.Exec("SET application_name TO $1", applicationName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// For a given statement-with-placeholders and its arguments, how should it look in SHOW QUERIES?
-	testCases := []struct {
-		statement string
-		args      []interface{}
-		expected  string
-	}{
-		{
-			"SELECT upper($1)",
-			[]interface{}{"hello"},
-			"SELECT upper('hello')",
-		},
-	}
-
-	// Perform both as a simple execution and as a prepared statement,
-	// to make sure we're exercising both code paths.
-	queryExecutionMethods := []struct {
-		label string
-		exec  func(*gosql.DB, string, ...interface{}) (gosql.Result, error)
-	}{
-		{
-			"Exec",
-			func(conn *gosql.DB, statement string, args ...interface{}) (gosql.Result, error) {
-				return conn.Exec(statement, args...)
-			},
-		}, {
-			"PrepareAndExec",
-			func(conn *gosql.DB, statement string, args ...interface{}) (gosql.Result, error) {
-				stmt, err := conn.Prepare(statement)
-				if err != nil {
-					return nil, err
-				}
-				defer stmt.Close()
-				return stmt.Exec(args...)
-			},
-		},
-	}
-
-	for _, method := range queryExecutionMethods {
-		for _, test := range testCases {
-			t.Run(fmt.Sprintf("%v/%v", method.label, test.statement), func(t *testing.T) {
-				_, err := method.exec(applicationConnection, test.statement, test.args...)
-
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				require.Equal(t, test.expected, recordedQueries[test.statement])
-			})
-		}
-	}
-}
-
 func TestShowSessions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	var conn *gosql.DB
 
-	tc := serverutils.StartNewTestCluster(t, 2 /* numNodes */, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(context.Background())
+	tc := serverutils.StartTestCluster(t, 2 /* numNodes */, base.TestClusterArgs{})
+	defer tc.Stopper().Stop(context.TODO())
 
 	conn = tc.ServerConn(0)
 	sqlutils.CreateTable(t, conn, "t", "num INT", 0, nil)
@@ -760,7 +645,7 @@ func TestShowSessions(t *testing.T) {
 	var showSessions = fmt.Sprintf(`
 	select node_id, (now() - session_start)::float from
 		[show cluster sessions] where application_name not like '%s%%'
-	`, catconstants.InternalAppNamePrefix)
+	`, sql.InternalAppNamePrefix)
 
 	rows, err := conn.Query(showSessions)
 	if err != nil {
@@ -826,7 +711,7 @@ func TestShowSessions(t *testing.T) {
 	// Now check the behavior on error.
 	tc.StopServer(1)
 
-	rows, err = conn.Query(`SELECT node_id, active_queries FROM [SHOW ALL CLUSTER SESSIONS]`)
+	rows, err = conn.Query(`SELECT node_id, active_queries FROM [SHOW CLUSTER SESSIONS]`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,230 +743,338 @@ func TestShowSessions(t *testing.T) {
 
 func TestShowSessionPrivileges(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	params.Insecure = true
 	s, rawSQLDBroot, _ := serverutils.StartServer(t, params)
 	sqlDBroot := sqlutils.MakeSQLRunner(rawSQLDBroot)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
-	// Create three users: one with no special permissions, one with the
-	// VIEWACTIVITY role option, and one admin. We'll check that the VIEWACTIVITY
-	// users and the admin can see all sessions and the unpermissioned user can
-	// only see their own session.
-	_ = sqlDBroot.Exec(t, `CREATE USER noperms`)
-	_ = sqlDBroot.Exec(t, `CREATE USER viewactivity VIEWACTIVITY`)
-	_ = sqlDBroot.Exec(t, `CREATE USER adminuser`)
-	_ = sqlDBroot.Exec(t, `GRANT admin TO adminuser`)
-
-	type user struct {
-		username             string
-		canViewOtherSessions bool
-		sqlRunner            *sqlutils.SQLRunner
+	// Prepare a non-root session.
+	_ = sqlDBroot.Exec(t, `CREATE USER nonroot`)
+	pgURL := url.URL{
+		Scheme:   "postgres",
+		User:     url.User("nonroot"),
+		Host:     s.ServingAddr(),
+		RawQuery: "sslmode=disable",
 	}
-
-	users := []user{
-		{"noperms", false, nil},
-		{"viewactivity", true, nil},
-		{"adminuser", true, nil},
+	rawSQLDBnonroot, err := gosql.Open("postgres", pgURL.String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, tc := range users {
-		pgURL := url.URL{
-			Scheme:   "postgres",
-			User:     url.User(tc.username),
-			Host:     s.ServingSQLAddr(),
-			RawQuery: "sslmode=disable",
-		}
-		db, err := gosql.Open("postgres", pgURL.String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer db.Close()
-		users[i].sqlRunner = sqlutils.MakeSQLRunner(db)
+	defer rawSQLDBnonroot.Close()
+	sqlDBnonroot := sqlutils.MakeSQLRunner(rawSQLDBnonroot)
 
-		// Ensure the session is open.
-		users[i].sqlRunner.Exec(t, `SELECT version()`)
-	}
+	// Ensure the non-root session is open.
+	sqlDBnonroot.Exec(t, `SELECT version()`)
 
-	for _, u := range users {
-		t.Run(u.username, func(t *testing.T) {
-			rows := u.sqlRunner.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
-			defer rows.Close()
-			counts := map[string]int{}
-			for rows.Next() {
-				var userName string
-				if err := rows.Scan(&userName); err != nil {
-					t.Fatal(err)
-				}
-				counts[userName]++
-			}
-			if err := rows.Err(); err != nil {
+	t.Run("root", func(t *testing.T) {
+		// Verify that the root session can use SHOW SESSIONS properly and
+		// can observe other sessions than its own.
+		rows := sqlDBroot.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
+		defer rows.Close()
+		counts := map[string]int{}
+		for rows.Next() {
+			var userName string
+			if err := rows.Scan(&userName); err != nil {
 				t.Fatal(err)
 			}
-			for _, u2 := range users {
-				if u.canViewOtherSessions || u.username == u2.username {
-					if counts[u2.username] == 0 {
-						t.Fatalf(
-							"%s session is unable to see %s session: %+v", u.username, u2.username, counts)
-					}
-				} else if counts[u2.username] > 0 {
-					t.Fatalf(
-						"%s session should not be able to see %s session: %+v", u.username, u2.username, counts)
+			counts[userName]++
+		}
+		if counts[security.RootUser] == 0 {
+			t.Fatalf("root session is unable to see its own session: %+v", counts)
+		}
+		if counts["nonroot"] == 0 {
+			t.Fatal("root session is unable to see non-root session")
+		}
+	})
+
+	t.Run("non-root", func(t *testing.T) {
+		// Verify that the non-root session can use SHOW SESSIONS properly
+		// and cannot observe other sessions than its own.
+		rows := sqlDBnonroot.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
+		defer rows.Close()
+		counts := map[string]int{}
+		for rows.Next() {
+			var userName string
+			if err := rows.Scan(&userName); err != nil {
+				t.Fatal(err)
+			}
+			counts[userName]++
+		}
+		if counts["nonroot"] == 0 {
+			t.Fatal("non-root session is unable to see its own session")
+		}
+		if len(counts) > 1 {
+			t.Fatalf("non-root session is able to see other sessions: %+v", counts)
+		}
+	})
+}
+
+// TestShowJobs manually inserts a row into system.jobs and checks that the
+// encoded protobuf payload is properly decoded and visible in
+// crdb_internal.jobs.
+func TestShowJobs(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	params, _ := tests.CreateTestServerParams()
+	s, rawSQLDB, _ := serverutils.StartServer(t, params)
+	sqlDB := sqlutils.MakeSQLRunner(rawSQLDB)
+	defer s.Stopper().Stop(context.TODO())
+
+	// row represents a row returned from crdb_internal.jobs, but
+	// *not* a row in system.jobs.
+	type row struct {
+		id                int64
+		typ               string
+		status            string
+		description       string
+		username          string
+		err               string
+		created           time.Time
+		started           time.Time
+		finished          time.Time
+		modified          time.Time
+		fractionCompleted float32
+		highWater         hlc.Timestamp
+		coordinatorID     roachpb.NodeID
+		details           jobspb.Details
+	}
+
+	for _, in := range []row{
+		{
+			id:          42,
+			typ:         "SCHEMA CHANGE",
+			status:      "superfailed",
+			description: "failjob",
+			username:    "failure",
+			err:         "boom",
+			// lib/pq returns time.Time objects with goofy locations, which breaks
+			// reflect.DeepEqual without this time.FixedZone song and dance.
+			// See: https://github.com/lib/pq/issues/329
+			created:           timeutil.Unix(1, 0).In(time.FixedZone("", 0)),
+			started:           timeutil.Unix(2, 0).In(time.FixedZone("", 0)),
+			finished:          timeutil.Unix(3, 0).In(time.FixedZone("", 0)),
+			modified:          timeutil.Unix(4, 0).In(time.FixedZone("", 0)),
+			fractionCompleted: 0.42,
+			coordinatorID:     7,
+			details:           jobspb.SchemaChangeDetails{},
+		},
+		{
+			id:          43,
+			typ:         "CHANGEFEED",
+			status:      "running",
+			description: "persistent feed",
+			username:    "persistent",
+			err:         "",
+			// lib/pq returns time.Time objects with goofy locations, which breaks
+			// reflect.DeepEqual without this time.FixedZone song and dance.
+			// See: https://github.com/lib/pq/issues/329
+			created:  timeutil.Unix(1, 0).In(time.FixedZone("", 0)),
+			started:  timeutil.Unix(2, 0).In(time.FixedZone("", 0)),
+			finished: timeutil.Unix(3, 0).In(time.FixedZone("", 0)),
+			modified: timeutil.Unix(4, 0).In(time.FixedZone("", 0)),
+			highWater: hlc.Timestamp{
+				WallTime: 1533143242000000,
+				Logical:  4,
+			},
+			coordinatorID: 7,
+			details:       jobspb.ChangefeedDetails{},
+		},
+	} {
+		t.Run("", func(t *testing.T) {
+			// system.jobs is part proper SQL columns, part protobuf, so we can't use the
+			// row struct directly.
+			inPayload, err := protoutil.Marshal(&jobspb.Payload{
+				Description:    in.description,
+				StartedMicros:  in.started.UnixNano() / time.Microsecond.Nanoseconds(),
+				FinishedMicros: in.finished.UnixNano() / time.Microsecond.Nanoseconds(),
+				Username:       in.username,
+				Lease: &jobspb.Lease{
+					NodeID: 7,
+				},
+				Error:   in.err,
+				Details: jobspb.WrapPayloadDetails(in.details),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			progress := &jobspb.Progress{
+				ModifiedMicros: in.modified.UnixNano() / time.Microsecond.Nanoseconds(),
+			}
+			if in.highWater != (hlc.Timestamp{}) {
+				progress.Progress = &jobspb.Progress_HighWater{
+					HighWater: &in.highWater,
 				}
+			} else {
+				progress.Progress = &jobspb.Progress_FractionCompleted{
+					FractionCompleted: in.fractionCompleted,
+				}
+			}
+			inProgress, err := protoutil.Marshal(progress)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sqlDB.Exec(t,
+				`INSERT INTO system.jobs (id, status, created, payload, progress) VALUES ($1, $2, $3, $4, $5)`,
+				in.id, in.status, in.created, inPayload, inProgress,
+			)
+
+			var out row
+			var maybeFractionCompleted *float32
+			var decimalHighWater *apd.Decimal
+			sqlDB.QueryRow(t, `
+      SELECT job_id, job_type, status, created, description, started, finished, modified,
+             fraction_completed, high_water_timestamp, user_name, ifnull(error, ''), coordinator_id
+        FROM crdb_internal.jobs WHERE job_id = $1`, in.id).Scan(
+				&out.id, &out.typ, &out.status, &out.created, &out.description, &out.started,
+				&out.finished, &out.modified, &maybeFractionCompleted, &decimalHighWater, &out.username,
+				&out.err, &out.coordinatorID,
+			)
+
+			if decimalHighWater != nil {
+				var err error
+				out.highWater, err = tree.DecimalToHLC(decimalHighWater)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if maybeFractionCompleted != nil {
+				out.fractionCompleted = *maybeFractionCompleted
+			}
+
+			// details field is not explicitly checked for equality; its value is
+			// confirmed via the job_type field, which is dependent on the details
+			// field.
+			out.details = in.details
+
+			if !reflect.DeepEqual(in, out) {
+				diff := strings.Join(pretty.Diff(in, out), "\n")
+				t.Fatalf("in job did not match out job:\n%s", diff)
 			}
 		})
 	}
 }
 
-func TestLintClusterSettingNames(t *testing.T) {
+func TestShowJobsWithError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
-	rows, err := sqlDB.Query(`SELECT variable, setting_type, description FROM [SHOW ALL CLUSTER SETTINGS]`)
+	// Create at least 4 row, ensuring the last 3 rows are corrupted.
+	if _, err := sqlDB.Exec(`
+     -- Ensure there is at least one row in system.jobs.
+     CREATE TABLE foo(x INT); ALTER TABLE foo ADD COLUMN y INT;
+     -- Create a corrupted payload field from the first row.
+     INSERT INTO system.jobs(id, status, payload, progress) SELECT id+1, status, '\xaaaa'::BYTES, progress FROM system.jobs ORDER BY id LIMIT 1;
+     -- Create a corrupted progress field.
+     INSERT INTO system.jobs(id, status, payload, progress) SELECT id+2, status, payload, '\xaaaa'::BYTES FROM system.jobs ORDER BY id LIMIT 1;
+     -- Corrupt both fields.
+     INSERT INTO system.jobs(id, status, payload, progress) SELECT id+3, status, '\xaaaa'::BYTES, '\xaaaa'::BYTES FROM system.jobs ORDER BY id LIMIT 1;
+     -- Test what happens with a NULL progress field (which is a valid value).
+     INSERT INTO system.jobs(id, status, payload, progress) SELECT id+4, status, payload, NULL::BYTES FROM system.jobs ORDER BY id LIMIT 1;
+     INSERT INTO system.jobs(id, status, payload, progress) SELECT id+5, status, '\xaaaa'::BYTES, NULL::BYTES FROM system.jobs ORDER BY id LIMIT 1;
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract the last 4 rows from the query.
+	rows, err := sqlDB.Query(`
+  WITH a AS (SELECT job_id, description, fraction_completed, error FROM [SHOW JOBS] ORDER BY job_id DESC LIMIT 6)
+  SELECT ifnull(description, 'NULL'), ifnull(fraction_completed, -1)::string, ifnull(error,'NULL') FROM a ORDER BY job_id ASC`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 
-	for rows.Next() {
-		var varName, sType, desc string
-		if err := rows.Scan(&varName, &sType, &desc); err != nil {
-			t.Fatal(err)
-		}
+	var desc, frac, errStr string
 
-		if strings.ToLower(varName) != varName {
-			t.Errorf("%s: variable name must be all lowercase", varName)
-		}
-
-		suffixSuggestions := map[string]string{
-			"_ttl":     ".ttl",
-			"_enabled": ".enabled",
-			"_timeout": ".timeout",
-		}
-
-		nameErr := func() error {
-			segments := strings.Split(varName, ".")
-			for _, segment := range segments {
-				if strings.TrimSpace(segment) != segment {
-					return errors.Errorf("%s: part %q has heading or trailing whitespace", varName, segment)
-				}
-				tokens, ok := parser.Tokens(segment)
-				if !ok {
-					return errors.Errorf("%s: part %q does not scan properly", varName, segment)
-				}
-				if len(tokens) == 0 || len(tokens) > 1 {
-					return errors.Errorf("%s: part %q has invalid structure", varName, segment)
-				}
-				if tokens[0].TokenID != parser.IDENT {
-					cat, ok := lexbase.KeywordsCategories[tokens[0].Str]
-					if !ok {
-						return errors.Errorf("%s: part %q has invalid structure", varName, segment)
-					}
-					if cat == "R" {
-						return errors.Errorf("%s: part %q is a reserved keyword", varName, segment)
-					}
-				}
-			}
-
-			for suffix, repl := range suffixSuggestions {
-				if strings.HasSuffix(varName, suffix) {
-					return errors.Errorf("%s: use %q instead of %q", varName, repl, suffix)
-				}
-			}
-
-			if sType == "b" && !strings.HasSuffix(varName, ".enabled") {
-				return errors.Errorf("%s: use .enabled for booleans", varName)
-			}
-
-			return nil
-		}()
-		if nameErr != nil {
-			var grandFathered = map[string]string{
-				"server.declined_reservation_timeout":                `server.declined_reservation_timeout: use ".timeout" instead of "_timeout"`,
-				"server.failed_reservation_timeout":                  `server.failed_reservation_timeout: use ".timeout" instead of "_timeout"`,
-				"server.web_session_timeout":                         `server.web_session_timeout: use ".timeout" instead of "_timeout"`,
-				"sql.distsql.flow_stream_timeout":                    `sql.distsql.flow_stream_timeout: use ".timeout" instead of "_timeout"`,
-				"debug.panic_on_failed_assertions":                   `debug.panic_on_failed_assertions: use .enabled for booleans`,
-				"diagnostics.reporting.send_crash_reports":           `diagnostics.reporting.send_crash_reports: use .enabled for booleans`,
-				"kv.closed_timestamp.follower_reads_enabled":         `kv.closed_timestamp.follower_reads_enabled: use ".enabled" instead of "_enabled"`,
-				"kv.raft_log.disable_synchronization_unsafe":         `kv.raft_log.disable_synchronization_unsafe: use .enabled for booleans`,
-				"kv.range_merge.queue_enabled":                       `kv.range_merge.queue_enabled: use ".enabled" instead of "_enabled"`,
-				"kv.range_split.by_load_enabled":                     `kv.range_split.by_load_enabled: use ".enabled" instead of "_enabled"`,
-				"kv.transaction.parallel_commits_enabled":            `kv.transaction.parallel_commits_enabled: use ".enabled" instead of "_enabled"`,
-				"kv.transaction.write_pipelining_enabled":            `kv.transaction.write_pipelining_enabled: use ".enabled" instead of "_enabled"`,
-				"server.clock.forward_jump_check_enabled":            `server.clock.forward_jump_check_enabled: use ".enabled" instead of "_enabled"`,
-				"sql.defaults.experimental_optimizer_mutations":      `sql.defaults.experimental_optimizer_mutations: use .enabled for booleans`,
-				"sql.distsql.distribute_index_joins":                 `sql.distsql.distribute_index_joins: use .enabled for booleans`,
-				"sql.metrics.statement_details.dump_to_logs":         `sql.metrics.statement_details.dump_to_logs: use .enabled for booleans`,
-				"sql.metrics.statement_details.sample_logical_plans": `sql.metrics.statement_details.sample_logical_plans: use .enabled for booleans`,
-				"sql.trace.log_statement_execute":                    `sql.trace.log_statement_execute: use .enabled for booleans`,
-				"trace.debug.enable":                                 `trace.debug.enable: use .enabled for booleans`,
-				// These two settings have been deprecated in favor of a new (better named) setting
-				// but the old name is still around to support migrations.
-				// TODO(knz): remove these cases when these settings are retired.
-				"timeseries.storage.10s_resolution_ttl": `timeseries.storage.10s_resolution_ttl: part "10s_resolution_ttl" has invalid structure`,
-				"timeseries.storage.30m_resolution_ttl": `timeseries.storage.30m_resolution_ttl: part "30m_resolution_ttl" has invalid structure`,
-
-				// These use the _timeout suffix to stay consistent with the
-				// corresponding session variables.
-				"sql.defaults.statement_timeout":                   `sql.defaults.statement_timeout: use ".timeout" instead of "_timeout"`,
-				"sql.defaults.idle_in_session_timeout":             `sql.defaults.idle_in_session_timeout: use ".timeout" instead of "_timeout"`,
-				"sql.defaults.idle_in_transaction_session_timeout": `sql.defaults.idle_in_transaction_session_timeout: use ".timeout" instead of "_timeout"`,
-			}
-			expectedErr, found := grandFathered[varName]
-			if !found || expectedErr != nameErr.Error() {
-				t.Error(nameErr)
-			}
-		}
-
-		if strings.TrimSpace(desc) != desc {
-			t.Errorf("%s: description %q has heading or trailing whitespace", varName, desc)
-		}
-
-		if len(desc) == 0 {
-			t.Errorf("%s: description is empty", varName)
-		}
-
-		if len(desc) > 0 {
-			if strings.ToLower(desc[0:1]) != desc[0:1] {
-				t.Errorf("%s: description %q must not start with capital", varName, desc)
-			}
-			if sType != "e" && strings.Contains(desc, ". ") != (desc[len(desc)-1] == '.') {
-				// TODO(knz): this check doesn't work with the way enum values are added to their descriptions.
-				t.Errorf("%s: description %q must end with period if and only if it contains a secondary sentence", varName, desc)
-			}
-		}
+	// Valid row.
+	rowNum := 0
+	if !rows.Next() {
+		t.Fatalf("%d too few rows", rowNum)
 	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row %d: %q %q %v", rowNum, desc, errStr, frac)
+	if desc == "NULL" || errStr != "" || frac[0] == '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
 
-}
+	// Corrupted payload but valid progress.
+	if !rows.Next() {
+		t.Fatalf("%d: too few rows", rowNum)
+	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row %d: %q %q %v", rowNum, desc, errStr, frac)
+	if desc != "NULL" || !strings.HasPrefix(errStr, "error decoding payload") || frac[0] == '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
 
-// TestCancelQueriesRace can be stressed to try and reproduce a race
-// between SHOW QUERIES and currently executing statements. For
-// more details, see #28033.
-func TestCancelQueriesRace(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	// Corrupted progress but valid payload.
+	if !rows.Next() {
+		t.Fatalf("%d: too few rows", rowNum)
+	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row %d: %q %q %v", rowNum, desc, errStr, frac)
+	if desc == "NULL" || !strings.HasPrefix(errStr, "error decoding progress") || frac[0] != '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
 
-	waiter := make(chan struct{})
-	go func() {
-		_, _ = sqlDB.ExecContext(ctx, `SELECT pg_sleep(10)`)
-		close(waiter)
-	}()
-	_, _ = sqlDB.ExecContext(ctx, `CANCEL QUERIES (
-		SELECT query_id FROM [SHOW QUERIES] WHERE query LIKE 'SELECT pg_sleep%'
-	)`)
-	_, _ = sqlDB.ExecContext(ctx, `CANCEL QUERIES (
-		SELECT query_id FROM [SHOW QUERIES] WHERE query LIKE 'SELECT pg_sleep%'
-	)`)
+	// Both payload and progress corrupted.
+	if !rows.Next() {
+		t.Fatalf("%d: too few rows", rowNum)
+	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row: %q %q %v", desc, errStr, frac)
+	if desc != "NULL" ||
+		!strings.Contains(errStr, "error decoding payload") ||
+		!strings.Contains(errStr, "error decoding progress") ||
+		frac[0] != '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
 
-	cancel()
-	<-waiter
+	// Valid payload and missing progress.
+	if !rows.Next() {
+		t.Fatalf("%d too few rows", rowNum)
+	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row %d: %q %q %v", rowNum, desc, errStr, frac)
+	if desc == "NULL" || errStr != "" || frac[0] != '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
+
+	// Invalid payload and missing progress.
+	if !rows.Next() {
+		t.Fatalf("%d too few rows", rowNum)
+	}
+	if err := rows.Scan(&desc, &frac, &errStr); err != nil {
+		t.Fatalf("%d: %v", rowNum, err)
+	}
+	t.Logf("row %d: %q %q %v", rowNum, desc, errStr, frac)
+	if desc != "NULL" ||
+		!strings.Contains(errStr, "error decoding payload") ||
+		strings.Contains(errStr, "error decoding progress") ||
+		frac[0] != '-' {
+		t.Fatalf("%d: invalid row", rowNum)
+	}
+	rowNum++
 }

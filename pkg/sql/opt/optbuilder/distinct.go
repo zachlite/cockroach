@@ -1,31 +1,34 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package optbuilder
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
 // constructDistinct wraps inScope.group in a DistinctOn operator corresponding
 // to a SELECT DISTINCT statement.
-func (b *Builder) constructDistinct(inScope *scope) memo.RelExpr {
+func (b *Builder) constructDistinct(inScope *scope) memo.GroupID {
 	// We are doing a distinct along all the projected columns.
-	var private memo.GroupingPrivate
+	var def memo.GroupByDef
 	for i := range inScope.cols {
-		if inScope.cols[i].visibility == visible {
-			private.GroupingCols.Add(inScope.cols[i].id)
+		if !inScope.cols[i].hidden {
+			def.GroupingCols.Add(int(inScope.cols[i].id))
 		}
 	}
 
@@ -34,31 +37,28 @@ func (b *Builder) constructDistinct(inScope *scope) memo.RelExpr {
 	//   SELECT DISTINCT a FROM t ORDER BY b
 	// Note: this behavior is consistent with PostgreSQL.
 	for _, col := range inScope.ordering {
-		if !private.GroupingCols.Contains(col.ID()) {
-			panic(pgerror.Newf(
-				pgcode.InvalidColumnReference,
+		if !def.GroupingCols.Contains(int(col.ID())) {
+			panic(builderError{pgerror.NewErrorf(
+				pgerror.CodeInvalidColumnReferenceError,
 				"for SELECT DISTINCT, ORDER BY expressions must appear in select list",
-			))
+			)})
 		}
 	}
 
 	// We don't set def.Ordering. Because the ordering can only refer to projected
 	// columns, it does not affect the results; it doesn't need to be required of
 	// the DistinctOn input.
-	input := inScope.expr.(memo.RelExpr)
-	return b.factory.ConstructDistinctOn(input, memo.EmptyAggregationsExpr, &private)
+
+	return b.factory.ConstructDistinctOn(
+		inScope.group,
+		b.factory.ConstructAggregations(memo.EmptyList, b.factory.InternColList(nil)),
+		b.factory.InternGroupByDef(&def),
+	)
 }
 
 // buildDistinctOn builds a set of memo groups that represent a DISTINCT ON
-// expression. If nullsAreDistinct is true, then construct the UpsertDistinctOn
-// operator rather than the DistinctOn operator (see the UpsertDistinctOn
-// operator comment for details on the differences). The errorOnDup parameter
-// controls whether multiple rows in the same distinct group trigger an error.
-// If empty, no error is triggered. This can only take on a value in the
-// EnsureDistinctOn and EnsureUpsertDistinctOn cases.
-func (b *Builder) buildDistinctOn(
-	distinctOnCols opt.ColSet, inScope *scope, nullsAreDistinct bool, errorOnDup string,
-) (outScope *scope) {
+// expression.
+func (b *Builder) buildDistinctOn(distinctOnCols opt.ColSet, inScope *scope) (outScope *scope) {
 	// When there is a DISTINCT ON clause, the ORDER BY clause is restricted to either:
 	//  1. Contain a subset of columns from the ON list, or
 	//  2. Start with a permutation of all columns from the ON list.
@@ -82,13 +82,13 @@ func (b *Builder) buildDistinctOn(
 	// expressions.
 	var seen opt.ColSet
 	for _, col := range inScope.ordering {
-		if !distinctOnCols.Contains(col.ID()) {
-			panic(pgerror.Newf(
-				pgcode.InvalidColumnReference,
+		if !distinctOnCols.Contains(int(col.ID())) {
+			panic(builderError{pgerror.NewErrorf(
+				pgerror.CodeInvalidColumnReferenceError,
 				"SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
-			))
+			)})
 		}
-		seen.Add(col.ID())
+		seen.Add(int(col.ID()))
 		if seen.Equals(distinctOnCols) {
 			// All DISTINCT ON columns showed up; other columns are allowed in the
 			// rest of the ORDER BY (case 2 above).
@@ -96,13 +96,20 @@ func (b *Builder) buildDistinctOn(
 		}
 	}
 
-	private := memo.GroupingPrivate{GroupingCols: distinctOnCols.Copy(),
-		NullsAreDistinct: nullsAreDistinct, ErrorOnDup: errorOnDup}
-
+	def := memo.GroupByDef{
+		GroupingCols: distinctOnCols.Copy(),
+	}
 	// The ordering is used for intra-group ordering. Ordering with respect to the
 	// DISTINCT ON columns doesn't affect intra-group ordering, so we add these
 	// columns as optional.
-	private.Ordering.FromOrderingWithOptCols(inScope.ordering, distinctOnCols)
+	def.Ordering.FromOrderingWithOptCols(inScope.ordering, distinctOnCols)
+
+	// TODO(radu): the execbuilder doesn't correctly handle orderings with
+	// optional columns that are not constant (#31882). The fix for that is
+	// involved; for now we don't set the grouping columns as optional. The
+	// exploration rule that looks at interesting orderings negates (or at least
+	// alleviates) the impact of restricting the Ordering in this way.
+	def.Ordering.Optional = opt.ColSet{}
 
 	// Set up a new scope for the output of DISTINCT ON. This scope differs from
 	// the input scope in that it doesn't have "extra" ORDER BY columns, e.g.
@@ -120,13 +127,14 @@ func (b *Builder) buildDistinctOn(
 	outScope.cols = make([]scopeColumn, 0, len(inScope.cols))
 	// Add the output columns.
 	for i := range inScope.cols {
-		outScope.cols = append(outScope.cols, inScope.cols[i])
+		if !inScope.cols[i].hidden {
+			outScope.cols = append(outScope.cols, inScope.cols[i])
+		}
 	}
-
 	// Add any extra ON columns.
 	outScope.extraCols = make([]scopeColumn, 0, len(inScope.extraCols))
 	for i := range inScope.extraCols {
-		if distinctOnCols.Contains(inScope.extraCols[i].id) {
+		if distinctOnCols.Contains(int(inScope.extraCols[i].id)) {
 			outScope.extraCols = append(outScope.extraCols, inScope.extraCols[i])
 		}
 	}
@@ -134,41 +142,35 @@ func (b *Builder) buildDistinctOn(
 	// Retain the prefix of the ordering that refers to the ON columns.
 	outScope.ordering = inScope.ordering
 	for i, col := range inScope.ordering {
-		if !distinctOnCols.Contains(col.ID()) {
+		if !distinctOnCols.Contains(int(col.ID())) {
 			outScope.ordering = outScope.ordering[:i]
 			break
 		}
 	}
 
-	aggs := make(memo.AggregationsExpr, 0, len(inScope.cols))
-
+	aggCols := make(opt.ColList, 0, len(inScope.cols))
+	aggGroups := make([]memo.GroupID, 0, len(inScope.cols))
 	// Build FirstAgg for all visible columns except the DistinctOnCols
 	// (and eliminate duplicates).
 	excluded := distinctOnCols.Copy()
 	for i := range outScope.cols {
-		if id := outScope.cols[i].id; !excluded.Contains(id) {
-			excluded.Add(id)
-			aggs = append(aggs, b.factory.ConstructAggregationsItem(
-				b.factory.ConstructFirstAgg(b.factory.ConstructVariable(id)),
-				id,
+		if id := outScope.cols[i].id; !excluded.Contains(int(id)) {
+			excluded.Add(int(id))
+			aggCols = append(aggCols, id)
+			aggGroups = append(aggGroups, b.factory.ConstructFirstAgg(
+				b.factory.ConstructVariable(b.factory.InternColumnID(id)),
 			))
 		}
 	}
 
-	input := inScope.expr.(memo.RelExpr)
-	if nullsAreDistinct {
-		if errorOnDup == "" {
-			outScope.expr = b.factory.ConstructUpsertDistinctOn(input, aggs, &private)
-		} else {
-			outScope.expr = b.factory.ConstructEnsureUpsertDistinctOn(input, aggs, &private)
-		}
-	} else {
-		if errorOnDup == "" {
-			outScope.expr = b.factory.ConstructDistinctOn(input, aggs, &private)
-		} else {
-			outScope.expr = b.factory.ConstructEnsureDistinctOn(input, aggs, &private)
-		}
-	}
+	outScope.group = b.factory.ConstructDistinctOn(
+		inScope.group,
+		b.factory.ConstructAggregations(
+			b.factory.InternList(aggGroups),
+			b.factory.InternColList(aggCols),
+		),
+		b.factory.InternGroupByDef(&def),
+	)
 	return outScope
 }
 
@@ -188,8 +190,8 @@ func (b *Builder) analyzeDistinctOnArgs(
 	// semaCtx in case we are recursively called within a subquery
 	// context.
 	defer b.semaCtx.Properties.Restore(b.semaCtx.Properties)
-	b.semaCtx.Properties.Require(exprKindDistinctOn.String(), tree.RejectGenerators)
-	inScope.context = exprKindDistinctOn
+	b.semaCtx.Properties.Require("DISTINCT ON", tree.RejectGenerators)
+	inScope.context = "DISTINCT ON"
 
 	for i := range distinctOn {
 		b.analyzeExtraArgument(distinctOn[i], inScope, projectionsScope, distinctOnScope)
@@ -206,9 +208,7 @@ func (b *Builder) buildDistinctOnArgs(inScope, projectionsScope, distinctOnScope
 	}
 
 	for i := range distinctOnScope.cols {
-		b.addOrderByOrDistinctOnColumn(
-			inScope, projectionsScope, distinctOnScope, &distinctOnScope.cols[i],
-		)
+		b.addExtraColumn(inScope, projectionsScope, distinctOnScope, &distinctOnScope.cols[i])
 	}
 	projectionsScope.addExtraColumns(distinctOnScope.cols)
 	projectionsScope.distinctOnCols = distinctOnScope.colSet()

@@ -1,30 +1,26 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/migration"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -40,18 +36,26 @@ import (
 // plan execution.
 type planHookFn func(
 	context.Context, tree.Statement, PlanHookState,
-) (fn PlanHookRowFn, header colinfo.ResultColumns, subplans []planNode, avoidBuffering bool, err error)
+) (fn PlanHookRowFn, header sqlbase.ResultColumns, subplans []planNode, err error)
 
 // PlanHookRowFn describes the row-production for hook-created plans. The
 // channel argument is used to return results to the plan's runner. It's
 // a blocking channel, so implementors should be careful to only use blocking
 // sends on it when necessary. Any subplans returned by the hook when initially
-// called are passed back, planned and started, for the RowFn's use.
+// called are passed back, planned and started, for the the RowFn's use.
 //
 //TODO(dt): should this take runParams like a normal planNode.Next?
 type PlanHookRowFn func(context.Context, []planNode, chan<- tree.Datums) error
 
 var planHooks []planHookFn
+
+// wrappedPlanHookFn is similar to planHookFn but returns an existing plan type.
+// Additionally, it takes a context.
+type wrappedPlanHookFn func(
+	context.Context, tree.Statement, PlanHookState,
+) (planNode, error)
+
+var wrappedPlanHooks []wrappedPlanHookFn
 
 func (p *planner) RunParams(ctx context.Context) runParams {
 	return runParams{ctx, p.ExtendedEvalContext(), p}
@@ -61,66 +65,56 @@ func (p *planner) RunParams(ctx context.Context) runParams {
 // We pass this as one interface, rather than individually passing each field or
 // interface as we find we need them, to avoid churn in the planHookFn sig and
 // the hooks that implement it.
-//
-// The PlanHookState is used by modules that are under the CCL. Since the OSS
-// modules cannot depend on the CCL modules, the CCL modules need to inform the
-// planner when they should be invoked (via plan hooks). The only way for the
-// CCL statements to get access to a "planner" is through this PlanHookState
-// that gets passed back due to this inversion of roles.
 type PlanHookState interface {
-	resolver.SchemaResolver
+	SchemaResolver
 	RunParams(ctx context.Context) runParams
-	SemaCtx() *tree.SemaContext
 	ExtendedEvalContext() *extendedEvalContext
 	SessionData() *sessiondata.SessionData
 	ExecCfg() *ExecutorConfig
 	DistSQLPlanner() *DistSQLPlanner
-	LeaseMgr() *lease.Manager
-	TypeAsString(ctx context.Context, e tree.Expr, op string) (func() (string, error), error)
-	TypeAsStringArray(ctx context.Context, e tree.Exprs, op string) (func() ([]string, error), error)
+	LeaseMgr() *LeaseManager
+	TypeAsString(e tree.Expr, op string) (func() (string, error), error)
+	TypeAsStringArray(e tree.Exprs, op string) (func() ([]string, error), error)
 	TypeAsStringOpts(
-		ctx context.Context, opts tree.KVOptions, optsValidate map[string]KVStringOptValidate,
+		opts tree.KVOptions, optsValidate map[string]KVStringOptValidate,
 	) (func() (map[string]string, error), error)
-	User() security.SQLUsername
+	User() string
 	AuthorizationAccessor
 	// The role create/drop call into OSS code to reuse plan nodes.
 	// TODO(mberhault): it would be easier to just pass a planner to plan hooks.
-	GetAllRoles(ctx context.Context) (map[security.SQLUsername]bool, error)
+	CreateUserNode(
+		ctx context.Context, nameE, passwordE tree.Expr, ifNotExists bool, isRole bool, opName string,
+	) (*CreateUserNode, error)
+	DropUserNode(
+		ctx context.Context, namesE tree.Exprs, ifExists bool, isRole bool, opName string,
+	) (*DropUserNode, error)
+	GetAllUsersAndRoles(ctx context.Context) (map[string]bool, error)
 	BumpRoleMembershipTableVersion(ctx context.Context) error
-	EvalAsOfTimestamp(ctx context.Context, asOf tree.AsOfClause) (hlc.Timestamp, error)
-	ResolveMutableTableDescriptor(ctx context.Context, tn *tree.TableName, required bool, requiredType tree.RequiredTableKind) (prefix catalog.ResolvedObjectPrefix, table *tabledesc.Mutable, err error)
-	ShowCreate(
-		ctx context.Context, dbPrefix string, allDescs []descpb.Descriptor, desc catalog.TableDescriptor, displayOptions ShowCreateDisplayOptions,
-	) (string, error)
-	CreateSchemaNamespaceEntry(ctx context.Context, schemaNameKey roachpb.Key,
-		schemaID descpb.ID) error
-	MigrationJobDeps() migration.JobDeps
-	BufferClientNotice(ctx context.Context, notice pgnotice.Notice)
+	Select(ctx context.Context, n *tree.Select, desiredTypes []types.T) (planNode, error)
+	EvalAsOfTimestamp(asOf tree.AsOfClause, max hlc.Timestamp) (hlc.Timestamp, error)
+	ResolveUncachedDatabaseByName(
+		ctx context.Context, dbName string, required bool) (*UncachedDatabaseDescriptor, error)
 }
 
 // AddPlanHook adds a hook used to short-circuit creating a planNode from a
 // tree.Statement. If the func returned by the hook is non-nil, it is used to
 // construct a planNode that runs that func in a goroutine during Start.
-//
-// See PlanHookState comments for information about why plan hooks are needed.
 func AddPlanHook(f planHookFn) {
 	planHooks = append(planHooks, f)
 }
 
-// ClearPlanHooks is used by tests to clear out any mocked out plan hooks that
-// were registered.
-func ClearPlanHooks() {
-	planHooks = nil
+// AddWrappedPlanHook adds a hook used to short-circuit creating a planNode from a
+// tree.Statement. If the returned plan is non-nil, it is used directly by the planner.
+func AddWrappedPlanHook(f wrappedPlanHookFn) {
+	wrappedPlanHooks = append(wrappedPlanHooks, f)
 }
 
 // hookFnNode is a planNode implemented in terms of a function. It begins the
 // provided function during Start and serves the results it returns over the
 // channel.
 type hookFnNode struct {
-	optColumnsSlot
-
 	f        PlanHookRowFn
-	header   colinfo.ResultColumns
+	header   sqlbase.ResultColumns
 	subplans []planNode
 
 	run hookFnRun

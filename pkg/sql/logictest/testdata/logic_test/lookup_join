@@ -1,3 +1,5 @@
+# LogicTest: fakedist-opt local-opt
+
 statement ok
 CREATE TABLE abc (a INT, b INT, c INT, PRIMARY KEY (a, c));
 INSERT INTO abc VALUES (1, 1, 2), (2, 1, 1), (2, NULL, 2)
@@ -12,6 +14,8 @@ INSERT INTO gh VALUES (NULL, 1)
 
 # Set up the statistics as if the first table is much smaller than the second.
 # This will make lookup join into the second table be the best plan.
+# TODO(radu): we have to use very small row counts because of the poor row
+# count estimation for joins (left-rows * right-rows / 10).
 statement ok
 ALTER TABLE abc INJECT STATISTICS '[
   {
@@ -49,12 +53,6 @@ SELECT * FROM abc JOIN def ON f = b
 2  1  1  2     1  1
 1  1  2  NULL  2  1
 2  1  1  NULL  2  1
-
-query IIIIII rowsort
-SELECT * FROM abc JOIN def ON f = b AND e = c
-----
-1  1  2  NULL  2  1
-2  1  1  2     1  1
 
 query IIIIII rowsort
 SELECT * FROM abc JOIN def ON f = b WHERE a > 1 AND e > 1
@@ -113,21 +111,9 @@ INSERT INTO data SELECT a, b, c, d FROM
    generate_series(1, 10) AS c(c),
    generate_series(1, 10) AS d(d)
 
-statement ok
-ALTER TABLE data INJECT STATISTICS '[
-  {
-    "columns": ["a"],
-    "created_at": "2018-01-01 1:00:00.00000+00:00",
-    "row_count": 100000,
-    "distinct_count": 100000
-  }
-]'
-
 # Ensure lookup join performs properly on input that has more than 100 rows.
 query I
-SELECT count(*)
-FROM (SELECT * FROM data WHERE c = 1) AS l
-NATURAL JOIN (SELECT * FROM data WHERE c > 0) AS r
+SELECT count(*) FROM (SELECT * FROM data WHERE c = 1) AS l NATURAL JOIN data AS r
 ----
 1000
 
@@ -513,6 +499,9 @@ SELECT u.a FROM t JOIN u ON t.d = u.d AND t.a = u.a AND t.d = u.d WHERE t.e = 5
 ----
 1
 
+# Regression test for #33342. We want the ordering in the lookup join node to
+# be +f not +a; this is achieved by making def show up in the query first (and
+# thus get smaller opt.ColumnIDs).
 query IIIIII colnames,partialsort(4)
 SELECT * FROM def JOIN abc ON a=f ORDER BY a
 ----
@@ -521,140 +510,3 @@ d     e  f  a  b     c
 NULL  2  1  1  1     2
 1     1  2  2  NULL  2
 1     1  2  2  1     1
-
-# Test lookup semi and anti join.
-query III rowsort
-SELECT * from abc WHERE EXISTS (SELECT * FROM def WHERE a=f)
-----
-1  1     2
-2  1     1
-2  NULL  2
-
-query III rowsort
-SELECT * from abc WHERE NOT EXISTS (SELECT * FROM def WHERE a=f)
-----
-
-query III rowsort
-SELECT * from abc WHERE EXISTS (SELECT * FROM def WHERE a=f AND c=e)
-----
-1  1  2
-2  1  1
-
-query III rowsort
-SELECT * from abc WHERE NOT EXISTS (SELECT * FROM def WHERE a=f AND c=e)
-----
-2  NULL  2
-
-query III rowsort
-SELECT * from abc WHERE EXISTS (SELECT * FROM def WHERE a=f AND d+b>1)
-----
-1  1  2
-2  1  1
-
-query III rowsort
-SELECT * from abc WHERE NOT EXISTS (SELECT * FROM def WHERE a=f AND d+b>1)
-----
-2  NULL  2
-
-query II
-SELECT a,b from small WHERE EXISTS (SELECT a FROM data WHERE small.a=data.a) ORDER BY a
-----
-1   2
-2   4
-3   6
-4   8
-5   10
-6   12
-7   14
-8   16
-9   18
-10  20
-
-query II
-SELECT a,b from small WHERE a+b<20 AND EXISTS (SELECT a FROM data WHERE small.a=data.a AND small.b+data.c>15) ORDER BY a
-----
-3  6
-4  8
-5  10
-6  12
-
-# Regression test for #50964.
-statement ok
-CREATE TABLE tab4 (
-  pk INT8 PRIMARY KEY, col0 INT8, col1 FLOAT8, col2 STRING, col3 INT8, col4 FLOAT8, col5 STRING,
-  UNIQUE (col3 DESC, col4 DESC)
-)
-
-query I
-SELECT pk FROM tab4 WHERE col0 IN (SELECT col3 FROM tab4 WHERE col4 = 495.6) AND (col3 IS NULL)
-----
-
-###########################################################
-#  LOOKUP JOINS WITH LOOKUP EXPRESSIONS                   #
-#  https://github.com/cockroachdb/cockroach/issues/59615  #
-###########################################################
-
-# Regression test for #59615. Ensure that invalid lookup joins are not created
-# for left and anti joins.
-statement ok
-CREATE TABLE t59615 (
-  x INT NOT NULL CHECK (x in (1, 3)),
-  y INT NOT NULL,
-  z INT,
-  PRIMARY KEY (x, y)
-)
-
-query IIII rowsort
-SELECT * FROM (VALUES (1), (2)) AS u(y) LEFT JOIN t59615 t ON u.y = t.y
-----
-1  NULL  NULL  NULL
-2  NULL  NULL  NULL
-
-query I rowsort
-SELECT * FROM (VALUES (1), (2)) AS u(y) WHERE NOT EXISTS (
-  SELECT * FROM t59615 t WHERE u.y = t.y
-)
-----
-1
-2
-
-statement ok
-CREATE TABLE lookup_expr (
-  r STRING NOT NULL CHECK (r IN ('east', 'west')),
-  v INT NOT NULL,
-  w INT,
-  x INT,
-  y INT NOT NULL CHECK (y IN (10, 20)),
-  z INT NOT NULL CHECK (z = 5),
-  PRIMARY KEY (r, v),
-  INDEX (r, x, y, z, w)
-)
-
-statement ok
-INSERT INTO lookup_expr VALUES
-  ('east', 1, 1, 10, 10, 5),
-  ('east', 2, NULL, 20, 10, 5),
-  ('east', 3, 3, NULL, 10, 5),
-  ('east', 4, 4, 40, 20, 5),
-  ('east', 5, NULL, 50, 20, 5),
-  ('west', 6, 1, 10, 20, 5),
-  ('west', 7, NULL, NULL, 20, 5),
-  ('west', 8, 2, 20, 20, 5),
-  ('west', 9, 3, 30, 10, 5),
-  ('west', 10, 4, 40, 10, 5)
-
-query IITIIIII rowsort
-SELECT * FROM (VALUES (1, 10), (2, 20), (3, NULL)) AS u(w, x) LEFT JOIN lookup_expr t
-ON u.w = t.w AND u.x = t.x
-----
-1  10    east  1     1     10    10    5
-1  10    west  6     1     10    20    5
-2  20    west  8     2     20    20    5
-3  NULL  NULL  NULL  NULL  NULL  NULL  NULL
-
-query II rowsort
-SELECT * FROM (VALUES (1, 10), (2, 20), (3, NULL)) AS u(w, x) WHERE NOT EXISTS (
-  SELECT * FROM lookup_expr t WHERE u.w = t.w AND u.x = t.x
-)
-----
-3  NULL

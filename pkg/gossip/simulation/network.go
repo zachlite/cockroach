@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package simulation
 
@@ -16,8 +20,9 @@ import (
 	"net"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -31,8 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"google.golang.org/grpc"
 )
 
 // Node represents a node used in a Network. It includes information
@@ -55,45 +58,37 @@ func (n *Node) Addr() net.Addr {
 type Network struct {
 	Nodes           []*Node
 	Stopper         *stop.Stopper
-	RPCContext      *rpc.Context
 	nodeIDAllocator roachpb.NodeID // provides unique node IDs
+	rpcContext      *rpc.Context
 	tlsConfig       *tls.Config
 	started         bool
 }
 
 // NewNetwork creates nodeCount gossip nodes.
-func NewNetwork(
-	stopper *stop.Stopper, nodeCount int, createResolvers bool, defaultZoneConfig *zonepb.ZoneConfig,
-) *Network {
+func NewNetwork(stopper *stop.Stopper, nodeCount int, createResolvers bool) *Network {
 	log.Infof(context.TODO(), "simulating gossip network with %d nodes", nodeCount)
 
 	n := &Network{
 		Nodes:   []*Node{},
 		Stopper: stopper,
 	}
-	n.RPCContext = rpc.NewContext(rpc.ContextOptions{
-		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
-		Config:     &base.Config{Insecure: true},
-		Clock:      hlc.NewClock(hlc.UnixNano, time.Nanosecond),
-		Stopper:    n.Stopper,
-		Settings:   cluster.MakeTestingClusterSettings(),
-	})
+	n.rpcContext = rpc.NewContext(
+		log.AmbientContext{Tracer: tracing.NewTracer()},
+		&base.Config{Insecure: true},
+		hlc.NewClock(hlc.UnixNano, time.Nanosecond),
+		n.Stopper,
+		&cluster.MakeTestingClusterSettings().Version,
+	)
 	var err error
-	n.tlsConfig, err = n.RPCContext.GetServerTLSConfig()
+	n.tlsConfig, err = n.rpcContext.GetServerTLSConfig()
 	if err != nil {
-		log.Fatalf(context.TODO(), "%v", err)
+		log.Fatal(context.TODO(), err)
 	}
 
-	// Ensure that tests using this test context and restart/shut down
-	// their servers do not inadvertently start talking to servers from
-	// unrelated concurrent tests.
-	n.RPCContext.ClusterID.Set(context.TODO(), uuid.MakeV4())
-
 	for i := 0; i < nodeCount; i++ {
-		node, err := n.CreateNode(defaultZoneConfig)
+		node, err := n.CreateNode()
 		if err != nil {
-			log.Fatalf(context.TODO(), "%v", err)
+			log.Fatal(context.TODO(), err)
 		}
 		// Build a resolver for each instance or we'll get data races.
 		if createResolvers {
@@ -108,18 +103,19 @@ func NewNetwork(
 }
 
 // CreateNode creates a simulation node and starts an RPC server for it.
-func (n *Network) CreateNode(defaultZoneConfig *zonepb.ZoneConfig) (*Node, error) {
-	server := rpc.NewServer(n.RPCContext)
+func (n *Network) CreateNode() (*Node, error) {
+	server := rpc.NewServer(n.rpcContext)
 	ln, err := net.Listen(util.IsolatedTestAddr.Network(), util.IsolatedTestAddr.String())
 	if err != nil {
 		return nil, err
 	}
 	node := &Node{Server: server, Listener: ln, Registry: metric.NewRegistry()}
-	node.Gossip = gossip.NewTest(0, n.RPCContext, server, n.Stopper, node.Registry, defaultZoneConfig)
-	n.Stopper.AddCloser(stop.CloserFn(server.Stop))
-	_ = n.Stopper.RunAsyncTask(context.TODO(), "node-wait-quiesce", func(context.Context) {
+	node.Gossip = gossip.NewTest(0, n.rpcContext, server, n.Stopper, node.Registry)
+	n.Stopper.RunWorker(context.TODO(), func(context.Context) {
 		<-n.Stopper.ShouldQuiesce()
 		netutil.FatalIfUnexpected(ln.Close())
+		<-n.Stopper.ShouldStop()
+		server.Stop()
 		node.Gossip.EnableSimulationCycler(false)
 	})
 	n.Nodes = append(n.Nodes, node)
@@ -143,9 +139,10 @@ func (n *Network) StartNode(node *Node) error {
 		encoding.EncodeUint64Ascending(nil, 0), time.Hour); err != nil {
 		return err
 	}
-	return n.Stopper.RunAsyncTask(context.TODO(), "start-node", func(context.Context) {
+	n.Stopper.RunWorker(context.TODO(), func(context.Context) {
 		netutil.FatalIfUnexpected(node.Server.Serve(node.Listener))
 	})
+	return nil
 }
 
 // GetNodeFromID returns the simulation node associated with
@@ -179,14 +176,14 @@ func (n *Network) SimulateNetwork(simCallback func(cycle int, network *Network) 
 			encoding.EncodeUint64Ascending(nil, uint64(cycle)),
 			time.Hour,
 		); err != nil {
-			log.Fatalf(context.TODO(), "%v", err)
+			log.Fatal(context.TODO(), err)
 		}
 		if err := nodes[0].Gossip.AddInfo(
 			gossip.KeyClusterID,
 			encoding.EncodeUint64Ascending(nil, uint64(cycle)),
 			0*time.Second,
 		); err != nil {
-			log.Fatalf(context.TODO(), "%v", err)
+			log.Fatal(context.TODO(), err)
 		}
 		// Every node gossips every cycle.
 		for _, node := range nodes {
@@ -195,7 +192,7 @@ func (n *Network) SimulateNetwork(simCallback func(cycle int, network *Network) 
 				encoding.EncodeUint64Ascending(nil, uint64(cycle)),
 				time.Hour,
 			); err != nil {
-				log.Fatalf(context.TODO(), "%v", err)
+				log.Fatal(context.TODO(), err)
 			}
 			node.Gossip.SimulationCycle()
 		}
@@ -222,7 +219,7 @@ func (n *Network) Start() {
 	n.started = true
 	for _, node := range n.Nodes {
 		if err := n.StartNode(node); err != nil {
-			log.Fatalf(context.TODO(), "%v", err)
+			log.Fatal(context.TODO(), err)
 		}
 	}
 }

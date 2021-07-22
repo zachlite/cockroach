@@ -1,12 +1,17 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License. See the AUTHORS file
+// for names of contributors.
 
 package cli
 
@@ -15,30 +20,23 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
-	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/workload"
-	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
-	"github.com/cockroachdb/cockroach/pkg/workload/workloadsql"
-	"github.com/cockroachdb/errors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/time/rate"
+
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"golang.org/x/time/rate"
+
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/workload"
 )
 
 var runFlags = pflag.NewFlagSet(`run`, pflag.ContinueOnError)
@@ -46,51 +44,19 @@ var tolerateErrors = runFlags.Bool("tolerate-errors", false, "Keep running on er
 var maxRate = runFlags.Float64(
 	"max-rate", 0, "Maximum frequency of operations (reads/writes). If 0, no limit.")
 var maxOps = runFlags.Uint64("max-ops", 0, "Maximum number of operations to run")
-var duration = runFlags.Duration("duration", 0,
-	"The duration to run (in addition to --ramp). If 0, run forever.")
-var doInit = runFlags.Bool("init", false, "Automatically run init. DEPRECATED: Use workload init instead.")
+var duration = runFlags.Duration("duration", 0, "The duration to run. If 0, run forever.")
+var doInit = runFlags.Bool("init", false, "Automatically run init")
 var ramp = runFlags.Duration("ramp", 0*time.Second, "The duration over which to ramp up load.")
 
 var initFlags = pflag.NewFlagSet(`init`, pflag.ContinueOnError)
 var drop = initFlags.Bool("drop", false, "Drop the existing database, if it exists")
 
-var sharedFlags = pflag.NewFlagSet(`shared`, pflag.ContinueOnError)
-var pprofport = sharedFlags.Int("pprofport", 33333, "Port for pprof endpoint.")
-var dataLoader = sharedFlags.String("data-loader", `INSERT`,
-	"How to load initial table data. Options are INSERT and IMPORT")
-var initConns = sharedFlags.Int("init-conns", 16,
-	"The number of connections to use during INSERT init")
-
-var displayEvery = runFlags.Duration("display-every", time.Second, "How much time between every one-line activity reports.")
-
-var displayFormat = runFlags.String("display-format", "simple", "Output display format (simple, incremental-json)")
-
-var prometheusPort = sharedFlags.Int(
-	"prometheus-port",
-	2112,
-	"Port to expose prometheus metrics if the workload has a prometheus gatherer set.",
-)
-
 var histograms = runFlags.String(
 	"histograms", "",
 	"File to write per-op incremental and cumulative histogram data.")
-var histogramsMaxLatency = runFlags.Duration(
-	"histograms-max-latency", 100*time.Second,
-	"Expected maximum latency of running a query")
-
-var securityFlags = pflag.NewFlagSet(`security`, pflag.ContinueOnError)
-var secure = securityFlags.Bool("secure", false,
-	"Run in secure mode (sslmode=require). "+
-		"Running in secure mode expects the relevant certs to have been created for the user in the certs/ directory."+
-		"For example when using root, certs/client.root.crt certs/client.root.key should exist.")
-var user = securityFlags.String("user", "root", "Specify a user to run the workload as")
-var password = securityFlags.String("password", "", "Optionally specify a password for the user")
 
 func init() {
-
-	_ = sharedFlags.MarkHidden("pprofport")
-
-	AddSubCmd(func(userFacing bool) *cobra.Command {
+	AddSubCmd(func() *cobra.Command {
 		var initCmd = SetCmdDefaults(&cobra.Command{
 			Use:   `init`,
 			Short: `set up tables for a workload`,
@@ -103,24 +69,18 @@ func init() {
 			}
 
 			genInitCmd := SetCmdDefaults(&cobra.Command{
-				Use:   meta.Name + " [pgurl...]",
+				Use:   meta.Name,
 				Short: meta.Description,
-				Long:  meta.Description + meta.Details,
 				Args:  cobra.ArbitraryArgs,
 			})
 			genInitCmd.Flags().AddFlagSet(initFlags)
-			genInitCmd.Flags().AddFlagSet(sharedFlags)
 			genInitCmd.Flags().AddFlagSet(genFlags)
-			genInitCmd.Flags().AddFlagSet(securityFlags)
 			genInitCmd.Run = CmdHelper(gen, runInit)
-			if userFacing && !meta.PublicFacing {
-				genInitCmd.Hidden = true
-			}
 			initCmd.AddCommand(genInitCmd)
 		}
 		return initCmd
 	})
-	AddSubCmd(func(userFacing bool) *cobra.Command {
+	AddSubCmd(func() *cobra.Command {
 		var runCmd = SetCmdDefaults(&cobra.Command{
 			Use:   `run`,
 			Short: `run a workload's operations against a cluster`,
@@ -139,15 +99,12 @@ func init() {
 			}
 
 			genRunCmd := SetCmdDefaults(&cobra.Command{
-				Use:   meta.Name + " [pgurl...]",
+				Use:   meta.Name,
 				Short: meta.Description,
-				Long:  meta.Description + meta.Details,
 				Args:  cobra.ArbitraryArgs,
 			})
 			genRunCmd.Flags().AddFlagSet(runFlags)
-			genRunCmd.Flags().AddFlagSet(sharedFlags)
 			genRunCmd.Flags().AddFlagSet(genFlags)
-			genRunCmd.Flags().AddFlagSet(securityFlags)
 			initFlags.VisitAll(func(initFlag *pflag.Flag) {
 				// Every init flag is a valid run flag that implies the --init option.
 				f := *initFlag
@@ -155,9 +112,6 @@ func init() {
 				genRunCmd.Flags().AddFlag(&f)
 			})
 			genRunCmd.Run = CmdHelper(gen, runRun)
-			if userFacing && !meta.PublicFacing {
-				genRunCmd.Hidden = true
-			}
 			runCmd.AddCommand(genRunCmd)
 		}
 		return runCmd
@@ -170,18 +124,9 @@ func init() {
 func CmdHelper(
 	gen workload.Generator, fn func(gen workload.Generator, urls []string, dbName string) error,
 ) func(*cobra.Command, []string) {
-	return HandleErrs(func(cmd *cobra.Command, args []string) error {
-		// Apply the logging configuration if none was set already.
-		if active, _ := log.IsActive(); !active {
-			cfg := logconfig.DefaultStderrConfig()
-			if err := cfg.Validate(nil /* no default log directory */); err != nil {
-				return err
-			}
-			if _, err := log.ApplyConfig(cfg); err != nil {
-				return err
-			}
-		}
+	const crdbDefaultURL = `postgres://root@localhost:26257?sslmode=disable`
 
+	return HandleErrs(func(cmd *cobra.Command, args []string) error {
 		if h, ok := gen.(workload.Hookser); ok {
 			if h.Hooks().Validate != nil {
 				if err := h.Hooks().Validate(); err != nil {
@@ -196,23 +141,8 @@ func CmdHelper(
 		if dbFlag := cmd.Flag(`db`); dbFlag != nil {
 			dbOverride = dbFlag.Value.String()
 		}
-
 		urls := args
 		if len(urls) == 0 {
-			crdbDefaultURL := fmt.Sprintf(`postgres://%s@localhost:26257?sslmode=disable`, *user)
-			if *secure {
-				if *password != "" {
-					crdbDefaultURL = fmt.Sprintf(
-						`postgres://%s:%s@localhost:26257?sslmode=require&sslrootcert=certs/ca.crt`,
-						*user, *password)
-				} else {
-					crdbDefaultURL = fmt.Sprintf(
-						// This URL expects the certs to have been created by the user.
-						`postgres://%s@localhost:26257?sslcert=certs/client.%s.crt&sslkey=certs/client.%s.key&sslrootcert=certs/ca.crt&sslmode=require`,
-						*user, *user, *user)
-				}
-			}
-
 			urls = []string{crdbDefaultURL}
 		}
 		dbName, err := workload.SanitizeUrls(gen, dbOverride, urls)
@@ -265,12 +195,15 @@ func workerRun(
 		// Limit how quickly the load generator sends requests based on --max-rate.
 		if limiter != nil {
 			if err := limiter.Wait(ctx); err != nil {
-				return
+				if err == ctx.Err() {
+					return
+				}
+				panic(err)
 			}
 		}
 
 		if err := workFn(ctx); err != nil {
-			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			if errors.Cause(err) == ctx.Err() {
 				return
 			}
 			errCh <- err
@@ -292,7 +225,6 @@ func runInit(gen workload.Generator, urls []string, dbName string) error {
 		return err
 	}
 
-	startPProfEndPoint(ctx)
 	return runInitImpl(ctx, gen, initDB, dbName)
 }
 
@@ -308,60 +240,23 @@ func runInitImpl(
 		return err
 	}
 
-	var l workload.InitialDataLoader
-	switch strings.ToLower(*dataLoader) {
-	case `insert`, `inserts`:
-		l = workloadsql.InsertsDataLoader{
-			Concurrency: *initConns,
-		}
-	case `import`, `imports`:
-		l = workload.ImportDataLoader
-	default:
-		return errors.Errorf(`unknown data loader: %s`, *dataLoader)
-	}
-
-	_, err := workloadsql.Setup(ctx, initDB, gen, l)
+	const batchSize = -1
+	// TODO(dan): Don't hardcode this. Similar to dbOverride, this should be
+	// hooked up to a flag directly once once more of run.go moves inside
+	// workload.
+	const concurrency = 16
+	_, err := workload.Setup(ctx, initDB, gen, batchSize, concurrency)
 	return err
-}
-
-func startPProfEndPoint(ctx context.Context) {
-	b := envutil.EnvOrDefaultInt64("COCKROACH_BLOCK_PROFILE_RATE",
-		10000000 /* 1 sample per 10 milliseconds spent blocking */)
-
-	m := envutil.EnvOrDefaultInt("COCKROACH_MUTEX_PROFILE_RATE",
-		1000 /* 1 sample per 1000 mutex contention events */)
-	runtime.SetBlockProfileRate(int(b))
-	runtime.SetMutexProfileFraction(m)
-
-	go func() {
-		err := http.ListenAndServe(":"+strconv.Itoa(*pprofport), nil)
-		if err != nil {
-			log.Errorf(ctx, "%v", err)
-		}
-	}()
 }
 
 func runRun(gen workload.Generator, urls []string, dbName string) error {
 	ctx := context.Background()
 
-	var formatter outputFormat
-	switch *displayFormat {
-	case "simple":
-		formatter = &textFormatter{}
-	case "incremental-json":
-		formatter = &jsonFormatter{w: os.Stdout}
-	default:
-		return errors.Errorf("unknown display format: %s", *displayFormat)
-	}
-
-	startPProfEndPoint(ctx)
 	initDB, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
 	if err != nil {
 		return err
 	}
 	if *doInit || *drop {
-		log.Info(ctx, `DEPRECATION: `+
-			`the --init flag on "workload run" will no longer be supported after 19.2`)
 		for {
 			err = runInitImpl(ctx, gen, initDB, dbName)
 			if err == nil {
@@ -370,7 +265,6 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 			if !*tolerateErrors {
 				return err
 			}
-			log.Infof(ctx, "retrying after error during init: %v", err)
 		}
 	}
 
@@ -385,54 +279,18 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 	if !ok {
 		return errors.Errorf(`no operations defined for %s`, gen.Meta().Name)
 	}
-	reg := histogram.NewRegistry(
-		*histogramsMaxLatency,
-		gen.Meta().Name,
-	)
-	// Expose the prometheus gatherer.
-	go func() {
-		if err := http.ListenAndServe(
-			fmt.Sprintf(":%d", *prometheusPort),
-			promhttp.HandlerFor(reg.Gatherer(), promhttp.HandlerOpts{}),
-		); err != nil {
-			log.Errorf(context.Background(), "error serving prometheus: %v", err)
-		}
-	}()
-
-	var ops workload.QueryLoad
-	prepareStart := timeutil.Now()
-	log.Infof(ctx, "creating load generator...")
-	const prepareTimeout = 60 * time.Minute
-	prepareCtx, cancel := context.WithTimeout(ctx, prepareTimeout)
-	defer cancel()
-	if prepareErr := func(ctx context.Context) error {
-		retry := retry.StartWithCtx(ctx, retry.Options{})
-		var err error
-		for retry.Next() {
-			if err != nil {
-				log.Warningf(ctx, "retrying after error while creating load: %v", err)
-			}
-			ops, err = o.Ops(ctx, urls, reg)
-			if err == nil {
-				return nil
-			}
-			err = errors.Wrapf(err, "failed to initialize the load generator")
-			if !*tolerateErrors {
-				return err
-			}
-		}
-		if ctx.Err() != nil {
-			// Don't retry endlessly. Note that this retry loop is not under the
-			// control of --duration, so we're avoiding retrying endlessly.
-			log.Errorf(ctx, "Attempt to create load generator failed. "+
-				"It's been more than %s since we started trying to create the load generator "+
-				"so we're giving up. Last failure: %s", prepareTimeout, err)
-		}
+	reg := workload.NewHistogramRegistry()
+	ops, err := o.Ops(urls, reg)
+	if err != nil {
 		return err
-	}(prepareCtx); prepareErr != nil {
-		return prepareErr
 	}
-	log.Infof(ctx, "creating load generator... done (took %s)", timeutil.Now().Sub(prepareStart))
+
+	for _, table := range gen.Tables() {
+		splitConcurrency := len(ops.WorkerFns)
+		if err := workload.Split(ctx, initDB, table, splitConcurrency); err != nil {
+			return err
+		}
+	}
 
 	start := timeutil.Now()
 	errCh := make(chan error)
@@ -443,8 +301,6 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 		rampDone = make(chan struct{})
 	}
 
-	workersCtx, cancelWorkers := context.WithCancel(ctx)
-	defer cancelWorkers()
 	var wg sync.WaitGroup
 	wg.Add(len(ops.WorkerFns))
 	go func() {
@@ -453,23 +309,24 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 		var rampCtx context.Context
 		if rampDone != nil {
 			var cancel func()
-			rampCtx, cancel = context.WithTimeout(workersCtx, *ramp)
+			rampCtx, cancel = context.WithTimeout(ctx, *ramp)
 			defer cancel()
 		}
 
 		for i, workFn := range ops.WorkerFns {
-			go func(i int, workFn func(context.Context) error) {
+			i, workFn := i, workFn
+			go func() {
 				// If a ramp period was specified, start all of the workers
 				// gradually with a new context.
 				if rampCtx != nil {
 					rampPerWorker := *ramp / time.Duration(len(ops.WorkerFns))
 					time.Sleep(time.Duration(i) * rampPerWorker)
-					workerRun(rampCtx, errCh, nil /* wg */, limiter, workFn)
+					workerRun(rampCtx, errCh, nil, limiter, workFn)
 				}
 
 				// Start worker again, this time with the main context.
-				workerRun(workersCtx, errCh, &wg, limiter, workFn)
-			}(i, workFn)
+				workerRun(ctx, errCh, &wg, limiter, workFn)
+			}()
 		}
 
 		if rampCtx != nil {
@@ -480,7 +337,8 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 		}
 	}()
 
-	ticker := time.NewTicker(*displayEvery)
+	var numErr int
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	done := make(chan os.Signal, 3)
 	signal.Notify(done, exitSignals...)
@@ -507,49 +365,77 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 		jsonEnc = json.NewEncoder(jsonF)
 	}
 
-	everySecond := log.Every(*displayEvery)
-	for {
+	for i := 0; ; {
 		select {
 		case err := <-errCh:
-			formatter.outputError(err)
+			numErr++
 			if *tolerateErrors {
-				if everySecond.ShouldLog() {
-					log.Errorf(ctx, "%v", err)
-				}
+				log.Error(ctx, err)
 				continue
 			}
 			return err
 
 		case <-ticker.C:
 			startElapsed := timeutil.Since(start)
-			reg.Tick(func(t histogram.Tick) {
-				formatter.outputTick(startElapsed, t)
+			reg.Tick(func(t workload.HistogramTick) {
+				if i%20 == 0 {
+					fmt.Println("_elapsed___errors__ops/sec(inst)___ops/sec(cum)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)")
+				}
+				i++
+				fmt.Printf("%8s %8d %14.1f %14.1f %8.1f %8.1f %8.1f %8.1f %s\n",
+					time.Duration(startElapsed.Seconds()+0.5)*time.Second,
+					numErr,
+					float64(t.Hist.TotalCount())/t.Elapsed.Seconds(),
+					float64(t.Cumulative.TotalCount())/startElapsed.Seconds(),
+					time.Duration(t.Hist.ValueAtQuantile(50)).Seconds()*1000,
+					time.Duration(t.Hist.ValueAtQuantile(95)).Seconds()*1000,
+					time.Duration(t.Hist.ValueAtQuantile(99)).Seconds()*1000,
+					time.Duration(t.Hist.ValueAtQuantile(100)).Seconds()*1000,
+					t.Name,
+				)
 				if jsonEnc != nil && rampDone == nil {
 					_ = jsonEnc.Encode(t.Snapshot())
 				}
 			})
 
 		// Once the load generator is fully ramped up, we reset the histogram
-		// and the start time to throw away the stats for the ramp up period.
+		// and the start time to throw away the stats for the the ramp up period.
 		case <-rampDone:
 			rampDone = nil
 			start = timeutil.Now()
-			formatter.rampDone()
-			reg.Tick(func(t histogram.Tick) {
+			i = 0
+			reg.Tick(func(t workload.HistogramTick) {
 				t.Cumulative.Reset()
 				t.Hist.Reset()
 			})
 
 		case <-done:
-			cancelWorkers()
-			if ops.Close != nil {
-				ops.Close(ctx)
+			const totalHeader = "\n_elapsed___errors_____ops(total)___ops/sec(cum)__avg(ms)__p50(ms)__p95(ms)__p99(ms)_pMax(ms)"
+			fmt.Println(totalHeader + `__total`)
+			startElapsed := timeutil.Since(start)
+			printTotalHist := func(t workload.HistogramTick) {
+				if t.Cumulative == nil {
+					return
+				}
+				if t.Cumulative.TotalCount() == 0 {
+					return
+				}
+				fmt.Printf("%7.1fs %8d %14d %14.1f %8.1f %8.1f %8.1f %8.1f %8.1f  %s\n",
+					startElapsed.Seconds(), numErr,
+					t.Cumulative.TotalCount(),
+					float64(t.Cumulative.TotalCount())/startElapsed.Seconds(),
+					time.Duration(t.Cumulative.Mean()).Seconds()*1000,
+					time.Duration(t.Cumulative.ValueAtQuantile(50)).Seconds()*1000,
+					time.Duration(t.Cumulative.ValueAtQuantile(95)).Seconds()*1000,
+					time.Duration(t.Cumulative.ValueAtQuantile(99)).Seconds()*1000,
+					time.Duration(t.Cumulative.ValueAtQuantile(100)).Seconds()*1000,
+					t.Name,
+				)
 			}
 
-			startElapsed := timeutil.Since(start)
-			resultTick := histogram.Tick{Name: ops.ResultHist}
-			reg.Tick(func(t histogram.Tick) {
-				formatter.outputTotal(startElapsed, t)
+			resultTick := workload.HistogramTick{Name: ops.ResultHist}
+			reg.Tick(func(t workload.HistogramTick) {
+				printTotalHist(t)
 				if jsonEnc != nil {
 					// Note that we're outputting the delta from the last tick. The
 					// cumulative histogram can be computed by merging all of the
@@ -565,7 +451,9 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 					}
 				}
 			})
-			formatter.outputResult(startElapsed, resultTick)
+
+			fmt.Println(totalHeader + `__result`)
+			printTotalHist(resultTick)
 
 			if h, ok := gen.(workload.Hookser); ok {
 				if h.Hooks().PostRun != nil {

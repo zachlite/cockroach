@@ -1,18 +1,21 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 )
 
 // VarName occurs inside scalar expressions.
@@ -63,8 +66,8 @@ var singletonStarName VarName = UnqualifiedStar{}
 func StarExpr() VarName { return singletonStarName }
 
 // ResolvedType implements the TypedExpr interface.
-func (UnqualifiedStar) ResolvedType() *types.T {
-	panic(errors.AssertionFailedf("unqualified stars ought to be replaced before this point"))
+func (UnqualifiedStar) ResolvedType() types.T {
+	panic("unqualified stars ought to be replaced before this point")
 }
 
 // Variable implements the VariableExpr interface.
@@ -74,8 +77,8 @@ func (UnqualifiedStar) Variable() {}
 // VarName interface, and thus TypedExpr too.
 
 // ResolvedType implements the TypedExpr interface.
-func (*UnresolvedName) ResolvedType() *types.T {
-	panic(errors.AssertionFailedf("unresolved names ought to be replaced before this point"))
+func (*UnresolvedName) ResolvedType() types.T {
+	panic("unresolved names ought to be replaced before this point")
 }
 
 // Variable implements the VariableExpr interface.  Although, the
@@ -92,13 +95,14 @@ func (n *UnresolvedName) NormalizeVarName() (VarName, error) {
 // columns in a table when used in a SELECT clause.
 // (e.g. `table.*`).
 type AllColumnsSelector struct {
-	// TableName corresponds to the table prefix, before the star.
-	TableName *UnresolvedObjectName
+	// TableName corresponds to the table prefix, before the star. The
+	// UnresolvedName within is guaranteed to not contain a star itself.
+	TableName UnresolvedName
 }
 
 // Format implements the NodeFormatter interface.
 func (a *AllColumnsSelector) Format(ctx *FmtCtx) {
-	ctx.FormatNode(a.TableName)
+	ctx.FormatNode(&a.TableName)
 	ctx.WriteString(".*")
 }
 func (a *AllColumnsSelector) String() string { return AsString(a) }
@@ -112,29 +116,33 @@ func (a *AllColumnsSelector) NormalizeVarName() (VarName, error) { return a, nil
 func (a *AllColumnsSelector) Variable() {}
 
 // ResolvedType implements the TypedExpr interface.
-func (*AllColumnsSelector) ResolvedType() *types.T {
-	panic(errors.AssertionFailedf("all-columns selectors ought to be replaced before this point"))
+func (*AllColumnsSelector) ResolvedType() types.T {
+	panic("all-columns selectors ought to be replaced before this point")
 }
 
 // ColumnItem corresponds to the name of a column in an expression.
 type ColumnItem struct {
-	// TableName holds the table prefix, if the name refers to a column. It is
-	// optional.
+	// TableName holds the table prefix, if the name refers to a column.
 	//
-	// This uses UnresolvedObjectName because we need to preserve the
+	// This uses UnresolvedName because we need to preserve the
 	// information about which parts were initially specified in the SQL
 	// text. ColumnItems are intermediate data structures anyway, that
 	// still need to undergo name resolution.
-	TableName *UnresolvedObjectName
+	TableName UnresolvedName
 	// ColumnName names the designated column.
 	ColumnName Name
+
+	// This column is a selector column expression used in a SELECT
+	// for an UPDATE/DELETE.
+	// TODO(vivek): Do not artificially create such expressions
+	// when scanning columns for an UPDATE/DELETE.
+	ForUpdateOrDelete bool
 }
 
 // Format implements the NodeFormatter interface.
-// If this is updated, then dummyColumnItem.Format should be updated as well.
 func (c *ColumnItem) Format(ctx *FmtCtx) {
-	if c.TableName != nil {
-		ctx.FormatNode(c.TableName)
+	if c.TableName.NumParts > 0 {
+		c.TableName.Format(ctx)
 		ctx.WriteByte('.')
 	}
 	ctx.FormatNode(&c.ColumnName)
@@ -156,7 +164,7 @@ func (c *ColumnItem) Column() string {
 func (c *ColumnItem) Variable() {}
 
 // ResolvedType implements the TypedExpr interface.
-func (c *ColumnItem) ResolvedType() *types.T {
+func (c *ColumnItem) ResolvedType() types.T {
 	if presetTypesForTesting == nil {
 		return nil
 	}
@@ -173,19 +181,18 @@ func NewColumnItem(tn *TableName, colName Name) *ColumnItem {
 // MakeColumnItem constructs a column item from an already valid
 // TableName. This can be used for e.g. pretty-printing.
 func MakeColumnItem(tn *TableName, colName Name) ColumnItem {
-	c := ColumnItem{ColumnName: colName}
-	if tn.Table() != "" {
-		numParts := 1
-		if tn.ExplicitCatalog {
-			numParts = 3
-		} else if tn.ExplicitSchema {
-			numParts = 2
-		}
-
-		c.TableName = &UnresolvedObjectName{
-			NumParts: numParts,
-			Parts:    [3]string{tn.Table(), tn.Schema(), tn.Catalog()},
-		}
+	c := ColumnItem{
+		TableName: UnresolvedName{
+			Parts: NameParts{tn.Table(), tn.Schema(), tn.Catalog()},
+		},
+		ColumnName: colName,
+	}
+	if tn.ExplicitCatalog {
+		c.TableName.NumParts = 3
+	} else if tn.ExplicitSchema {
+		c.TableName.NumParts = 2
+	} else {
+		c.TableName.NumParts = 1
 	}
 	return c
 }

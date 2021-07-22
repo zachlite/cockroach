@@ -1,8 +1,8 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
+// Licensed under the Cockroach Community Licence (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
@@ -18,19 +18,14 @@ export class Box {
       return null;
     }
 
-    const left = d3.min(boxes, (b) => b.left());
-    const top = d3.min(boxes, (b) => b.top());
-    const right = d3.max(boxes, (b) => b.right());
-    const bottom = d3.max(boxes, (b) => b.bottom());
+    const left = d3.min(boxes, b => b.left());
+    const top = d3.min(boxes, b => b.top());
+    const right = d3.max(boxes, b => b.right());
+    const bottom = d3.max(boxes, b => b.bottom());
     return new Box(left, top, right - left, bottom - top);
   }
 
-  constructor(
-    private x: number,
-    private y: number,
-    private w: number,
-    private h: number,
-  ) {}
+  constructor(private x: number, private y: number, private w: number, private h: number) { }
 
   width() {
     return this.w;

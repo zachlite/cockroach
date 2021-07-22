@@ -1,21 +1,24 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package settings
 
 import (
-	"context"
 	"strconv"
 	"time"
 
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 // EncodeDuration encodes a duration in the format parseRaw expects.
@@ -50,30 +53,30 @@ type updater struct {
 // wrapped atomic settings values as we go and note which settings were updated,
 // then set the rest to default in ResetRemaining().
 type Updater interface {
-	Set(ctx context.Context, k, rawValue, valType string) error
-	ResetRemaining(ctx context.Context)
+	Set(k, rawValue, valType string) error
+	ResetRemaining()
 }
 
 // A NoopUpdater ignores all updates.
 type NoopUpdater struct{}
 
 // Set implements Updater. It is a no-op.
-func (u NoopUpdater) Set(ctx context.Context, k, rawValue, valType string) error { return nil }
+func (u NoopUpdater) Set(_, _, _ string) error { return nil }
 
 // ResetRemaining implements Updater. It is a no-op.
-func (u NoopUpdater) ResetRemaining(context.Context) {}
+func (u NoopUpdater) ResetRemaining() {}
 
 // NewUpdater makes an Updater.
 func NewUpdater(sv *Values) Updater {
 	return updater{
-		m:  make(map[string]struct{}, len(registry)),
+		m:  make(map[string]struct{}, len(Registry)),
 		sv: sv,
 	}
 }
 
 // Set attempts to parse and update a setting and notes that it was updated.
-func (u updater) Set(ctx context.Context, key, rawValue string, vt string) error {
-	d, ok := registry[key]
+func (u updater) Set(key, rawValue string, vt string) error {
+	d, ok := Registry[key]
 	if !ok {
 		if _, ok := retiredSettings[key]; ok {
 			return nil
@@ -90,54 +93,49 @@ func (u updater) Set(ctx context.Context, key, rawValue string, vt string) error
 
 	switch setting := d.(type) {
 	case *StringSetting:
-		return setting.set(ctx, u.sv, rawValue)
+		return setting.set(u.sv, rawValue)
 	case *BoolSetting:
 		b, err := strconv.ParseBool(rawValue)
 		if err != nil {
 			return err
 		}
-		setting.set(ctx, u.sv, b)
+		setting.set(u.sv, b)
 		return nil
-	case numericSetting: // includes *EnumSetting
+	case numericSetting:
 		i, err := strconv.Atoi(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, int64(i))
+		return setting.set(u.sv, int64(i))
 	case *FloatSetting:
 		f, err := strconv.ParseFloat(rawValue, 64)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, f)
+		return setting.set(u.sv, f)
 	case *DurationSetting:
 		d, err := time.ParseDuration(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, d)
-	case *DurationSettingWithExplicitUnit:
-		d, err := time.ParseDuration(rawValue)
+		return setting.set(u.sv, d)
+	case *EnumSetting:
+		i, err := strconv.Atoi(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, d)
-	case *VersionSetting:
-		// We intentionally avoid updating the setting through this code path.
-		// The specific setting backed by VersionSetting is the cluster version
-		// setting, changes to which are propagated through direct RPCs to each
-		// node in the cluster instead of gossip. This is done using the
-		// BumpClusterVersion RPC.
-		return nil
+		return setting.set(u.sv, int64(i))
+	case *StateMachineSetting:
+		return setting.set(u.sv, []byte(rawValue))
 	}
 	return nil
 }
 
 // ResetRemaining sets all settings not updated by the updater to their default values.
-func (u updater) ResetRemaining(ctx context.Context) {
-	for k, v := range registry {
+func (u updater) ResetRemaining() {
+	for k, v := range Registry {
 		if _, ok := u.m[k]; !ok {
-			v.setToDefault(ctx, u.sv)
+			v.setToDefault(u.sv)
 		}
 	}
 }

@@ -1,15 +1,19 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import React from "react";
-import { Route, Redirect } from "react-router-dom";
+import { Route } from "react-router";
 import { Store } from "redux";
 
 import { doLogout, selectLoginState } from "src/redux/login";
@@ -19,24 +23,21 @@ import LoginPage from "src/views/login/loginPage";
 export const LOGIN_PAGE = "/login";
 export const LOGOUT_PAGE = "/logout";
 
-export function createLoginRoute() {
-  return <Route exact path={LOGIN_PAGE} component={LoginPage} />;
-}
+export default function createLoginRoutes(store: Store<AdminUIState>): JSX.Element {
+  function handleLogout(_nextState: any, replace: (route: string) => {}) {
+    const loginState = selectLoginState(store.getState());
 
-export function createLogoutRoute(store: Store<AdminUIState>): JSX.Element {
+    if (!loginState.loggedInUser()) {
+      return replace(LOGIN_PAGE);
+    }
+
+    store.dispatch(doLogout());
+  }
+
   return (
-    <Route
-      exact
-      path={LOGOUT_PAGE}
-      render={() => {
-        const loginState = selectLoginState(store.getState());
-
-        if (!loginState.loggedInUser()) {
-          return <Redirect to={LOGIN_PAGE} />;
-        }
-
-        store.dispatch(doLogout());
-      }}
-    />
+    <React.Fragment>
+      <Route path={LOGIN_PAGE} component={ LoginPage } />
+      <Route path={LOGOUT_PAGE} onEnter={ handleLogout } />
+    </React.Fragment>
   );
 }

@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package cluster
 
@@ -25,11 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -39,7 +38,9 @@ import (
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/go-connections/nat"
 	isatty "github.com/mattn/go-isatty"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // Retrieve the IP address of docker itself.
@@ -68,6 +69,11 @@ type Container struct {
 	id      string
 	name    string
 	cluster *DockerCluster
+}
+
+// ID returns the container's id.
+func (c Container) ID() string {
+	return c.id
 }
 
 // Name returns the container's name.
@@ -201,7 +207,6 @@ func createContainer(
 	l *DockerCluster,
 	containerConfig container.Config,
 	hostConfig container.HostConfig,
-	platformSpec specs.Platform,
 	containerName string,
 ) (*Container, error) {
 	hostConfig.NetworkMode = container.NetworkMode(l.networkID)
@@ -222,14 +227,14 @@ func createContainer(
 	// container.
 	for _, bind := range hostConfig.Binds {
 		hostPath, _ := splitBindSpec(bind)
-		if _, err := os.Stat(hostPath); oserror.IsNotExist(err) {
+		if _, err := os.Stat(hostPath); os.IsNotExist(err) {
 			maybePanic(os.MkdirAll(hostPath, 0755))
 		} else {
 			maybePanic(err)
 		}
 	}
 
-	resp, err := l.client.ContainerCreate(ctx, &containerConfig, &hostConfig, nil, &platformSpec, containerName)
+	resp, err := l.client.ContainerCreate(ctx, &containerConfig, &hostConfig, nil, containerName)
 	if err != nil {
 		return nil, err
 	}
@@ -303,13 +308,13 @@ func (c *Container) Wait(ctx context.Context, condition container.WaitCondition)
 
 		out := io.MultiWriter(cmdLog, os.Stderr)
 		if err := c.Logs(ctx, out); err != nil {
-			log.Warningf(ctx, "%v", err)
+			log.Warning(ctx, err)
 		}
 
 		if exitCode := waitOKBody.StatusCode; exitCode != 0 {
 			err = errors.Errorf("non-zero exit code: %d", exitCode)
 			fmt.Fprintln(out, err.Error())
-			log.Shoutf(ctx, severity.INFO, "command left-over files in %s", c.cluster.volumesDir)
+			log.Shout(ctx, log.Severity_INFO, "command left-over files in ", c.cluster.volumesDir)
 		}
 
 		return err
@@ -355,7 +360,7 @@ func (c *Container) Inspect(ctx context.Context) (types.ContainerJSON, error) {
 func (c *Container) Addr(ctx context.Context, port nat.Port) *net.TCPAddr {
 	containerInfo, err := c.Inspect(ctx)
 	if err != nil {
-		log.Errorf(ctx, "%v", err)
+		log.Error(ctx, err)
 		return nil
 	}
 	bindings, ok := containerInfo.NetworkSettings.Ports[port]
@@ -364,7 +369,7 @@ func (c *Container) Addr(ctx context.Context, port nat.Port) *net.TCPAddr {
 	}
 	portNum, err := strconv.Atoi(bindings[0].HostPort)
 	if err != nil {
-		log.Errorf(ctx, "%v", err)
+		log.Error(ctx, err)
 		return nil
 	}
 	return &net.TCPAddr{
@@ -386,13 +391,16 @@ func (cli resilientDockerClient) ContainerStart(
 	clientCtx context.Context, id string, opts types.ContainerStartOptions,
 ) error {
 	for {
-		err := contextutil.RunWithTimeout(clientCtx, "start container", 20*time.Second, func(ctx context.Context) error {
+		err := func() error {
+			ctx, cancel := context.WithTimeout(clientCtx, 20*time.Second)
+			defer cancel()
+
 			return cli.APIClient.ContainerStart(ctx, id, opts)
-		})
+		}()
 
 		// Keep going if ContainerStart timed out, but client's context is not
 		// expired.
-		if errors.Is(err, context.DeadlineExceeded) && clientCtx.Err() == nil {
+		if err == context.DeadlineExceeded && clientCtx.Err() == nil {
 			log.Warningf(clientCtx, "ContainerStart timed out, retrying")
 			continue
 		}
@@ -405,12 +413,9 @@ func (cli resilientDockerClient) ContainerCreate(
 	config *container.Config,
 	hostConfig *container.HostConfig,
 	networkingConfig *network.NetworkingConfig,
-	platformSpec *specs.Platform,
 	containerName string,
 ) (container.ContainerCreateCreatedBody, error) {
-	response, err := cli.APIClient.ContainerCreate(
-		ctx, config, hostConfig, networkingConfig, platformSpec, containerName,
-	)
+	response, err := cli.APIClient.ContainerCreate(ctx, config, hostConfig, networkingConfig, containerName)
 	if err != nil && strings.Contains(err.Error(), "already in use") {
 		log.Infof(ctx, "unable to create container %s: %v", containerName, err)
 		containers, cerr := cli.ContainerList(ctx, types.ContainerListOptions{
@@ -437,7 +442,7 @@ func (cli resilientDockerClient) ContainerCreate(
 					log.Infof(ctx, "unable to remove container: %v", rerr)
 					return container.ContainerCreateCreatedBody{}, err
 				}
-				return cli.ContainerCreate(ctx, config, hostConfig, networkingConfig, platformSpec, containerName)
+				return cli.ContainerCreate(ctx, config, hostConfig, networkingConfig, containerName)
 			}
 		}
 		log.Warningf(ctx, "error indicated existing container %s, "+

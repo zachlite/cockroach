@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package gossip
 
@@ -18,10 +22,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
+	"github.com/gogo/protobuf/proto"
+	"github.com/pkg/errors"
+	"google.golang.org/grpc"
+
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -31,36 +40,35 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
-	"google.golang.org/grpc"
 )
 
 // startGossip creates and starts a gossip instance.
 func startGossip(
-	clusterID uuid.UUID,
-	nodeID roachpb.NodeID,
-	stopper *stop.Stopper,
-	t *testing.T,
-	registry *metric.Registry,
+	nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T, registry *metric.Registry,
 ) *Gossip {
-	return startGossipAtAddr(clusterID, nodeID, util.IsolatedTestAddr, stopper, t, registry)
+	return startGossipAtAddr(nodeID, util.IsolatedTestAddr, stopper, t, registry)
+}
+
+func newInsecureRPCContext(stopper *stop.Stopper) *rpc.Context {
+	return rpc.NewContext(
+		log.AmbientContext{Tracer: tracing.NewTracer()},
+		&base.Config{Insecure: true},
+		hlc.NewClock(hlc.UnixNano, time.Nanosecond),
+		stopper,
+		&cluster.MakeTestingClusterSettings().Version,
+	)
 }
 
 func startGossipAtAddr(
-	clusterID uuid.UUID,
 	nodeID roachpb.NodeID,
 	addr net.Addr,
 	stopper *stop.Stopper,
 	t *testing.T,
 	registry *metric.Registry,
 ) *Gossip {
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-	rpcContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
-	rpcContext.NodeID.Set(context.Background(), nodeID)
-
+	rpcContext := newInsecureRPCContext(stopper)
 	server := rpc.NewServer(rpcContext)
-	g := NewTest(nodeID, rpcContext, server, stopper, registry, zonepb.DefaultZoneConfigRef())
+	g := NewTest(nodeID, rpcContext, server, stopper, registry)
 	ln, err := netutil.ListenAndServeGRPC(stopper, server, addr)
 	if err != nil {
 		t.Fatal(err)
@@ -115,20 +123,20 @@ func (s *fakeGossipServer) Gossip(stream Gossip_GossipServer) error {
 // faked gossip instance. The remote gossip instance launches its
 // faked gossip service just for check the client message.
 func startFakeServerGossips(
-	t *testing.T, clusterID uuid.UUID, localNodeID roachpb.NodeID, stopper *stop.Stopper,
+	t *testing.T, localNodeID roachpb.NodeID, stopper *stop.Stopper,
 ) (*Gossip, *fakeGossipServer) {
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-	lRPCContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
+	lRPCContext := newInsecureRPCContext(stopper)
 
 	lserver := rpc.NewServer(lRPCContext)
-	local := NewTest(localNodeID, lRPCContext, lserver, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
+	local := NewTest(localNodeID, lRPCContext, lserver, stopper, metric.NewRegistry())
 	lln, err := netutil.ListenAndServeGRPC(stopper, lserver, util.IsolatedTestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	local.start(lln.Addr())
 
-	rRPCContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
+	rRPCContext := newInsecureRPCContext(stopper)
+
 	rserver := rpc.NewServer(rRPCContext)
 	remote := newFakeGossipServer(rserver, stopper)
 	rln, err := netutil.ListenAndServeGRPC(stopper, rserver, util.IsolatedTestAddr)
@@ -144,14 +152,12 @@ func startFakeServerGossips(
 func gossipSucceedsSoon(
 	t *testing.T,
 	stopper *stop.Stopper,
-	clusterID uuid.UUID,
 	disconnected chan *client,
 	gossip map[*client]*Gossip,
 	f func() error,
 ) {
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	// Use an insecure context since we don't need a valid cert.
-	rpcContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
+	rpcContext := newInsecureRPCContext(stopper)
 
 	for c := range gossip {
 		disconnected <- c
@@ -176,18 +182,13 @@ func gossipSucceedsSoon(
 func TestClientGossip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
-	local := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
-	remote := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	disconnected := make(chan *client, 1)
 	c := newClient(log.AmbientContext{Tracer: tracing.NewTracer()}, remote.GetNodeAddr(), makeMetrics())
 
 	defer func() {
-		stopper.Stop(context.Background())
+		stopper.Stop(context.TODO())
 		if c != <-disconnected {
 			t.Errorf("expected client disconnect after remote close")
 		}
@@ -200,7 +201,7 @@ func TestClientGossip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gossipSucceedsSoon(t, stopper, clusterID, disconnected, map[*client]*Gossip{
+	gossipSucceedsSoon(t, stopper, disconnected, map[*client]*Gossip{
 		c: local,
 	}, func() error {
 		if _, err := remote.GetInfo("local-key"); err != nil {
@@ -217,14 +218,9 @@ func TestClientGossip(t *testing.T) {
 func TestClientGossipMetrics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
-	local := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
-	remote := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
+	defer stopper.Stop(context.TODO())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 
 	if err := local.AddInfo("local-key", nil, time.Hour); err != nil {
 		t.Fatal(err)
@@ -234,7 +230,7 @@ func TestClientGossipMetrics(t *testing.T) {
 	}
 
 	gossipSucceedsSoon(
-		t, stopper, clusterID, make(chan *client, 2),
+		t, stopper, make(chan *client, 2),
 		map[*client]*Gossip{
 			newClient(log.AmbientContext{Tracer: tracing.NewTracer()}, local.GetNodeAddr(), remote.nodeMetrics): remote,
 		},
@@ -282,22 +278,16 @@ func TestClientNodeID(t *testing.T) {
 	stopper := stop.NewStopper()
 	disconnected := make(chan *client, 1)
 
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
 	localNodeID := roachpb.NodeID(1)
-	local, remote := startFakeServerGossips(t, clusterID, localNodeID, stopper)
+	local, remote := startFakeServerGossips(t, localNodeID, stopper)
 
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	// Use an insecure context. We're talking to tcp socket which are not in the certs.
-	rpcContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
-
+	rpcContext := newInsecureRPCContext(stopper)
 	c := newClient(log.AmbientContext{Tracer: tracing.NewTracer()}, &remote.nodeAddr, makeMetrics())
 	disconnected <- c
 
 	defer func() {
-		stopper.Stop(context.Background())
+		stopper.Stop(context.TODO())
 		if c != <-disconnected {
 			t.Errorf("expected client disconnect after remote close")
 		}
@@ -335,8 +325,8 @@ func verifyServerMaps(g *Gossip, expCount int) bool {
 func TestClientDisconnectLoopback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-	local := startGossip(uuid.Nil, 1, stopper, t, metric.NewRegistry())
+	defer stopper.Stop(context.TODO())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	lAddr := local.mu.is.NodeAddr
 	local.startClientLocked(&lAddr)
@@ -357,14 +347,9 @@ func TestClientDisconnectLoopback(t *testing.T) {
 func TestClientDisconnectRedundant(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
-	local := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
-	remote := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
+	defer stopper.Stop(context.TODO())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	remote.mu.Lock()
 	rAddr := remote.mu.is.NodeAddr
@@ -416,15 +401,9 @@ func TestClientDisconnectRedundant(t *testing.T) {
 func TestClientDisallowMultipleConns(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
-	local := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
-	remote := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
-
+	defer stopper.Stop(context.TODO())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	remote.mu.Lock()
 	rAddr := remote.mu.is.NodeAddr
@@ -458,24 +437,18 @@ func TestClientDisallowMultipleConns(t *testing.T) {
 func TestClientRegisterWithInitNodeID(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
+	defer stopper.Stop(context.TODO())
 
 	// Create three gossip nodes, and connect to the first with NodeID 0.
 	var g []*Gossip
 	var gossipAddr string
 	for i := 0; i < 3; i++ {
-		nodeID := roachpb.NodeID(i + 1)
+		RPCContext := newInsecureRPCContext(stopper)
 
-		rpcContext := rpc.NewInsecureTestingContextWithClusterID(clock, stopper, clusterID)
-		server := rpc.NewServer(rpcContext)
+		server := rpc.NewServer(RPCContext)
 		// node ID must be non-zero
 		gnode := NewTest(
-			nodeID, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef(),
+			roachpb.NodeID(i+1), RPCContext, server, stopper, metric.NewRegistry(),
 		)
 		g = append(g, gnode)
 
@@ -536,13 +509,9 @@ func (tr *testResolver) GetAddress() (net.Addr, error) {
 func TestClientRetryBootstrap(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-
-	// Shared cluster ID by all gossipers (this ensures that the gossipers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-	local := startGossip(clusterID, 1, stopper, t, metric.NewRegistry())
-	remote := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
+	defer stopper.Stop(context.TODO())
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 
 	if err := local.AddInfo("local-key", []byte("hello"), 0*time.Second); err != nil {
 		t.Fatal(err)
@@ -567,9 +536,9 @@ func TestClientRetryBootstrap(t *testing.T) {
 func TestClientForwardUnresolved(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
+	defer stopper.Stop(context.TODO())
 	const nodeID = 1
-	local := startGossip(uuid.Nil, nodeID, stopper, t, metric.NewRegistry())
+	local := startGossip(nodeID, stopper, t, metric.NewRegistry())
 	addr := local.GetNodeAddr()
 
 	client := newClient(log.AmbientContext{Tracer: tracing.NewTracer()}, addr, makeMetrics()) // never started
@@ -588,11 +557,11 @@ func TestClientForwardUnresolved(t *testing.T) {
 	local.outgoing.addPlaceholder() // so that the resolvePlaceholder in handleResponse doesn't fail
 	local.mu.Unlock()
 	if err := client.handleResponse(
-		context.Background(), local, reply,
+		context.TODO(), local, reply,
 	); !testutils.IsError(err, "received forward") {
 		t.Fatal(err)
 	}
-	if !client.forwardAddr.Equal(&newAddr) {
+	if !proto.Equal(client.forwardAddr, &newAddr) {
 		t.Fatalf("unexpected forward address %v, expected %v", client.forwardAddr, &newAddr)
 	}
 }

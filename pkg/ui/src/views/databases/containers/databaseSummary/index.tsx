@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
@@ -14,13 +18,7 @@ import React from "react";
 import * as protos from "src/js/protos";
 
 import { AdminUIState } from "src/redux/state";
-import {
-  refreshDatabaseDetails,
-  refreshTableDetails,
-  refreshTableStats,
-  generateTableID,
-  KeyedCachedDataReducerState,
-} from "src/redux/apiReducers";
+import { refreshDatabaseDetails, refreshTableDetails, refreshTableStats, generateTableID} from "src/redux/apiReducers";
 
 import { SortSetting } from "src/views/shared/components/sortabletable";
 
@@ -30,7 +28,6 @@ import { TableInfo } from "src/views/databases/data/tableInfo";
 // on a DatabaseSummary component.
 export interface DatabaseSummaryExplicitData {
   name: string;
-  updateOnLoad?: boolean;
 }
 
 // DatabaseSummaryConnectedData describes properties which are applied to a
@@ -38,7 +35,7 @@ export interface DatabaseSummaryExplicitData {
 interface DatabaseSummaryConnectedData {
   sortSetting: SortSetting;
   tableInfos: TableInfo[];
-  dbResponse: KeyedCachedDataReducerState<protos.cockroach.server.serverpb.DatabaseDetailsResponse>;
+  dbResponse: protos.cockroach.server.serverpb.DatabaseDetailsResponse;
   grants: protos.cockroach.server.serverpb.DatabaseDetailsResponse.Grant[];
 }
 
@@ -51,79 +48,49 @@ interface DatabaseSummaryActions {
   refreshTableStats: typeof refreshTableStats;
 }
 
-export type DatabaseSummaryProps = DatabaseSummaryExplicitData &
-  DatabaseSummaryConnectedData &
-  DatabaseSummaryActions;
-
-interface DatabaseSummaryState {
-  finishedLoadingTableData: boolean;
-}
+type DatabaseSummaryProps = DatabaseSummaryExplicitData & DatabaseSummaryConnectedData & DatabaseSummaryActions;
 
 // DatabaseSummaryBase implements common lifecycle methods for DatabaseSummary
 // components, which differ primarily by their render() method.
 // TODO(mrtracy): We need to find a better abstraction for the common
 // "refresh-on-mount-or-receiveProps" we have in many of our connected
 // components; that would allow us to avoid this inheritance.
-export class DatabaseSummaryBase extends React.Component<
-  DatabaseSummaryProps,
-  DatabaseSummaryState
-> {
+export class DatabaseSummaryBase extends React.Component<DatabaseSummaryProps, {}> {
   // loadTableDetails loads data for each table which have no info in the store.
   // TODO(mrtracy): Should this be refreshing data always? Not sure if there
   // is a performance concern with invalidation periods.
-  async loadTableDetails(props = this.props) {
+  loadTableDetails(props = this.props) {
     if (props.tableInfos && props.tableInfos.length > 0) {
-      for (const tblInfo of props.tableInfos) {
-        // TODO(davidh): this is a stopgap inserted to deal with DBs containing hundreds of tables
-        await Promise.all([
-          _.isUndefined(tblInfo.numColumns)
-            ? props.refreshTableDetails(
-                new protos.cockroach.server.serverpb.TableDetailsRequest({
-                  database: props.name,
-                  table: tblInfo.name,
-                }),
-              )
-            : null,
-          _.isUndefined(tblInfo.physicalSize)
-            ? props.refreshTableStats(
-                new protos.cockroach.server.serverpb.TableStatsRequest({
-                  database: props.name,
-                  table: tblInfo.name,
-                }),
-              )
-            : null,
-        ]);
-      }
+      _.each(props.tableInfos, (tblInfo) => {
+        if (_.isUndefined(tblInfo.numColumns)) {
+          props.refreshTableDetails(new protos.cockroach.server.serverpb.TableDetailsRequest({
+            database: props.name,
+            table: tblInfo.name,
+          }));
+        }
+        if (_.isUndefined(tblInfo.physicalSize)) {
+          props.refreshTableStats(new protos.cockroach.server.serverpb.TableStatsRequest({
+            database: props.name,
+            table: tblInfo.name,
+          }));
+        }
+      });
     }
-    this.setState({ finishedLoadingTableData: true });
   }
 
   // Refresh when the component is mounted.
-  async componentDidMount() {
-    this.props.refreshDatabaseDetails(
-      new protos.cockroach.server.serverpb.DatabaseDetailsRequest({
-        database: this.props.name,
-      }),
-    );
-    if (this.props.updateOnLoad) {
-      await this.loadTableDetails();
-    }
+  componentWillMount() {
+    this.props.refreshDatabaseDetails(new protos.cockroach.server.serverpb.DatabaseDetailsRequest({ database: this.props.name }));
+    this.loadTableDetails();
   }
 
   // Refresh when the component receives properties.
-  async componentDidUpdate() {
-    if (this.props.updateOnLoad) {
-      await this.loadTableDetails(this.props);
-    }
+  componentWillReceiveProps(props: DatabaseSummaryProps) {
+    this.loadTableDetails(props);
   }
 
-  // Leaving this render method alone during linting cleanup since it's
-  // used to discourage render without subclassing.
-  // eslint-disable-next-line react/require-render-return
   render(): React.ReactElement<any> {
-    throw new Error(
-      "DatabaseSummaryBase should never be instantiated directly. ",
-    );
+      throw new Error("DatabaseSummaryBase should never be instantiated directly. ");
   }
 }
 
@@ -138,15 +105,12 @@ export function databaseDetails(state: AdminUIState) {
 // to be expensive. My current intuition is that this will not be a bottleneck.
 export function tableInfos(state: AdminUIState, dbName: string) {
   const dbDetails = databaseDetails(state);
-  const tableNames =
-    dbDetails[dbName] &&
-    dbDetails[dbName].data &&
-    dbDetails[dbName].data.table_names;
+  const tableNames = dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.table_names;
   if (!tableNames) {
     return null;
   }
   const details = state.cachedData.tableDetails;
-  const stats = state.cachedData.tableStats;
+  const stats =  state.cachedData.tableStats;
   return _.map(tableNames, (tableName) => {
     const tblId = generateTableID(dbName, tableName);
     const tblDetails = details[tblId] && details[tblId].data;
@@ -157,8 +121,6 @@ export function tableInfos(state: AdminUIState, dbName: string) {
 
 // Function which extracts the grants for a single database from redux state.
 export function grants(state: AdminUIState, dbName: string) {
-  const dbDetails = databaseDetails(state);
-  return (
-    dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.grants
-  );
+    const dbDetails = databaseDetails(state);
+    return dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.grants;
 }

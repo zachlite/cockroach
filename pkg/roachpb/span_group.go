@@ -1,16 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package roachpb
 
-import "github.com/cockroachdb/cockroach/pkg/util/interval"
+import (
+	"github.com/cockroachdb/cockroach/pkg/util/interval"
+)
 
 // A SpanGroup is a specialization of interval.RangeGroup which deals
 // with key spans. The zero-value of a SpanGroup can be used immediately.
@@ -41,21 +47,6 @@ func (g *SpanGroup) Add(spans ...Span) bool {
 	return ret
 }
 
-// Sub will attempt to subtract the provided Spans from the SpanGroup,
-// returning whether the subtraction increased the span of the group
-// or not.
-func (g *SpanGroup) Sub(spans ...Span) bool {
-	if len(spans) == 0 {
-		return false
-	}
-	ret := false
-	g.checkInit()
-	for _, span := range spans {
-		ret = g.rg.Sub(s2r(span)) || ret
-	}
-	return ret
-}
-
 // Contains returns whether or not the provided Key is contained
 // within the group of Spans in the SpanGroup.
 func (g *SpanGroup) Contains(k Key) bool {
@@ -78,8 +69,6 @@ func (g *SpanGroup) Len() int {
 	}
 	return g.rg.Len()
 }
-
-var _ = (*SpanGroup).Len
 
 // Slice will return the contents of the SpanGroup as a slice of Spans.
 func (g *SpanGroup) Slice() []Span {

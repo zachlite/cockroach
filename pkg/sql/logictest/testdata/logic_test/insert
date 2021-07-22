@@ -1,3 +1,5 @@
+# LogicTest: local local-opt local-parallel-stmts
+
 statement error pgcode 42P01 relation "kv" does not exist
 INSERT INTO kv VALUES ('a', 'b')
 
@@ -41,13 +43,13 @@ SELECT v || 'hello' FROM [INSERT INTO kv VALUES ('e', 'f'), ('g', '') RETURNING 
 fhello
 hello
 
-statement error pgcode 23505 duplicate key value violates unique constraint "a"\nDETAIL: Key \(v\)=\('f'\) already exists\.
+statement error pgcode 23505 duplicate key value \(v\)=\('f'\) violates unique constraint "a"
 INSERT INTO kv VALUES ('h', 'f')
 
 statement ok
 INSERT INTO kv VALUES ('f', 'g')
 
-statement error duplicate key value violates unique constraint "a"\nDETAIL: Key \(v\)=\('g'\) already exists\.
+statement error duplicate key value \(v\)=\('g'\) violates unique constraint "a"
 INSERT INTO kv VALUES ('h', 'g')
 
 query TT
@@ -105,7 +107,6 @@ SELECT * FROM kv3
 statement ok
 CREATE TABLE kv4 (
   int INT PRIMARY KEY,
-  bit BIT,
   bool BOOLEAN,
   char CHAR,
   float FLOAT
@@ -117,38 +118,31 @@ INSERT INTO kv4 (int) VALUES ('a')
 statement ok
 INSERT INTO kv4 (int) VALUES (1)
 
-statement error could not parse string as bit array: "a" is not a valid binary digit
-INSERT INTO kv4 (int, bit) VALUES (2, 'a')
-
-statement ok
-INSERT INTO kv4 (int, bit) VALUES (2, B'1')
-
 statement error could not parse "a" as type bool
 INSERT INTO kv4 (int, bool) VALUES (3, 'a')
 
 statement ok
 INSERT INTO kv4 (int, bool) VALUES (3, true)
 
-statement error value type int doesn't match type char of column "char"
+statement error value type int doesn't match type CHAR of column "char"
 INSERT INTO kv4 (int, char) VALUES (4, 1)
 
 statement ok
 INSERT INTO kv4 (int, char) VALUES (4, 'a')
 
-statement error value type int doesn't match type float of column "float"
+statement error value type int doesn't match type FLOAT8 of column "float"
 INSERT INTO kv4 (int, float) VALUES (5, 1::INT)
 
 statement ok
 INSERT INTO kv4 (int, float) VALUES (5, 2.3)
 
-query ITBTR rowsort
+query IBTR rowsort
 SELECT * from kv4
 ----
-1  NULL  NULL  NULL  NULL
-2  1     NULL  NULL  NULL
-3  NULL  true  NULL  NULL
-4  NULL  NULL  a     NULL
-5  NULL  NULL  NULL  2.3
+1  NULL  NULL  NULL
+3  true  NULL  NULL
+4  NULL  a     NULL
+5  NULL  NULL  2.3
 
 statement ok
 CREATE TABLE kv5 (
@@ -330,7 +324,7 @@ INSERT INTO abc VALUES (1, 2, 10)
 
 # Verify we get the correct message, even though internally the ConditionalPut
 # for the index key will also fail.
-statement error pgcode 23505 duplicate key value violates unique constraint "primary"\nDETAIL: Key \(a,b\)=\(1,2\) already exists\.
+statement error pgcode 23505 duplicate key value \(a,b\)=\(1,2\) violates unique constraint "primary"
 INSERT INTO abc VALUES (1, 2, 20)
 
 statement ok
@@ -352,7 +346,7 @@ CREATE TABLE blindcput (
 
 # The optimization thresholds at 10 k/v operations, so we need at least that
 # many in one batch to trigger it.
-statement error duplicate key value violates unique constraint "primary"\nDETAIL: Key \(x\)=\(1\) already exists\.
+statement error duplicate key value \(x\)=\(1\) violates unique constraint "primary"
 INSERT INTO blindcput values (1, 1), (2, 2), (3, 3), (4, 4), (1, 5)
 
 statement ok
@@ -361,13 +355,13 @@ CREATE TABLE nocols()
 statement error INSERT has more expressions than target columns, 2 expressions for 0 targets
 INSERT INTO nocols VALUES (true, default)
 
-statement error at or near "k": syntax error: unimplemented
+statement error unimplemented at or near "k"
 INSERT INTO kv (kv.k) VALUES ('hello')
 
-statement error at or near "\*": syntax error: unimplemented
+statement error unimplemented at or near "*"
 INSERT INTO kv (k.*) VALUES ('hello')
 
-statement error at or near "v": syntax error: unimplemented
+statement error unimplemented at or near "v"
 INSERT INTO kv (k.v) VALUES ('hello')
 
 
@@ -382,12 +376,13 @@ statement ok
 INSERT INTO select_t VALUES (1, 9), (8, 2), (3, 7), (6, 4)
 
 # Check that INSERT supports ORDER BY (MySQL extension)
-query II rowsort
-INSERT INTO insert_t TABLE select_t ORDER BY v DESC LIMIT 3 RETURNING x, v
+query II
+INSERT INTO insert_t TABLE select_t ORDER BY v DESC RETURNING x, v
 ----
 1  9
 3  7
 6  4
+8  2
 
 # Check that INSERT supports LIMIT (MySQL extension)
 
@@ -443,10 +438,10 @@ CREATE TABLE string_t (
 statement ok
 INSERT INTO string_t VALUES ('str')
 
-query error value type string doesn't match type bytes of column "b"
+query error value type string doesn't match type BYTES of column "b"
 INSERT INTO bytes_t SELECT * FROM string_t
 
-query error value type bytes doesn't match type string of column "s"
+query error value type bytes doesn't match type STRING of column "s"
 INSERT INTO string_t SELECT * FROM bytes_t
 
 subtest string_width_check
@@ -465,14 +460,13 @@ CREATE TABLE sw (
  cc VARCHAR COLLATE en,
  dc VARCHAR(3) COLLATE en,
  ec STRING COLLATE en,
- fc STRING(3) COLLATE en,
- FAMILY "primary" (a, b, c, d, e, f, g, ac, bc, cc, dc, ec, fc, rowid)
+ fc STRING(3) COLLATE en
 )
 
 query T
 SELECT create_statement FROM [SHOW CREATE TABLE sw]
 ----
-CREATE TABLE public.sw (
+CREATE TABLE sw (
    a CHAR NULL,
    b CHAR(3) NULL,
    c VARCHAR NULL,
@@ -486,8 +480,6 @@ CREATE TABLE public.sw (
    dc VARCHAR(3) COLLATE en NULL,
    ec STRING COLLATE en NULL,
    fc STRING(3) COLLATE en NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (a, b, c, d, e, f, g, ac, bc, cc, dc, ec, fc, rowid)
 )
 
@@ -501,10 +493,10 @@ INSERT INTO sw VALUES (
    '', '', '', '', '', '', '',
    '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en)
 
-statement error value too long for type CHAR
+statement error value too long for type CHAR \(column "a"\)
 INSERT INTO sw(a) VALUES ('ab')
 
-statement error value too long for type CHAR COLLATE en
+statement error value too long for type CHAR COLLATE en \(column "ac"\)
 INSERT INTO sw(ac) VALUES ('ab' COLLATE en)
 
 statement ok
@@ -512,22 +504,22 @@ INSERT INTO sw (b, c, d, e, f, g, bc, cc, dc, ec, fc) VALUES (
    'b22', 'c22', 'd22', 'e22', 'f22', 'g22',
    'B22' COLLATE en, 'C22' COLLATE en, 'D22' COLLATE en, 'E22' COLLATE en, 'F22' COLLATE en)
 
-statement error value too long for type CHAR\(3\)
+statement error value too long for type CHAR\(3\) \(column "b"\)
 INSERT INTO sw(b) VALUES ('abcd')
 
-statement error value too long for type CHAR\(3\) COLLATE en
+statement error value too long for type CHAR\(3\) COLLATE en \(column "bc"\)
 INSERT INTO sw(bc) VALUES ('abcd' COLLATE en)
 
-statement error value too long for type VARCHAR\(3\)
+statement error value too long for type VARCHAR\(3\) \(column "d"\)
 INSERT INTO sw(d) VALUES ('abcd')
 
-statement error value too long for type VARCHAR\(3\) COLLATE en
+statement error value too long for type VARCHAR\(3\) COLLATE en \(column "dc"\)
 INSERT INTO sw(dc) VALUES ('abcd' COLLATE en)
 
-statement error value too long for type STRING\(3\)
+statement error value too long for type STRING\(3\) \(column "f"\)
 INSERT INTO sw(f) VALUES ('abcd')
 
-statement error value too long for type STRING\(3\) COLLATE en
+statement error value too long for type STRING\(3\) COLLATE en \(column "fc"\)
 INSERT INTO sw(fc) VALUES ('abcd' COLLATE en)
 
 subtest regression_26742
@@ -535,7 +527,7 @@ subtest regression_26742
 statement ok
 CREATE TABLE ct(x INT, derived INT AS (x+1) STORED)
 
-statement error value type varchar doesn't match type int of column "x"
+statement error value type string doesn't match type INT of column "x"
 INSERT INTO ct(x) SELECT c FROM sw
 
 subtest contraint_check_validation_ordering
@@ -576,7 +568,7 @@ CREATE TABLE src(x VARCHAR PRIMARY KEY);
                        y VARCHAR CHECK(length(y) < 4) REFERENCES src(x))
 
 # Sanity check that the FK constraints gets actually validated
-statement error foreign key
+statement error foreign key violation
 INSERT INTO derived(x) VALUES('xxx')
 
 statement error value too long for type CHAR\(3\)
@@ -597,14 +589,12 @@ BEGIN; ALTER TABLE t29494 ADD COLUMN y INT NOT NULL DEFAULT 123
 query T
 SELECT create_statement FROM [SHOW CREATE t29494]
 ----
-CREATE TABLE public.t29494 (
-   x INT8 NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+CREATE TABLE t29494 (
+   x INT NULL,
    FAMILY "primary" (x, rowid)
 )
 
-# Check that the new column is not usable in RETURNING.
+# Check that the new column is not usable in RETURNING
 statement error column "y" does not exist
 INSERT INTO t29494(x) VALUES (123) RETURNING y
 
@@ -622,35 +612,10 @@ INSERT INTO t29494(x) VALUES (123) RETURNING *
 statement ok
 COMMIT
 
-subtest regression_32759_33012
+subtest regression_32759
 
 statement ok
-CREATE TABLE t32759 (
-  x INT, y STRING DEFAULT 'b' NOT NULL, z INT,
-  FAMILY "primary" (x, z, rowid)
-)
-
-statement ok
-BEGIN; ALTER TABLE t32759 DROP COLUMN y
-
-# Check that the dropped column is not visible
-query T
-SELECT create_statement FROM [SHOW CREATE t32759]
-----
-CREATE TABLE public.t32759 (
-   x INT8 NULL,
-   z INT8 NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-   FAMILY "primary" (x, z, rowid)
-)
-
-# Check that values cannot be inserted into the dropped column.
-statement error column "y" does not exist
-INSERT INTO t32759(x, y, z) VALUES (2, 'c', 2)
-
-statement ok
-ROLLBACK
+CREATE TABLE t32759(x INT, y INT NOT NULL DEFAULT(10), z INT)
 
 statement ok
 BEGIN; ALTER TABLE t32759 DROP COLUMN y
@@ -663,52 +628,3 @@ x  z
 
 statement ok
 COMMIT
-
-# Test ORDER BY with computed ordering column (requires extra column).
-
-statement ok
-CREATE TABLE xy(x INT PRIMARY KEY, y INT);
-CREATE TABLE ab(a INT PRIMARY KEY, b INT);
-INSERT INTO ab VALUES (1, 1), (2, 2)
-
-query II rowsort
-INSERT INTO xy (x, y) SELECT a, b FROM ab ORDER BY -b LIMIT 10 RETURNING *;
-----
-2  2
-1  1
-
-statement ok
-DROP TABLE xy; DROP TABLE ab
-
-subtest regression_35611
-
-statement ok
-CREATE TABLE t35611(a INT PRIMARY KEY, CHECK (a > 0))
-
-statement ok
-BEGIN; ALTER TABLE t35611 ADD COLUMN b INT
-
-statement ok
-INSERT INTO t35611 (a) VALUES (1)
-
-statement ok
-COMMIT
-
-# ------------------------------------------------------------------------------
-# Regression for #35364.
-# ------------------------------------------------------------------------------
-subtest regression_35364
-
-statement ok
-CREATE TABLE t35364(x DECIMAL(1,0) CHECK (x = 0))
-
-statement ok
-INSERT INTO t35364(x) VALUES (0.1)
-
-query T
-SELECT x FROM t35364
-----
-0
-
-statement ok
-DROP TABLE t35364

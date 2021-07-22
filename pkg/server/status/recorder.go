@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package status
 
@@ -16,39 +20,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util/cgroups"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/system"
-	"github.com/cockroachdb/errors"
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
+	"github.com/pkg/errors"
 )
 
 const (
+	defaultCGroupMemPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 	// storeTimeSeriesPrefix is the common prefix for time series keys which
 	// record store-specific data.
 	storeTimeSeriesPrefix = "cr.store.%s"
@@ -58,7 +61,6 @@ const (
 
 	advertiseAddrLabelKey = "advertise-addr"
 	httpAddrLabelKey      = "http-addr"
-	sqlAddrLabelKey       = "sql-addr"
 )
 
 type quantile struct {
@@ -82,13 +84,10 @@ var recordHistogramQuantiles = []quantile{
 // directly in order to simplify testing.
 type storeMetrics interface {
 	StoreID() roachpb.StoreID
-	Descriptor(context.Context, bool) (*roachpb.StoreDescriptor, error)
+	Descriptor(bool) (*roachpb.StoreDescriptor, error)
+	MVCCStats() enginepb.MVCCStats
 	Registry() *metric.Registry
 }
-
-var childMetricsEnabled = settings.RegisterBoolSetting("server.child_metrics.enabled",
-	"enables the exporting of child metrics, additional prometheus time series with extra labels",
-	false)
 
 // MetricsRecorder is used to periodically record the information in a number of
 // metric registries.
@@ -100,7 +99,7 @@ var childMetricsEnabled = settings.RegisterBoolSetting("server.child_metrics.ena
 type MetricsRecorder struct {
 	*HealthChecker
 	gossip       *gossip.Gossip
-	nodeLiveness *liveness.NodeLiveness
+	nodeLiveness *storage.NodeLiveness
 	rpcContext   *rpc.Context
 	settings     *cluster.Settings
 	clock        *hlc.Clock
@@ -149,7 +148,7 @@ type MetricsRecorder struct {
 // given clock.
 func NewMetricsRecorder(
 	clock *hlc.Clock,
-	nodeLiveness *liveness.NodeLiveness,
+	nodeLiveness *storage.NodeLiveness,
 	rpcContext *rpc.Context,
 	gossip *gossip.Gossip,
 	settings *cluster.Settings,
@@ -174,7 +173,7 @@ func (mr *MetricsRecorder) AddNode(
 	reg *metric.Registry,
 	desc roachpb.NodeDescriptor,
 	startedAt int64,
-	advertiseAddr, httpAddr, sqlAddr string,
+	advertiseAddr, httpAddr string,
 ) {
 	mr.mu.Lock()
 	defer mr.mu.Unlock()
@@ -192,7 +191,6 @@ func (mr *MetricsRecorder) AddNode(
 
 	metadata.AddLabel(advertiseAddrLabelKey, advertiseAddr)
 	metadata.AddLabel(httpAddrLabelKey, httpAddr)
-	metadata.AddLabel(sqlAddrLabelKey, sqlAddr)
 	nodeIDGauge := metric.NewGauge(metadata)
 	nodeIDGauge.Update(int64(desc.NodeID))
 	reg.AddMetric(nodeIDGauge)
@@ -254,10 +252,10 @@ func (mr *MetricsRecorder) scrapeIntoPrometheus(pm *metric.PrometheusExporter) {
 			log.Warning(context.TODO(), "MetricsRecorder asked to scrape metrics before NodeID allocation")
 		}
 	}
-	includeChildMetrics := childMetricsEnabled.Get(&mr.settings.SV)
-	pm.ScrapeRegistry(mr.mu.nodeRegistry, includeChildMetrics)
+
+	pm.ScrapeRegistry(mr.mu.nodeRegistry)
 	for _, reg := range mr.mu.storeRegistries {
-		pm.ScrapeRegistry(reg, includeChildMetrics)
+		pm.ScrapeRegistry(reg)
 	}
 }
 
@@ -373,8 +371,8 @@ func (mr *MetricsRecorder) GetMetricsMetadata() map[string]metric.Metadata {
 // latency. Throughputs are stored as bytes, and latencies as nanos.
 func (mr *MetricsRecorder) getNetworkActivity(
 	ctx context.Context,
-) map[roachpb.NodeID]statuspb.NodeStatus_NetworkActivity {
-	activity := make(map[roachpb.NodeID]statuspb.NodeStatus_NetworkActivity)
+) map[roachpb.NodeID]NodeStatus_NetworkActivity {
+	activity := make(map[roachpb.NodeID]NodeStatus_NetworkActivity)
 	if mr.nodeLiveness != nil && mr.gossip != nil {
 		isLiveMap := mr.nodeLiveness.GetIsLiveMap()
 
@@ -383,22 +381,22 @@ func (mr *MetricsRecorder) getNetworkActivity(
 		if mr.rpcContext.RemoteClocks != nil {
 			currentAverages = mr.rpcContext.RemoteClocks.AllLatencies()
 		}
-		for nodeID, entry := range isLiveMap {
+		for nodeID, alive := range isLiveMap {
 			address, err := mr.gossip.GetNodeIDAddress(nodeID)
 			if err != nil {
-				if entry.IsLive {
-					log.Warningf(ctx, "%v", err)
+				if alive {
+					log.Warning(ctx, err.Error())
 				}
 				continue
 			}
-			na := statuspb.NodeStatus_NetworkActivity{}
+			na := NodeStatus_NetworkActivity{}
 			key := address.String()
 			if tp, ok := throughputMap.Load(key); ok {
 				stats := tp.(*rpc.Stats)
 				na.Incoming = stats.Incoming()
 				na.Outgoing = stats.Outgoing()
 			}
-			if entry.IsLive {
+			if alive {
 				if latency, ok := currentAverages[key]; ok {
 					na.Latency = latency.Nanoseconds()
 				}
@@ -412,7 +410,7 @@ func (mr *MetricsRecorder) getNetworkActivity(
 // GenerateNodeStatus returns a status summary message for the node. The summary
 // includes the recent values of metrics for both the node and all of its
 // component stores. When the node isn't initialized yet, nil is returned.
-func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.NodeStatus {
+func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *NodeStatus {
 	activity := mr.getNetworkActivity(ctx)
 
 	mr.mu.RLock()
@@ -434,22 +432,31 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 
 	systemMemory, _, err := GetTotalMemoryWithoutLogging()
 	if err != nil {
-		log.Errorf(ctx, "could not get total system memory: %v", err)
+		log.Error(ctx, "could not get total system memory:", err)
 	}
 
 	// Generate a node status with no store data.
-	nodeStat := &statuspb.NodeStatus{
+	nodeStat := &NodeStatus{
 		Desc:              mr.mu.desc,
 		BuildInfo:         build.GetInfo(),
 		UpdatedAt:         now,
 		StartedAt:         mr.mu.startedAt,
-		StoreStatuses:     make([]statuspb.StoreStatus, 0, lastSummaryCount),
+		StoreStatuses:     make([]StoreStatus, 0, lastSummaryCount),
 		Metrics:           make(map[string]float64, lastNodeMetricCount),
 		Args:              os.Args,
 		Env:               envutil.GetEnvVarsUsed(),
 		Activity:          activity,
-		NumCpus:           int32(system.NumCPU()),
+		NumCpus:           int32(runtime.NumCPU()),
 		TotalSystemMemory: systemMemory,
+	}
+
+	// If the cluster hasn't yet been definitively moved past the network stats
+	// phase, ensure that we provide latencies separately for backwards compatibility.
+	if !mr.settings.Version.IsMinSupported(cluster.VersionRPCNetworkStats) {
+		nodeStat.Latencies = make(map[roachpb.NodeID]int64)
+		for nodeID, na := range nodeStat.Activity {
+			nodeStat.Latencies[nodeID] = na.Latency
+		}
 	}
 
 	eachRecordableValue(mr.mu.nodeRegistry, func(name string, val float64) {
@@ -464,13 +471,13 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 		})
 
 		// Gather descriptor from store.
-		descriptor, err := mr.mu.stores[storeID].Descriptor(ctx, false /* useCached */)
+		descriptor, err := mr.mu.stores[storeID].Descriptor(false /* useCached */)
 		if err != nil {
-			log.Errorf(ctx, "could not record status summaries: Store %d could not return descriptor, error: %s", storeID, err)
+			log.Errorf(ctx, "Could not record status summaries: Store %d could not return descriptor, error: %s", storeID, err)
 			continue
 		}
 
-		nodeStat.StoreStatuses = append(nodeStat.StoreStatuses, statuspb.StoreStatus{
+		nodeStat.StoreStatuses = append(nodeStat.StoreStatuses, StoreStatus{
 			Desc:    *descriptor,
 			Metrics: storeMetrics,
 		})
@@ -488,42 +495,21 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 	return nodeStat
 }
 
-// WriteNodeStatus writes the supplied summary to the given client. If mustExist
-// is true, the key must already exist and must not change while being updated,
-// otherwise an error is returned -- if false, the status is always written.
+// WriteNodeStatus writes the supplied summary to the given client.
 func (mr *MetricsRecorder) WriteNodeStatus(
-	ctx context.Context, db *kv.DB, nodeStatus statuspb.NodeStatus, mustExist bool,
+	ctx context.Context, db *client.DB, nodeStatus NodeStatus,
 ) error {
 	mr.writeSummaryMu.Lock()
 	defer mr.writeSummaryMu.Unlock()
 	key := keys.NodeStatusKey(nodeStatus.Desc.NodeID)
-	// We use an inline value to store only a single version of the node status.
+	// We use PutInline to store only a single version of the node status.
 	// There's not much point in keeping the historical versions as we keep
 	// all of the constituent data as timeseries. Further, due to the size
 	// of the build info in the node status, writing one of these every 10s
 	// will generate more versions than will easily fit into a range over
 	// the course of a day.
-	if mustExist && mr.settings.Version.IsActive(ctx, clusterversion.CPutInline) {
-		entry, err := db.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		if entry.Value == nil {
-			return errors.New("status entry not found, node may have been decommissioned")
-		}
-		err = db.CPutInline(kv.CtxForCPutInline(ctx), key, &nodeStatus, entry.Value.TagAndDataBytes())
-		if detail := (*roachpb.ConditionFailedError)(nil); errors.As(err, &detail) {
-			if detail.ActualValue == nil {
-				return errors.New("status entry not found, node may have been decommissioned")
-			}
-			return errors.New("status entry unexpectedly changed during update")
-		} else if err != nil {
-			return err
-		}
-	} else {
-		if err := db.PutInline(ctx, key, &nodeStatus); err != nil {
-			return err
-		}
+	if err := db.PutInline(ctx, key, &nodeStatus); err != nil {
+		return err
 	}
 	if log.V(2) {
 		statusJSON, err := json.Marshal(&nodeStatus)
@@ -545,22 +531,17 @@ type registryRecorder struct {
 }
 
 func extractValue(mtr interface{}) (float64, error) {
-	// TODO(tschottdorf,ajwerner): consider moving this switch to a single
-	// interface implemented by the individual metric types.
-	type (
-		float64Valuer interface{ Value() float64 }
-		int64Valuer   interface{ Value() int64 }
-		int64Counter  interface{ Count() int64 }
-	)
+	// TODO(tschottdorf|mrtracy): consider moving this switch to an interface
+	// implemented by the individual metric types.
 	switch mtr := mtr.(type) {
 	case float64:
 		return mtr, nil
-	case float64Valuer:
-		return mtr.Value(), nil
-	case int64Valuer:
-		return float64(mtr.Value()), nil
-	case int64Counter:
+	case *metric.Counter:
 		return float64(mtr.Count()), nil
+	case *metric.Gauge:
+		return float64(mtr.Value()), nil
+	case *metric.GaugeFloat64:
+		return mtr.Value(), nil
 	default:
 		return 0, errors.Errorf("cannot extract value for type %T", mtr)
 	}
@@ -591,11 +572,10 @@ func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
 			for _, pt := range recordHistogramQuantiles {
 				fn(name+pt.suffix, float64(curr.ValueAtQuantile(pt.quantile)))
 			}
-			fn(name+"-count", float64(curr.TotalCount()))
 		} else {
 			val, err := extractValue(mtr)
 			if err != nil {
-				log.Warningf(context.TODO(), "%v", err)
+				log.Warning(context.TODO(), err)
 				return
 			}
 			fn(name, val)
@@ -618,15 +598,15 @@ func (rr registryRecorder) record(dest *[]tspb.TimeSeriesData) {
 	})
 }
 
-// GetTotalMemory returns either the total system memory (in bytes) or if
-// possible the cgroups available memory.
+// GetTotalMemory returns either the total system memory or if possible the
+// cgroups available memory.
 func GetTotalMemory(ctx context.Context) (int64, error) {
 	memory, warning, err := GetTotalMemoryWithoutLogging()
 	if err != nil {
 		return 0, err
 	}
 	if warning != "" {
-		log.Infof(ctx, "%s", warning)
+		log.Infof(ctx, warning)
 	}
 	return memory, nil
 }
@@ -658,16 +638,32 @@ func GetTotalMemoryWithoutLogging() (int64, string, error) {
 	if runtime.GOOS != "linux" {
 		return checkTotal(totalMem, "")
 	}
-	cgAvlMem, warning, err := cgroups.GetMemoryLimit()
+
+	var buf []byte
+	if buf, err = ioutil.ReadFile(defaultCGroupMemPath); err != nil {
+		warning := fmt.Sprintf("can't read available memory from cgroups (%s), using system memory %s instead",
+			err, humanizeutil.IBytes(totalMem))
+		return checkTotal(totalMem, warning)
+	}
+
+	cgAvlMem, err := strconv.ParseUint(strings.TrimSpace(string(buf)), 10, 64)
 	if err != nil {
-		return checkTotal(totalMem,
-			fmt.Sprintf("available memory from cgroups is unsupported, using system memory %s instead: %v",
-				humanizeutil.IBytes(totalMem), err))
+		warning := fmt.Sprintf("can't parse available memory from cgroups (%s), using system memory %s instead",
+			err, humanizeutil.IBytes(totalMem))
+		return checkTotal(totalMem, warning)
 	}
-	if cgAvlMem == 0 || (totalMem > 0 && cgAvlMem > totalMem) {
-		return checkTotal(totalMem,
-			fmt.Sprintf("available memory from cgroups (%s) is unsupported, using system memory %s instead: %s",
-				humanize.IBytes(uint64(cgAvlMem)), humanizeutil.IBytes(totalMem), warning))
+
+	if cgAvlMem == 0 || cgAvlMem > math.MaxInt64 {
+		warning := fmt.Sprintf("available memory from cgroups (%s) is unsupported, using system memory %s instead",
+			humanize.IBytes(cgAvlMem), humanizeutil.IBytes(totalMem))
+		return checkTotal(totalMem, warning)
 	}
-	return checkTotal(cgAvlMem, "")
+
+	if totalMem > 0 && int64(cgAvlMem) > totalMem {
+		warning := fmt.Sprintf("available memory from cgroups (%s) exceeds system memory %s, using system memory",
+			humanize.IBytes(cgAvlMem), humanizeutil.IBytes(totalMem))
+		return checkTotal(totalMem, warning)
+	}
+
+	return checkTotal(int64(cgAvlMem), "")
 }

@@ -9,10 +9,11 @@
 # Possible configurations:
 #
 #   - amd64-linux-gnu:      amd64, Linux 2.6.32, dynamically link glibc 2.12.2
-#   - arm64-linux-gnu:      arm64, Linux 3.7.10, dynamically link glibc 2.12.2
+#   - amd64-linux-musl:     amd64, Linux 2.6.32, statically link musl 1.1.16
+#   - amd64-linux-msan:     amd64, recent Linux, enable Clang's memory sanitizer
+#   - arm64-linux-gnueabi:  arm64, Linux 3.7.10, dynamically link glibc 2.12.2
 #   - amd64-darwin:         amd64, macOS 10.9
 #   - amd64-windows:        amd64, Windows 8, statically link all non-Windows libraries
-#   - s390x-linux-gnu:      s390x, Linux 2.6.32, dynamically link glibc 2.12.2
 #
 # When specifying configurations on the command line, the architecture prefix
 # and/or the ABI suffix can be omitted, in which case a suitable default will
@@ -31,10 +32,6 @@ shopt -s extglob
 cd "$(dirname "$(readlink -f "$0")")/../.."
 source build/shlib.sh
 
-# Callers can set the MKRELEASE_BUILDTYPE environment variable to configure a
-# custom build type.
-BUILDTYPE="${MKRELEASE_BUILDTYPE:-release}"
-
 case "${1-}" in
   ""|?(amd64-)linux?(-gnu))
     args=(
@@ -42,25 +39,38 @@ case "${1-}" in
       XGOARCH=amd64
       XCMAKE_SYSTEM_NAME=Linux
       TARGET_TRIPLE=x86_64-unknown-linux-gnu
-      # -lrt is needed as clock_gettime isn't part of glibc prior to 2.17.
-      # If we update to a newer glibc, the -lrt can be removed.
-      LDFLAGS="-static-libgcc -static-libstdc++ -lrt"
+      LDFLAGS="-static-libgcc -static-libstdc++"
       SUFFIX=-linux-2.6.32-gnu-amd64
     ) ;;
 
-  ?(arm64-)linux?(-gnu))
-    # Manually set the correct values for configure checks that libkrb5 won't be
-    # able to perform because we're cross-compiling.
-    export krb5_cv_attr_constructor_destructor=yes
-    export ac_cv_func_regcomp=yes
-    export ac_cv_printf_positional=yes
+  ?(amd64-)linux-musl)
+    args=(
+      XGOOS=linux
+      XGOARCH=amd64
+      XCMAKE_SYSTEM_NAME=Linux
+      TARGET_TRIPLE=x86_64-unknown-linux-musl
+      LDFLAGS=-static
+      SUFFIX=-linux-2.6.32-musl-amd64
+    ) ;;
+
+  ?(arm64-)linux?(-gnueabi))
     args=(
       XGOOS=linux
       XGOARCH=arm64
       XCMAKE_SYSTEM_NAME=Linux
-      TARGET_TRIPLE=aarch64-unknown-linux-gnu
+      TARGET_TRIPLE=aarch64-unknown-linux-gnueabi
       LDFLAGS="-static-libgcc -static-libstdc++"
       SUFFIX=-linux-3.7.10-gnu-aarch64
+    ) ;;
+
+  ?(amd64-)linux-msan)
+    flags="-fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer -I/libcxx_msan/include -I/libcxx_msan/include/c++/v1"
+    args=(
+      CFLAGS="$flags"
+      CXXFLAGS="$flags"
+      LDFLAGS="-fsanitize=memory -stdlib=libc++ -L/libcxx_msan/lib -lc++abi -Wl,-rpath,/libcxx_msan/lib"
+      GOFLAGS=-msan
+      TAGS=stdmalloc
     ) ;;
 
   ?(amd64-)darwin)
@@ -68,9 +78,9 @@ case "${1-}" in
       XGOOS=darwin
       XGOARCH=amd64
       XCMAKE_SYSTEM_NAME=Darwin
-      TARGET_TRIPLE=x86_64-apple-darwin19
-      EXTRA_XCMAKE_FLAGS=-DCMAKE_INSTALL_NAME_TOOL=x86_64-apple-darwin19-install_name_tool
-      SUFFIX=-darwin-10.10-amd64
+      TARGET_TRIPLE=x86_64-apple-darwin13
+      EXTRA_XCMAKE_FLAGS=-DCMAKE_INSTALL_NAME_TOOL=x86_64-apple-darwin13-install_name_tool
+      SUFFIX=-darwin-10.9-amd64
     ) ;;
 
   ?(amd64-)windows)
@@ -83,22 +93,6 @@ case "${1-}" in
       SUFFIX=-windows-6.2-amd64
     ) ;;
 
-  ?(s390x-)linux?(-gnu))
-    # Manually set the correct values for configure checks that libkrb5 won't be
-    # able to perform because we're cross-compiling.
-    export krb5_cv_attr_constructor_destructor=yes
-    export ac_cv_func_regcomp=yes
-    export ac_cv_printf_positional=yes
-    args=(
-      XGOOS=linux
-      XGOARCH=s390x
-      XCMAKE_SYSTEM_NAME=Linux
-      TARGET_TRIPLE=s390x-ibm-linux-gnu
-      # -lrt is needed as clock_gettime isn't part of glibc prior to 2.17.
-      # If we update to a newer glibc, the -lrt can be removed.
-      LDFLAGS="-static-libgcc -static-libstdc++ -lrt"
-      SUFFIX=-linux-2.6.32-gnu-s390x
-    ) ;;
   *)  die "unknown release configuration: $1" ;;
 esac
 
@@ -106,4 +100,4 @@ if [ $# -ge 1 ]; then
     shift
 fi
 
-(set -x && CGO_ENABLED=1 make BUILDTYPE=$BUILDTYPE "${args[@]}" "$@")
+(set -x && CGO_ENABLED=1 make BUILDTYPE=release "${args[@]}" "$@")

@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package pretty_test
 
@@ -23,44 +27,31 @@ func Example_align() {
 			pretty.Text("aaa"),
 			pretty.Text("bbb"),
 			pretty.Text("ccc")),
-		pretty.Table(pretty.TableRightAlignFirstColumn, pretty.Text,
-			pretty.TableRow{Label: "SELECT",
+		pretty.RLTable(true,
+			pretty.RLTableRow{Label: "SELECT",
 				Doc: pretty.Join(",",
 					pretty.Text("aaa"),
 					pretty.Text("bbb"),
 					pretty.Text("ccc")),
 			},
-			pretty.TableRow{Label: "FROM",
+			pretty.RLTableRow{Label: "FROM",
 				Doc: pretty.Join(",",
 					pretty.Text("t"),
 					pretty.Text("u"),
 					pretty.Text("v")),
 			}),
-		pretty.Table(pretty.TableLeftAlignFirstColumn, pretty.Text,
-			pretty.TableRow{Label: "SELECT",
-				Doc: pretty.Join(",",
-					pretty.Text("aaa"),
-					pretty.Text("bbb"),
-					pretty.Text("ccc")),
-			},
-			pretty.TableRow{Label: "FROM",
-				Doc: pretty.Join(",",
-					pretty.Text("t"),
-					pretty.Text("u"),
-					pretty.Text("v")),
-			}),
-		pretty.Table(pretty.TableRightAlignFirstColumn, pretty.Text,
-			pretty.TableRow{Label: "woo", Doc: nil}, // check nil rows are omitted
-			pretty.TableRow{Label: "", Doc: pretty.Nil},
-			pretty.TableRow{Label: "KEY", Doc: pretty.Text("VALUE")},
-			pretty.TableRow{Label: "", Doc: pretty.Text("OTHERVALUE")},
-			pretty.TableRow{Label: "AAA", Doc: pretty.Nil}, // check no extra space is added
+		pretty.RLTable(true,
+			pretty.RLTableRow{Label: "woo", Doc: nil}, // check nil rows are omitted
+			pretty.RLTableRow{Label: "", Doc: pretty.Nil},
+			pretty.RLTableRow{Label: "KEY", Doc: pretty.Text("VALUE")},
+			pretty.RLTableRow{Label: "", Doc: pretty.Text("OTHERVALUE")},
+			pretty.RLTableRow{Label: "AAA", Doc: pretty.Nil}, // check no extra space is added
 		),
 	}
 	for _, n := range []int{1, 15, 30, 80} {
 		fmt.Printf("%d:\n", n)
 		for _, doc := range testData {
-			p := pretty.Pretty(doc, n, true /*useTabs*/, 4 /*tabWidth*/, nil /*keywordTransform*/)
+			p := pretty.Pretty(doc, n, true /*useTabs*/, 4 /*tabWidth*/)
 			fmt.Printf("%s\n\n", p)
 		}
 	}
@@ -71,15 +62,6 @@ func Example_align() {
 	// 	aaa,
 	// 	bbb,
 	// 	ccc
-	//
-	// SELECT
-	// 	aaa,
-	// 	bbb,
-	// 	ccc
-	// FROM
-	// 	t,
-	// 	u,
-	// 	v
 	//
 	// SELECT
 	// 	aaa,
@@ -105,11 +87,6 @@ func Example_align() {
 	//        ccc
 	//   FROM t, u, v
 	//
-	// SELECT aaa,
-	//        bbb,
-	//        ccc
-	// FROM   t, u, v
-	//
 	// KEY VALUE
 	//     OTHERVALUE
 	// AAA
@@ -120,15 +97,10 @@ func Example_align() {
 	// SELECT aaa, bbb, ccc
 	//   FROM t, u, v
 	//
-	// SELECT aaa, bbb, ccc
-	// FROM   t, u, v
-	//
 	// KEY VALUE OTHERVALUE AAA
 	//
 	// 80:
 	// SELECT aaa, bbb, ccc
-	//
-	// SELECT aaa, bbb, ccc FROM t, u, v
 	//
 	// SELECT aaa, bbb, ccc FROM t, u, v
 	//
@@ -216,7 +188,7 @@ func Example_tree() {
 		))
 	}
 	for _, n := range []int{1, 30, 80} {
-		p := pretty.Pretty(showTree(tree), n, false /*useTabs*/, 4 /*tabWidth*/, nil /*keywordTransform*/)
+		p := pretty.Pretty(showTree(tree), n, false /*useTabs*/, 4 /*tabWidth*/)
 		fmt.Printf("%d:\n%s\n\n", n, p)
 	}
 	// Output:

@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
@@ -17,22 +21,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv"
+	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
+
+	// We dot-import fsm to use common names such as fsm.True/False.
+	. "github.com/cockroachdb/cockroach/pkg/util/fsm"
 )
 
 var noRewindExpected = CmdPos(-1)
@@ -40,18 +47,18 @@ var noRewindExpected = CmdPos(-1)
 type testContext struct {
 	manualClock *hlc.ManualClock
 	clock       *hlc.Clock
-	mockDB      *kv.DB
-	mon         *mon.BytesMonitor
-	tracer      *tracing.Tracer
+	mockDB      *client.DB
+	mon         mon.BytesMonitor
+	tracer      opentracing.Tracer
 	// ctx is mimicking the spirit of a client connection's context
 	ctx      context.Context
 	settings *cluster.Settings
 }
 
-func makeTestContext(stopper *stop.Stopper) testContext {
+func makeTestContext() testContext {
 	manual := hlc.NewManualClock(123)
 	clock := hlc.NewClock(manual.UnixNano, time.Nanosecond)
-	factory := kv.MakeMockTxnSenderFactory(
+	factory := client.MakeMockTxnSenderFactory(
 		func(context.Context, *roachpb.Transaction, roachpb.BatchRequest,
 		) (*roachpb.BatchResponse, *roachpb.Error) {
 			return nil, nil
@@ -62,8 +69,8 @@ func makeTestContext(stopper *stop.Stopper) testContext {
 	return testContext{
 		manualClock: manual,
 		clock:       clock,
-		mockDB:      kv.NewDB(ambient, factory, clock, stopper),
-		mon: mon.NewMonitor(
+		mockDB:      client.NewDB(ambient, factory, clock),
+		mon: mon.MakeMonitor(
 			"test root mon",
 			mon.MemoryResource,
 			nil,  /* curCount */
@@ -73,18 +80,32 @@ func makeTestContext(stopper *stop.Stopper) testContext {
 			settings,
 		),
 		tracer:   ambient.Tracer,
-		ctx:      context.Background(),
+		ctx:      context.TODO(),
 		settings: settings,
 	}
 }
 
+type retryIntentEnum int
+
+const (
+	retryIntentUnknown retryIntentEnum = iota
+	retryIntentSet
+	retryIntentNotSet
+)
+
 // createOpenState returns a txnState initialized with an open txn.
-func (tc *testContext) createOpenState(typ txnType) (fsm.State, *txnState) {
+func (tc *testContext) createOpenState(
+	typ txnType, retryIntentOpt retryIntentEnum,
+) (State, *txnState) {
+	if retryIntentOpt == retryIntentUnknown {
+		log.Fatalf(context.TODO(), "retryIntentOpt not specified")
+	}
+
 	sp := tc.tracer.StartSpan("createOpenState")
-	ctx := tracing.ContextWithSpan(tc.ctx, sp)
+	ctx := opentracing.ContextWithSpan(tc.ctx, sp)
 	ctx, cancel := context.WithCancel(ctx)
 
-	txnStateMon := mon.NewMonitor("test mon",
+	txnStateMon := mon.MakeMonitor("test mon",
 		mon.MemoryResource,
 		nil,  /* curCount */
 		nil,  /* maxHist */
@@ -92,33 +113,48 @@ func (tc *testContext) createOpenState(typ txnType) (fsm.State, *txnState) {
 		1000, /* noteworthy */
 		cluster.MakeTestingClusterSettings(),
 	)
-	txnStateMon.Start(tc.ctx, tc.mon, mon.BoundAccount{})
+	txnStateMon.Start(tc.ctx, &tc.mon, mon.BoundAccount{})
 
 	ts := txnState{
 		Ctx:           ctx,
 		connCtx:       tc.ctx,
+		sp:            sp,
 		cancel:        cancel,
 		sqlTimestamp:  timeutil.Now(),
+		isolation:     enginepb.SERIALIZABLE,
 		priority:      roachpb.NormalUserPriority,
-		mon:           txnStateMon,
+		mon:           &txnStateMon,
 		txnAbortCount: metric.NewCounter(MetaTxnAbort),
 	}
-	ts.mu.txn = kv.NewTxn(ctx, tc.mockDB, roachpb.NodeID(1) /* gatewayNodeID */)
+	ts.mu.txn = client.NewTxn(ctx, tc.mockDB, roachpb.NodeID(1) /* gatewayNodeID */, client.RootTxn)
 
 	state := stateOpen{
-		ImplicitTxn: fsm.FromBool(typ == implicitTxn),
+		ImplicitTxn: FromBool(typ == implicitTxn),
+		RetryIntent: FromBool(retryIntentOpt == retryIntentSet),
 	}
 	return state, &ts
 }
 
 // createAbortedState returns a txnState initialized with an aborted txn.
-func (tc *testContext) createAbortedState() (fsm.State, *txnState) {
-	_, ts := tc.createOpenState(explicitTxn)
-	return stateAborted{}, ts
+func (tc *testContext) createAbortedState(retryIntentOpt retryIntentEnum) (State, *txnState) {
+	_, ts := tc.createOpenState(explicitTxn, retryIntentOpt)
+	ts.mu.txn.CleanupOnError(ts.Ctx, errors.Errorf("dummy error"))
+	s := stateAborted{RetryIntent: FromBool(retryIntentOpt == retryIntentSet)}
+	return s, ts
 }
 
-func (tc *testContext) createCommitWaitState() (fsm.State, *txnState, error) {
-	_, ts := tc.createOpenState(explicitTxn)
+func (tc *testContext) createRestartWaitState() (State, *txnState) {
+	_, ts := tc.createOpenState(
+		explicitTxn,
+		// retryIntent must had been set in order for the state to advance to
+		// RestartWait.
+		retryIntentSet)
+	s := stateRestartWait{}
+	return s, ts
+}
+
+func (tc *testContext) createCommitWaitState() (State, *txnState, error) {
+	_, ts := tc.createOpenState(explicitTxn, retryIntentSet)
 	// Commit the KV txn, simulating what the execution layer is doing.
 	if err := ts.mu.txn.Commit(ts.Ctx); err != nil {
 		return nil, nil, err
@@ -127,8 +163,8 @@ func (tc *testContext) createCommitWaitState() (fsm.State, *txnState, error) {
 	return s, ts, nil
 }
 
-func (tc *testContext) createNoTxnState() (fsm.State, *txnState) {
-	txnStateMon := mon.NewMonitor("test mon",
+func (tc *testContext) createNoTxnState() (State, *txnState) {
+	txnStateMon := mon.MakeMonitor("test mon",
 		mon.MemoryResource,
 		nil,  /* curCount */
 		nil,  /* maxHist */
@@ -136,7 +172,7 @@ func (tc *testContext) createNoTxnState() (fsm.State, *txnState) {
 		1000, /* noteworthy */
 		cluster.MakeTestingClusterSettings(),
 	)
-	ts := txnState{mon: txnStateMon, connCtx: tc.ctx}
+	ts := txnState{mon: &txnStateMon, connCtx: tc.ctx}
 	return stateNoTxn{}, &ts
 }
 
@@ -166,15 +202,16 @@ func checkAdv(adv advanceInfo, expCode advanceCode, expRewPos CmdPos, expEv txnE
 // correspond to expectations. Any field left nil will not be checked.
 type expKVTxn struct {
 	debugName    *string
+	isolation    *enginepb.IsolationType
 	userPriority *roachpb.UserPriority
 	// For the timestamps we just check the physical part. The logical part is
 	// incremented every time the clock is read and so it's unpredictable.
-	writeTSNanos          *int64
-	readTSNanos           *int64
-	uncertaintyLimitNanos *int64
+	tsNanos     *int64
+	origTSNanos *int64
+	maxTSNanos  *int64
 }
 
-func checkTxn(txn *kv.Txn, exp expKVTxn) error {
+func checkTxn(txn *client.Txn, exp expKVTxn) error {
 	if txn == nil {
 		return errors.Errorf("expected a KV txn but found an uninitialized txn")
 	}
@@ -182,42 +219,43 @@ func checkTxn(txn *kv.Txn, exp expKVTxn) error {
 		return errors.Errorf("expected DebugName: %s, but got: %s",
 			*exp.debugName, txn.DebugName())
 	}
+	if exp.isolation != nil && *exp.isolation != txn.Isolation() {
+		return errors.Errorf("expected isolation: %s, but got: %s",
+			*exp.isolation, txn.Isolation())
+	}
 	if exp.userPriority != nil && *exp.userPriority != txn.UserPriority() {
 		return errors.Errorf("expected UserPriority: %s, but got: %s",
 			*exp.userPriority, txn.UserPriority())
 	}
-	proto := txn.TestingCloneTxn()
-	if exp.writeTSNanos != nil && *exp.writeTSNanos != proto.WriteTimestamp.WallTime {
+	proto := txn.Serialize()
+	if exp.tsNanos != nil && *exp.tsNanos != proto.Timestamp.WallTime {
 		return errors.Errorf("expected Timestamp: %d, but got: %s",
-			*exp.writeTSNanos, proto.WriteTimestamp)
+			*exp.tsNanos, proto.Timestamp)
 	}
-	if readTimestamp := txn.ReadTimestamp(); exp.readTSNanos != nil &&
-		*exp.readTSNanos != readTimestamp.WallTime {
-		return errors.Errorf("expected ReadTimestamp: %d, but got: %s",
-			*exp.readTSNanos, readTimestamp)
+	if origTimestamp := txn.OrigTimestamp(); exp.origTSNanos != nil &&
+		*exp.origTSNanos != origTimestamp.WallTime {
+		return errors.Errorf("expected OrigTimestamp: %d, but got: %s",
+			*exp.origTSNanos, origTimestamp)
 	}
-	if exp.uncertaintyLimitNanos != nil && *exp.uncertaintyLimitNanos != proto.GlobalUncertaintyLimit.WallTime {
-		return errors.Errorf("expected GlobalUncertaintyLimit: %d, but got: %s",
-			*exp.uncertaintyLimitNanos, proto.GlobalUncertaintyLimit)
+	if exp.maxTSNanos != nil && *exp.maxTSNanos != proto.MaxTimestamp.WallTime {
+		return errors.Errorf("expected MaxTimestamp: %d, but got: %s",
+			*exp.maxTSNanos, proto.MaxTimestamp)
 	}
 	return nil
 }
 
 func TestTransitions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
-	stopper := stop.NewStopper()
-	defer stopper.Stop(ctx)
+	ctx := context.TODO()
 	dummyRewCap := rewindCapability{rewindPos: CmdPos(12)}
-	testCon := makeTestContext(stopper)
+	testCon := makeTestContext()
 	tranCtx := transitionCtx{
 		db:             testCon.mockDB,
-		nodeIDOrZero:   roachpb.NodeID(5),
+		nodeID:         roachpb.NodeID(5),
 		clock:          testCon.clock,
 		tracer:         tracing.NewTracer(),
-		connMon:        testCon.mon,
+		connMon:        &testCon.mon,
 		sessionTracing: &SessionTracing{},
 		settings:       testCon.settings,
 	}
@@ -229,26 +267,27 @@ func TestTransitions(t *testing.T) {
 
 	txnName := sqlTxnName
 	now := testCon.clock.Now()
+	iso := enginepb.SERIALIZABLE
 	pri := roachpb.NormalUserPriority
-	uncertaintyLimit := testCon.clock.Now().Add(testCon.clock.MaxOffset().Nanoseconds(), 0 /* logical */)
+	maxTS := testCon.clock.Now().Add(testCon.clock.MaxOffset().Nanoseconds(), 0 /* logical */)
 	type test struct {
 		name string
 
 		// A function used to init the txnState to the desired state before the
 		// transition. The returned State and txnState are to be used to initialize
 		// a Machine.
-		init func() (fsm.State, *txnState, error)
+		init func() (State, *txnState, error)
 
 		// The event to deliver to the state machine.
-		ev fsm.Event
+		ev Event
 		// evPayload, if not nil, is the payload to be delivered with the event.
-		evPayload fsm.EventPayload
+		evPayload EventPayload
 		// evFun, if specified, replaces ev and allows a test to create an event
 		// that depends on the transactionState.
-		evFun func(ts *txnState) (fsm.Event, fsm.EventPayload)
+		evFun func(ts *txnState) (Event, EventPayload)
 
 		// The expected state of the fsm after the transition.
-		expState fsm.State
+		expState State
 
 		// The expected advance instructions resulting from the transition.
 		expAdv expAdvance
@@ -264,14 +303,13 @@ func TestTransitions(t *testing.T) {
 		{
 			// Start an implicit txn from NoTxn.
 			name: "NoTxn->Starting (implicit txn)",
-			init: func() (fsm.State, *txnState, error) {
+			init: func() (State, *txnState, error) {
 				s, ts := testCon.createNoTxnState()
 				return s, ts, nil
 			},
-			ev: eventTxnStart{ImplicitTxn: fsm.True},
-			evPayload: makeEventTxnStartPayload(pri, tree.ReadWrite, timeutil.Now(),
-				nil /* historicalTimestamp */, tranCtx),
-			expState: stateOpen{ImplicitTxn: fsm.True},
+			ev:        eventTxnStart{ImplicitTxn: True},
+			evPayload: makeEventTxnStartPayload(iso, pri, tree.ReadWrite, timeutil.Now(), tranCtx),
+			expState:  stateOpen{ImplicitTxn: True, RetryIntent: False},
 			expAdv: expAdvance{
 				// We expect to stayInPlace; upon starting a txn the statement is
 				// executed again, this time in state Open.
@@ -279,44 +317,59 @@ func TestTransitions(t *testing.T) {
 				expEv:   txnStart,
 			},
 			expTxn: &expKVTxn{
-				debugName:             &txnName,
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
+				debugName:    &txnName,
+				isolation:    &iso,
+				userPriority: &pri,
+				tsNanos:      &now.WallTime,
+				origTSNanos:  &now.WallTime,
+				maxTSNanos:   &maxTS.WallTime,
 			},
 		},
 		{
 			// Start an explicit txn from NoTxn.
 			name: "NoTxn->Starting (explicit txn)",
-			init: func() (fsm.State, *txnState, error) {
+			init: func() (State, *txnState, error) {
 				s, ts := testCon.createNoTxnState()
 				return s, ts, nil
 			},
-			ev: eventTxnStart{ImplicitTxn: fsm.False},
-			evPayload: makeEventTxnStartPayload(pri, tree.ReadWrite, timeutil.Now(),
-				nil /* historicalTimestamp */, tranCtx),
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			ev:        eventTxnStart{ImplicitTxn: False},
+			evPayload: makeEventTxnStartPayload(iso, pri, tree.ReadWrite, timeutil.Now(), tranCtx),
+			expState:  stateOpen{ImplicitTxn: False, RetryIntent: False},
 			expAdv: expAdvance{
 				expCode: advanceOne,
 				expEv:   txnStart,
 			},
 			expTxn: &expKVTxn{
-				debugName:             &txnName,
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
+				debugName:    &txnName,
+				isolation:    &iso,
+				userPriority: &pri,
+				tsNanos:      &now.WallTime,
+				origTSNanos:  &now.WallTime,
+				maxTSNanos:   &maxTS.WallTime,
 			},
 		},
 		//
 		// Tests starting from the Open state.
 		//
 		{
+			// Set the retry intent.
+			name: "Open->Open + retry intent",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
+				return s, ts, nil
+			},
+			ev:       eventRetryIntentSet{},
+			expState: stateOpen{ImplicitTxn: False, RetryIntent: True},
+			expAdv: expAdvance{
+				expCode: advanceOne,
+			},
+			expTxn: &expKVTxn{},
+		},
+		{
 			// Finish an implicit txn.
 			name: "Open (implicit) -> NoTxn",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(implicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(implicitTxn, retryIntentNotSet)
 				// We commit the KV transaction, as that's done by the layer below
 				// txnState.
 				if err := ts.mu.txn.Commit(ts.Ctx); err != nil {
@@ -324,8 +377,8 @@ func TestTransitions(t *testing.T) {
 				}
 				return s, ts, nil
 			},
-			ev:        eventTxnFinishCommitted{},
-			evPayload: nil,
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
 			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
@@ -336,8 +389,8 @@ func TestTransitions(t *testing.T) {
 		{
 			// Finish an explicit txn.
 			name: "Open (explicit) -> NoTxn",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
 				// We commit the KV transaction, as that's done by the layer below
 				// txnState.
 				if err := ts.mu.txn.Commit(ts.Ctx); err != nil {
@@ -345,8 +398,8 @@ func TestTransitions(t *testing.T) {
 				}
 				return s, ts, nil
 			},
-			ev:        eventTxnFinishCommitted{},
-			evPayload: nil,
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
 			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
@@ -357,18 +410,21 @@ func TestTransitions(t *testing.T) {
 		{
 			// Get a retriable error while we can auto-retry.
 			name: "Open + auto-retry",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
 				return s, ts, nil
 			},
-			evFun: func(ts *txnState) (fsm.Event, fsm.EventPayload) {
+			evFun: func(ts *txnState) (Event, EventPayload) {
 				b := eventRetriableErrPayload{
-					err:    ts.mu.txn.PrepareRetryableError(ctx, "test retriable err"),
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
 					rewCap: dummyRewCap,
 				}
-				return eventRetriableErr{CanAutoRetry: fsm.True, IsCommit: fsm.False}, b
+				return eventRetriableErr{CanAutoRetry: True, IsCommit: False}, b
 			},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			expState: stateOpen{ImplicitTxn: False, RetryIntent: False},
 			expAdv: expAdvance{
 				expCode: rewind,
 				expEv:   txnRestart,
@@ -381,18 +437,21 @@ func TestTransitions(t *testing.T) {
 			// except this time the error is on a COMMIT. This shouldn't make any
 			// difference; we should still auto-retry like the above.
 			name: "Open + auto-retry (COMMIT)",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
 				return s, ts, nil
 			},
-			evFun: func(ts *txnState) (fsm.Event, fsm.EventPayload) {
+			evFun: func(ts *txnState) (Event, EventPayload) {
 				b := eventRetriableErrPayload{
-					err:    ts.mu.txn.PrepareRetryableError(ctx, "test retriable err"),
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
 					rewCap: dummyRewCap,
 				}
-				return eventRetriableErr{CanAutoRetry: fsm.True, IsCommit: fsm.True}, b
+				return eventRetriableErr{CanAutoRetry: True, IsCommit: True}, b
 			},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			expState: stateOpen{ImplicitTxn: False, RetryIntent: False},
 			expAdv: expAdvance{
 				expCode: rewind,
 				expEv:   txnRestart,
@@ -404,21 +463,24 @@ func TestTransitions(t *testing.T) {
 			// Get a retriable error when we can no longer auto-retry, but the client
 			// is doing client-side retries.
 			name: "Open + client retry",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentSet)
 				return s, ts, nil
 			},
-			evFun: func(ts *txnState) (fsm.Event, fsm.EventPayload) {
+			evFun: func(ts *txnState) (Event, EventPayload) {
 				b := eventRetriableErrPayload{
-					err:    ts.mu.txn.PrepareRetryableError(ctx, "test retriable err"),
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
 					rewCap: rewindCapability{},
 				}
-				return eventRetriableErr{CanAutoRetry: fsm.False, IsCommit: fsm.False}, b
+				return eventRetriableErr{CanAutoRetry: False, IsCommit: False}, b
 			},
-			expState: stateAborted{},
+			expState: stateRestartWait{},
 			expAdv: expAdvance{
 				expCode: skipBatch,
-				expEv:   noEvent,
+				expEv:   txnRestart,
 			},
 			// Expect non-nil txn.
 			expTxn: &expKVTxn{},
@@ -431,21 +493,24 @@ func TestTransitions(t *testing.T) {
 			// done a RELEASE such that COMMIT couldn't get retriable errors), and so
 			// we can't go to RestartWait.
 			name: "Open + client retry + error on COMMIT",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentSet)
 				return s, ts, nil
 			},
-			evFun: func(ts *txnState) (fsm.Event, fsm.EventPayload) {
+			evFun: func(ts *txnState) (Event, EventPayload) {
 				b := eventRetriableErrPayload{
-					err:    ts.mu.txn.PrepareRetryableError(ctx, "test retriable err"),
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
 					rewCap: rewindCapability{},
 				}
-				return eventRetriableErr{CanAutoRetry: fsm.False, IsCommit: fsm.True}, b
+				return eventRetriableErr{CanAutoRetry: False, IsCommit: True}, b
 			},
 			expState: stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: skipBatch,
-				expEv:   txnRollback,
+				expEv:   txnAborted,
 			},
 			// Expect nil txn.
 			expTxn: nil,
@@ -453,39 +518,67 @@ func TestTransitions(t *testing.T) {
 		{
 			// An error on COMMIT leaves us in NoTxn, not in Aborted.
 			name: "Open + non-retriable error on COMMIT",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentSet)
 				return s, ts, nil
 			},
-			ev:        eventNonRetriableErr{IsCommit: fsm.True},
+			ev:        eventNonRetriableErr{IsCommit: True},
 			evPayload: eventNonRetriableErrPayload{err: fmt.Errorf("test non-retriable err")},
 			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: skipBatch,
-				expEv:   txnRollback,
+				expEv:   txnAborted,
 			},
 			// Expect nil txn.
 			expTxn: nil,
 		},
 		{
+			// We get a retriable error, but we can't auto-retry and the client is not
+			// doing client-directed retries.
+			name: "Open + useless retriable error (explicit)",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
+				return s, ts, nil
+			},
+			evFun: func(ts *txnState) (Event, EventPayload) {
+				b := eventRetriableErrPayload{
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
+					rewCap: rewindCapability{},
+				}
+				return eventRetriableErr{CanAutoRetry: False, IsCommit: False}, b
+			},
+			expState: stateAborted{RetryIntent: False},
+			expAdv: expAdvance{
+				expCode: skipBatch,
+				expEv:   txnAborted,
+			},
+			expTxn: &expKVTxn{},
+		},
+		{
 			// Like the above, but this time with an implicit txn: we get a retriable
 			// error, but we can't auto-retry. We expect to go to NoTxn.
 			name: "Open + useless retriable error (implicit)",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(implicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(implicitTxn, retryIntentNotSet)
 				return s, ts, nil
 			},
-			evFun: func(ts *txnState) (fsm.Event, fsm.EventPayload) {
+			evFun: func(ts *txnState) (Event, EventPayload) {
 				b := eventRetriableErrPayload{
-					err:    ts.mu.txn.PrepareRetryableError(ctx, "test retriable err"),
+					err: roachpb.NewHandledRetryableTxnError(
+						"test retriable err",
+						ts.mu.txn.ID(),
+						*ts.mu.txn.Serialize()),
 					rewCap: rewindCapability{},
 				}
-				return eventRetriableErr{CanAutoRetry: fsm.False, IsCommit: fsm.False}, b
+				return eventRetriableErr{CanAutoRetry: False, IsCommit: False}, b
 			},
 			expState: stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: skipBatch,
-				expEv:   txnRollback,
+				expEv:   txnAborted,
 			},
 			// Expect the txn to have been cleared.
 			expTxn: nil,
@@ -493,24 +586,24 @@ func TestTransitions(t *testing.T) {
 		{
 			// We get a non-retriable error.
 			name: "Open + non-retriable error",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentNotSet)
 				return s, ts, nil
 			},
-			ev:        eventNonRetriableErr{IsCommit: fsm.False},
+			ev:        eventNonRetriableErr{IsCommit: False},
 			evPayload: eventNonRetriableErrPayload{err: fmt.Errorf("test non-retriable err")},
-			expState:  stateAborted{},
+			expState:  stateAborted{RetryIntent: False},
 			expAdv: expAdvance{
 				expCode: skipBatch,
-				expEv:   noEvent,
+				expEv:   txnAborted,
 			},
 			expTxn: &expKVTxn{},
 		},
 		{
 			// We go to CommitWait (after a RELEASE SAVEPOINT).
 			name: "Open->CommitWait",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentSet)
 				// Simulate what execution does before generating this event.
 				err := ts.mu.txn.Commit(ts.Ctx)
 				return s, ts, err
@@ -526,12 +619,12 @@ func TestTransitions(t *testing.T) {
 		{
 			// Restarting from Open via ROLLBACK TO SAVEPOINT.
 			name: "Open + restart",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createOpenState(explicitTxn)
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createOpenState(explicitTxn, retryIntentSet)
 				return s, ts, nil
 			},
 			ev:       eventTxnRestart{},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			expState: stateOpen{ImplicitTxn: False, RetryIntent: True},
 			expAdv: expAdvance{
 				expCode: advanceOne,
 				expEv:   txnRestart,
@@ -546,94 +639,108 @@ func TestTransitions(t *testing.T) {
 		{
 			// The txn finished, such as after a ROLLBACK.
 			name: "Aborted->NoTxn",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createAbortedState()
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createAbortedState(retryIntentNotSet)
 				return s, ts, nil
 			},
-			ev:       eventTxnFinishAborted{},
-			expState: stateNoTxn{},
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: false},
+			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
-				expEv:   txnRollback,
+				expEv:   txnAborted,
 			},
 			expTxn: nil,
 		},
 		{
-			// The txn is starting again (ROLLBACK TO SAVEPOINT <not cockroach_restart> while in Aborted).
-			name: "Aborted->Open",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createAbortedState()
+			// The txn is starting again (e.g. ROLLBACK TO SAVEPOINT while in Aborted).
+			name: "Aborted->Starting",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createAbortedState(retryIntentSet)
 				return s, ts, nil
 			},
-			ev:       eventSavepointRollback{},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			ev:        eventTxnStart{ImplicitTxn: False},
+			evPayload: makeEventTxnStartPayload(iso, pri, tree.ReadWrite, timeutil.Now(), tranCtx),
+			expState:  stateOpen{ImplicitTxn: False, RetryIntent: True},
 			expAdv: expAdvance{
 				expCode: advanceOne,
 				expEv:   noEvent,
 			},
 			expTxn: &expKVTxn{},
 		},
+		//
+		// Tests starting from the RestartWait state.
+		//
 		{
-			// The txn is starting again (ROLLBACK TO SAVEPOINT cockroach_restart while in Aborted).
-			name: "Aborted->Restart",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createAbortedState()
-				return s, ts, nil
+			// The txn got finished, such as after a ROLLBACK.
+			name: "RestartWait->NoTxn",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createRestartWaitState()
+				err := ts.mu.txn.Rollback(ts.Ctx)
+				return s, ts, err
 			},
-			ev:       eventTxnRestart{},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: false},
+			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
-				expEv:   txnRestart,
+				expEv:   txnAborted,
 			},
-			expTxn: &expKVTxn{
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
-			},
+			expTxn: nil,
 		},
 		{
-			// The txn is starting again (e.g. ROLLBACK TO SAVEPOINT while in Aborted).
-			// Verify that the historical timestamp from the evPayload is propagated
-			// to the expTxn.
-			name: "Aborted->Starting (historical)",
-			init: func() (fsm.State, *txnState, error) {
-				s, ts := testCon.createAbortedState()
+			// The txn got restarted, through a ROLLBACK TO SAVEPOINT.
+			name: "RestartWait->Open",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createRestartWaitState()
 				return s, ts, nil
 			},
 			ev:       eventTxnRestart{},
-			expState: stateOpen{ImplicitTxn: fsm.False},
+			expState: stateOpen{ImplicitTxn: False, RetryIntent: True},
 			expAdv: expAdvance{
 				expCode: advanceOne,
 				expEv:   txnRestart,
 			},
-			expTxn: &expKVTxn{
-				writeTSNanos: proto.Int64(now.WallTime),
+			expTxn: &expKVTxn{},
+		},
+		{
+			name: "RestartWait->Aborted",
+			init: func() (State, *txnState, error) {
+				s, ts := testCon.createRestartWaitState()
+				return s, ts, nil
 			},
+			ev:        eventNonRetriableErr{IsCommit: False},
+			evPayload: eventNonRetriableErrPayload{err: fmt.Errorf("test non-retriable err")},
+			expState:  stateAborted{RetryIntent: True},
+			expAdv: expAdvance{
+				expCode: skipBatch,
+				expEv:   txnAborted,
+			},
+			expTxn: &expKVTxn{},
 		},
 		//
 		// Tests starting from the CommitWait state.
 		//
 		{
 			name: "CommitWait->NoTxn",
-			init: func() (fsm.State, *txnState, error) {
+			init: func() (State, *txnState, error) {
 				return testCon.createCommitWaitState()
 			},
-			ev:       eventTxnFinishCommitted{},
-			expState: stateNoTxn{},
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
+			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
-				expEv:   noEvent,
+				expEv:   txnCommit,
 			},
 			expTxn: nil,
 		},
 		{
 			name: "CommitWait + err",
-			init: func() (fsm.State, *txnState, error) {
+			init: func() (State, *txnState, error) {
 				return testCon.createCommitWaitState()
 			},
-			ev:        eventNonRetriableErr{IsCommit: fsm.False},
+			ev:        eventNonRetriableErr{IsCommit: False},
 			evPayload: eventNonRetriableErrPayload{err: fmt.Errorf("test non-retriable err")},
 			expState:  stateCommitWait{},
 			expAdv: expAdvance{
@@ -650,7 +757,7 @@ func TestTransitions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			machine := fsm.MakeMachine(TxnStateTransitions, s, ts)
+			machine := MakeMachine(TxnStateTransitions, s, ts)
 
 			// Perform the test's transition.
 			ev := tc.ev

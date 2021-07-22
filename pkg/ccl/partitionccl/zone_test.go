@@ -15,28 +15,24 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
+	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	sqlDB.Exec(t, `
@@ -47,65 +43,47 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 			PARTITION p1 VALUES IN (DEFAULT)
 		)`)
 
-	yamlDefault := fmt.Sprintf("gc: {ttlseconds: %d}", s.(*server.TestServer).Cfg.DefaultZoneConfig.GC.TTLSeconds)
+	yamlDefault := fmt.Sprintf("gc: {ttlseconds: %d}", config.DefaultZoneConfig().GC.TTLSeconds)
 	yamlOverride := "gc: {ttlseconds: 42}"
-	zoneOverride := s.(*server.TestServer).Cfg.DefaultZoneConfig
-	zoneOverride.GC = &zonepb.GCPolicy{TTLSeconds: 42}
-	partialZoneOverride := *zonepb.NewZoneConfig()
-	partialZoneOverride.GC = &zonepb.GCPolicy{TTLSeconds: 42}
+	zoneOverride := config.DefaultZoneConfig()
+	zoneOverride.GC.TTLSeconds = 42
 
-	dbID := sqlutils.QueryDatabaseID(t, db, "d")
-	tableID := sqlutils.QueryTableID(t, db, "d", "public", "t")
+	dbDescID := uint32(keys.MinNonPredefinedUserDescID)
 
 	defaultRow := sqlutils.ZoneRow{
-		ID:     keys.RootNamespaceID,
-		Config: s.(*server.TestServer).Cfg.DefaultZoneConfig,
+		ID:           keys.RootNamespaceID,
+		CLISpecifier: ".default",
+		Config:       config.DefaultZoneConfig(),
 	}
 	defaultOverrideRow := sqlutils.ZoneRow{
-		ID:     keys.RootNamespaceID,
-		Config: zoneOverride,
+		ID:           keys.RootNamespaceID,
+		CLISpecifier: ".default",
+		Config:       zoneOverride,
 	}
 	dbRow := sqlutils.ZoneRow{
-		ID:     dbID,
-		Config: zoneOverride,
+		ID:           dbDescID,
+		CLISpecifier: "d",
+		Config:       zoneOverride,
 	}
 	tableRow := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: zoneOverride,
+		ID:           dbDescID + 1,
+		CLISpecifier: "d.t",
+		Config:       zoneOverride,
 	}
 	primaryRow := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: zoneOverride,
+		ID:           dbDescID + 1,
+		CLISpecifier: "d.t@primary",
+		Config:       zoneOverride,
 	}
 	p0Row := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: zoneOverride,
+		ID:           dbDescID + 1,
+		CLISpecifier: "d.t.p0",
+		Config:       zoneOverride,
 	}
 	p1Row := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: zoneOverride,
-	}
-
-	// Partially filled config rows
-	partialDbRow := sqlutils.ZoneRow{
-		ID:     dbID,
-		Config: partialZoneOverride,
-	}
-	partialTableRow := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: partialZoneOverride,
-	}
-	partialPrimaryRow := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: partialZoneOverride,
-	}
-	partialP0Row := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: partialZoneOverride,
-	}
-	partialP1Row := sqlutils.ZoneRow{
-		ID:     tableID,
-		Config: partialZoneOverride,
+		ID:           dbDescID + 1,
+		CLISpecifier: "d.t.p1",
+		Config:       zoneOverride,
 	}
 
 	// Remove stock zone configs installed at cluster bootstrap. Otherwise this
@@ -124,7 +102,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure a database zone config applies to that database, its tables, and its
 	// tables' indices and partitions.
 	sqlutils.SetZoneConfig(t, sqlDB, "DATABASE d", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, partialDbRow)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", dbRow)
@@ -134,7 +112,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure a table zone config applies to that table and its indices and
 	// partitions, but no other zones.
 	sqlutils.SetZoneConfig(t, sqlDB, "TABLE d.t", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, partialDbRow, partialTableRow)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, dbRow, tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", tableRow)
@@ -144,7 +122,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure an index zone config applies to that index and its partitions, but
 	// no other zones.
 	sqlutils.SetZoneConfig(t, sqlDB, "INDEX d.t@primary", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, partialDbRow, partialTableRow, partialPrimaryRow)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, dbRow, tableRow, primaryRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", primaryRow)
@@ -154,7 +132,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure a partition zone config applies to that partition, but no other
 	// zones.
 	sqlutils.SetZoneConfig(t, sqlDB, "PARTITION p0 OF TABLE d.t", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, partialDbRow, partialTableRow, partialPrimaryRow, partialP0Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, dbRow, tableRow, primaryRow, p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", primaryRow)
@@ -164,7 +142,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure updating the default zone propagates to zones without an override,
 	// but not to those with overrides.
 	sqlutils.SetZoneConfig(t, sqlDB, "RANGE default", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, partialDbRow, partialTableRow, partialPrimaryRow, partialP0Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, dbRow, tableRow, primaryRow, p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", dbRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", primaryRow)
@@ -173,7 +151,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 
 	// Ensure deleting a database zone leaves child overrides in place.
 	sqlutils.DeleteZoneConfig(t, sqlDB, "DATABASE d")
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, partialTableRow, partialPrimaryRow, partialP0Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, tableRow, primaryRow, p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "DATABASE d", defaultOverrideRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", tableRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", primaryRow)
@@ -182,7 +160,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 
 	// Ensure deleting a table zone leaves child overrides in place.
 	sqlutils.DeleteZoneConfig(t, sqlDB, "TABLE d.t")
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, partialPrimaryRow, partialP0Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, primaryRow, p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", defaultOverrideRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", primaryRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "PARTITION p0 OF TABLE d.t", p0Row)
@@ -190,7 +168,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 
 	// Ensure deleting an index zone leaves child overrides in place.
 	sqlutils.DeleteZoneConfig(t, sqlDB, "INDEX d.t@primary")
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, partialP0Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultOverrideRow, p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "INDEX d.t@primary", defaultOverrideRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "PARTITION p0 OF TABLE d.t", p0Row)
 
@@ -218,7 +196,7 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 	// Ensure subzones can be created even when no table zone exists.
 	sqlutils.SetZoneConfig(t, sqlDB, "PARTITION p0 OF TABLE d.t", yamlOverride)
 	sqlutils.SetZoneConfig(t, sqlDB, "PARTITION p1 OF TABLE d.t", yamlOverride)
-	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, partialP0Row, partialP1Row)
+	sqlutils.VerifyAllZoneConfigs(t, sqlDB, defaultRow, p0Row, p1Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "TABLE d.t", defaultRow)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "PARTITION p0 OF TABLE d.t", p0Row)
 	sqlutils.VerifyZoneConfigForTarget(t, sqlDB, "PARTITION p1 OF TABLE d.t", p1Row)
@@ -234,10 +212,9 @@ func TestValidIndexPartitionSetShowZones(t *testing.T) {
 
 func TestInvalidIndexPartitionSetShowZones(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	for i, tc := range []struct {
 		query string
@@ -276,7 +253,6 @@ func TestInvalidIndexPartitionSetShowZones(t *testing.T) {
 
 func TestGenerateSubzoneSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	rng, _ := randutil.NewPseudoRand()
 
 	partitioningTests := allPartitioningTests(rng)
@@ -292,8 +268,8 @@ func TestGenerateSubzoneSpans(t *testing.T) {
 			}
 			clusterID := uuid.MakeV4()
 			hasNewSubzones := false
-			spans, err := sql.GenerateSubzoneSpans(
-				cluster.NoSettings, clusterID, keys.SystemSQLCodec, test.parsed.tableDesc, test.parsed.subzones, hasNewSubzones)
+			spans, err := GenerateSubzoneSpans(
+				cluster.NoSettings, clusterID, test.parsed.tableDesc, test.parsed.subzones, hasNewSubzones)
 			if err != nil {
 				t.Fatalf("generating subzone spans: %+v", err)
 			}
@@ -301,14 +277,13 @@ func TestGenerateSubzoneSpans(t *testing.T) {
 			var actual []string
 			for _, span := range spans {
 				subzone := test.parsed.subzones[span.SubzoneIndex]
-				idx, err := test.parsed.tableDesc.FindIndexWithID(descpb.IndexID(subzone.IndexID))
+				idxDesc, err := test.parsed.tableDesc.FindIndexByID(sqlbase.IndexID(subzone.IndexID))
 				if err != nil {
 					t.Fatalf("could not find index with ID %d: %+v", subzone.IndexID, err)
 				}
 
 				directions := []encoding.Direction{encoding.Ascending /* index ID */}
-				for i := 0; i < idx.NumKeyColumns(); i++ {
-					cd := idx.GetKeyColumnDirection(i)
+				for _, cd := range idxDesc.ColumnDirections {
 					ed, err := cd.ToEncodingDirection()
 					if err != nil {
 						t.Fatal(err)
@@ -320,7 +295,7 @@ func TestGenerateSubzoneSpans(t *testing.T) {
 				if len(subzone.PartitionName) > 0 {
 					subzoneShort = "." + subzone.PartitionName
 				} else {
-					subzoneShort = "@" + idx.GetName()
+					subzoneShort = "@" + idxDesc.Name
 				}
 
 				// Verify that we're always doing the space savings when we can.

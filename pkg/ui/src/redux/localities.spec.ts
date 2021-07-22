@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import { assert } from "chai";
 
@@ -34,9 +38,11 @@ function makeStateWithLocalities(localities: LocalityTier[][]) {
   };
 }
 
-describe("selectLocalityTree", function () {
-  it("puts nodes without locality at the top-level", function () {
-    const state = makeStateWithLocalities([[]]);
+describe("selectLocalityTree", function() {
+  it("puts nodes without locality at the top-level", function() {
+    const state = makeStateWithLocalities([
+      [],
+    ]);
 
     const tree = selectLocalityTree(state);
 
@@ -46,7 +52,7 @@ describe("selectLocalityTree", function () {
     assert.lengthOf(tree.nodes, 1);
   });
 
-  it("organizes nodes by locality", function () {
+  it("organizes nodes by locality", function() {
     const state = makeStateWithLocalities([
       [{ key: "region", value: "us-east-1" }],
       [{ key: "region", value: "us-east-2" }],
@@ -57,7 +63,7 @@ describe("selectLocalityTree", function () {
     assert.isEmpty(tree.tiers);
     assert.isEmpty(tree.nodes);
 
-    assert.hasAllKeys(tree.localities, ["region"]);
+    assert.hasAllKeys(tree.localities, ["region"] );
     const regions = tree.localities.region;
 
     assert.hasAllKeys(regions, ["us-east-1", "us-east-2"]);

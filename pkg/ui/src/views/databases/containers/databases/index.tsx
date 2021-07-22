@@ -1,25 +1,27 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
+import PropTypes from "prop-types";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
+import { InjectedRouter, RouterState } from "react-router";
 import { createSelector } from "reselect";
-import { withRouter, RouteComponentProps } from "react-router-dom";
 
 import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
-import {
-  PageConfig,
-  PageConfigItem,
-} from "src/views/shared/components/pageconfig";
+import { PageConfig, PageConfigItem } from "src/views/shared/components/pageconfig";
 
 import { AdminUIState } from "src/redux/state";
 import { refreshDatabases } from "src/redux/apiReducers";
@@ -29,38 +31,38 @@ import DatabaseSummaryTables from "src/views/databases/containers/databaseTables
 import DatabaseSummaryGrants from "src/views/databases/containers/databaseGrants";
 import NonTableSummary from "./nonTableSummary";
 
-import "./databases.styl";
-
 const databasePages = [
   { value: "tables", label: "Tables" },
   { value: "grants", label: "Grants" },
 ];
 
 // The system databases should sort after user databases.
-const systemDatabases = ["defaultdb", "postgres", "system"];
+const systemDatabases = [
+  "defaultdb",
+  "postgres",
+  "system",
+];
 
-interface DatabaseListNavProps {
-  selected: string;
-  onChange: (value: string) => void;
-}
 // DatabaseListNav displays the database page navigation bar.
-class DatabaseListNav extends React.Component<DatabaseListNavProps> {
+class DatabaseListNav extends React.Component<{selected: string}, {}> {
+  // Magic to add react router to the context.
+  // See https://github.com/ReactTraining/react-router/issues/975
+  // TODO(mrtracy): Switch this, and the other uses of contextTypes, to use the
+  // 'withRouter' HoC after upgrading to react-router 4.x.
+  static contextTypes = {
+    router: PropTypes.object.isRequired,
+  };
+  context: { router: InjectedRouter & RouterState; };
+
   render() {
-    const { selected, onChange } = this.props;
-    return (
-      <PageConfig>
-        <PageConfigItem>
-          <Dropdown
-            title="View"
-            options={databasePages}
-            selected={selected}
-            onChange={({ value }: DropdownOption) => {
-              onChange(value);
-            }}
-          />
-        </PageConfigItem>
-      </PageConfig>
-    );
+    return <PageConfig>
+      <PageConfigItem>
+        <Dropdown title="View" options={databasePages} selected={this.props.selected}
+                  onChange={(selected: DropdownOption) => {
+                    this.context.router.push(`databases/${selected.value}`);
+                  }} />
+      </PageConfigItem>
+    </PageConfig>;
   }
 }
 
@@ -80,80 +82,62 @@ interface DatabaseListActions {
   refreshDatabases: typeof refreshDatabases;
 }
 
-type DatabaseListProps = DatabaseListData &
-  DatabaseListActions &
-  RouteComponentProps;
+type DatabaseListProps = DatabaseListData & DatabaseListActions;
 
 // DatabaseTablesList displays the "Tables" sub-tab of the main database page.
-class DatabaseTablesList extends React.Component<DatabaseListProps> {
-  componentDidMount() {
+class DatabaseTablesList extends React.Component<DatabaseListProps, {}> {
+  componentWillMount() {
     this.props.refreshDatabases();
   }
-
-  handleOnNavigationListChange = (value: string) => {
-    this.props.history.push(`/databases/${value}`);
-  };
 
   render() {
     const { user, system } = this.props.databasesByType;
 
-    return (
-      <div>
-        <Helmet title="Tables | Databases" />
-        <section className="section">
-          <h1 className="base-heading">Databases</h1>
-        </section>
-        <DatabaseListNav
-          selected="tables"
-          onChange={this.handleOnNavigationListChange}
-        />
-        <div className="section databases">
-          {user.map((n) => (
-            <DatabaseSummaryTables name={n} key={n} updateOnLoad={false} />
-          ))}
-          {system.map((n) => (
-            <DatabaseSummaryTables name={n} key={n} updateOnLoad={false} />
-          ))}
-          <NonTableSummary />
-        </div>
+    return <div>
+      <Helmet>
+        <title>Tables | Databases</title>
+      </Helmet>
+      <section className="section"><h1>Databases</h1></section>
+      <DatabaseListNav selected="tables"/>
+      <div className="section databases">
+        {
+          user.map(n => <DatabaseSummaryTables name={n} key={n} />)
+        }
+        <hr />
+        {
+          system.map(n => <DatabaseSummaryTables name={n} key={n} />)
+        }
+        <NonTableSummary />
       </div>
-    );
+    </div>;
   }
 }
 
 // DatabaseTablesList displays the "Grants" sub-tab of the main database page.
-class DatabaseGrantsList extends React.Component<DatabaseListProps> {
-  componentDidMount() {
+class DatabaseGrantsList extends React.Component<DatabaseListProps, {}> {
+  componentWillMount() {
     this.props.refreshDatabases();
   }
-
-  handleOnNavigationListChange = (value: string) => {
-    this.props.history.push(`/databases/${value}`);
-  };
 
   render() {
     const { user, system } = this.props.databasesByType;
 
-    return (
-      <div>
-        <Helmet title="Grants | Databases" />
-        <section className="section">
-          <h1 className="base-heading">Databases</h1>
-        </section>
-        <DatabaseListNav
-          selected="grants"
-          onChange={this.handleOnNavigationListChange}
-        />
-        <div className="section databases">
-          {user.map((n) => (
-            <DatabaseSummaryGrants name={n} key={n} />
-          ))}
-          {system.map((n) => (
-            <DatabaseSummaryGrants name={n} key={n} />
-          ))}
-        </div>
+    return <div>
+      <Helmet>
+        <title>Grants | Databases</title>
+      </Helmet>
+      <section className="section"><h1>Databases</h1></section>
+      <DatabaseListNav selected="grants"/>
+      <div className="section databases">
+        {
+          user.map(n => <DatabaseSummaryGrants name={n} key={n} />)
+        }
+        <hr />
+        {
+          system.map(n => <DatabaseSummaryGrants name={n} key={n} />)
+        }
       </div>
-    );
+    </div>;
   }
 }
 
@@ -161,10 +145,7 @@ type DatabasesState = Pick<AdminUIState, "cachedData", "databases">;
 
 // Base selectors to extract data from redux state.
 function databaseNames(state: DatabasesState): string[] {
-  if (
-    state.cachedData.databases.data &&
-    state.cachedData.databases.data.databases
-  ) {
+  if (state.cachedData.databases.data && state.cachedData.databases.data.databases) {
     return state.cachedData.databases.data.databases;
   }
   return [];
@@ -173,32 +154,34 @@ function databaseNames(state: DatabasesState): string[] {
 export const selectDatabasesByType = createSelector(
   databaseNames,
   (dbs: string[]) => {
-    const [user, system] = _.partition(
-      dbs,
-      (db) => systemDatabases.indexOf(db) === -1,
-    );
+    const [user, system] = _.partition(dbs, (db) => systemDatabases.indexOf(db) === -1);
     return { user, system };
   },
 );
 
-const mapStateToProps = (state: AdminUIState) => ({
-  // RootState contains declaration for whole state
-  databasesByType: selectDatabasesByType(state),
-});
-
-const mapDispatchToProps = {
-  refreshDatabases,
-};
-
 // Connect the DatabaseTablesList class with our redux store.
-const databaseTablesListConnected = withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(DatabaseTablesList),
-);
+const databaseTablesListConnected = connect(
+  (state: AdminUIState) => {
+    return {
+      databasesByType: selectDatabasesByType(state),
+    };
+  },
+  {
+    refreshDatabases,
+  },
+)(DatabaseTablesList);
 
 // Connect the DatabaseGrantsList class with our redux store.
-const databaseGrantsListConnected = withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(DatabaseGrantsList),
-);
+const databaseGrantsListConnected = connect(
+  (state: AdminUIState) => {
+    return {
+      databasesByType: selectDatabasesByType(state),
+    };
+  },
+  {
+    refreshDatabases,
+  },
+)(DatabaseGrantsList);
 
 export {
   databaseTablesListConnected as DatabaseTablesList,

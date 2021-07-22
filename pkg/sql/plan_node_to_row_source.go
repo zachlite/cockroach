@@ -1,97 +1,89 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 )
 
 type metadataForwarder interface {
-	forwardMetadata(metadata *execinfrapb.ProducerMetadata)
+	forwardMetadata(metadata *distsqlrun.ProducerMetadata)
 }
 
 type planNodeToRowSource struct {
-	execinfra.ProcessorBase
+	distsqlrun.ProcessorBase
 
-	input execinfra.RowSource
+	started bool
 
 	fastPath bool
 
 	node        planNode
 	params      runParams
-	outputTypes []*types.T
+	outputTypes []sqlbase.ColumnType
 
 	firstNotWrapped planNode
 
 	// run time state machine values
-	row rowenc.EncDatumRow
+	row sqlbase.EncDatumRow
 }
-
-var _ execinfra.OpNode = &planNodeToRowSource{}
 
 func makePlanNodeToRowSource(
 	source planNode, params runParams, fastPath bool,
 ) (*planNodeToRowSource, error) {
-	var typs []*types.T
-	if fastPath {
-		// If our node is a "fast path node", it means that we're set up to
-		// just return a row count meaning we'll output a single row with a
-		// single INT column.
-		typs = []*types.T{types.Int}
-	} else {
-		typs = getTypesFromResultColumns(planColumns(source))
+	nodeColumns := planColumns(source)
+
+	types := make([]sqlbase.ColumnType, len(nodeColumns))
+	for i := range nodeColumns {
+		colTyp, err := sqlbase.DatumTypeToColumnType(nodeColumns[i].Typ)
+		if err != nil {
+			return nil, err
+		}
+		types[i] = colTyp
 	}
-	row := make(rowenc.EncDatumRow, len(typs))
+	row := make(sqlbase.EncDatumRow, len(nodeColumns))
 
 	return &planNodeToRowSource{
 		node:        source,
 		params:      params,
-		outputTypes: typs,
+		outputTypes: types,
 		row:         row,
 		fastPath:    fastPath,
 	}, nil
 }
 
-var _ execinfra.LocalProcessor = &planNodeToRowSource{}
-
-// MustBeStreaming implements the execinfra.Processor interface.
-func (p *planNodeToRowSource) MustBeStreaming() bool {
-	// hookFnNode is special because it might be blocked forever if we decide to
-	// buffer its output.
-	_, isHookFnNode := p.node.(*hookFnNode)
-	return isHookFnNode
-}
+var _ distsqlrun.LocalProcessor = &planNodeToRowSource{}
 
 // InitWithOutput implements the LocalProcessor interface.
 func (p *planNodeToRowSource) InitWithOutput(
-	flowCtx *execinfra.FlowCtx, post *execinfrapb.PostProcessSpec, output execinfra.RowReceiver,
+	post *distsqlrun.PostProcessSpec, output distsqlrun.RowReceiver,
 ) error {
 	return p.InitWithEvalCtx(
 		p,
 		post,
 		p.outputTypes,
-		flowCtx,
+		nil, /* flowCtx */
 		p.params.EvalContext(),
 		0, /* processorID */
 		output,
 		nil, /* memMonitor */
-		execinfra.ProcStateOpts{},
+		distsqlrun.ProcStateOpts{},
 	)
 }
 
@@ -100,13 +92,12 @@ func (p *planNodeToRowSource) InitWithOutput(
 // drain this row source of its metadata in case the planNode tree we're
 // wrapping returned an error, since planNodes don't know how to drain trailing
 // metadata.
-func (p *planNodeToRowSource) SetInput(ctx context.Context, input execinfra.RowSource) error {
+func (p *planNodeToRowSource) SetInput(ctx context.Context, input distsqlrun.RowSource) error {
 	if p.firstNotWrapped == nil {
 		// Short-circuit if we never set firstNotWrapped - indicating this planNode
 		// tree had no DistSQL-plannable subtrees.
 		return nil
 	}
-	p.input = input
 	p.AddInputToDrain(input)
 	// Search the plan we're wrapping for firstNotWrapped, which is the planNode
 	// that DistSQL planning resumed in. Replace that planNode with input,
@@ -121,17 +112,38 @@ func (p *planNodeToRowSource) SetInput(ctx context.Context, input execinfra.RowS
 	})
 }
 
-func (p *planNodeToRowSource) Start(ctx context.Context) {
-	ctx = p.StartInternalNoSpan(ctx)
+func (p *planNodeToRowSource) Start(ctx context.Context) context.Context {
+	// We do not call p.StartInternal to avoid creating a span. Only the context
+	// needs to be set.
+	p.Ctx = ctx
 	p.params.ctx = ctx
-	// This starts all of the nodes below this node.
-	if err := startExec(p.params, p.node); err != nil {
-		p.MoveToDraining(err)
+	if !p.started {
+		p.started = true
+		// This starts all of the nodes below this node.
+		if err := startExec(p.params, p.node); err != nil {
+			p.MoveToDraining(err)
+			return ctx
+		}
+	}
+	return ctx
+}
+
+func (p *planNodeToRowSource) InternalClose() {
+	if p.ProcessorBase.InternalClose() {
+		p.started = true
 	}
 }
 
-func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
-	if p.State == execinfra.StateRunning && p.fastPath {
+func (p *planNodeToRowSource) startExec(_ runParams) error {
+	// If we're getting startExec'd, it means we're running in local mode - so we
+	// mark ourselves already started, since local mode will have taken care of
+	// starting the child nodes of this node.
+	p.started = true
+	return nil
+}
+
+func (p *planNodeToRowSource) Next() (sqlbase.EncDatumRow, *distsqlrun.ProducerMetadata) {
+	if p.State == distsqlrun.StateRunning && p.fastPath {
 		var count int
 		// If our node is a "fast path node", it means that we're set up to just
 		// return a row count. So trigger the fast path and return the row count as
@@ -166,10 +178,10 @@ func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerM
 		p.MoveToDraining(nil /* err */)
 		// Return the row count the only way we can: as a single-column row with
 		// the count inside.
-		return rowenc.EncDatumRow{rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(count))}}, nil
+		return sqlbase.EncDatumRow{sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(count))}}, nil
 	}
 
-	for p.State == execinfra.StateRunning {
+	for p.State == distsqlrun.StateRunning {
 		valid, err := p.node.Next(p.params)
 		if err != nil || !valid {
 			p.MoveToDraining(err)
@@ -178,7 +190,7 @@ func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerM
 
 		for i, datum := range p.node.Values() {
 			if datum != nil {
-				p.row[i] = rowenc.DatumToEncDatum(p.outputTypes[i], datum)
+				p.row[i] = sqlbase.DatumToEncDatum(p.outputTypes[i], datum)
 			}
 		}
 		// ProcessRow here is required to deal with projections, which won't be
@@ -190,31 +202,19 @@ func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerM
 	return nil, p.DrainHelper()
 }
 
+func (p *planNodeToRowSource) ConsumerDone() {
+	p.MoveToDraining(nil /* err */)
+}
+
+func (p *planNodeToRowSource) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	p.InternalClose()
+}
+
 // forwardMetadata will be called by any upstream rowSourceToPlanNode processors
 // that need to forward metadata to the end of the flow. They can't pass
 // metadata through local processors, so they instead add the metadata to our
 // trailing metadata and expect us to forward it further.
-func (p *planNodeToRowSource) forwardMetadata(metadata *execinfrapb.ProducerMetadata) {
+func (p *planNodeToRowSource) forwardMetadata(metadata *distsqlrun.ProducerMetadata) {
 	p.ProcessorBase.AppendTrailingMeta(*metadata)
-}
-
-// ChildCount is part of the execinfra.OpNode interface.
-func (p *planNodeToRowSource) ChildCount(verbose bool) int {
-	if _, ok := p.input.(execinfra.OpNode); ok {
-		return 1
-	}
-	return 0
-}
-
-// Child is part of the execinfra.OpNode interface.
-func (p *planNodeToRowSource) Child(nth int, verbose bool) execinfra.OpNode {
-	switch nth {
-	case 0:
-		if n, ok := p.input.(execinfra.OpNode); ok {
-			return n
-		}
-		panic("input to planNodeToRowSource is not an execinfra.OpNode")
-	default:
-		panic(errors.AssertionFailedf("invalid index %d", nth))
-	}
 }

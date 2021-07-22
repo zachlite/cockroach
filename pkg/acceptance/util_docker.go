@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package acceptance
 
@@ -20,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/containerd/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 )
@@ -59,7 +62,7 @@ func testDockerSuccess(ctx context.Context, t *testing.T, name string, cmd []str
 const (
 	// Iterating against a locally built version of the docker image can be done
 	// by changing acceptanceImage to the hash of the container.
-	acceptanceImage = "docker.io/cockroachdb/acceptance:20200303-091324"
+	acceptanceImage = "docker.io/cockroachdb/acceptance:20180416-090309"
 )
 
 func testDocker(
@@ -90,8 +93,7 @@ func testDocker(
 			Binds:       []string{filepath.Join(pwd, "testdata") + ":/mnt/data"},
 		}
 		err = l.OneShot(
-			ctx, acceptanceImage, types.ImagePullOptions{}, containerConfig, hostConfig,
-			platforms.DefaultSpec(), "docker-"+name,
+			ctx, acceptanceImage, types.ImagePullOptions{}, containerConfig, hostConfig, "docker-"+name,
 		)
 		preserveLogs := err != nil
 		l.Cleanup(ctx, preserveLogs)

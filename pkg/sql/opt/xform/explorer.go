@@ -1,19 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package xform
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -68,10 +71,10 @@ import (
 //    (InnerJoin
 //      $r
 //      $t
-//      (ConstructFiltersNotUsing $s $lowerOn $upperOn)
+//      (Filters (ConstructConditionsNotUsing $s $lowerOn $upperOn))
 //    )
 //    $s
-//    (ConstructFiltersUsing $s $lowerOn $upperOn)
+//    (Filters (ConstructConditionsUsing $s $lowerOn $upperOn))
 //  )
 //
 // In this example, if the upper and lower groups each contain two InnerJoin
@@ -86,22 +89,21 @@ type explorer struct {
 	mem     *memo.Memo
 
 	// funcs is the struct used to call all custom match and replace functions
-	// used by the exploration rules. It wraps an unnamed norm.CustomFuncs, so
-	// it provides a clean interface for calling functions from both the xform
-	// and norm packages using the same prefix.
+	// used by the exploration rules. It wraps an unnamed xfunc.CustomFuncs,
+	// so it provides a clean interface for calling functions from both the xform
+	// and xfunc packages using the same prefix.
 	funcs CustomFuncs
+
+	// exprs is a buffer reused by custom replace functions.
+	exprs []memo.Expr
 }
 
 // init initializes the explorer for use (or reuse).
 func (e *explorer) init(o *Optimizer) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*e = explorer{
-		evalCtx: o.evalCtx,
-		o:       o,
-		f:       o.Factory(),
-		mem:     o.mem,
-	}
+	e.evalCtx = o.evalCtx
+	e.o = o
+	e.f = o.Factory()
+	e.mem = o.mem
 	e.funcs.Init(e)
 }
 
@@ -154,60 +156,53 @@ func (e *explorer) init(o *Optimizer) {
 //         if ordinal(e3) >= state.start:
 //           ... explore (e1, e2, e3) combo ...
 //
-func (e *explorer) exploreGroup(grp memo.RelExpr) *exploreState {
+func (e *explorer) exploreGroup(group memo.GroupID) *exploreState {
 	// Do nothing if this group has already been fully explored.
-	state := e.ensureExploreState(grp)
+	state := e.ensureExploreState(group)
 	if state.fullyExplored {
 		return state
 	}
 
-	// Update set of group members that will be considered during this pass, by
-	// setting the start member to be the end expression from last pass.
+	// Update set of expressions that will be considered during this pass, by
+	// setting the start expression to be the end expression from last pass.
+	exprCount := e.mem.ExprCount(group)
 	state.start = state.end
-	state.end = 0
-	for member := grp; member != nil; member = member.NextExpr() {
-		state.end++
-	}
+	state.end = memo.ExprOrdinal(exprCount)
 
-	var member memo.RelExpr
-	var i int
 	fullyExplored := true
-	for i, member = 0, grp; i < state.end; i, member = i+1, member.NextExpr() {
-		// If member was fully explored in previous passes, then nothing further
-		// to do.
-		if state.isMemberFullyExplored(i) {
+	for i := 0; i < exprCount; i++ {
+		ordinal := memo.ExprOrdinal(i)
+
+		// If expression was fully explored in previous passes, then nothing
+		// further to do.
+		if state.isExprFullyExplored(ordinal) {
 			continue
 		}
 
-		if memberExplored := e.exploreGroupMember(state, member, i); memberExplored {
+		eid := memo.ExprID{Group: group, Expr: ordinal}
+		if e.exploreExpr(state, eid) {
 			// No more rules can ever match this expression, so skip it in
 			// future passes.
-			state.markMemberAsFullyExplored(i)
+			state.markExprAsFullyExplored(ordinal)
 		} else {
-			// If even one member is not fully explored, then the group is not
-			// fully explored.
+			// If even one expression is not fully explored, then the group is
+			// not fully explored.
 			fullyExplored = false
 		}
 	}
 
-	// If new group members were added by the explorer, then the group has not
-	// yet been fully explored.
-	if fullyExplored && member == nil {
+	// If all existing group expressions have been fully explored, and no new
+	// ones were added, then group can be skipped in future passes.
+	if fullyExplored && e.mem.ExprCount(group) == int(state.end) {
 		state.fullyExplored = true
 	}
 	return state
 }
 
-// lookupExploreState returns the optState struct associated with the memo
-// group.
-func (e *explorer) lookupExploreState(grp memo.RelExpr) *exploreState {
-	return &e.o.lookupOptState(grp, physical.MinRequired).explore
-}
-
 // ensureExploreState allocates the exploration state in the optState struct
 // associated with the memo group, with respect to the min physical props.
-func (e *explorer) ensureExploreState(grp memo.RelExpr) *exploreState {
-	return &e.o.ensureOptState(grp, physical.MinRequired).explore
+func (e *explorer) ensureExploreState(group memo.GroupID) *exploreState {
+	return &e.o.ensureOptState(group, memo.MinPhysPropsID).explore
 }
 
 // ----------------------------------------------------------------------
@@ -225,31 +220,29 @@ type exploreState struct {
 	// be explored in the current pass. Expressions < start have been partly
 	// explored during previous passes. Expressions >= end are new expressions
 	// added during the current pass.
-	start int
-	end   int
+	start memo.ExprOrdinal
+	end   memo.ExprOrdinal
 
-	// fullyExplored is set to true once all members of the group have been fully
-	// explored, meaning that no new members will ever be added to the group, or
-	// to dependent child groups. Further exploration of the group can be skipped.
+	// fullyExplored is set to true once all expressions in the group have been
+	// fully explored, and no new expressions will ever be added. Further
+	// exploration of the group can be skipped.
 	fullyExplored bool
 
-	// fullyExploredMembers is a set of ordinal positions of members within the
-	// memo group. Once a member expression has been fully explored, its ordinal
-	// is added to this set.
-	fullyExploredMembers util.FastIntSet
+	// fullyExploredExprs is a set of memo.ExprOrdinal values. Once an
+	// expression has been fully explored, its ordinal is added to this set.
+	fullyExploredExprs util.FastIntSet
 }
 
-// isMemberFullyExplored is true if the member at the given ordinal position
-// within the group will never match an additional rule, and can therefore be
-// skipped in future exploration passes.
-func (e *exploreState) isMemberFullyExplored(ordinal int) bool {
-	return e.fullyExploredMembers.Contains(ordinal)
+// isExprFullyExplored is true if the given expression will never match an
+// additional rule, and can therefore be skipped in future exploration passes.
+func (e *exploreState) isExprFullyExplored(ordinal memo.ExprOrdinal) bool {
+	return e.fullyExploredExprs.Contains(int(ordinal))
 }
 
-// markMemberAsFullyExplored is called when all possible matching combinations
+// markExprAsFullyExplored is called when all possible matching combinations
 // have been considered for the subtree rooted at the given expression. Even if
 // there are more exploration passes, this expression will never have new
 // children, grand-children, etc. that might cause it to match another rule.
-func (e *exploreState) markMemberAsFullyExplored(ordinal int) {
-	e.fullyExploredMembers.Add(ordinal)
+func (e *exploreState) markExprAsFullyExplored(ordinal memo.ExprOrdinal) {
+	e.fullyExploredExprs.Add(int(ordinal))
 }

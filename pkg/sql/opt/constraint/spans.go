@@ -1,20 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package constraint
 
 import (
 	"sort"
 	"strings"
-
-	"github.com/cockroachdb/errors"
 )
 
 // Spans is a collection of spans. There are no general requirements on the
@@ -43,12 +45,10 @@ func (s *Spans) Alloc(capacity int) {
 
 // InitSingleSpan initializes the structure with a single span.
 func (s *Spans) InitSingleSpan(sp *Span) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*s = Spans{
-		firstSpan: *sp,
-		numSpans:  1,
-	}
+	s.firstSpan = *sp
+	s.otherSpans = nil
+	s.numSpans = 1
+	s.immutable = false
 }
 
 // Count returns the number of spans.
@@ -67,7 +67,7 @@ func (s *Spans) Get(nth int) *Span {
 // Append adds another span (at the end).
 func (s *Spans) Append(sp *Span) {
 	if s.immutable {
-		panic(errors.AssertionFailedf("mutation disallowed"))
+		panic("mutation disallowed")
 	}
 	if s.numSpans == 0 {
 		s.firstSpan = *sp
@@ -80,10 +80,10 @@ func (s *Spans) Append(sp *Span) {
 // Truncate removes all but the first newLength spans.
 func (s *Spans) Truncate(newLength int) {
 	if s.immutable {
-		panic(errors.AssertionFailedf("mutation disallowed"))
+		panic("mutation disallowed")
 	}
 	if int32(newLength) > s.numSpans {
-		panic(errors.AssertionFailedf("can't truncate to longer length"))
+		panic("can't truncate to longer length")
 	}
 	if newLength == 0 {
 		s.otherSpans = s.otherSpans[:0]

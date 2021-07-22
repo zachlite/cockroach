@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package server
 
@@ -14,29 +18,27 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 func (s *statusServer) Statements(
 	ctx context.Context, req *serverpb.StatementsRequest,
 ) (*serverpb.StatementsResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = s.AnnotateCtx(ctx)
-
-	if _, err := s.privilegeChecker.requireViewActivityPermission(ctx); err != nil {
+	if _, err := s.admin.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
 
+	ctx = propagateGatewayMetadata(ctx)
+	ctx = s.AnnotateCtx(ctx)
+
 	response := &serverpb.StatementsResponse{
-		Statements:            []serverpb.StatementsResponse_CollectedStatementStatistics{},
-		LastReset:             timeutil.Now(),
-		InternalAppNamePrefix: catconstants.InternalAppNamePrefix,
+		Statements: []serverpb.StatementsResponse_CollectedStatementStatistics{},
+		LastReset:  timeutil.Now(),
 	}
 
 	localReq := &serverpb.StatementsRequest{
@@ -49,7 +51,7 @@ func (s *statusServer) Statements(
 			return nil, status.Errorf(codes.InvalidArgument, err.Error())
 		}
 		if local {
-			return statementsLocal(ctx, s.gossip.NodeID, s.admin.server.sqlServer)
+			return s.StatementsLocal(ctx)
 		}
 		status, err := s.dialNode(ctx, requestedNodeID)
 		if err != nil {
@@ -73,7 +75,6 @@ func (s *statusServer) Statements(
 		func(nodeID roachpb.NodeID, resp interface{}) {
 			statementsResp := resp.(*serverpb.StatementsResponse)
 			response.Statements = append(response.Statements, statementsResp.Statements...)
-			response.Transactions = append(response.Transactions, statementsResp.Transactions...)
 			if response.LastReset.After(statementsResp.LastReset) {
 				response.LastReset = statementsResp.LastReset
 			}
@@ -88,42 +89,21 @@ func (s *statusServer) Statements(
 	return response, nil
 }
 
-func statementsLocal(
-	ctx context.Context, nodeID *base.NodeIDContainer, sqlServer *SQLServer,
-) (*serverpb.StatementsResponse, error) {
-	stmtStats, err := sqlServer.pgServer.SQLServer.GetUnscrubbedStmtStats(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	txnStats, err := sqlServer.pgServer.SQLServer.GetUnscrubbedTxnStats(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	lastReset := sqlServer.pgServer.SQLServer.GetStmtStatsLastReset()
+func (s *statusServer) StatementsLocal(ctx context.Context) (*serverpb.StatementsResponse, error) {
+	stmtStats := s.admin.server.pgServer.SQLServer.GetUnscrubbedStmtStats()
+	lastReset := s.admin.server.pgServer.SQLServer.GetStmtStatsLastReset()
 
 	resp := &serverpb.StatementsResponse{
-		Statements:            make([]serverpb.StatementsResponse_CollectedStatementStatistics, len(stmtStats)),
-		LastReset:             lastReset,
-		InternalAppNamePrefix: catconstants.InternalAppNamePrefix,
-		Transactions:          make([]serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics, len(txnStats)),
-	}
-
-	for i, txn := range txnStats {
-		resp.Transactions[i] = serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics{
-			StatsData: txn,
-			NodeID:    nodeID.Get(),
-		}
+		Statements: make([]serverpb.StatementsResponse_CollectedStatementStatistics, len(stmtStats)),
+		LastReset:  lastReset,
 	}
 
 	for i, stmt := range stmtStats {
 		resp.Statements[i] = serverpb.StatementsResponse_CollectedStatementStatistics{
 			Key: serverpb.StatementsResponse_ExtendedStatementStatisticsKey{
 				KeyData: stmt.Key,
-				NodeID:  nodeID.Get(),
+				NodeID:  s.gossip.NodeID.Get(),
 			},
-			ID:    stmt.ID,
 			Stats: stmt.Stats,
 		}
 	}

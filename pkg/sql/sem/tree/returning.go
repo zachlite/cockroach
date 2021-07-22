@@ -1,21 +1,25 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
 // ReturningClause represents the returning clause on a statement.
 type ReturningClause interface {
 	NodeFormatter
-	// statementReturnType returns the StatementReturnType of statements that include
+	// statementType returns the StatementType of statements that include
 	// the implementors variant of a RETURNING clause.
-	statementReturnType() StatementReturnType
+	statementType() StatementType
 	returningClause()
 }
 
@@ -53,10 +57,10 @@ type NoReturningClause struct{}
 // Format implements the NodeFormatter interface.
 func (*NoReturningClause) Format(_ *FmtCtx) {}
 
-// used by parent statements to determine their own StatementReturnType.
-func (*ReturningExprs) statementReturnType() StatementReturnType    { return Rows }
-func (*ReturningNothing) statementReturnType() StatementReturnType  { return RowsAffected }
-func (*NoReturningClause) statementReturnType() StatementReturnType { return RowsAffected }
+// used by parent statements to determine their own StatementType.
+func (*ReturningExprs) statementType() StatementType    { return Rows }
+func (*ReturningNothing) statementType() StatementType  { return RowsAffected }
+func (*NoReturningClause) statementType() StatementType { return RowsAffected }
 
 func (*ReturningExprs) returningClause()    {}
 func (*ReturningNothing) returningClause()  {}

@@ -12,14 +12,14 @@ INSERT 1
 dump d t
 ----
 ----
-CREATE TABLE public.t (
-	a INT8 NOT NULL,
-	b INT8 NULL AS (a + 1:::INT8) STORED,
+CREATE TABLE t (
+	a INT NOT NULL,
+	b INT NULL AS (a + 1) STORED,
 	CONSTRAINT "primary" PRIMARY KEY (a ASC),
 	FAMILY "primary" (a, b)
 );
 
-INSERT INTO public.t (a) VALUES
+INSERT INTO t (a) VALUES
 	(1);
 ----
 ----

@@ -1,36 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package memo
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 )
-
-// BuildConstraints returns a constraint.Set that represents the given scalar
-// expression. A "tight" boolean is also returned which is true if the
-// constraint is exactly equivalent to the expression.
-func BuildConstraints(
-	e opt.ScalarExpr, md *opt.Metadata, evalCtx *tree.EvalContext,
-) (_ *constraint.Set, tight bool) {
-	cb := constraintsBuilder{md: md, evalCtx: evalCtx}
-	return cb.buildConstraints(e)
-}
 
 // Convenience aliases to avoid the constraint prefix everywhere.
 const includeBoundary = constraint.IncludeBoundary
@@ -56,18 +49,17 @@ type constraintsBuilder struct {
 // buildSingleColumnConstraint creates a constraint set implied by
 // a binary boolean operator.
 func (cb *constraintsBuilder) buildSingleColumnConstraint(
-	col opt.ColumnID, op opt.Operator, val opt.Expr,
+	col opt.ColumnID, op opt.Operator, val ExprView,
 ) (_ *constraint.Set, tight bool) {
-	if op == opt.InOp && CanExtractConstTuple(val) {
-		els := val.(*TupleExpr).Elems
+	if op == opt.InOp && MatchesTupleOfConstants(val) {
 		keyCtx := constraint.KeyContext{EvalCtx: cb.evalCtx}
 		keyCtx.Columns.InitSingle(opt.MakeOrderingColumn(col, false /* descending */))
 
 		var spans constraint.Spans
-		spans.Alloc(len(els))
+		spans.Alloc(val.ChildCount())
 		var sp constraint.Span
-		for _, child := range els {
-			datum := ExtractConstDatum(child)
+		for i, n := 0, val.ChildCount(); i < n; i++ {
+			datum := ExtractConstDatum(val.Child(i))
 			if !cb.verifyType(col, datum.ResolvedType()) {
 				return unconstrained, false
 			}
@@ -85,7 +77,7 @@ func (cb *constraintsBuilder) buildSingleColumnConstraint(
 		return constraint.SingleConstraint(&c), true
 	}
 
-	if opt.IsConstValueOp(val) || CanExtractConstTuple(val) {
+	if val.IsConstValue() || MatchesTupleOfConstants(val) {
 		res, tight := cb.buildSingleColumnConstraintConst(col, op, ExtractConstDatum(val))
 		if res != unconstrained {
 			return res, tight
@@ -96,8 +88,8 @@ func (cb *constraintsBuilder) buildSingleColumnConstraint(
 	if opt.BoolOperatorRequiresNotNullArgs(op) {
 		res := cb.notNullSpan(col)
 		// Check if the right-hand side is a variable too (e.g. a > b).
-		if v, ok := val.(*VariableExpr); ok {
-			res = res.Intersect(cb.evalCtx, cb.notNullSpan(v.Col))
+		if val.Operator() == opt.VariableOp {
+			res = res.Intersect(cb.evalCtx, cb.notNullSpan(val.Private().(opt.ColumnID)))
 		}
 		return res, false
 	}
@@ -204,15 +196,6 @@ func (cb *constraintsBuilder) buildSingleColumnConstraintConst(
 				return cb.makeStringPrefixSpan(col, prefix), false
 			}
 		}
-
-	case opt.ContainsOp:
-		if arr, ok := datum.(*tree.DArray); ok {
-			if arr.HasNulls {
-				return contradiction, true
-			}
-		}
-		// NULL cannot contain anything, so a non-tight, not-null span is built.
-		return cb.notNullSpan(col), false
 	}
 	return unconstrained, false
 }
@@ -227,27 +210,32 @@ func (cb *constraintsBuilder) buildSingleColumnConstraintConst(
 // if the spans are exactly equivalent to the expression (and not weaker).
 // Assumes that ev is an InOp and both children are TupleOps.
 func (cb *constraintsBuilder) buildConstraintForTupleIn(
-	in *InExpr,
+	ev ExprView,
 ) (_ *constraint.Set, tight bool) {
-	lhs, rhs := in.Left.(*TupleExpr), in.Right.(*TupleExpr)
+	lhs, rhs := ev.Child(0), ev.Child(1)
 
 	// We can only constrain here if every element of rhs is a TupleOp.
-	for _, elem := range rhs.Elems {
-		if elem.Op() != opt.TupleOp {
+	for i, n := 0, rhs.ChildCount(); i < n; i++ {
+		val := rhs.Child(i)
+		if val.Operator() != opt.TupleOp {
 			return unconstrained, false
 		}
 	}
 
-	constrainedCols := make([]opt.OrderingColumn, 0, len(lhs.Elems))
-	colIdxsInLHS := make([]int, 0, len(lhs.Elems))
-	for i, lelem := range lhs.Elems {
-		if v, ok := lelem.(*VariableExpr); ok {
+	constrainedCols := make([]opt.OrderingColumn, 0, lhs.ChildCount())
+	colIdxsInLHS := make([]int, 0, lhs.ChildCount())
+	for i, n := 0, lhs.ChildCount(); i < n; i++ {
+		if colID, ok := lhs.Child(i).Private().(opt.ColumnID); ok {
 			// We can't constrain a column if it's compared to anything besides a constant.
 			allConstant := true
-			for _, relem := range rhs.Elems {
-				// Element must be tuple (checked above).
-				tup := relem.(*TupleExpr)
-				if !opt.IsConstValueOp(tup.Elems[i]) {
+			for j, m := 0, rhs.ChildCount(); j < m; j++ {
+				val := rhs.Child(j)
+
+				if val.Operator() != opt.TupleOp {
+					return unconstrained, false
+				}
+
+				if !val.Child(i).IsConstValue() {
 					allConstant = false
 					break
 				}
@@ -256,7 +244,7 @@ func (cb *constraintsBuilder) buildConstraintForTupleIn(
 			if allConstant {
 				constrainedCols = append(
 					constrainedCols,
-					opt.MakeOrderingColumn(v.Col, false /* descending */),
+					opt.MakeOrderingColumn(colID, false /* descending */),
 				)
 				colIdxsInLHS = append(colIdxsInLHS, i)
 			}
@@ -269,24 +257,23 @@ func (cb *constraintsBuilder) buildConstraintForTupleIn(
 
 	// If any of the LHS entries are not constrained then our constraints are not
 	// tight.
-	tight = (len(constrainedCols) == len(lhs.Elems))
+	tight = (len(constrainedCols) == lhs.ChildCount())
 
 	keyCtx := constraint.KeyContext{EvalCtx: cb.evalCtx}
 	keyCtx.Columns.Init(constrainedCols)
 	var sp constraint.Span
 	var spans constraint.Spans
-	spans.Alloc(len(rhs.Elems))
+	spans.Alloc(rhs.ChildCount())
 
 	keyCtx.Columns.Init(constrainedCols)
-	for _, elem := range rhs.Elems {
-		// Element must be tuple (checked above).
-		tup := elem.(*TupleExpr)
+	for i, n := 0, rhs.ChildCount(); i < n; i++ {
 		vals := make(tree.Datums, len(colIdxsInLHS))
+		val := rhs.Child(i)
 
 		hasNull := false
 		for j := range colIdxsInLHS {
-			constval := tup.Elems[colIdxsInLHS[j]]
-			datum := ExtractConstDatum(constval)
+			elem := val.Child(colIdxsInLHS[j])
+			datum := ExtractConstDatum(elem)
 			if datum == tree.DNull {
 				hasNull = true
 				break
@@ -328,10 +315,10 @@ func (cb *constraintsBuilder) buildConstraintForTupleIn(
 		var spans constraint.Spans
 		keyCtx := constraint.KeyContext{EvalCtx: cb.evalCtx}
 		keyCtx.Columns.InitSingle(constrainedCols[i])
-		for _, elem := range rhs.Elems {
-			// Element must be tuple (checked above).
-			constVal := elem.(*TupleExpr).Elems[colIdxsInLHS[i]]
-			datum := ExtractConstDatum(constVal)
+		for j, n := 0, rhs.ChildCount(); j < n; j++ {
+			val := rhs.Child(j)
+			elem := val.Child(colIdxsInLHS[i])
+			datum := ExtractConstDatum(elem)
 			key := constraint.MakeKey(datum)
 			var sp constraint.Span
 			sp.Init(key, constraint.IncludeBoundary, key, constraint.IncludeBoundary)
@@ -348,35 +335,34 @@ func (cb *constraintsBuilder) buildConstraintForTupleIn(
 }
 
 func (cb *constraintsBuilder) buildConstraintForTupleInequality(
-	e opt.ScalarExpr,
+	ev ExprView,
 ) (_ *constraint.Set, tight bool) {
-	lhs, rhs := e.Child(0).(*TupleExpr), e.Child(1).(*TupleExpr)
-	if !CanExtractConstDatum(rhs) {
+	lhs, rhs := ev.Child(0), ev.Child(1)
+	if !MatchesTupleOfConstants(rhs) {
 		return unconstrained, false
 	}
 
 	// Find the longest prefix that has only variables on the left side and only
 	// non-NULL constants on the right side.
-	for i, leftChild := range lhs.Elems {
-		rightChild := rhs.Elems[i]
-		variable, ok := leftChild.(*VariableExpr)
-		if !ok {
+	for i, n := 0, lhs.ChildCount(); i < n; i++ {
+		leftChild, rightChild := lhs.Child(i), rhs.Child(i)
+		if leftChild.Operator() != opt.VariableOp {
 			return unconstrained, false
 		}
-		if !cb.verifyType(variable.Col, rightChild.DataType()) {
+		if !cb.verifyType(leftChild.Private().(opt.ColumnID), rightChild.Logical().Scalar.Type) {
 			// We have a mixed-type comparison.
 			return unconstrained, false
 		}
-		if rightChild.Op() == opt.NullOp {
+		if rightChild.Operator() == opt.NullOp {
 			// TODO(radu): NULLs are tricky and require special handling; we ignore
 			// the expression for now.
 			return unconstrained, false
 		}
 	}
 
-	datums := make(tree.Datums, len(lhs.Elems))
+	datums := make(tree.Datums, lhs.ChildCount())
 	for i := range datums {
-		datums[i] = ExtractConstDatum(rhs.Elems[i])
+		datums[i] = ExtractConstDatum(rhs.Child(i))
 	}
 	key := constraint.MakeCompositeKey(datums...)
 
@@ -386,7 +372,7 @@ func (cb *constraintsBuilder) buildConstraintForTupleInequality(
 	var less bool
 	var boundary constraint.SpanBoundary
 
-	switch e.Op() {
+	switch ev.Operator() {
 	case opt.NeOp:
 		// TODO(radu)
 		return unconstrained, false
@@ -399,7 +385,7 @@ func (cb *constraintsBuilder) buildConstraintForTupleInequality(
 	case opt.GeOp:
 		less, boundary = false, includeBoundary
 	default:
-		panic(errors.AssertionFailedf("unsupported operator type %s", log.Safe(e.Op())))
+		panic(fmt.Sprintf("unsupported op %s", ev.Operator()))
 	}
 	// Disallow NULLs on the first column.
 	startKey, startBoundary := constraint.MakeKey(tree.DNull), excludeBoundary
@@ -414,153 +400,82 @@ func (cb *constraintsBuilder) buildConstraintForTupleInequality(
 	span.Init(startKey, startBoundary, endKey, endBoundary)
 
 	keyCtx := constraint.KeyContext{EvalCtx: cb.evalCtx}
-	cols := make([]opt.OrderingColumn, len(lhs.Elems))
+	cols := make([]opt.OrderingColumn, lhs.ChildCount())
 	for i := range cols {
-		v := lhs.Elems[i].(*VariableExpr)
-		cols[i] = opt.MakeOrderingColumn(v.Col, false /* descending */)
+		cols[i] = opt.MakeOrderingColumn(lhs.Child(i).Private().(opt.ColumnID), false /* descending */)
 	}
 	keyCtx.Columns.Init(cols)
 	span.PreferInclusive(&keyCtx)
 	return constraint.SingleSpanConstraint(&keyCtx, &span), true
 }
 
-func (cb *constraintsBuilder) buildFunctionConstraints(
-	f *FunctionExpr,
-) (_ *constraint.Set, tight bool) {
-	if f.Properties.NullableArgs {
-		return unconstrained, false
+// getConstraints retrieves the constraints already calculated for an
+// expression.
+func (cb *constraintsBuilder) getConstraints(ev ExprView) (_ *constraint.Set, tight bool) {
+	s := ev.Logical().Scalar
+	if s.Constraints == nil {
+		s.Constraints, s.TightConstraints = cb.buildConstraints(ev)
 	}
-
-	// For an arbitrary function, the best we can do is deduce a set of not-null
-	// constraints.
-	cs := unconstrained
-	for _, arg := range f.Args {
-		if variable, ok := arg.(*VariableExpr); ok {
-			cs = cs.Intersect(cb.evalCtx, cb.notNullSpan(variable.Col))
-		}
-	}
-
-	return cs, false
+	return s.Constraints, s.TightConstraints
 }
 
-func (cb *constraintsBuilder) buildConstraints(e opt.ScalarExpr) (_ *constraint.Set, tight bool) {
-	switch t := e.(type) {
-	case *FalseExpr, *NullExpr:
+func (cb *constraintsBuilder) buildConstraints(ev ExprView) (_ *constraint.Set, tight bool) {
+	switch ev.Operator() {
+	case opt.NullOp:
 		return contradiction, true
 
-	case *VariableExpr:
+	case opt.VariableOp:
 		// (x) is equivalent to (x = TRUE) if x is boolean.
-		if cb.md.ColumnMeta(t.Col).Type.Family() == types.BoolFamily {
-			return cb.buildSingleColumnConstraintConst(t.Col, opt.EqOp, tree.DBoolTrue)
+		if col := ev.Private().(opt.ColumnID); cb.md.ColumnType(col).Equivalent(types.Bool) {
+			return cb.buildSingleColumnConstraintConst(col, opt.EqOp, tree.DBoolTrue)
 		}
 		return unconstrained, false
 
-	case *NotExpr:
+	case opt.NotOp:
 		// (NOT x) is equivalent to (x = FALSE) if x is boolean.
-		if v, ok := t.Input.(*VariableExpr); ok {
-			if cb.md.ColumnMeta(v.Col).Type.Family() == types.BoolFamily {
-				return cb.buildSingleColumnConstraintConst(v.Col, opt.EqOp, tree.DBoolFalse)
+		if child := ev.Child(0); child.Operator() == opt.VariableOp {
+			if col := child.Private().(opt.ColumnID); cb.md.ColumnType(col).Equivalent(types.Bool) {
+				return cb.buildSingleColumnConstraintConst(col, opt.EqOp, tree.DBoolFalse)
 			}
 		}
 		return unconstrained, false
 
-	case *AndExpr:
-		cl, tightl := cb.buildConstraints(t.Left)
-		cr, tightr := cb.buildConstraints(t.Right)
-		cl = cl.Intersect(cb.evalCtx, cr)
-		tightl = tightl && tightr
-		return cl, (tightl || cl == contradiction)
-
-	case *OrExpr:
-		cl, tightl := cb.buildConstraints(t.Left)
-		cr, tightr := cb.buildConstraints(t.Right)
-		res := cl.Union(cb.evalCtx, cr)
-
-		// The union may not be "tight" because the new constraint set might
-		// allow combinations of values that the expression does not allow.
-		//
-		// For example, consider the expression:
-		//
-		//   (@1 = 4 AND @2 = 6) OR (@1 = 5 AND @2 = 7)
-		//
-		// The resulting constraint set is:
-		//
-		//   /1: [/4 - /4] [/5 - /5]
-		//   /2: [/6 - /6] [/7 - /7]
-		//
-		// This constraint set is not tight, because it allows values for @1
-		// and @2 that the original expression does not, such as @1=4, @2=7.
-		//
-		// However, there are three cases in which the union constraint set is
-		// tight.
-		//
-		// First, if the left, right, and result sets have a single constraint,
-		// then the result constraint is tight if the left and right are tight.
-		// If there is a single constraint for all three sets, it implies that
-		// the sets involve the same column. Therefore it is safe to determine
-		// the tightness of the union based on the tightness of the left and
-		// right.
-		//
-		// Second, if one of the left or right set is a contradiction, then the
-		// result constraint is tight if the other input set is tight. This is
-		// because contradictions are tight and fully describe the set of
-		// values that the original expression allows - none.
-		//
-		// For example, consider the expression:
-		//
-		//   (@1 = 4 AND @1 = 6) OR (@1 = 5 AND @2 = 7)
-		//
-		// The resulting constraint set is:
-		//
-		//   /1: [/5 - /5]
-		//   /2: [/7 - /7]
-		//
-		// This constraint set is tight, because there are no values for @1 and
-		// @2 that satisfy the set but do not satisfy the expression.
-		//
-		// Third, if both the left and the right set are contradictions, then
-		// the result set is tight. This is because contradictions are tight
-		// and, as explained above, they fully describe the set of values that
-		// satisfy their expression. Note that this third case is generally
-		// covered by the second case, but it's mentioned here for the sake of
-		// explicitness.
-		if cl == contradiction {
-			return res, tightr
+	case opt.AndOp, opt.FiltersOp:
+		// ChildCount can be zero if this is not a fully normalized expression
+		// (e.g. when using optsteps).
+		if ev.ChildCount() > 0 {
+			c, tight := cb.getConstraints(ev.Child(0))
+			for i, n := 1, ev.ChildCount(); i < n; i++ {
+				ci, tighti := cb.getConstraints(ev.Child(i))
+				c = c.Intersect(cb.evalCtx, ci)
+				tight = tight && tighti
+			}
+			return c, (tight || c == contradiction)
 		}
-		if cr == contradiction {
-			return res, tightl
-		}
-		tight := tightl && tightr && cl.Length() == 1 && cr.Length() == 1 && res.Length() == 1
-		return res, tight
-
-	case *RangeExpr:
-		return cb.buildConstraints(t.And)
-
-	case *FunctionExpr:
-		return cb.buildFunctionConstraints(t)
-	}
-
-	if e.ChildCount() < 2 {
 		return unconstrained, false
 	}
 
-	child0, child1 := e.Child(0), e.Child(1)
+	if ev.ChildCount() < 2 {
+		return unconstrained, false
+	}
+
+	child0, child1 := ev.Child(0), ev.Child(1)
 	// Check for an operation where the left-hand side is an
 	// indexed var for this column.
 
 	// Check for tuple operations.
-	if child0.Op() == opt.TupleOp && child1.Op() == opt.TupleOp {
-		switch e.Op() {
+	if child0.Operator() == opt.TupleOp && child1.Operator() == opt.TupleOp {
+		switch ev.Operator() {
 		case opt.LtOp, opt.LeOp, opt.GtOp, opt.GeOp, opt.NeOp:
 			// Tuple inequality.
-			return cb.buildConstraintForTupleInequality(e)
+			return cb.buildConstraintForTupleInequality(ev)
 
 		case opt.InOp:
-			return cb.buildConstraintForTupleIn(e.(*InExpr))
+			return cb.buildConstraintForTupleIn(ev)
 		}
 	}
-	if v, ok := child0.(*VariableExpr); ok {
-		return cb.buildSingleColumnConstraint(v.Col, e.Op(), child1)
+	if child0.Operator() == opt.VariableOp {
+		return cb.buildSingleColumnConstraint(child0.Private().(opt.ColumnID), ev.Operator(), child1)
 	}
 	return unconstrained, false
 }
@@ -621,6 +536,6 @@ func (cb *constraintsBuilder) makeStringPrefixSpan(
 // verifyType checks that the type of column matches the given type. We disallow
 // mixed-type comparisons because if they become index constraints, we would
 // generate incorrect encodings (#4313).
-func (cb *constraintsBuilder) verifyType(col opt.ColumnID, typ *types.T) bool {
-	return typ.Family() == types.UnknownFamily || cb.md.ColumnMeta(col).Type.Equivalent(typ)
+func (cb *constraintsBuilder) verifyType(col opt.ColumnID, typ types.T) bool {
+	return typ == types.Unknown || cb.md.ColumnType(col).Equivalent(typ)
 }

@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package rpc
 
@@ -16,17 +20,15 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/stats"
+
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
-	"google.golang.org/grpc/stats"
 )
 
 func TestStatsHandlerBasic(t *testing.T) {
@@ -96,15 +98,9 @@ func TestStatsHandlerWithHeartbeats(t *testing.T) {
 	// Can't be zero because that'd be an empty offset.
 	clock := hlc.NewClock(timeutil.Unix(0, 1).UnixNano, time.Nanosecond)
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
+	defer stopper.Stop(context.TODO())
 
-	// Shared cluster ID by all RPC peers (this ensures that the peers
-	// don't talk to servers from unrelated tests by accident).
-	clusterID := uuid.MakeV4()
-
-	serverCtx := newTestContext(clusterID, clock, stopper)
-	const serverNodeID = 1
-	serverCtx.NodeID.Set(context.Background(), serverNodeID)
+	serverCtx := newTestContext(clock, stopper)
 	s := newTestServer(t, serverCtx)
 
 	heartbeat := &ManualHeartbeatService{
@@ -112,8 +108,7 @@ func TestStatsHandlerWithHeartbeats(t *testing.T) {
 		stopper:            stopper,
 		clock:              clock,
 		remoteClockMonitor: serverCtx.RemoteClocks,
-		settings:           serverCtx.Settings,
-		nodeID:             &serverCtx.NodeID,
+		version:            serverCtx.version,
 	}
 	RegisterHeartbeatServer(s, heartbeat)
 
@@ -123,19 +118,18 @@ func TestStatsHandlerWithHeartbeats(t *testing.T) {
 	}
 	remoteAddr := ln.Addr().String()
 
-	clientCtx := newTestContext(clusterID, clock, stopper)
+	clientCtx := newTestContext(clock, stopper)
 	// Make the interval shorter to speed up the test.
-	clientCtx.Config.RPCHeartbeatInterval = 1 * time.Millisecond
+	clientCtx.heartbeatInterval = 1 * time.Millisecond
 	go func() { heartbeat.ready <- nil }()
-	if _, err := clientCtx.GRPCDialNode(remoteAddr, serverNodeID, DefaultClass).
-		Connect(context.Background()); err != nil {
+	if _, err := clientCtx.GRPCDial(remoteAddr).Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	// Wait for the connection & successful heartbeat.
 	testutils.SucceedsSoon(t, func() error {
-		err := clientCtx.TestingConnHealth(remoteAddr, serverNodeID)
-		if err != nil && !errors.Is(err, ErrNotHeartbeated) {
+		err := clientCtx.ConnHealth(remoteAddr)
+		if err != nil && err != ErrNotHeartbeated {
 			t.Fatal(err)
 		}
 		return err
@@ -171,8 +165,6 @@ func TestStatsHandlerWithHeartbeats(t *testing.T) {
 		if s, c := serverVal.(*Stats).Outgoing(), clientVal.(*Stats).Incoming(); s == 0 || c == 0 || s > c {
 			return fmt.Errorf("expected server.outgoing < client.incoming; got %d, %d", s, c)
 		}
-		log.Infof(context.Background(), "server incoming = %v, server outgoing = %v, client incoming = %v, client outgoing = %v",
-			serverVal.(*Stats).Incoming(), serverVal.(*Stats).Outgoing(), clientVal.(*Stats).Incoming(), clientVal.(*Stats).Outgoing())
 		return nil
 	})
 }

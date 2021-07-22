@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
@@ -14,12 +18,12 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/span"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 var _ checkOperation = &physicalCheckOperation{}
@@ -27,12 +31,12 @@ var _ checkOperation = &physicalCheckOperation{}
 // physicalCheckOperation is a check on an indexes physical data.
 type physicalCheckOperation struct {
 	tableName *tree.TableName
-	tableDesc catalog.TableDescriptor
-	index     catalog.Index
+	tableDesc *sqlbase.TableDescriptor
+	indexDesc *sqlbase.IndexDescriptor
 
 	// columns is a list of the columns returned in the query result
 	// tree.Datums.
-	columns []catalog.Column
+	columns []*sqlbase.ColumnDescriptor
 	// primaryColIdxs maps PrimaryIndex.Columns to the row
 	// indexes in the query result tree.Datums.
 	primaryColIdxs []int
@@ -43,21 +47,18 @@ type physicalCheckOperation struct {
 // physicalCheckRun contains the run-time state for
 // physicalCheckOperation during local execution.
 type physicalCheckRun struct {
-	started bool
-
-	rows     *rowContainerHelper
-	iterator *rowContainerIterator
-	// If currentRow is nil, it means that all rows have been exhausted.
-	currentRow tree.Datums
+	started  bool
+	rows     *sqlbase.RowContainer
+	rowIndex int
 }
 
 func newPhysicalCheckOperation(
-	tableName *tree.TableName, tableDesc catalog.TableDescriptor, index catalog.Index,
+	tableName *tree.TableName, tableDesc *sqlbase.TableDescriptor, indexDesc *sqlbase.IndexDescriptor,
 ) *physicalCheckOperation {
 	return &physicalCheckOperation{
 		tableName: tableName,
 		tableDesc: tableDesc,
-		index:     index,
+		indexDesc: indexDesc,
 	}
 }
 
@@ -68,32 +69,32 @@ func (o *physicalCheckOperation) Start(params runParams) error {
 	ctx := params.ctx
 	// Collect all of the columns, their types, and their IDs.
 	var columnIDs []tree.ColumnID
-	colIDToIdx := catalog.ColumnIDToOrdinalMap(o.tableDesc.PublicColumns())
-	columns := make([]catalog.Column, len(columnIDs))
+	colIDToIdx := make(map[sqlbase.ColumnID]int, len(o.tableDesc.Columns))
+	columns := make([]*sqlbase.ColumnDescriptor, len(columnIDs))
+	for i := range o.tableDesc.Columns {
+		colIDToIdx[o.tableDesc.Columns[i].ID] = i
+	}
 
 	// Collect all of the columns being scanned.
-	if o.index.GetID() == o.tableDesc.GetPrimaryIndexID() {
-		for _, c := range o.tableDesc.PublicColumns() {
-			columnIDs = append(columnIDs, tree.ColumnID(c.GetID()))
+	if o.indexDesc.ID == o.tableDesc.PrimaryIndex.ID {
+		for i := range o.tableDesc.Columns {
+			columnIDs = append(columnIDs, tree.ColumnID(o.tableDesc.Columns[i].ID))
 		}
 	} else {
-		for i := 0; i < o.index.NumKeyColumns(); i++ {
-			id := o.index.GetKeyColumnID(i)
+		for _, id := range o.indexDesc.ColumnIDs {
 			columnIDs = append(columnIDs, tree.ColumnID(id))
 		}
-		for i := 0; i < o.index.NumKeySuffixColumns(); i++ {
-			id := o.index.GetKeySuffixColumnID(i)
+		for _, id := range o.indexDesc.ExtraColumnIDs {
 			columnIDs = append(columnIDs, tree.ColumnID(id))
 		}
-		for i := 0; i < o.index.NumSecondaryStoredColumns(); i++ {
-			id := o.index.GetStoredColumnID(i)
+		for _, id := range o.indexDesc.StoreColumnIDs {
 			columnIDs = append(columnIDs, tree.ColumnID(id))
 		}
 	}
 
 	for i := range columnIDs {
-		idx := colIDToIdx.GetDefault(descpb.ColumnID(columnIDs[i]))
-		columns = append(columns, o.tableDesc.PublicColumns()[idx])
+		idx := colIDToIdx[sqlbase.ColumnID(columnIDs[i])]
+		columns = append(columns, &o.tableDesc.Columns[idx])
 	}
 
 	// Find the row indexes for all of the primary index columns.
@@ -103,29 +104,39 @@ func (o *physicalCheckOperation) Start(params runParams) error {
 	}
 
 	indexFlags := &tree.IndexFlags{
-		IndexID:     tree.IndexID(o.index.GetID()),
+		IndexID:     tree.IndexID(o.indexDesc.ID),
 		NoIndexJoin: true,
 	}
 	scan := params.p.Scan()
-	scan.isCheck = true
+	scan.run.isCheck = true
 	colCfg := scanColumnsConfig{wantedColumns: columnIDs, addUnwantedAsHidden: true}
 	if err := scan.initTable(ctx, params.p, o.tableDesc, indexFlags, colCfg); err != nil {
 		return err
 	}
-	scan.index = scan.specifiedIndex
-	sb := span.MakeBuilder(params.EvalContext(), params.ExecCfg().Codec, o.tableDesc, o.index)
-	scan.spans, err = sb.UnconstrainedSpans()
+	plan := planNode(scan)
+
+	neededColumns := make([]bool, len(o.tableDesc.Columns))
+	for _, id := range columnIDs {
+		neededColumns[colIDToIdx[sqlbase.ColumnID(id)]] = true
+	}
+
+	// Optimize the plan. This is required in order to populate scanNode
+	// spans.
+	plan, err = params.p.optimizePlan(ctx, plan, neededColumns)
 	if err != nil {
+		plan.Close(ctx)
 		return err
 	}
-	scan.isFull = true
+	defer plan.Close(ctx)
 
-	planCtx := params.extendedEvalCtx.DistSQLPlanner.NewPlanningCtx(ctx, params.extendedEvalCtx, params.p, params.p.txn, true /* distribute */)
-	// Since physicalCheckOperation might be only one of many check operations
-	// that scrubNode needs to perform, we need to make sure that scrubNode
-	// is not closed when this physical check operation is being cleaned up.
-	planCtx.ignoreClose = true
-	physPlan, err := params.extendedEvalCtx.DistSQLPlanner.createScrubPhysicalCheck(planCtx, scan)
+	scan = plan.(*scanNode)
+
+	span := o.tableDesc.IndexSpan(o.indexDesc.ID)
+	spans := []roachpb.Span{span}
+
+	planCtx := params.extendedEvalCtx.DistSQLPlanner.NewPlanningCtx(ctx, params.extendedEvalCtx, params.p.txn)
+	physPlan, err := params.extendedEvalCtx.DistSQLPlanner.createScrubPhysicalCheck(
+		&planCtx, scan, *o.tableDesc, *o.indexDesc, spans, params.p.ExecCfg().Clock.Now())
 	if err != nil {
 		return err
 	}
@@ -133,47 +144,39 @@ func (o *physicalCheckOperation) Start(params runParams) error {
 	o.primaryColIdxs = primaryColIdxs
 	o.columns = columns
 	o.run.started = true
-	rows, err := scrubRunDistSQL(ctx, planCtx, params.p, physPlan, rowexec.ScrubTypes)
-	if rows == nil || err != nil {
-		// If either there were no rows that failed the check operation or an
-		// error was encountered, we short-circuit and don't set currentRow.
-		// This will indicate that we're done.
+	rows, err := scrubRunDistSQL(ctx, &planCtx, params.p, &physPlan, distsqlrun.ScrubTypes)
+	if err != nil {
+		rows.Close(ctx)
 		return err
 	}
 	o.run.rows = rows
-	o.run.iterator = newRowContainerIterator(ctx, *rows, rowexec.ScrubTypes)
-	o.run.currentRow, err = o.run.iterator.next()
-	return err
+	return nil
 }
 
 // Next implements the checkOperation interface.
 func (o *physicalCheckOperation) Next(params runParams) (tree.Datums, error) {
-	timestamp, err := tree.MakeDTimestamp(
+	row := o.run.rows.At(o.run.rowIndex)
+	o.run.rowIndex++
+
+	timestamp := tree.MakeDTimestamp(
 		params.extendedEvalCtx.GetStmtTimestamp(), time.Nanosecond)
-	if err != nil {
-		return nil, err
-	}
 
-	details, ok := o.run.currentRow[2].(*tree.DJSON)
+	details, ok := row[2].(*tree.DJSON)
 	if !ok {
-		return nil, errors.Errorf("expected row value 3 to be DJSON, got: %T", o.run.currentRow[2])
+		return nil, errors.Errorf("expected row value 3 to be DJSON, got: %T", row[2])
 	}
 
-	res := tree.Datums{
+	return tree.Datums{
 		// TODO(joey): Add the job UUID once the SCRUB command uses jobs.
-		tree.DNull,          /* job_uuid */
-		o.run.currentRow[0], /* errorType */
+		tree.DNull, /* job_uuid */
+		row[0],     /* errorType */
 		tree.NewDString(o.tableName.Catalog()),
 		tree.NewDString(o.tableName.Table()),
-		o.run.currentRow[1], /* primaryKey */
+		row[1], /* primaryKey */
 		timestamp,
 		tree.DBoolFalse,
 		details,
-	}
-
-	// Advance to the next row.
-	o.run.currentRow, err = o.run.iterator.next()
-	return res, err
+	}, nil
 }
 
 // Started implements the checkOperation interface.
@@ -182,18 +185,13 @@ func (o *physicalCheckOperation) Started() bool {
 }
 
 // Done implements the checkOperation interface.
-func (o *physicalCheckOperation) Done(context.Context) bool {
-	return o.run.currentRow == nil
+func (o *physicalCheckOperation) Done(ctx context.Context) bool {
+	return o.run.rows == nil || o.run.rowIndex >= o.run.rows.Len()
 }
 
 // Close implements the checkOperation interface.
 func (o *physicalCheckOperation) Close(ctx context.Context) {
 	if o.run.rows != nil {
-		o.run.rows.close(ctx)
-		o.run.rows = nil
-	}
-	if o.run.iterator != nil {
-		o.run.iterator.close()
-		o.run.iterator = nil
+		o.run.rows.Close(ctx)
 	}
 }

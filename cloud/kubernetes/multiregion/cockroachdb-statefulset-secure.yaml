@@ -5,7 +5,7 @@ metadata:
   labels:
     app: cockroachdb
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: Role
 metadata:
   name: cockroachdb
@@ -20,7 +20,7 @@ rules:
   - create
   - get
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
 metadata:
   name: cockroachdb
@@ -36,7 +36,7 @@ rules:
   - get
   - watch
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: RoleBinding
 metadata:
   name: cockroachdb
@@ -51,7 +51,7 @@ subjects:
   name: cockroachdb
   namespace: default
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding
 metadata:
   name: cockroachdb
@@ -136,16 +136,13 @@ spec:
       app: cockroachdb
   maxUnavailable: 1
 ---
-apiVersion: apps/v1
+apiVersion: apps/v1beta1
 kind: StatefulSet
 metadata:
   name: cockroachdb
 spec:
   serviceName: "cockroachdb"
   replicas: 3
-  selector:
-    matchLabels:
-      app: cockroachdb
   template:
     metadata:
       labels:
@@ -166,21 +163,20 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
       - name: cockroachdb
-        image: cockroachdb/cockroach:v21.1.5
+        image: cockroachdb/cockroach:v2.0.5
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 26257
           name: grpc
         - containerPort: 8080
           name: http
-# We recommend that you do not configure a liveness probe on a production environment, as this can impact the availability of production databases.
-#      livenessProbe:
-#        httpGet:
-#          path: "/health"
-#          port: http
-#          scheme: HTTPS
-#        initialDelaySeconds: 30
-#        periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: "/health"
+            port: http
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: "/health?ready=1"
@@ -196,33 +192,13 @@ spec:
           mountPath: /cockroach/cockroach-certs
         env:
         - name: COCKROACH_CHANNEL
-          value: kubernetes-multiregion
-        - name: GOMAXPROCS
-          valueFrom:
-            resourceFieldRef:
-              resource: limits.cpu
-              divisor: "1"
-        - name: MEMORY_LIMIT_MIB
-          valueFrom:
-            resourceFieldRef:
-              resource: limits.memory
-              divisor: "1Mi"
+          value: kubernetes-secure
         command:
           - "/bin/bash"
           - "-ecx"
           # The use of qualified `hostname -f` is crucial:
           # Other nodes aren't able to look up the unqualified hostname.
-          - exec
-            /cockroach/cockroach
-            start
-            --logtostderr
-            --certs-dir /cockroach/cockroach-certs
-            --advertise-host $(hostname -f)
-            --http-addr 0.0.0.0
-            --join JOINLIST
-            --locality LOCALITYLIST
-            --cache $(expr $MEMORY_LIMIT_MIB / 4)MiB
-            --max-sql-memory $(expr $MEMORY_LIMIT_MIB / 4)MiB
+          - "exec /cockroach/cockroach start --logtostderr --certs-dir /cockroach/cockroach-certs --advertise-host $(hostname -f) --http-host 0.0.0.0 --join JOINLIST --locality LOCALITYLIST --cache 25% --max-sql-memory 25%"
       # No pre-stop hook is required, a SIGTERM plus some time is all that's
       # needed for graceful shutdown of a node.
       terminationGracePeriodSeconds: 60

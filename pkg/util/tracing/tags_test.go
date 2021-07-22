@@ -1,88 +1,50 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tracing
 
 import (
 	"testing"
 
-	"github.com/cockroachdb/logtags"
-	"github.com/opentracing/opentracing-go"
-	zipkin "github.com/openzipkin-contrib/zipkin-go-opentracing"
-	"github.com/stretchr/testify/require"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logtags"
 )
-
-type mockTracerManager struct{}
-
-func (*mockTracerManager) Name() string             { return "mock " }
-func (*mockTracerManager) Close(opentracing.Tracer) {}
 
 func TestLogTags(t *testing.T) {
 	tr := NewTracer()
-	rec := zipkin.NewInMemoryRecorder()
-	shadowTracer, err := zipkin.NewTracer(rec)
-	require.NoError(t, err)
-	tr.setShadowTracer(&mockTracerManager{}, shadowTracer)
 
 	l := logtags.SingleTagBuffer("tag1", "val1")
 	l = l.Add("tag2", "val2")
-	sp1 := tr.StartSpan("foo", WithForceRealSpan(), WithLogTags(l))
-	sp1.SetVerbose(true)
-	sp1.Finish()
-	require.NoError(t, TestingCheckRecordedSpans(sp1.GetRecording(), `
-		span: foo
-			tags: _verbose=1 tag1=val1 tag2=val2
-	`))
-	{
-		exp := opentracing.Tags(map[string]interface{}{"tag1": "val1", "tag2": "val2"})
-		require.Equal(t,
-			exp,
-			rec.GetSpans()[0].Tags,
-		)
-		rec.Reset()
+	sp1 := tr.StartSpan("foo", Recordable, LogTags(l))
+	StartRecording(sp1, SingleNodeRecording)
+
+	if err := TestingCheckRecordedSpans(GetRecording(sp1), `
+		span foo:
+		  tags: tag1=val1 tag2=val2
+	`); err != nil {
+		t.Fatal(err)
 	}
 
 	RegisterTagRemapping("tag1", "one")
 	RegisterTagRemapping("tag2", "two")
 
-	sp2 := tr.StartSpan("bar", WithForceRealSpan(), WithLogTags(l))
-	sp2.SetVerbose(true)
-	sp2.Finish()
-	require.NoError(t, TestingCheckRecordedSpans(sp2.GetRecording(), `
-		span: bar
-			tags: _verbose=1 one=val1 two=val2
-	`))
+	sp2 := tr.StartSpan("bar", Recordable, LogTags(l))
+	StartRecording(sp2, SingleNodeRecording)
 
-	{
-		exp := opentracing.Tags(map[string]interface{}{"one": "val1", "two": "val2"})
-		require.Equal(t,
-			exp,
-			rec.GetSpans()[0].Tags,
-		)
-		rec.Reset()
+	if err := TestingCheckRecordedSpans(GetRecording(sp2), `
+		span bar:
+			tags: one=val1 two=val2
+	`); err != nil {
+		t.Fatal(err)
 	}
-
-	sp3 := tr.StartSpan("baz", WithLogTags(l), WithForceRealSpan())
-	sp3.SetVerbose(true)
-	sp3.Finish()
-	require.NoError(t, TestingCheckRecordedSpans(sp3.GetRecording(), `
-		span: baz
-			tags: _verbose=1 one=val1 two=val2
-	`))
-	{
-		exp := opentracing.Tags(map[string]interface{}{"one": "val1", "two": "val2"})
-		require.Equal(t,
-			exp,
-			rec.GetSpans()[0].Tags,
-		)
-		rec.Reset()
-	}
-
 }

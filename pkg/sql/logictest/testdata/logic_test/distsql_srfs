@@ -1,3 +1,5 @@
+# LogicTest: fakedist fakedist-opt fakedist-metadata
+
 statement ok
 CREATE TABLE data (a INT PRIMARY KEY)
 

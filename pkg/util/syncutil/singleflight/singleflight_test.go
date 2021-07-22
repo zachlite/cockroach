@@ -1,13 +1,3 @@
-// Copyright 2019 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 // Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in licenses/BSD-golang.txt.
@@ -17,13 +7,12 @@
 package singleflight
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/cockroachdb/errors"
 )
 
 func TestDo(t *testing.T) {
@@ -53,7 +42,7 @@ func TestDoErr(t *testing.T) {
 	v, _, err := g.Do("key", func() (interface{}, error) {
 		return nil, someErr
 	})
-	if !errors.Is(err, someErr) {
+	if err != someErr {
 		t.Errorf("Do error = %v; want someErr %v", err, someErr)
 	}
 	if v != nil {
@@ -131,24 +120,6 @@ func TestDoChanDupSuppress(t *testing.T) {
 	}
 }
 
-func TestNumCalls(t *testing.T) {
-	c := make(chan struct{})
-	fn := func() (interface{}, error) {
-		<-c
-		return "bar", nil
-	}
-	var g Group
-	assertNumCalls(t, g.NumCalls("key"), 0)
-	resC1, _ := g.DoChan("key", fn)
-	assertNumCalls(t, g.NumCalls("key"), 1)
-	resC2, _ := g.DoChan("key", fn)
-	assertNumCalls(t, g.NumCalls("key"), 2)
-	close(c)
-	<-resC1
-	<-resC2
-	assertNumCalls(t, g.NumCalls("key"), 0)
-}
-
 func assertRes(t *testing.T, res Result, expectShared bool) {
 	if got, want := fmt.Sprintf("%v (%T)", res.Val, res.Val), "bar (string)"; got != want {
 		t.Errorf("Res.Val = %v; want %v", got, want)
@@ -158,11 +129,5 @@ func assertRes(t *testing.T, res Result, expectShared bool) {
 	}
 	if res.Shared != expectShared {
 		t.Errorf("Res.Shared = %t; want %t", res.Shared, expectShared)
-	}
-}
-
-func assertNumCalls(t *testing.T, actualCalls int, expectedCalls int) {
-	if actualCalls != expectedCalls {
-		t.Errorf("NumCalls = %d; want %d", actualCalls, expectedCalls)
 	}
 }

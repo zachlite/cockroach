@@ -1,26 +1,31 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 type scatterNode struct {
@@ -33,11 +38,7 @@ type scatterNode struct {
 // (`ALTER TABLE/INDEX ... SCATTER ...` statement)
 // Privileges: INSERT on table.
 func (p *planner) Scatter(ctx context.Context, n *tree.Scatter) (planNode, error) {
-	if !p.ExecCfg().Codec.ForSystemTenant() {
-		return nil, errorutil.UnsupportedWithMultiTenancy(54255)
-	}
-
-	tableDesc, index, err := p.getTableAndIndex(ctx, &n.TableOrIndex, privilege.INSERT)
+	tableDesc, index, err := p.getTableAndIndex(ctx, n.Table, n.Index, privilege.INSERT)
 	if err != nil {
 		return nil, err
 	}
@@ -45,30 +46,29 @@ func (p *planner) Scatter(ctx context.Context, n *tree.Scatter) (planNode, error
 	var span roachpb.Span
 	if n.From == nil {
 		// No FROM/TO specified; the span is the entire table/index.
-		span = tableDesc.IndexSpan(p.ExecCfg().Codec, index.GetID())
+		span = tableDesc.IndexSpan(index.ID)
 	} else {
 		switch {
 		case len(n.From) == 0:
 			return nil, errors.Errorf("no columns in SCATTER FROM expression")
-		case len(n.From) > index.NumKeyColumns():
+		case len(n.From) > len(index.ColumnIDs):
 			return nil, errors.Errorf("too many columns in SCATTER FROM expression")
 		case len(n.To) == 0:
 			return nil, errors.Errorf("no columns in SCATTER TO expression")
-		case len(n.To) > index.NumKeyColumns():
+		case len(n.To) > len(index.ColumnIDs):
 			return nil, errors.Errorf("too many columns in SCATTER TO expression")
 		}
 
 		// Calculate the desired types for the select statement:
 		//  - column values; it is OK if the select statement returns fewer columns
 		//  (the relevant prefix is used).
-		desiredTypes := make([]*types.T, index.NumKeyColumns())
-		for i := 0; i < index.NumKeyColumns(); i++ {
-			colID := index.GetKeyColumnID(i)
-			c, err := tableDesc.FindColumnWithID(colID)
+		desiredTypes := make([]types.T, len(index.ColumnIDs))
+		for i, colID := range index.ColumnIDs {
+			c, err := tableDesc.FindColumnByID(colID)
 			if err != nil {
 				return nil, err
 			}
-			desiredTypes[i] = c.GetType()
+			desiredTypes[i] = c.Type.ToDatumType()
 		}
 		fromVals := make([]tree.Datum, len(n.From))
 		for i, expr := range n.From {
@@ -97,11 +97,11 @@ func (p *planner) Scatter(ctx context.Context, n *tree.Scatter) (planNode, error
 			}
 		}
 
-		span.Key, err = getRowKey(p.ExecCfg().Codec, tableDesc, index, fromVals)
+		span.Key, err = getRowKey(tableDesc, index, fromVals)
 		if err != nil {
 			return nil, err
 		}
-		span.EndKey, err = getRowKey(p.ExecCfg().Codec, tableDesc, index, toVals)
+		span.EndKey, err = getRowKey(tableDesc, index, toVals)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +128,7 @@ type scatterRun struct {
 	span roachpb.Span
 
 	rangeIdx int
-	ranges   []roachpb.Span
+	ranges   []roachpb.AdminScatterResponse_Range
 }
 
 func (n *scatterNode) startExec(params runParams) error {
@@ -137,19 +137,12 @@ func (n *scatterNode) startExec(params runParams) error {
 		RequestHeader:   roachpb.RequestHeader{Key: n.run.span.Key, EndKey: n.run.span.EndKey},
 		RandomizeLeases: true,
 	}
-	res, pErr := kv.SendWrapped(params.ctx, db.NonTransactionalSender(), req)
+	res, pErr := client.SendWrapped(params.ctx, db.NonTransactionalSender(), req)
 	if pErr != nil {
 		return pErr.GoError()
 	}
-	scatterRes := res.(*roachpb.AdminScatterResponse)
 	n.run.rangeIdx = -1
-	n.run.ranges = make([]roachpb.Span, len(scatterRes.RangeInfos))
-	for i, rangeInfo := range scatterRes.RangeInfos {
-		n.run.ranges[i] = roachpb.Span{
-			Key:    rangeInfo.Desc.StartKey.AsRawKey(),
-			EndKey: rangeInfo.Desc.EndKey.AsRawKey(),
-		}
-	}
+	n.run.ranges = res.(*roachpb.AdminScatterResponse).Ranges
 	return nil
 }
 
@@ -159,11 +152,22 @@ func (n *scatterNode) Next(params runParams) (bool, error) {
 	return hasNext, nil
 }
 
+var scatterNodeColumns = sqlbase.ResultColumns{
+	{
+		Name: "key",
+		Typ:  types.Bytes,
+	},
+	{
+		Name: "pretty",
+		Typ:  types.String,
+	},
+}
+
 func (n *scatterNode) Values() tree.Datums {
 	r := n.run.ranges[n.run.rangeIdx]
 	return tree.Datums{
-		tree.NewDBytes(tree.DBytes(r.Key)),
-		tree.NewDString(keys.PrettyPrint(nil /* valDirs */, r.Key)),
+		tree.NewDBytes(tree.DBytes(r.Span.Key)),
+		tree.NewDString(keys.PrettyPrint(nil /* valDirs */, r.Span.Key)),
 	}
 }
 

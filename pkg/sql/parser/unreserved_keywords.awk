@@ -1,4 +1,4 @@
-/^(cockroachdb_extra_)?reserved_keyword:/ {
+/^reserved_keyword:/ {
   keyword = 0
   next
 }

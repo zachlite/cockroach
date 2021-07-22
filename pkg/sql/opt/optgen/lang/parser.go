@@ -1,26 +1,26 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package lang
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 )
-
-// letLiteral is the keyword that designates a let expression.
-const letLiteral = "Let"
 
 // FileResolver is used by the parser to abstract the opening and reading of
 // input files. Callers of the parser can override the default behavior
@@ -40,7 +40,10 @@ type Parser struct {
 	saveSrc SourceLoc
 	errors  []error
 
-	// comments accumulates contiguous comments as they are scanned.
+	// comments accumulates contiguous comments as they are scanned, as long as
+	// it has been initialized to a non-nil array. Parser functions initialize
+	// it when they want to remember comments. For example, the parser tags
+	// each define and rule with any comments that preceded it.
 	comments CommentsExpr
 
 	// resolver is invoked to open the input files provided to the parser.
@@ -49,22 +52,13 @@ type Parser struct {
 	// unscanned is true if the last token was unscanned (i.e. put back to be
 	// reparsed).
 	unscanned bool
-
-	// exprs is tracks top-level expressions (including comments) in order.
-	exprs []Expr
-
-	// exprComments maps expressions to comments.
-	exprComments map[Expr]CommentsExpr
 }
 
 // NewParser constructs a new instance of the Optgen parser, with the specified
 // list of file paths as its input files. The Parse method must be called in
 // order to parse the input files.
 func NewParser(files ...string) *Parser {
-	p := &Parser{
-		files:        files,
-		exprComments: make(map[Expr]CommentsExpr),
-	}
+	p := &Parser{files: files}
 
 	// By default, resolve file names by a call to os.Open.
 	p.resolver = func(name string) (io.Reader, error) {
@@ -102,40 +96,6 @@ func (p *Parser) Errors() []error {
 	return p.errors
 }
 
-// Exprs returns the top-level expressions (defines, rules, comments) in the
-// order in which they were encountered.
-func (p *Parser) Exprs() []Expr {
-	return p.exprs
-}
-
-// GetComments returns the comments associated with e.
-func (p *Parser) GetComments(e Expr) CommentsExpr {
-	return p.exprComments[e]
-}
-
-func (p *Parser) getComments() CommentsExpr {
-	comments := p.comments
-	p.comments = nil
-	return comments
-}
-
-func (p *Parser) setComments(e Expr, comments CommentsExpr) {
-	if len(comments) > 0 {
-		p.exprComments[e] = comments
-	}
-}
-
-func (p *Parser) hasComments() bool {
-	return len(p.comments) > 0
-}
-
-func (p *Parser) appendComments() {
-	comments := p.getComments()
-	if len(comments) > 0 {
-		p.exprs = append(p.exprs, &comments)
-	}
-}
-
 // root = tags (define | rule)
 func (p *Parser) parseRoot() *RootExpr {
 	rootOp := &RootExpr{}
@@ -153,8 +113,11 @@ func (p *Parser) parseRoot() *RootExpr {
 	}
 
 	for {
-		var tags TagsExpr
 		var comments CommentsExpr
+		var tags TagsExpr
+
+		// Remember any comments at the top-level by initializing p.comments.
+		p.comments = make(CommentsExpr, 0)
 
 		tok := p.scan()
 		src := p.src
@@ -166,7 +129,10 @@ func (p *Parser) parseRoot() *RootExpr {
 		case LBRACKET:
 			p.unscan()
 
-			comments = p.getComments()
+			// Get any comments that have accumulated.
+			comments = p.comments
+			p.comments = nil
+
 			tags = p.parseTags()
 			if tags == nil {
 				p.tryRecover()
@@ -181,25 +147,25 @@ func (p *Parser) parseRoot() *RootExpr {
 					p.tryRecover()
 					break
 				}
-				p.setComments(rule, comments)
 
 				rootOp.Rules = append(rootOp.Rules, rule)
-				p.exprs = append(p.exprs, rule)
 				break
 			}
 
 			fallthrough
 
 		case IDENT:
+			// Get any comments that have accumulated.
+			if comments == nil {
+				comments = p.comments
+				p.comments = nil
+			}
+
 			// Only define identifier is allowed at the top level.
 			if !p.isDefineIdent() {
 				p.addExpectedTokenErr("define statement")
 				p.tryRecover()
 				break
-			}
-			// If there was no tag, we need to check for comments.
-			if len(comments) == 0 {
-				comments = p.getComments()
 			}
 
 			p.unscan()
@@ -209,10 +175,8 @@ func (p *Parser) parseRoot() *RootExpr {
 				p.tryRecover()
 				break
 			}
-			p.setComments(define, comments)
 
 			rootOp.Defines = append(rootOp.Defines, define)
-			p.exprs = append(p.exprs, define)
 
 		default:
 			p.addExpectedTokenErr("define statement or rule")
@@ -240,14 +204,10 @@ func (p *Parser) parseDefine(comments CommentsExpr, tags TagsExpr, src SourceLoc
 
 	for {
 		if p.scan() == RBRACE {
-			if p.hasComments() {
-				p.addErr(fmt.Sprintf("comments not allowed before closing }: %v", p.comments))
-				return nil
-			}
 			return define
 		}
-		p.unscan()
 
+		p.unscan()
 		defineField := p.parseDefineField()
 		if defineField == nil {
 			return nil
@@ -266,29 +226,13 @@ func (p *Parser) parseDefineField() *DefineFieldExpr {
 	src := p.src
 	name := p.s.Literal()
 
-	// Scan tokens until the first white space.
-	var typ bytes.Buffer
-	tok := p.scan()
-	for {
-		if tok != IDENT && tok != ASTERISK && tok != LBRACKET && tok != RBRACKET && tok != DOT {
-			p.addExpectedTokenErr("define field type")
-			return nil
-		}
-		typ.WriteString(p.s.Literal())
-		tok = p.scanInternal(false /* skipWhitespace */)
-		if tok == EOF || tok == WHITESPACE {
-			break
-		}
+	if !p.scanToken(IDENT, "define field type") {
+		return nil
 	}
 
-	field := &DefineFieldExpr{
-		Src:      &src,
-		Name:     StringExpr(name),
-		Comments: p.getComments(),
-		Type:     StringExpr(typ.String()),
-	}
-	p.setComments(field, field.Comments)
-	return field
+	typ := p.s.Literal()
+
+	return &DefineFieldExpr{Src: &src, Name: StringExpr(name), Type: StringExpr(typ)}
 }
 
 // rule = match '=>' replace
@@ -299,10 +243,6 @@ func (p *Parser) parseRule(comments CommentsExpr, tags TagsExpr, src SourceLoc) 
 	}
 
 	if !p.scanToken(ARROW, "'=>'") {
-		return nil
-	}
-	if p.hasComments() {
-		p.addErr("comments not allowed before =>")
 		return nil
 	}
 
@@ -326,50 +266,25 @@ func (p *Parser) parseMatch() Expr {
 	if !p.scanToken(LPAREN, "match pattern") {
 		return nil
 	}
-	comments := p.getComments()
 	p.unscan()
-	f := p.parseFunc()
-	p.setComments(f, comments)
-	return f
+	return p.parseFunc()
 }
 
 // replace = func | ref
 func (p *Parser) parseReplace() Expr {
-	tok := p.scan()
-	comments := p.getComments()
-	var e Expr
-	switch tok {
+	switch p.scan() {
 	case LPAREN:
 		p.unscan()
-		e = p.parseFunc()
+		return p.parseFunc()
 
 	case DOLLAR:
 		p.unscan()
-		e = p.parseRef()
+		return p.parseRef()
 
 	default:
 		p.addExpectedTokenErr("replace pattern")
 		return nil
 	}
-	p.setComments(e, comments)
-	return e
-}
-
-// func = '(' func-name arg* ')'
-// let = '(' 'Let' '(' '$' label ('$' label)* ')' ':' func ref ')'
-func (p *Parser) parseFuncOrLet() Expr {
-	if p.scan() != LPAREN {
-		panic("caller should have checked for left parenthesis")
-	}
-
-	// Peek ahead to determine if its a function or a let expression.
-	tok := p.scan()
-	literal := p.s.Literal()
-	p.unscan()
-	if tok == IDENT && literal == letLiteral {
-		return p.parseLet()
-	}
-	return p.parseFuncImpl()
 }
 
 // func = '(' func-name arg* ')'
@@ -377,15 +292,8 @@ func (p *Parser) parseFunc() Expr {
 	if p.scan() != LPAREN {
 		panic("caller should have checked for left parenthesis")
 	}
-	return p.parseFuncImpl()
-}
 
-// func = '(' func-name arg* ')'
-// Note: the leading '(' has already been scanned by parseFuncOrLet or
-// parseFunc.
-func (p *Parser) parseFuncImpl() Expr {
 	src := p.src
-
 	name := p.parseFuncName()
 	if name == nil {
 		return nil
@@ -394,20 +302,14 @@ func (p *Parser) parseFuncImpl() Expr {
 	fn := &FuncExpr{Src: &src, Name: name}
 	for {
 		if p.scan() == RPAREN {
-			if p.hasComments() {
-				p.addErr("comments not allowed before )")
-				return nil
-			}
 			return fn
 		}
 
 		p.unscan()
-		comments := p.getComments()
 		arg := p.parseArg()
 		if arg == nil {
 			return nil
 		}
-		p.setComments(arg, comments)
 
 		fn.Args = append(fn.Args, arg)
 	}
@@ -415,99 +317,19 @@ func (p *Parser) parseFuncImpl() Expr {
 
 // func-name = names | func
 func (p *Parser) parseFuncName() Expr {
-	tok := p.scan()
-	comments := p.getComments()
-	var e Expr
-	switch tok {
+	switch p.scan() {
 	case IDENT:
 		p.unscan()
-		e = p.parseNames()
+		return p.parseNames()
 
 	case LPAREN:
 		// Constructed name.
 		p.unscan()
-		e = p.parseFunc()
-
-	default:
-		p.addExpectedTokenErr("name")
-		return nil
-	}
-	p.setComments(e, comments)
-	return e
-}
-
-// let = '(' 'Let' '(' '$' label ('$' label)* ')' ':' func ref ')'
-// Note: the leading '(' has already been scanned by parseFuncOrLet.
-func (p *Parser) parseLet() Expr {
-	if p.scan() != IDENT && p.s.Literal() != letLiteral {
-		panic("caller should have checked for let literal")
+		return p.parseFunc()
 	}
 
-	if !p.scanToken(LPAREN, "'('") {
-		return nil
-	}
-
-	src := p.src
-
-	var labels StringsExpr
-	for {
-		tok := p.scan()
-		p.unscan()
-		if tok == RPAREN {
-			if p.hasComments() {
-				p.addErr("comments not allowed before ')'")
-				return nil
-			}
-			p.scan()
-			break
-		}
-
-		if !p.scanToken(DOLLAR, "'$'") {
-			return nil
-		}
-
-		if !p.scanToken(IDENT, "label") {
-			return nil
-		}
-
-		label := StringExpr(p.s.Literal())
-		labels = append(labels, label)
-	}
-
-	if len(labels) == 0 {
-		p.addErr("let expression must assign 1 or more variables")
-	}
-
-	if !p.scanToken(COLON, "':'") {
-		return nil
-	}
-
-	if !p.scanToken(LPAREN, "function") {
-		return nil
-	}
-	p.unscan()
-
-	target := p.parseFunc()
-	if target == nil {
-		return nil
-	}
-
-	if !p.scanToken(DOLLAR, "ref") {
-		return nil
-	}
-	p.unscan()
-	result := p.parseRef()
-
-	if !p.scanToken(RPAREN, "')'") {
-		return nil
-	}
-
-	return &LetExpr{
-		Src:    &src,
-		Labels: labels,
-		Target: target.(*FuncExpr),
-		Result: result,
-	}
+	p.addExpectedTokenErr("name")
+	return nil
 }
 
 // names = name ('|' name)*
@@ -587,46 +409,40 @@ func (p *Parser) parseAnd() Expr {
 	return &AndExpr{Src: src, Left: left, Right: right}
 }
 
-// expr = func | not | let | list | any | name | STRING | NUMBER
+// expr = func | not | list | any | name | STRING | NUMBER
 func (p *Parser) parseExpr() Expr {
-	tok := p.scan()
-	comments := p.getComments()
-	var e Expr
-	switch tok {
+	switch p.scan() {
 	case LPAREN:
 		p.unscan()
-		e = p.parseFuncOrLet()
+		return p.parseFunc()
 
 	case CARET:
 		p.unscan()
-		e = p.parseNot()
+		return p.parseNot()
 
 	case LBRACKET:
 		p.unscan()
-		e = p.parseList()
+		return p.parseList()
 
 	case ASTERISK:
-		src := p.src
-		e = &AnyExpr{Src: &src}
+		return &AnyExpr{}
 
 	case IDENT:
 		name := NameExpr(p.s.Literal())
-		e = &name
+		return &name
 
 	case STRING:
 		p.unscan()
-		e = p.parseString()
+		return p.parseString()
 
 	case NUMBER:
 		p.unscan()
-		e = p.parseNumber()
+		return p.parseNumber()
 
 	default:
 		p.addExpectedTokenErr("expression")
 		return nil
 	}
-	p.setComments(e, comments)
-	return e
 }
 
 // not = '^' expr
@@ -655,10 +471,6 @@ func (p *Parser) parseList() Expr {
 	list := &ListExpr{Src: &src}
 	for {
 		if p.scan() == RBRACKET {
-			if p.hasComments() {
-				p.addErr("comments not allowed before ]")
-				return nil
-			}
 			return list
 		}
 
@@ -674,18 +486,11 @@ func (p *Parser) parseList() Expr {
 
 // list-child = list-any | arg
 func (p *Parser) parseListChild() Expr {
-	tok := p.scan()
-	comments := p.getComments()
-	var e Expr
-	if tok == ELLIPSES {
-		src := p.src
-		e = &ListAnyExpr{Src: &src}
-	} else {
-		p.unscan()
-		e = p.parseArg()
+	if p.scan() == ELLIPSES {
+		return &ListAnyExpr{}
 	}
-	p.setComments(e, comments)
-	return e
+	p.unscan()
+	return p.parseArg()
 }
 
 // ref = '$' label
@@ -719,10 +524,6 @@ func (p *Parser) parseTags() TagsExpr {
 		tags = append(tags, TagExpr(p.s.Literal()))
 
 		if p.scan() == RBRACKET {
-			if p.hasComments() {
-				p.addErr("comments not allowed before ]")
-				return nil
-			}
 			return tags
 		}
 
@@ -789,10 +590,6 @@ func (p *Parser) scanToken(expected Token, desc string) bool {
 // scan returns the next non-whitespace, non-comment token from the underlying
 // scanner. If a token has been unscanned then read that instead.
 func (p *Parser) scan() Token {
-	return p.scanInternal(true /* skipWhitespace */)
-}
-
-func (p *Parser) scanInternal(skipWhitespace bool) Token {
 	// If we have a token in the buffer, then return it.
 	if p.unscanned {
 		// Restore saved current token, and save previous token.
@@ -811,8 +608,6 @@ func (p *Parser) scanInternal(skipWhitespace bool) Token {
 		tok := p.s.Scan()
 		switch tok {
 		case EOF:
-			p.appendComments()
-
 			// Reached end of current file, so try to open next file.
 			if p.file+1 >= len(p.files) {
 				// No more files to parse.
@@ -831,17 +626,17 @@ func (p *Parser) scanInternal(skipWhitespace bool) Token {
 			return ERROR
 
 		case COMMENT:
-			if !skipWhitespace {
-				return tok
+			// Remember contiguous comments if p.comments is initialized, else
+			// skip.
+			if p.comments != nil {
+				p.comments = append(p.comments, CommentExpr(p.s.Literal()))
 			}
-			p.comments = append(p.comments, CommentExpr(p.s.Literal()))
 
 		case WHITESPACE:
-			if !skipWhitespace {
-				return tok
-			}
-			if strings.Count(p.s.Literal(), "\n") > 1 {
-				p.appendComments()
+			// A blank line resets any accumulating comments, since they have
+			// to be contiguous.
+			if p.comments != nil && strings.Count(p.s.Literal(), "\n") > 1 {
+				p.comments = p.comments[:0]
 			}
 
 		default:

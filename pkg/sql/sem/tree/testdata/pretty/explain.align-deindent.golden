@@ -15,7 +15,9 @@ FROM
 			FROM
 				kv
 					AS a
-				JOIN kv USING (k)
+				JOIN
+					kv
+				USING (k)
 			WHERE
 				a.v
 				> 3
@@ -37,7 +39,9 @@ SELECT "Level",
 			FROM
 				kv
 					AS a
-				JOIN kv USING (k)
+				JOIN
+					kv
+				USING (k)
 			WHERE
 				a.v
 				> 3
@@ -58,7 +62,9 @@ SELECT "Level",
 		  FROM
 			kv
 				AS a
-			JOIN kv USING (k)
+			JOIN
+				kv
+			USING (k)
 		  WHERE
 			a.v
 			> 3
@@ -78,7 +84,8 @@ SELECT "Level",
 			*
 		  FROM
 			kv AS a
-			JOIN kv USING (k)
+			JOIN kv
+			USING (k)
 		  WHERE
 			a.v > 3
 		  ORDER BY
@@ -96,7 +103,9 @@ SELECT "Level",
 		)   SELECT *
 		      FROM kv
 					AS a
-		      JOIN kv USING (k)
+		           JOIN
+					kv
+		           USING (k)
 		     WHERE a.v
 		           > 3
 		  ORDER BY a.v
@@ -112,7 +121,9 @@ SELECT "Level", "Type"
 		)   SELECT *
 		      FROM kv
 					AS a
-		      JOIN kv USING (k)
+		           JOIN
+					kv
+		           USING (k)
 		     WHERE a.v
 		           > 3
 		  ORDER BY a.v
@@ -127,7 +138,8 @@ SELECT "Level", "Type"
 			VERBOSE
 		)   SELECT *
 		      FROM kv AS a
-		      JOIN kv USING (k)
+		           JOIN kv
+		           USING (k)
 		     WHERE a.v > 3
 		  ORDER BY a.v
 					DESC
@@ -141,7 +153,8 @@ SELECT "Level", "Type"
 			VERBOSE
 		)   SELECT *
 		      FROM kv AS a
-		      JOIN kv USING (k)
+		           JOIN kv
+		           USING (k)
 		     WHERE a.v > 3
 		  ORDER BY a.v DESC
        ]
@@ -155,7 +168,9 @@ SELECT "Level", "Type"
 		                  FROM
 							kv
 								AS a
-							JOIN kv USING (k)
+							JOIN
+								kv
+							USING (k)
 		                  WHERE
 							a.v
 							> 3
@@ -172,7 +187,8 @@ SELECT "Level", "Type"
 							*
 		                  FROM
 							kv AS a
-							JOIN kv USING (k)
+							JOIN kv
+							USING (k)
 		                  WHERE
 							a.v > 3
 		                  ORDER BY
@@ -187,7 +203,9 @@ SELECT "Level", "Type"
 		EXPLAIN (VERBOSE)   SELECT *
 		                      FROM kv
 									AS a
-		                      JOIN kv USING (k)
+		                           JOIN
+									kv
+		                           USING (k)
 		                     WHERE a.v
 		                           > 3
 		                  ORDER BY a.v
@@ -200,7 +218,8 @@ SELECT "Level", "Type"
   FROM [
 		EXPLAIN (VERBOSE)   SELECT *
 		                      FROM kv AS a
-		                      JOIN kv USING (k)
+		                           JOIN kv
+		                           USING (k)
 		                     WHERE a.v > 3
 		                  ORDER BY a.v
 									DESC
@@ -212,7 +231,19 @@ SELECT "Level", "Type"
   FROM [
 		EXPLAIN (VERBOSE)   SELECT *
 		                      FROM kv AS a
-		                      JOIN kv USING (k)
+		                           JOIN kv
+		                           USING (k)
+		                     WHERE a.v > 3
+		                  ORDER BY a.v DESC
+       ]
+
+52:
+----------------------------------------------------
+SELECT "Level", "Type"
+  FROM [
+		EXPLAIN (VERBOSE)   SELECT *
+		                      FROM kv AS a
+		                           JOIN kv USING (k)
 		                     WHERE a.v > 3
 		                  ORDER BY a.v DESC
        ]

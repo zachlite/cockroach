@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package grpcutil
 
@@ -16,21 +20,20 @@ import (
 	"io"
 	"strings"
 
-	circuit "github.com/cockroachdb/circuitbreaker"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/transport"
 )
 
 // ErrCannotReuseClientConn is returned when a failed connection is
 // being reused. We require that new connections be created with
 // pkg/rpc.GRPCDial instead.
-var ErrCannotReuseClientConn = errors.New(errCannotReuseClientConnMsg)
-
-const errCannotReuseClientConnMsg = "cannot reuse client connection"
+var ErrCannotReuseClientConn = errors.New("cannot reuse client connection")
 
 type localRequestKey struct{}
 
@@ -44,42 +47,20 @@ func IsLocalRequestContext(ctx context.Context) bool {
 	return ctx.Value(localRequestKey{}) != nil
 }
 
-// IsTimeout returns true if err's Cause is a gRPC timeout, or the request
-// was canceled by a context timeout.
-func IsTimeout(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	err = errors.Cause(err)
-	if s, ok := status.FromError(err); ok {
-		return s.Code() == codes.DeadlineExceeded
-	}
-	return false
-}
-
-// IsContextCanceled returns true if err's Cause is an error produced by gRPC
-// on context cancellation.
-func IsContextCanceled(err error) bool {
-	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
-		return s.Code() == codes.Canceled && s.Message() == context.Canceled.Error()
-	}
-	return false
-}
-
 // IsClosedConnection returns true if err's Cause is an error produced by gRPC
 // on closed connections.
 func IsClosedConnection(err error) bool {
-	if errors.Is(err, ErrCannotReuseClientConn) {
+	err = errors.Cause(err)
+	if err == ErrCannotReuseClientConn {
 		return true
 	}
-	err = errors.Cause(err)
 	if s, ok := status.FromError(err); ok {
 		if s.Code() == codes.Canceled ||
 			s.Code() == codes.Unavailable {
 			return true
 		}
 	}
-	if errors.Is(err, context.Canceled) ||
+	if err == context.Canceled ||
 		strings.Contains(err.Error(), "is closing") ||
 		strings.Contains(err.Error(), "tls: use of closed connection") ||
 		strings.Contains(err.Error(), "use of closed network connection") ||
@@ -88,36 +69,10 @@ func IsClosedConnection(err error) bool {
 		strings.Contains(err.Error(), "node unavailable") {
 		return true
 	}
+	if streamErr, ok := err.(transport.StreamError); ok && streamErr.Code == codes.Canceled {
+		return true
+	}
 	return netutil.IsClosedConnection(err)
-}
-
-// IsConnectionRejected returns true if err's cause is an error produced by
-// gRPC due to remote node being unavailable and retrying immediately would
-// not fix the problem. It happens when either remote node is decommissioned
-// or caller is not authorized to talk to the node.
-// This check is helpful if caller doesn't want to distinguish between
-// authentication and decommissioning errors in specific ways and just want
-// to abort operations.
-func IsConnectionRejected(err error) bool {
-	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
-		switch s.Code() {
-		case codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition:
-			return true
-		}
-	}
-	return false
-}
-
-// IsAuthError returns true if err's Cause is an error produced by
-// gRPC due to an authentication or authorization error for the operation.
-func IsAuthError(err error) bool {
-	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
-		switch s.Code() {
-		case codes.Unauthenticated, codes.PermissionDenied:
-			return true
-		}
-	}
-	return false
 }
 
 // RequestDidNotStart returns true if the given error from gRPC
@@ -131,13 +86,13 @@ func IsAuthError(err error) bool {
 // TODO(bdarnell): Replace this with a cleaner mechanism when/if
 // https://github.com/grpc/grpc-go/issues/1443 is resolved.
 func RequestDidNotStart(err error) bool {
-	if errors.HasType(err, connectionNotReadyError{}) ||
-		errors.HasType(err, (*netutil.InitialHeartbeatFailedError)(nil)) ||
-		errors.Is(err, circuit.ErrBreakerOpen) ||
-		IsConnectionRejected(err) {
+	if _, ok := err.(connectionNotReadyError); ok {
 		return true
 	}
-	s, ok := status.FromError(errors.Cause(err))
+	if _, ok := err.(netutil.InitialHeartbeatFailedError); ok {
+		return true
+	}
+	s, ok := status.FromError(err)
 	if !ok {
 		// This is a non-gRPC error; assume nothing.
 		return false

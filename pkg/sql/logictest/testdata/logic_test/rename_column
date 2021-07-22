@@ -1,4 +1,4 @@
-# LogicTest: !fakedist-metadata
+# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata
 
 statement ok
 CREATE TABLE users (
@@ -19,10 +19,10 @@ uid name  title
 1  tom   cat
 2  jerry rat
 
-statement error pq: column "name" of relation "users" already exists
+statement error column name "name" already exists
 ALTER TABLE users RENAME COLUMN title TO name
 
-statement error pgcode 42601 empty column name
+statement error empty column name
 ALTER TABLE users RENAME COLUMN title TO ""
 
 statement error pgcode 42703 column "ttle" does not exist
@@ -49,7 +49,7 @@ id name  species
 
 user testuser
 
-statement error pq: must be owner of table users or have CREATE privilege on table users
+statement error user testuser does not have CREATE privilege on relation users
 ALTER TABLE users RENAME COLUMN name TO username
 
 user root
@@ -76,14 +76,12 @@ query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
 table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       bar         false       1             id           ASC        false    false
-users       bar         false       2             username     ASC        false    false
+users       primary     false       1             id           ASC        false    false
 users       foo         true        1             username     ASC        false    false
 users       foo         true        2             species      N/A        true     false
 users       foo         true        3             id           ASC        false    true
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             username     N/A        true     false
-users       primary     false       3             species      N/A        true     false
+users       bar         false       1             id           ASC        false    false
+users       bar         false       2             username     ASC        false    false
 
 statement ok
 CREATE VIEW v1 AS SELECT id FROM users WHERE username = 'tom'
@@ -111,85 +109,22 @@ ALTER TABLE users RENAME COLUMN id TO uid
 # statement ok
 # ALTER TABLE users RENAME COLUMN username TO name
 
-statement ok
-DROP VIEW v2
-
 query T
-SELECT column_name FROM [SHOW COLUMNS FROM users] ORDER BY column_name
+SELECT column_name FROM [SHOW COLUMNS FROM users]
 ----
 id
-species
 username
+species
 
-statement ok
-SET vectorize=on
-
-query T
+query TTT
 EXPLAIN ALTER TABLE users RENAME COLUMN species TO woo
 ----
-distribution: local
-vectorized: true
-·
-• alter table
-
-statement ok
-RESET vectorize
+rename column  ·  ·
 
 # Verify that EXPLAIN did not actually rename the column
 query T
-SELECT column_name FROM [SHOW COLUMNS FROM users] ORDER BY column_name
+SELECT column_name FROM [SHOW COLUMNS FROM users]
 ----
 id
-species
 username
-
-# Check that a column can be added and renamed in the same statement
-statement ok
-ALTER TABLE users RENAME COLUMN species TO species_old,
-                  ADD COLUMN species STRING AS (species_old || ' woo') STORED
-
-query T rowsort
-SELECT species FROM users
-----
-cat woo
-rat woo
-
-# Test that renaming columns works inside transactions that create resources
-# which reference those columns.
-
-subtest rename_in_transaction
-
-statement ok
-CREATE TABLE foo (j INT);
-
-statement ok
-BEGIN;
-    ALTER TABLE foo ADD CONSTRAINT check_not_negative CHECK (j >= 0);
-    ALTER TABLE foo RENAME COLUMN j TO i;
-COMMIT;
-
-statement ok
-BEGIN;
-    ALTER TABLE foo ADD COLUMN k INT AS (i+1) STORED;
-    ALTER TABLE foo RENAME COLUMN i TO j;
-COMMIT;
-
-statement ok
-BEGIN;
-    ALTER TABLE foo ALTER COLUMN j SET NOT NULL;
-    ALTER TABLE foo RENAME COLUMN j TO i;
-COMMIT;
-
-statement ok
-BEGIN;
-    CREATE INDEX ON foo(i) WHERE i > 0;
-    ALTER TABLE foo RENAME COLUMN i TO j;
-COMMIT;
-
-statement ok
-INSERT INTO foo(j) VALUES (1);
-
-query II
-SELECT j, k FROM foo;
-----
-1  2
+species

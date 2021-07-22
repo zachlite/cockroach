@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package cluster
 
@@ -21,6 +25,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,18 +34,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
-	"github.com/containerd/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -48,11 +41,22 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 const (
-	defaultImage  = "docker.io/library/ubuntu:focal-20210119"
+	defaultImage  = "docker.io/library/ubuntu:xenial-20170214"
 	networkPrefix = "cockroachdb_acceptance"
 )
 
@@ -67,7 +71,7 @@ const CockroachBinaryInContainer = "/cockroach/cockroach"
 var cockroachImage = flag.String("i", defaultImage, "the docker image to run")
 var cockroachEntry = flag.String("e", "", "the entry point for the image")
 var waitOnStop = flag.Bool("w", false, "wait for the user to interrupt before tearing down the cluster")
-var maxRangeBytes = *zonepb.DefaultZoneConfig().RangeMaxBytes
+var maxRangeBytes = config.DefaultZoneConfig().RangeMaxBytes
 
 // CockroachBinary is the path to the host-side binary to use.
 var CockroachBinary = flag.String("b", func() string {
@@ -81,7 +85,7 @@ var CockroachBinary = flag.String("b", func() string {
 }(), "the host-side binary to run")
 
 func exists(path string) bool {
-	if _, err := os.Stat(path); oserror.IsNotExist(err) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return false
 	}
 	return true
@@ -152,7 +156,7 @@ func CreateDocker(
 	ctx context.Context, cfg TestConfig, volumesDir string, stopper *stop.Stopper,
 ) *DockerCluster {
 	select {
-	case <-stopper.ShouldQuiesce():
+	case <-stopper.ShouldStop():
 		// The stopper was already closed, exit early.
 		os.Exit(1)
 	default:
@@ -162,7 +166,7 @@ func CreateDocker(
 		log.Fatalf(ctx, "\"%s\": does not exist", *CockroachBinary)
 	}
 
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := client.NewEnvClient()
 	maybePanic(err)
 
 	cli.NegotiateAPIVersion(ctx)
@@ -196,6 +200,11 @@ func CreateDocker(
 	}
 }
 
+// Client returns the underlying docker client.
+func (l *DockerCluster) Client() client.APIClient {
+	return l.client
+}
+
 func (l *DockerCluster) expectEvent(c *Container, msgs ...string) {
 	for index, ctr := range l.Nodes {
 		if c.id != ctr.id {
@@ -222,14 +231,13 @@ func (l *DockerCluster) OneShot(
 	ipo types.ImagePullOptions,
 	containerConfig container.Config,
 	hostConfig container.HostConfig,
-	platformSpec specs.Platform,
 	name string,
 ) error {
 	if err := pullImage(ctx, l, ref, ipo); err != nil {
 		return err
 	}
 	hostConfig.VolumesFrom = []string{l.vols.id}
-	c, err := createContainer(ctx, l, containerConfig, hostConfig, platformSpec, name)
+	c, err := createContainer(ctx, l, containerConfig, hostConfig, name)
 	if err != nil {
 		return err
 	}
@@ -244,7 +252,38 @@ func (l *DockerCluster) OneShot(
 	if err := l.oneshot.Start(ctx); err != nil {
 		return err
 	}
-	return l.oneshot.Wait(ctx, container.WaitConditionNextExit)
+	return l.oneshot.Wait(ctx, container.WaitConditionNotRunning)
+}
+
+// SidecarContainer runs a container in the same bridge network as the
+// CockroachDB nodes.
+func (l *DockerCluster) SidecarContainer(
+	ctx context.Context, cfg container.Config, portMap map[string]string,
+) (*Container, error) {
+	if err := pullImage(ctx, l, cfg.Image, types.ImagePullOptions{}); err != nil {
+		return nil, err
+	}
+	portBindings := nat.PortMap{}
+	for from, to := range portMap {
+		portBindings[nat.Port(from+`/tcp`)] = []nat.PortBinding{{HostPort: to}}
+	}
+	hostConfig := &container.HostConfig{
+		NetworkMode: container.NetworkMode(l.networkID),
+		// Disable DNS search under the host machine's domain. This can catch
+		// upstream wildcard DNS matching and result in odd behavior.
+		DNSSearch:    []string{"."},
+		PortBindings: portBindings,
+	}
+	containerName := fmt.Sprintf(`%s-%s`, cfg.Hostname, l.clusterID)
+	resp, err := l.client.ContainerCreate(ctx, &cfg, hostConfig, nil, containerName)
+	if err != nil {
+		return nil, err
+	}
+	return &Container{
+		id:      resp.ID,
+		name:    containerName,
+		cluster: l,
+	}, nil
 }
 
 // stopOnPanic is invoked as a deferred function in Start in order to attempt
@@ -372,7 +411,6 @@ func (l *DockerCluster) initCluster(ctx context.Context) {
 			Binds:           binds,
 			PublishAllPorts: true,
 		},
-		platforms.DefaultSpec(),
 		fmt.Sprintf("volumes-%s", l.clusterID),
 	)
 	maybePanic(err)
@@ -381,7 +419,7 @@ func (l *DockerCluster) initCluster(ctx context.Context) {
 	// and it'll get in the way of future runs.
 	l.vols = c
 	maybePanic(c.Start(ctx))
-	maybePanic(c.Wait(ctx, container.WaitConditionNextExit))
+	maybePanic(c.Wait(ctx, container.WaitConditionNotRunning))
 }
 
 // cockroachEntryPoint returns the value to be used as
@@ -441,19 +479,13 @@ func (l *DockerCluster) createRoach(
 			},
 		},
 		hostConfig,
-		platforms.DefaultSpec(),
 		node.nodeStr,
 	)
 	maybePanic(err)
 }
 
 func (l *DockerCluster) createNodeCerts() {
-	// TODO(mjibson): Including "cockroach" here to mimic
-	// GenerateCerts. Currently when this function is called it overwrites
-	// the node.crt and node.key files generated by that function. Until
-	// this is correctly fixed, make the certs generated here at least the
-	// same as those.
-	nodes := []string{"localhost", "cockroach", dockerIP().String()}
+	nodes := []string{"localhost", dockerIP().String()}
 	for _, node := range l.Nodes {
 		nodes = append(nodes, node.nodeStr)
 	}
@@ -486,9 +518,10 @@ func (l *DockerCluster) startNode(ctx context.Context, node *testNode) {
 		}
 		cmd = append(cmd, fmt.Sprintf("--store=%s", storeSpec))
 	}
-	// Append --join flag for all nodes.
-	firstNodeAddr := l.Nodes[0].nodeStr
-	cmd = append(cmd, "--join="+net.JoinHostPort(firstNodeAddr, base.DefaultPort))
+	// Append --join flag (for all nodes except first in bootstrap-node-zero mode)
+	if node.index > 0 || l.config.InitMode != INIT_BOOTSTRAP_NODE_ZERO {
+		cmd = append(cmd, "--join="+net.JoinHostPort(l.Nodes[0].nodeStr, base.DefaultPort))
+	}
 
 	dockerLogDir := "/logs/" + node.nodeStr
 	localLogDir := filepath.Join(l.volumesDir, "logs", node.nodeStr)
@@ -498,6 +531,7 @@ func (l *DockerCluster) startNode(ctx context.Context, node *testNode) {
 		"--log-dir="+dockerLogDir)
 	env := []string{
 		"COCKROACH_SCAN_MAX_IDLE_TIME=200ms",
+		"COCKROACH_CONSISTENCY_CHECK_PANIC_ON_FAILURE=true",
 		"COCKROACH_SKIP_UPDATE_CHECK=1",
 		"COCKROACH_CRASH_REPORTS=",
 	}
@@ -528,14 +562,31 @@ func (l *DockerCluster) RunInitCommand(ctx context.Context, nodeIdx int) {
 			"init",
 			"--certs-dir=/certs/",
 			"--host=" + l.Nodes[nodeIdx].nodeStr,
-			"--log-dir=/logs/init-command",
-			"--logtostderr=NONE",
+			"--logtostderr",
 		},
 	}
 
 	log.Infof(ctx, "trying to initialize via %v", containerConfig.Cmd)
+	// This is called early in the bootstrap sequence, and the node may not have
+	// opened its ports yet. Wait for the health endpoint to become available,
+	// because we only get one shot at running the init command. (Retrying the
+	// init command is dangerous [0].)
+	// [0]: https://github.com/cockroachdb/cockroach/pull/19753#issuecomment-341561452
+	maybePanic(retry.ForDuration(time.Minute, func() error {
+		url := l.URL(ctx, nodeIdx) + "/health"
+		resp, httpErr := HTTPClient.Get(url)
+		if httpErr != nil {
+			return httpErr
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Warning(ctx, "server not healthy; retrying")
+			return errors.New("server not healthy")
+		}
+		return nil
+	}))
 	maybePanic(l.OneShot(ctx, defaultImage, types.ImagePullOptions{},
-		containerConfig, container.HostConfig{}, platforms.DefaultSpec(), "init-command"))
+		containerConfig, container.HostConfig{}, "init-command"))
 	log.Info(ctx, "cluster successfully initialized")
 }
 
@@ -543,10 +594,6 @@ func (l *DockerCluster) RunInitCommand(ctx context.Context, nodeIdx int) {
 func (l *DockerCluster) processEvent(ctx context.Context, event events.Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	// Logging everything we get from Docker in service of finding the root
-	// cause of #58955.
-	log.Infof(ctx, "processing event from Docker: %+v", event)
 
 	// If there's currently a oneshot container, ignore any die messages from
 	// it because those are expected.
@@ -573,7 +620,7 @@ func (l *DockerCluster) processEvent(ctx context.Context, event events.Message) 
 
 	// An event on any other container is unexpected. Die.
 	select {
-	case <-l.stopper.ShouldQuiesce():
+	case <-l.stopper.ShouldStop():
 	case <-l.monitorCtx.Done():
 	default:
 		// There is a very tiny race here: the signal handler might be closing the
@@ -645,15 +692,14 @@ func (l *DockerCluster) Start(ctx context.Context) {
 	log.Infof(ctx, "creating node certs (%dbit) in: %s", keyLen, certsDir)
 	l.createNodeCerts()
 
-	log.Infof(ctx, "starting %d nodes", len(l.Nodes))
 	l.monitorCtx, l.monitorCtxCancelFunc = context.WithCancel(context.Background())
 	go l.monitor(ctx)
 	var wg sync.WaitGroup
 	wg.Add(len(l.Nodes))
 	for _, node := range l.Nodes {
 		go func(node *testNode) {
-			defer wg.Done()
 			l.startNode(ctx, node)
+			wg.Done()
 		}(node)
 	}
 	wg.Wait()
@@ -709,7 +755,7 @@ func (l *DockerCluster) AssertAndStop(ctx context.Context, t testing.TB) {
 func (l *DockerCluster) stop(ctx context.Context) {
 	if *waitOnStop {
 		log.Infof(ctx, "waiting for interrupt")
-		<-l.stopper.ShouldQuiesce()
+		<-l.stopper.ShouldStop()
 	}
 
 	log.Infof(ctx, "stopping")
@@ -880,7 +926,7 @@ func (l *DockerCluster) ExecCLI(ctx context.Context, i int, cmd []string) (strin
 func (l *DockerCluster) Cleanup(ctx context.Context, preserveLogs bool) {
 	volumes, err := ioutil.ReadDir(l.volumesDir)
 	if err != nil {
-		log.Warningf(ctx, "%v", err)
+		log.Warning(ctx, err)
 		return
 	}
 	for _, v := range volumes {
@@ -888,7 +934,7 @@ func (l *DockerCluster) Cleanup(ctx context.Context, preserveLogs bool) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(l.volumesDir, v.Name())); err != nil {
-			log.Warningf(ctx, "%v", err)
+			log.Warning(ctx, err)
 		}
 	}
 }

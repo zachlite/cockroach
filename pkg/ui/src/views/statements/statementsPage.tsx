@@ -1,125 +1,205 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
+import _ from "lodash";
+import React from "react";
+import Helmet from "react-helmet";
 import { connect } from "react-redux";
+import { RouteComponentProps } from "react-router";
 import { createSelector } from "reselect";
-import { RouteComponentProps, withRouter } from "react-router-dom";
-import * as protos from "src/js/protos";
-import {
-  refreshStatementDiagnosticsRequests,
-  refreshStatements,
-} from "src/redux/apiReducers";
+
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { AdminUIState } from "src/redux/state";
+import { PrintTime } from "src/views/reports/containers/range/print";
+import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
+import Loading from "src/views/shared/components/loading";
+import { PageConfig, PageConfigItem } from "src/views/shared/components/pageconfig";
+import { SortSetting } from "src/views/shared/components/sortabletable";
+import { ToolTipWrapper } from "src/views/shared/components/toolTip";
+import { refreshStatements } from "src/redux/apiReducers";
 import { StatementsResponseMessage } from "src/util/api";
-import {
-  aggregateStatementStats,
-  combineStatementStats,
-  ExecutionStatistics,
-  flattenStatementStats,
-  statementKey,
-  StatementStatistics,
-} from "src/util/appStats";
+import { aggregateStatementStats, flattenStatementStats, combineStatementStats, StatementStatistics, ExecutionStatistics } from "src/util/appStats";
 import { appAttr } from "src/util/constants";
 import { TimestampToMoment } from "src/util/convert";
-import { PrintTime } from "src/views/reports/containers/range/print";
-import { selectDiagnosticsReportsPerStatement } from "src/redux/statements/statementsSelectors";
-import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
-import { getMatchParamByName } from "src/util/query";
+import { Pick } from "src/util/pick";
 
-import { StatementsPage, AggregateStatistics } from "@cockroachlabs/cluster-ui";
-import {
-  createOpenDiagnosticsModalAction,
-  createStatementDiagnosticsReportAction,
-} from "src/redux/statements";
-import {
-  trackDownloadDiagnosticsBundleAction,
-  trackStatementsPaginationAction,
-  trackStatementsSearchAction,
-  trackTableSortAction,
-} from "src/redux/analyticsActions";
-import { resetSQLStatsAction } from "src/redux/sqlStats";
-import { LocalSetting } from "src/redux/localsettings";
-import { nodeRegionsByIDSelector } from "src/redux/nodes";
+import { AggregateStatistics, StatementsSortedTable, makeStatementsColumns } from "./statementsTable";
+
+import * as protos from "src/js/protos";
+import "./statements.styl";
 
 type ICollectedStatementStatistics = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
-type IStatementDiagnosticsReport = protos.cockroach.server.serverpb.IStatementDiagnosticsReport;
+type RouteProps = RouteComponentProps<any, any>;
 
-interface StatementsSummaryData {
-  statement: string;
-  implicitTxn: boolean;
-  fullScan: boolean;
-  database: string;
-  stats: StatementStatistics[];
+interface StatementsPageProps {
+  statements: AggregateStatistics[];
+  apps: string[];
+  totalFingerprints: number;
+  lastReset: string;
+  refreshStatements: typeof refreshStatements;
 }
+
+interface StatementsPageState {
+  sortSetting: SortSetting;
+}
+
+class StatementsPage extends React.Component<StatementsPageProps & RouteProps, StatementsPageState> {
+
+  constructor(props: StatementsPageProps & RouteProps) {
+    super(props);
+    this.state = {
+      sortSetting: {
+        sortKey: 1,
+        ascending: false,
+      },
+    };
+  }
+
+  changeSortSetting = (ss: SortSetting) => {
+    this.setState({
+      sortSetting: ss,
+    });
+  }
+
+  selectApp = (app: DropdownOption) => {
+    this.props.router.push(`/statements/${app.value}`);
+  }
+
+  componentWillMount() {
+    this.props.refreshStatements();
+  }
+
+  componentWillReceiveProps() {
+    this.props.refreshStatements();
+  }
+
+  renderStatements = () => {
+    const selectedApp = this.props.params[appAttr] || "";
+    const appOptions = [{ value: "", label: "All" }];
+    this.props.apps.forEach(app => appOptions.push({ value: app, label: app }));
+
+    const lastClearedHelpText = (
+      <React.Fragment>
+        Statement history is cleared once an hour by default, which can be
+        configured with the cluster setting{" "}
+        <code><pre style={{ display: "inline-block" }}>diagnostics.reporting.interval</pre></code>.
+      </React.Fragment>
+    );
+
+    return (
+      <React.Fragment>
+        <PageConfig layout="spread">
+          <PageConfigItem>
+            <Dropdown
+              title="App"
+              options={appOptions}
+              selected={selectedApp}
+              onChange={this.selectApp}
+            />
+          </PageConfigItem>
+          <PageConfigItem>
+            <h4 className="statement-count-title">
+              {this.props.statements.length}
+              {selectedApp ? ` of ${this.props.totalFingerprints} ` : " "}
+              statement fingerprints.
+            </h4>
+          </PageConfigItem>
+          <PageConfigItem>
+            <h4 className="last-cleared-title">
+              <div className="last-cleared-tooltip__tooltip">
+                <ToolTipWrapper text={lastClearedHelpText}>
+                  <div className="last-cleared-tooltip__tooltip-hover-area">
+                    <div className="last-cleared-tooltip__info-icon">i</div>
+                  </div>
+                </ToolTipWrapper>
+              </div>
+              Last cleared {this.props.lastReset}.
+            </h4>
+          </PageConfigItem>
+        </PageConfig>
+
+        <section className="section">
+          <StatementsSortedTable
+            className="statements-table"
+            data={this.props.statements}
+            columns={makeStatementsColumns(this.props.statements, selectedApp)}
+            sortSetting={this.state.sortSetting}
+            onChangeSortSetting={this.changeSortSetting}
+          />
+        </section>
+      </React.Fragment>
+    );
+  }
+
+  render() {
+    return (
+      <React.Fragment>
+        <Helmet>
+          <title>
+            { this.props.params[appAttr] ? this.props.params[appAttr] + " App | Statements" : "Statements"}
+          </title>
+        </Helmet>
+
+        <section className="section">
+          <h1>Statements</h1>
+        </section>
+
+        <Loading
+          loading={_.isNil(this.props.statements)}
+          className="loading-image loading-image__spinner"
+          render={this.renderStatements}
+        />
+      </React.Fragment>
+    );
+  }
+}
+
+type StatementsState = Pick<AdminUIState, "cachedData", "statements">;
 
 // selectStatements returns the array of AggregateStatistics to show on the
 // StatementsPage, based on if the appAttr route parameter is set.
 export const selectStatements = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
-  (_state: AdminUIState, props: RouteComponentProps) => props,
-  selectDiagnosticsReportsPerStatement,
-  (
-    state: CachedDataReducerState<StatementsResponseMessage>,
-    props: RouteComponentProps<any>,
-    diagnosticsReportsPerStatement,
-  ): AggregateStatistics[] => {
+  (state: StatementsState) => state.cachedData.statements,
+  (_state: StatementsState, props: { params: { [key: string]: string } }) => props,
+  (state: CachedDataReducerState<StatementsResponseMessage>, props: RouteProps) => {
     if (!state.data) {
       return null;
     }
-    let statements = flattenStatementStats(state.data.statements);
-    const app = getMatchParamByName(props.match, appAttr);
-    const isInternal = (statement: ExecutionStatistics) =>
-      statement.app.startsWith(state.data.internal_app_name_prefix);
 
-    if (app && app !== "All") {
-      let criteria = decodeURIComponent(app);
-      let showInternal = false;
+    let statements = flattenStatementStats(state.data.statements);
+    if (props.params[appAttr]) {
+      let criteria = props.params[appAttr];
       if (criteria === "(unset)") {
         criteria = "";
-      } else if (criteria === "(internal)") {
-        showInternal = true;
       }
 
       statements = statements.filter(
-        (statement: ExecutionStatistics) =>
-          (showInternal && isInternal(statement)) || statement.app === criteria,
+        (statement: ExecutionStatistics) => statement.app === criteria,
       );
     }
 
-    const statsByStatementKey: {
-      [statement: string]: StatementsSummaryData;
-    } = {};
-    statements.forEach((stmt) => {
-      const key = statementKey(stmt);
-      if (!(key in statsByStatementKey)) {
-        statsByStatementKey[key] = {
-          statement: stmt.statement,
-          implicitTxn: stmt.implicit_txn,
-          fullScan: stmt.full_scan,
-          database: stmt.database,
-          stats: [],
-        };
-      }
-      statsByStatementKey[key].stats.push(stmt.stats);
+    const statementsMap: { [statement: string]: StatementStatistics[] } = {};
+    statements.forEach(stmt => {
+      const matches = statementsMap[stmt.statement] || (statementsMap[stmt.statement] = []);
+      matches.push(stmt.stats);
     });
 
-    return Object.keys(statsByStatementKey).map((key) => {
-      const stmt = statsByStatementKey[key];
+    return Object.keys(statementsMap).map(stmt => {
+      const stats = statementsMap[stmt];
       return {
-        label: stmt.statement,
-        implicitTxn: stmt.implicitTxn,
-        fullScan: stmt.fullScan,
-        database: stmt.database,
-        stats: combineStatementStats(stmt.stats),
-        diagnosticsReports: diagnosticsReportsPerStatement[stmt.statement],
+        label: stmt,
+        stats: combineStatementStats(stats),
       };
     });
   },
@@ -128,56 +208,31 @@ export const selectStatements = createSelector(
 // selectApps returns the array of all apps with statement statistics present
 // in the data.
 export const selectApps = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
+  (state: StatementsState) => state.cachedData.statements,
   (state: CachedDataReducerState<StatementsResponseMessage>) => {
     if (!state.data) {
       return [];
     }
 
     let sawBlank = false;
-    let sawInternal = false;
     const apps: { [app: string]: boolean } = {};
     state.data.statements.forEach(
       (statement: ICollectedStatementStatistics) => {
-        if (
-          state.data.internal_app_name_prefix &&
-          statement.key.key_data.app.startsWith(
-            state.data.internal_app_name_prefix,
-          )
-        ) {
-          sawInternal = true;
-        } else if (statement.key.key_data.app) {
+        if (statement.key.key_data.app) {
           apps[statement.key.key_data.app] = true;
         } else {
           sawBlank = true;
         }
       },
     );
-    return []
-      .concat(sawInternal ? ["(internal)"] : [])
-      .concat(sawBlank ? ["(unset)"] : [])
-      .concat(Object.keys(apps));
-  },
-);
-
-// selectDatabases returns the array of all databases with statement statistics present
-// in the data.
-export const selectDatabases = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
-  (state: CachedDataReducerState<StatementsResponseMessage>) => {
-    if (!state.data) {
-      return [];
-    }
-    return Array.from(
-      new Set(state.data.statements.map((s) => s.key.key_data.database)),
-    ).filter((dbName: string) => dbName !== null && dbName.length > 0);
+    return (sawBlank ? ["(unset)"] : []).concat(Object.keys(apps));
   },
 );
 
 // selectTotalFingerprints returns the count of distinct statement fingerprints
 // present in the data.
 export const selectTotalFingerprints = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
+  (state: StatementsState) => state.cachedData.statements,
   (state: CachedDataReducerState<StatementsResponseMessage>) => {
     if (!state.data) {
       return 0;
@@ -190,55 +245,27 @@ export const selectTotalFingerprints = createSelector(
 // selectLastReset returns a string displaying the last time the statement
 // statistics were reset.
 export const selectLastReset = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
+  (state: StatementsState) => state.cachedData.statements,
   (state: CachedDataReducerState<StatementsResponseMessage>) => {
     if (!state.data) {
       return "unknown";
     }
+
     return PrintTime(TimestampToMoment(state.data.last_reset));
   },
 );
 
-export const statementColumnsLocalSetting = new LocalSetting(
-  "create_statement_columns",
-  (state: AdminUIState) => state.localSettings,
-  null,
-);
+// tslint:disable-next-line:variable-name
+const StatementsPageConnected = connect(
+  (state: StatementsState, props: RouteProps) => ({
+    statements: selectStatements(state, props),
+    apps: selectApps(state),
+    totalFingerprints: selectTotalFingerprints(state),
+    lastReset: selectLastReset(state),
+  }),
+  {
+    refreshStatements,
+  },
+)(StatementsPage);
 
-export default withRouter(
-  connect(
-    (state: AdminUIState, props: RouteComponentProps) => ({
-      statements: selectStatements(state, props),
-      statementsError: state.cachedData.statements.lastError,
-      apps: selectApps(state),
-      databases: selectDatabases(state),
-      totalFingerprints: selectTotalFingerprints(state),
-      lastReset: selectLastReset(state),
-      columns: statementColumnsLocalSetting.selectorToArray(state),
-      nodeRegions: nodeRegionsByIDSelector(state),
-    }),
-    {
-      refreshStatements,
-      refreshStatementDiagnosticsRequests,
-      resetSQLStats: resetSQLStatsAction,
-      dismissAlertMessage: () =>
-        createStatementDiagnosticsAlertLocalSetting.set({ show: false }),
-      onActivateStatementDiagnostics: createStatementDiagnosticsReportAction,
-      onDiagnosticsModalOpen: createOpenDiagnosticsModalAction,
-      onSearchComplete: (results: AggregateStatistics[]) =>
-        trackStatementsSearchAction(results.length),
-      onPageChanged: trackStatementsPaginationAction,
-      onSortingChange: trackTableSortAction,
-      onDiagnosticsReportDownload: (report: IStatementDiagnosticsReport) =>
-        trackDownloadDiagnosticsBundleAction(report.statement_fingerprint),
-      // We use `null` when the value was never set and it will show all columns.
-      // If the user modifies the selection and no columns are selected,
-      // the function will save the value as a blank space, otherwise
-      // it gets saved as `null`.
-      onColumnsChange: (value: string[]) =>
-        statementColumnsLocalSetting.set(
-          value.length === 0 ? " " : value.join(","),
-        ),
-    },
-  )(StatementsPage),
-);
+export default StatementsPageConnected;

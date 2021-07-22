@@ -1,12 +1,17 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License. See the AUTHORS file
+// for names of contributors.
 
 package main
 
@@ -15,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 
 	"github.com/nlopes/slack"
 )
@@ -44,13 +48,32 @@ func findChannel(client *slack.Client, name string) (string, error) {
 	return "", fmt.Errorf("not found")
 }
 
-func sortTests(tests []*testImpl) {
+func sortTests(tests []*test) {
 	sort.Slice(tests, func(i, j int) bool {
 		return tests[i].Name() < tests[j].Name()
 	})
 }
 
-func postSlackReport(pass, fail, skip map[*testImpl]struct{}) {
+func postSlackReport(pass, fail map[*test]struct{}, skip int) {
+	var stablePass []*test
+	var stableFail []*test
+	var unstablePass []*test
+	var unstableFail []*test
+	for t := range pass {
+		if t.spec.Stable {
+			stablePass = append(stablePass, t)
+		} else {
+			unstablePass = append(unstablePass, t)
+		}
+	}
+	for t := range fail {
+		if t.spec.Stable {
+			stableFail = append(stableFail, t)
+		} else {
+			unstableFail = append(unstableFail, t)
+		}
+	}
+
 	client := makeSlackClient()
 	if client == nil {
 		return
@@ -69,22 +92,12 @@ func postSlackReport(pass, fail, skip map[*testImpl]struct{}) {
 	if b := os.Getenv("TC_BUILD_BRANCH"); b != "" {
 		branch = b
 	}
-
-	var prefix string
-	switch {
-	case cloud != "":
-		prefix = strings.ToUpper(cloud)
-	case local:
-		prefix = "LOCAL"
-	default:
-		prefix = "GCE"
-	}
-	message := fmt.Sprintf("[%s] %s: %d passed, %d failed, %d skipped",
-		prefix, branch, len(pass), len(fail), len(skip))
+	message := fmt.Sprintf("%s: %d passed, %d failed, %d skipped",
+		branch, len(stablePass), len(stableFail), skip)
 
 	{
 		status := "good"
-		if len(fail) > 0 {
+		if len(stableFail) > 0 {
 			status = "warning"
 		}
 		var link string
@@ -103,32 +116,29 @@ func postSlackReport(pass, fail, skip map[*testImpl]struct{}) {
 	}
 
 	data := []struct {
-		tests map[*testImpl]struct{}
+		tests []*test
 		title string
 		color string
 	}{
-		{pass, "Successes", "good"},
-		{fail, "Failures", "danger"},
-		{skip, "Skipped", "warning"},
+		{stableFail, "Failures", "danger"},
+		{unstablePass, "Successes [unstable]", "good"},
+		{unstableFail, "Failures [unstable]", "warning"},
 	}
 	for _, d := range data {
-		tests := make([]*testImpl, 0, len(d.tests))
-		for t := range d.tests {
-			tests = append(tests, t)
+		if len(d.tests) > 0 {
+			sortTests(d.tests)
+			var buf bytes.Buffer
+			for _, t := range d.tests {
+				fmt.Fprintf(&buf, "%s\n", t.Name())
+			}
+			params.Attachments = append(params.Attachments,
+				slack.Attachment{
+					Color:    d.color,
+					Title:    d.title,
+					Text:     buf.String(),
+					Fallback: message,
+				})
 		}
-		sortTests(tests)
-
-		var buf bytes.Buffer
-		for _, t := range tests {
-			fmt.Fprintf(&buf, "%s\n", t.Name())
-		}
-		params.Attachments = append(params.Attachments,
-			slack.Attachment{
-				Color:    d.color,
-				Title:    fmt.Sprintf("%s: %d", d.title, len(tests)),
-				Text:     buf.String(),
-				Fallback: message,
-			})
 	}
 
 	if _, _, err := client.PostMessage(channel, "", params); err != nil {

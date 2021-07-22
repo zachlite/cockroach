@@ -1,21 +1,25 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package constraint
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
 func TestConstraintSetIntersect(t *testing.T) {
@@ -223,99 +227,54 @@ func TestConstraintSetUnion(t *testing.T) {
 	test(res, "/1: [/10 - /10]")
 }
 
-func TestExtractCols(t *testing.T) {
+func TestExtractConstCols(t *testing.T) {
 	type testCase struct {
 		constraints []string
 		expected    opt.ColSet
 	}
 
-	cols := opt.MakeColSet
+	cols := util.MakeFastIntSet
 
 	cases := []testCase{
+		{[]string{`/1: [/10 - /10]`}, cols(1)},
+		{[]string{`/-1: [/10 - /10]`}, cols(1)},
+		{[]string{`/1: [/10 - /11]`}, cols()},
+		{[]string{`/1: [/10 - ]`}, cols()},
+		{[]string{`/1/2: [/10/2 - /10/4]`}, cols(1)},
+		{[]string{`/1/-2: [/10/4 - /10/2]`}, cols(1)},
+		{[]string{`/1/2: [/10/2 - /10/2]`}, cols(1, 2)},
+		{[]string{`/1/2: [/10/2 - /12/2]`}, cols()},
+		{[]string{`/1/2: [/9/2 - /9/2] [/10/2 - /12/2]`}, cols()},
+		{[]string{`/1: [/10 - /10] [/12 - /12]`}, cols()},
 		{
 			[]string{
 				`/1: [/10 - /10]`,
 				`/2: [/8 - /8]`,
 				`/-3: [/13 - /7]`,
-			},
-			cols(1, 2, 3),
-		},
-		{
-			[]string{
-				`/1/2: [/10/4 - /10/5] [/12/4 - /12/5]`,
-				`/2: [/4 - /4]`,
 			},
 			cols(1, 2),
 		},
 		{
 			[]string{
-				`/1/2/3: [/10/4 - /10/5] [/12/4 - /12/5]`,
-				`/4: [/4 - /4]`,
-			},
-			cols(1, 2, 3, 4),
-		},
-	}
-
-	evalCtx := tree.NewTestingEvalContext(nil)
-	for _, tc := range cases {
-		cs := Unconstrained
-		for _, constraint := range tc.constraints {
-			constraint := ParseConstraint(evalCtx, constraint)
-			cs = cs.Intersect(evalCtx, SingleConstraint(&constraint))
-		}
-		cols := cs.ExtractCols()
-		if !tc.expected.Equals(cols) {
-			t.Errorf("expected constant columns from %s to be %s, was %s", cs, tc.expected, cols)
-		}
-	}
-}
-
-func TestExtractConstColsForSet(t *testing.T) {
-	type vals map[opt.ColumnID]string
-	type testCase struct {
-		constraints []string
-		expected    vals
-	}
-
-	cases := []testCase{
-		{[]string{`/1: [/10 - /10]`}, vals{1: "10"}},
-		{[]string{`/-1: [/10 - /10]`}, vals{1: "10"}},
-		{[]string{`/1: [/10 - /11]`}, vals{}},
-		{[]string{`/1: [/10 - ]`}, vals{}},
-		{[]string{`/1/2: [/10/2 - /10/4]`}, vals{1: "10"}},
-		{[]string{`/1/-2: [/10/4 - /10/2]`}, vals{1: "10"}},
-		{[]string{`/1/2: [/10/2 - /10/2]`}, vals{1: "10", 2: "2"}},
-		{[]string{`/1/2: [/10/2 - /12/2]`}, vals{}},
-		{[]string{`/1/2: [/9/2 - /9/2] [/10/2 - /12/2]`}, vals{}},
-		{[]string{`/1: [/10 - /10] [/12 - /12]`}, vals{}},
-		{
-			[]string{
-				`/1: [/10 - /10]`,
-				`/2: [/8 - /8]`,
-				`/-3: [/13 - /7]`,
-			},
-			vals{1: "10", 2: "8"},
-		},
-		{
-			[]string{
 				`/1/2: [/10/4 - /10/5] [/12/4 - /12/5]`,
 				`/2: [/4 - /4]`,
 			},
-			vals{2: "4"},
+			cols(2),
 		},
-		{[]string{`/1: [/10 - /11)`}, vals{}},
+		{[]string{`/1: [/10 - /11)`}, cols()},
+		// TODO(justin): column 1 here is constant but we don't infer it as such.
 		{
 			[]string{
 				`/2/1: [/900/4 - /900/4] [/1000/4 - /1000/4] [/1100/4 - /1100/4] [/1400/4 - /1400/4] [/1500/4 - /1500/4]`,
 			},
-			vals{1: "4"},
+			cols(),
 		},
 		{
 			[]string{
 				`/1: [/2 - /3]`,
 				`/2/1: [/10/3 - /11/1]`,
 			},
-			vals{},
+			cols(),
 		},
 	}
 
@@ -327,80 +286,8 @@ func TestExtractConstColsForSet(t *testing.T) {
 			cs = cs.Intersect(evalCtx, SingleConstraint(&constraint))
 		}
 		cols := cs.ExtractConstCols(evalCtx)
-		var expCols opt.ColSet
-		for col := range tc.expected {
-			expCols.Add(col)
-		}
-		if !expCols.Equals(cols) {
-			t.Errorf("%s: expected constant columns be %s, was %s", cs, expCols, cols)
-		}
-		// Ensure that no value is returned for the columns that are not constant.
-		cs.ExtractCols().ForEach(func(col opt.ColumnID) {
-			if !cols.Contains(col) {
-				val := cs.ExtractValueForConstCol(evalCtx, col)
-				if val != nil {
-					t.Errorf("%s: const value should not have been found for column %d", cs, col)
-				}
-			}
-		})
-		// Ensure that the expected value is returned for the columns that are constant.
-		cols.ForEach(func(col opt.ColumnID) {
-			val := cs.ExtractValueForConstCol(evalCtx, col)
-			if val == nil {
-				t.Errorf("%s: no const value for column %d", cs, col)
-				return
-			}
-			if actual, expected := val.String(), tc.expected[col]; actual != expected {
-				t.Errorf("%s: expected value %s for column %d, got %s", cs, expected, col, actual)
-			}
-		})
-	}
-}
-
-func TestHasSingleColumnConstValues(t *testing.T) {
-	type testCase struct {
-		constraints []string
-		col         opt.ColumnID
-		vals        []int
-	}
-	cases := []testCase{
-		{[]string{`/1: [/10 - /10]`}, 1, []int{10}},
-		{[]string{`/-1: [/10 - /10]`}, 1, []int{10}},
-		{[]string{`/1: [/10 - /11]`}, 0, nil},
-		{[]string{`/1: [/10 - /10] [/11 - /11]`}, 1, []int{10, 11}},
-		{[]string{`/1: [/10 - /10] [/11 - /11] [/12 - /12]`}, 1, []int{10, 11, 12}},
-		{[]string{`/1: [/10 - /10] [/11 - /11] [/12 - /13]`}, 0, nil},
-		{[]string{`/1/2: [/10/2 - /10/4]`}, 0, nil},
-		{[]string{`/1/2: [/10/2 - /10/2]`}, 0, nil},
-		{
-			[]string{
-				`/1: [/10 - /10]`,
-				`/2: [/8 - /8]`,
-			},
-			0, nil,
-		},
-		{
-			[]string{
-				`/1: [/10 - /10]`,
-				`/1/2: [/10/8 - /10/8]`,
-			},
-			0, nil,
-		},
-	}
-	evalCtx := tree.NewTestingEvalContext(nil)
-	for _, tc := range cases {
-		cs := Unconstrained
-		for _, constraint := range tc.constraints {
-			constraint := ParseConstraint(evalCtx, constraint)
-			cs = cs.Intersect(evalCtx, SingleConstraint(&constraint))
-		}
-		col, vals, _ := cs.HasSingleColumnConstValues(evalCtx)
-		var intVals []int
-		for _, val := range vals {
-			intVals = append(intVals, int(*val.(*tree.DInt)))
-		}
-		if tc.col != col || !reflect.DeepEqual(tc.vals, intVals) {
-			t.Errorf("%s: expected %d,%d got %d,%d", cs, tc.col, tc.vals, col, intVals)
+		if !tc.expected.Equals(cols) {
+			t.Errorf("expected constant columns from %s to be %s, was %s", cs, tc.expected, cols)
 		}
 	}
 }

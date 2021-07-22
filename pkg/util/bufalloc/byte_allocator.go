@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package bufalloc
 
@@ -17,15 +21,13 @@ package bufalloc
 // indicates the total amount of memory and len() is the amount already
 // allocated. The size of the buffer to allocate from is grown exponentially
 // when it runs out of room up to a maximum size (chunkAllocMaxSize).
-type ByteAllocator struct {
-	b []byte
-}
+type ByteAllocator []byte
 
 const chunkAllocMinSize = 512
 const chunkAllocMaxSize = 16384
 
 func (a ByteAllocator) reserve(n int) ByteAllocator {
-	allocSize := cap(a.b) * 2
+	allocSize := cap(a) * 2
 	if allocSize < chunkAllocMinSize {
 		allocSize = chunkAllocMinSize
 	} else if allocSize > chunkAllocMaxSize {
@@ -34,20 +36,19 @@ func (a ByteAllocator) reserve(n int) ByteAllocator {
 	if allocSize < n {
 		allocSize = n
 	}
-	a.b = make([]byte, 0, allocSize)
-	return a
+	return make([]byte, 0, allocSize)
 }
 
 // Alloc allocates a new chunk of memory with the specified length. extraCap
 // indicates additional zero bytes that will be present in the returned []byte,
 // but not part of the length.
 func (a ByteAllocator) Alloc(n int, extraCap int) (ByteAllocator, []byte) {
-	if cap(a.b)-len(a.b) < n+extraCap {
+	if cap(a)-len(a) < n+extraCap {
 		a = a.reserve(n + extraCap)
 	}
-	p := len(a.b)
-	r := a.b[p : p+n : p+n+extraCap]
-	a.b = a.b[:p+n+extraCap]
+	p := len(a)
+	r := a[p : p+n : p+n+extraCap]
+	a = a[:p+n+extraCap]
 	return a, r
 }
 
@@ -59,11 +60,4 @@ func (a ByteAllocator) Copy(src []byte, extraCap int) (ByteAllocator, []byte) {
 	a, alloc = a.Alloc(len(src), extraCap)
 	copy(alloc, src)
 	return a, alloc
-}
-
-// Truncate resets the length of the underlying buffer to zero, allowing the
-// reserved capacity in the buffer to be written over and reused.
-func (a ByteAllocator) Truncate() ByteAllocator {
-	a.b = a.b[:0]
-	return a
 }

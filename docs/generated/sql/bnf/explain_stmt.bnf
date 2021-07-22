@@ -1,3 +1,5 @@
 explain_stmt ::=
-	'EXPLAIN' explainable_stmt
-	| 'EXPLAIN' '(' ( 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' | 'VEC' ) ( ( ',' ( 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' | 'VEC' ) ) )* ')' explainable_stmt
+	'EXPLAIN' preparable_stmt
+	| 'EXPLAIN' '(' ( | 'EXPRS' | 'METADATA' | 'QUALIFY' | 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' ) ( ( ',' ( | 'EXPRS' | 'METADATA' | 'QUALIFY' | 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' ) ) )* ')' preparable_stmt
+	| 'EXPLAIN' 'ANALYZE' preparable_stmt
+	| 'EXPLAIN' 'ANALYZE' '(' ( | 'EXPRS' | 'METADATA' | 'QUALIFY' | 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' ) ( ( ',' ( | 'EXPRS' | 'METADATA' | 'QUALIFY' | 'VERBOSE' | 'TYPES' | 'OPT' | 'DISTSQL' ) ) )* ')' preparable_stmt

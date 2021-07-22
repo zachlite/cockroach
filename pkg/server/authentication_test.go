@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package server
 
@@ -24,32 +28,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gogo/protobuf/jsonpb"
+	"github.com/lib/pq"
+	"github.com/pkg/errors"
+	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/debug"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
+	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/jsonpb"
-	"github.com/lib/pq"
-	"golang.org/x/crypto/bcrypt"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 )
 
 type ctxI interface {
@@ -58,7 +59,7 @@ type ctxI interface {
 }
 
 var _ ctxI = insecureCtx{}
-var _ ctxI = (*rpc.Context)(nil)
+var _ ctxI = (*base.Config)(nil)
 
 type insecureCtx struct{}
 
@@ -76,10 +77,9 @@ func (insecureCtx) HTTPRequestScheme() string {
 	return "https"
 }
 
-// Verify client certificate enforcement and user allowlisting.
+// Verify client certificate enforcement and user whitelisting.
 func TestSSLEnforcement(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
 		// This test is verifying the (unimplemented) authentication of SSL
 		// client certificates over HTTP endpoints. Web session authentication
@@ -87,30 +87,19 @@ func TestSSLEnforcement(t *testing.T) {
 		// clients being instantiated.
 		DisableWebSessionAuthentication: true,
 	})
-	defer s.Stopper().Stop(context.Background())
-
-	newRPCContext := func(cfg *base.Config) *rpc.Context {
-		return rpc.NewContext(rpc.ContextOptions{
-			TenantID: roachpb.SystemTenantID,
-			Config:   cfg,
-			Clock:    hlc.NewClock(hlc.UnixNano, 1),
-			Stopper:  s.Stopper(),
-			Settings: s.ClusterSettings(),
-		})
-	}
+	defer s.Stopper().Stop(context.TODO())
 
 	// HTTPS with client certs for security.RootUser.
-	rootCertsContext := newRPCContext(testutils.NewTestBaseContext(security.RootUserName()))
+	rootCertsContext := testutils.NewTestBaseContext(security.RootUser)
 	// HTTPS with client certs for security.NodeUser.
-	nodeCertsContext := newRPCContext(testutils.NewNodeTestBaseContext())
+	nodeCertsContext := testutils.NewNodeTestBaseContext()
 	// HTTPS with client certs for TestUser.
-	testCertsContext := newRPCContext(testutils.NewTestBaseContext(security.TestUserName()))
+	testCertsContext := testutils.NewTestBaseContext(TestUser)
 	// HTTPS without client certs. The user does not matter.
 	noCertsContext := insecureCtx{}
 	// Plain http.
-	plainHTTPCfg := testutils.NewTestBaseContext(security.TestUserName())
-	plainHTTPCfg.Insecure = true
-	insecureContext := newRPCContext(plainHTTPCfg)
+	insecureContext := testutils.NewTestBaseContext(TestUser)
+	insecureContext.Insecure = true
 
 	kvGet := &roachpb.GetRequest{}
 	kvGet.Key = roachpb.Key("/")
@@ -189,12 +178,8 @@ func TestSSLEnforcement(t *testing.T) {
 
 func TestVerifyPassword(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-
+	defer s.Stopper().Stop(context.TODO())
 	ts := s.(*TestServer)
 
 	if util.RaceEnabled {
@@ -204,39 +189,15 @@ func TestVerifyPassword(t *testing.T) {
 		security.BcryptCost = bcrypt.MinCost
 	}
 
-	//location is used for timezone testing.
-	shanghaiLoc, err := timeutil.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, user := range []struct {
-		username         string
-		password         string
-		loginFlag        string
-		validUntilClause string
-		qargs            []interface{}
+		username string
+		password string
 	}{
-		{"azure_diamond", "hunter2", "", "", nil},
-		{"druidia", "12345", "", "", nil},
-
-		{"richardc", "12345", "NOLOGIN", "", nil},
-		{"before_epoch", "12345", "", "VALID UNTIL '1969-01-01'", nil},
-		{"epoch", "12345", "", "VALID UNTIL '1970-01-01'", nil},
-		{"cockroach", "12345", "", "VALID UNTIL '2100-01-01'", nil},
-		{"cthon98", "12345", "", "VALID UNTIL NULL", nil},
-
-		{"toolate", "12345", "", "VALID UNTIL $1",
-			[]interface{}{timeutil.Now().Add(-10 * time.Minute)}},
-		{"timelord", "12345", "", "VALID UNTIL $1",
-			[]interface{}{timeutil.Now().Add(59 * time.Minute).In(shanghaiLoc)}},
+		{"azure_diamond", "hunter2"},
+		{"druidia", "12345"},
 	} {
-		username := security.MakeSQLUsernameFromPreNormalizedString(user.username)
-		cmd := fmt.Sprintf(
-			"CREATE USER %s WITH PASSWORD '%s' %s %s",
-			username.SQLIdentifier(), user.password, user.loginFlag, user.validUntilClause)
-
-		if _, err := db.Exec(cmd, user.qargs...); err != nil {
+		cmd := fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s'", user.username, user.password)
+		if _, err := db.Exec(cmd); err != nil {
 			t.Fatalf("failed to create user: %s", err)
 		}
 	}
@@ -260,19 +221,9 @@ func TestVerifyPassword(t *testing.T) {
 		{"root", "", false, "crypto/bcrypt"},
 		{"", "", false, "does not exist"},
 		{"doesntexist", "zxcvbn", false, "does not exist"},
-
-		{"richardc", "12345", false,
-			"richardc does not have login privilege"},
-		{"before_epoch", "12345", false, ""},
-		{"epoch", "12345", false, ""},
-		{"cockroach", "12345", true, ""},
-		{"toolate", "12345", false, ""},
-		{"timelord", "12345", true, ""},
-		{"cthon98", "12345", true, ""},
 	} {
 		t.Run("", func(t *testing.T) {
-			username := security.MakeSQLUsernameFromPreNormalizedString(tc.username)
-			valid, expired, err := ts.authentication.verifyPassword(context.Background(), username, tc.password)
+			valid, err := ts.authentication.verifyPassword(context.TODO(), tc.username, tc.password)
 			if err != nil {
 				t.Errorf(
 					"credentials %s/%s failed with error %s, wanted no error",
@@ -281,7 +232,7 @@ func TestVerifyPassword(t *testing.T) {
 					err,
 				)
 			}
-			if valid && !expired != tc.shouldAuthenticate {
+			if valid != tc.shouldAuthenticate {
 				t.Errorf(
 					"credentials %s/%s valid = %t, wanted %t",
 					tc.username,
@@ -296,17 +247,16 @@ func TestVerifyPassword(t *testing.T) {
 
 func TestCreateSession(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 	ts := s.(*TestServer)
 
-	username := security.TestUserName()
+	username := "testUser"
 
 	// Create an authentication, noting the time before and after creation. This
 	// lets us ensure that the timestamps created are accurate.
 	timeBoundBefore := ts.clock.PhysicalTime()
-	id, origSecret, err := ts.authentication.newAuthSession(context.Background(), username)
+	id, origSecret, err := ts.authentication.newAuthSession(context.TODO(), username)
 	if err != nil {
 		t.Fatalf("error creating auth session: %s", err)
 	}
@@ -349,7 +299,7 @@ WHERE id = $1`
 	}
 
 	// Username.
-	if a, e := sessUsername, username.Normalized(); a != e {
+	if a, e := sessUsername, username; a != e {
 		t.Fatalf("session username got %s, wanted %s", a, e)
 	}
 
@@ -388,13 +338,12 @@ WHERE id = $1`
 
 func TestVerifySession(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 	ts := s.(*TestServer)
 
-	sessionUsername := security.TestUserName()
-	id, origSecret, err := ts.authentication.newAuthSession(context.Background(), sessionUsername)
+	sessionUsername := "testUser"
+	id, origSecret, err := ts.authentication.newAuthSession(context.TODO(), sessionUsername)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,14 +398,14 @@ func TestVerifySession(t *testing.T) {
 		},
 	} {
 		t.Run(tc.testname, func(t *testing.T) {
-			valid, username, err := ts.authentication.verifySession(context.Background(), &tc.cookie)
+			valid, username, err := ts.authentication.verifySession(context.TODO(), &tc.cookie)
 			if err != nil {
 				t.Fatalf("test got error %s, wanted no error", err)
 			}
 			if a, e := valid, tc.shouldVerify; a != e {
 				t.Fatalf("cookie %v verification = %t, wanted %t", tc.cookie, a, e)
 			}
-			if a, e := username, sessionUsername.Normalized(); tc.shouldVerify && a != e {
+			if a, e := username, sessionUsername; tc.shouldVerify && a != e {
 				t.Fatalf("cookie %v verification returned username %s, wanted %s", tc.cookie, a, e)
 			}
 		})
@@ -465,10 +414,12 @@ func TestVerifySession(t *testing.T) {
 
 func TestAuthenticationAPIUserLogin(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 	ts := s.(*TestServer)
+	if err := ts.WaitForInitialSplits(); err != nil {
+		t.Fatal(err)
+	}
 
 	const (
 		validUsername = "testuser"
@@ -556,13 +507,12 @@ func TestAuthenticationAPIUserLogin(t *testing.T) {
 
 func TestLogout(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 	ts := s.(*TestServer)
 
 	// Log in.
-	authHTTPClient, cookie, err := ts.getAuthenticatedHTTPClientAndCookie(authenticatedUserName(), true)
+	authHTTPClient, cookie, err := ts.getAuthenticatedHTTPClientAndCookie(authenticatedUserName, true)
 	if err != nil {
 		t.Fatal("error opening HTTP client", err)
 	}
@@ -603,7 +553,7 @@ func TestLogout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encodedCookie, err := EncodeSessionCookie(cookie, false /* forHTTPSOnly */)
+	encodedCookie, err := EncodeSessionCookie(cookie)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,9 +588,8 @@ func TestLogout(t *testing.T) {
 // testing an endpoint of each with a verified and unverified client.
 func TestAuthenticationMux(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 	tsrv := s.(*TestServer)
 
 	// Both the normal and authenticated client will be used for each test.
@@ -712,7 +661,6 @@ func TestAuthenticationMux(t *testing.T) {
 
 func TestGRPCAuthentication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
@@ -740,15 +688,15 @@ func TestGRPCAuthentication(t *testing.T) {
 			return err
 		}},
 		{"perReplica", func(ctx context.Context, conn *grpc.ClientConn) error {
-			_, err := kvserver.NewPerReplicaClient(conn).CollectChecksum(ctx, &kvserver.CollectChecksumRequest{})
+			_, err := storage.NewPerReplicaClient(conn).CollectChecksum(ctx, &storage.CollectChecksumRequest{})
 			return err
 		}},
 		{"raft", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := kvserver.NewMultiRaftClient(conn).RaftMessageBatch(ctx)
+			stream, err := storage.NewMultiRaftClient(conn).RaftMessageBatch(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&kvserver.RaftMessageRequestBatch{})
+			_ = stream.Send(&storage.RaftMessageRequestBatch{})
 			_, err = stream.Recv()
 			return err
 		}},
@@ -762,11 +710,11 @@ func TestGRPCAuthentication(t *testing.T) {
 			return err
 		}},
 		{"distSQL", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := execinfrapb.NewDistSQLClient(conn).FlowStream(ctx)
+			stream, err := distsqlrun.NewDistSQLClient(conn).RunSyncFlow(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&execinfrapb.ProducerMessage{})
+			_ = stream.Send(&distsqlrun.ConsumerSignal{})
 			_, err = stream.Recv()
 			return err
 		}},
@@ -784,20 +732,18 @@ func TestGRPCAuthentication(t *testing.T) {
 		}},
 	}
 
-	conn, err := grpc.DialContext(ctx, s.ServingRPCAddr(),
+	conn, err := grpc.DialContext(ctx, s.Addr(),
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
 			InsecureSkipVerify: true,
 		})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close() // nolint:grpcconnclose
-	}(conn)
+	defer func(conn *grpc.ClientConn) { _ = conn.Close() }(conn)
 	for _, subsystem := range subsystems {
 		t.Run(fmt.Sprintf("no-cert/%s", subsystem.name), func(t *testing.T) {
 			err := subsystem.sendRPC(ctx, conn)
-			if exp := "TLSInfo is not available in request context"; !testutils.IsError(err, exp) {
+			if exp := "no client certificates in request"; !testutils.IsError(err, exp) {
 				t.Errorf("expected %q error, but got %v", exp, err)
 			}
 		})
@@ -807,22 +753,20 @@ func TestGRPCAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsConfig, err := certManager.GetClientTLSConfig(security.TestUserName())
+	tlsConfig, err := certManager.GetClientTLSConfig("testuser")
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err = grpc.DialContext(ctx, s.ServingRPCAddr(),
+	conn, err = grpc.DialContext(ctx, s.Addr(),
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close() // nolint:grpcconnclose
-	}(conn)
+	defer func(conn *grpc.ClientConn) { _ = conn.Close() }(conn)
 	for _, subsystem := range subsystems {
 		t.Run(fmt.Sprintf("bad-user/%s", subsystem.name), func(t *testing.T) {
 			err := subsystem.sendRPC(ctx, conn)
-			if exp := `user \[testuser\] is not allowed to perform this RPC`; !testutils.IsError(err, exp) {
+			if exp := "user testuser is not allowed to perform this RPC"; !testutils.IsError(err, exp) {
 				t.Errorf("expected %q error, but got %v", exp, err)
 			}
 		})

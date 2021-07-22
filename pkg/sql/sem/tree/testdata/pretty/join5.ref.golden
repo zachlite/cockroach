@@ -6,11 +6,14 @@ SELECT
 	*
 FROM
 	a
-	CROSS JOIN b,
+	CROSS JOIN
+		b,
 	a
-	CROSS JOIN (
+	CROSS JOIN
+		(
 			c
-			CROSS JOIN d
+			CROSS JOIN
+				d
 		),
 	d,
 	(
@@ -30,11 +33,37 @@ SELECT
 	*
 FROM
 	a
+	CROSS JOIN
+		b,
+	a
+	CROSS JOIN
+		(
+			c
+			CROSS JOIN
+				d
+		),
+	d,
+	(TABLE x),
+	(
+		TABLE
+			e
+		ORDER BY
+			f
+	)
+
+17:
+-----------------
+SELECT
+	*
+FROM
+	a
 	CROSS JOIN b,
 	a
-	CROSS JOIN (
+	CROSS JOIN
+		(
 			c
-			CROSS JOIN d
+			CROSS JOIN
+				d
 		),
 	d,
 	(TABLE x),
@@ -53,10 +82,25 @@ FROM
 	a
 	CROSS JOIN b,
 	a
-	CROSS JOIN (
+	CROSS JOIN
+		(
 			c
 			CROSS JOIN d
 		),
+	d,
+	(TABLE x),
+	(TABLE e ORDER BY f)
+
+25:
+-------------------------
+SELECT
+	*
+FROM
+	a
+	CROSS JOIN b,
+	a
+	CROSS JOIN
+		(c CROSS JOIN d),
 	d,
 	(TABLE x),
 	(TABLE e ORDER BY f)

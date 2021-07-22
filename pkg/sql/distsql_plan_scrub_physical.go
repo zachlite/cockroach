@@ -1,19 +1,25 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // createScrubPhysicalCheck generates a plan for running a physical
@@ -22,35 +28,51 @@ import (
 // TableReaders will only emit errors encountered during scanning
 // instead of row data. The plan is finalized.
 func (dsp *DistSQLPlanner) createScrubPhysicalCheck(
-	planCtx *PlanningCtx, n *scanNode,
-) (*PhysicalPlan, error) {
-	spec, _, err := initTableReaderSpec(n)
+	planCtx *PlanningCtx,
+	n *scanNode,
+	desc sqlbase.TableDescriptor,
+	indexDesc sqlbase.IndexDescriptor,
+	spans []roachpb.Span,
+	readAsOf hlc.Timestamp,
+) (PhysicalPlan, error) {
+	spec, _, err := initTableReaderSpec(n, planCtx.EvalContext(), nil /* indexVarMap */)
 	if err != nil {
-		return nil, err
+		return PhysicalPlan{}, err
 	}
 
 	spanPartitions, err := dsp.PartitionSpans(planCtx, n.spans)
 	if err != nil {
-		return nil, err
+		return PhysicalPlan{}, err
 	}
 
-	corePlacement := make([]physicalplan.ProcessorCorePlacement, len(spanPartitions))
+	var p PhysicalPlan
+	stageID := p.NewStageID()
+	p.ResultRouters = make([]distsqlplan.ProcessorIdx, len(spanPartitions))
 	for i, sp := range spanPartitions {
-		tr := &execinfrapb.TableReaderSpec{}
-		*tr = *spec
-		tr.Spans = make([]execinfrapb.TableReaderSpan, len(sp.Spans))
+		tr := &distsqlrun.TableReaderSpec{}
+		*tr = spec
+		tr.Spans = make([]distsqlrun.TableReaderSpan, len(sp.Spans))
 		for j := range sp.Spans {
 			tr.Spans[j].Span = sp.Spans[j]
 		}
 
-		corePlacement[i].NodeID = sp.Node
-		corePlacement[i].Core.TableReader = tr
+		proc := distsqlplan.Processor{
+			Node: sp.Node,
+			Spec: distsqlrun.ProcessorSpec{
+				Core:    distsqlrun.ProcessorCoreUnion{TableReader: tr},
+				Output:  []distsqlrun.OutputRouterSpec{{Type: distsqlrun.OutputRouterSpec_PASS_THROUGH}},
+				StageID: stageID,
+			},
+		}
+
+		pIdx := p.AddProcessor(proc)
+		p.ResultRouters[i] = pIdx
 	}
 
-	p := planCtx.NewPhysicalPlan()
-	p.AddNoInputStage(corePlacement, execinfrapb.PostProcessSpec{}, rowexec.ScrubTypes, execinfrapb.Ordering{})
-	p.PlanToStreamColMap = identityMapInPlace(make([]int, len(rowexec.ScrubTypes)))
+	// Set the plan's result types to be ScrubTypes.
+	p.ResultTypes = distsqlrun.ScrubTypes
+	p.PlanToStreamColMap = identityMapInPlace(make([]int, len(distsqlrun.ScrubTypes)))
 
-	dsp.FinalizePlan(planCtx, p)
+	dsp.FinalizePlan(planCtx, &p)
 	return p, nil
 }

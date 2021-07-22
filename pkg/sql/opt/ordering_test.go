@@ -1,21 +1,25 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package opt_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
 func TestOrdering(t *testing.T) {
@@ -26,7 +30,23 @@ func TestOrdering(t *testing.T) {
 		t.Error("ordering not empty")
 	}
 
-	if !ordering.ColSet().Equals(opt.MakeColSet(1, 5)) {
+	if !ordering.Provides(ordering) {
+		t.Error("ordering should provide itself")
+	}
+
+	if !ordering.Provides(opt.Ordering{1}) {
+		t.Error("ordering should provide the prefix ordering")
+	}
+
+	if (opt.Ordering{}).Provides(ordering) {
+		t.Error("empty ordering should not provide ordering")
+	}
+
+	if !ordering.Provides(opt.Ordering{}) {
+		t.Error("ordering should provide the empty ordering")
+	}
+
+	if !ordering.ColSet().Equals(util.MakeFastIntSet(1, 5)) {
 		t.Error("ordering colset should equal the ordering columns")
 	}
 
@@ -45,44 +65,71 @@ func TestOrdering(t *testing.T) {
 	if (opt.Ordering{}).Equals(ordering) {
 		t.Error("empty ordering should not equal ordering")
 	}
+
+	common := ordering.CommonPrefix(opt.Ordering{1})
+	if exp := (opt.Ordering{1}); !reflect.DeepEqual(common, exp) {
+		t.Errorf("expected common prefix %s, got %s", exp, common)
+	}
+	common = ordering.CommonPrefix(opt.Ordering{1, 2, 3})
+	if exp := (opt.Ordering{1}); !reflect.DeepEqual(common, exp) {
+		t.Errorf("expected common prefix %s, got %s", exp, common)
+	}
+	common = ordering.CommonPrefix(opt.Ordering{1, 5, 6})
+	if exp := (opt.Ordering{1, 5}); !reflect.DeepEqual(common, exp) {
+		t.Errorf("expected common prefix %s, got %s", exp, common)
+	}
 }
 
-func TestOrderingColumn_RemapColumn(t *testing.T) {
-	var md opt.Metadata
-	catalog := testcat.New()
-	_, err := catalog.ExecuteDDL("CREATE TABLE tab (a INT PRIMARY KEY, b INT, c INT, d INT);")
-	if err != nil {
-		t.Fatal(err)
+func TestOrderingSet(t *testing.T) {
+	expect := func(s opt.OrderingSet, exp string) {
+		t.Helper()
+		if actual := s.String(); actual != exp {
+			t.Errorf("expected %s; got %s", exp, actual)
+		}
 	}
-	tn := tree.NewUnqualifiedTableName("tab")
-	tab := catalog.Table(tn)
+	var s opt.OrderingSet
+	expect(s, "")
+	s.Add(opt.Ordering{1, 2})
+	expect(s, "(+1,+2)")
+	s.Add(opt.Ordering{1, -2, 3})
+	expect(s, "(+1,+2) (+1,-2,+3)")
+	// Add an ordering that already exists.
+	s.Add(opt.Ordering{1, -2, 3})
+	expect(s, "(+1,+2) (+1,-2,+3)")
+	// Add an ordering that is a prefix of an existing ordering.
+	s.Add(opt.Ordering{1, -2})
+	expect(s, "(+1,+2) (+1,-2,+3)")
+	// Add an ordering that has an existing ordering as a prefix.
+	s.Add(opt.Ordering{1, 2, 5})
+	expect(s, "(+1,+2,+5) (+1,-2,+3)")
 
-	from := md.AddTable(tab, &tree.TableName{})
-	to := md.AddTable(tab, &tree.TableName{})
+	s2 := s.Copy()
+	s2.RestrictToPrefix(opt.Ordering{1})
+	expect(s2, "(+1,+2,+5) (+1,-2,+3)")
+	s2 = s.Copy()
+	s2.RestrictToPrefix(opt.Ordering{1, 2})
+	expect(s2, "(+1,+2,+5)")
+	s2 = s.Copy()
+	s2.RestrictToPrefix(opt.Ordering{2})
+	expect(s2, "")
 
-	col1 := opt.MakeOrderingColumn(from.ColumnID(0), false)
-	col2 := opt.MakeOrderingColumn(from.ColumnID(3), true)
+	s2 = s.Copy()
+	s2.RestrictToCols(util.MakeFastIntSet(1, 2, 3, 5))
+	expect(s2, "(+1,+2,+5) (+1,-2,+3)")
 
-	remappedCol1 := col1.RemapColumn(from, to)
-	remappedCol2 := col2.RemapColumn(from, to)
+	s2 = s.Copy()
+	s2.RestrictToCols(util.MakeFastIntSet(1, 2, 3))
+	expect(s2, "(+1,+2) (+1,-2,+3)")
 
-	expected := "+1"
-	if col1.String() != expected {
-		t.Errorf("\ncol1 was changed: %s\n", col1.String())
-	}
+	s2 = s.Copy()
+	s2.RestrictToCols(util.MakeFastIntSet(1, 2))
+	expect(s2, "(+1,+2) (+1,-2)")
 
-	expected = "-4"
-	if col2.String() != expected {
-		t.Errorf("\ncol2 was changed: %s\n", col2.String())
-	}
+	s2 = s.Copy()
+	s2.RestrictToCols(util.MakeFastIntSet(1, 3))
+	expect(s2, "(+1)")
 
-	expected = "+7"
-	if remappedCol1.String() != expected {
-		t.Errorf("\nexpected: %s\nactual: %s\n", expected, remappedCol1.String())
-	}
-
-	expected = "-10"
-	if remappedCol2.String() != expected {
-		t.Errorf("\nexpected: %s\nactual: %s\n", expected, remappedCol2.String())
-	}
+	s2 = s.Copy()
+	s2.RestrictToCols(util.MakeFastIntSet(2, 3))
+	expect(s2, "")
 }

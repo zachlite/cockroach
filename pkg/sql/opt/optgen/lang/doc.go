@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 /*
 Package lang implements a language called Optgen, short for "optimizer
@@ -102,13 +106,7 @@ rule has a unique name and consists of a match pattern and a corresponding
 replace pattern. A rule's match pattern is tested against every node in the
 target expression tree, bottom-up. Each matching node is replaced by a node
 constructed according to the replace pattern. The replacement node is itself
-tested against every rule, and so on, until no further rules match. The order
-that rules are applied depends on the order of the rules in each file, the
-lexicographical ordering of files, and whether or not a rule is marked as high
-or low priority as it is depicted below:
-
-[InlineConstVar, Normalize, HighPriority]
-
+tested against every rule, and so on, until no further rules match.
 
 Note that this is just a conceptual description. Optgen does not actually do
 any of this matching or replacing itself. Other components use the Optgen
@@ -167,39 +165,6 @@ The $input variable is bound to the first child of the "Select" node. If the
 second child is a "True" node, then the "Select" node will be replaced by its
 input. Variables can also be passed as arguments to custom matchers, which are
 described below.
-
-Let Expression
-
-A let expression can be used for binding multiple variables to the result of a
-custom function with multiple return values. This expression consists of two
-elements, a binding and a result. The binding includes a list of variables to
-bind followed by a custom function to produce the bind values. The result is a
-variable reference which is the value of the expression when evaluated.
-
-For example:
-
-  [SplitSelect]
-  (Select
-    $input:*
-    $filters:* &
-      (Let ($filterA $filterB $ok):(SplitFilters $filters) $ok)
-  )
-  =>
-  (Select (Select $input $filterA) $filterB)
-
-The "($filtersA $filtersB $ok):(SplitFilters $filters)" part indicates that
-$filtersA $filtersB and $ok are bound to the three return values of
-(SplitFilters $filters). The let expression evaluates to the value of $ok.
-
-A let expression can also be used in a replace pattern. For example:
-
-  [AlterSelect]
-  (Select $input:* $filters:*)
-  =>
-  (Select
-    (Let ($newInput $newFilters):(AlterSelect $input $filters) $newInput)
-    $newFilters
-  )
 
 Matching Names
 
@@ -423,9 +388,9 @@ invocations, or lists. Here is an example:
 
 Dynamic Construction
 
-Sometimes the name of a constructed node can be one of several choices. The
-built-in "OpName" function can be used to dynamically construct the right kind
-of node. For example:
+Sometimes the name of a constructed node can be one of several choices, and may
+not even be known at compile-time. The built-in "OpName" function can be used
+to dynamically construct the right kind of node. For example:
 
   [NormalizeVar]
   (Eq | Ne
@@ -489,45 +454,6 @@ name is passed as a parameter to two functions in this example:
   =>
   (ConstructBinary Minus $right $left)
 
-Type Inference
-
-Expressions in both the match and replace patterns are assigned a data type
-that describes the kind of data that will be returned by the expression. These
-types are inferred using a combination of top-down and bottom-up type inference
-rules. For example:
-
-  define Select {
-    Input  Expr
-    Filter Expr
-  }
-
-  (Select $input:(LeftJoin | RightJoin) $filter:*) => $input
-
-The type of $input is inferred as "LeftJoin | RightJoin" by bubbling up the type
-of the bound expression. That type is propagated to the $input reference in the
-replace pattern. By contrast, the type of the * expression is inferred to be
-"Expr" using a top-down type inference rule, since the second argument to the
-Select operator is known to have type "Expr".
-
-When multiple types are inferred for an expression using different type
-inference rules, the more restrictive type is assigned to the expression. For
-example:
-
-  (Select $input:* & (LeftJoin)) => $input
-
-Here, the left input to the And expression was inferred to have type "Expr" and
-the right input to have type "LeftJoin". Since "LeftJoin" is the more
-restrictive type, the And expression and the $input binding are typed as
-"LeftJoin".
-
-Type inference detects and reports type contradictions, which occur when
-multiple incompatible types are inferred for an expression. For example:
-
-  (Select $input:(InnerJoin) & (LeftJoin)) => $input
-
-Because the input cannot be both an InnerJoin and a LeftJoin, Optgen reports a
-type contradiction error.
-
 Syntax
 
 This section describes the Optgen language syntax in a variant of extended
@@ -553,13 +479,12 @@ grammar.
   names        = name ('|' name)*
   arg          = bind and | ref | and
   and          = expr ('&' and)
-  expr         = func | not | let | list | any | name | STRING | NUMBER
+  expr         = func | not | list | any | name | STRING | NUMBER
   not          = '^' expr
   list         = '[' list-child* ']'
   list-child   = list-any | arg
   list-any     = '...'
   bind         = '$' label ':' and
-  let          = '(' 'Let' '(' '$' label ('$' label)* ')' ':' func ref ')'
   ref          = '$' label
   any          = '*'
   name         = IDENT
@@ -570,7 +495,7 @@ represented as single-quoted strings above:
 
   STRING     = " [^"\n]* "
   NUMBER     = UnicodeDigit+
-  IDENT      = (UnicodeLetter | '_') (UnicodeLetter | '_' | UnicodeNumber)*
+  IDENT      = UnicodeLetter (UnicodeLetter | UnicodeNumber)*
   COMMENT    = '#' .* \n
   WHITESPACE = UnicodeSpace+
 

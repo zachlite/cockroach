@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
@@ -18,27 +22,27 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // TestFuncNull execs all builtin funcs with various kinds of NULLs,
 // attempting to induce a panic.
 func TestFuncNull(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	ctx := context.Background()
+	ctx := context.TODO()
 	defer s.Stopper().Stop(ctx)
 
 	run := func(t *testing.T, q string) {
-		rows, err := db.QueryContext(ctx, q)
-		if err == nil {
-			rows.Close()
-		}
+		t.Run(q, func(t *testing.T) {
+			rows, err := db.QueryContext(ctx, q)
+			if err == nil {
+				rows.Close()
+			}
+		})
 	}
 
 	for _, name := range builtins.AllBuiltinNames {
@@ -96,9 +100,9 @@ func TestFuncNull(t *testing.T) {
 					if i > 0 {
 						sb.WriteString(", ")
 					}
-					if typ.Family() == types.ArrayFamily {
+					if typ.FamilyEqual(types.FamArray) {
 						hasArray = true
-						if typ.ArrayContents().Family() == types.AnyFamily {
+						if typ == types.AnyArray {
 							fmt.Fprintf(&sb, "ARRAY[NULL]::STRING[]")
 						} else {
 							fmt.Fprintf(&sb, "ARRAY[NULL]::%s", typ)

@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 //
 // An ordered key encoding scheme for arbitrary-precision fixed-point
 // numeric values based on sqlite4's key encoding:
@@ -21,8 +25,9 @@ import (
 	"math/big"
 	"unsafe"
 
-	"github.com/cockroachdb/apd/v2"
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/apd"
 )
 
 // EncodeDecimalAscending returns the resulting byte slice with the encoded decimal
@@ -152,7 +157,7 @@ func decimalEandM(d *apd.Decimal, tmp []byte) (int, []byte) {
 // The mantissa m can be stored in the spare capacity of appendTo.
 func encodeEandM(appendTo []byte, negative bool, e int, m []byte) []byte {
 	var buf []byte
-	if n := len(m) + MaxVarintLen + 2; n <= cap(appendTo)-len(appendTo) {
+	if n := len(m) + maxVarintSize + 2; n <= cap(appendTo)-len(appendTo) {
 		buf = appendTo[len(appendTo) : len(appendTo)+n]
 	} else {
 		buf = make([]byte, n)
@@ -351,16 +356,17 @@ func getDecimalLen(buf []byte) (int, error) {
 // makeDecimalFromMandE reconstructs the decimal from the mantissa M and
 // exponent E.
 func makeDecimalFromMandE(negative bool, e int, m []byte, tmp []byte) (apd.Decimal, error) {
-	if len(m) == 0 {
-		return apd.Decimal{}, errors.New("expected mantissa, got zero bytes")
-	}
 	// ±dddd.
 	b := tmp[:0]
 	if n := len(m)*2 + 1; cap(b) < n {
 		b = make([]byte, 0, n)
 	}
-	for _, v := range m {
-		t := int(v) / 2
+	for i, v := range m {
+		t := int(v)
+		if i == len(m) {
+			t--
+		}
+		t /= 2
 		if t < 0 || t > 99 {
 			return apd.Decimal{}, errors.Errorf("base-100 encoded digit %d out of range [0,99]", t)
 		}
@@ -617,62 +623,55 @@ func encodeNonsortingDecimalValueWithoutExp(digits []big.Word, buf []byte) []byt
 // of the encoded value is.
 func DecodeNonsortingDecimal(buf []byte, tmp []byte) (apd.Decimal, error) {
 	var dec apd.Decimal
-	err := DecodeIntoNonsortingDecimal(&dec, buf, tmp)
-	return dec, err
-}
 
-// DecodeIntoNonsortingDecimal is like DecodeNonsortingDecimal, but it operates
-// on the passed-in *apd.Decimal instead of producing a new one.
-func DecodeIntoNonsortingDecimal(dec *apd.Decimal, buf []byte, tmp []byte) error {
-	*dec = apd.Decimal{}
 	switch buf[0] {
 	case decimalNaN:
 		dec.Form = apd.NaN
-		return nil
+		return dec, nil
 	case decimalNegativeInfinity:
 		dec.Form = apd.Infinite
 		dec.Negative = true
-		return nil
+		return dec, nil
 	case decimalInfinity:
 		dec.Form = apd.Infinite
-		return nil
+		return dec, nil
 	case decimalZero:
-		return nil
+		return dec, nil
 	}
 
 	dec.Form = apd.Finite
 	switch {
 	case buf[0] == decimalNegLarge:
-		if err := decodeNonsortingDecimalValue(dec, false, buf[1:], tmp); err != nil {
-			return err
+		if err := decodeNonsortingDecimalValue(&dec, false, buf[1:], tmp); err != nil {
+			return apd.Decimal{}, err
 		}
 		dec.Negative = true
-		return nil
+		return dec, nil
 	case buf[0] == decimalNegMedium:
-		decodeNonsortingDecimalValueWithoutExp(dec, buf[1:], tmp)
+		decodeNonsortingDecimalValueWithoutExp(&dec, buf[1:], tmp)
 		dec.Negative = true
-		return nil
+		return dec, nil
 	case buf[0] == decimalNegSmall:
-		if err := decodeNonsortingDecimalValue(dec, true, buf[1:], tmp); err != nil {
-			return err
+		if err := decodeNonsortingDecimalValue(&dec, true, buf[1:], tmp); err != nil {
+			return apd.Decimal{}, err
 		}
 		dec.Negative = true
-		return nil
+		return dec, nil
 	case buf[0] == decimalPosSmall:
-		if err := decodeNonsortingDecimalValue(dec, true, buf[1:], tmp); err != nil {
-			return err
+		if err := decodeNonsortingDecimalValue(&dec, true, buf[1:], tmp); err != nil {
+			return apd.Decimal{}, err
 		}
-		return nil
+		return dec, nil
 	case buf[0] == decimalPosMedium:
-		decodeNonsortingDecimalValueWithoutExp(dec, buf[1:], tmp)
-		return nil
+		decodeNonsortingDecimalValueWithoutExp(&dec, buf[1:], tmp)
+		return dec, nil
 	case buf[0] == decimalPosLarge:
-		if err := decodeNonsortingDecimalValue(dec, false, buf[1:], tmp); err != nil {
-			return err
+		if err := decodeNonsortingDecimalValue(&dec, false, buf[1:], tmp); err != nil {
+			return apd.Decimal{}, err
 		}
-		return nil
+		return dec, nil
 	default:
-		return errors.Errorf("unknown decimal prefix of the encoded byte slice: %q", buf)
+		return apd.Decimal{}, errors.Errorf("unknown prefix of the encoded byte slice: %q", buf)
 	}
 }
 
@@ -710,9 +709,9 @@ func decodeNonsortingDecimalValueWithoutExp(dec *apd.Decimal, buf, tmp []byte) {
 func UpperBoundNonsortingDecimalSize(d *apd.Decimal) int {
 	// Makeup of upper bound size:
 	// - 1 byte for the prefix
-	// - MaxVarintLen for the exponent
+	// - maxVarintSize for the exponent
 	// - WordLen for the big.Int bytes
-	return 1 + MaxVarintLen + WordLen(d.Coeff.Bits())
+	return 1 + maxVarintSize + WordLen(d.Coeff.Bits())
 }
 
 // upperBoundNonsortingDecimalUnscaledSize is the same as
@@ -727,9 +726,9 @@ func upperBoundNonsortingDecimalUnscaledSize(unscaledLen int) int {
 	unscaledLenWordRounded := int(unscaledLenBase2Words) * bigWordSize
 	// Makeup of upper bound size:
 	// - 1 byte for the prefix
-	// - MaxVarintLen for the exponent
+	// - maxVarintSize for the exponent
 	// - unscaledLenWordRounded for the big.Int bytes
-	return 1 + MaxVarintLen + unscaledLenWordRounded
+	return 1 + maxVarintSize + unscaledLenWordRounded
 }
 
 // Taken from math/big/arith.go.

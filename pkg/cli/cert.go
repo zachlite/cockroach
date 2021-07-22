@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package cli
 
@@ -16,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -29,22 +33,11 @@ const defaultKeySize = 2048
 const defaultCALifetime = 10 * 366 * 24 * time.Hour  // ten years
 const defaultCertLifetime = 5 * 366 * 24 * time.Hour // five years
 
-// Options settable via command-line flags. See below for defaults.
 var keySize int
 var caCertificateLifetime time.Duration
 var certificateLifetime time.Duration
 var allowCAKeyReuse bool
 var overwriteFiles bool
-var generatePKCS8Key bool
-
-func initPreFlagsCertDefaults() {
-	keySize = defaultKeySize
-	caCertificateLifetime = defaultCALifetime
-	certificateLifetime = defaultCertLifetime
-	allowCAKeyReuse = false
-	overwriteFiles = false
-	generatePKCS8Key = false
-}
 
 // A createCACert command generates a CA certificate and stores it
 // in the cert directory.
@@ -180,8 +173,10 @@ Creation fails if the CA expiration time is before the desired certificate expir
 // TODO(marc): there is currently no way to specify which CA cert to use if more
 // than one if present.
 func runCreateClientCert(cmd *cobra.Command, args []string) error {
-	username, err := security.MakeSQLUsernameFromUserInput(args[0], security.UsernameCreation)
-	if err != nil {
+	var err error
+	var username string
+	// We intentionally allow the `node` user to have a cert.
+	if username, err = sql.NormalizeAndValidateUsernameNoBlacklist(args[0]); err != nil {
 		return errors.Wrap(err, "failed to generate client certificate and key")
 	}
 
@@ -192,8 +187,7 @@ func runCreateClientCert(cmd *cobra.Command, args []string) error {
 			keySize,
 			certificateLifetime,
 			overwriteFiles,
-			username,
-			generatePKCS8Key),
+			username),
 		"failed to generate client certificate and key")
 }
 
@@ -211,9 +205,9 @@ List certificates and keys found in the certificate directory.
 
 // runListCerts loads and lists all certs.
 func runListCerts(cmd *cobra.Command, args []string) error {
-	cm, err := security.NewCertificateManager(baseCfg.SSLCertsDir, security.CommandTLSSettings{})
+	cm, err := baseCfg.GetCertificateManager()
 	if err != nil {
-		return errors.Wrap(err, "cannot load certificates")
+		return errors.Wrap(err, "could not get certificate manager")
 	}
 
 	fmt.Fprintf(os.Stdout, "Certificate directory: %s\n", baseCfg.SSLCertsDir)
@@ -300,7 +294,7 @@ func runListCerts(cmd *cobra.Command, args []string) error {
 		addRow(cert, fmt.Sprintf("user: %s", user))
 	}
 
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, certTableHeaders, clisqlexec.NewRowSliceIter(rows, alignment))
+	return printQueryOutput(os.Stdout, certTableHeaders, newRowSliceIter(rows, alignment))
 }
 
 var certCmds = []*cobra.Command{

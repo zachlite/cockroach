@@ -1,18 +1,22 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 import _ from "lodash";
 import React from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
+import { RouterState } from "react-router";
 import { createSelector } from "reselect";
 
 import * as protos from "src/js/protos";
@@ -20,8 +24,7 @@ import { storesRequestKey, refreshStores } from "src/redux/apiReducers";
 import { AdminUIState } from "src/redux/state";
 import { nodeIDAttr } from "src/util/constants";
 import EncryptionStatus from "src/views/reports/containers/stores/encryption";
-import { Loading } from "@cockroachlabs/cluster-ui";
-import { getMatchParamByName } from "src/util/query";
+import Loading from "src/views/shared/components/loading";
 
 interface StoresOwnProps {
   stores: protos.cockroach.server.serverpb.IStoreDetails[];
@@ -30,31 +33,30 @@ interface StoresOwnProps {
   refreshStores: typeof refreshStores;
 }
 
-type StoresProps = StoresOwnProps & RouteComponentProps;
+type StoresProps = StoresOwnProps & RouterState;
 
 function storesRequestFromProps(props: StoresProps) {
-  const nodeId = getMatchParamByName(props.match, nodeIDAttr);
   return new protos.cockroach.server.serverpb.StoresRequest({
-    node_id: nodeId,
+    node_id: props.params[nodeIDAttr],
   });
 }
 
 /**
  * Renders the Stores Report page.
  */
-export class Stores extends React.Component<StoresProps, {}> {
+class Stores extends React.Component<StoresProps, {}> {
   refresh(props = this.props) {
     props.refreshStores(storesRequestFromProps(props));
   }
 
-  componentDidMount() {
+  componentWillMount() {
     // Refresh nodes status query when mounting.
     this.refresh();
   }
 
-  componentDidUpdate(prevProps: StoresProps) {
-    if (!_.isEqual(this.props.location, prevProps.location)) {
-      this.refresh(this.props);
+  componentWillReceiveProps(nextProps: StoresProps) {
+    if (this.props.location !== nextProps.location) {
+      this.refresh(nextProps);
     }
   }
 
@@ -65,12 +67,8 @@ export class Stores extends React.Component<StoresProps, {}> {
     }
     return (
       <tr className="stores-table__row">
-        <th className="stores-table__cell stores-table__cell--header">
-          {header}
-        </th>
-        <td className="stores-table__cell" title={realTitle}>
-          {value}
-        </td>
+        <th className="stores-table__cell stores-table__cell--header">{header}</th>
+        <td className="stores-table__cell" title={realTitle}>{value}</td>
       </tr>
     );
   }
@@ -79,28 +77,37 @@ export class Stores extends React.Component<StoresProps, {}> {
     return (
       <table key={store.store_id} className="stores-table">
         <tbody>
-          {this.renderSimpleRow("Store ID", store.store_id.toString())}
-          {new EncryptionStatus({ store: store }).getEncryptionRows()}
+          { this.renderSimpleRow("Store ID", store.store_id.toString()) }
+          { new EncryptionStatus({store: store}).getEncryptionRows() }
         </tbody>
       </table>
     );
-  };
+  }
 
   renderContent = () => {
-    const { stores, match } = this.props;
-
-    const nodeID = getMatchParamByName(match, nodeIDAttr);
-    if (_.isEmpty(stores)) {
+    const nodeID = this.props.params[nodeIDAttr];
+    if (!_.isNil(this.props.lastError)) {
       return (
-        <h2 className="base-heading">No stores were found on node {nodeID}.</h2>
+        <h2>Error loading stores for node {nodeID}</h2>
       );
     }
 
-    return _.map(this.props.stores, this.renderStore);
-  };
+    const { stores } = this.props;
+    if (_.isEmpty(stores)) {
+      return (
+        <h2>No stores were found on node {nodeID}.</h2>
+      );
+    }
+
+    return (
+      <React.Fragment>
+        { _.map(this.props.stores,  this.renderStore) }
+      </React.Fragment>
+    );
+  }
 
   render() {
-    const nodeID = getMatchParamByName(this.props.match, nodeIDAttr);
+    const nodeID = this.props.params[nodeIDAttr];
     let header: string = null;
     if (_.isNaN(parseInt(nodeID, 10))) {
       header = "Local Node";
@@ -110,12 +117,14 @@ export class Stores extends React.Component<StoresProps, {}> {
 
     return (
       <div className="section">
-        <Helmet title="Stores | Debug" />
-        <h1 className="base-heading">Stores</h1>
-        <h2 className="base-heading">{header} stores</h2>
+        <Helmet>
+          <title>Stores | Debug</title>
+        </Helmet>
+        <h1>Stores</h1>
+        <h2>{header} stores</h2>
         <Loading
           loading={this.props.loading}
-          error={this.props.lastError}
+          className="loading-image loading-image__spinner"
           render={this.renderContent}
         />
       </div>
@@ -155,14 +164,16 @@ const selectStoresLastError = createSelector(
   },
 );
 
-const mapStateToProps = (state: AdminUIState, props: StoresProps) => ({
-  stores: selectSortedStores(state, props),
-  loading: selectStoresLoading(state, props),
-  lastError: selectStoresLastError(state, props),
-});
+function mapStateToProps(state: AdminUIState, props: StoresProps) {
+  return {
+    stores: selectSortedStores(state, props),
+    loading: selectStoresLoading(state, props),
+    lastError: selectStoresLastError(state, props),
+  };
+}
 
-const mapDispatchToProps = {
+const actions = {
   refreshStores,
 };
 
-export default withRouter(connect(mapStateToProps, mapDispatchToProps)(Stores));
+export default connect(mapStateToProps, actions)(Stores);

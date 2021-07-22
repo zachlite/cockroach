@@ -1,202 +1,180 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
 import (
 	"bytes"
 	"fmt"
-	"math"
+	"sort"
+	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
-// PlaceholderIdx is the 0-based index of a placeholder. Placeholder "$1"
-// has PlaceholderIdx=0.
-type PlaceholderIdx uint16
+// PlaceholderTypes relates placeholder names to their resolved type.
+type PlaceholderTypes map[string]types.T
 
-// MaxPlaceholderIdx is the maximum allowed value of a PlaceholderIdx.
-// The pgwire protocol is limited to 2^16 placeholders, so we limit the IDs to
-// this range as well.
-const MaxPlaceholderIdx = math.MaxUint16
-
-// String returns the index as a placeholder string representation ($1, $2 etc).
-func (idx PlaceholderIdx) String() string {
-	return fmt.Sprintf("$%d", idx+1)
-}
-
-// PlaceholderTypes stores placeholder types (or type hints), one per
-// PlaceholderIdx.  The slice is always pre-allocated to the number of
-// placeholders in the statement. Entries that don't yet have a type are nil.
-type PlaceholderTypes []*types.T
-
-// Identical returns true if two PlaceholderTypes contain the same types.
-func (pt PlaceholderTypes) Identical(other PlaceholderTypes) bool {
-	if len(pt) != len(other) {
-		return false
-	}
-	for i, t := range pt {
-		switch {
-		case t == nil && other[i] == nil:
-		case t == nil || other[i] == nil:
-			return false
-		case !t.Identical(other[i]):
-			return false
-		}
-	}
-	return true
-}
-
-// AssertAllSet verifies that all types have been set and returns an error
-// otherwise.
-func (pt PlaceholderTypes) AssertAllSet() error {
-	for i := range pt {
-		if pt[i] == nil {
-			return placeholderTypeAmbiguityError(PlaceholderIdx(i))
-		}
-	}
-	return nil
-}
-
-// QueryArguments stores query arguments, one per PlaceholderIdx.
+// QueryArguments relates placeholder names to their provided query argument.
 //
 // A nil value represents a NULL argument.
-type QueryArguments []TypedExpr
+type QueryArguments map[string]TypedExpr
 
-func (qa QueryArguments) String() string {
-	if len(qa) == 0 {
-		return "{}"
+var emptyQueryArgumentStr = "{}"
+
+func (qa *QueryArguments) String() string {
+	if len(*qa) == 0 {
+		return emptyQueryArgumentStr
 	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	sep := ""
-	for k, v := range qa {
-		fmt.Fprintf(&buf, "%s%s:%q", sep, PlaceholderIdx(k), v)
+	for k, v := range *qa {
+		fmt.Fprintf(&buf, "%s$%s:%q", sep, k, v)
 		sep = ", "
 	}
 	buf.WriteByte('}')
 	return buf.String()
 }
 
-// PlaceholderTypesInfo encapsulates typing information for placeholders.
-type PlaceholderTypesInfo struct {
+// PlaceholderInfo defines the interface to SQL placeholders.
+type PlaceholderInfo struct {
+	Values QueryArguments
 	// TypeHints contains the initially set type hints for each placeholder if
-	// present. It is not changed during query type checking.
+	// present, and will be filled in completely by the end of type checking
+	// Hints that were present before type checking will not change, and hints
+	// that were not present before type checking will be set to their
+	// placeholder's inferred type.
 	TypeHints PlaceholderTypes
 	// Types contains the final types set for each placeholder after type
 	// checking.
 	Types PlaceholderTypes
+	// permitUnassigned controls whether AssertAllAssigned returns an error when
+	// there are unassigned placeholders. See PermitUnassigned().
+	permitUnassigned bool
 }
 
-// Type returns the known type of a placeholder. If there is no known type yet
-// but there is a type hint, returns the type hint.
-func (p *PlaceholderTypesInfo) Type(idx PlaceholderIdx) (_ *types.T, ok bool, _ error) {
-	if len(p.Types) <= int(idx) {
-		return nil, false, makeNoValueProvidedForPlaceholderErr(idx)
-	}
-	t := p.Types[idx]
-	if t == nil && len(p.TypeHints) > int(idx) {
-		t = p.TypeHints[idx]
-	}
-	return t, t != nil, nil
+// MakePlaceholderInfo constructs an empty PlaceholderInfo.
+func MakePlaceholderInfo() PlaceholderInfo {
+	res := PlaceholderInfo{}
+	res.Clear()
+	return res
 }
 
-// ValueType returns the type of the value that must be supplied for a placeholder.
-// This is the type hint given by the client if there is one, or the placeholder
-// type if there isn't one. This can differ from Type(idx) when a client hint is
-// overridden (see Placeholder.Eval).
-func (p *PlaceholderTypesInfo) ValueType(idx PlaceholderIdx) (_ *types.T, ok bool) {
-	var t *types.T
-	if len(p.TypeHints) >= int(idx) {
-		t = p.TypeHints[idx]
-	}
-	if t == nil {
-		t = p.Types[idx]
-	}
-	return t, (t != nil)
-}
-
-// SetType assigns a known type to a placeholder.
-// Reports an error if another type was previously assigned.
-func (p *PlaceholderTypesInfo) SetType(idx PlaceholderIdx, typ *types.T) error {
-	if t := p.Types[idx]; t != nil {
-		if !typ.Equivalent(t) {
-			return pgerror.Newf(
-				pgcode.DatatypeMismatch,
-				"placeholder %s already has type %s, cannot assign %s", idx, t, typ)
-		}
-		return nil
-	}
-	p.Types[idx] = typ
-	return nil
-}
-
-// PlaceholderInfo defines the interface to SQL placeholders.
-type PlaceholderInfo struct {
-	PlaceholderTypesInfo
-
-	Values QueryArguments
-}
-
-// Init initializes a PlaceholderInfo structure appropriate for the given number
-// of placeholders, and with the given (optional) type hints.
-func (p *PlaceholderInfo) Init(numPlaceholders int, typeHints PlaceholderTypes) error {
-	p.Types = make(PlaceholderTypes, numPlaceholders)
-	if typeHints == nil {
-		p.TypeHints = make(PlaceholderTypes, numPlaceholders)
-	} else {
-		if err := checkPlaceholderArity(len(typeHints), numPlaceholders); err != nil {
-			return err
-		}
-		p.TypeHints = typeHints
-	}
-	p.Values = nil
-	return nil
+// Clear resets the placeholder info map.
+func (p *PlaceholderInfo) Clear() {
+	p.TypeHints = PlaceholderTypes{}
+	p.Types = PlaceholderTypes{}
+	p.Values = QueryArguments{}
+	p.permitUnassigned = false
 }
 
 // Assign resets the PlaceholderInfo to the contents of src.
-// If src is nil, a new structure is initialized.
-func (p *PlaceholderInfo) Assign(src *PlaceholderInfo, numPlaceholders int) error {
+// If src is nil, the map is cleared.
+func (p *PlaceholderInfo) Assign(src *PlaceholderInfo) {
 	if src != nil {
-		if err := checkPlaceholderArity(len(src.Types), numPlaceholders); err != nil {
-			return err
-		}
 		*p = *src
-		return nil
+	} else {
+		p.Clear()
 	}
-	return p.Init(numPlaceholders, nil /* typeHints */)
 }
 
-func checkPlaceholderArity(numTypes, numPlaceholders int) error {
-	if numTypes > numPlaceholders {
-		return errors.AssertionFailedf(
-			"unexpected placeholder types: got %d, expected %d",
-			numTypes, numPlaceholders)
-	} else if numTypes < numPlaceholders {
-		return pgerror.Newf(pgcode.UndefinedParameter,
-			"could not find types for all placeholders: got %d, expected %d",
-			numTypes, numPlaceholders)
+// PermitUnassigned permits unassigned placeholders during plan construction,
+// so that EXPLAIN can work on statements with placeholders.
+func (p *PlaceholderInfo) PermitUnassigned() {
+	p.permitUnassigned = true
+}
+
+// AssertAllAssigned ensures that all placeholders that are used also have a
+// value assigned, or that PermitUnassigned was called.
+func (p *PlaceholderInfo) AssertAllAssigned() error {
+	if p.permitUnassigned {
+		return nil
+	}
+	var missing []string
+	for pn := range p.Types {
+		if _, ok := p.Values[pn]; !ok {
+			missing = append(missing, "$"+pn)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return pgerror.NewErrorf(pgerror.CodeUndefinedParameterError,
+			"no value provided for placeholder%s: %s",
+			util.Pluralize(int64(len(missing))),
+			strings.Join(missing, ", "),
+		)
 	}
 	return nil
+}
+
+// Type returns the known type of a placeholder. If allowHints is true, will
+// return a type hint if there's no known type yet but there is a type hint.
+// Returns false in the 2nd value if the placeholder is not typed.
+func (p *PlaceholderInfo) Type(name string, allowHints bool) (types.T, bool) {
+	if t, ok := p.Types[name]; ok {
+		return t, true
+	} else if t, ok := p.TypeHints[name]; ok {
+		return t, true
+	}
+	return nil, false
 }
 
 // Value returns the known value of a placeholder.  Returns false in
 // the 2nd value if the placeholder does not have a value.
-func (p *PlaceholderInfo) Value(idx PlaceholderIdx) (TypedExpr, bool) {
-	if len(p.Values) <= int(idx) || p.Values[idx] == nil {
-		return nil, false
+func (p *PlaceholderInfo) Value(name string) (TypedExpr, bool) {
+	if v, ok := p.Values[name]; ok {
+		return v, true
 	}
-	return p.Values[idx], true
+	return nil, false
+}
+
+// SetType assigns a known type to a placeholder.
+// Reports an error if another type was previously assigned.
+func (p *PlaceholderInfo) SetType(name string, typ types.T) error {
+	if t, ok := p.Types[name]; ok {
+		if !typ.Equivalent(t) {
+			return pgerror.NewErrorf(
+				pgerror.CodeDatatypeMismatchError,
+				"placeholder %s already has type %s, cannot assign %s", name, t, typ)
+		}
+		return nil
+	}
+	p.Types[name] = typ
+	if _, ok := p.TypeHints[name]; !ok {
+		// If the client didn't give us a type hint, we must communicate our
+		// inferred type to pgwire so it can know how to parse incoming data.
+		p.TypeHints[name] = typ
+	}
+	return nil
+}
+
+// SetTypeHints resets the type and values in the map and replaces the
+// type hints map by an alias to src. If src is nil, the map is cleared.
+// The type hints map is aliased because the invoking code from
+// pgwire/v3.go for sql.Prepare needs to receive the updated type
+// assignments after Prepare completes.
+func (p *PlaceholderInfo) SetTypeHints(src PlaceholderTypes) {
+	if src != nil {
+		p.TypeHints = src
+		p.Types = PlaceholderTypes{}
+		p.Values = QueryArguments{}
+	} else {
+		p.Clear()
+	}
 }
 
 // IsUnresolvedPlaceholder returns whether expr is an unresolved placeholder. In
@@ -205,8 +183,8 @@ func (p *PlaceholderInfo) Value(idx PlaceholderIdx) (TypedExpr, bool) {
 // whether the placeholder's type remains unset in the PlaceholderInfo.
 func (p *PlaceholderInfo) IsUnresolvedPlaceholder(expr Expr) bool {
 	if t, ok := StripParens(expr).(*Placeholder); ok {
-		_, res, err := p.Type(t.Idx)
-		return !(err == nil && res)
+		_, res := p.TypeHints[t.Name]
+		return !res
 	}
 	return false
 }

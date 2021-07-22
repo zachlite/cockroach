@@ -45,20 +45,16 @@ func (e *RootExpr) Value() interface{} {
 	return nil
 }
 
-func (e *RootExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *RootExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &RootExpr{Defines: *children[0].(*DefineSetExpr), Rules: *children[1].(*RuleSetExpr), Src: e.Source()}
+		return accept(&RootExpr{Defines: *children[0].(*DefineSetExpr), Rules: *children[1].(*RuleSetExpr), Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *RootExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *RootExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *RootExpr) String() string {
@@ -93,8 +89,8 @@ func (e *DefineSetExpr) Value() interface{} {
 	return nil
 }
 
-func (e *DefineSetExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *DefineSetExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
 		typedChildren := make(DefineSetExpr, len(children))
 		for i := 0; i < len(children); i++ {
@@ -102,15 +98,11 @@ func (e *DefineSetExpr) Visit(visit VisitFunc) Expr {
 		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
 func (e *DefineSetExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *DefineSetExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *DefineSetExpr) String() string {
@@ -145,8 +137,8 @@ func (e *RuleSetExpr) Value() interface{} {
 	return nil
 }
 
-func (e *RuleSetExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *RuleSetExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
 		typedChildren := make(RuleSetExpr, len(children))
 		for i := 0; i < len(children); i++ {
@@ -154,15 +146,11 @@ func (e *RuleSetExpr) Visit(visit VisitFunc) Expr {
 		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
 func (e *RuleSetExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *RuleSetExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *RuleSetExpr) String() string {
@@ -223,20 +211,16 @@ func (e *DefineExpr) Value() interface{} {
 	return nil
 }
 
-func (e *DefineExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *DefineExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &DefineExpr{Comments: *children[0].(*CommentsExpr), Tags: *children[1].(*TagsExpr), Name: *children[2].(*StringExpr), Fields: *children[3].(*DefineFieldsExpr), Src: e.Source()}
+		return accept(&DefineExpr{Comments: *children[0].(*CommentsExpr), Tags: *children[1].(*TagsExpr), Name: *children[2].(*StringExpr), Fields: *children[3].(*DefineFieldsExpr), Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *DefineExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *DefineExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *DefineExpr) String() string {
@@ -271,8 +255,8 @@ func (e *CommentsExpr) Value() interface{} {
 	return nil
 }
 
-func (e *CommentsExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *CommentsExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
 		typedChildren := make(CommentsExpr, len(children))
 		for i := 0; i < len(children); i++ {
@@ -280,15 +264,11 @@ func (e *CommentsExpr) Visit(visit VisitFunc) Expr {
 		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
 func (e *CommentsExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *CommentsExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *CommentsExpr) String() string {
@@ -323,16 +303,12 @@ func (e *CommentExpr) Value() interface{} {
 	return string(*e)
 }
 
-func (e *CommentExpr) Visit(visit VisitFunc) Expr {
-	return e
+func (e *CommentExpr) Visit(accept AcceptFunc) Expr {
+	return accept(e)
 }
 
 func (e *CommentExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *CommentExpr) InferredType() DataType {
-	return StringDataType
 }
 
 func (e *CommentExpr) String() string {
@@ -367,8 +343,8 @@ func (e *TagsExpr) Value() interface{} {
 	return nil
 }
 
-func (e *TagsExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *TagsExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
 		typedChildren := make(TagsExpr, len(children))
 		for i := 0; i < len(children); i++ {
@@ -376,15 +352,11 @@ func (e *TagsExpr) Visit(visit VisitFunc) Expr {
 		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
 func (e *TagsExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *TagsExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *TagsExpr) String() string {
@@ -419,16 +391,12 @@ func (e *TagExpr) Value() interface{} {
 	return string(*e)
 }
 
-func (e *TagExpr) Visit(visit VisitFunc) Expr {
-	return e
+func (e *TagExpr) Visit(accept AcceptFunc) Expr {
+	return accept(e)
 }
 
 func (e *TagExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *TagExpr) InferredType() DataType {
-	return StringDataType
 }
 
 func (e *TagExpr) String() string {
@@ -463,8 +431,8 @@ func (e *DefineFieldsExpr) Value() interface{} {
 	return nil
 }
 
-func (e *DefineFieldsExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *DefineFieldsExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
 		typedChildren := make(DefineFieldsExpr, len(children))
 		for i := 0; i < len(children); i++ {
@@ -472,15 +440,11 @@ func (e *DefineFieldsExpr) Visit(visit VisitFunc) Expr {
 		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
 func (e *DefineFieldsExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *DefineFieldsExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *DefineFieldsExpr) String() string {
@@ -494,10 +458,9 @@ func (e *DefineFieldsExpr) Format(buf *bytes.Buffer, level int) {
 }
 
 type DefineFieldExpr struct {
-	Comments CommentsExpr
-	Name     StringExpr
-	Type     StringExpr
-	Src      *SourceLoc
+	Name StringExpr
+	Type StringExpr
+	Src  *SourceLoc
 }
 
 func (e *DefineFieldExpr) Op() Operator {
@@ -505,16 +468,14 @@ func (e *DefineFieldExpr) Op() Operator {
 }
 
 func (e *DefineFieldExpr) ChildCount() int {
-	return 3
+	return 2
 }
 
 func (e *DefineFieldExpr) Child(nth int) Expr {
 	switch nth {
 	case 0:
-		return &e.Comments
-	case 1:
 		return &e.Name
-	case 2:
+	case 1:
 		return &e.Type
 	}
 	panic(fmt.Sprintf("child index %d is out of range", nth))
@@ -523,10 +484,8 @@ func (e *DefineFieldExpr) Child(nth int) Expr {
 func (e *DefineFieldExpr) ChildName(nth int) string {
 	switch nth {
 	case 0:
-		return "Comments"
-	case 1:
 		return "Name"
-	case 2:
+	case 1:
 		return "Type"
 	}
 	return ""
@@ -536,20 +495,16 @@ func (e *DefineFieldExpr) Value() interface{} {
 	return nil
 }
 
-func (e *DefineFieldExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *DefineFieldExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &DefineFieldExpr{Comments: *children[0].(*CommentsExpr), Name: *children[1].(*StringExpr), Type: *children[2].(*StringExpr), Src: e.Source()}
+		return accept(&DefineFieldExpr{Name: *children[0].(*StringExpr), Type: *children[1].(*StringExpr), Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *DefineFieldExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *DefineFieldExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *DefineFieldExpr) String() string {
@@ -566,7 +521,7 @@ type RuleExpr struct {
 	Comments CommentsExpr
 	Name     StringExpr
 	Tags     TagsExpr
-	Match    *FuncExpr
+	Match    *MatchExpr
 	Replace  Expr
 	Src      *SourceLoc
 }
@@ -615,20 +570,16 @@ func (e *RuleExpr) Value() interface{} {
 	return nil
 }
 
-func (e *RuleExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *RuleExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &RuleExpr{Comments: *children[0].(*CommentsExpr), Name: *children[1].(*StringExpr), Tags: *children[2].(*TagsExpr), Match: children[3].(*FuncExpr), Replace: children[4], Src: e.Source()}
+		return accept(&RuleExpr{Comments: *children[0].(*CommentsExpr), Name: *children[1].(*StringExpr), Tags: *children[2].(*TagsExpr), Match: children[3].(*MatchExpr), Replace: children[4], Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *RuleExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *RuleExpr) InferredType() DataType {
-	return AnyDataType
 }
 
 func (e *RuleExpr) String() string {
@@ -641,403 +592,10 @@ func (e *RuleExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }
 
-type FuncExpr struct {
-	Name Expr
-	Args SliceExpr
-	Src  *SourceLoc
-	Typ  DataType
-}
-
-func (e *FuncExpr) Op() Operator {
-	return FuncOp
-}
-
-func (e *FuncExpr) ChildCount() int {
-	return 2
-}
-
-func (e *FuncExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return e.Name
-	case 1:
-		return &e.Args
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *FuncExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Name"
-	case 1:
-		return "Args"
-	}
-	return ""
-}
-
-func (e *FuncExpr) Value() interface{} {
-	return nil
-}
-
-func (e *FuncExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &FuncExpr{Name: children[0], Args: *children[1].(*SliceExpr), Src: e.Source()}
-	}
-	return e
-}
-
-func (e *FuncExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *FuncExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *FuncExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *FuncExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type NamesExpr []NameExpr
-
-func (e *NamesExpr) Op() Operator {
-	return NamesOp
-}
-
-func (e *NamesExpr) ChildCount() int {
-	return len(*e)
-}
-
-func (e *NamesExpr) Child(nth int) Expr {
-	return &(*e)[nth]
-}
-
-func (e *NamesExpr) ChildName(nth int) string {
-	return ""
-}
-
-func (e *NamesExpr) Value() interface{} {
-	return nil
-}
-
-func (e *NamesExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		typedChildren := make(NamesExpr, len(children))
-		for i := 0; i < len(children); i++ {
-			typedChildren[i] = *children[i].(*NameExpr)
-		}
-		return &typedChildren
-	}
-	return e
-}
-
-func (e *NamesExpr) Source() *SourceLoc {
-	return nil
-}
-
-func (e *NamesExpr) InferredType() DataType {
-	return AnyDataType
-}
-
-func (e *NamesExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *NamesExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type NameExpr string
-
-func (e *NameExpr) Op() Operator {
-	return NameOp
-}
-
-func (e *NameExpr) ChildCount() int {
-	return 0
-}
-
-func (e *NameExpr) Child(nth int) Expr {
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *NameExpr) ChildName(nth int) string {
-	return ""
-}
-
-func (e *NameExpr) Value() interface{} {
-	return string(*e)
-}
-
-func (e *NameExpr) Visit(visit VisitFunc) Expr {
-	return e
-}
-
-func (e *NameExpr) Source() *SourceLoc {
-	return nil
-}
-
-func (e *NameExpr) InferredType() DataType {
-	return StringDataType
-}
-
-func (e *NameExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *NameExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type AndExpr struct {
-	Left  Expr
-	Right Expr
-	Src   *SourceLoc
-	Typ   DataType
-}
-
-func (e *AndExpr) Op() Operator {
-	return AndOp
-}
-
-func (e *AndExpr) ChildCount() int {
-	return 2
-}
-
-func (e *AndExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return e.Left
-	case 1:
-		return e.Right
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *AndExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Left"
-	case 1:
-		return "Right"
-	}
-	return ""
-}
-
-func (e *AndExpr) Value() interface{} {
-	return nil
-}
-
-func (e *AndExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &AndExpr{Left: children[0], Right: children[1], Src: e.Source()}
-	}
-	return e
-}
-
-func (e *AndExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *AndExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *AndExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *AndExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type NotExpr struct {
-	Input Expr
-	Src   *SourceLoc
-	Typ   DataType
-}
-
-func (e *NotExpr) Op() Operator {
-	return NotOp
-}
-
-func (e *NotExpr) ChildCount() int {
-	return 1
-}
-
-func (e *NotExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return e.Input
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *NotExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Input"
-	}
-	return ""
-}
-
-func (e *NotExpr) Value() interface{} {
-	return nil
-}
-
-func (e *NotExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &NotExpr{Input: children[0], Src: e.Source()}
-	}
-	return e
-}
-
-func (e *NotExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *NotExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *NotExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *NotExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type ListExpr struct {
-	Items SliceExpr
-	Src   *SourceLoc
-	Typ   DataType
-}
-
-func (e *ListExpr) Op() Operator {
-	return ListOp
-}
-
-func (e *ListExpr) ChildCount() int {
-	return 1
-}
-
-func (e *ListExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return &e.Items
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *ListExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Items"
-	}
-	return ""
-}
-
-func (e *ListExpr) Value() interface{} {
-	return nil
-}
-
-func (e *ListExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &ListExpr{Items: *children[0].(*SliceExpr), Src: e.Source()}
-	}
-	return e
-}
-
-func (e *ListExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *ListExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *ListExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *ListExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type ListAnyExpr struct {
-	Src *SourceLoc
-}
-
-func (e *ListAnyExpr) Op() Operator {
-	return ListAnyOp
-}
-
-func (e *ListAnyExpr) ChildCount() int {
-	return 0
-}
-
-func (e *ListAnyExpr) Child(nth int) Expr {
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *ListAnyExpr) ChildName(nth int) string {
-	return ""
-}
-
-func (e *ListAnyExpr) Value() interface{} {
-	return nil
-}
-
-func (e *ListAnyExpr) Visit(visit VisitFunc) Expr {
-	return e
-}
-
-func (e *ListAnyExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *ListAnyExpr) InferredType() DataType {
-	return AnyDataType
-}
-
-func (e *ListAnyExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *ListAnyExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
 type BindExpr struct {
 	Label  StringExpr
 	Target Expr
 	Src    *SourceLoc
-	Typ    DataType
 }
 
 func (e *BindExpr) Op() Operator {
@@ -1072,20 +630,16 @@ func (e *BindExpr) Value() interface{} {
 	return nil
 }
 
-func (e *BindExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *BindExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &BindExpr{Label: *children[0].(*StringExpr), Target: children[1], Src: e.Source()}
+		return accept(&BindExpr{Label: *children[0].(*StringExpr), Target: children[1], Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *BindExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *BindExpr) InferredType() DataType {
-	return e.Typ
 }
 
 func (e *BindExpr) String() string {
@@ -1098,80 +652,9 @@ func (e *BindExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }
 
-type LetExpr struct {
-	Labels StringsExpr
-	Target Expr
-	Result *RefExpr
-	Src    *SourceLoc
-	Typ    DataType
-}
-
-func (e *LetExpr) Op() Operator {
-	return LetOp
-}
-
-func (e *LetExpr) ChildCount() int {
-	return 3
-}
-
-func (e *LetExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return &e.Labels
-	case 1:
-		return e.Target
-	case 2:
-		return e.Result
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *LetExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Labels"
-	case 1:
-		return "Target"
-	case 2:
-		return "Result"
-	}
-	return ""
-}
-
-func (e *LetExpr) Value() interface{} {
-	return nil
-}
-
-func (e *LetExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &LetExpr{Labels: *children[0].(*StringsExpr), Target: children[1], Result: children[2].(*RefExpr), Src: e.Source()}
-	}
-	return e
-}
-
-func (e *LetExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *LetExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *LetExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *LetExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
 type RefExpr struct {
 	Label StringExpr
 	Src   *SourceLoc
-	Typ   DataType
 }
 
 func (e *RefExpr) Op() Operator {
@@ -1202,20 +685,16 @@ func (e *RefExpr) Value() interface{} {
 	return nil
 }
 
-func (e *RefExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *RefExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		return &RefExpr{Label: *children[0].(*StringExpr), Src: e.Source()}
+		return accept(&RefExpr{Label: *children[0].(*StringExpr), Src: e.Source()})
 	}
-	return e
+	return accept(e)
 }
 
 func (e *RefExpr) Source() *SourceLoc {
 	return e.Src
-}
-
-func (e *RefExpr) InferredType() DataType {
-	return e.Typ
 }
 
 func (e *RefExpr) String() string {
@@ -1228,99 +707,582 @@ func (e *RefExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }
 
-type AnyExpr struct {
-	Src *SourceLoc
-	Typ DataType
+type MatchExpr struct {
+	Names OpNamesExpr
+	Args  ListExpr
+	Src   *SourceLoc
 }
 
-func (e *AnyExpr) Op() Operator {
-	return AnyOp
+func (e *MatchExpr) Op() Operator {
+	return MatchOp
 }
 
-func (e *AnyExpr) ChildCount() int {
-	return 0
+func (e *MatchExpr) ChildCount() int {
+	return 2
 }
 
-func (e *AnyExpr) Child(nth int) Expr {
+func (e *MatchExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return &e.Names
+	case 1:
+		return &e.Args
+	}
 	panic(fmt.Sprintf("child index %d is out of range", nth))
 }
 
-func (e *AnyExpr) ChildName(nth int) string {
+func (e *MatchExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "Names"
+	case 1:
+		return "Args"
+	}
 	return ""
 }
 
-func (e *AnyExpr) Value() interface{} {
+func (e *MatchExpr) Value() interface{} {
 	return nil
 }
 
-func (e *AnyExpr) Visit(visit VisitFunc) Expr {
-	return e
+func (e *MatchExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&MatchExpr{Names: *children[0].(*OpNamesExpr), Args: *children[1].(*ListExpr), Src: e.Source()})
+	}
+	return accept(e)
 }
 
-func (e *AnyExpr) Source() *SourceLoc {
+func (e *MatchExpr) Source() *SourceLoc {
 	return e.Src
 }
 
-func (e *AnyExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *AnyExpr) String() string {
+func (e *MatchExpr) String() string {
 	var buf bytes.Buffer
 	e.Format(&buf, 0)
 	return buf.String()
 }
 
-func (e *AnyExpr) Format(buf *bytes.Buffer, level int) {
+func (e *MatchExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }
 
-type SliceExpr []Expr
+type OpNamesExpr []OpNameExpr
 
-func (e *SliceExpr) Op() Operator {
-	return SliceOp
+func (e *OpNamesExpr) Op() Operator {
+	return OpNamesOp
 }
 
-func (e *SliceExpr) ChildCount() int {
+func (e *OpNamesExpr) ChildCount() int {
 	return len(*e)
 }
 
-func (e *SliceExpr) Child(nth int) Expr {
-	return (*e)[nth]
+func (e *OpNamesExpr) Child(nth int) Expr {
+	return &(*e)[nth]
 }
 
-func (e *SliceExpr) ChildName(nth int) string {
+func (e *OpNamesExpr) ChildName(nth int) string {
 	return ""
 }
 
-func (e *SliceExpr) Value() interface{} {
+func (e *OpNamesExpr) Value() interface{} {
 	return nil
 }
 
-func (e *SliceExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
+func (e *OpNamesExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
 	if children != nil {
-		typedChildren := SliceExpr(children)
+		typedChildren := make(OpNamesExpr, len(children))
+		for i := 0; i < len(children); i++ {
+			typedChildren[i] = *children[i].(*OpNameExpr)
+		}
 		return &typedChildren
 	}
-	return e
+	return accept(e)
 }
 
-func (e *SliceExpr) Source() *SourceLoc {
+func (e *OpNamesExpr) Source() *SourceLoc {
 	return nil
 }
 
-func (e *SliceExpr) InferredType() DataType {
-	return AnyDataType
-}
-
-func (e *SliceExpr) String() string {
+func (e *OpNamesExpr) String() string {
 	var buf bytes.Buffer
 	e.Format(&buf, 0)
 	return buf.String()
 }
 
-func (e *SliceExpr) Format(buf *bytes.Buffer, level int) {
+func (e *OpNamesExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type OpNameExpr string
+
+func (e *OpNameExpr) Op() Operator {
+	return OpNameOp
+}
+
+func (e *OpNameExpr) ChildCount() int {
+	return 0
+}
+
+func (e *OpNameExpr) Child(nth int) Expr {
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *OpNameExpr) ChildName(nth int) string {
+	return ""
+}
+
+func (e *OpNameExpr) Value() interface{} {
+	return string(*e)
+}
+
+func (e *OpNameExpr) Visit(accept AcceptFunc) Expr {
+	return accept(e)
+}
+
+func (e *OpNameExpr) Source() *SourceLoc {
+	return nil
+}
+
+func (e *OpNameExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *OpNameExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type MatchAndExpr struct {
+	Left  Expr
+	Right Expr
+	Src   *SourceLoc
+}
+
+func (e *MatchAndExpr) Op() Operator {
+	return MatchAndOp
+}
+
+func (e *MatchAndExpr) ChildCount() int {
+	return 2
+}
+
+func (e *MatchAndExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return e.Left
+	case 1:
+		return e.Right
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *MatchAndExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "Left"
+	case 1:
+		return "Right"
+	}
+	return ""
+}
+
+func (e *MatchAndExpr) Value() interface{} {
+	return nil
+}
+
+func (e *MatchAndExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&MatchAndExpr{Left: children[0], Right: children[1], Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *MatchAndExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *MatchAndExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *MatchAndExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type MatchInvokeExpr struct {
+	FuncName StringExpr
+	Args     ListExpr
+	Src      *SourceLoc
+}
+
+func (e *MatchInvokeExpr) Op() Operator {
+	return MatchInvokeOp
+}
+
+func (e *MatchInvokeExpr) ChildCount() int {
+	return 2
+}
+
+func (e *MatchInvokeExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return &e.FuncName
+	case 1:
+		return &e.Args
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *MatchInvokeExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "FuncName"
+	case 1:
+		return "Args"
+	}
+	return ""
+}
+
+func (e *MatchInvokeExpr) Value() interface{} {
+	return nil
+}
+
+func (e *MatchInvokeExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&MatchInvokeExpr{FuncName: *children[0].(*StringExpr), Args: *children[1].(*ListExpr), Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *MatchInvokeExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *MatchInvokeExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *MatchInvokeExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type MatchNotExpr struct {
+	Input Expr
+	Src   *SourceLoc
+}
+
+func (e *MatchNotExpr) Op() Operator {
+	return MatchNotOp
+}
+
+func (e *MatchNotExpr) ChildCount() int {
+	return 1
+}
+
+func (e *MatchNotExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return e.Input
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *MatchNotExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "Input"
+	}
+	return ""
+}
+
+func (e *MatchNotExpr) Value() interface{} {
+	return nil
+}
+
+func (e *MatchNotExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&MatchNotExpr{Input: children[0], Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *MatchNotExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *MatchNotExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *MatchNotExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type MatchAnyExpr struct {
+}
+
+func (e *MatchAnyExpr) Op() Operator {
+	return MatchAnyOp
+}
+
+func (e *MatchAnyExpr) ChildCount() int {
+	return 0
+}
+
+func (e *MatchAnyExpr) Child(nth int) Expr {
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *MatchAnyExpr) ChildName(nth int) string {
+	return ""
+}
+
+func (e *MatchAnyExpr) Value() interface{} {
+	return nil
+}
+
+func (e *MatchAnyExpr) Visit(accept AcceptFunc) Expr {
+	return accept(e)
+}
+
+func (e *MatchAnyExpr) Source() *SourceLoc {
+	return nil
+}
+
+func (e *MatchAnyExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *MatchAnyExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type MatchListExpr struct {
+	MatchItem Expr
+	Src       *SourceLoc
+}
+
+func (e *MatchListExpr) Op() Operator {
+	return MatchListOp
+}
+
+func (e *MatchListExpr) ChildCount() int {
+	return 1
+}
+
+func (e *MatchListExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return e.MatchItem
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *MatchListExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "MatchItem"
+	}
+	return ""
+}
+
+func (e *MatchListExpr) Value() interface{} {
+	return nil
+}
+
+func (e *MatchListExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&MatchListExpr{MatchItem: children[0], Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *MatchListExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *MatchListExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *MatchListExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type ConstructExpr struct {
+	Name Expr
+	Args ListExpr
+	Src  *SourceLoc
+}
+
+func (e *ConstructExpr) Op() Operator {
+	return ConstructOp
+}
+
+func (e *ConstructExpr) ChildCount() int {
+	return 2
+}
+
+func (e *ConstructExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return e.Name
+	case 1:
+		return &e.Args
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *ConstructExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "Name"
+	case 1:
+		return "Args"
+	}
+	return ""
+}
+
+func (e *ConstructExpr) Value() interface{} {
+	return nil
+}
+
+func (e *ConstructExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&ConstructExpr{Name: children[0], Args: *children[1].(*ListExpr), Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *ConstructExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *ConstructExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *ConstructExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type ConstructListExpr struct {
+	Items ListExpr
+	Src   *SourceLoc
+}
+
+func (e *ConstructListExpr) Op() Operator {
+	return ConstructListOp
+}
+
+func (e *ConstructListExpr) ChildCount() int {
+	return 1
+}
+
+func (e *ConstructListExpr) Child(nth int) Expr {
+	switch nth {
+	case 0:
+		return &e.Items
+	}
+	panic(fmt.Sprintf("child index %d is out of range", nth))
+}
+
+func (e *ConstructListExpr) ChildName(nth int) string {
+	switch nth {
+	case 0:
+		return "Items"
+	}
+	return ""
+}
+
+func (e *ConstructListExpr) Value() interface{} {
+	return nil
+}
+
+func (e *ConstructListExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		return accept(&ConstructListExpr{Items: *children[0].(*ListExpr), Src: e.Source()})
+	}
+	return accept(e)
+}
+
+func (e *ConstructListExpr) Source() *SourceLoc {
+	return e.Src
+}
+
+func (e *ConstructListExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *ConstructListExpr) Format(buf *bytes.Buffer, level int) {
+	formatExpr(e, buf, level)
+}
+
+type ListExpr []Expr
+
+func (e *ListExpr) Op() Operator {
+	return ListOp
+}
+
+func (e *ListExpr) ChildCount() int {
+	return len(*e)
+}
+
+func (e *ListExpr) Child(nth int) Expr {
+	return (*e)[nth]
+}
+
+func (e *ListExpr) ChildName(nth int) string {
+	return ""
+}
+
+func (e *ListExpr) Value() interface{} {
+	return nil
+}
+
+func (e *ListExpr) Visit(accept AcceptFunc) Expr {
+	children := visitExprChildren(e, accept)
+	if children != nil {
+		typedChildren := ListExpr(children)
+		return &typedChildren
+	}
+	return accept(e)
+}
+
+func (e *ListExpr) Source() *SourceLoc {
+	return nil
+}
+
+func (e *ListExpr) String() string {
+	var buf bytes.Buffer
+	e.Format(&buf, 0)
+	return buf.String()
+}
+
+func (e *ListExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }
 
@@ -1346,16 +1308,12 @@ func (e *StringExpr) Value() interface{} {
 	return string(*e)
 }
 
-func (e *StringExpr) Visit(visit VisitFunc) Expr {
-	return e
+func (e *StringExpr) Visit(accept AcceptFunc) Expr {
+	return accept(e)
 }
 
 func (e *StringExpr) Source() *SourceLoc {
 	return nil
-}
-
-func (e *StringExpr) InferredType() DataType {
-	return StringDataType
 }
 
 func (e *StringExpr) String() string {
@@ -1365,166 +1323,5 @@ func (e *StringExpr) String() string {
 }
 
 func (e *StringExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type StringsExpr []StringExpr
-
-func (e *StringsExpr) Op() Operator {
-	return StringsOp
-}
-
-func (e *StringsExpr) ChildCount() int {
-	return len(*e)
-}
-
-func (e *StringsExpr) Child(nth int) Expr {
-	return &(*e)[nth]
-}
-
-func (e *StringsExpr) ChildName(nth int) string {
-	return ""
-}
-
-func (e *StringsExpr) Value() interface{} {
-	return nil
-}
-
-func (e *StringsExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		typedChildren := make(StringsExpr, len(children))
-		for i := 0; i < len(children); i++ {
-			typedChildren[i] = *children[i].(*StringExpr)
-		}
-		return &typedChildren
-	}
-	return e
-}
-
-func (e *StringsExpr) Source() *SourceLoc {
-	return nil
-}
-
-func (e *StringsExpr) InferredType() DataType {
-	return AnyDataType
-}
-
-func (e *StringsExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *StringsExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type NumberExpr int64
-
-func (e *NumberExpr) Op() Operator {
-	return NumberOp
-}
-
-func (e *NumberExpr) ChildCount() int {
-	return 0
-}
-
-func (e *NumberExpr) Child(nth int) Expr {
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *NumberExpr) ChildName(nth int) string {
-	return ""
-}
-
-func (e *NumberExpr) Value() interface{} {
-	return int64(*e)
-}
-
-func (e *NumberExpr) Visit(visit VisitFunc) Expr {
-	return e
-}
-
-func (e *NumberExpr) Source() *SourceLoc {
-	return nil
-}
-
-func (e *NumberExpr) InferredType() DataType {
-	return Int64DataType
-}
-
-func (e *NumberExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *NumberExpr) Format(buf *bytes.Buffer, level int) {
-	formatExpr(e, buf, level)
-}
-
-type CustomFuncExpr struct {
-	Name NameExpr
-	Args SliceExpr
-	Src  *SourceLoc
-	Typ  DataType
-}
-
-func (e *CustomFuncExpr) Op() Operator {
-	return CustomFuncOp
-}
-
-func (e *CustomFuncExpr) ChildCount() int {
-	return 2
-}
-
-func (e *CustomFuncExpr) Child(nth int) Expr {
-	switch nth {
-	case 0:
-		return &e.Name
-	case 1:
-		return &e.Args
-	}
-	panic(fmt.Sprintf("child index %d is out of range", nth))
-}
-
-func (e *CustomFuncExpr) ChildName(nth int) string {
-	switch nth {
-	case 0:
-		return "Name"
-	case 1:
-		return "Args"
-	}
-	return ""
-}
-
-func (e *CustomFuncExpr) Value() interface{} {
-	return nil
-}
-
-func (e *CustomFuncExpr) Visit(visit VisitFunc) Expr {
-	children := visitChildren(e, visit)
-	if children != nil {
-		return &CustomFuncExpr{Name: *children[0].(*NameExpr), Args: *children[1].(*SliceExpr), Src: e.Source()}
-	}
-	return e
-}
-
-func (e *CustomFuncExpr) Source() *SourceLoc {
-	return e.Src
-}
-
-func (e *CustomFuncExpr) InferredType() DataType {
-	return e.Typ
-}
-
-func (e *CustomFuncExpr) String() string {
-	var buf bytes.Buffer
-	e.Format(&buf, 0)
-	return buf.String()
-}
-
-func (e *CustomFuncExpr) Format(buf *bytes.Buffer, level int) {
 	formatExpr(e, buf, level)
 }

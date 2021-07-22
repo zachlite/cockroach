@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package lang
 
@@ -39,9 +43,6 @@ const (
 	// STRING is a literal string delimited by double quotes that cannot extend
 	// past the end of a line: " [^"\n]* "
 	STRING
-	// NUMBER is an numeric literal composed of Unicode numeric digits:
-	// UnicodeDigit+
-	NUMBER
 	// WHITESPACE is any sequence of Unicode whitespace characters.
 	WHITESPACE
 	// COMMENT is a code comment that extends to end of line: # .* EOL
@@ -74,8 +75,6 @@ const (
 	COMMA
 	// CARET is the caret rune: ^
 	CARET
-	// DOT is the dot rune: .
-	DOT
 	// ELLIPSES is three periods in succession: ...
 	ELLIPSES
 	// PIPE is the vertical line rune: |
@@ -143,16 +142,10 @@ func (s *Scanner) Scan() Token {
 		return s.scanWhitespace()
 	}
 
-	// If we see a letter or underscore then consume as an identifier or keyword.
-	if unicode.IsLetter(ch) || ch == '_' {
+	// If we see a letter then consume as an identifier or keyword.
+	if unicode.IsLetter(ch) {
 		s.unread()
 		return s.scanIdentifier()
-	}
-
-	// If we see a digit then consume as a numeric literal.
-	if unicode.IsDigit(ch) {
-		s.unread()
-		return s.scanNumericLiteral()
 	}
 
 	// Otherwise read the individual character.
@@ -233,24 +226,16 @@ func (s *Scanner) Scan() Token {
 			if s.read() == '.' {
 				s.tok = ELLIPSES
 				s.lit = "..."
-			} else {
-				s.unread()
-				s.tok = ILLEGAL
-				s.lit = ".."
+				break
 			}
-			break
 		}
-		s.unread()
-		s.tok = DOT
+
+		s.tok = ILLEGAL
 		s.lit = "."
 
 	case '"':
 		s.unread()
-		return s.scanStringLiteral('"', false /* multiLine */)
-
-	case '`':
-		s.unread()
-		return s.scanStringLiteral('`', true /* multiLine */)
+		return s.scanStringLiteral()
 
 	case '#':
 		s.unread()
@@ -364,7 +349,7 @@ func (s *Scanner) scanIdentifier() Token {
 			break
 		}
 
-		if !unicode.IsLetter(ch) && !unicode.IsDigit(ch) && ch != '_' {
+		if !unicode.IsLetter(ch) && !unicode.IsDigit(ch) {
 			s.unread()
 			break
 		}
@@ -377,7 +362,7 @@ func (s *Scanner) scanIdentifier() Token {
 	return s.tok
 }
 
-func (s *Scanner) scanStringLiteral(endChar rune, multiLine bool) Token {
+func (s *Scanner) scanStringLiteral() Token {
 	// Create a buffer and read the current character into it.
 	var buf bytes.Buffer
 	buf.WriteRune(s.read())
@@ -386,7 +371,7 @@ func (s *Scanner) scanStringLiteral(endChar rune, multiLine bool) Token {
 	// newline, or EOF is read.
 	for {
 		ch := s.read()
-		if ch == errRune || ch == eofRune || (!multiLine && ch == '\n') {
+		if ch == errRune || ch == eofRune || ch == '\n' {
 			s.unread()
 			s.tok = ILLEGAL
 			break
@@ -394,38 +379,12 @@ func (s *Scanner) scanStringLiteral(endChar rune, multiLine bool) Token {
 
 		buf.WriteRune(ch)
 
-		if ch == endChar {
+		if ch == '"' {
 			s.tok = STRING
 			break
 		}
 	}
 
-	s.lit = buf.String()
-	return s.tok
-}
-
-func (s *Scanner) scanNumericLiteral() Token {
-	// Create a buffer and read the current character into it.
-	var buf bytes.Buffer
-	buf.WriteRune(s.read())
-
-	// Read every subsequent Unicode digit character into the buffer.
-	// Non-digit characters and EOF will cause the loop to exit.
-	for {
-		ch := s.read()
-		if ch == eofRune {
-			break
-		}
-
-		if !unicode.IsDigit(ch) {
-			s.unread()
-			break
-		}
-
-		buf.WriteRune(ch)
-	}
-
-	s.tok = NUMBER
 	s.lit = buf.String()
 	return s.tok
 }

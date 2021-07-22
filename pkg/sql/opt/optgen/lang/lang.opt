@@ -21,12 +21,13 @@
 #          example, []*DefineExpr and []TagExpr. Slice definitions are marked
 #          with a "Slice" tag, and have an Element field that specifies the
 #          type of slice elements. For example:
-#            [Slice] define Slice { Element Expr }
+#            [Slice] define List { Element Expr }
+
 
 # Root expression is always the top-most node in the AST.
 define Root {
     Defines DefineSet
-    Rules RuleSet
+    Rules   RuleSet
 }
 
 # type DefineSetExpr []*DefineExpr
@@ -43,9 +44,9 @@ define RuleSet {
 
 define Define {
     Comments Comments
-    Tags Tags
-    Name String
-    Fields DefineFields
+    Tags     Tags
+    Name     String
+    Fields   DefineFields
 }
 
 # type CommentsExpr []CommentExpr
@@ -79,81 +80,77 @@ define DefineFields {
 }
 
 define DefineField {
-    Comments Comments
     Name String
     Type String
 }
 
 define Rule {
     Comments Comments
-    Name String
-    Tags Tags
-    Match Func
-    Replace Expr
+    Name     String
+    Tags     Tags
+    Match    Match
+    Replace  Expr
 }
 
-[HasType]
-define Func {
-    Name Expr
-    Args Slice
-}
-
-# type NamesExpr []NameExpr
-[Slice]
-define Names {
-    Element Name
-}
-
-# type NameExpr string
-[Value]
-define Name {
-    Value string
-}
-
-[HasType]
-define And {
-    Left Expr
-    Right Expr
-}
-
-[HasType]
-define Not {
-    Input Expr
-}
-
-[HasType]
-define List {
-    Items Slice
-}
-
-define ListAny {
-}
-
-[HasType]
 define Bind {
-    Label String
+    Label  String
     Target Expr
 }
 
-[HasType]
-define Let {
-    Labels Strings
-    Target Expr
-    Result Ref
-}
-
-[HasType]
 define Ref {
     Label String
 }
 
-[HasType]
-define Any {
+define Match {
+    Names OpNames
+    Args  List
 }
 
-# type SliceExpr []Expr
+# type OpNamesExpr []OpNameExpr
 [Slice]
-define Slice {
+define OpNames {
+    Element OpName
+}
+
+# type OpNameExpr string
+[Value]
+define OpName {
+    Value string
+}
+
+define MatchAnd {
+    Left  Expr
+    Right Expr
+}
+
+define MatchInvoke {
+    FuncName String
+    Args     List
+}
+
+define MatchNot {
+    Input Expr
+}
+
+define MatchAny {
+}
+
+define MatchList {
+    MatchItem Expr
+}
+
+define Construct {
+    Name Expr
+    Args List
+}
+
+define ConstructList {
+    Items List
+}
+
+# type ListExpr []Expr
+[Slice]
+define List {
     Element Expr
 }
 
@@ -161,27 +158,4 @@ define Slice {
 [Value]
 define String {
     Value string
-}
-
-# type StringExpr string
-[Slice]
-define Strings {
-    Element String
-}
-
-# type NumberExpr int
-[Value]
-define Number {
-    Value int64
-}
-
-#
-# The below operators are never created by the parser, but are created by the
-# compiler, in order to make further processing of the tree easier.
-#
-
-[HasType]
-define CustomFunc {
-    Name Name
-    Args Slice
 }

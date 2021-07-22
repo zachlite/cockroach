@@ -8,11 +8,10 @@ maybe_ccache
 
 mkdir -p artifacts
 
-TESTTIMEOUT=24h
-
-run_json_test build/builder.sh \
-  stdbuf -oL -eL \
-  make testrace \
-  GOTESTFLAGS=-json \
-  PKG=./pkg/sql/logictest \
-  TESTTIMEOUT="${TESTTIMEOUT}"
+build/builder.sh env \
+	make testrace \
+	PKG=./pkg/sql/logictest \
+	TESTFLAGS='-v' \
+	2>&1 \
+	| tee artifacts/testlogicrace.log \
+	| go-test-teamcity

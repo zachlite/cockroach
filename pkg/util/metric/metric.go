@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package metric
 
@@ -18,12 +22,13 @@ import (
 	"time"
 
 	"github.com/VividCortex/ewma"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/codahale/hdrhistogram"
 	"github.com/gogo/protobuf/proto"
 	prometheusgo "github.com/prometheus/client_model/go"
-	metrics "github.com/rcrowley/go-metrics"
+	"github.com/rcrowley/go-metrics"
+
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const (
@@ -45,14 +50,6 @@ type Iterable interface {
 	GetName() string
 	// GetHelp returns the help text for the metric.
 	GetHelp() string
-	// GetMeasurement returns the label for the metric, which describes the entity
-	// it measures.
-	GetMeasurement() string
-	// GetUnit returns the unit that should be used to display the metric
-	// (e.g. in bytes).
-	GetUnit() Unit
-	// GetMetadata returns the metric's metadata, which can be used in charts.
-	GetMetadata() Metadata
 	// Inspect calls the given closure with each contained item.
 	Inspect(func(interface{}))
 }
@@ -75,19 +72,11 @@ type PrometheusExportable interface {
 	ToPrometheusMetric() *prometheusgo.Metric
 }
 
-// PrometheusIterable is an extension of PrometheusExportable to indicate that
-// this metric is comprised of children metrics which augment the parent's
-// label values.
-//
-// The motivating use-case for this interface is the existence of tenants. We'd
-// like to capture per-tenant metrics and expose them to prometheus while not
-// polluting the internal tsdb.
-type PrometheusIterable interface {
-	PrometheusExportable
-
-	// Each takes a slice of label pairs associated with the parent metric and
-	// calls the passed function with each of the children metrics.
-	Each([]*prometheusgo.LabelPair, func(metric *prometheusgo.Metric))
+// Metadata holds metadata about a metric. It must be embedded in
+// each metric object.
+type Metadata struct {
+	Name, Help string
+	labels     []*prometheusgo.LabelPair
 }
 
 // GetName returns the metric's name.
@@ -100,33 +89,15 @@ func (m *Metadata) GetHelp() string {
 	return m.Help
 }
 
-// GetMeasurement returns the entity measured by the metric.
-func (m *Metadata) GetMeasurement() string {
-	return m.Measurement
-}
-
-// GetUnit returns the metric's unit of measurement.
-func (m *Metadata) GetUnit() Unit {
-	return m.Unit
-}
-
-// GetLabels returns the metric's labels. For rationale behind the conversion
-// from metric.LabelPair to prometheusgo.LabelPair, see the LabelPair comment
-// in pkg/util/metric/metric.proto.
+// GetLabels returns the metric's labels.
 func (m *Metadata) GetLabels() []*prometheusgo.LabelPair {
-	lps := make([]*prometheusgo.LabelPair, len(m.Labels))
-	// x satisfies the field XXX_unrecognized in prometheusgo.LabelPair.
-	var x []byte
-	for i, v := range m.Labels {
-		lps[i] = &prometheusgo.LabelPair{Name: v.Name, Value: v.Value, XXX_unrecognized: x}
-	}
-	return lps
+	return m.labels
 }
 
 // AddLabel adds a label/value pair for this metric.
 func (m *Metadata) AddLabel(name, value string) {
-	m.Labels = append(m.Labels,
-		&LabelPair{
+	m.labels = append(m.labels,
+		&prometheusgo.LabelPair{
 			Name:  proto.String(exportedLabel(name)),
 			Value: proto.String(value),
 		})
@@ -136,19 +107,16 @@ var _ Iterable = &Gauge{}
 var _ Iterable = &GaugeFloat64{}
 var _ Iterable = &Counter{}
 var _ Iterable = &Histogram{}
-var _ Iterable = &Rate{}
 
 var _ json.Marshaler = &Gauge{}
 var _ json.Marshaler = &GaugeFloat64{}
 var _ json.Marshaler = &Counter{}
 var _ json.Marshaler = &Registry{}
-var _ json.Marshaler = &Rate{}
 
 var _ PrometheusExportable = &Gauge{}
 var _ PrometheusExportable = &GaugeFloat64{}
 var _ PrometheusExportable = &Counter{}
 var _ PrometheusExportable = &Histogram{}
-var _ PrometheusExportable = &Rate{}
 
 type periodic interface {
 	nextTick() time.Time
@@ -318,14 +286,6 @@ func (h *Histogram) ToPrometheusMetric() *prometheusgo.Metric {
 	}
 }
 
-// GetMetadata returns the metric's metadata including the Prometheus
-// MetricType.
-func (h *Histogram) GetMetadata() Metadata {
-	baseMetadata := h.Metadata
-	baseMetadata.MetricType = prometheusgo.MetricType_HISTOGRAM
-	return baseMetadata
-}
-
 // A Counter holds a single mutable atomic value.
 type Counter struct {
 	Metadata
@@ -365,14 +325,6 @@ func (c *Counter) ToPrometheusMetric() *prometheusgo.Metric {
 	return &prometheusgo.Metric{
 		Counter: &prometheusgo.Counter{Value: proto.Float64(float64(c.Counter.Count()))},
 	}
-}
-
-// GetMetadata returns the metric's metadata including the Prometheus
-// MetricType.
-func (c *Counter) GetMetadata() Metadata {
-	baseMetadata := c.Metadata
-	baseMetadata.MetricType = prometheusgo.MetricType_COUNTER
-	return baseMetadata
 }
 
 // A Gauge atomically stores a single integer value.
@@ -443,14 +395,6 @@ func (g *Gauge) ToPrometheusMetric() *prometheusgo.Metric {
 	}
 }
 
-// GetMetadata returns the metric's metadata including the Prometheus
-// MetricType.
-func (g *Gauge) GetMetadata() Metadata {
-	baseMetadata := g.Metadata
-	baseMetadata.MetricType = prometheusgo.MetricType_GAUGE
-	return baseMetadata
-}
-
 // A GaugeFloat64 atomically stores a single float64 value.
 type GaugeFloat64 struct {
 	Metadata
@@ -467,7 +411,7 @@ func (g *GaugeFloat64) GetType() *prometheusgo.MetricType {
 	return prometheusgo.MetricType_GAUGE.Enum()
 }
 
-// Inspect calls the given closure with itself.
+// Inspect calls the given closure with the empty string and itself.
 func (g *GaugeFloat64) Inspect(f func(interface{})) { f(g) }
 
 // MarshalJSON marshals to JSON.
@@ -482,17 +426,8 @@ func (g *GaugeFloat64) ToPrometheusMetric() *prometheusgo.Metric {
 	}
 }
 
-// GetMetadata returns the metric's metadata including the Prometheus
-// MetricType.
-func (g *GaugeFloat64) GetMetadata() Metadata {
-	baseMetadata := g.Metadata
-	baseMetadata.MetricType = prometheusgo.MetricType_GAUGE
-	return baseMetadata
-}
-
 // A Rate is a exponential weighted moving average.
 type Rate struct {
-	Metadata
 	mu       syncutil.Mutex // protects fields below
 	curSum   float64
 	wrapped  ewma.MovingAverage
@@ -502,46 +437,18 @@ type Rate struct {
 
 // NewRate creates an EWMA rate on the given timescale. Timescales at
 // or below 2s are illegal and will cause a panic.
-func NewRate(metadata Metadata, timescale time.Duration) *Rate {
+func NewRate(timescale time.Duration) *Rate {
 	const tickInterval = time.Second
 	if timescale <= 2*time.Second {
 		panic(fmt.Sprintf("EWMA with per-second ticks makes no sense on timescale %s", timescale))
 	}
 	avgAge := float64(timescale) / float64(2*tickInterval)
+
 	return &Rate{
-		Metadata: metadata,
 		interval: tickInterval,
 		nextT:    now(),
 		wrapped:  ewma.NewMovingAverage(avgAge),
 	}
-}
-
-// GetType returns the prometheus type enum for this metric.
-func (e *Rate) GetType() *prometheusgo.MetricType {
-	return prometheusgo.MetricType_GAUGE.Enum()
-}
-
-// Inspect calls the given closure with itself.
-func (e *Rate) Inspect(f func(interface{})) { f(e) }
-
-// MarshalJSON marshals to JSON.
-func (e *Rate) MarshalJSON() ([]byte, error) {
-	return json.Marshal(e.Value())
-}
-
-// ToPrometheusMetric returns a filled-in prometheus metric of the right type.
-func (e *Rate) ToPrometheusMetric() *prometheusgo.Metric {
-	return &prometheusgo.Metric{
-		Gauge: &prometheusgo.Gauge{Value: proto.Float64(e.Value())},
-	}
-}
-
-// GetMetadata returns the metric's metadata including the Prometheus
-// MetricType.
-func (e *Rate) GetMetadata() Metadata {
-	baseMetadata := e.Metadata
-	baseMetadata.MetricType = prometheusgo.MetricType_GAUGE
-	return baseMetadata
 }
 
 // Value returns the current value of the Rate.

@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package protoutil_test
 
@@ -16,14 +20,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
-	"github.com/cockroachdb/cockroach/pkg/gossip"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/gogo/protobuf/proto"
+
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
 func TestCloneProto(t *testing.T) {
@@ -40,15 +45,15 @@ func TestCloneProto(t *testing.T) {
 
 		// Cloneable types. This includes all types for which a
 		// protoutil.Clone call exists in the codebase as of 2016-11-21.
-		{&zonepb.ZoneConfig{}, false},
+		{&config.ZoneConfig{}, false},
 		{&gossip.Info{}, false},
 		{&gossip.BootstrapInfo{}, false},
-		{&descpb.IndexDescriptor{}, false},
+		{&sqlbase.IndexDescriptor{}, false},
 		{&roachpb.SplitTrigger{}, false},
 		{&roachpb.Value{}, false},
-		{&kvserverpb.ReplicaState{}, false},
+		{&storagebase.ReplicaState{}, false},
 		{&roachpb.RangeDescriptor{}, false},
-		{&descpb.PartitioningDescriptor{}, false},
+		{&sqlbase.PartitioningDescriptor{}, false},
 	}
 	for _, tc := range testCases {
 		var clone protoutil.Message

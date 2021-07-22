@@ -1,3 +1,5 @@
+# LogicTest: default parallel-stmts distsql
+
 # Basic IPv4 tests
 
 query T
@@ -24,11 +26,6 @@ query T
 SELECT '0.0.0.0':::INET;
 ----
 0.0.0.0
-
-query T
-SELECT '::/0'::inet::text::inet;
-----
-::/0
 
 # Basic IPv6 tests
 
@@ -871,9 +868,3 @@ query T
 SELECT text('::ffff:192.168.0.1/24'::INET)
 ----
 ::ffff:192.168.0.1/24
-
-# Verify the inet datum gets serialized correctly for distsql.
-query T
-SELECT host(max('192.168.0.2/24'::INET)) FROM (VALUES (1)) AS t(x)
-----
-192.168.0.2

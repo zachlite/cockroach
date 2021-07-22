@@ -1,17 +1,21 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package util
 
 import (
-	"fmt"
+	fmt "fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -29,7 +33,7 @@ func TestFastIntMap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%d-%d", tc.keyRange, tc.valRange), func(t *testing.T) {
-			t.Parallel() // SAFE FOR TESTING (this comment is for the linter)
+			t.Parallel()
 			rng, _ := randutil.NewPseudoRand()
 			var fm FastIntMap
 			m := make(map[int]int)
@@ -44,10 +48,6 @@ func TestFastIntMap(t *testing.T) {
 							k, v, ok, expV, expOk,
 						)
 					}
-				}
-
-				if e := fm.Empty(); e != (len(m) == 0) {
-					t.Fatalf("incorrect Empty: %t expected %t (%+v %v)", e, len(m) == 0, fm, m)
 				}
 
 				if l := fm.Len(); l != len(m) {

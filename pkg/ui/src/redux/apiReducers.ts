@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 import { combineReducers } from "redux";
 import moment from "moment";
@@ -21,7 +11,7 @@ import {
 import * as api from "src/util/api";
 import { VersionList } from "src/interfaces/cockroachlabs";
 import { versionCheck } from "src/util/cockroachlabsAPI";
-import { INodeStatus, RollupStoreMetrics } from "src/util/proto";
+import { NodeStatus$Properties, RollupStoreMetrics } from "src/util/proto";
 import * as protos from "src/js/protos";
 
 // The primary export of this file are the "refresh" functions of the various
@@ -50,8 +40,10 @@ export const healthReducerObj = new CachedDataReducer(
 );
 export const refreshHealth = healthReducerObj.refresh;
 
-function rollupStoreMetrics(res: api.NodesResponseMessage): INodeStatus[] {
-  return _.map(res.nodes, (node) => {
+function rollupStoreMetrics(
+  res: api.NodesResponseMessage,
+): NodeStatus$Properties[] {
+  return _.map(res.nodes, node => {
     RollupStoreMetrics(node);
     return node;
   });
@@ -75,11 +67,7 @@ export const refreshRaft = raftReducerObj.refresh;
 export const versionReducerObj = new CachedDataReducer(versionCheck, "version");
 export const refreshVersion = versionReducerObj.refresh;
 
-export const locationsReducerObj = new CachedDataReducer(
-  api.getLocations,
-  "locations",
-  moment.duration(10, "m"),
-);
+export const locationsReducerObj = new CachedDataReducer(api.getLocations, "locations", moment.duration(10, "m"));
 export const refreshLocations = locationsReducerObj.refresh;
 
 const databasesReducerObj = new CachedDataReducer(
@@ -124,9 +112,7 @@ const tableStatsReducerObj = new KeyedCachedDataReducer(
 export const refreshTableStats = tableStatsReducerObj.refresh;
 
 const nonTableStatsReducerObj = new CachedDataReducer(
-  api.getNonTableStats,
-  "nonTableStats",
-  moment.duration(1, "m"),
+  api.getNonTableStats, "nonTableStats", moment.duration(1, "m"),
 );
 export const refreshNonTableStats = nonTableStatsReducerObj.refresh;
 
@@ -144,14 +130,8 @@ export const livenessReducerObj = new CachedDataReducer(
 );
 export const refreshLiveness = livenessReducerObj.refresh;
 
-export const jobsKey = (
-  status: string,
-  type: protos.cockroach.sql.jobs.jobspb.Type,
-  limit: number,
-) =>
-  `${encodeURIComponent(status)}/${encodeURIComponent(
-    type.toString(),
-  )}/${encodeURIComponent(limit.toString())}`;
+export const jobsKey = (status: string, type: protos.cockroach.sql.jobs.Type, limit: number) =>
+  `${encodeURIComponent(status)}/${encodeURIComponent(type.toString())}/${encodeURIComponent(limit.toString())}`;
 
 const jobsRequestKey = (req: api.JobsRequestMessage): string =>
   jobsKey(req.status, req.type, req.limit);
@@ -164,29 +144,13 @@ const jobsReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshJobs = jobsReducerObj.refresh;
 
-export const jobRequestKey = (req: api.JobRequestMessage): string =>
-  `${req.job_id}`;
+export const queryToID = (req: api.QueryPlanRequestMessage): string => req.query;
 
-const jobReducerObj = new KeyedCachedDataReducer(
-  api.getJob,
-  "job",
-  jobRequestKey,
-  moment.duration(10, "s"),
-);
-export const refreshJob = jobReducerObj.refresh;
-
-export const queryToID = (req: api.QueryPlanRequestMessage): string =>
-  req.query;
-
-const queryPlanReducerObj = new CachedDataReducer(
-  api.getQueryPlan,
-  "queryPlan",
-);
+const queryPlanReducerObj = new CachedDataReducer(api.getQueryPlan, "queryPlan");
 export const refreshQueryPlan = queryPlanReducerObj.refresh;
 
-export const problemRangesRequestKey = (
-  req: api.ProblemRangesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "all" : req.node_id);
+export const problemRangesRequestKey = (req: api.ProblemRangesRequestMessage): string =>
+  _.isEmpty(req.node_id) ? "all" : req.node_id;
 
 const problemRangesReducerObj = new KeyedCachedDataReducer(
   api.getProblemRanges,
@@ -197,9 +161,8 @@ const problemRangesReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshProblemRanges = problemRangesReducerObj.refresh;
 
-export const certificatesRequestKey = (
-  req: api.CertificatesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "none" : req.node_id);
+export const certificatesRequestKey = (req: api.CertificatesRequestMessage): string =>
+  _.isEmpty(req.node_id) ? "none" : req.node_id;
 
 const certificatesReducerObj = new KeyedCachedDataReducer(
   api.getCertificates,
@@ -221,9 +184,8 @@ const rangeReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshRange = rangeReducerObj.refresh;
 
-export const allocatorRangeRequestKey = (
-  req: api.AllocatorRangeRequestMessage,
-): string => (_.isNil(req.range_id) ? "none" : req.range_id.toString());
+export const allocatorRangeRequestKey = (req: api.AllocatorRangeRequestMessage): string =>
+  _.isNil(req.range_id) ? "none" : req.range_id.toString();
 
 const allocatorRangeReducerObj = new KeyedCachedDataReducer(
   api.getAllocatorRange,
@@ -246,6 +208,18 @@ const rangeLogReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshRangeLog = rangeLogReducerObj.refresh;
 
+export const commandQueueRequestKey = (req: api.CommandQueueRequestMessage): string =>
+  _.isNil(req.range_id) ? "none" : req.range_id.toString();
+
+const commandQueueReducerObj = new KeyedCachedDataReducer(
+  api.getCommandQueue,
+  "commandQueue",
+  commandQueueRequestKey,
+  moment.duration(0),
+  moment.duration(1, "m"),
+);
+export const refreshCommandQueue = commandQueueReducerObj.refresh;
+
 export const settingsReducerObj = new CachedDataReducer(
   api.getSettings,
   "settings",
@@ -254,66 +228,11 @@ export const settingsReducerObj = new CachedDataReducer(
 );
 export const refreshSettings = settingsReducerObj.refresh;
 
-export const sessionsReducerObj = new CachedDataReducer(
-  api.getSessions,
-  "sessions",
-  // The sessions page is a real time view, so need a fairly quick update pace.
-  moment.duration(10, "s"),
-  moment.duration(1, "m"),
-);
-export const invalidateSessions = sessionsReducerObj.invalidateData;
-export const refreshSessions = sessionsReducerObj.refresh;
-
-export const storesRequestKey = (req: api.StoresRequestMessage): string =>
-  _.isEmpty(req.node_id) ? "none" : req.node_id;
-
-const storesReducerObj = new KeyedCachedDataReducer(
-  api.getStores,
-  "stores",
-  storesRequestKey,
-  moment.duration(0),
-  moment.duration(1, "m"),
-);
-export const refreshStores = storesReducerObj.refresh;
-
-const queriesReducerObj = new CachedDataReducer(
-  api.getStatements,
-  "statements",
-  moment.duration(5, "m"),
-  moment.duration(1, "m"),
-);
-export const invalidateStatements = queriesReducerObj.invalidateData;
-export const refreshStatements = queriesReducerObj.refresh;
-
-const statementDiagnosticsReportsReducerObj = new CachedDataReducer(
-  api.getStatementDiagnosticsReports,
-  "statementDiagnosticsReports",
-  moment.duration(5, "m"),
-  moment.duration(1, "m"),
-);
-export const refreshStatementDiagnosticsRequests =
-  statementDiagnosticsReportsReducerObj.refresh;
-export const invalidateStatementDiagnosticsRequests =
-  statementDiagnosticsReportsReducerObj.invalidateData;
-
-const dataDistributionReducerObj = new CachedDataReducer(
-  api.getDataDistribution,
-  "dataDistribution",
-  moment.duration(1, "m"),
-);
-export const refreshDataDistribution = dataDistributionReducerObj.refresh;
-
-const metricMetadataReducerObj = new CachedDataReducer(
-  api.getAllMetricMetadata,
-  "metricMetadata",
-);
-export const refreshMetricMetadata = metricMetadataReducerObj.refresh;
-
 export interface APIReducersState {
   cluster: CachedDataReducerState<api.ClusterResponseMessage>;
   events: CachedDataReducerState<api.EventsResponseMessage>;
   health: HealthState;
-  nodes: CachedDataReducerState<INodeStatus[]>;
+  nodes: CachedDataReducerState<NodeStatus$Properties[]>;
   raft: CachedDataReducerState<api.RaftDebugResponseMessage>;
   version: CachedDataReducerState<VersionList>;
   locations: CachedDataReducerState<api.LocationsResponseMessage>;
@@ -325,20 +244,14 @@ export interface APIReducersState {
   logs: CachedDataReducerState<api.LogEntriesResponseMessage>;
   liveness: CachedDataReducerState<api.LivenessResponseMessage>;
   jobs: KeyedCachedDataReducerState<api.JobsResponseMessage>;
-  job: KeyedCachedDataReducerState<api.JobResponseMessage>;
   queryPlan: CachedDataReducerState<api.QueryPlanResponseMessage>;
   problemRanges: KeyedCachedDataReducerState<api.ProblemRangesResponseMessage>;
   certificates: KeyedCachedDataReducerState<api.CertificatesResponseMessage>;
   range: KeyedCachedDataReducerState<api.RangeResponseMessage>;
   allocatorRange: KeyedCachedDataReducerState<api.AllocatorRangeResponseMessage>;
   rangeLog: KeyedCachedDataReducerState<api.RangeLogResponseMessage>;
-  sessions: CachedDataReducerState<api.SessionsResponseMessage>;
+  commandQueue: KeyedCachedDataReducerState<api.CommandQueueResponseMessage>;
   settings: CachedDataReducerState<api.SettingsResponseMessage>;
-  stores: KeyedCachedDataReducerState<api.StoresResponseMessage>;
-  statements: CachedDataReducerState<api.StatementsResponseMessage>;
-  dataDistribution: CachedDataReducerState<api.DataDistributionResponseMessage>;
-  metricMetadata: CachedDataReducerState<api.MetricMetadataResponseMessage>;
-  statementDiagnosticsReports: CachedDataReducerState<api.StatementDiagnosticsReportsResponseMessage>;
 }
 
 export const apiReducersReducer = combineReducers<APIReducersState>({
@@ -350,30 +263,21 @@ export const apiReducersReducer = combineReducers<APIReducersState>({
   [versionReducerObj.actionNamespace]: versionReducerObj.reducer,
   [locationsReducerObj.actionNamespace]: locationsReducerObj.reducer,
   [databasesReducerObj.actionNamespace]: databasesReducerObj.reducer,
-  [databaseDetailsReducerObj.actionNamespace]:
-    databaseDetailsReducerObj.reducer,
+  [databaseDetailsReducerObj.actionNamespace]: databaseDetailsReducerObj.reducer,
   [tableDetailsReducerObj.actionNamespace]: tableDetailsReducerObj.reducer,
   [tableStatsReducerObj.actionNamespace]: tableStatsReducerObj.reducer,
   [nonTableStatsReducerObj.actionNamespace]: nonTableStatsReducerObj.reducer,
   [logsReducerObj.actionNamespace]: logsReducerObj.reducer,
   [livenessReducerObj.actionNamespace]: livenessReducerObj.reducer,
   [jobsReducerObj.actionNamespace]: jobsReducerObj.reducer,
-  [jobReducerObj.actionNamespace]: jobReducerObj.reducer,
   [queryPlanReducerObj.actionNamespace]: queryPlanReducerObj.reducer,
   [problemRangesReducerObj.actionNamespace]: problemRangesReducerObj.reducer,
   [certificatesReducerObj.actionNamespace]: certificatesReducerObj.reducer,
   [rangeReducerObj.actionNamespace]: rangeReducerObj.reducer,
   [allocatorRangeReducerObj.actionNamespace]: allocatorRangeReducerObj.reducer,
   [rangeLogReducerObj.actionNamespace]: rangeLogReducerObj.reducer,
+  [commandQueueReducerObj.actionNamespace]: commandQueueReducerObj.reducer,
   [settingsReducerObj.actionNamespace]: settingsReducerObj.reducer,
-  [sessionsReducerObj.actionNamespace]: sessionsReducerObj.reducer,
-  [storesReducerObj.actionNamespace]: storesReducerObj.reducer,
-  [queriesReducerObj.actionNamespace]: queriesReducerObj.reducer,
-  [dataDistributionReducerObj.actionNamespace]:
-    dataDistributionReducerObj.reducer,
-  [metricMetadataReducerObj.actionNamespace]: metricMetadataReducerObj.reducer,
-  [statementDiagnosticsReportsReducerObj.actionNamespace]:
-    statementDiagnosticsReportsReducerObj.reducer,
 });
 
 export { CachedDataReducerState, KeyedCachedDataReducerState };

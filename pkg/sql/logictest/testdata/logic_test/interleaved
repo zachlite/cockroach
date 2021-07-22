@@ -1,4 +1,5 @@
-# LogicTest: !3node-tenant(49854)
+# LogicTest: default parallel-stmts distsql
+
 # Grandparent table
 statement ok
 CREATE TABLE p2 (i INT PRIMARY KEY, s STRING)
@@ -52,6 +53,19 @@ SELECT * FROM p2
 3  3
 5  5
 7  7
+
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM p1_0]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+fetched: /p1_0/primary/2/'2'/s2 -> /'2.01'
+fetched: /p1_0/primary/2/'2'/d -> 2
+output row: [2 '2' '2.01' 2]
+fetched: /p1_0/primary/3/'3'/s2 -> /'3.01'
+fetched: /p1_0/primary/3/'3'/d -> 3
+output row: [3 '3' '3.01' 3]
+fetched: /p1_0/primary/5/'5' -> NULL
+output row: [5 '5' NULL NULL]
 
 query ITTT rowsort
 SELECT * FROM p1_0
@@ -114,17 +128,6 @@ SELECT * FROM p0
 3  3  3.0  3
 5  5  5.0  5
 
-# check that a column backfill on an interleaved table works well.
-statement ok
-ALTER TABLE p0 ADD e INT DEFAULT 7
-
-query ITTTI rowsort
-SELECT * FROM p0
-----
-2  2  2.0  2 7
-3  3  3.0  3 7
-5  5  5.0  5 7
-
 # Check that fast delete is disabled when run on a table with child interleaves
 statement ok
 DELETE FROM p2
@@ -139,47 +142,34 @@ SELECT * FROM p1_0
 2  2  2.01  2
 7  5  7.01  7.0
 
-# check that a column backfill on an interleaved table works well.
-statement ok
-ALTER TABLE p1_0 ADD e INT DEFAULT 7
-
-query ITTTI rowsort
-SELECT * FROM p1_0
-----
-2  2  2.01  2   7
-7  5  7.01  7.0 7
-
-query ITTTI rowsort
+query ITTT rowsort
 SELECT * FROM p0
 ----
-2  2  2.0  2 7
-3  3  3.0  3 7
-5  5  5.0  5 7
+2  2  2.0  2
+3  3  3.0  3
+5  5  5.0  5
 
 statement ok
 DROP INDEX p0@p0i
 
-query ITTTI rowsort
+query ITTT rowsort
 SELECT * FROM p0
 ----
-2  2  2.0  2 7
-3  3  3.0  3 7
-5  5  5.0  5 7
+2  2  2.0  2
+3  3  3.0  3
+5  5  5.0  5
 
 statement ok
 DROP TABLE p0
 
-query ITTTI rowsort
+query ITTT rowsort
 SELECT * FROM p1_0
 ----
-2  2  2.01  2   7
-7  5  7.01  7.0 7
-
-statement error "p2" is interleaved by table "p1_0"
-TRUNCATE TABLE p2
+2  2  2.01  2
+7  5  7.01  7.0
 
 statement ok
-TRUNCATE TABLE p2 CASCADE
+TRUNCATE TABLE p2
 
 statement error unimplemented
 DROP TABLE p2
@@ -188,7 +178,7 @@ statement ok
 CREATE INDEX p1_s2 ON p1_1 (s2)
 
 # p1_0 is truncated when p2 is truncated.
-query ITTTI rowsort
+query ITTT rowsort
 SELECT * FROM p1_0
 ----
 
@@ -207,8 +197,7 @@ CREATE TABLE all_interleaves (
   c INT,
   d INT,
   INDEX (c),
-  UNIQUE INDEX (d),
-  FAMILY "primary" (b, c, d)
+  UNIQUE INDEX (d)
 ) INTERLEAVE IN PARENT p1_1 (b)
 
 statement ok
@@ -220,17 +209,17 @@ CREATE UNIQUE INDEX ON all_interleaves (d, c) INTERLEAVE IN PARENT p1_1 (d)
 query TT
 SHOW CREATE TABLE all_interleaves
 ----
-all_interleaves                         CREATE TABLE public.all_interleaves (
-                                        b INT8 NOT NULL,
-                                        c INT8 NULL,
-                                        d INT8 NULL,
-                                        CONSTRAINT "primary" PRIMARY KEY (b ASC),
-                                        INDEX all_interleaves_c_idx (c ASC),
-                                        UNIQUE INDEX all_interleaves_d_key (d ASC),
-                                        INDEX all_interleaves_c_d_idx (c ASC, d ASC) INTERLEAVE IN PARENT public.p1_1 (c),
-                                        UNIQUE INDEX all_interleaves_d_c_key (d ASC, c ASC) INTERLEAVE IN PARENT public.p1_1 (d),
-                                        FAMILY "primary" (b, c, d)
-) INTERLEAVE IN PARENT public.p1_1 (b)
+all_interleaves   CREATE TABLE all_interleaves (
+                    b INT NOT NULL,
+                    c INT NULL,
+                    d INT NULL,
+                    CONSTRAINT "primary" PRIMARY KEY (b ASC),
+                    INDEX all_interleaves_c_idx (c ASC),
+                    UNIQUE INDEX all_interleaves_d_key (d ASC),
+                    INDEX all_interleaves_c_d_idx (c ASC, d ASC) INTERLEAVE IN PARENT p1_1 (c),
+                    UNIQUE INDEX all_interleaves_d_c_key (d ASC, c ASC) INTERLEAVE IN PARENT p1_1 (d),
+                    FAMILY "primary" (b, c, d)
+                  ) INTERLEAVE IN PARENT p1_1 (b)
 
 statement error pgcode 42P01 relation "missing" does not exist
 CREATE TABLE err (f FLOAT PRIMARY KEY) INTERLEAVE IN PARENT missing (f)
@@ -318,6 +307,13 @@ SELECT * FROM orders WHERE customer = 1 AND id = 1000
 ----
 1 1000 100.00000
 
+query TTT
+EXPLAIN SELECT * FROM orders WHERE customer = 1 AND id = 1000
+----
+scan  ·      ·
+·     table  orders@primary
+·     spans  /1/#/66/1/1000-/1/#/66/1/1000/#
+
 # Check that interleaving can occur across databases
 statement ok
 CREATE DATABASE other; CREATE TABLE other.foo(x INT PRIMARY KEY);
@@ -326,8 +322,8 @@ CREATE DATABASE other; CREATE TABLE other.foo(x INT PRIMARY KEY);
 query TT
 SHOW CREATE TABLE interdb
 ----
-interdb                                      CREATE TABLE public.interdb (
-                                             x INT8 NOT NULL,
+interdb                                      CREATE TABLE interdb (
+                                             x INT NOT NULL,
                                              CONSTRAINT "primary" PRIMARY KEY (x ASC),
                                              FAMILY "primary" (x)
 ) INTERLEAVE IN PARENT other.public.foo (x)
@@ -337,7 +333,7 @@ CREATE TABLE t1 (id1 INT PRIMARY KEY, id2 INT, id3 INT);
 
 statement ok
 CREATE INDEX c on t1 (id2)
-   STORING (id3)
+   STORING (id1,id3)
    INTERLEAVE in PARENT t1 (id2);
 
 statement ok
@@ -369,24 +365,25 @@ INSERT INTO p20067 VALUES (1, 'John Doe');
 INSERT INTO c20067 VALUES (1, 1, 'John Doe Junior');
 COMMIT;
 
-statement error duplicate key value violates unique constraint "uq_name"\nDETAIL: Key \(name\)=\('John Doe Junior'\) already exists\.
+statement error duplicate key value \(name\)=\('John Doe Junior'\) violates unique constraint "uq_name"
 INSERT INTO c20067 VALUES (2, 1, 'John Doe Junior')
 
-statement error duplicate key value violates unique constraint "uq_name"\nDETAIL: Key \(name\)=\('John Doe Junior'\) already exists\.
+statement error duplicate key value \(name\)=\('John Doe Junior'\) violates unique constraint "uq_name"
 BEGIN; INSERT INTO p20067 VALUES (2, 'John Doe'); INSERT INTO c20067 VALUES (2, 1, 'John Doe Junior'); END;
 
 # End the last transaction.
 statement ok
 END
 
-statement error duplicate key value violates unique constraint "primary"\nDETAIL: Key \(p_id,c_id\)=\(1,1\) already exists\.
+statement error duplicate key value \(p_id,c_id\)=\(1,1\) violates unique constraint "primary"
 INSERT INTO c20067 VALUES (1, 1, 'John Doe')
 
 # Regression test for #26756: ensure that interleaved table joins don't get
 # planned incorrectly given a merge join ordering caused by a constant value
 # constraint on a non-interleaved column.
 
-subtest join_on_other_columns
+subtest interleaved_join_on_other_columns
+
 statement ok
 CREATE TABLE users (id INT PRIMARY KEY)
 
@@ -403,128 +400,3 @@ query I
 SELECT count(*) FROM users JOIN documents ON users.id=documents.user_id WHERE documents.id=0
 ----
 1
-
-# Regression test for #44158: ensure we can delete many thousands of rows from
-# interleaved child tables.
-
-subtest interleaved_delete_many_rows_child_tables
-statement ok
-CREATE TABLE big_interleave_grandparent (x INT PRIMARY KEY);
-
-statement ok
-CREATE TABLE big_interleave_parent (x INT, y INT, PRIMARY KEY (x, y)) INTERLEAVE IN PARENT big_interleave_grandparent(x);
-
-statement ok
-ALTER TABLE big_interleave_parent ADD CONSTRAINT fk FOREIGN KEY (x) REFERENCES big_interleave_grandparent(x) ON DELETE CASCADE;
-
-statement ok
-CREATE TABLE big_interleave_child (x INT, y INT, z INT, PRIMARY KEY (x, y, z)) INTERLEAVE IN PARENT big_interleave_parent(x, y);
-
-statement ok
-ALTER TABLE big_interleave_child ADD CONSTRAINT fk FOREIGN KEY (x, y) REFERENCES big_interleave_parent(x, y) ON DELETE CASCADE;
-
-statement ok
-INSERT INTO big_interleave_grandparent VALUES (1);
-
-statement ok
-INSERT INTO big_interleave_parent (SELECT 1, id FROM generate_series(1, 20) AS id);
-
-statement ok
-INSERT INTO big_interleave_child (x,y,z) SELECT 1, p.id, q.id FROM (SELECT generate_series(1,17) as id) p, (SELECT generate_series (1,897) as id) q;
-
-statement ok
-DELETE FROM big_interleave_grandparent WHERE x = 1;
-
-query III
-SELECT
-  (SELECT count(*) FROM big_interleave_grandparent)
- ,(SELECT count(*) FROM big_interleave_parent)
- ,(SELECT count(*) FROM big_interleave_child)
-;
-----
-0 0 0
-
-# test for #56579: ensure that deprecation notice is present
-
-subtest interleaved_deprecation_notice
-statement ok
-CREATE TABLE interleave_parent (x INT PRIMARY KEY);
-
-statement notice NOTICE: interleaved tables and interleaved indexes are deprecated in 20.2 and will be removed in 21.2\nHINT: .*52009.*
-CREATE TABLE interleave_create_notice (x INT, y INT, s STRING, PRIMARY KEY (x, y)) INTERLEAVE IN PARENT interleave_parent(x);
-
-
-statement notice NOTICE: interleaved tables and interleaved indexes are deprecated in 20.2 and will be removed in 21.2\nHINT: .*52009.*
-CREATE INDEX interleave_index ON interleave_create_notice (x, s) INTERLEAVE IN PARENT interleave_parent(x);
-
-statement ok
-CREATE TABLE interleave_pk_notice (x INT NOT NULL, y INT);
-
-statement notice NOTICE: interleaved tables and interleaved indexes are deprecated in 20.2 and will be removed in 21.2\nHINT: .*52009.*
-ALTER TABLE interleave_pk_notice ALTER PRIMARY KEY USING COLUMNS (x) INTERLEAVE IN PARENT interleave_parent(x);
-
-statement ok
-SET CLUSTER SETTING sql.defaults.interleaved_tables.enabled = false
-
-statement error interleaved tables and interleaved indexes are disabled
-CREATE TABLE willfail (x INT, y INT, s STRING, PRIMARY KEY (x, y)) INTERLEAVE IN PARENT interleave_parent(x);
-
-statement error interleaved tables and interleaved indexes are disabled
-CREATE INDEX willfail ON interleave_create_notice (x, s) INTERLEAVE IN PARENT interleave_parent(x);
-
-statement error interleaved tables and interleaved indexes are disabled
-ALTER TABLE interleave_pk_notice ALTER PRIMARY KEY USING COLUMNS (x) INTERLEAVE IN PARENT interleave_parent(x);
-
-statement ok
-SET CLUSTER SETTING sql.defaults.interleaved_tables.enabled = true
-
-# Interleaved index as non-primary one check
-statement ok
-CREATE TABLE parent(x int, y int);
-
-statement ok
-CREATE TABLE child(x int, y int, z int );
-
-statement ok
-CREATE INDEX NIINDX ON PARENT(x,y);
-
-statement ok
-CREATE INDEX NIINDX2 ON CHILD(z);
-
-statement ok
-CREATE INDEX NIINDX3 ON CHILD(z);
-
-statement ok
-CREATE INDEX IINDX ON CHILD(rowid,x,y,z) INTERLEAVE IN PARENT PARENT(rowid);
-
-# Child in different schema then parent
-statement ok
-CREATE TABLE parentDS (k STRING PRIMARY KEY);
-
-statement ok
-CREATE SCHEMA child_schema;
-
-statement ok
-CREATE TABLE child_schema.child (ck INT8 PRIMARY KEY, k STRING NOT NULL UNIQUE);
-
-statement ok
-CREATE INDEX interl ON child_schema.child (k) INTERLEAVE IN PARENT parentDS (k);
-
-query TTTTTTT
-select * from "".crdb_internal.interleaved;
-----
-test  public        p1_1                      p1_id                    test   public  p1_1
-test  public        all_interleaves           primary                  test   public  p1_1
-test  public        all_interleaves           all_interleaves_c_d_idx  test   public  p1_1
-test  public        all_interleaves           all_interleaves_d_c_key  test   public  p1_1
-test  public        orders                    primary                  test   public  customers
-test  public        interdb                   primary                  other  public  foo
-test  public        c20067                    primary                  test   public  p20067
-test  public        documents                 primary                  test   public  users
-test  public        big_interleave_parent     primary                  test   public  big_interleave_grandparent
-test  public        big_interleave_child      primary                  test   public  big_interleave_parent
-test  public        interleave_create_notice  primary                  test   public  interleave_parent
-test  public        interleave_create_notice  interleave_index         test   public  interleave_parent
-test  public        interleave_pk_notice      primary                  test   public  interleave_parent
-test  public        child                     iindx                    test   public  parent
-test  child_schema  child                     interl                   test   public  parentds

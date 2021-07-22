@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
@@ -28,16 +32,14 @@ import (
 	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/acceptance/localcluster"
-	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors/oserror"
 )
 
-var workers = flag.Int("w", 2*runtime.GOMAXPROCS(0), "number of workers")
+var workers = flag.Int("w", 2*runtime.NumCPU(), "number of workers")
 var monkeys = flag.Int("m", 3, "number of monkeys")
 var numNodes = flag.Int("n", 4, "number of nodes")
 var numAccounts = flag.Int("a", 1e5, "number of accounts")
@@ -112,7 +114,7 @@ func (z *zeroSum) run(workers, monkeys int) {
 func (z *zeroSum) setup() uint32 {
 	db := z.Nodes[0].DB()
 	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS zerosum"); err != nil {
-		log.Fatalf(context.Background(), "%v", err)
+		log.Fatal(context.Background(), err)
 	}
 
 	accounts := `
@@ -122,7 +124,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 )
 `
 	if _, err := db.Exec(accounts); err != nil {
-		log.Fatalf(context.Background(), "%v", err)
+		log.Fatal(context.Background(), err)
 	}
 
 	tableIDQuery := `
@@ -132,7 +134,7 @@ SELECT tables.id FROM system.namespace tables
 `
 	var tableID uint32
 	if err := db.QueryRow(tableIDQuery, "zerosum", "accounts").Scan(&tableID); err != nil {
-		log.Fatalf(context.Background(), "%v", err)
+		log.Fatal(context.Background(), err)
 	}
 	return tableID
 }
@@ -152,7 +154,7 @@ func (z *zeroSum) maybeLogError(err error) {
 	if localcluster.IsUnavailableError(err) || strings.Contains(err.Error(), "range is frozen") {
 		return
 	}
-	log.Errorf(context.Background(), "%v", err)
+	log.Error(context.Background(), err)
 	atomic.AddUint64(&z.stats.errors, 1)
 }
 
@@ -183,7 +185,7 @@ func (z *zeroSum) worker() {
 				var id uint64
 				var balance int64
 				if err = rows.Scan(&id, &balance); err != nil {
-					log.Fatalf(context.Background(), "%v", err)
+					log.Fatal(context.Background(), err)
 				}
 				switch id {
 				case from:
@@ -218,7 +220,7 @@ func (z *zeroSum) monkey(tableID uint32, d time.Duration) {
 	for {
 		time.Sleep(time.Duration(rand.Float64() * float64(d)))
 
-		key := keys.SystemSQLCodec.TablePrefix(tableID)
+		key := keys.MakeTablePrefix(tableID)
 		key = encoding.EncodeVarintAscending(key, int64(zipf.Uint64()))
 
 		switch r.Intn(2) {
@@ -331,7 +333,7 @@ func (z *zeroSum) rangeInfo() (int, []int) {
 		z.maybeLogError(err)
 		return -1, replicas
 	}
-	rows, err := db.Query(`SELECT array_length(replicas, 1) FROM crdb_internal.ranges`)
+	rows, err := db.Query(`SELECT ARRAY_LENGTH(replicas, 1) FROM crdb_internal.ranges`)
 	if err != nil {
 		z.maybeLogError(err)
 		return -1, replicas
@@ -416,7 +418,7 @@ func main() {
 
 	cockroachBin := func() string {
 		bin := "./cockroach"
-		if _, err := os.Stat(bin); oserror.IsNotExist(err) {
+		if _, err := os.Stat(bin); os.IsNotExist(err) {
 			bin = "cockroach"
 		} else if err != nil {
 			panic(err)
@@ -439,9 +441,9 @@ func main() {
 	c := &localcluster.LocalCluster{Cluster: localcluster.New(cfg)}
 	defer c.Close()
 
-	log.SetExitFunc(false /* hideStack */, func(code exit.Code) {
+	log.SetExitFunc(func(code int) {
 		c.Close()
-		exit.WithCode(code)
+		os.Exit(code)
 	})
 
 	signalCh := make(chan os.Signal, 1)

@@ -12,18 +12,15 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	tests := []struct {
 		stmt  string
@@ -43,15 +40,11 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 		},
 		{
 			stmt:  "create table a (i int references b (id))",
-			error: `this IMPORT format does not support foreign keys`,
+			error: `foreign keys not supported: FOREIGN KEY \(i\) REFERENCES b \(id\)`,
 		},
 		{
-			stmt:  "create table a (i int, constraint a foreign key (i) references c (id))",
-			error: `this IMPORT format does not support foreign keys`,
-		},
-		{
-			stmt:  "create table a (i int, j int as (i + 10) virtual)",
-			error: `to import into a table with virtual computed columns, use IMPORT INTO`,
+			stmt:  "create table a (i int, constraint a  foreign key (i) references c (id))",
+			error: `foreign keys not supported: CONSTRAINT a FOREIGN KEY \(i\) REFERENCES c \(id\)`,
 		},
 		{
 			stmt: `create table a (
@@ -67,7 +60,6 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 		},
 	}
 	ctx := context.Background()
-	semaCtx := tree.MakeSemaContext()
 	st := cluster.MakeTestingClusterSettings()
 	for _, tc := range tests {
 		t.Run(tc.stmt, func(t *testing.T) {
@@ -75,11 +67,11 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			create, ok := stmt.AST.(*tree.CreateTable)
+			create, ok := stmt.(*tree.CreateTable)
 			if !ok {
 				t.Fatal("expected CREATE TABLE statement in table file")
 			}
-			_, err = MakeTestingSimpleTableDescriptor(ctx, &semaCtx, st, create, defaultCSVParentID, keys.PublicSchemaID, defaultCSVTableID, NoFKs, 0)
+			_, err = MakeSimpleTableDescriptor(ctx, st, create, defaultCSVParentID, defaultCSVTableID, 0)
 			if !testutils.IsError(err, tc.error) {
 				t.Fatalf("expected %v, got %+v", tc.error, err)
 			}

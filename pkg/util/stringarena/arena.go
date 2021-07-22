@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package stringarena
 
@@ -27,40 +31,12 @@ import (
 type Arena struct {
 	alloc []byte
 	acc   *mon.BoundAccount
-	size  int64
 }
 
 // Make creates a new Arena with the specified monitoring account. If acc is
 // nil, memory monitoring will be disabled.
 func Make(acc *mon.BoundAccount) Arena {
 	return Arena{acc: acc}
-}
-
-// UnsafeReset informs the memory account that previously allocated strings will
-// no longer be used, and moves the current block pointer to the front of the
-// buffer. Prefer to use this over creating a new arena in situations where we
-// know that none of the strings currently on the arena will be referenced
-// again.
-//
-// NOTE: Do NOT use this if you cannot guarantee that previously allocated
-// strings will never be referenced again! If we cannot guarantee that, we run
-// the risk of overwriting their contents with new data, which violates
-// assumptions about the immutability of Go's strings.
-//
-// To prevent overwriting, we theoretically only need to ensure that strings
-// allocated on the current block are never used again, but callers are
-// oblivious to which block the string they get is allocated on, so it is easier
-// to ensure that no previously allocated strings are used again.
-func (a *Arena) UnsafeReset(ctx context.Context) error {
-	newSize := int64(cap(a.alloc))
-	if a.acc != nil {
-		if err := a.acc.Resize(ctx, a.size, newSize); err != nil {
-			return err
-		}
-	}
-	a.alloc = a.alloc[:0]
-	a.size = newSize
-	return nil
 }
 
 // AllocBytes allocates a string in the arena with contents specified by
@@ -112,6 +88,5 @@ func (a *Arena) reserve(ctx context.Context, n int) error {
 		}
 	}
 	a.alloc = make([]byte, 0, allocSize)
-	a.size += int64(allocSize)
 	return nil
 }

@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 
 /**
@@ -35,9 +25,6 @@ import _ from "lodash";
  * @param changes A set of new properties which should replace properties of the
  * previous object.
  */
-export default function nextState<T extends Object>(
-  lastState: T,
-  changes: Partial<T>,
-): T {
-  return _.assign({}, lastState, changes);
+export default function nextState<T extends Object>(lastState: T, changes: Partial<T>): T {
+    return _.assign({}, lastState, changes);
 }

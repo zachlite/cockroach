@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package httputil
 
@@ -16,9 +20,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/jsonpb"
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
 const (
@@ -46,7 +51,6 @@ const (
 
 // GetJSON uses the supplied client to GET the URL specified by the parameters
 // and unmarshals the result into response.
-// TODO(someone): make this context-aware, see client.go.
 func GetJSON(httpClient http.Client, path string, response protoutil.Message) error {
 	req, err := http.NewRequest("GET", path, nil)
 	if err != nil {
@@ -58,7 +62,6 @@ func GetJSON(httpClient http.Client, path string, response protoutil.Message) er
 
 // PostJSON uses the supplied client to POST request to the URL specified by
 // the parameters and unmarshals the result into response.
-// TODO(someone): make this context-aware, see client.go.
 func PostJSON(httpClient http.Client, path string, request, response protoutil.Message) error {
 	// Hack to avoid upsetting TestProtoMarshal().
 	marshalFn := (&jsonpb.Marshaler{}).Marshal
@@ -80,7 +83,6 @@ func PostJSON(httpClient http.Client, path string, request, response protoutil.M
 //
 // The response is returned to the caller, though its body will have been
 // closed.
-// TODO(someone): make this context-aware, see client.go.
 func PostJSONWithRequest(
 	httpClient http.Client, path string, request, response protoutil.Message,
 ) (*http.Response, error) {

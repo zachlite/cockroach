@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 /*
 Package lang implements a language called Optgen, short for "optimizer
@@ -63,14 +67,6 @@ Here is the syntax for an operator definition:
     ...
   }
 
-And here is an example:
-
-  define Join {
-    Left  Expr
-    Right Expr
-    On    Expr
-  }
-
 Definition Tags
 
 A "definition tag" is an opaque identifier that describes some property of the
@@ -87,14 +83,6 @@ Here is the definition tagging syntax:
   define <name> {
   }
 
-And here is an example:
-
-  [Comparison, Inequality]
-  define Lt {
-    Left  Expr
-    Right Expr
-  }
-
 Rules
 
 Optgen language input files may contain any number of rules, in any order. Each
@@ -102,19 +90,7 @@ rule has a unique name and consists of a match pattern and a corresponding
 replace pattern. A rule's match pattern is tested against every node in the
 target expression tree, bottom-up. Each matching node is replaced by a node
 constructed according to the replace pattern. The replacement node is itself
-tested against every rule, and so on, until no further rules match. The order
-that rules are applied depends on the order of the rules in each file, the
-lexicographical ordering of files, and whether or not a rule is marked as high
-or low priority as it is depicted below:
-
-[InlineConstVar, Normalize, HighPriority]
-
-
-Note that this is just a conceptual description. Optgen does not actually do
-any of this matching or replacing itself. Other components use the Optgen
-library to generate code. These components are free to match however they want,
-and to replace nodes or keep the new and old nodes side-by-side (as with a
-typical optimizer MEMO structure).
+tested against every rule, and so on, until no further rules match.
 
 Similar to define statements, a rule may have a set of tags associated with it.
 Rule tags logically group rules, and can also serve as directives to the code
@@ -154,9 +130,9 @@ and a "Const" node as its right child.
 
 Binding
 
-Child patterns within match and replace patterns can be "bound" to a named
-variable. These variables can then be referenced later in the match pattern or
-in the replace pattern. This is a critical part of the Optgen language, since
+Child patterns within a node match pattern can be "bound" to a named variable.
+These variables can then be referenced later in the match pattern or in the
+replace pattern. This is a critical part of the Optgen language, since
 virtually every pattern constructs its replacement pattern based on parts of
 the match pattern. For example:
 
@@ -167,39 +143,6 @@ The $input variable is bound to the first child of the "Select" node. If the
 second child is a "True" node, then the "Select" node will be replaced by its
 input. Variables can also be passed as arguments to custom matchers, which are
 described below.
-
-Let Expression
-
-A let expression can be used for binding multiple variables to the result of a
-custom function with multiple return values. This expression consists of two
-elements, a binding and a result. The binding includes a list of variables to
-bind followed by a custom function to produce the bind values. The result is a
-variable reference which is the value of the expression when evaluated.
-
-For example:
-
-  [SplitSelect]
-  (Select
-    $input:*
-    $filters:* &
-      (Let ($filterA $filterB $ok):(SplitFilters $filters) $ok)
-  )
-  =>
-  (Select (Select $input $filterA) $filterB)
-
-The "($filtersA $filtersB $ok):(SplitFilters $filters)" part indicates that
-$filtersA $filtersB and $ok are bound to the three return values of
-(SplitFilters $filters). The let expression evaluates to the value of $ok.
-
-A let expression can also be used in a replace pattern. For example:
-
-  [AlterSelect]
-  (Select $input:* $filters:*)
-  =>
-  (Select
-    (Let ($newInput $newFilters):(AlterSelect $input $filters) $newInput)
-    $newFilters
-  )
 
 Matching Names
 
@@ -235,19 +178,16 @@ This pattern matches "Eq", "Ne", "Lt", or "Gt" nodes.
 
 Matching Primitive Types
 
-String and numeric constant nodes in the tree can be matched against literals.
-A literal string or number in a match pattern is interpreted as a matcher of
-that type, and will be tested for equality with the child node. For example:
+Often, there are leaf nodes in the target expression tree that can be matched
+against primitive types, like simple strings. A literal string in a match
+pattern is interpreted as a "string matcher" and is tested for equality with
+the child node. For example:
 
   [EliminateConcat]
-  (Concat $left:* (Const "")) => $left
+  (Concat $left:* "") => $left
 
-If Concat's right operand is a constant expression with the empty string as its
-value, then the pattern matches. Similarly, a constant numeric expression can be
-matched like this:
-
-  [LimitScan]
-  (Limit (Scan $def:*) (Const 1)) => (ScanOneRow $def)
+If Concat's right operand is a literal string expression that's equal to the
+empty string, then the pattern matches.
 
 Matching Lists
 
@@ -260,46 +200,23 @@ and the list of arguments to the function:
     Args ExprList
   }
 
-There are several kinds of list matchers, each of which uses a variant of the
-list matching bracket syntax. The ellipses signify that 0 or more items can
-match at either the beginning or end of the list. The item pattern can be any
-legal match pattern, and can be bound to a variable.
+The list matcher iterates through the nodes in a list, looking for the first
+node that matches its condition. Any subsequent matching nodes are ignored by
+the matcher. However, often the replace pattern removes or modifies the first
+node so that it no longer matches. Then, when the same pattern is applied to
+the replacement expression, the list matcher will find the next matching node,
+and so on.
 
-  [ ... <item pattern> ... ]
-
-- ANY: Matches if any item in the list matches the item pattern. If multiple
-items match, then the list matcher binds to the first match.
-
-  [ ... $item:* ... ]
-
-- FIRST: Matches if the first item in the list matches the item pattern (and
-there is at least one item in the list).
-
-  [ $item:* ... ]
-
-- LAST: Matches if the last item in the list matches the item pattern (and
-there is at least one item).
-
-  [ ... $item:* ]
-
-- SINGLE: Matches if there is exactly one item in the list, and it matches the
-item pattern.
-
-  [ $item:* ]
-
-- EMPTY: Matches if there are zero items in the list.
-
-  []
-
-Following is a more complete example. The ANY list matcher in the example
-searches through the Filter child's list, looking for a Subquery node. If a
-matching node is found, then the list matcher succeeds and binds the node to
-the $item variable.
+List matching syntax looks like this:
 
   (Select
     $input:*
     (Filter [ ... $item:(Subquery) ... ])
   )
+
+The list matcher searches through the Filter child's list, looking for a
+Subquery node. If a matching node is found, then the list matcher succeeds and
+binds the node to the $item variable.
 
 Custom Matching
 
@@ -311,30 +228,23 @@ match. For example:
   [EliminateFilters]
   (Filters $items:* & (IsEmptyList $items)) => (True)
 
+Custom matching functions are always combined with a child matcher using a
+boolean & (AND) operator (see Boolean Expressions section for more details).
 This pattern passes the $items child node to the IsEmptyList function. If that
 returns true, then the pattern matches.
 
-Custom matching functions can appear anywhere that other matchers can, and can
-be combined with other matchers using boolean operators (see the Boolean
-Expressions section for more details). While variable references are the most
-common argument, it is also legal to nest function invocations:
-
-  (Project
-    $input:*
-    $projections:* & ^(IsEmpty (FindUnusedColumns $projections))
-  )
-
 Boolean Expressions
 
-Multiple match expressions of any type can be combined using the boolean &
-(AND) operator. All must match in order for the overall match to succeed:
+Child matchers can be combined with custom matching functions using the boolean
+& (AND) operator. Multiple match expressions can be combined in this way:
 
-  (Not
-    $input:(Comparison) & (Inequality) & (CanInvert $input)
+  (FuncCall
+    $name:*
+    $args:* & (IsAggFunc $name) & (IsSingletonList $args)
   )
 
 The boolean ^ (NOT) operator negates the result of a boolean match expression.
-It can be used with any kind of matcher, including custom match functions:
+It can be used with any kind of matcher:
 
   (JoinApply
     $left:^(Select)
@@ -376,6 +286,10 @@ case where the substitution node was already present in the match pattern:
   [EliminateAnd]
   (And $left:* (True)) => $left
 
+Literal strings can be part of a replace pattern, or even all of it:
+
+  (Concat "" "") => ""
+
 Custom Construction
 
 When Optgen syntax cannot easily produce a result, custom construction
@@ -396,36 +310,14 @@ the name of a custom function. For example:
   )
 
 Here, the ConcatFilters custom function is invoked in order to concatenate two
-filter lists together. Function parameters can include nodes, lists (see the
-Constructing Lists section), operator names (see the Name parameters section),
-and the results of nested custom function calls. While custom functions
-typically return a node, they can return other types if they are parameters to
-other custom functions.
-
-Constructing Lists
-
-Lists can be constructed and passed as parameters to node construction
-expressions or custom replace functions. A list consists of multiple items that
-can be of any parameter type, including nodes, strings, custom function
-invocations, or lists. Here is an example:
-
-  [MergeSelectJoin]
-  (Select
-    (InnerJoin $left:* $right:* $on:*)
-    $filters:*
-  )
-  =>
-  (InnerJoin
-    $left
-    $right
-    (And [$on $filters])
-  )
+filter lists together. While custom functions typically return a node, they can
+return other types if the context allows it.
 
 Dynamic Construction
 
-Sometimes the name of a constructed node can be one of several choices. The
-built-in "OpName" function can be used to dynamically construct the right kind
-of node. For example:
+Sometimes the name of a constructed node can be one of several choices, and may
+not even be known at compile-time. The built-in "OpName" function can be used
+to dynamically construct the right kind of node. For example:
 
   [NormalizeVar]
   (Eq | Ne
@@ -437,9 +329,9 @@ of node. For example:
 
 In this pattern, the name of the constructed result is either Eq or Ne,
 depending on which is matched. When the OpName function has no arguments, then
-it is bound to the name of the node matched at the top-level. The OpName
-function can also take a single variable reference argument. In that case, it
-refers to the name of the node bound to that variable:
+it is bound to the name of the top-level match expression. The OpName function
+can also take a single variable reference argument. In that case, it refers to
+the name of the expression bound to that variable:
 
   [PushDownSelect]
   (Select
@@ -456,78 +348,6 @@ refers to the name of the node bound to that variable:
 In this pattern, Join is a tag that refers to a group of nodes. The replace
 expression will construct a node having the same name as the matched join node.
 
-Name Parameters
-
-The OpName built-in function can also be a parameter to a custom match or
-replace function which needs to know which name matched. For example:
-
-  [FoldBinaryNull]
-  (Binary $left:* (Null) & ^(HasNullableArgs (OpName)))
-  =>
-  (Null)
-
-The name of the matched Binary node (e.g. Plus, In, Contains) is passed to the
-HasNullableArgs function as a symbolic identifier. Here is an example that uses
-a custom replace function and the OpName function with an argument:
-
-  [NegateComparison]
-  (Not $input:(Comparison $left:* $right:*))
-  =>
-  (InvertComparison (OpName $input) $left $right)
-
-As described in the previous section, adding the argument enables OpName to
-return a name that was matched deeper in the pattern.
-
-In addition to a name returned by the OpName function, custom match and replace
-functions can accept literal operator names as parameters. The Minus operator
-name is passed as a parameter to two functions in this example:
-
-  [FoldMinus]
-  (UnaryMinus
-    (Minus $left $right) & (OverloadExists Minus $right $left)
-  )
-  =>
-  (ConstructBinary Minus $right $left)
-
-Type Inference
-
-Expressions in both the match and replace patterns are assigned a data type
-that describes the kind of data that will be returned by the expression. These
-types are inferred using a combination of top-down and bottom-up type inference
-rules. For example:
-
-  define Select {
-    Input  Expr
-    Filter Expr
-  }
-
-  (Select $input:(LeftJoin | RightJoin) $filter:*) => $input
-
-The type of $input is inferred as "LeftJoin | RightJoin" by bubbling up the type
-of the bound expression. That type is propagated to the $input reference in the
-replace pattern. By contrast, the type of the * expression is inferred to be
-"Expr" using a top-down type inference rule, since the second argument to the
-Select operator is known to have type "Expr".
-
-When multiple types are inferred for an expression using different type
-inference rules, the more restrictive type is assigned to the expression. For
-example:
-
-  (Select $input:* & (LeftJoin)) => $input
-
-Here, the left input to the And expression was inferred to have type "Expr" and
-the right input to have type "LeftJoin". Since "LeftJoin" is the more
-restrictive type, the And expression and the $input binding are typed as
-"LeftJoin".
-
-Type inference detects and reports type contradictions, which occur when
-multiple incompatible types are inferred for an expression. For example:
-
-  (Select $input:(InnerJoin) & (LeftJoin)) => $input
-
-Because the input cannot be both an InnerJoin and a LeftJoin, Optgen reports a
-type contradiction error.
-
 Syntax
 
 This section describes the Optgen language syntax in a variant of extended
@@ -536,41 +356,40 @@ terminals correspond to tokens returned by the scanner. Whitespace and
 comment tokens can be freely interleaved between other tokens in the
 grammar.
 
-  root         = tags (define | rule)
-  tags         = '[' IDENT (',' IDENT)* ']'
+  root                = tags (define | rule)
+  tags                = '[' IDENT (',' IDENT)* ']'
 
-  define       = 'define' define-name '{' define-field* '}'
-  define-name  = IDENT
-  define-field = field-name field-type
-  field-name   = IDENT
-  field-type   = IDENT
+  define              = 'define' define-name '{' define-field* '}'
+  define-name         = IDENT
+  define-field        = field-name field-type
+  field-name          = IDENT
+  field-type          = IDENT
 
-  rule         = func '=>' replace
-  match        = func
-  replace      = func | ref
-  func         = '(' func-name arg* ')'
-  func-name    = names | func
-  names        = name ('|' name)*
-  arg          = bind and | ref | and
-  and          = expr ('&' and)
-  expr         = func | not | let | list | any | name | STRING | NUMBER
-  not          = '^' expr
-  list         = '[' list-child* ']'
-  list-child   = list-any | arg
-  list-any     = '...'
-  bind         = '$' label ':' and
-  let          = '(' 'Let' '(' '$' label ('$' label)* ')' ':' func ref ')'
-  ref          = '$' label
-  any          = '*'
-  name         = IDENT
-  label        = IDENT
+  rule                = match '=>' replace
+  match               = '(' match-opnames match-child* ')'
+  match-opnames       = match-opname ('|' match-opname)
+  match-opname        = IDENT
+  match-child         = (bind-child | match-unbound-child) ('&' match-and)?
+  bind-child          = '$' label ':' match-unbound-child
+  label               = IDENT
+  match-unbound-child = match | STRING | '^' match-unbound-child | match-any |
+                        match-list
+  match-and           = match-custom ('&' match-and)?
+  match-custom        = match-invoke | '^' match-custom
+  match-invoke        = '(' invoke-name ref* ')'
+  invoke-name         = IDENT
+  match-list          = '[' '...' match-child '...' ']'
+  ref                 = '$' label
+
+  replace             = construct | STRING | ref
+  construct           = '(' construct-name replace* ')'
+  construct-name      = IDENT | construct
 
 Here are the pseudo-regex definitions for the lexical tokens that aren't
 represented as single-quoted strings above:
 
   STRING     = " [^"\n]* "
-  NUMBER     = UnicodeDigit+
-  IDENT      = (UnicodeLetter | '_') (UnicodeLetter | '_' | UnicodeNumber)*
+  IDENT      = UnicodeLetter (UnicodeLetter | UnicodeNumber)*
   COMMENT    = '#' .* \n
   WHITESPACE = UnicodeSpace+
 

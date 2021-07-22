@@ -1,30 +1,30 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
 	"io"
 	"os"
-	"path/filepath"
-	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optgen/lang"
-	"github.com/cockroachdb/errors"
 )
-
-type globResolver func(pattern string) (matches []string, err error)
 
 type genFunc func(compiled *lang.CompiledExpr, w io.Writer)
 
@@ -53,15 +53,9 @@ type optgen struct {
 	// redirected.
 	stdErr io.Writer
 
-	// globResolver is called to map from source arguments to a set of file
-	// names, using filepath.Glob syntax. The files will then be resolved by
-	// fileResolver. Tests can hook this in order to avoid actually listing
-	// files/directories on disk.
-	globResolver globResolver
-
-	// fileResolver is called to open an input file of the specified name. Tests
+	// resolver is called to open an input file of the specified name. Tests
 	// can hook this in order to avoid actually opening files on disk.
-	fileResolver lang.FileResolver
+	resolver lang.FileResolver
 
 	// cmdLine stores the set of flags used to invoke the Optgen tool.
 	cmdLine *flag.FlagSet
@@ -89,17 +83,12 @@ func (g *optgen) run(args ...string) bool {
 	cmd := args[0]
 	sources := g.cmdLine.Args()[1:]
 
-	runValidate := true
 	switch cmd {
 	case "compile":
-	case "explorer":
 	case "exprs":
 	case "factory":
+	case "ifactory":
 	case "ops":
-	case "rulenames":
-
-	case "execfactory", "execexplain":
-		runValidate = false
 
 	default:
 		g.cmdLine.Usage()
@@ -107,40 +96,20 @@ func (g *optgen) run(args ...string) bool {
 		return false
 	}
 
-	// Set glob resolver if it hasn't yet been set.
-	if g.globResolver == nil {
-		g.globResolver = filepath.Glob
-	}
+	compiler := lang.NewCompiler(sources...)
 
-	// Map sources to a set of files using the glob resolver.
-	files := make([]string, 0, len(sources))
-	for _, source := range sources {
-		matches, err := g.globResolver(source)
-		if err != nil {
-			g.reportError(err)
-			return false
-		}
-		files = append(files, matches...)
-	}
-
-	// Sort the files so that output is stable.
-	sort.Strings(files)
-
-	compiler := lang.NewCompiler(files...)
-
-	if g.fileResolver != nil {
+	if g.resolver != nil {
 		// Use caller-provided custom file resolver.
-		compiler.SetFileResolver(g.fileResolver)
+		compiler.SetFileResolver(g.resolver)
 	}
 
 	var errors []error
 	compiled := compiler.Compile()
 	if compiled == nil {
 		errors = compiler.Errors()
-	} else if runValidate {
+	} else {
 		// Do additional validation checks.
-		var v validator
-		errors = v.validate(compiled)
+		errors = g.validate(compiled)
 	}
 
 	if errors != nil {
@@ -162,10 +131,6 @@ func (g *optgen) run(args ...string) bool {
 	case "compile":
 		err = g.writeOutputFile([]byte(compiled.String()))
 
-	case "explorer":
-		var gen explorerGen
-		err = g.generate(compiled, gen.generate)
-
 	case "exprs":
 		var gen exprsGen
 		err = g.generate(compiled, gen.generate)
@@ -174,20 +139,12 @@ func (g *optgen) run(args ...string) bool {
 		var gen factoryGen
 		err = g.generate(compiled, gen.generate)
 
+	case "ifactory":
+		var gen ifactoryGen
+		err = g.generate(compiled, gen.generate)
+
 	case "ops":
 		var gen opsGen
-		err = g.generate(compiled, gen.generate)
-
-	case "rulenames":
-		var gen ruleNamesGen
-		err = g.generate(compiled, gen.generate)
-
-	case "execfactory":
-		var gen execFactoryGen
-		err = g.generate(compiled, gen.generate)
-
-	case "execexplain":
-		var gen execExplainGen
 		err = g.generate(compiled, gen.generate)
 	}
 
@@ -196,6 +153,52 @@ func (g *optgen) run(args ...string) bool {
 		return false
 	}
 	return true
+}
+
+// validate performs additional checks on the compiled Optgen expression. In
+// particular, it checks the order and types of the fields in define
+// expressions. The Optgen language itself allows any field order and types, so
+// the compiler does not do these checks.
+func (g *optgen) validate(compiled *lang.CompiledExpr) []error {
+	var errors []error
+
+	for _, define := range compiled.Defines {
+		// Ensure that fields are defined in the following order:
+		//   Expr*
+		//   ExprList?
+		//   Private?
+		//
+		// That is, there can be zero or more expression-typed fields, followed
+		// by zero or one list-typed field, followed by zero or one private field.
+		for i, field := range define.Fields {
+			if isPrivateType(string(field.Type)) {
+				if i != len(define.Fields)-1 {
+					format := "private field '%s' is not the last field in '%s'"
+					err := fmt.Errorf(format, field.Name, define.Name)
+					err = addErrorSource(err, field.Source())
+					errors = append(errors, err)
+					break
+				}
+			}
+
+			if isListType(string(field.Type)) {
+				index := len(define.Fields) - 1
+				if privateField(define) != nil {
+					index--
+				}
+
+				if i != index {
+					format := "list field '%s' is not the last non-private field in '%s'"
+					err := fmt.Errorf(format, field.Name, define.Name)
+					err = addErrorSource(err, field.Source())
+					errors = append(errors, err)
+					break
+				}
+			}
+		}
+	}
+
+	return errors
 }
 
 func (g *optgen) generate(compiled *lang.CompiledExpr, genFunc genFunc) error {
@@ -214,7 +217,7 @@ func (g *optgen) generate(compiled *lang.CompiledExpr, genFunc genFunc) error {
 			// Write out incorrect source for easier debugging.
 			b = buf.Bytes()
 			out := g.cmdLine.Lookup("out").Value.String()
-			err = fmt.Errorf("code formatting failed with Go parse error\n%s:%s", out, err)
+			err = fmt.Errorf("Code formatting failed with Go parse error\n%s:%s", out, err)
 		}
 	} else {
 		b = buf.Bytes()
@@ -261,14 +264,10 @@ func (g *optgen) usage() {
 
 	fmt.Fprintf(g.stdErr, "The commands are:\n\n")
 	fmt.Fprintf(g.stdErr, "\tcompile    generate the optgen compiled format\n")
-	fmt.Fprintf(g.stdErr, "\texplorer   generate expression tree exploration rules\n")
 	fmt.Fprintf(g.stdErr, "\texprs      generate expression definitions and functions\n")
 	fmt.Fprintf(g.stdErr, "\tfactory    generate expression tree creation and normalization functions\n")
+	fmt.Fprintf(g.stdErr, "\tifactory   generate interface for factory construct methods\n")
 	fmt.Fprintf(g.stdErr, "\tops        generate operator definitions and functions\n")
-	fmt.Fprintf(g.stdErr, "\trulenames  generate enumeration of rule names\n")
-	fmt.Fprintf(g.stdErr, "\n")
-
-	fmt.Fprintf(g.stdErr, "The sources can be file names and/or filepath.Glob patterns.\n")
 	fmt.Fprintf(g.stdErr, "\n")
 
 	fmt.Fprintf(g.stdErr, "Flags:\n")
@@ -280,4 +279,8 @@ func (g *optgen) usage() {
 
 func (g *optgen) reportError(err error) {
 	fmt.Fprintf(g.stdErr, "ERROR: %v\n", err)
+}
+
+func addErrorSource(err error, src *lang.SourceLoc) error {
+	return fmt.Errorf("%s: %s", src, err)
 }

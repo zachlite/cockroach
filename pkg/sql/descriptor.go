@@ -1,41 +1,30 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/pkg/errors"
+
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 )
 
 //
@@ -47,113 +36,85 @@ import (
 //
 
 var (
-	errEmptyDatabaseName = pgerror.New(pgcode.Syntax, "empty database name")
-	errNoDatabase        = pgerror.New(pgcode.InvalidName, "no database specified")
-	errNoSchema          = pgerror.Newf(pgcode.InvalidName, "no schema specified")
-	errNoTable           = pgerror.New(pgcode.InvalidName, "no table specified")
-	errNoType            = pgerror.New(pgcode.InvalidName, "no type specified")
-	errNoMatch           = pgerror.New(pgcode.UndefinedObject, "no object matched")
+	errEmptyDatabaseName = errors.New("empty database name")
+	errNoDatabase        = errors.New("no database specified")
+	errNoTable           = errors.New("no table specified")
+	errNoMatch           = errors.New("no object matched")
 )
 
-// createDatabase takes Database descriptor and creates it if needed,
-// incrementing the descriptor counter. Returns true if the descriptor
+type descriptorAlreadyExistsErr struct {
+	desc sqlbase.DescriptorProto
+	name string
+}
+
+func (d descriptorAlreadyExistsErr) Error() string {
+	return fmt.Sprintf("%s %q already exists", d.desc.TypeName(), d.name)
+}
+
+// GenerateUniqueDescID returns the next available Descriptor ID and increments
+// the counter. The incrementing is non-transactional, and the counter could be
+// incremented multiple times because of retries.
+func GenerateUniqueDescID(ctx context.Context, db *client.DB) (sqlbase.ID, error) {
+	// Increment unique descriptor counter.
+	newVal, err := client.IncrementValRetryable(ctx, db, keys.DescIDGenerator, 1)
+	if err != nil {
+		return 0, err
+	}
+	return sqlbase.ID(newVal - 1), nil
+}
+
+// createDescriptor takes a Table or Database descriptor and creates it if
+// needed, incrementing the descriptor counter. Returns true if the descriptor
 // is actually created, false if it already existed, or an error if one was
 // encountered. The ifNotExists flag is used to declare if the "already existed"
 // state should be an error (false) or a no-op (true).
-// createDatabase implements the DatabaseDescEditor interface.
-func (p *planner) createDatabase(
-	ctx context.Context, database *tree.CreateDatabase, jobDesc string,
-) (*dbdesc.Mutable, bool, error) {
+func (p *planner) createDescriptor(
+	ctx context.Context,
+	plainKey sqlbase.DescriptorKey,
+	descriptor sqlbase.DescriptorProto,
+	ifNotExists bool,
+) (bool, error) {
+	idKey := plainKey.Key()
 
-	dbName := string(database.Name)
-	dKey := catalogkeys.MakeDatabaseNameKey(p.ExecCfg().Codec, dbName)
-
-	if exists, databaseID, err := catalogkv.LookupDatabaseID(ctx, p.txn, p.ExecCfg().Codec, dbName); err == nil && exists {
-		if database.IfNotExists {
-			// Check if the database is in a dropping state
-			desc, err := catalogkv.MustGetDatabaseDescByID(ctx, p.txn, p.ExecCfg().Codec, databaseID)
-			if err != nil {
-				return nil, false, err
-			}
-			if desc.Dropped() {
-				return nil, false, pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-					"database %q is being dropped, try again later",
-					dbName)
-			}
+	if exists, err := descExists(ctx, p.txn, idKey); err == nil && exists {
+		if ifNotExists {
 			// Noop.
-			return nil, false, nil
+			return false, nil
 		}
-		return nil, false, sqlerrors.NewDatabaseAlreadyExistsError(dbName)
+		// Key exists, but we don't want it to: error out.
+		switch descriptor.TypeName() {
+		case "database":
+			return false, sqlbase.NewDatabaseAlreadyExistsError(plainKey.Name())
+		case "table", "view":
+			return false, sqlbase.NewRelationAlreadyExistsError(plainKey.Name())
+		default:
+			return false, descriptorAlreadyExistsErr{descriptor, plainKey.Name()}
+		}
 	} else if err != nil {
-		return nil, false, err
+		return false, err
 	}
 
-	id, err := catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
+	id, err := GenerateUniqueDescID(ctx, p.ExecCfg().DB)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 
-	if database.PrimaryRegion != tree.PrimaryRegionNotSpecifiedName {
-		telemetry.Inc(sqltelemetry.CreateMultiRegionDatabaseCounter)
-		telemetry.Inc(
-			sqltelemetry.CreateDatabaseSurvivalGoalCounter(
-				database.SurvivalGoal.TelemetryName(),
-			),
-		)
-	}
+	return true, p.createDescriptorWithID(ctx, idKey, id, descriptor)
+}
 
-	regionConfig, err := p.maybeInitializeMultiRegionMetadata(
-		ctx,
-		database.SurvivalGoal,
-		database.PrimaryRegion,
-		database.Regions,
-	)
+func descExists(ctx context.Context, txn *client.Txn, idKey roachpb.Key) (bool, error) {
+	// Check whether idKey exists.
+	gr, err := txn.Get(ctx, idKey)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
-
-	desc := dbdesc.NewInitial(
-		id,
-		string(database.Name),
-		p.SessionData().User(),
-		dbdesc.MaybeWithDatabaseRegionConfig(regionConfig),
-	)
-
-	if err := p.createDescriptorWithID(ctx, dKey, id, desc, nil, jobDesc); err != nil {
-		return nil, true, err
-	}
-
-	// Initialize the multi-region database by creating the multi-region enum and
-	// database-level zone configuration if there is a region config on the
-	// descriptor.
-	if err := p.maybeInitializeMultiRegionDatabase(ctx, desc, regionConfig); err != nil {
-		return nil, true, err
-	}
-
-	// Every database must be initialized with the public schema.
-	key := catalogkeys.MakePublicSchemaNameKey(p.ExecCfg().Codec, id)
-	if err := p.CreateSchemaNamespaceEntry(ctx, key, keys.PublicSchemaID); err != nil {
-		return nil, true, err
-	}
-
-	return desc, true, nil
+	return gr.Exists(), nil
 }
 
 func (p *planner) createDescriptorWithID(
-	ctx context.Context,
-	idKey roachpb.Key,
-	id descpb.ID,
-	descriptor catalog.Descriptor,
-	st *cluster.Settings,
-	jobDesc string,
+	ctx context.Context, idKey roachpb.Key, id sqlbase.ID, descriptor sqlbase.DescriptorProto,
 ) error {
-	if descriptor.GetID() == 0 {
-		// TODO(ajwerner): Return the error here rather than fatal.
-		log.Fatalf(ctx, "%v", errors.AssertionFailedf("cannot create descriptor with an empty ID: %v", descriptor))
-	}
-	if descriptor.GetID() != id {
-		log.Fatalf(ctx, "%v", errors.AssertionFailedf("cannot create descriptor with an unexpected (%v) ID: %v", id, descriptor))
-	}
+	descriptor.SetID(id)
 	// TODO(pmattis): The error currently returned below is likely going to be
 	// difficult to interpret.
 	//
@@ -163,167 +124,113 @@ func (p *planner) createDescriptorWithID(
 	// but not going through the normal INSERT logic and not performing a precise
 	// mimicry. In particular, we're only writing a single key per table, while
 	// perfect mimicry would involve writing a sentinel key for each row as well.
+	descKey := sqlbase.MakeDescMetadataKey(descriptor.GetID())
 
-	b := &kv.Batch{}
+	b := &client.Batch{}
 	descID := descriptor.GetID()
+	descDesc := sqlbase.WrapDescriptor(descriptor)
 	if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
 		log.VEventf(ctx, 2, "CPut %s -> %d", idKey, descID)
+		log.VEventf(ctx, 2, "CPut %s -> %s", descKey, descDesc)
 	}
 	b.CPut(idKey, descID, nil)
-	if err := catalogkv.WriteNewDescToBatch(
-		ctx,
-		p.ExtendedEvalContext().Tracing.KVTracingEnabled(),
-		st,
-		b,
-		p.ExecCfg().Codec,
-		descID,
-		descriptor,
-	); err != nil {
+	b.CPut(descKey, descDesc, nil)
+
+	if desc, ok := descriptor.(*sqlbase.TableDescriptor); ok {
+		p.Tables().addUncommittedTable(*desc)
+	}
+
+	return p.txn.Run(ctx, b)
+}
+
+// getDescriptor looks up the descriptor for `plainKey`, validates it,
+// and unmarshals it into `descriptor`.
+//
+// If `plainKey` doesn't exist, returns false and nil error.
+// In most cases you'll want to use wrappers: `getDatabaseDesc` or
+// `getTableDesc`.
+func getDescriptor(
+	ctx context.Context,
+	txn *client.Txn,
+	plainKey sqlbase.DescriptorKey,
+	descriptor sqlbase.DescriptorProto,
+) (bool, error) {
+	gr, err := txn.Get(ctx, plainKey.Key())
+	if err != nil {
+		return false, err
+	}
+	if !gr.Exists() {
+		return false, nil
+	}
+
+	if err := getDescriptorByID(ctx, txn, sqlbase.ID(gr.ValueInt()), descriptor); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// getDescriptorByID looks up the descriptor for `id`, validates it,
+// and unmarshals it into `descriptor`.
+//
+// In most cases you'll want to use wrappers: `getDatabaseDescByID` or
+// `getTableDescByID`.
+func getDescriptorByID(
+	ctx context.Context, txn *client.Txn, id sqlbase.ID, descriptor sqlbase.DescriptorProto,
+) error {
+	descKey := sqlbase.MakeDescMetadataKey(id)
+	desc := &sqlbase.Descriptor{}
+	if err := txn.GetProto(ctx, descKey, desc); err != nil {
 		return err
 	}
 
-	mutDesc, ok := descriptor.(catalog.MutableDescriptor)
-	if !ok {
-		log.Fatalf(ctx, "unexpected type %T when creating descriptor", descriptor)
-	}
+	switch t := descriptor.(type) {
+	case *sqlbase.TableDescriptor:
+		table := desc.GetTable()
+		if table == nil {
+			return errors.Errorf("%q is not a table", desc.String())
+		}
+		table.MaybeFillInDescriptor()
 
-	isTable := false
-	addUncommitted := false
-	switch mutDesc.(type) {
-	case *dbdesc.Mutable, *schemadesc.Mutable, *typedesc.Mutable:
-		addUncommitted = true
-	case *tabledesc.Mutable:
-		addUncommitted = true
-		isTable = true
-	default:
-		log.Fatalf(ctx, "unexpected type %T when creating descriptor", mutDesc)
-	}
-	if addUncommitted {
-		if err := p.Descriptors().AddUncommittedDescriptor(mutDesc); err != nil {
+		if err := table.Validate(ctx, txn, nil /* clusterVersion */); err != nil {
 			return err
 		}
-	}
+		*t = *table
+	case *sqlbase.DatabaseDescriptor:
+		database := desc.GetDatabase()
+		if database == nil {
+			return errors.Errorf("%q is not a database", desc.String())
+		}
 
-	if err := p.txn.Run(ctx, b); err != nil {
-		return err
-	}
-	if isTable && mutDesc.Adding() {
-		// Queue a schema change job to eventually make the table public.
-		if err := p.createOrUpdateSchemaChangeJob(
-			ctx,
-			mutDesc.(*tabledesc.Mutable),
-			jobDesc,
-			descpb.InvalidMutationID); err != nil {
+		if err := database.Validate(); err != nil {
 			return err
 		}
+		*t = *database
 	}
 	return nil
 }
 
-// TranslateSurvivalGoal translates a tree.SurvivalGoal into a
-// descpb.SurvivalGoal.
-func TranslateSurvivalGoal(g tree.SurvivalGoal) (descpb.SurvivalGoal, error) {
-	switch g {
-	case tree.SurvivalGoalDefault:
-		return descpb.SurvivalGoal_ZONE_FAILURE, nil
-	case tree.SurvivalGoalZoneFailure:
-		return descpb.SurvivalGoal_ZONE_FAILURE, nil
-	case tree.SurvivalGoalRegionFailure:
-		return descpb.SurvivalGoal_REGION_FAILURE, nil
-	default:
-		return 0, errors.Newf("unknown survival goal: %d", g)
-	}
-}
-
-func (p *planner) checkRegionIsCurrentlyActive(
-	ctx context.Context, region descpb.RegionName,
-) error {
-	liveRegions, err := p.getLiveClusterRegions(ctx)
+// GetAllDescriptors looks up and returns all available descriptors.
+func GetAllDescriptors(ctx context.Context, txn *client.Txn) ([]sqlbase.DescriptorProto, error) {
+	descsKey := sqlbase.MakeAllDescsMetadataKey()
+	kvs, err := txn.Scan(ctx, descsKey, descsKey.PrefixEnd(), 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Ensure that the region we're adding is currently active.
-	return CheckClusterRegionIsLive(liveRegions, region)
-}
-
-// InitializeMultiRegionMetadataCCL is the public hook point for the
-// CCL-licensed multi-region initialization code.
-var InitializeMultiRegionMetadataCCL = func(
-	ctx context.Context,
-	evalCtx *tree.EvalContext,
-	execCfg *ExecutorConfig,
-	liveClusterRegions LiveClusterRegions,
-	survivalGoal tree.SurvivalGoal,
-	primaryRegion descpb.RegionName,
-	regions []tree.Name,
-) (*multiregion.RegionConfig, error) {
-	return nil, sqlerrors.NewCCLRequiredError(
-		errors.New("creating multi-region databases requires a CCL binary"),
-	)
-}
-
-// DefaultPrimaryRegionClusterSettingName is the name of the cluster setting that returns
-const DefaultPrimaryRegionClusterSettingName = "sql.defaults.primary_region"
-
-// DefaultPrimaryRegion is a cluster setting that contains the default primary region.
-var DefaultPrimaryRegion = settings.RegisterStringSetting(
-	DefaultPrimaryRegionClusterSettingName,
-	`if not empty, all databases created without a PRIMARY REGION will `+
-		`implicitly have the given PRIMARY REGION`,
-	"",
-).WithPublic()
-
-// maybeInitializeMultiRegionMetadata initializes multi-region metadata if a
-// primary region is supplied and works as a pass-through otherwise. It creates
-// a new region config from the given parameters and reserves an ID for the
-// multi-region enum.
-func (p *planner) maybeInitializeMultiRegionMetadata(
-	ctx context.Context, survivalGoal tree.SurvivalGoal, primaryRegion tree.Name, regions []tree.Name,
-) (*multiregion.RegionConfig, error) {
-	if primaryRegion == "" && len(regions) == 0 {
-		defaultPrimaryRegion := DefaultPrimaryRegion.Get(&p.execCfg.Settings.SV)
-		if defaultPrimaryRegion == "" {
-			return nil, nil
+	descs := make([]sqlbase.DescriptorProto, len(kvs))
+	for i, kv := range kvs {
+		desc := &sqlbase.Descriptor{}
+		if err := kv.ValueProto(desc); err != nil {
+			return nil, err
 		}
-		primaryRegion = tree.Name(defaultPrimaryRegion)
-		// TODO(#67156): send notice immediately, so it pops up even on error.
-		p.noticeSender.BufferNotice(
-			pgnotice.Newf("setting %s as the PRIMARY REGION as no PRIMARY REGION was specified", primaryRegion),
-		)
+		switch t := desc.Union.(type) {
+		case *sqlbase.Descriptor_Table:
+			descs[i] = desc.GetTable()
+		case *sqlbase.Descriptor_Database:
+			descs[i] = desc.GetDatabase()
+		default:
+			return nil, errors.Errorf("Descriptor.Union has unexpected type %T", t)
+		}
 	}
-
-	liveRegions, err := p.getLiveClusterRegions(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	regionConfig, err := InitializeMultiRegionMetadataCCL(
-		ctx,
-		p.EvalContext(),
-		p.ExecCfg(),
-		liveRegions,
-		survivalGoal,
-		descpb.RegionName(primaryRegion),
-		regions,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return regionConfig, nil
-}
-
-// GetImmutableTableInterfaceByID is part of the EvalPlanner interface.
-func (p *planner) GetImmutableTableInterfaceByID(ctx context.Context, id int) (interface{}, error) {
-	desc, err := p.Descriptors().GetImmutableTableByID(
-		ctx,
-		p.txn,
-		descpb.ID(id),
-		tree.ObjectLookupFlagsWithRequired(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return desc, nil
+	return descs, nil
 }

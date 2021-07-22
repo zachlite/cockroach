@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql_test
 
@@ -19,26 +23,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func TestScatterRandomizeLeases(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	skip.UnderStressRace(t, "uses too many resources for stressrace")
-	skip.UnderShort(t, "takes 25s")
 
 	const numHosts = 3
-
-	tc := serverutils.StartNewTestCluster(t, numHosts, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(context.Background())
+	tc := serverutils.StartTestCluster(t, numHosts, base.TestClusterArgs{})
+	defer tc.Stopper().Stop(context.TODO())
 
 	sqlutils.CreateTable(
 		t, tc.ServerConn(0), "t",
@@ -49,15 +45,11 @@ func TestScatterRandomizeLeases(t *testing.T) {
 
 	r := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 
-	// Even though we disabled merges via the store testing knob, we must also
-	// disable the setting in order for manual splits to be allowed.
-	r.Exec(t, "SET CLUSTER SETTING kv.range_merge.queue_enabled = false")
-
 	// Introduce 99 splits to get 100 ranges.
 	r.Exec(t, "ALTER TABLE test.t SPLIT AT (SELECT i*10 FROM generate_series(1, 99) AS g(i))")
 
 	getLeaseholders := func() (map[int]int, error) {
-		rows := r.Query(t, `SELECT range_id, lease_holder FROM [SHOW RANGES FROM TABLE test.t]`)
+		rows := r.Query(t, `SELECT "Range ID", "Lease Holder" FROM [SHOW TESTING_RANGES FROM TABLE test.t]`)
 		leaseholders := make(map[int]int)
 		numRows := 0
 		for ; rows.Next(); numRows++ {
@@ -69,7 +61,7 @@ func TestScatterRandomizeLeases(t *testing.T) {
 				t.Fatalf("invalid rangeID: %d", rangeID)
 			}
 			if leaseholder < 1 || leaseholder > numHosts {
-				return nil, fmt.Errorf("invalid lease_holder value: %d", leaseholder)
+				return nil, fmt.Errorf("invalid leaseholder value: %d", leaseholder)
 			}
 			leaseholders[rangeID] = leaseholder
 		}
@@ -111,7 +103,6 @@ func TestScatterRandomizeLeases(t *testing.T) {
 // is unskipped.
 func TestScatterResponse(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(context.Background())
@@ -122,7 +113,7 @@ func TestScatterResponse(t *testing.T) {
 		1000,
 		sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowModuloFn(10)),
 	)
-	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+	tableDesc := sqlbase.GetTableDescriptor(kvDB, "test", "t")
 
 	r := sqlutils.MakeSQLRunner(sqlDB)
 	r.Exec(t, "ALTER TABLE test.t SPLIT AT (SELECT i*10 FROM generate_series(1, 99) AS g(i))")
@@ -137,10 +128,10 @@ func TestScatterResponse(t *testing.T) {
 		}
 		var expectedKey roachpb.Key
 		if i == 0 {
-			expectedKey = keys.SystemSQLCodec.TablePrefix(uint32(tableDesc.GetID()))
+			expectedKey = keys.MakeTablePrefix(uint32(tableDesc.ID))
 		} else {
 			var err error
-			expectedKey, err = randgen.TestingMakePrimaryIndexKey(tableDesc, i*10)
+			expectedKey, err = sqlbase.MakePrimaryIndexKey(tableDesc, i*10)
 			if err != nil {
 				t.Fatal(err)
 			}

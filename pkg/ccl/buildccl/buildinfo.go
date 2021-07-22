@@ -8,7 +8,9 @@
 
 package buildccl
 
-import "github.com/cockroachdb/cockroach/pkg/build"
+import (
+	"github.com/cockroachdb/cockroach/pkg/build"
+)
 
 func init() {
 	build.Distribution = "CCL"

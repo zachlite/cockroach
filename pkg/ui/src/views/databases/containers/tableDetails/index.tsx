@@ -1,45 +1,33 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import { Col, Row, Tabs } from "antd";
-import { SummaryCard } from "src/views/shared/components/summaryCard";
 import React from "react";
-import { Helmet } from "react-helmet";
+import { Link, RouterState } from "react-router";
 import { connect } from "react-redux";
-import { RouteComponentProps, withRouter } from "react-router-dom";
+
+import "./sqlhighlight.styl";
+
 import * as protos from "src/js/protos";
-import {
-  generateTableID,
-  refreshTableDetails,
-  refreshTableStats,
-  refreshDatabaseDetails,
-} from "src/redux/apiReducers";
-import { LocalSetting } from "src/redux/localsettings";
-import { AdminUIState } from "src/redux/state";
 import { databaseNameAttr, tableNameAttr } from "src/util/constants";
 import { Bytes } from "src/util/format";
+import { AdminUIState } from "src/redux/state";
+import { LocalSetting } from "src/redux/localsettings";
+import { refreshTableDetails, refreshTableStats, generateTableID } from "src/redux/apiReducers";
+import { SummaryBar, SummaryHeadlineStat } from "src/views/shared/components/summaryBar";
+
 import { TableInfo } from "src/views/databases/data/tableInfo";
 import { SortSetting } from "src/views/shared/components/sortabletable";
 import { SortedTable } from "src/views/shared/components/sortedtable";
-const { TabPane } = Tabs;
-import { getMatchParamByName } from "src/util/query";
-import { Button } from "@cockroachlabs/cluster-ui";
-import { ArrowLeft } from "@cockroachlabs/icons";
-import SqlBox from "src/views/shared/components/sql/box";
+import * as hljs from "highlight.js";
 
-class GrantsSortedTable extends SortedTable<protos.cockroach.server.serverpb.TableDetailsResponse.IGrant> {}
+// Specialization of generic SortedTable component:
+//   https://github.com/Microsoft/TypeScript/issues/3960
+//
+// The variable name must start with a capital letter or JSX will not recognize
+// it as a component.
+// tslint:disable-next-line:variable-name
+export const GrantsSortedTable = SortedTable as new () => SortedTable<protos.cockroach.server.serverpb.TableDetailsResponse.Grant$Properties>;
 
-const databaseTableGrantsSortSetting = new LocalSetting<
-  AdminUIState,
-  SortSetting
->("tableDetails/sort_setting/grants", (s) => s.localSettings);
+const databaseTableGrantsSortSetting = new LocalSetting<AdminUIState, SortSetting>(
+  "tableDetails/sort_setting/grants", (s) => s.localSettings,
+);
 
 /**
  * TableMainData are the data properties which should be passed to the TableMain
@@ -58,7 +46,6 @@ interface TableMainActions {
   // Refresh the table data
   refreshTableDetails: typeof refreshTableDetails;
   refreshTableStats: typeof refreshTableStats;
-  refreshDatabaseDetails: typeof refreshDatabaseDetails;
   setSort: typeof databaseTableGrantsSortSetting.set;
 }
 
@@ -66,136 +53,87 @@ interface TableMainActions {
  * TableMainProps is the type of the props object that must be passed to
  * TableMain component.
  */
-type TableMainProps = TableMainData & TableMainActions & RouteComponentProps;
+type TableMainProps = TableMainData & TableMainActions & RouterState;
 
 /**
  * TableMain renders the main content of the databases page, which is primarily a
  * data table of all databases.
  */
-export class TableMain extends React.Component<TableMainProps, {}> {
-  componentDidMount() {
-    const database = getMatchParamByName(this.props.match, databaseNameAttr);
-    const table = getMatchParamByName(this.props.match, tableNameAttr);
-    this.props.refreshDatabaseDetails(
-      new protos.cockroach.server.serverpb.DatabaseDetailsRequest({
-        database: getMatchParamByName(this.props.match, databaseNameAttr),
-      }),
-    );
-    this.props.refreshTableDetails(
-      new protos.cockroach.server.serverpb.TableDetailsRequest({
-        database,
-        table,
-      }),
-    );
-    this.props.refreshTableStats(
-      new protos.cockroach.server.serverpb.TableStatsRequest({
-        database,
-        table,
-      }),
-    );
+class TableMain extends React.Component<TableMainProps, {}> {
+  createStmtNode: Node;
+
+  componentWillMount() {
+    this.props.refreshTableDetails(new protos.cockroach.server.serverpb.TableDetailsRequest({
+      database: this.props.params[databaseNameAttr],
+      table: this.props.params[tableNameAttr],
+    }));
+    this.props.refreshTableStats(new protos.cockroach.server.serverpb.TableStatsRequest({
+      database: this.props.params[databaseNameAttr],
+      table: this.props.params[tableNameAttr],
+    }));
   }
 
-  prevPage = () => this.props.history.goBack();
+  componentDidMount() {
+    hljs.highlightBlock(this.createStmtNode);
+  }
+
+  componentDidUpdate() {
+    hljs.highlightBlock(this.createStmtNode);
+  }
 
   render() {
-    const { tableInfo, grantsSortSetting, match } = this.props;
-    const database = getMatchParamByName(match, databaseNameAttr);
-    const table = getMatchParamByName(match, tableNameAttr);
+    const { tableInfo, grantsSortSetting } = this.props;
 
-    const title = `${database}.${table}`;
     if (tableInfo) {
-      return (
-        <div>
-          <Helmet title={`${title} Table | Databases`} />
-          <div className="page--header">
-            <Button
-              onClick={this.prevPage}
-              type="unstyled-link"
-              size="small"
-              icon={<ArrowLeft fontSize={"10px"} />}
-              iconPosition="left"
-            >
-              Databases
-            </Button>
-            <div className="database-summary-title">
-              <h2 className="base-heading">{title}</h2>
+      return <div>
+        <section className="section">
+          <section className="section parent-link">
+            <Link to="/databases/tables">&lt; Back to Databases</Link>
+          </section>
+          <div className="database-summary-title">
+            <h2>{ this.props.params[tableNameAttr] }</h2>
+          </div>
+          <div className="content l-columns">
+            <div className="l-columns__left">
+              <pre className="sql-highlight" ref={(node) => this.createStmtNode = node}>
+                {/* TODO (mrtracy): format create table statement */}
+                {tableInfo.createStatement}
+              </pre>
+              <div className="sql-table">
+                <GrantsSortedTable
+                  data={tableInfo.grants}
+                  sortSetting={grantsSortSetting}
+                  onChangeSortSetting={(setting) => this.props.setSort(setting) }
+                  columns={[
+                    {
+                      title: "User",
+                      cell: (grants) => grants.user,
+                      sort: (grants) => grants.user,
+                    },
+                    {
+                      title: "Grants",
+                      cell: (grants) => grants.privileges.join(", "),
+                      sort: (grants) => grants.privileges.join(", "),
+                    },
+                  ]}/>
+              </div>
+            </div>
+            <div className="l-columns__right">
+              <SummaryBar>
+                <SummaryHeadlineStat
+                  title="Size"
+                  tooltip="Approximate total disk size of this table across all replicas."
+                  value={ tableInfo.physicalSize }
+                  format={ Bytes }/>
+                <SummaryHeadlineStat
+                  title="Ranges"
+                  tooltip="The total number of ranges in this table."
+                  value={ tableInfo.rangeCount }/>
+              </SummaryBar>
             </div>
           </div>
-          <section className="section section--container table-details">
-            <Tabs defaultActiveKey="1" className="cockroach--tabs">
-              <TabPane tab="Overview" key="1">
-                <Row gutter={16}>
-                  <Col className="gutter-row" span={16}>
-                    <SqlBox
-                      value={tableInfo.createStatement || ""}
-                      secondaryValue={tableInfo.configureZoneStatement || ""}
-                    />
-                  </Col>
-                  <Col className="gutter-row" span={8}>
-                    <SummaryCard>
-                      <Row>
-                        <Col span={12}>
-                          <div className="summary--card__counting">
-                            <h3 className="summary--card__counting--value">
-                              {Bytes(tableInfo.physicalSize)}
-                            </h3>
-                            <p className="summary--card__counting--label">
-                              Size
-                            </p>
-                          </div>
-                        </Col>
-                        <Col span={12}>
-                          <div className="summary--card__counting">
-                            <h3 className="summary--card__counting--value">
-                              {tableInfo.numReplicas}
-                            </h3>
-                            <p className="summary--card__counting--label">
-                              Replicas
-                            </p>
-                          </div>
-                        </Col>
-                        <Col span={24}>
-                          <div className="summary--card__counting">
-                            <h3 className="summary--card__counting--value">
-                              {tableInfo.rangeCount}
-                            </h3>
-                            <p className="summary--card__counting--label">
-                              Ranges
-                            </p>
-                          </div>
-                        </Col>
-                      </Row>
-                    </SummaryCard>
-                  </Col>
-                </Row>
-              </TabPane>
-              <TabPane tab="Grants" key="2">
-                <SummaryCard>
-                  <GrantsSortedTable
-                    data={tableInfo.grants}
-                    sortSetting={grantsSortSetting}
-                    onChangeSortSetting={(setting) =>
-                      this.props.setSort(setting)
-                    }
-                    columns={[
-                      {
-                        title: "User",
-                        cell: (grants) => grants.user,
-                        sort: (grants) => grants.user,
-                      },
-                      {
-                        title: "Grants",
-                        cell: (grants) => grants.privileges.join(", "),
-                        sort: (grants) => grants.privileges.join(", "),
-                      },
-                    ]}
-                  />
-                </SummaryCard>
-              </TabPane>
-            </Tabs>
-          </section>
-        </div>
-      );
+        </section>
+      </div>;
     }
     return <div>No results.</div>;
   }
@@ -205,37 +143,27 @@ export class TableMain extends React.Component<TableMainProps, {}> {
  *         SELECTORS
  */
 
-export function selectTableInfo(
-  state: AdminUIState,
-  props: RouteComponentProps,
-): TableInfo {
-  const db = getMatchParamByName(props.match, databaseNameAttr);
-  const table = getMatchParamByName(props.match, tableNameAttr);
+function tableInfo(state: AdminUIState, props: RouterState): TableInfo {
+  const db = props.params[databaseNameAttr];
+  const table = props.params[tableNameAttr];
   const details = state.cachedData.tableDetails[generateTableID(db, table)];
   const stats = state.cachedData.tableStats[generateTableID(db, table)];
   return new TableInfo(table, details && details.data, stats && stats.data);
 }
 
-const mapStateToProps = (
-  state: AdminUIState,
-  ownProps: RouteComponentProps,
-) => {
-  return {
-    tableInfo: selectTableInfo(state, ownProps),
-    grantsSortSetting: databaseTableGrantsSortSetting.selector(state),
-  };
-};
-
-const mapDispatchToProps = {
-  setSort: databaseTableGrantsSortSetting.set,
-  refreshTableDetails,
-  refreshTableStats,
-  refreshDatabaseDetails,
-};
-
 // Connect the TableMain class with our redux store.
-const tableMainConnected = withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(TableMain),
-);
+const tableMainConnected = connect(
+  (state: AdminUIState, ownProps: RouterState) => {
+    return {
+      tableInfo: tableInfo(state, ownProps),
+      grantsSortSetting: databaseTableGrantsSortSetting.selector(state),
+    };
+  },
+  {
+    setSort: databaseTableGrantsSortSetting.set,
+    refreshTableDetails,
+    refreshTableStats,
+  },
+)(TableMain);
 
 export default tableMainConnected;

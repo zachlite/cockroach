@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 //
 // This file provides generic interfaces that allow tests to set up test
 // clusters without importing the testcluster (and indirectly server) package
@@ -18,24 +22,16 @@
 package serverutils
 
 import (
-	"context"
 	gosql "database/sql"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
 // TestClusterInterface defines TestCluster functionality used by tests.
 type TestClusterInterface interface {
-	// Start is used to start up the servers that were instantiated when
-	// creating this cluster.
-	Start(t testing.TB)
-
-	// NumServers returns the number of servers this test cluster is configured
-	// with.
 	NumServers() int
 
 	// Server returns the TestServerInterface corresponding to a specific node.
@@ -51,75 +47,19 @@ type TestClusterInterface interface {
 	// defer the Stop() method on this stopper after starting a test cluster.
 	Stopper() *stop.Stopper
 
-	// AddVoters adds voter replicas for a range on a set of stores.
+	// AddReplicas adds replicas for a range on a set of stores.
 	// It's illegal to have multiple replicas of the same range on stores of a single
 	// node.
 	// The method blocks until a snapshot of the range has been copied to all the
 	// new replicas and the new replicas become part of the Raft group.
-	AddVoters(
+	AddReplicas(
 		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) (roachpb.RangeDescriptor, error)
 
-	// AddVotersMulti is the same as AddVoters but will execute multiple jobs.
-	AddVotersMulti(
-		kts ...KeyAndTargets,
-	) ([]roachpb.RangeDescriptor, []error)
-
-	// AddVotersOrFatal is the same as AddVoters but will Fatal the test on
-	// error.
-	AddVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// RemoveVoters removes one or more voter replicas from a range.
-	RemoveVoters(
+	// RemoveReplicas removes one or more replicas from a range.
+	RemoveReplicas(
 		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) (roachpb.RangeDescriptor, error)
-
-	// RemoveVotersOrFatal is the same as RemoveVoters but will Fatal the test on
-	// error.
-	RemoveVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// AddNonVoters adds non-voting replicas for a range on a set of stores.
-	//
-	//This method blocks until the new replicas become a part of the Raft group.
-	AddNonVoters(
-		startKey roachpb.Key,
-		targets ...roachpb.ReplicationTarget,
-	) (roachpb.RangeDescriptor, error)
-
-	// AddNonVotersOrFatal is the same as AddNonVoters but will fatal if it fails.
-	AddNonVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// RemoveNonVoters removes one or more non-voters from a range.
-	RemoveNonVoters(
-		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) (roachpb.RangeDescriptor, error)
-
-	// RemoveNonVotersOrFatal is the same as RemoveNonVoters but will fatal if it
-	// fails.
-	RemoveNonVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// SwapVoterWithNonVoter atomically "swaps" the voting replica located on
-	// `voterTarget` with the non-voting replica located on `nonVoterTarget`. A
-	// sequence of ReplicationChanges is considered to have "swapped" a voter on
-	// s1 with a non-voter on s2 iff the resulting state after the execution of
-	// these changes is such that s1 has a non-voter and s2 has a voter.
-	SwapVoterWithNonVoter(
-		startKey roachpb.Key, voterTarget, nonVoterTarget roachpb.ReplicationTarget,
-	) (*roachpb.RangeDescriptor, error)
-
-	// SwapVoterWithNonVoterOrFatal is the same as SwapVoterWithNonVoter but will
-	// fatal if it fails.
-	SwapVoterWithNonVoterOrFatal(
-		t *testing.T, startKey roachpb.Key, voterTarget, nonVoterTarget roachpb.ReplicationTarget,
-	) *roachpb.RangeDescriptor
 
 	// FindRangeLeaseHolder returns the current lease holder for the given range.
 	// In particular, it returns one particular node's (the hint, if specified) view
@@ -147,56 +87,18 @@ type TestClusterInterface interface {
 		rangeDesc roachpb.RangeDescriptor, dest roachpb.ReplicationTarget,
 	) error
 
-	// MoveRangeLeaseNonCooperatively performs a non-cooperative transfer of the
-	// lease for a range from whoever has it to a particular store. That store
-	// must already have a replica of the range. If that replica already has the
-	// (active) lease, this method is a no-op.
-	//
-	// The transfer is non-cooperative in that the lease is made to expire by
-	// advancing the manual clock. The target is then instructed to acquire the
-	// ownerless lease. Most tests should use the cooperative version of this
-	// method, TransferRangeLease.
-	//
-	// Returns the new lease.
-	//
-	// If the lease starts out on dest, this is a no-op and the current lease is
-	// returned.
-	MoveRangeLeaseNonCooperatively(
-		ctx context.Context,
-		rangeDesc roachpb.RangeDescriptor,
-		dest roachpb.ReplicationTarget,
-		manual *hlc.HybridManualClock,
-	) (*roachpb.Lease, error)
-
 	// LookupRange returns the descriptor of the range containing key.
 	LookupRange(key roachpb.Key) (roachpb.RangeDescriptor, error)
 
-	// LookupRangeOrFatal is the same as LookupRange but will Fatal the test on
-	// error.
-	LookupRangeOrFatal(t testing.TB, key roachpb.Key) roachpb.RangeDescriptor
-
 	// Target returns a roachpb.ReplicationTarget for the specified server.
 	Target(serverIdx int) roachpb.ReplicationTarget
-
-	// ReplicationMode returns the ReplicationMode that the test cluster was
-	// configured with.
-	ReplicationMode() base.TestClusterReplicationMode
-
-	// ScratchRange returns the start key of a span of keyspace suitable for use
-	// as kv scratch space (it doesn't overlap system spans or SQL tables). The
-	// range is lazily split off on the first call to ScratchRange.
-	ScratchRange(t testing.TB) roachpb.Key
-
-	// WaitForFullReplication waits until all stores in the cluster
-	// have no ranges with replication pending.
-	WaitForFullReplication() error
 }
 
 // TestClusterFactory encompasses the actual implementation of the shim
 // service.
 type TestClusterFactory interface {
-	// NewTestCluster creates a test cluster without starting it.
-	NewTestCluster(t testing.TB, numNodes int, args base.TestClusterArgs) TestClusterInterface
+	// New instantiates a test server.
+	StartTestCluster(t testing.TB, numNodes int, args base.TestClusterArgs) TestClusterInterface
 }
 
 var clusterFactoryImpl TestClusterFactory
@@ -208,29 +110,12 @@ func InitTestClusterFactory(impl TestClusterFactory) {
 	clusterFactoryImpl = impl
 }
 
-// StartNewTestCluster creates and starts up a TestCluster made up of numNodes
-// in-memory testing servers. The cluster should be stopped using
-// Stopper().Stop().
-func StartNewTestCluster(
-	t testing.TB, numNodes int, args base.TestClusterArgs,
-) TestClusterInterface {
-	cluster := NewTestCluster(t, numNodes, args)
-	cluster.Start(t)
-	return cluster
-}
-
-// NewTestCluster creates TestCluster made up of numNodes in-memory testing
-// servers. It can be started using the return type.
-func NewTestCluster(t testing.TB, numNodes int, args base.TestClusterArgs) TestClusterInterface {
+// StartTestCluster starts up a TestCluster made up of numNodes in-memory
+// testing servers. The cluster should be stopped using Stopper().Stop().
+func StartTestCluster(t testing.TB, numNodes int, args base.TestClusterArgs) TestClusterInterface {
 	if clusterFactoryImpl == nil {
 		panic("TestClusterFactory not initialized. One needs to be injected " +
 			"from the package's TestMain()")
 	}
-	return clusterFactoryImpl.NewTestCluster(t, numNodes, args)
-}
-
-// KeyAndTargets contains replica startKey and targets.
-type KeyAndTargets struct {
-	StartKey roachpb.Key
-	Targets  []roachpb.ReplicationTarget
+	return clusterFactoryImpl.StartTestCluster(t, numNodes, args)
 }

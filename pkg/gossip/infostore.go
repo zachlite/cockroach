@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package gossip
 
@@ -16,8 +20,9 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -27,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
 )
 
 type stringMatcher interface {
@@ -42,9 +46,8 @@ func (allMatcher) MatchString(string) bool {
 
 // callback holds regexp pattern match and GossipCallback method.
 type callback struct {
-	matcher   stringMatcher
-	method    Callback
-	redundant bool
+	matcher stringMatcher
+	method  Callback
 }
 
 // infoStore objects manage maps of Info objects. They maintain a
@@ -68,9 +71,9 @@ type infoStore struct {
 	highWaterStamps map[roachpb.NodeID]int64 // Per-node information for gossip peers
 	callbacks       []*callback
 
+	callbackMu     syncutil.Mutex // Serializes callbacks
 	callbackWorkMu syncutil.Mutex // Protects callbackWork
 	callbackWork   []func()
-	callbackCh     chan struct{} // Channel to signal the callback goroutine
 }
 
 var monoTime struct {
@@ -111,30 +114,9 @@ func ratchetMonotonic(v int64) {
 	monoTime.Unlock()
 }
 
-// ratchetHighWaterStamp sets stamps[nodeID] to max(stamps[nodeID], newStamp).
-func ratchetHighWaterStamp(stamps map[roachpb.NodeID]int64, nodeID roachpb.NodeID, newStamp int64) {
-	if nodeID != 0 && stamps[nodeID] < newStamp {
-		stamps[nodeID] = newStamp
-	}
-}
-
-// mergeHighWaterStamps merges the high water stamps in src into dest by
-// performing a ratchet operation for each stamp in src. The existing stamps in
-// dest will either remain the same (if they are smaller than the corresponding
-// stamp in src) or be bumped to the higher value in src.
-func mergeHighWaterStamps(dest *map[roachpb.NodeID]int64, src map[roachpb.NodeID]int64) {
-	if *dest == nil {
-		*dest = src
-		return
-	}
-	for nodeID, newStamp := range src {
-		ratchetHighWaterStamp(*dest, nodeID, newStamp)
-	}
-}
-
 // String returns a string representation of an infostore.
 func (is *infoStore) String() string {
-	var buf strings.Builder
+	buf := bytes.Buffer{}
 	if infoCount := len(is.Infos); infoCount > 0 {
 		fmt.Fprintf(&buf, "infostore with %d info(s): ", infoCount)
 	} else {
@@ -147,7 +129,7 @@ func (is *infoStore) String() string {
 		fmt.Fprintf(&buf, "%sinfo %q: %+v", prepend, key, i.Value)
 		prepend = ", "
 		return nil
-	}, false /* deleteExpired */); err != nil {
+	}); err != nil {
 		// This should never happen because the func we pass above never errors out.
 		panic(err)
 	}
@@ -161,40 +143,14 @@ func newInfoStore(
 	nodeAddr util.UnresolvedAddr,
 	stopper *stop.Stopper,
 ) *infoStore {
-	is := &infoStore{
+	return &infoStore{
 		AmbientContext:  ambient,
 		nodeID:          nodeID,
 		stopper:         stopper,
 		Infos:           make(infoMap),
 		NodeAddr:        nodeAddr,
 		highWaterStamps: map[roachpb.NodeID]int64{},
-		callbackCh:      make(chan struct{}, 1),
 	}
-
-	_ = is.stopper.RunAsyncTask(context.Background(), "infostore", func(ctx context.Context) {
-		for {
-			for {
-				is.callbackWorkMu.Lock()
-				work := is.callbackWork
-				is.callbackWork = nil
-				is.callbackWorkMu.Unlock()
-
-				if len(work) == 0 {
-					break
-				}
-				for _, w := range work {
-					w()
-				}
-			}
-
-			select {
-			case <-is.callbackCh:
-			case <-is.stopper.ShouldQuiesce():
-				return
-			}
-		}
-	})
-	return is
 }
 
 // newInfo allocates and returns a new info object using the specified
@@ -218,11 +174,13 @@ func (is *infoStore) newInfo(val []byte, ttl time.Duration) *Info {
 }
 
 // getInfo returns the Info at key. Returns nil when key is not present
-// in the infoStore. Does not modify the infoStore.
+// in the infoStore.
 func (is *infoStore) getInfo(key string) *Info {
 	if info, ok := is.Infos[key]; ok {
-		// Check TTL and ignore if too old.
-		if !info.expired(monotonicUnixNano()) {
+		// Check TTL and discard if too old.
+		if info.expired(monotonicUnixNano()) {
+			delete(is.Infos, key)
+		} else {
 			return info
 		}
 	}
@@ -238,8 +196,7 @@ func (is *infoStore) addInfo(key string, i *Info) error {
 	}
 	// Only replace an existing info if new timestamp is greater, or if
 	// timestamps are equal, but new hops is smaller.
-	existingInfo, ok := is.Infos[key]
-	if ok {
+	if existingInfo, ok := is.Infos[key]; ok {
 		iNanos := i.Value.Timestamp.WallTime
 		existingNanos := existingInfo.Value.Timestamp.WallTime
 		if iNanos < existingNanos || (iNanos == existingNanos && i.Hops >= existingInfo.Hops) {
@@ -251,23 +208,24 @@ func (is *infoStore) addInfo(key string, i *Info) error {
 		i.OrigStamp = monotonicUnixNano()
 		if highWaterStamp, ok := is.highWaterStamps[i.NodeID]; ok && highWaterStamp >= i.OrigStamp {
 			// Report both timestamps in the crash.
-			log.Fatalf(context.Background(),
-				"high water stamp %d >= %d", log.Safe(highWaterStamp), log.Safe(i.OrigStamp))
+			log.Fatal(context.Background(),
+				log.Safe(fmt.Sprintf("high water stamp %d >= %d", highWaterStamp, i.OrigStamp)))
 		}
 	}
 	// Update info map.
 	is.Infos[key] = i
 	// Update the high water timestamp & min hops for the originating node.
-	ratchetHighWaterStamp(is.highWaterStamps, i.NodeID, i.OrigStamp)
-	changed := existingInfo == nil ||
-		!bytes.Equal(existingInfo.Value.RawBytes, i.Value.RawBytes)
-	is.processCallbacks(key, i.Value, changed)
+	if nID := i.NodeID; nID != 0 {
+		if hws := is.highWaterStamps[nID]; hws < i.OrigStamp {
+			is.highWaterStamps[nID] = i.OrigStamp
+		}
+	}
+	is.processCallbacks(key, i.Value)
 	return nil
 }
 
 // getHighWaterStamps returns a copy of the high water stamps map of
-// gossip peer info maintained by this infostore. Does not modify
-// the infoStore.
+// gossip peer info maintained by this infostore.
 func (is *infoStore) getHighWaterStamps() map[roachpb.NodeID]int64 {
 	copy := make(map[roachpb.NodeID]int64, len(is.highWaterStamps))
 	for k, hws := range is.highWaterStamps {
@@ -281,9 +239,7 @@ func (is *infoStore) getHighWaterStamps() map[roachpb.NodeID]int64 {
 // received. The callback method is invoked with the info key which
 // matched pattern. Returns a function to unregister the callback.
 // Note: the callback may fire after being unregistered.
-func (is *infoStore) registerCallback(
-	pattern string, method Callback, opts ...CallbackOption,
-) func() {
+func (is *infoStore) registerCallback(pattern string, method Callback) func() {
 	var matcher stringMatcher
 	if pattern == ".*" {
 		matcher = allMatcher{}
@@ -291,17 +247,13 @@ func (is *infoStore) registerCallback(
 		matcher = regexp.MustCompile(pattern)
 	}
 	cb := &callback{matcher: matcher, method: method}
-	for _, opt := range opts {
-		opt.apply(cb)
-	}
-
 	is.callbacks = append(is.callbacks, cb)
 	if err := is.visitInfos(func(key string, i *Info) error {
 		if matcher.MatchString(key) {
 			is.runCallbacks(key, i.Value, method)
 		}
 		return nil
-	}, true /* deleteExpired */); err != nil {
+	}); err != nil {
 		panic(err)
 	}
 
@@ -310,7 +262,6 @@ func (is *infoStore) registerCallback(
 			if targetCB == cb {
 				numCBs := len(is.callbacks)
 				is.callbacks[i] = is.callbacks[numCBs-1]
-				is.callbacks[numCBs-1] = nil // for GC
 				is.callbacks = is.callbacks[:numCBs-1]
 				break
 			}
@@ -321,10 +272,10 @@ func (is *infoStore) registerCallback(
 // processCallbacks processes callbacks for the specified key by
 // matching each callback's regular expression against the key and invoking
 // the corresponding callback method on a match.
-func (is *infoStore) processCallbacks(key string, content roachpb.Value, changed bool) {
+func (is *infoStore) processCallbacks(key string, content roachpb.Value) {
 	var matches []Callback
 	for _, cb := range is.callbacks {
-		if (changed || cb.redundant) && cb.matcher.MatchString(key) {
+		if cb.matcher.MatchString(key) {
 			matches = append(matches, cb.method)
 		}
 	}
@@ -342,30 +293,41 @@ func (is *infoStore) runCallbacks(key string, content roachpb.Value, callbacks .
 	is.callbackWork = append(is.callbackWork, f)
 	is.callbackWorkMu.Unlock()
 
-	// Signal the callback goroutine. Callbacks run in a goroutine to avoid mutex
-	// reentry. We also guarantee callbacks are run in order such that if a key
-	// is updated twice in succession, the second callback will never be run
-	// before the first.
-	select {
-	case is.callbackCh <- struct{}{}:
-	default:
+	// Run callbacks in a goroutine to avoid mutex reentry. We also guarantee
+	// callbacks are run in order such that if a key is updated twice in
+	// succession, the second callback will never be run before the first.
+	if err := is.stopper.RunAsyncTask(
+		context.Background(), "gossip.infoStore: callback", func(_ context.Context,
+		) {
+			// Grab the callback mutex to serialize execution of the callbacks.
+			is.callbackMu.Lock()
+			defer is.callbackMu.Unlock()
+
+			// Grab and execute the list of work.
+			is.callbackWorkMu.Lock()
+			work := is.callbackWork
+			is.callbackWork = nil
+			is.callbackWorkMu.Unlock()
+
+			for _, w := range work {
+				w()
+			}
+		}); err != nil {
+		ctx := is.AnnotateCtx(context.TODO())
+		log.Warning(ctx, err)
 	}
 }
 
-// visitInfos implements a visitor pattern to run the visitInfo function against
-// each info in turn. If deleteExpired is specified as true then the method will
-// delete any infos that it finds which are expired, so it may modify the
-// infoStore. If it is specified as false, the method will ignore expired infos
-// without deleting them or modifying the infoStore.
-func (is *infoStore) visitInfos(visitInfo func(string, *Info) error, deleteExpired bool) error {
+// visitInfos implements a visitor pattern to run the visitInfo
+// function against each info in turn. Be sure to skip over any expired
+// infos.
+func (is *infoStore) visitInfos(visitInfo func(string, *Info) error) error {
 	now := monotonicUnixNano()
 
 	if visitInfo != nil {
 		for k, i := range is.Infos {
 			if i.expired(now) {
-				if deleteExpired {
-					delete(is.Infos, k)
-				}
+				delete(is.Infos, k)
 				continue
 			}
 			if err := visitInfo(k, i); err != nil {
@@ -394,13 +356,13 @@ func (is *infoStore) combine(
 		infoCopy.Hops++
 		infoCopy.PeerID = nodeID
 		if infoCopy.OrigStamp == 0 {
-			panic(errors.Errorf("combining info from n%d with 0 original timestamp", nodeID))
+			panic(errors.Errorf("combining info from node %d with 0 original timestamp", nodeID))
 		}
 		// errNotFresh errors from addInfo are ignored; they indicate that
 		// the data in *is is newer than in *delta.
 		if addErr := is.addInfo(key, &infoCopy); addErr == nil {
 			freshCount++
-		} else if !errors.Is(addErr, errNotFresh) {
+		} else if addErr != errNotFresh {
 			err = addErr
 		}
 	}
@@ -411,8 +373,6 @@ func (is *infoStore) combine(
 // newer than the high water timestamps indicated by the supplied
 // map (which is taken from the perspective of the peer node we're
 // taking this delta for).
-//
-// May modify the infoStore.
 func (is *infoStore) delta(highWaterTimestamps map[roachpb.NodeID]int64) map[string]*Info {
 	infos := make(map[string]*Info)
 	// Compute delta of infos.
@@ -421,25 +381,11 @@ func (is *infoStore) delta(highWaterTimestamps map[roachpb.NodeID]int64) map[str
 			infos[key] = i
 		}
 		return nil
-	}, true /* deleteExpired */); err != nil {
+	}); err != nil {
 		panic(err)
 	}
 
 	return infos
-}
-
-// populateMostDistantMarkers adds the node ID infos to the infos map. The node
-// ID infos are used as markers in the mostDistant calculation and need to be
-// propagated regardless of high water stamps.
-func (is *infoStore) populateMostDistantMarkers(infos map[string]*Info) {
-	if err := is.visitInfos(func(key string, i *Info) error {
-		if IsNodeIDKey(key) {
-			infos[key] = i
-		}
-		return nil
-	}, true /* deleteExpired */); err != nil {
-		panic(err)
-	}
 }
 
 // mostDistant returns the most distant gossip node known to the store
@@ -450,8 +396,6 @@ func (is *infoStore) populateMostDistantMarkers(infos map[string]*Info) {
 // Infos from it) for the purposes of excluding them from the result.
 // This check is particularly useful if mostDistant is called multiple times
 // in quick succession.
-//
-// May modify the infoStore.
 func (is *infoStore) mostDistant(
 	hasOutgoingConn func(roachpb.NodeID) bool,
 ) (roachpb.NodeID, uint32) {
@@ -470,7 +414,7 @@ func (is *infoStore) mostDistant(
 			nodeID = i.NodeID
 		}
 		return nil
-	}, true /* deleteExpired */); err != nil {
+	}); err != nil {
 		panic(err)
 	}
 	return nodeID, maxHops
@@ -479,8 +423,6 @@ func (is *infoStore) mostDistant(
 // leastUseful determines which node ID from amongst the set is
 // currently contributing the least. Returns the node ID. If nodes is
 // empty, returns 0.
-//
-// May modify the infoStore.
 func (is *infoStore) leastUseful(nodes nodeSet) roachpb.NodeID {
 	contrib := make(map[roachpb.NodeID]map[roachpb.NodeID]struct{}, nodes.len())
 	for node := range nodes.nodes {
@@ -492,7 +434,7 @@ func (is *infoStore) leastUseful(nodes nodeSet) roachpb.NodeID {
 		}
 		contrib[i.PeerID][i.NodeID] = struct{}{}
 		return nil
-	}, true /* deleteExpired */); err != nil {
+	}); err != nil {
 		panic(err)
 	}
 

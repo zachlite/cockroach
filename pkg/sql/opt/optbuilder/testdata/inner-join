@@ -1,138 +1,97 @@
 exec-ddl
-CREATE TABLE a (x INT PRIMARY KEY, y FLOAT)
+CREATE TABLE t.a (x INT PRIMARY KEY, y FLOAT)
 ----
+table a
+  x int NOT NULL
+  y float NULL
 
 exec-ddl
-CREATE TABLE b (x INT, y FLOAT)
+CREATE TABLE t.b (x INT, y FLOAT)
 ----
+table b
+  x int NULL
+  y float NULL
+  rowid int NOT NULL (hidden)
 
 exec-ddl
-CREATE TABLE c (x INT, y FLOAT, z VARCHAR, CONSTRAINT fk_x_ref_a FOREIGN KEY (x) REFERENCES a (x))
+CREATE TABLE t.c (x INT, y FLOAT, z VARCHAR, CONSTRAINT fk_x_ref_a FOREIGN KEY (x) REFERENCES t.a (x))
 ----
+table c
+  x int NULL
+  y float NULL
+  z string NULL
+  rowid int NOT NULL (hidden)
 
 build
-SELECT * FROM a, b
+SELECT * FROM t.a, t.b
 ----
 project
- ├── columns: x:1!null y:2 x:5 y:6
- └── inner-join (cross)
-      ├── columns: a.x:1!null a.y:2 a.crdb_internal_mvcc_timestamp:3 a.tableoid:4 b.x:5 b.y:6 rowid:7!null b.crdb_internal_mvcc_timestamp:8 b.tableoid:9
-      ├── scan a
-      │    └── columns: a.x:1!null a.y:2 a.crdb_internal_mvcc_timestamp:3 a.tableoid:4
-      ├── scan b
-      │    └── columns: b.x:5 b.y:6 rowid:7!null b.crdb_internal_mvcc_timestamp:8 b.tableoid:9
-      └── filters (true)
+ ├── columns: a.x:int:1 a.y:float:null:2 b.x:int:null:3 b.y:float:null:4
+ ├── inner-join
+ │    ├── columns: a.x:int:1 a.y:float:null:2 b.x:int:null:3 b.y:float:null:4 b.rowid:int:5
+ │    ├── scan
+ │    │    └── columns: a.x:int:1 a.y:float:null:2
+ │    ├── scan
+ │    │    └── columns: b.x:int:null:3 b.y:float:null:4 b.rowid:int:5
+ │    └── true [type=bool]
+ └── projections
+      ├── variable: a.x [type=int]
+      ├── variable: a.y [type=float]
+      ├── variable: b.x [type=int]
+      └── variable: b.y [type=float]
 
 build
-SELECT a.x, b.y FROM a, b WHERE a.x = b.x
+SELECT a.x, b.y FROM t.a, t.b WHERE a.x = b.x
 ----
 project
- ├── columns: x:1!null y:6
- └── select
-      ├── columns: a.x:1!null a.y:2 a.crdb_internal_mvcc_timestamp:3 a.tableoid:4 b.x:5!null b.y:6 rowid:7!null b.crdb_internal_mvcc_timestamp:8 b.tableoid:9
-      ├── inner-join (cross)
-      │    ├── columns: a.x:1!null a.y:2 a.crdb_internal_mvcc_timestamp:3 a.tableoid:4 b.x:5 b.y:6 rowid:7!null b.crdb_internal_mvcc_timestamp:8 b.tableoid:9
-      │    ├── scan a
-      │    │    └── columns: a.x:1!null a.y:2 a.crdb_internal_mvcc_timestamp:3 a.tableoid:4
-      │    ├── scan b
-      │    │    └── columns: b.x:5 b.y:6 rowid:7!null b.crdb_internal_mvcc_timestamp:8 b.tableoid:9
-      │    └── filters (true)
-      └── filters
-           └── a.x:1 = b.x:5
+ ├── columns: a.x:int:1 b.y:float:null:4
+ ├── select
+ │    ├── columns: a.x:int:1 a.y:float:null:2 b.x:int:null:3 b.y:float:null:4 b.rowid:int:5
+ │    ├── inner-join
+ │    │    ├── columns: a.x:int:1 a.y:float:null:2 b.x:int:null:3 b.y:float:null:4 b.rowid:int:5
+ │    │    ├── scan
+ │    │    │    └── columns: a.x:int:1 a.y:float:null:2
+ │    │    ├── scan
+ │    │    │    └── columns: b.x:int:null:3 b.y:float:null:4 b.rowid:int:5
+ │    │    └── true [type=bool]
+ │    └── eq [type=bool]
+ │         ├── variable: a.x [type=int]
+ │         └── variable: b.x [type=int]
+ └── projections
+      ├── variable: a.x [type=int]
+      └── variable: b.y [type=float]
 
 build
-SELECT * FROM c, b, a WHERE c.x = a.x AND b.x = a.x
+SELECT * FROM t.c, t.b, t.a WHERE c.x = a.x AND b.x = a.x
 ----
 project
- ├── columns: x:1!null y:2 z:3 x:7!null y:8 x:12!null y:13
- └── select
-      ├── columns: c.x:1!null c.y:2 z:3 c.rowid:4!null c.crdb_internal_mvcc_timestamp:5 c.tableoid:6 b.x:7!null b.y:8 b.rowid:9!null b.crdb_internal_mvcc_timestamp:10 b.tableoid:11 a.x:12!null a.y:13 a.crdb_internal_mvcc_timestamp:14 a.tableoid:15
-      ├── inner-join (cross)
-      │    ├── columns: c.x:1 c.y:2 z:3 c.rowid:4!null c.crdb_internal_mvcc_timestamp:5 c.tableoid:6 b.x:7 b.y:8 b.rowid:9!null b.crdb_internal_mvcc_timestamp:10 b.tableoid:11 a.x:12!null a.y:13 a.crdb_internal_mvcc_timestamp:14 a.tableoid:15
-      │    ├── scan c
-      │    │    └── columns: c.x:1 c.y:2 z:3 c.rowid:4!null c.crdb_internal_mvcc_timestamp:5 c.tableoid:6
-      │    ├── inner-join (cross)
-      │    │    ├── columns: b.x:7 b.y:8 b.rowid:9!null b.crdb_internal_mvcc_timestamp:10 b.tableoid:11 a.x:12!null a.y:13 a.crdb_internal_mvcc_timestamp:14 a.tableoid:15
-      │    │    ├── scan b
-      │    │    │    └── columns: b.x:7 b.y:8 b.rowid:9!null b.crdb_internal_mvcc_timestamp:10 b.tableoid:11
-      │    │    ├── scan a
-      │    │    │    └── columns: a.x:12!null a.y:13 a.crdb_internal_mvcc_timestamp:14 a.tableoid:15
-      │    │    └── filters (true)
-      │    └── filters (true)
-      └── filters
-           └── (c.x:1 = a.x:12) AND (b.x:7 = a.x:12)
-
-exec-ddl
-CREATE TABLE db1.a (x INT PRIMARY KEY, y FLOAT, z STRING)
-----
-
-exec-ddl
-CREATE TABLE db2.a (x INT PRIMARY KEY, y FLOAT)
-----
-
-build fully-qualify-names
-SELECT a.x FROM db1.a, db2.a
-----
-error (42P09): ambiguous source name: "a"
-
-build fully-qualify-names
-SELECT x FROM a, b
-----
-error (42702): column reference "x" is ambiguous (candidates: a.x, b.x)
-
-build fully-qualify-names
-SELECT * FROM db1.a, db2.a
-----
-project
- ├── columns: x:1!null y:2 z:3 x:6!null y:7
- └── inner-join (cross)
-      ├── columns: db1.public.a.x:1!null db1.public.a.y:2 db1.public.a.z:3 db1.public.a.crdb_internal_mvcc_timestamp:4 db1.public.a.tableoid:5 db2.public.a.x:6!null db2.public.a.y:7 db2.public.a.crdb_internal_mvcc_timestamp:8 db2.public.a.tableoid:9
-      ├── scan db1.public.a
-      │    └── columns: db1.public.a.x:1!null db1.public.a.y:2 db1.public.a.z:3 db1.public.a.crdb_internal_mvcc_timestamp:4 db1.public.a.tableoid:5
-      ├── scan db2.public.a
-      │    └── columns: db2.public.a.x:6!null db2.public.a.y:7 db2.public.a.crdb_internal_mvcc_timestamp:8 db2.public.a.tableoid:9
-      └── filters (true)
-
-build fully-qualify-names
-SELECT * FROM a, a
-----
-error (42712): source name "a" specified more than once (missing AS clause)
-
-# TODO(justin): this case should be rejected for having a name specified twice.
-build fully-qualify-names
-SELECT * FROM a, (SELECT * FROM a) AS a
-----
-project
- ├── columns: x:1!null y:2 x:5!null y:6
- └── inner-join (cross)
-      ├── columns: t.public.a.x:1!null t.public.a.y:2 t.public.a.crdb_internal_mvcc_timestamp:3 t.public.a.tableoid:4 t.public.a.x:5!null t.public.a.y:6
-      ├── scan t.public.a
-      │    └── columns: t.public.a.x:1!null t.public.a.y:2 t.public.a.crdb_internal_mvcc_timestamp:3 t.public.a.tableoid:4
-      ├── project
-      │    ├── columns: t.public.a.x:5!null t.public.a.y:6
-      │    └── scan t.public.a
-      │         └── columns: t.public.a.x:5!null t.public.a.y:6 t.public.a.crdb_internal_mvcc_timestamp:7 t.public.a.tableoid:8
-      └── filters (true)
-
-build fully-qualify-names
-SELECT * FROM t.a, a
-----
-error (42712): source name "a" specified more than once (missing AS clause)
-
-build fully-qualify-names
-SELECT * FROM t.a, a AS a
-----
-project
- ├── columns: x:1!null y:2 x:5!null y:6
- └── inner-join (cross)
-      ├── columns: t.public.a.x:1!null t.public.a.y:2 t.public.a.crdb_internal_mvcc_timestamp:3 t.public.a.tableoid:4 t.public.a.x:5!null t.public.a.y:6 t.public.a.crdb_internal_mvcc_timestamp:7 t.public.a.tableoid:8
-      ├── scan t.public.a
-      │    └── columns: t.public.a.x:1!null t.public.a.y:2 t.public.a.crdb_internal_mvcc_timestamp:3 t.public.a.tableoid:4
-      ├── scan t.public.a
-      │    └── columns: t.public.a.x:5!null t.public.a.y:6 t.public.a.crdb_internal_mvcc_timestamp:7 t.public.a.tableoid:8
-      └── filters (true)
-
-build fully-qualify-names
-SELECT a.* FROM t.a, a AS a
-----
-error (42P09): ambiguous source name: "a"
+ ├── columns: c.x:int:null:1 c.y:float:null:2 c.z:string:null:3 b.x:int:null:5 b.y:float:null:6 a.x:int:8 a.y:float:null:9
+ ├── select
+ │    ├── columns: c.x:int:null:1 c.y:float:null:2 c.z:string:null:3 c.rowid:int:4 b.x:int:null:5 b.y:float:null:6 b.rowid:int:7 a.x:int:8 a.y:float:null:9
+ │    ├── inner-join
+ │    │    ├── columns: c.x:int:null:1 c.y:float:null:2 c.z:string:null:3 c.rowid:int:4 b.x:int:null:5 b.y:float:null:6 b.rowid:int:7 a.x:int:8 a.y:float:null:9
+ │    │    ├── inner-join
+ │    │    │    ├── columns: c.x:int:null:1 c.y:float:null:2 c.z:string:null:3 c.rowid:int:4 b.x:int:null:5 b.y:float:null:6 b.rowid:int:7
+ │    │    │    ├── scan
+ │    │    │    │    └── columns: c.x:int:null:1 c.y:float:null:2 c.z:string:null:3 c.rowid:int:4
+ │    │    │    ├── scan
+ │    │    │    │    └── columns: b.x:int:null:5 b.y:float:null:6 b.rowid:int:7
+ │    │    │    └── true [type=bool]
+ │    │    ├── scan
+ │    │    │    └── columns: a.x:int:8 a.y:float:null:9
+ │    │    └── true [type=bool]
+ │    └── and [type=bool]
+ │         ├── eq [type=bool]
+ │         │    ├── variable: c.x [type=int]
+ │         │    └── variable: a.x [type=int]
+ │         └── eq [type=bool]
+ │              ├── variable: b.x [type=int]
+ │              └── variable: a.x [type=int]
+ └── projections
+      ├── variable: c.x [type=int]
+      ├── variable: c.y [type=float]
+      ├── variable: c.z [type=string]
+      ├── variable: b.x [type=int]
+      ├── variable: b.y [type=float]
+      ├── variable: a.x [type=int]
+      └── variable: a.y [type=float]

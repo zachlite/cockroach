@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package parser
 
@@ -18,12 +22,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/cockroachdb/cockroach/pkg/docs"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/errors"
 )
 
 // HelpMessage describes a contextual help message.
@@ -72,9 +73,8 @@ func (h *HelpMessage) Format(w io.Writer) {
 // error", with the error set to a contextual help message about the
 // current statement.
 func helpWith(sqllex sqlLexer, helpText string) int {
-	scan := sqllex.(*lexer)
+	scan := sqllex.(*Scanner)
 	if helpText == "" {
-		scan.lastError = pgerror.WithCandidateCode(errors.New("help upon syntax error"), pgcode.Syntax)
 		scan.populateHelpMsg("help:\n" + AllHelp)
 		return 1
 	}
@@ -97,8 +97,8 @@ func helpWithFunction(sqllex sqlLexer, f tree.ResolvableFunctionReference) int {
 	msg := HelpMessage{
 		Function: f.String(),
 		HelpMessageBody: HelpMessageBody{
-			Category: d.Category,
-			SeeAlso:  docs.URL("functions-and-operators.html"),
+			Category: "built-in functions",
+			SeeAlso:  base.DocsURL("functions-and-operators.html"),
 		},
 	}
 
@@ -111,23 +111,26 @@ func helpWithFunction(sqllex sqlLexer, f tree.ResolvableFunctionReference) int {
 	// together.
 	lastInfo := ""
 	for i, overload := range d.Definition {
-		b := overload.(*tree.Overload)
+		b := overload.(tree.Builtin)
 		if b.Info != "" && b.Info != lastInfo {
 			if i > 0 {
 				fmt.Fprintln(w, "---")
 			}
 			fmt.Fprintf(w, "\n%s\n\n", b.Info)
-			fmt.Fprintln(w, "Signature")
+			fmt.Fprintln(w, "Signature\tCategory")
 		}
 		lastInfo = b.Info
 
-		simplifyRet := d.Class == tree.GeneratorClass
-		fmt.Fprintf(w, "%s%s\n", d.Name, b.Signature(simplifyRet))
+		cat := b.Category
+		if cat != "" {
+			cat = "[" + cat + "]"
+		}
+		fmt.Fprintf(w, "%s%s\t%s\n", d.Name, b.Signature(), cat)
 	}
 	_ = w.Flush()
 	msg.Text = buf.String()
 
-	sqllex.(*lexer).SetHelp(msg)
+	sqllex.(*Scanner).SetHelp(msg)
 	return 1
 }
 
@@ -172,7 +175,7 @@ var HelpMessages = func(h map[string]HelpMessageBody) map[string]HelpMessageBody
 	reformatSeeAlso := func(seeAlso string) string {
 		return strings.Replace(
 			strings.Replace(seeAlso, ", ", "\n  ", -1),
-			"WEBDOCS", docs.URLBase, -1)
+			"WEBDOCS", base.DocsURLBase, -1)
 	}
 	srcMsg := h["<SOURCE>"]
 	srcMsg.SeeAlso = reformatSeeAlso(strings.TrimSpace(srcMsg.SeeAlso))

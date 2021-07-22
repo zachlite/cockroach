@@ -1,8 +1,8 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
+// Licensed under the Cockroach Community Licence (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
@@ -16,6 +16,7 @@ interface LabelsProps {
 }
 
 export class Labels extends React.Component<LabelsProps> {
+
   render() {
     return (
       <g
@@ -26,11 +27,14 @@ export class Labels extends React.Component<LabelsProps> {
         transform="translate(50 22)"
       >
         <title>{this.props.tooltip}</title>
-        <text fill={DARK_BLUE}>{this.props.label}</text>
+        <text fill={DARK_BLUE}>
+          {this.props.label}
+        </text>
         <text fill={MAIN_BLUE} y="20">
           {this.props.subLabel}
         </text>
       </g>
     );
   }
+
 }

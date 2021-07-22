@@ -1,33 +1,18 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import classNames from "classnames";
 import _ from "lodash";
 import Long from "long";
 import moment from "moment";
 import React from "react";
-import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { withRouter, RouteComponentProps } from "react-router-dom";
+import { RouterState } from "react-router";
 
 import * as protos from "src/js/protos";
 import { refreshLiveness, refreshNodes } from "src/redux/apiReducers";
-import { nodesSummarySelector, NodesSummary } from "src/redux/nodes";
+import { NodesSummary, nodesSummarySelector } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
 import { LongToMoment } from "src/util/convert";
 import { FixLong } from "src/util/fixLong";
-import {
-  getFilters,
-  localityToString,
-  NodeFilterList,
-} from "src/views/reports/components/nodeFilterList";
+import { getFilters, localityToString, NodeFilterList } from "src/views/reports/components/nodeFilterList";
 
 interface NodesOwnProps {
   nodesSummary: NodesSummary;
@@ -37,30 +22,24 @@ interface NodesOwnProps {
 
 interface NodesTableRowParams {
   title: string;
-  extract: (
-    ns: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) => React.ReactNode;
-  equality?: (
-    ns: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) => string;
-  cellTitle?: (
-    ns: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) => string;
+  extract: (ns: protos.cockroach.server.status.NodeStatus$Properties) => React.ReactNode;
+  equality?: (ns: protos.cockroach.server.status.NodeStatus$Properties) => string;
+  cellTitle?: (ns: protos.cockroach.server.status.NodeStatus$Properties) => string;
 }
 
-type NodesProps = NodesOwnProps & RouteComponentProps;
+type NodesProps = NodesOwnProps & RouterState;
 
 const dateFormat = "Y-MM-DD HH:mm:ss";
 const detailTimeFormat = "Y/MM/DD HH:mm:ss";
 
 const loading = (
   <div className="section">
-    <h1 className="base-heading">Node Diagnostics</h1>
-    <h2 className="base-heading">Loading cluster status...</h2>
+    <h1>Node Diagnostics</h1>
+    <h2>Loading cluster status...</h2>
   </div>
 );
 
-function NodeTableCell(props: { value: React.ReactNode; title: string }) {
+function NodeTableCell(props: { value: React.ReactNode, title: string }) {
   return (
     <td className="nodes-table__cell" title={props.title}>
       {props.value}
@@ -70,43 +49,30 @@ function NodeTableCell(props: { value: React.ReactNode; title: string }) {
 
 // Functions starting with "print" return a single string representation which
 // can be used for title, the main content or even equality comparisons.
-function printNodeID(
-  status: protos.cockroach.server.status.statuspb.INodeStatus,
-) {
+function printNodeID(status: protos.cockroach.server.status.NodeStatus$Properties) {
   return `n${status.desc.node_id}`;
 }
 
 function printSingleValue(value: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     return _.get(status, value, null);
   };
 }
 
-function printSingleValueWithFunction(
-  value: string,
-  fn: (item: any) => string,
-) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+function printSingleValueWithFunction(value: string, fn: (item: any) => string) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     return fn(_.get(status, value, null));
   };
 }
 
 function printMultiValue(value: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     return _.join(_.get(status, value, []), "\n");
   };
 }
 
 function printDateValue(value: string, inputDateFormat: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     if (!_.has(status, value)) {
       return null;
     }
@@ -115,24 +81,18 @@ function printDateValue(value: string, inputDateFormat: string) {
 }
 
 function printTimestampValue(value: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     if (!_.has(status, value)) {
       return null;
     }
-    return LongToMoment(FixLong(_.get(status, value) as Long)).format(
-      dateFormat,
-    );
+    return LongToMoment(FixLong(_.get(status, value) as Long)).format(dateFormat);
   };
 }
 
 // Functions starting with "title" are used exclusively to print the cell
 // titles. They always return a single string.
 function titleDateValue(value: string, inputDateFormat: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     if (!_.has(status, value)) {
       return null;
     }
@@ -142,39 +102,35 @@ function titleDateValue(value: string, inputDateFormat: string) {
 }
 
 function titleTimestampValue(value: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
     if (!_.has(status, value)) {
       return null;
     }
     const raw = FixLong(_.get(status, value) as Long);
-    return `${LongToMoment(raw).format(dateFormat)}\n${raw.toString()}`;
+    return `${LongToMoment(raw).format(dateFormat)}\n${raw.toString}`;
   };
 }
 
 // Functions starting with "extract" are used exclusively for for extracting
 // the main content of a cell.
 function extractMultiValue(value: string) {
-  return function (
-    status: protos.cockroach.server.status.statuspb.INodeStatus,
-  ) {
-    const items = _.map(_.get(status, value, []), (item) => item.toString());
+  return function (status: protos.cockroach.server.status.NodeStatus$Properties) {
+    const items = _.map(_.get(status, value, []), item => item.toString());
     return (
       <ul className="nodes-entries-list">
-        {_.map(items, (item, key) => (
-          <li key={key} className="nodes-entries-list--item">
-            {item}
-          </li>
-        ))}
+        {
+          _.map(items, (item, key) => (
+            <li key={key} className="nodes-entries-list--item">
+              {item}
+            </li>
+          ))
+        }
       </ul>
     );
   };
 }
 
-function extractCertificateLink(
-  status: protos.cockroach.server.status.statuspb.INodeStatus,
-) {
+function extractCertificateLink(status: protos.cockroach.server.status.NodeStatus$Properties) {
   const nodeID = status.desc.node_id;
   return (
     <a className="debug-link" href={`#/reports/certificates/${nodeID}`}>
@@ -280,20 +236,20 @@ const nodesTableRows: NodesTableRowParams[] = [
 /**
  * Renders the Nodes Diagnostics Report page.
  */
-export class Nodes extends React.Component<NodesProps, {}> {
+class Nodes extends React.Component<NodesProps, {}> {
   refresh(props = this.props) {
     props.refreshLiveness();
     props.refreshNodes();
   }
 
-  componentDidMount() {
+  componentWillMount() {
     // Refresh nodes status query when mounting.
     this.refresh();
   }
 
-  componentDidUpdate(prevProps: NodesProps) {
-    if (!_.isEqual(this.props.location, prevProps.location)) {
-      this.refresh(this.props);
+  componentWillReceiveProps(nextProps: NodesProps) {
+    if (this.props.location !== nextProps.location) {
+      this.refresh(nextProps);
     }
   }
 
@@ -301,23 +257,16 @@ export class Nodes extends React.Component<NodesProps, {}> {
     orderedNodeIDs: string[],
     key: number,
     title: string,
-    extract: (
-      ns: protos.cockroach.server.status.statuspb.INodeStatus,
-    ) => React.ReactNode,
-    equality?: (
-      ns: protos.cockroach.server.status.statuspb.INodeStatus,
-    ) => string,
-    cellTitle?: (
-      ns: protos.cockroach.server.status.statuspb.INodeStatus,
-    ) => string,
+    extract: (ns: protos.cockroach.server.status.NodeStatus$Properties) => React.ReactNode,
+    equality?: (ns: protos.cockroach.server.status.NodeStatus$Properties) => string,
+    cellTitle?: (ns: protos.cockroach.server.status.NodeStatus$Properties) => string,
   ) {
-    const inconsistent =
-      !_.isNil(equality) &&
-      _.chain(orderedNodeIDs)
-        .map((nodeID) => this.props.nodesSummary.nodeStatusByID[nodeID])
-        .map((status) => equality(status))
-        .uniq()
-        .value().length > 1;
+    const inconsistent = !_.isNil(equality) && _.chain(orderedNodeIDs)
+      .map(nodeID => this.props.nodesSummary.nodeStatusByID[nodeID])
+      .map(status => equality(status))
+      .uniq()
+      .value()
+      .length > 1;
     const headerClassName = classNames(
       "nodes-table__cell",
       "nodes-table__cell--header",
@@ -326,17 +275,21 @@ export class Nodes extends React.Component<NodesProps, {}> {
 
     return (
       <tr className="nodes-table__row" key={key}>
-        <th className={headerClassName}>{title}</th>
-        {_.map(orderedNodeIDs, (nodeID) => {
-          const status = this.props.nodesSummary.nodeStatusByID[nodeID];
-          return (
-            <NodeTableCell
-              key={nodeID}
-              value={extract(status)}
-              title={_.isNil(cellTitle) ? null : cellTitle(status)}
-            />
-          );
-        })}
+        <th className={headerClassName}>
+          {title}
+        </th>
+        {
+          _.map(orderedNodeIDs, nodeID => {
+            const status = this.props.nodesSummary.nodeStatusByID[nodeID];
+            return (
+              <NodeTableCell
+                key={nodeID}
+                value={extract(status)}
+                title={_.isNil(cellTitle) ? null : cellTitle(status)}
+              />
+            );
+          })
+        }
       </tr>
     );
   }
@@ -350,62 +303,52 @@ export class Nodes extends React.Component<NodesProps, {}> {
 
     const filters = getFilters(this.props.location);
 
-    let nodeIDsContext = _.chain(nodesSummary.nodeIDs).map((nodeID: string) =>
-      Number.parseInt(nodeID, 10),
-    );
+    let nodeIDsContext = _.chain(nodesSummary.nodeIDs)
+      .map(nodeID => Number.parseInt(nodeID, 10));
     if (!_.isNil(filters.nodeIDs) && filters.nodeIDs.size > 0) {
-      nodeIDsContext = nodeIDsContext.filter((nodeID) =>
-        filters.nodeIDs.has(nodeID),
-      );
+      nodeIDsContext = nodeIDsContext.filter(nodeID => filters.nodeIDs.has(nodeID));
     }
     if (!_.isNil(filters.localityRegex)) {
-      nodeIDsContext = nodeIDsContext.filter((nodeID) =>
-        filters.localityRegex.test(
-          localityToString(nodeStatusByID[nodeID.toString()].desc.locality),
-        ),
-      );
+      nodeIDsContext = nodeIDsContext.filter(nodeID => (
+        filters.localityRegex.test(localityToString(nodeStatusByID[nodeID.toString()].desc.locality))
+      ));
     }
 
     // Sort the node IDs and then convert them back to string for lookups.
     const orderedNodeIDs = nodeIDsContext
-      .orderBy((nodeID) => nodeID)
-      .map((nodeID) => nodeID.toString())
+      .orderBy(nodeID => nodeID)
+      .map(nodeID => nodeID.toString())
       .value();
 
     if (_.isEmpty(orderedNodeIDs)) {
       return (
         <section className="section">
-          <h1 className="base-heading">Node Diagnostics</h1>
-          <NodeFilterList
-            nodeIDs={filters.nodeIDs}
-            localityRegex={filters.localityRegex}
-          />
-          <h2 className="base-heading">No nodes match the filters</h2>
+          <h1>Node Diagnostics</h1>
+          <NodeFilterList nodeIDs={filters.nodeIDs} localityRegex={filters.localityRegex} />
+          <h2>No nodes match the filters</h2>
         </section>
       );
     }
 
     return (
       <section className="section">
-        <Helmet title="Node Diagnostics | Debug" />
-        <h1 className="base-heading">Node Diagnostics</h1>
-        <NodeFilterList
-          nodeIDs={filters.nodeIDs}
-          localityRegex={filters.localityRegex}
-        />
-        <h2 className="base-heading">Nodes</h2>
+        <h1>Node Diagnostics</h1>
+        <NodeFilterList nodeIDs={filters.nodeIDs} localityRegex={filters.localityRegex} />
+        <h2>Nodes</h2>
         <table className="nodes-table">
           <tbody>
-            {_.map(nodesTableRows, (row, key) => {
-              return this.renderNodesTableRow(
-                orderedNodeIDs,
-                key,
-                row.title,
-                row.extract,
-                row.equality,
-                row.cellTitle,
-              );
-            })}
+            {
+              _.map(nodesTableRows, (row, key) => {
+                return this.renderNodesTableRow(
+                  orderedNodeIDs,
+                  key,
+                  row.title,
+                  row.extract,
+                  row.equality,
+                  row.cellTitle,
+                );
+              })
+            }
           </tbody>
         </table>
       </section>
@@ -413,13 +356,15 @@ export class Nodes extends React.Component<NodesProps, {}> {
   }
 }
 
-const mapStateToProps = (state: AdminUIState) => ({
-  nodesSummary: nodesSummarySelector(state),
-});
+function mapStateToProps(state: AdminUIState) {
+  return {
+    nodesSummary: nodesSummarySelector(state),
+  };
+}
 
-const mapDispatchToProps = {
+const actions = {
   refreshNodes,
   refreshLiveness,
 };
 
-export default withRouter(connect(mapStateToProps, mapDispatchToProps)(Nodes));
+export default connect(mapStateToProps, actions)(Nodes);

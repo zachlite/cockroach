@@ -1,17 +1,20 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sessiondata
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
@@ -54,14 +57,6 @@ func (ss *SequenceState) RecordValue(seqID uint32, val int64) {
 	ss.mu.Unlock()
 }
 
-// SetLastSequenceIncremented sets the id of the last incremented sequence.
-// Usually this id is set through RecordValue().
-func (ss *SequenceState) SetLastSequenceIncremented(seqID uint32) {
-	ss.mu.Lock()
-	ss.mu.lastSequenceIncremented = seqID
-	ss.mu.Unlock()
-}
-
 // GetLastValue returns the value most recently obtained by
 // nextval() for the last sequence for which RecordLatestVal() was called.
 func (ss *SequenceState) GetLastValue() (int64, error) {
@@ -69,8 +64,8 @@ func (ss *SequenceState) GetLastValue() (int64, error) {
 	defer ss.mu.Unlock()
 
 	if !ss.nextValEverCalledLocked() {
-		return 0, pgerror.New(
-			pgcode.ObjectNotInPrerequisiteState, "lastval is not yet defined in this session")
+		return 0, pgerror.NewError(
+			pgerror.CodeObjectNotInPrerequisiteStateError, "lastval is not yet defined in this session")
 	}
 
 	return ss.mu.latestValues[ss.mu.lastSequenceIncremented], nil
@@ -86,21 +81,4 @@ func (ss *SequenceState) GetLastValueByID(seqID uint32) (int64, bool) {
 
 	val, ok := ss.mu.latestValues[seqID]
 	return val, ok
-}
-
-// Export returns a copy of the SequenceState's state - the latestValues and
-// lastSequenceIncremented. If there are no values in latestValues, the returned
-// map will be nil.
-// lastSequenceIncremented is only defined if latestValues is non-empty.
-func (ss *SequenceState) Export() (map[uint32]int64, uint32) {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	var res map[uint32]int64
-	if len(ss.mu.latestValues) > 0 {
-		res = make(map[uint32]int64, len(ss.mu.latestValues))
-		for k, v := range ss.mu.latestValues {
-			res[k] = v
-		}
-	}
-	return res, ss.mu.lastSequenceIncremented
 }

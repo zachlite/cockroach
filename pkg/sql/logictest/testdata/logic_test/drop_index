@@ -1,3 +1,5 @@
+# LogicTest: default
+
 statement ok
 CREATE TABLE users (
   id    INT PRIMARY KEY,
@@ -11,9 +13,7 @@ CREATE TABLE users (
 statement ok
 CREATE TABLE othertable (
    x INT,
-   y INT,
-   INDEX baw (x),
-   INDEX yak (y, x)
+   INDEX baw (x)
 )
 
 statement error index name "baw" is ambiguous
@@ -21,27 +21,6 @@ DROP INDEX baw
 
 statement error index name "baw" is ambiguous
 DROP INDEX IF EXISTS baw
-
-statement error pgcode 42704 index "ark" does not exist
-DROP INDEX ark
-
-statement ok
-DROP INDEX IF EXISTS ark
-
-statement error pgcode 42704 index "ark" does not exist
-DROP INDEX users@ark
-
-statement ok
-DROP INDEX IF EXISTS users@ark
-
-statement ok
-DROP INDEX yak
-
-statement ok
-CREATE INDEX yak ON othertable (y, x)
-
-statement ok
-DROP INDEX IF EXISTS yak
 
 statement ok
 DROP TABLE othertable
@@ -55,14 +34,12 @@ INSERT INTO users VALUES (1, 'tom', 'cat'),(2, 'jerry', 'rat')
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       bar         false       1             id           ASC        false    false
-users       bar         false       2             name         ASC        false    false
-users       foo         true        1             name         ASC        false    false
-users       foo         true        2             id           ASC        false    true
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  foo      false   1    name    ASC        false    false
+users  foo      false   2    id      ASC        false    true
+users  bar      true    1    id      ASC        false    false
+users  bar      true    2    name    ASC        false    false
 
 statement error index "zap" does not exist
 DROP INDEX users@zap
@@ -73,14 +50,12 @@ DROP INDEX IF EXISTS users@zap
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       bar         false       1             id           ASC        false    false
-users       bar         false       2             name         ASC        false    false
-users       foo         true        1             name         ASC        false    false
-users       foo         true        2             id           ASC        false    true
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  foo      false   1    name    ASC        false    false
+users  foo      false   2    id      ASC        false    true
+users  bar      true    1    id      ASC        false    false
+users  bar      true    2    name    ASC        false    false
 
 # Also test that dropping with a non-existing index still drops 'foo'.
 
@@ -90,12 +65,10 @@ DROP INDEX IF EXISTS users@foo, users@zap
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       bar         false       1             id           ASC        false    false
-users       bar         false       2             name         ASC        false    false
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  bar      true    1    id      ASC        false    false
+users  bar      true    2    name    ASC        false    false
 
 user testuser
 
@@ -121,10 +94,8 @@ DROP INDEX users@bar CASCADE
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
 
 user root
 
@@ -149,14 +120,12 @@ DROP INDEX IF EXISTS users@invalid, users@baz
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       bar         true        1             title        ASC        false    false
-users       bar         true        2             id           ASC        false    true
-users       foo         true        1             name         ASC        false    false
-users       foo         true        2             id           ASC        false    true
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  foo      false   1    name    ASC        false    false
+users  foo      false   2    id      ASC        false    true
+users  bar      false   1    title   ASC        false    false
+users  bar      false   2    id      ASC        false    true
 
 statement ok
 CREATE VIEW v AS SELECT name FROM users@{FORCE_INDEX=foo}
@@ -170,22 +139,20 @@ DROP INDEX users@bar
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       foo         true        1             name         ASC        false    false
-users       foo         true        2             id           ASC        false    true
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
+users  foo      false   1    name    ASC        false    false
+users  foo      false   2    id      ASC        false    true
 
 statement ok
 CREATE VIEW v2 AS SELECT name FROM v
 
-query TTTTIT
+query T
 SHOW TABLES
 ----
-public  users  table  root  0  NULL
-public  v      view   root  0  NULL
-public  v2     view   root  0  NULL
+users
+v
+v2
 
 statement ok
 GRANT ALL ON users to testuser
@@ -206,15 +173,13 @@ DROP INDEX users@foo CASCADE
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
 
-query TTTTIT
+query T
 SHOW TABLES
 ----
-public  users  table  root  0  NULL
+users
 
 # Test the syntax without a '@'
 
@@ -229,10 +194,8 @@ DROP INDEX IF EXISTS baz, zap
 query TTBITTBB colnames
 SHOW INDEXES FROM users
 ----
-table_name  index_name  non_unique  seq_in_index  column_name  direction  storing  implicit
-users       primary     false       1             id           ASC        false    false
-users       primary     false       2             name         N/A        true     false
-users       primary     false       3             title        N/A        true     false
+Table  Name     Unique  Seq  Column  Direction  Storing  Implicit
+users  primary  true    1    id      ASC        false    false
 
 # Test that it still succeeds when an index does not exist.
 
@@ -267,74 +230,3 @@ CREATE SEQUENCE s
 
 statement error pgcode 42704 pq: index "nonexistent_index" does not exist
 DROP INDEX nonexistent_index
-
-statement ok
-CREATE TABLE tu (a INT UNIQUE)
-
-statement ok
-CREATE UNIQUE INDEX tu_a ON tu(a)
-
-statement error in use as unique constraint
-DROP INDEX tu_a_key
-
-statement ok
-DROP INDEX tu_a
-
-# Test that we have more relaxed restrictions on dropping indexes referenced by fks.
-subtest fk_drop
-
-# Ensure that DROP INDEX CASCADE does not delete the foreign key when
-# there is another index that can satisfy the foreign key constraint.
-statement ok
-CREATE TABLE fk1 (x int);
-CREATE TABLE fk2 (x int PRIMARY KEY);
-CREATE INDEX i ON fk1 (x);
-CREATE INDEX i2 ON fk1 (x);
-ALTER TABLE fk1 ADD CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES fk2 (x);
-DROP INDEX fk1@i CASCADE
-
-query TT
-SHOW CREATE fk1
-----
-fk1  CREATE TABLE public.fk1 (
-     x INT8 NULL,
-     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-     CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-     CONSTRAINT fk1 FOREIGN KEY (x) REFERENCES public.fk2(x),
-     INDEX i2 (x ASC),
-     FAMILY "primary" (x, rowid)
-)
-
-# test that notices are generated on index drops
-subtest notice_on_drop_index
-
-query T noticetrace
-CREATE TABLE drop_index_test(a int); CREATE INDEX drop_index_test_index ON drop_index_test(a); DROP INDEX drop_index_test_index
-----
-NOTICE: the data for dropped indexes is reclaimed asynchronously
-HINT: The reclamation delay can be customized in the zone configuration for the table.
-
-# test correct error reporting from NewUniquenessConstraintViolationError; see #46276
-subtest new_uniqueness_constraint_error
-
-statement ok
-CREATE TABLE t (a INT PRIMARY KEY, b DECIMAL(10,1) NOT NULL DEFAULT(0), UNIQUE INDEX t_secondary (b), FAMILY (a, b));
-INSERT INTO t VALUES (100, 500.5);
-
-statement ok
-BEGIN;
-DROP INDEX t_secondary CASCADE;
-ALTER TABLE t DROP COLUMN b;
-INSERT INTO t SELECT a + 1 FROM t;
-
-statement error pgcode 23505 duplicate key value: decoding err=column-id "2" does not exist
-UPSERT INTO t SELECT a + 1 FROM t;
-
-statement ok
-COMMIT;
-
-# test the primary key cannot be dropped with drop index; see #56853
-subtest drop_primary_key
-
-statement error pgcode 0A000 cannot drop the primary index of a table using DROP INDEX
-CREATE TABLE drop_primary(); DROP INDEX drop_primary@primary CASCADE;

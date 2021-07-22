@@ -1,28 +1,17 @@
-FROM registry.access.redhat.com/ubi8/ubi-minimal
+FROM debian:8.9
 
-# For deployment, we need the following additionally installed:
-# tzdata - for time zone functions; reinstalled to replace the missing
-#          files in /usr/share/zoneinfo/
-# hostname - used in cockroach k8s manifests
-# tar - used by kubectl cp
-RUN microdnf update -y \
-    && rpm --erase --nodeps tzdata \
-    && microdnf install tzdata hostname tar -y \
-    && rm -rf /var/cache/yum
+# Install root CAs so we can make SSL connections to phone home and
+# do backups to GCE/AWS/Azure.
+RUN apt-get update && \
+	apt-get -y upgrade && \
+	apt-get install -y ca-certificates  && \
+	rm -rf /var/lib/apt/lists/*
 
-RUN mkdir /usr/local/lib/cockroach /cockroach /licenses
+RUN mkdir -p /cockroach
 COPY cockroach.sh cockroach /cockroach/
-COPY licenses/* /licenses/
-# Install GEOS libraries.
-COPY libgeos.so libgeos_c.so /usr/local/lib/cockroach/
-
 # Set working directory so that relative paths
 # are resolved appropriately when passed as args.
 WORKDIR /cockroach/
-
-# Include the directory in the path to make it easier to invoke
-# commands via Docker
-ENV PATH=/cockroach:$PATH
 
 ENV COCKROACH_CHANNEL=official-docker
 

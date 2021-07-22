@@ -1,107 +1,1459 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
-package parser_test
+package parser
 
 import (
-	"bytes"
-	"fmt"
 	"go/constant"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	_ "github.com/cockroachdb/cockroach/pkg/util/log" // for flags
-	"github.com/cockroachdb/datadriven"
-	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/assert"
 )
 
-// TestParseDataDriven verifies that we can parse the supplied SQL and regenerate the SQL
+// TestParse verifies that we can parse the supplied SQL and regenerate the SQL
 // string from the syntax tree.
-func TestParseDatadriven(t *testing.T) {
-	datadriven.Walk(t, "testdata", func(t *testing.T, path string) {
-		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
-			switch d.Cmd {
-			case "parse":
-				// Check parse.
-				stmts, err := parser.Parse(d.Input)
-				if err != nil {
-					d.Fatalf(t, "unexpected parse error: %v", err)
-				}
+func TestParse(t *testing.T) {
+	testData := []struct {
+		sql string
+	}{
+		{``},
+		{`VALUES ("")`},
 
-				// Check pretty-print roundtrip via the sqlfmt logic.
-				sqlutils.VerifyStatementPrettyRoundtrip(t, d.Input)
+		{`BEGIN TRANSACTION`},
+		{`BEGIN TRANSACTION READ ONLY`},
+		{`BEGIN TRANSACTION READ WRITE`},
+		{`BEGIN TRANSACTION ISOLATION LEVEL SNAPSHOT`},
+		{`BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE`},
+		{`BEGIN TRANSACTION PRIORITY LOW`},
+		{`BEGIN TRANSACTION PRIORITY NORMAL`},
+		{`BEGIN TRANSACTION PRIORITY HIGH`},
+		{`BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE, PRIORITY HIGH`},
+		{`BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE, PRIORITY HIGH, READ WRITE`},
+		{`COMMIT TRANSACTION`},
+		{`ROLLBACK TRANSACTION`},
+		{"SAVEPOINT foo"},
 
-				ref := stmts.String()
-				note := ""
-				if ref != d.Input {
-					note = " -- normalized!"
-				}
+		{`CREATE DATABASE a`},
+		{`CREATE DATABASE a TEMPLATE = 'template0'`},
+		{`CREATE DATABASE a TEMPLATE = 'invalid'`},
+		{`CREATE DATABASE a ENCODING = 'UTF8'`},
+		{`CREATE DATABASE a ENCODING = 'INVALID'`},
+		{`CREATE DATABASE a LC_COLLATE = 'C.UTF-8'`},
+		{`CREATE DATABASE a LC_COLLATE = 'INVALID'`},
+		{`CREATE DATABASE a LC_CTYPE = 'C.UTF-8'`},
+		{`CREATE DATABASE a LC_CTYPE = 'INVALID'`},
+		{`CREATE DATABASE a TEMPLATE = 'template0' ENCODING = 'UTF8' LC_COLLATE = 'C.UTF-8' LC_CTYPE = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = 'template0'`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = 'invalid'`},
+		{`CREATE DATABASE IF NOT EXISTS a ENCODING = 'UTF8'`},
+		{`CREATE DATABASE IF NOT EXISTS a ENCODING = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_COLLATE = 'C.UTF-8'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_COLLATE = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_CTYPE = 'C.UTF-8'`},
+		{`CREATE DATABASE IF NOT EXISTS a LC_CTYPE = 'INVALID'`},
+		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = 'template0' ENCODING = 'UTF8' LC_COLLATE = 'C.UTF-8' LC_CTYPE = 'INVALID'`},
 
-				// Check roundtrip and formatting with flags.
-				var buf bytes.Buffer
-				fmt.Fprintf(&buf, "%s%s\n", ref, note)
-				fmt.Fprintln(&buf, stmts.StringWithFlags(tree.FmtAlwaysGroupExprs), "-- fully parenthesized")
-				constantsHidden := stmts.StringWithFlags(tree.FmtHideConstants)
-				fmt.Fprintln(&buf, constantsHidden, "-- literals removed")
+		{`CREATE INDEX a ON b (c)`},
+		{`CREATE INDEX a ON b.c (d)`},
+		{`CREATE INDEX ON a (b)`},
+		{`CREATE INDEX ON a (b) STORING (c)`},
+		{`CREATE INDEX ON a (b) INTERLEAVE IN PARENT c (d)`},
+		{`CREATE INDEX ON a (b) INTERLEAVE IN PARENT c.d (e)`},
+		{`CREATE INDEX ON a (b ASC, c DESC)`},
+		{`CREATE UNIQUE INDEX a ON b (c)`},
+		{`CREATE UNIQUE INDEX a ON b (c) STORING (d)`},
+		{`CREATE UNIQUE INDEX a ON b (c) INTERLEAVE IN PARENT d (e, f)`},
+		{`CREATE UNIQUE INDEX a ON b (c) INTERLEAVE IN PARENT d.e (f, g)`},
+		{`CREATE UNIQUE INDEX a ON b.c (d)`},
+		{`CREATE INVERTED INDEX a ON b (c)`},
+		{`CREATE INVERTED INDEX a ON b.c (d)`},
 
-				// As of this writing, the SQL statement stats proceed as follows:
-				// first the literals are removed from statement to form a stat key,
-				// then the stat key is re-parsed, to undergo the anonymization stage.
-				// We also want to check the re-parsing is fine.
-				//
-				// TODO(knz,rafiss): Turn the following two cases into proper test
-				// errors once the bugs are fixed.
-				reparsedStmts, err := parser.Parse(constantsHidden)
-				if err != nil {
-					fmt.Fprintln(&buf, "REPARSE WITHOUT LITERALS FAILS:", err)
-				} else {
-					reparsedStmtsS := reparsedStmts.String()
-					if reparsedStmtsS != constantsHidden {
-						fmt.Fprintln(&buf, reparsedStmtsS, "-- UNEXPECTED REPARSED AST WITHOUT LITERALS")
-					}
-				}
+		{`CREATE TABLE a ()`},
+		{`CREATE TABLE a (b INT)`},
+		{`CREATE TABLE a (b INT, c INT)`},
+		{`CREATE TABLE a (b CHAR)`},
+		{`CREATE TABLE a (b CHAR(3))`},
+		{`CREATE TABLE a (b VARCHAR)`},
+		{`CREATE TABLE a (b VARCHAR(3))`},
+		{`CREATE TABLE a (b STRING)`},
+		{`CREATE TABLE a (b STRING(3))`},
+		{`CREATE TABLE a (b FLOAT)`},
+		{`CREATE TABLE a (b SERIAL)`},
+		{`CREATE TABLE a (b SMALLSERIAL)`},
+		{`CREATE TABLE a (b BIGSERIAL)`},
+		{`CREATE TABLE a (b TIME)`},
+		{`CREATE TABLE a (b UUID)`},
+		{`CREATE TABLE a (b INET)`},
+		{`CREATE TABLE a (b INT NULL)`},
+		{`CREATE TABLE a (b INT CONSTRAINT maybe NULL)`},
+		{`CREATE TABLE a (b INT NOT NULL)`},
+		{`CREATE TABLE a (b INT CONSTRAINT always NOT NULL)`},
+		{`CREATE TABLE a (b INT PRIMARY KEY)`},
+		{`CREATE TABLE a (b INT UNIQUE)`},
+		{`CREATE TABLE a (b INT NULL PRIMARY KEY)`},
+		{`CREATE TABLE a (b INT DEFAULT 1)`},
+		{`CREATE TABLE a (b INT CONSTRAINT one DEFAULT 1)`},
+		{`CREATE TABLE a (b INT DEFAULT now())`},
+		{`CREATE TABLE a (a INT CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT CONSTRAINT positive CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT DEFAULT 1 CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT CONSTRAINT one DEFAULT 1 CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT DEFAULT 1 CONSTRAINT positive CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT CONSTRAINT one DEFAULT 1 CONSTRAINT positive CHECK (a > 0))`},
+		{`CREATE TABLE a (a INT CONSTRAINT one CHECK (a > 0) CONSTRAINT two CHECK (a < 10))`},
+		// "0" lost quotes previously.
+		{`CREATE TABLE a (b INT, c TEXT, PRIMARY KEY (b, c, "0"))`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b, c) REFERENCES other)`},
+		{`CREATE TABLE a (b INT, c TEXT, FOREIGN KEY (b, c) REFERENCES other (x, y))`},
+		{`CREATE TABLE a (b INT, c TEXT, CONSTRAINT s FOREIGN KEY (b, c) REFERENCES other (x, y))`},
+		{`CREATE TABLE a (b INT, c TEXT, INDEX (b, c))`},
+		{`CREATE TABLE a (b INT, c TEXT, INDEX d (b, c))`},
+		{`CREATE TABLE a (b INT, c TEXT, CONSTRAINT d UNIQUE (b, c))`},
+		{`CREATE TABLE a (b INT, c TEXT, CONSTRAINT d UNIQUE (b, c) INTERLEAVE IN PARENT d (e, f))`},
+		{`CREATE TABLE a (b INT, UNIQUE (b))`},
+		{`CREATE TABLE a (b INT, UNIQUE (b) STORING (c))`},
+		{`CREATE TABLE a (b INT, INDEX (b))`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE RESTRICT ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE CASCADE)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE CASCADE ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET NULL)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET NULL ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET DEFAULT ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE RESTRICT ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET DEFAULT ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE CASCADE ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON DELETE SET NULL ON UPDATE RESTRICT)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE CASCADE)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE SET NULL)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo ON UPDATE SET DEFAULT)`},
+		{`CREATE TABLE a (b INT, c INT CONSTRAINT ref REFERENCES foo)`},
+		{`CREATE TABLE a (b INT, c INT REFERENCES foo (bar))`},
+		{`CREATE TABLE a (b INT, INDEX (b) STORING (c))`},
+		{`CREATE TABLE a (b INT, c TEXT, INDEX (b ASC, c DESC) STORING (c))`},
+		{`CREATE TABLE a (b INT, INDEX (b) INTERLEAVE IN PARENT c (d, e))`},
+		{`CREATE TABLE a (b INT, FAMILY (b))`},
+		{`CREATE TABLE a (b INT, c STRING, FAMILY foo (b), FAMILY (c))`},
+		{`CREATE TABLE a (b INT) INTERLEAVE IN PARENT foo (c, d)`},
+		{`CREATE TABLE a (b INT) INTERLEAVE IN PARENT foo (c) CASCADE`},
+		{`CREATE TABLE a.b (b INT)`},
+		{`CREATE TABLE IF NOT EXISTS a (b INT)`},
+		{`CREATE TABLE a (b INT AS (a + b) STORED)`},
 
-				fmt.Fprintln(&buf, stmts.StringWithFlags(tree.FmtAnonymize), "-- identifiers removed")
-				if strings.Contains(ref, tree.PasswordSubstitution) {
-					fmt.Fprintln(&buf, stmts.StringWithFlags(tree.FmtShowPasswords), "-- passwords exposed")
-				}
+		{`CREATE TABLE a (b INT) PARTITION BY LIST (b) (PARTITION p1 VALUES IN (1, DEFAULT), PARTITION p2 VALUES IN ((1, 2), (3, 4)))`},
+		{`CREATE TABLE a (b INT) PARTITION BY RANGE (b) (PARTITION p1 VALUES FROM (MINVALUE) TO (1), PARTITION p2 VALUES FROM (2, MAXVALUE) TO (4, 4), PARTITION p3 VALUES FROM (4, 4) TO (MAXVALUE))`},
+		// This monstrosity was added on the assumption that it's more readable
+		// than all on one line. Feel free to rip it out if you come across it
+		// and disagree.
+		{regexp.MustCompile(`\n\s*`).ReplaceAllLiteralString(
+			`CREATE TABLE a (b INT, c INT, d INT) PARTITION BY LIST (b) (
+				PARTITION p1 VALUES IN (1) PARTITION BY LIST (c) (
+					PARTITION p1_1 VALUES IN (3), PARTITION p1_2 VALUES IN (4, 5)
+				), PARTITION p2 VALUES IN (6) PARTITION BY RANGE (c) (
+					PARTITION p2_1 VALUES FROM (7) TO (8) PARTITION BY LIST (d) (
+						PARTITION p2_1_1 VALUES IN (8)
+					)
+				)
+			)`, ``),
+		},
+		{`CREATE TABLE a () INTERLEAVE IN PARENT b (c) PARTITION BY LIST (d) (PARTITION e VALUES IN (1))`},
+		{`CREATE TABLE IF NOT EXISTS a () PARTITION BY LIST (b) (PARTITION c VALUES IN (1))`},
+		{`CREATE TABLE a (INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))`},
+		{`CREATE TABLE a (UNIQUE (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))`},
+		{`CREATE INDEX ON a (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1))`},
+		{`CREATE INDEX IF NOT EXISTS a ON b (c) PARTITION BY LIST (d) (PARTITION e VALUES IN (1))`},
+		{`ALTER TABLE a PARTITION BY LIST (b) (PARTITION p1 VALUES IN (1))`},
+		{`ALTER INDEX a@idx PARTITION BY LIST (b) (PARTITION p1 VALUES IN (1))`},
 
-				return buf.String()
+		{`CREATE TABLE a AS SELECT * FROM b`},
+		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b`},
+		{`CREATE TABLE a AS SELECT * FROM b ORDER BY c`},
+		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b ORDER BY c`},
+		{`CREATE TABLE a AS SELECT * FROM b LIMIT 3`},
+		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b LIMIT 3`},
+		{`CREATE TABLE a AS VALUES ('one', 1), ('two', 2), ('three', 3)`},
+		{`CREATE TABLE IF NOT EXISTS a AS VALUES ('one', 1), ('two', 2), ('three', 3)`},
+		{`CREATE TABLE a (str, num) AS VALUES ('one', 1), ('two', 2), ('three', 3)`},
+		{`CREATE TABLE IF NOT EXISTS a (str, num) AS VALUES ('one', 1), ('two', 2), ('three', 3)`},
+		{`CREATE TABLE a AS SELECT * FROM b UNION SELECT * FROM c`},
+		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b UNION SELECT * FROM c`},
+		{`CREATE TABLE a AS SELECT * FROM b UNION VALUES ('one', 1) ORDER BY c LIMIT 5`},
+		{`CREATE TABLE IF NOT EXISTS a AS SELECT * FROM b UNION VALUES ('one', 1) ORDER BY c LIMIT 5`},
+		{`CREATE TABLE a (b STRING COLLATE "DE")`},
+		{`CREATE TABLE a (b STRING[] COLLATE "DE")`},
 
-			case "error":
-				_, err := parser.Parse(d.Input)
-				if err == nil {
-					return ""
-				}
-				pgerr := pgerror.Flatten(err)
-				msg := pgerr.Message
-				if pgerr.Detail != "" {
-					msg += "\nDETAIL: " + pgerr.Detail
-				}
-				if pgerr.Hint != "" {
-					msg += "\nHINT: " + pgerr.Hint
-				}
-				return msg
-			}
-			d.Fatalf(t, "unsupported command: %s", d.Cmd)
-			return ""
-		})
-	})
+		{`CREATE VIEW a AS SELECT * FROM b`},
+		{`CREATE VIEW a AS SELECT b.* FROM b LIMIT 5`},
+		{`CREATE VIEW a AS (SELECT c, d FROM b WHERE c > 0 ORDER BY c)`},
+		{`CREATE VIEW a (x, y) AS SELECT c, d FROM b`},
+		{`CREATE VIEW a AS VALUES (1, 'one'), (2, 'two')`},
+		{`CREATE VIEW a (x, y) AS VALUES (1, 'one'), (2, 'two')`},
+		{`CREATE VIEW a AS TABLE b`},
+
+		{`CREATE SEQUENCE a`},
+		{`CREATE SEQUENCE IF NOT EXISTS a`},
+		{`CREATE SEQUENCE a CYCLE`},
+		{`CREATE SEQUENCE a NO CYCLE`},
+		{`CREATE SEQUENCE a CACHE 0`},
+		{`CREATE SEQUENCE a CACHE 1`},
+		{`CREATE SEQUENCE a CACHE 2`},
+		{`CREATE SEQUENCE a INCREMENT 5`},
+		{`CREATE SEQUENCE a INCREMENT BY 5`},
+		{`CREATE SEQUENCE a NO MAXVALUE`},
+		{`CREATE SEQUENCE a MAXVALUE 1000`},
+		{`CREATE SEQUENCE a NO MINVALUE`},
+		{`CREATE SEQUENCE a MINVALUE 1000`},
+		{`CREATE SEQUENCE a START 1000`},
+		{`CREATE SEQUENCE a START WITH 1000`},
+		{`CREATE SEQUENCE a INCREMENT 5 NO MAXVALUE MINVALUE 1 START 3`},
+		{`CREATE SEQUENCE a INCREMENT 5 NO CYCLE NO MAXVALUE MINVALUE 1 START 3 CACHE 1`},
+
+		{`CREATE STATISTICS a ON col1 FROM t`},
+		{`CREATE STATISTICS a ON col1, col2 FROM t`},
+		{`CREATE STATISTICS a ON col1 FROM d.t`},
+
+		{`DELETE FROM a`},
+		{`DELETE FROM a.b`},
+		{`DELETE FROM a WHERE a = b`},
+		{`DELETE FROM a WHERE a = b LIMIT c`},
+		{`DELETE FROM a WHERE a = b ORDER BY c`},
+		{`DELETE FROM a WHERE a = b ORDER BY c LIMIT d`},
+		{`DELETE FROM a WHERE a = b RETURNING a, b`},
+		{`DELETE FROM a WHERE a = b RETURNING 1, 2`},
+		{`DELETE FROM a WHERE a = b RETURNING a + b`},
+		{`DELETE FROM a WHERE a = b RETURNING NOTHING`},
+		{`DELETE FROM a WHERE a = b ORDER BY c LIMIT d RETURNING e`},
+
+		{`DISCARD ALL`},
+
+		{`DROP DATABASE a`},
+		{`DROP DATABASE IF EXISTS a`},
+		{`DROP DATABASE a CASCADE`},
+		{`DROP DATABASE a RESTRICT`},
+		{`DROP TABLE a`},
+		{`DROP TABLE a.b`},
+		{`DROP TABLE a, b`},
+		{`DROP TABLE IF EXISTS a`},
+		{`DROP TABLE a RESTRICT`},
+		{`DROP TABLE a.b RESTRICT`},
+		{`DROP TABLE a, b RESTRICT`},
+		{`DROP TABLE IF EXISTS a RESTRICT`},
+		{`DROP TABLE a CASCADE`},
+		{`DROP TABLE a.b CASCADE`},
+		{`DROP TABLE a, b CASCADE`},
+		{`DROP TABLE IF EXISTS a CASCADE`},
+		{`DROP INDEX a.b@c`},
+		{`DROP INDEX a`},
+		{`DROP INDEX a.b`},
+		{`DROP INDEX IF EXISTS a.b@c`},
+		{`DROP INDEX a.b@c, d@f`},
+		{`DROP INDEX IF EXISTS a.b@c, d@f`},
+		{`DROP INDEX a.b@c CASCADE`},
+		{`DROP INDEX IF EXISTS a.b@c RESTRICT`},
+		{`DROP VIEW a`},
+		{`DROP VIEW a.b`},
+		{`DROP VIEW a, b`},
+		{`DROP VIEW IF EXISTS a`},
+		{`DROP VIEW a RESTRICT`},
+		{`DROP VIEW IF EXISTS a, b RESTRICT`},
+		{`DROP VIEW a.b CASCADE`},
+		{`DROP VIEW a, b CASCADE`},
+		{`DROP SEQUENCE a`},
+		{`DROP SEQUENCE a.b`},
+		{`DROP SEQUENCE a, b`},
+		{`DROP SEQUENCE IF EXISTS a`},
+		{`DROP SEQUENCE a RESTRICT`},
+		{`DROP SEQUENCE IF EXISTS a, b RESTRICT`},
+		{`DROP SEQUENCE a.b CASCADE`},
+		{`DROP SEQUENCE a, b CASCADE`},
+
+		{`CANCEL JOB a`},
+		{`CANCEL QUERY a`},
+		{`RESUME JOB a`},
+		{`PAUSE JOB a`},
+
+		{`EXPLAIN SELECT 1`},
+		{`EXPLAIN EXPLAIN SELECT 1`},
+		{`EXPLAIN (A, B, C) SELECT 1`},
+		{`SELECT * FROM [EXPLAIN SELECT 1]`},
+		{`SELECT * FROM [SHOW TRANSACTION STATUS]`},
+
+		{`SHOW barfoo`},
+		{`SHOW database`},
+		{`SHOW timezone`},
+
+		{`SHOW CLUSTER SETTING a`},
+		{`SHOW CLUSTER SETTING all`},
+
+		{`SHOW DATABASES`},
+		{`SHOW SCHEMAS`},
+		{`SHOW SCHEMAS FROM a`},
+		{`SHOW TABLES`},
+		{`SHOW TABLES FROM a`},
+		{`SHOW TABLES FROM a.b`},
+		{`SHOW COLUMNS FROM a`},
+		{`SHOW COLUMNS FROM a.b.c`},
+		{`SHOW INDEXES FROM a`},
+		{`SHOW INDEXES FROM a.b.c`},
+		{`SHOW CONSTRAINTS FROM a`},
+		{`SHOW CONSTRAINTS FROM a.b.c`},
+		{`SHOW TABLES FROM a.b; SHOW COLUMNS FROM b`},
+		{`SHOW ROLES`},
+		{`SHOW USERS`},
+		{`SHOW JOBS`},
+		{`SHOW CLUSTER QUERIES`},
+		{`SHOW LOCAL QUERIES`},
+		{`SHOW CLUSTER SESSIONS`},
+		{`SHOW LOCAL SESSIONS`},
+		{`SHOW TRACE FOR SESSION`},
+		{`SHOW KV TRACE FOR SESSION`},
+		{`SHOW TRACE FOR SELECT 42`},
+		{`SHOW TRACE FOR TABLE foo`},
+		{`SHOW KV TRACE FOR TABLE foo`},
+		{`SHOW COMPACT TRACE FOR TABLE foo`},
+		{`SHOW COMPACT KV TRACE FOR TABLE foo`},
+		{`SHOW EXPERIMENTAL_REPLICA TRACE FOR SELECT 42`},
+		{`SHOW STATISTICS FOR TABLE t`},
+		{`SHOW STATISTICS FOR TABLE d.t`},
+		{`SHOW HISTOGRAM 123`},
+		{`SHOW EXPERIMENTAL_RANGES FROM TABLE d.t`},
+		{`SHOW EXPERIMENTAL_RANGES FROM TABLE t`},
+		{`SHOW EXPERIMENTAL_RANGES FROM INDEX d.t@i`},
+		{`SHOW EXPERIMENTAL_RANGES FROM INDEX t@i`},
+		{`SHOW EXPERIMENTAL_RANGES FROM INDEX d.i`},
+		{`SHOW EXPERIMENTAL_RANGES FROM INDEX i`},
+		{`SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE d.t`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATIONS`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR RANGE default`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR RANGE meta`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR DATABASE db`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR TABLE db.t`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR PARTITION p OF TABLE db.t`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR TABLE t`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR PARTITION p OF TABLE t`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR INDEX db.t@i`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR INDEX t@i`},
+		{`EXPERIMENTAL SHOW ZONE CONFIGURATION FOR INDEX i`},
+
+		// Tables are the default, but can also be specified with
+		// GRANT x ON TABLE y. However, the stringer does not output TABLE.
+		{`SHOW GRANTS`},
+		{`SHOW GRANTS ON TABLE foo`},
+		{`SHOW GRANTS ON TABLE foo, db.foo`},
+		{`SHOW GRANTS ON DATABASE foo, bar`},
+		{`SHOW GRANTS ON DATABASE foo FOR bar`},
+		{`SHOW GRANTS FOR bar, baz`},
+
+		{`SHOW GRANTS ON ROLE`},
+		{`SHOW GRANTS ON ROLE foo`},
+		{`SHOW GRANTS ON ROLE foo, bar`},
+		{`SHOW GRANTS ON ROLE foo FOR bar`},
+		{`SHOW GRANTS ON ROLE FOR bar, baz`},
+
+		{`SHOW TRANSACTION STATUS`},
+
+		{`SHOW SYNTAX 'select 1'`},
+
+		{`PREPARE a AS SELECT 1`},
+		{`PREPARE a (INT) AS SELECT $1`},
+		{`PREPARE a (STRING, STRING) AS SELECT $1, $2`},
+		{`PREPARE a AS INSERT INTO a VALUES (1)`},
+		{`PREPARE a (INT) AS INSERT INTO a VALUES ($1)`},
+		{`PREPARE a AS UPDATE a SET b = 1`},
+		{`PREPARE a (INT) AS UPDATE a SET b = $1`},
+		{`PREPARE a AS UPSERT INTO a VALUES (1)`},
+		{`PREPARE a (INT) AS UPSERT INTO a VALUES ($1)`},
+		{`PREPARE a AS DELETE FROM a`},
+		{`PREPARE a (INT) AS DELETE FROM a WHERE b = $1`},
+		{`PREPARE a AS BACKUP DATABASE a TO 'b'`},
+		{`PREPARE a (STRING) AS BACKUP DATABASE a TO $1`},
+		{`PREPARE a AS RESTORE DATABASE a FROM 'b'`},
+		{`PREPARE a (STRING) AS RESTORE DATABASE a FROM $1`},
+		{`PREPARE a AS CANCEL QUERY 1`},
+		{`PREPARE a (STRING) AS CANCEL QUERY $1`},
+		{`PREPARE a AS CANCEL JOB 1`},
+		{`PREPARE a (INT) AS CANCEL JOB $1`},
+		{`PREPARE a AS PAUSE JOB 1`},
+		{`PREPARE a (INT) AS PAUSE JOB $1`},
+		{`PREPARE a AS RESUME JOB 1`},
+		{`PREPARE a (INT) AS RESUME JOB $1`},
+		{`PREPARE a AS IMPORT TABLE a CREATE USING 'b' CSV DATA ('c') WITH temp = 'd'`},
+		{`PREPARE a (STRING, STRING, STRING) AS IMPORT TABLE a CREATE USING $1 CSV DATA ($2) WITH temp = $3`},
+
+		{`EXECUTE a`},
+		{`EXECUTE a (1)`},
+		{`EXECUTE a (1, 1)`},
+		{`EXECUTE a (1 + 1)`},
+
+		{`DEALLOCATE a`},
+		{`DEALLOCATE ALL`},
+
+		// Tables are the default, but can also be specified with
+		// GRANT x ON TABLE y. However, the stringer does not output TABLE.
+		{`GRANT SELECT ON TABLE foo TO root`},
+		{`GRANT SELECT, DELETE, UPDATE ON TABLE foo, db.foo TO root, bar`},
+		{`GRANT DROP ON DATABASE foo TO root`},
+		{`GRANT ALL ON DATABASE foo TO root, test`},
+		{`GRANT SELECT, INSERT ON DATABASE bar TO foo, bar, baz`},
+		{`GRANT SELECT, INSERT ON DATABASE db1, db2 TO foo, bar, baz`},
+		{`GRANT SELECT, INSERT ON DATABASE db1, db2 TO "test-user"`},
+		{`GRANT rolea, roleb TO usera, userb`},
+		{`GRANT rolea, roleb TO usera, userb WITH ADMIN OPTION`},
+
+		// Tables are the default, but can also be specified with
+		// REVOKE x ON TABLE y. However, the stringer does not output TABLE.
+		{`REVOKE SELECT ON TABLE foo FROM root`},
+		{`REVOKE UPDATE, DELETE ON TABLE foo, db.foo FROM root, bar`},
+		{`REVOKE INSERT ON DATABASE foo FROM root`},
+		{`REVOKE ALL ON DATABASE foo FROM root, test`},
+		{`REVOKE SELECT, INSERT ON DATABASE bar FROM foo, bar, baz`},
+		{`REVOKE SELECT, INSERT ON DATABASE db1, db2 FROM foo, bar, baz`},
+		{`REVOKE rolea, roleb FROM usera, userb`},
+		{`REVOKE ADMIN OPTION FOR rolea, roleb FROM usera, userb`},
+
+		{`INSERT INTO a VALUES (1)`},
+		{`INSERT INTO a.b VALUES (1)`},
+		{`INSERT INTO a VALUES (1, 2)`},
+		{`INSERT INTO a VALUES (1, DEFAULT)`},
+		{`INSERT INTO a VALUES (1, 2), (3, 4)`},
+		{`INSERT INTO a VALUES (a + 1, 2 * 3)`},
+		{`INSERT INTO a(a, b) VALUES (1, 2)`},
+		{`INSERT INTO a SELECT b, c FROM d`},
+		{`INSERT INTO a DEFAULT VALUES`},
+		{`INSERT INTO a VALUES (1) RETURNING a, b`},
+		{`INSERT INTO a VALUES (1, 2) RETURNING 1, 2`},
+		{`INSERT INTO a VALUES (1, 2) RETURNING a + b, c`},
+		{`INSERT INTO a VALUES (1, 2) RETURNING NOTHING`},
+
+		{`UPSERT INTO a VALUES (1)`},
+		{`UPSERT INTO a.b VALUES (1)`},
+		{`UPSERT INTO a VALUES (1, 2)`},
+		{`UPSERT INTO a VALUES (1, DEFAULT)`},
+		{`UPSERT INTO a VALUES (1, 2), (3, 4)`},
+		{`UPSERT INTO a VALUES (a + 1, 2 * 3)`},
+		{`UPSERT INTO a(a, b) VALUES (1, 2)`},
+		{`UPSERT INTO a SELECT b, c FROM d`},
+		{`UPSERT INTO a DEFAULT VALUES`},
+		{`UPSERT INTO a DEFAULT VALUES RETURNING a, b`},
+		{`UPSERT INTO a DEFAULT VALUES RETURNING 1, 2`},
+		{`UPSERT INTO a DEFAULT VALUES RETURNING a + b`},
+		{`UPSERT INTO a DEFAULT VALUES RETURNING NOTHING`},
+
+		{`INSERT INTO a VALUES (1) ON CONFLICT DO NOTHING`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO NOTHING`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT DO UPDATE SET a = 1`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a, b) DO UPDATE SET a = 1`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1, b = excluded.a`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1 WHERE b > 2`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = DEFAULT`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = (SELECT 1, 2)`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = (SELECT 1, 2) RETURNING a, b`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = (SELECT 1, 2) RETURNING 1, 2`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = (SELECT 1, 2) RETURNING a + b`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET (a, b) = (SELECT 1, 2) RETURNING NOTHING`},
+
+		{`SELECT 1 + 1`},
+		{`SELECT -1`},
+		{`SELECT +1`},
+		{`SELECT .1`},
+		{`SELECT 1.2e1`},
+		{`SELECT 1.2e+1`},
+		{`SELECT 1.2e-1`},
+		{`SELECT true AND false`},
+		{`SELECT true AND NULL`},
+		{`SELECT true = false`},
+		{`SELECT (true = false)`},
+		{`SELECT (ARRAY['a', 'b'])[2]`},
+		{`SELECT (ARRAY (VALUES (1), (2)))[1]`},
+		{`SELECT (SELECT 1)`},
+		{`SELECT ((SELECT 1))`},
+		{`SELECT (SELECT ARRAY['a', 'b'])[2]`},
+		{`SELECT ((SELECT ARRAY['a', 'b']))[2]`},
+		{`SELECT ((((VALUES (1)))))`},
+		{`SELECT EXISTS (SELECT 1)`},
+		{`SELECT (VALUES (1))`},
+		{`SELECT (1, 2, 3)`},
+		{`SELECT (ROW(1, 2, 3))`},
+		{`SELECT (ROW())`},
+		{`SELECT (TABLE a)`},
+		{`SELECT 0x1`},
+		{`SELECT 'Deutsch' COLLATE "DE"`},
+		{`SELECT a @> b`},
+		{`SELECT a <@ b`},
+		{`SELECT a ? b`},
+		{`SELECT a ?| b`},
+		{`SELECT a ?& b`},
+		{`SELECT a->'x'`},
+		{`SELECT a#>'{x}'`},
+		{`SELECT a#>>'{x}'`},
+		{`SELECT (a->'x')->'y'`},
+		{`SELECT (a->'x')->>'y'`},
+		{`SELECT ''::JSON`},
+		{`SELECT ''::JSONB`},
+
+		{`SELECT 1 FROM t`},
+		{`SELECT 1, 2 FROM t`},
+		{`SELECT * FROM t`},
+		{`SELECT "*" FROM t`},
+		{`SELECT a, b FROM t`},
+		{`SELECT a AS b FROM t`},
+		{`SELECT a.* FROM t`},
+		{`SELECT a = b FROM t`},
+		{`SELECT $1 FROM t`},
+		{`SELECT $1, $2 FROM t`},
+		{`SELECT NULL FROM t`},
+		{`SELECT 0.1 FROM t`},
+		{`SELECT a FROM t`},
+		{`SELECT a.b FROM t`},
+		{`SELECT a.b.* FROM t`},
+		{`SELECT a.b[1] FROM t`},
+		{`SELECT a.b[1 + 1:4][3] FROM t`},
+		{`SELECT a.b[:4][3] FROM t`},
+		{`SELECT a.b[1 + 1:][3] FROM t`},
+		{`SELECT a.b[:][3] FROM t`},
+		{`SELECT 'a' FROM t`},
+		{`SELECT 'a' FROM t@bar`},
+		{`SELECT 'a' FROM t@primary`},
+		{`SELECT 'a' FROM t@like`},
+		{`SELECT 'a' FROM t@{NO_INDEX_JOIN}`},
+		{`SELECT 'a' FROM t@{FORCE_INDEX=bar,NO_INDEX_JOIN}`},
+		{`SELECT * FROM t AS "of" AS OF SYSTEM TIME '2016-01-01'`},
+
+		{`SELECT BOOL 'foo'`},
+		{`SELECT INT 'foo'`},
+		{`SELECT REAL 'foo'`},
+		{`SELECT DECIMAL 'foo'`},
+		{`SELECT BIT '1'`},
+		{`SELECT CHAR 'foo'`},
+		{`SELECT VARCHAR 'foo'`},
+		{`SELECT STRING 'foo'`},
+		{`SELECT BYTES 'foo'`},
+		{`SELECT DATE 'foo'`},
+		{`SELECT TIME 'foo'`},
+		{`SELECT TIMESTAMP 'foo'`},
+		{`SELECT TIMESTAMP WITH TIME ZONE 'foo'`},
+
+		{`SELECT '1'::INT`},
+		{`SELECT '1'::SERIAL`},
+		{`SELECT '1':::INT`},
+		{`SELECT '1':::SERIAL`},
+		{`SELECT INT '1'`},
+		{`SELECT SERIAL '1'`},
+
+		{`SELECT 'foo'::JSON`},
+		{`SELECT 'foo'::JSONB`},
+		{`SELECT 'foo':::JSON`},
+		{`SELECT 'foo':::JSONB`},
+		{`SELECT JSON 'foo'`},
+		{`SELECT JSONB 'foo'`},
+
+		{`SELECT '192.168.0.1'::INET`},
+		{`SELECT '192.168.0.1':::INET`},
+		{`SELECT INET '192.168.0.1'`},
+
+		{`SELECT 'a' AS "12345"`},
+		{`SELECT 'a' AS clnm`},
+		{`SELECT 'a' AS primary`},
+		{`SELECT 'a' AS like`},
+
+		{`SELECT 0xf0 FROM t`},
+		{`SELECT 0xF0 FROM t`},
+
+		// Escaping may change since the scanning process loses information
+		// (you can write e'\'' or ''''), but these are the idempotent cases.
+		// Generally, anything that needs to escape plus \ and ' leads to an
+		// escaped string.
+		{`SELECT e'a\'a' FROM t`},
+		{`SELECT e'a\\\\na' FROM t`},
+		{`SELECT e'\\\\n' FROM t`},
+		{`SELECT "a""a" FROM t`},
+		{`SELECT a FROM "t\n"`},  // no escaping in sql identifiers
+		{`SELECT a FROM "t"""`},  // no escaping in sql identifiers
+		{`SELECT "full" FROM t`}, // must quote column name keyword
+
+		{`SELECT "FROM" FROM t`},
+		{`SELECT CAST(1 AS TEXT)`},
+		{`SELECT ANNOTATE_TYPE(1, TEXT)`},
+		{`SELECT a FROM t AS bar`},
+		{`SELECT a FROM t AS bar (bar1)`},
+		{`SELECT a FROM t AS bar (bar1, bar2, bar3)`},
+		{`SELECT a FROM t WITH ORDINALITY`},
+		{`SELECT a FROM t WITH ORDINALITY AS bar`},
+		{`SELECT a FROM (SELECT 1 FROM t)`},
+		{`SELECT a FROM (SELECT 1 FROM t) AS bar`},
+		{`SELECT a FROM (SELECT 1 FROM t) AS bar (bar1)`},
+		{`SELECT a FROM (SELECT 1 FROM t) AS bar (bar1, bar2, bar3)`},
+		{`SELECT a FROM (SELECT 1 FROM t) WITH ORDINALITY`},
+		{`SELECT a FROM (SELECT 1 FROM t) WITH ORDINALITY AS bar`},
+		{`SELECT a FROM generate_series(1, 32)`},
+		{`SELECT a FROM generate_series(1, 32) AS s (x)`},
+		{`SELECT a FROM generate_series(1, 32) WITH ORDINALITY AS s (x)`},
+		{`SELECT a FROM t1, t2`},
+		{`SELECT a FROM t AS t1`},
+		{`SELECT a FROM t AS t1 (c1)`},
+		{`SELECT a FROM t AS t1 (c1, c2, c3, c4)`},
+		{`SELECT a FROM s.t`},
+
+		{`SELECT count(DISTINCT a) FROM t`},
+		{`SELECT count(ALL a) FROM t`},
+
+		{`SELECT a FROM t WHERE a = b`},
+		{`SELECT a FROM t WHERE NOT (a = b)`},
+		{`SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t)`},
+		{`SELECT a FROM t WHERE NOT true`},
+		{`SELECT a FROM t WHERE NOT false`},
+		{`SELECT a FROM t WHERE a IN (b)`},
+		{`SELECT a FROM t WHERE a IN (b, c)`},
+		{`SELECT a FROM t WHERE a IN (SELECT a FROM t)`},
+		{`SELECT a FROM t WHERE a NOT IN (b, c)`},
+		{`SELECT a FROM t WHERE a = ANY (ARRAY[b, c])`},
+		{`SELECT a FROM t WHERE a = ANY ARRAY[b, c]`},
+		{`SELECT a FROM t WHERE a != SOME (ARRAY[b, c])`},
+		{`SELECT a FROM t WHERE a != SOME ARRAY[b, c]`},
+		{`SELECT a FROM t WHERE a = ANY (SELECT 1)`},
+		{`SELECT a FROM t WHERE a LIKE ALL (ARRAY[b, c])`},
+		{`SELECT a FROM t WHERE a LIKE ALL ARRAY[b, c]`},
+		{`SELECT a FROM t WHERE a LIKE b`},
+		{`SELECT a FROM t WHERE a NOT LIKE b`},
+		{`SELECT a FROM t WHERE a ILIKE b`},
+		{`SELECT a FROM t WHERE a NOT ILIKE b`},
+		{`SELECT a FROM t WHERE a SIMILAR TO b`},
+		{`SELECT a FROM t WHERE a NOT SIMILAR TO b`},
+		{`SELECT a FROM t WHERE a ~ b`},
+		{`SELECT a FROM t WHERE a !~ b`},
+		{`SELECT a FROM t WHERE a ~* c`},
+		{`SELECT a FROM t WHERE a !~* c`},
+		{`SELECT a FROM t WHERE a BETWEEN b AND c`},
+		{`SELECT a FROM t WHERE a BETWEEN SYMMETRIC b AND c`},
+		{`SELECT a FROM t WHERE a NOT BETWEEN b AND c`},
+		{`SELECT a FROM t WHERE a NOT BETWEEN SYMMETRIC b AND c`},
+		{`SELECT a FROM t WHERE a IS NULL`},
+		{`SELECT a FROM t WHERE a IS NOT NULL`},
+		{`SELECT a FROM t WHERE a IS true`},
+		{`SELECT a FROM t WHERE a IS NOT true`},
+		{`SELECT a FROM t WHERE a IS false`},
+		{`SELECT a FROM t WHERE a IS NOT false`},
+		{`SELECT a FROM t WHERE a IS OF (INT)`},
+		{`SELECT a FROM t WHERE a IS NOT OF (FLOAT, STRING)`},
+		{`SELECT a FROM t WHERE a IS DISTINCT FROM b`},
+		{`SELECT a FROM t WHERE a IS NOT DISTINCT FROM b`},
+		{`SELECT a FROM t WHERE a < b`},
+		{`SELECT a FROM t WHERE a <= b`},
+		{`SELECT a FROM t WHERE a >= b`},
+		{`SELECT a FROM t WHERE a != b`},
+		{`SELECT a FROM t WHERE a = (SELECT a FROM t)`},
+		{`SELECT a FROM t WHERE a = (b)`},
+		{`SELECT a FROM t WHERE CASE WHEN a = b THEN c END`},
+		{`SELECT a FROM t WHERE CASE WHEN a = b THEN c ELSE d END`},
+		{`SELECT a FROM t WHERE CASE WHEN a = b THEN c WHEN b = d THEN d ELSE d END`},
+		{`SELECT a FROM t WHERE CASE aa WHEN a = b THEN c END`},
+		{`SELECT a FROM t WHERE a = b()`},
+		{`SELECT a FROM t WHERE a = b(c)`},
+		{`SELECT a FROM t WHERE a = b(c, d)`},
+		{`SELECT a FROM t WHERE a = count(*)`},
+		{`SELECT a FROM t WHERE a = IF(b, c, d)`},
+		{`SELECT a FROM t WHERE a = IFNULL(b, c)`},
+		{`SELECT a FROM t WHERE a = NULLIF(b, c)`},
+		{`SELECT a FROM t WHERE a = COALESCE(a, b, c, d, e)`},
+		{`SELECT (a.b) FROM t WHERE (b.c) = 2`},
+
+		{`SELECT a FROM t ORDER BY a`},
+		{`SELECT a FROM t ORDER BY a ASC`},
+		{`SELECT a FROM t ORDER BY a DESC`},
+		{`SELECT a FROM t ORDER BY PRIMARY KEY t`},
+		{`SELECT a FROM t ORDER BY PRIMARY KEY t ASC`},
+		{`SELECT a FROM t ORDER BY PRIMARY KEY t DESC`},
+		{`SELECT a FROM t ORDER BY INDEX t@foo`},
+		{`SELECT a FROM t ORDER BY INDEX t@foo ASC`},
+		{`SELECT a FROM t ORDER BY INDEX t@foo DESC`},
+		{`SELECT a FROM t ORDER BY INDEX t@primary`},
+		{`SELECT a FROM t ORDER BY INDEX t@like`},
+
+		{`SELECT 1 FROM t GROUP BY a`},
+		{`SELECT 1 FROM t GROUP BY a, b`},
+
+		{`SELECT a FROM t HAVING a = b`},
+
+		{`SELECT a FROM t WINDOW w AS ()`},
+		{`SELECT a FROM t WINDOW w AS (w2)`},
+		{`SELECT a FROM t WINDOW w AS (PARTITION BY b)`},
+		{`SELECT a FROM t WINDOW w AS (PARTITION BY b, 1 + 2)`},
+		{`SELECT a FROM t WINDOW w AS (ORDER BY c)`},
+		{`SELECT a FROM t WINDOW w AS (ORDER BY c, 1 + 2)`},
+		{`SELECT a FROM t WINDOW w AS (PARTITION BY b ORDER BY c)`},
+
+		{`SELECT avg(1) OVER w FROM t`},
+		{`SELECT avg(1) OVER () FROM t`},
+		{`SELECT avg(1) OVER (w) FROM t`},
+		{`SELECT avg(1) OVER (PARTITION BY b) FROM t`},
+		{`SELECT avg(1) OVER (ORDER BY c) FROM t`},
+		{`SELECT avg(1) OVER (PARTITION BY b ORDER BY c) FROM t`},
+		{`SELECT avg(1) OVER (w PARTITION BY b ORDER BY c) FROM t`},
+
+		{`SELECT a FROM t UNION SELECT 1 FROM t`},
+		{`SELECT a FROM t UNION SELECT 1 FROM t UNION SELECT 1 FROM t`},
+		{`SELECT a FROM t UNION ALL SELECT 1 FROM t`},
+		{`SELECT a FROM t EXCEPT SELECT 1 FROM t`},
+		{`SELECT a FROM t EXCEPT ALL SELECT 1 FROM t`},
+		{`SELECT a FROM t INTERSECT SELECT 1 FROM t`},
+		{`SELECT a FROM t INTERSECT ALL SELECT 1 FROM t`},
+
+		{`SELECT a FROM t1 JOIN t2 ON a = b`},
+		{`SELECT a FROM t1 JOIN t2 USING (a)`},
+		{`SELECT a FROM t1 LEFT JOIN t2 ON a = b`},
+		{`SELECT a FROM t1 RIGHT JOIN t2 ON a = b`},
+		{`SELECT a FROM t1 INNER JOIN t2 ON a = b`},
+		{`SELECT a FROM t1 CROSS JOIN t2`},
+		{`SELECT a FROM t1 NATURAL JOIN t2`},
+		{`SELECT a FROM t1 INNER JOIN t2 USING (a)`},
+		{`SELECT a FROM t1 FULL JOIN t2 USING (a)`},
+		{`SELECT * FROM (t1 WITH ORDINALITY AS o1 CROSS JOIN t2 WITH ORDINALITY AS o2) WITH ORDINALITY AS o3`},
+
+		{`SELECT a FROM t1 AS OF SYSTEM TIME '2016-01-01'`},
+		{`SELECT a FROM t1, t2 AS OF SYSTEM TIME '2016-01-01'`},
+
+		{`SELECT a FROM t LIMIT a`},
+		{`SELECT a FROM t OFFSET b`},
+		{`SELECT a FROM t LIMIT a OFFSET b`},
+		{`SELECT DISTINCT * FROM t`},
+		{`SELECT DISTINCT a, b FROM t`},
+		{`SELECT DISTINCT ON (a, b) c FROM t`},
+		{`SET a = 3`},
+		{`SET a = 3, 4`},
+		{`SET a = '3'`},
+		{`SET a = 3.0`},
+		{`SET a = $1`},
+		{`SET a = off`},
+		{`SET TRANSACTION READ ONLY`},
+		{`SET TRANSACTION READ WRITE`},
+		{`SET TRANSACTION ISOLATION LEVEL SNAPSHOT`},
+		{`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`},
+		{`SET TRANSACTION PRIORITY LOW`},
+		{`SET TRANSACTION PRIORITY NORMAL`},
+		{`SET TRANSACTION PRIORITY HIGH`},
+		{`SET TRANSACTION ISOLATION LEVEL SNAPSHOT, PRIORITY HIGH`},
+		{`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE`},
+		{`SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SNAPSHOT`},
+		{`SET CLUSTER SETTING a = 3`},
+		{`SET CLUSTER SETTING a = '3s'`},
+		{`SET CLUSTER SETTING a = '3'`},
+		{`SET CLUSTER SETTING a = 3.0`},
+		{`SET CLUSTER SETTING a = $1`},
+		{`SET CLUSTER SETTING a = off`},
+
+		{`SELECT * FROM (VALUES (1, 2)) AS foo`},
+		{`SELECT * FROM (VALUES (1, 2)) AS foo (a, b)`},
+
+		{`SELECT * FROM [123 AS t]`},
+		{`SELECT * FROM [123(1, 2, 3) AS t]`},
+		{`SELECT * FROM [123() AS t]`},
+		{`SELECT * FROM t@[123]`},
+		{`SELECT * FROM t@{FORCE_INDEX=[123],NO_INDEX_JOIN}`},
+		{`SELECT * FROM [123 AS t]@[456]`},
+		{`SELECT * FROM [123 AS t]@{FORCE_INDEX=[456],NO_INDEX_JOIN}`},
+
+		{`TABLE a`}, // Shorthand for: SELECT * FROM a; used e.g. in CREATE VIEW v AS TABLE t
+		{`TABLE [123 AS a]`},
+
+		{`TRUNCATE TABLE a`},
+		{`TRUNCATE TABLE a, b.c`},
+		{`TRUNCATE TABLE a CASCADE`},
+
+		{`UPDATE a SET b = 3`},
+		{`UPDATE a.b SET b = 3`},
+		{`UPDATE a SET b = 3, c = DEFAULT`},
+		{`UPDATE a SET b = 3 + 4`},
+		{`UPDATE a SET (b, c) = (3, DEFAULT)`},
+		{`UPDATE a SET (b, c) = (SELECT 3, 4)`},
+		{`UPDATE a SET b = 3 WHERE a = b`},
+		{`UPDATE a SET b = 3 WHERE a = b LIMIT c`},
+		{`UPDATE a SET b = 3 WHERE a = b ORDER BY c`},
+		{`UPDATE a SET b = 3 WHERE a = b ORDER BY c LIMIT d`},
+		{`UPDATE a SET b = 3 WHERE a = b RETURNING a`},
+		{`UPDATE a SET b = 3 WHERE a = b RETURNING 1, 2`},
+		{`UPDATE a SET b = 3 WHERE a = b RETURNING a, a + b`},
+		{`UPDATE a SET b = 3 WHERE a = b RETURNING NOTHING`},
+		{`UPDATE a SET b = 3 WHERE a = b ORDER BY c LIMIT d RETURNING e`},
+
+		{`UPDATE t AS "0" SET k = ''`},                 // "0" lost its quotes
+		{`SELECT * FROM "0" JOIN "0" USING (id, "0")`}, // last "0" lost its quotes.
+
+		{`ALTER DATABASE a RENAME TO b`},
+		{`ALTER TABLE a RENAME TO b`},
+		{`ALTER TABLE IF EXISTS a RENAME TO b`},
+		{`ALTER INDEX a@b RENAME TO b`},
+		{`ALTER INDEX b RENAME TO b`},
+		{`ALTER INDEX a@primary RENAME TO like`},
+		{`ALTER INDEX IF EXISTS a@b RENAME TO b`},
+		{`ALTER INDEX IF EXISTS a@primary RENAME TO like`},
+		{`ALTER TABLE a RENAME COLUMN c1 TO c2`},
+		{`ALTER TABLE IF EXISTS a RENAME COLUMN c1 TO c2`},
+
+		{`ALTER TABLE a ADD b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE a ADD IF NOT EXISTS b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE IF EXISTS a ADD b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE IF EXISTS a ADD IF NOT EXISTS b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE a ADD COLUMN b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE a ADD COLUMN IF NOT EXISTS b INT, ADD CONSTRAINT a_idx UNIQUE (a) NOT VALID`},
+		{`ALTER TABLE IF EXISTS a ADD COLUMN b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE IF EXISTS a ADD COLUMN IF NOT EXISTS b INT, ADD CONSTRAINT a_idx UNIQUE (a)`},
+		{`ALTER TABLE a ADD b INT FAMILY fam_a`},
+		{`ALTER TABLE a ADD b INT CREATE FAMILY`},
+		{`ALTER TABLE a ADD b INT CREATE FAMILY fam_b`},
+		{`ALTER TABLE a ADD b INT CREATE IF NOT EXISTS FAMILY fam_b`},
+
+		{`ALTER TABLE a DROP b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE a DROP IF EXISTS b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE IF EXISTS a DROP b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE IF EXISTS a DROP IF EXISTS b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE a DROP COLUMN b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE a DROP COLUMN IF EXISTS b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE IF EXISTS a DROP COLUMN b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE IF EXISTS a DROP COLUMN IF EXISTS b, DROP CONSTRAINT a_idx`},
+		{`ALTER TABLE a DROP COLUMN b CASCADE`},
+		{`ALTER TABLE a DROP COLUMN b RESTRICT`},
+		{`ALTER TABLE a DROP CONSTRAINT b CASCADE`},
+		{`ALTER TABLE a DROP CONSTRAINT IF EXISTS b RESTRICT`},
+		{`ALTER TABLE a VALIDATE CONSTRAINT a`},
+
+		{`ALTER TABLE a ALTER COLUMN b SET DEFAULT 42`},
+		{`ALTER TABLE a ALTER COLUMN b SET DEFAULT NULL`},
+		{`ALTER TABLE a ALTER COLUMN b DROP DEFAULT`},
+		{`ALTER TABLE a ALTER COLUMN b DROP NOT NULL`},
+		{`ALTER TABLE a ALTER b DROP NOT NULL`},
+
+		{`COPY t FROM STDIN`},
+		{`COPY t (a, b, c) FROM STDIN`},
+
+		{`ALTER TABLE a SPLIT AT VALUES (1)`},
+		{`ALTER TABLE a SPLIT AT SELECT * FROM t`},
+		{`ALTER TABLE d.a SPLIT AT VALUES ('b', 2)`},
+		{`ALTER INDEX a@i SPLIT AT VALUES (1)`},
+		{`ALTER INDEX d.a@i SPLIT AT VALUES (2)`},
+		{`ALTER INDEX i SPLIT AT VALUES (1)`},
+		{`ALTER INDEX d.i SPLIT AT VALUES (2)`},
+
+		{`ALTER TABLE a EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 1)`},
+		{`ALTER TABLE a EXPERIMENTAL_RELOCATE SELECT * FROM t`},
+		{`ALTER TABLE d.a EXPERIMENTAL_RELOCATE VALUES (ARRAY[1, 2, 3], 'b', 2)`},
+		{`ALTER INDEX d.i EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 2)`},
+
+		{`ALTER TABLE a SCATTER`},
+		{`ALTER TABLE a SCATTER FROM (1, 2, 3) TO (4, 5, 6)`},
+		{`ALTER TABLE d.a SCATTER`},
+		{`ALTER INDEX d.i SCATTER FROM (1) TO (2)`},
+
+		{`ALTER RANGE default EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER RANGE meta EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER DATABASE db EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER TABLE db.t EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER PARTITION p OF TABLE db.t EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER TABLE t EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER PARTITION p OF TABLE t EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER INDEX db.t@i EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER INDEX t@i EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER INDEX i EXPERIMENTAL CONFIGURE ZONE 'foo'`},
+		{`ALTER TABLE t EXPERIMENTAL CONFIGURE ZONE b'foo'`},
+		{`ALTER TABLE t EXPERIMENTAL CONFIGURE ZONE NULL`},
+		{`ALTER TABLE t EXPERIMENTAL_AUDIT SET READ WRITE`},
+		{`ALTER TABLE t EXPERIMENTAL_AUDIT SET OFF`},
+
+		{`ALTER SEQUENCE a RENAME TO b`},
+		{`ALTER SEQUENCE IF EXISTS a RENAME TO b`},
+		{`ALTER SEQUENCE a INCREMENT BY 5 START WITH 1000`},
+		{`ALTER SEQUENCE IF EXISTS a INCREMENT BY 5 START WITH 1000`},
+		{`ALTER SEQUENCE IF EXISTS a NO CYCLE CACHE 1`},
+
+		{`EXPERIMENTAL SCRUB DATABASE x`},
+		{`EXPERIMENTAL SCRUB DATABASE x AS OF SYSTEM TIME 1`},
+		{`EXPERIMENTAL SCRUB TABLE x`},
+		{`EXPERIMENTAL SCRUB TABLE x AS OF SYSTEM TIME 1`},
+		{`EXPERIMENTAL SCRUB TABLE x AS OF SYSTEM TIME 1 WITH OPTIONS INDEX ALL`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS INDEX (index_name)`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS PHYSICAL`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS CONSTRAINT ALL`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS CONSTRAINT (cst_name)`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS PHYSICAL, INDEX (index_name), CONSTRAINT (cst_name)`},
+		{`EXPERIMENTAL SCRUB TABLE x WITH OPTIONS PHYSICAL, INDEX ALL, CONSTRAINT ALL`},
+
+		{`BACKUP TABLE foo TO 'bar'`},
+		{`BACKUP TABLE foo.foo, baz.baz TO 'bar'`},
+		{`SHOW BACKUP 'bar'`},
+		{`BACKUP TABLE foo TO 'bar' AS OF SYSTEM TIME '1' INCREMENTAL FROM 'baz'`},
+		{`BACKUP TABLE foo TO $1 INCREMENTAL FROM 'bar', $2, 'baz'`},
+		{`BACKUP DATABASE foo TO 'bar'`},
+		{`BACKUP DATABASE foo, baz TO 'bar'`},
+		{`BACKUP DATABASE foo TO 'bar' AS OF SYSTEM TIME '1' INCREMENTAL FROM 'baz'`},
+		{`RESTORE TABLE foo FROM 'bar'`},
+		{`RESTORE TABLE foo FROM $1`},
+		{`RESTORE TABLE foo FROM $1, $2, 'bar'`},
+		{`RESTORE TABLE foo, baz FROM 'bar'`},
+		{`RESTORE TABLE foo, baz FROM 'bar' AS OF SYSTEM TIME '1'`},
+		{`RESTORE DATABASE foo FROM 'bar'`},
+		{`RESTORE DATABASE foo, baz FROM 'bar'`},
+		{`RESTORE DATABASE foo, baz FROM 'bar' AS OF SYSTEM TIME '1'`},
+		{`BACKUP TABLE foo TO 'bar' WITH key1, key2 = 'value'`},
+		{`RESTORE TABLE foo FROM 'bar' WITH key1, key2 = 'value'`},
+		{`IMPORT TABLE foo CREATE USING 'nodelocal:///some/file' CSV DATA ('path/to/some/file', $1) WITH temp = 'path/to/temp'`},
+		{`IMPORT TABLE foo (id INT PRIMARY KEY, email STRING, age INT) CSV DATA ('path/to/some/file', $1) WITH temp = 'path/to/temp'`},
+		{`IMPORT TABLE foo (id INT, email STRING, age INT) CSV DATA ('path/to/some/file', $1) WITH comma = ',', "nullif" = 'n/a', temp = $2`},
+		{`SET ROW (1, true, NULL)`},
+
+		// Regression for #15926
+		{`SELECT * FROM ((t1 NATURAL JOIN t2 WITH ORDINALITY AS o1)) WITH ORDINALITY AS o2`},
+	}
+	for _, d := range testData {
+		stmts, err := Parse(d.sql)
+		if err != nil {
+			t.Fatalf("%s: expected success, but found %s", d.sql, err)
+		}
+		s := stmts.String()
+		if d.sql != s {
+			t.Errorf("expected \n%s\n, but found \n%s", d.sql, s)
+		}
+	}
+}
+
+// TestParse2 verifies that we can parse the supplied SQL and regenerate the
+// expected SQL string from the syntax tree. Note that if the input and output
+// SQL strings are the same, the test case should go in TestParse instead.
+func TestParse2(t *testing.T) {
+	testData := []struct {
+		sql      string
+		expected string
+	}{
+		{`CREATE DATABASE a WITH ENCODING = 'foo'`,
+			`CREATE DATABASE a ENCODING = 'foo'`},
+		{`CREATE DATABASE a TEMPLATE = template0`,
+			`CREATE DATABASE a TEMPLATE = 'template0'`},
+		{`CREATE DATABASE a TEMPLATE = invalid`,
+			`CREATE DATABASE a TEMPLATE = 'invalid'`},
+		{`CREATE TABLE a (b INT, UNIQUE INDEX foo (b))`,
+			`CREATE TABLE a (b INT, CONSTRAINT foo UNIQUE (b))`},
+		{`CREATE TABLE a (b INT, UNIQUE INDEX foo (b) INTERLEAVE IN PARENT c (d))`,
+			`CREATE TABLE a (b INT, CONSTRAINT foo UNIQUE (b) INTERLEAVE IN PARENT c (d))`},
+		{`CREATE TABLE a (UNIQUE INDEX (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))`,
+			`CREATE TABLE a (UNIQUE (b) PARTITION BY LIST (c) (PARTITION d VALUES IN (1)))`},
+		{`CREATE INDEX ON a (b) COVERING (c)`, `CREATE INDEX ON a (b) STORING (c)`},
+
+		{`SELECT TIMESTAMP WITHOUT TIME ZONE 'foo'`, `SELECT TIMESTAMP 'foo'`},
+		{`SELECT CAST('foo' AS TIMESTAMP WITHOUT TIME ZONE)`, `SELECT CAST('foo' AS TIMESTAMP)`},
+		{`SELECT CAST(1 AS "char")`, `SELECT CAST(1 AS CHAR)`},
+
+		{`SELECT 'a' FROM t@{FORCE_INDEX=bar}`, `SELECT 'a' FROM t@bar`},
+		{`SELECT 'a' FROM t@{NO_INDEX_JOIN,FORCE_INDEX=bar}`,
+			`SELECT 'a' FROM t@{FORCE_INDEX=bar,NO_INDEX_JOIN}`},
+
+		{`SELECT 'a' FROM t@{FORCE_INDEX=[123]}`, `SELECT 'a' FROM t@[123]`},
+		{`SELECT 'a' FROM [123 AS t]@{FORCE_INDEX=[456]}`, `SELECT 'a' FROM [123 AS t]@[456]`},
+
+		{`SELECT a FROM t WHERE a ISNULL`, `SELECT a FROM t WHERE a IS NULL`},
+		{`SELECT a FROM t WHERE a NOTNULL`, `SELECT a FROM t WHERE a IS NOT NULL`},
+		{`SELECT a FROM t WHERE a IS UNKNOWN`, `SELECT a FROM t WHERE a IS NULL`},
+		{`SELECT a FROM t WHERE a IS NOT UNKNOWN`, `SELECT a FROM t WHERE a IS NOT NULL`},
+
+		{`SELECT - - 5`, `SELECT -(-5)`},
+		{`SELECT a FROM t WHERE b = - 2`, `SELECT a FROM t WHERE b = (-2)`},
+		{`SELECT a FROM t WHERE a = b AND a = c`, `SELECT a FROM t WHERE (a = b) AND (a = c)`},
+		{`SELECT a FROM t WHERE a = b OR a = c`, `SELECT a FROM t WHERE (a = b) OR (a = c)`},
+		{`SELECT a FROM t WHERE NOT a = b`, `SELECT a FROM t WHERE NOT (a = b)`},
+
+		{`SELECT a FROM t WHERE a = b & c`, `SELECT a FROM t WHERE a = (b & c)`},
+		{`SELECT a FROM t WHERE a = b | c`, `SELECT a FROM t WHERE a = (b | c)`},
+		{`SELECT a FROM t WHERE a = b # c`, `SELECT a FROM t WHERE a = (b # c)`},
+		{`SELECT a FROM t WHERE a = b ^ c`, `SELECT a FROM t WHERE a = (b ^ c)`},
+		{`SELECT a FROM t WHERE a = b + c`, `SELECT a FROM t WHERE a = (b + c)`},
+		{`SELECT a FROM t WHERE a = b - c`, `SELECT a FROM t WHERE a = (b - c)`},
+		{`SELECT a FROM t WHERE a = b * c`, `SELECT a FROM t WHERE a = (b * c)`},
+		{`SELECT a FROM t WHERE a = b / c`, `SELECT a FROM t WHERE a = (b / c)`},
+		{`SELECT a FROM t WHERE a = b % c`, `SELECT a FROM t WHERE a = (b % c)`},
+		{`SELECT a FROM t WHERE a = b || c`, `SELECT a FROM t WHERE a = (b || c)`},
+		{`SELECT a FROM t WHERE a = + b`, `SELECT a FROM t WHERE a = (+b)`},
+		{`SELECT a FROM t WHERE a = - b`, `SELECT a FROM t WHERE a = (-b)`},
+		{`SELECT a FROM t WHERE a = ~ b`, `SELECT a FROM t WHERE a = (~b)`},
+
+		{`SELECT b <<= c`, `SELECT inet_contained_by_or_equals(b, c)`},
+		{`SELECT b >>= c`, `SELECT inet_contains_or_equals(b, c)`},
+		{`SELECT b && c`, `SELECT inet_contains_or_contained_by(b, c)`},
+
+		// Escaped string literals are not always escaped the same because
+		// '''' and e'\'' scan to the same token. It's more convenient to
+		// prefer escaping ' and \, so we do that.
+		{`SELECT 'a''a'`,
+			`SELECT e'a\'a'`},
+		{`SELECT 'a\a'`,
+			`SELECT e'a\\a'`},
+		{`SELECT 'a\n'`,
+			`SELECT e'a\\n'`},
+		{"SELECT '\n'",
+			`SELECT e'\n'`},
+		{"SELECT '\n\\'",
+			`SELECT e'\n\\'`},
+		{`SELECT "a'a" FROM t`,
+			`SELECT "a'a" FROM t`},
+		// Hexadecimal literal strings are turned into regular strings.
+		{`SELECT x'61'`, `SELECT b'a'`},
+		{`SELECT X'61'`, `SELECT b'a'`},
+		// Comments are stripped.
+		{`SELECT 1 FROM t -- hello world`,
+			`SELECT 1 FROM t`},
+		{`SELECT /* hello world */ 1 FROM t`,
+			`SELECT 1 FROM t`},
+		{`SELECT /* hello */ 1 FROM /* world */ t`,
+			`SELECT 1 FROM t`},
+		// Alias expressions are always output using AS.
+		{`SELECT 1 FROM t t1`,
+			`SELECT 1 FROM t AS t1`},
+		{`SELECT 1 FROM t t1 (c1, c2)`,
+			`SELECT 1 FROM t AS t1 (c1, c2)`},
+		// Alternate not-equal operator.
+		{`SELECT a FROM t WHERE a <> b`,
+			`SELECT a FROM t WHERE a != b`},
+		// BETWEEN ASYMMETRIC is noise for BETWEEN.
+		{`SELECT a FROM t WHERE a BETWEEN ASYMMETRIC b AND c`,
+			`SELECT a FROM t WHERE a BETWEEN b AND c`},
+		// OUTER is syntactic sugar.
+		{`SELECT a FROM t1 LEFT OUTER JOIN t2 ON a = b`,
+			`SELECT a FROM t1 LEFT JOIN t2 ON a = b`},
+		{`SELECT a FROM t1 RIGHT OUTER JOIN t2 ON a = b`,
+			`SELECT a FROM t1 RIGHT JOIN t2 ON a = b`},
+		// Some functions are nearly keywords.
+		{`SELECT CURRENT_SCHEMA`,
+			`SELECT current_schema()`},
+		{`SELECT CURRENT_CATALOG`,
+			`SELECT current_database()`},
+		{`SELECT CURRENT_TIMESTAMP`,
+			`SELECT current_timestamp()`},
+		{`SELECT CURRENT_DATE`,
+			`SELECT current_date()`},
+		{`SELECT POSITION(a IN b)`,
+			`SELECT strpos(b, a)`},
+		{`SELECT TRIM(BOTH a FROM b)`,
+			`SELECT btrim(b, a)`},
+		{`SELECT TRIM(LEADING a FROM b)`,
+			`SELECT ltrim(b, a)`},
+		{`SELECT TRIM(TRAILING a FROM b)`,
+			`SELECT rtrim(b, a)`},
+		{`SELECT TRIM(a, b)`,
+			`SELECT btrim(a, b)`},
+		{`SELECT CURRENT_USER`,
+			`SELECT current_user()`},
+		{`SELECT CURRENT_ROLE`,
+			`SELECT current_user()`},
+		{`SELECT SESSION_USER`,
+			`SELECT current_user()`},
+		{`SELECT USER`,
+			`SELECT current_user()`},
+		// Offset has an optional ROW/ROWS keyword.
+		{`SELECT a FROM t1 OFFSET a ROW`,
+			`SELECT a FROM t1 OFFSET a`},
+		{`SELECT a FROM t1 OFFSET a ROWS`,
+			`SELECT a FROM t1 OFFSET a`},
+		// We allow OFFSET before LIMIT, but always output LIMIT first.
+		{`SELECT a FROM t OFFSET a LIMIT b`,
+			`SELECT a FROM t LIMIT b OFFSET a`},
+		// FETCH FIRST ... is alternative syntax for LIMIT.
+		{`SELECT a FROM t FETCH FIRST 3 ROWS ONLY`,
+			`SELECT a FROM t LIMIT 3`},
+		{`SELECT a FROM t FETCH NEXT 3 ROWS ONLY`,
+			`SELECT a FROM t LIMIT 3`},
+		{`SELECT a FROM t FETCH FIRST ROW ONLY`,
+			`SELECT a FROM t LIMIT 1`},
+		{`SELECT a FROM t FETCH FIRST (2 * a) ROWS ONLY`,
+			`SELECT a FROM t LIMIT 2 * a`},
+		{`SELECT a FROM t OFFSET b FETCH FIRST (2 * a) ROWS ONLY`,
+			`SELECT a FROM t LIMIT 2 * a OFFSET b`},
+		{`SELECT a FROM t FETCH FIRST (2 * a) ROWS ONLY OFFSET b`,
+			`SELECT a FROM t LIMIT 2 * a OFFSET b`},
+		// Double negation. See #1800.
+		{`SELECT *,-/* comment */-5`,
+			`SELECT *, -(-5)`},
+		{"SELECT -\n-5",
+			`SELECT -(-5)`},
+		{`SELECT -0.-/*test*/-1`,
+			`SELECT (-0.) - (-1)`,
+		},
+		// See #1948.
+		{`SELECT~~+~++~bd(*)`,
+			`SELECT ~(~(+(~(+(+(~bd(*)))))))`},
+		// See #1957.
+		{`SELECT+y[array[]]`,
+			`SELECT +y[ARRAY[]]`},
+		{`SELECT a FROM t UNION DISTINCT SELECT 1 FROM t`,
+			`SELECT a FROM t UNION SELECT 1 FROM t`},
+		{`SELECT a FROM t EXCEPT DISTINCT SELECT 1 FROM t`,
+			`SELECT a FROM t EXCEPT SELECT 1 FROM t`},
+		{`SELECT a FROM t INTERSECT DISTINCT SELECT 1 FROM t`,
+			`SELECT a FROM t INTERSECT SELECT 1 FROM t`},
+
+		{`SELECT a #- '{x}'`, `SELECT json_remove_path(a, '{x}')`},
+
+		// Pretty printing the FAMILY INET function is not normal due to the grammar
+		// definition of FAMILY.
+		{`SELECT FAMILY(x)`,
+			`SELECT "family"(x)`},
+
+		{`SET SCHEMA 'public'`,
+			`SET search_path = 'public'`},
+		{`SET TIME ZONE 'pst8pdt'`,
+			`SET timezone = 'pst8pdt'`},
+		{`SET TIME ZONE 'Europe/Rome'`,
+			`SET timezone = 'Europe/Rome'`},
+		{`SET TIME ZONE -7`,
+			`SET timezone = -7`},
+		{`SET TIME ZONE -7.3`,
+			`SET timezone = -7.3`},
+		{`SET TIME ZONE DEFAULT`,
+			`SET timezone = DEFAULT`},
+		{`SET TIME ZONE LOCAL`,
+			`SET timezone = 'local'`},
+		{`SET TIME ZONE pst8pdt`,
+			`SET timezone = 'pst8pdt'`},
+		{`SET TIME ZONE "Europe/Rome"`,
+			`SET timezone = 'Europe/Rome'`},
+		{`SET TIME ZONE INTERVAL '-7h'`,
+			`SET timezone = '-7h'`},
+		{`SET TIME ZONE INTERVAL '-7h0m5s' HOUR TO MINUTE`,
+			`SET timezone = '-6h-59m'`},
+		{`SET CLUSTER SETTING a = on`,
+			`SET CLUSTER SETTING a = "on"`},
+		{`SET a = on`,
+			`SET a = "on"`},
+		{`SET a = default`,
+			`SET a = DEFAULT`},
+
+		// Special substring syntax
+		{`SELECT SUBSTRING('RoacH' from 2 for 3)`,
+			`SELECT substring('RoacH', 2, 3)`},
+		{`SELECT SUBSTRING('RoacH' for 2 from 3)`,
+			`SELECT substring('RoacH', 3, 2)`},
+		{`SELECT SUBSTRING('RoacH' from 2)`,
+			`SELECT substring('RoacH', 2)`},
+		{`SELECT SUBSTRING('RoacH' for 3)`,
+			`SELECT substring('RoacH', 1, 3)`},
+		{`SELECT SUBSTRING('f(oabaroob' from '\(o(.)b')`,
+			`SELECT substring('f(oabaroob', e'\\(o(.)b')`},
+		{`SELECT SUBSTRING('f(oabaroob' from '+(o(.)b' for '+')`,
+			`SELECT substring('f(oabaroob', '+(o(.)b', '+')`},
+		// Special position syntax
+		{`SELECT POSITION('ig' in 'high')`,
+			`SELECT strpos('high', 'ig')`},
+		// Special overlay syntax
+		{`SELECT OVERLAY('w33333rce' PLACING 'resou' FROM 3)`,
+			`SELECT overlay('w33333rce', 'resou', 3)`},
+		{`SELECT OVERLAY('w33333rce' PLACING 'resou' FROM 3 FOR 5)`,
+			`SELECT overlay('w33333rce', 'resou', 3, 5)`},
+		// Special extract syntax
+		{`SELECT EXTRACT(second from now())`,
+			`SELECT extract('second', now())`},
+		// Special trim syntax
+		{`SELECT TRIM('xy' from 'xyxtrimyyx')`,
+			`SELECT btrim('xyxtrimyyx', 'xy')`},
+		{`SELECT TRIM(both 'xy' from 'xyxtrimyyx')`,
+			`SELECT btrim('xyxtrimyyx', 'xy')`},
+		{`SELECT TRIM(from 'xyxtrimyyx')`,
+			`SELECT btrim('xyxtrimyyx')`},
+		{`SELECT TRIM(both 'xyxtrimyyx')`,
+			`SELECT btrim('xyxtrimyyx')`},
+		{`SELECT TRIM(both from 'xyxtrimyyx')`,
+			`SELECT btrim('xyxtrimyyx')`},
+		{`SELECT TRIM(leading 'xy' from 'xyxtrimyyx')`,
+			`SELECT ltrim('xyxtrimyyx', 'xy')`},
+		{`SELECT TRIM(leading from 'xyxtrimyyx')`,
+			`SELECT ltrim('xyxtrimyyx')`},
+		{`SELECT TRIM(leading 'xyxtrimyyx')`,
+			`SELECT ltrim('xyxtrimyyx')`},
+		{`SELECT TRIM(trailing 'xy' from 'xyxtrimyyx')`,
+			`SELECT rtrim('xyxtrimyyx', 'xy')`},
+		{`SELECT TRIM(trailing from 'xyxtrimyyx')`,
+			`SELECT rtrim('xyxtrimyyx')`},
+		{`SELECT TRIM(trailing 'xyxtrimyyx')`,
+			`SELECT rtrim('xyxtrimyyx')`},
+		{`SELECT a IS NAN`,
+			`SELECT a = 'NaN'`},
+		{`SELECT a IS NOT NAN`,
+			`SELECT a != 'NaN'`},
+		{`SHOW INDEX FROM t`,
+			`SHOW INDEXES FROM t`},
+		{`SHOW CONSTRAINT FROM t`,
+			`SHOW CONSTRAINTS FROM t`},
+		{`SHOW KEYS FROM t`,
+			`SHOW INDEXES FROM t`},
+		{`SHOW SESSION barfoo`, `SHOW barfoo`},
+		{`SHOW SESSION database`, `SHOW database`},
+		{`SHOW SESSION TIME ZONE`, `SHOW timezone`},
+		{`SHOW SESSION TIMEZONE`, `SHOW timezone`},
+		{`EXPERIMENTAL SHOW ALL ZONE CONFIGURATIONS`, `EXPERIMENTAL SHOW ZONE CONFIGURATIONS`},
+		{`BEGIN`,
+			`BEGIN TRANSACTION`},
+		{`START TRANSACTION`,
+			`BEGIN TRANSACTION`},
+		{`COMMIT`,
+			`COMMIT TRANSACTION`},
+		{`END`,
+			`COMMIT TRANSACTION`},
+		{`BEGIN TRANSACTION PRIORITY LOW, ISOLATION LEVEL SNAPSHOT`,
+			`BEGIN TRANSACTION ISOLATION LEVEL SNAPSHOT, PRIORITY LOW`},
+		{`SET TRANSACTION PRIORITY NORMAL, ISOLATION LEVEL SERIALIZABLE`,
+			`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, PRIORITY NORMAL`},
+		{`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE`,
+			`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE`},
+		{`SET TRANSACTION ISOLATION LEVEL SNAPSHOT READ ONLY`,
+			`SET TRANSACTION ISOLATION LEVEL SNAPSHOT, READ ONLY`},
+		{"SET CLUSTER SETTING a TO 1", "SET CLUSTER SETTING a = 1"},
+		{"RELEASE foo", "RELEASE SAVEPOINT foo"},
+		{"RELEASE SAVEPOINT foo", "RELEASE SAVEPOINT foo"},
+		{"ROLLBACK", "ROLLBACK TRANSACTION"},
+		{"ROLLBACK TRANSACTION", "ROLLBACK TRANSACTION"},
+		{"ROLLBACK TO foo", "ROLLBACK TRANSACTION TO SAVEPOINT foo"},
+		{"ROLLBACK TO SAVEPOINT foo", "ROLLBACK TRANSACTION TO SAVEPOINT foo"},
+		{"ROLLBACK TRANSACTION TO foo", "ROLLBACK TRANSACTION TO SAVEPOINT foo"},
+		{"ROLLBACK TRANSACTION TO SAVEPOINT foo", "ROLLBACK TRANSACTION TO SAVEPOINT foo"},
+		{"ABORT TRANSACTION", "ROLLBACK TRANSACTION"},
+		{"ABORT WORK", "ROLLBACK TRANSACTION"},
+		{"ABORT", "ROLLBACK TRANSACTION"},
+		{`DEALLOCATE PREPARE a`,
+			`DEALLOCATE a`},
+		{`DEALLOCATE PREPARE ALL`,
+			`DEALLOCATE ALL`},
+
+		{`BACKUP DATABASE foo TO bar`,
+			`BACKUP DATABASE foo TO 'bar'`},
+		{`BACKUP DATABASE foo TO "bar.12" INCREMENTAL FROM "baz.34"`,
+			`BACKUP DATABASE foo TO 'bar.12' INCREMENTAL FROM 'baz.34'`},
+		{`RESTORE DATABASE foo FROM bar`,
+			`RESTORE DATABASE foo FROM 'bar'`},
+
+		{`SHOW ALL CLUSTER SETTINGS`, `SHOW CLUSTER SETTING all`},
+
+		{`SHOW SESSIONS`, `SHOW CLUSTER SESSIONS`},
+		{`SHOW QUERIES`, `SHOW CLUSTER QUERIES`},
+
+		{`USE foo`, `SET database = foo`},
+
+		{`SET NAMES foo`, `SET client_encoding = foo`},
+		{`SET NAMES 'foo'`, `SET client_encoding = 'foo'`},
+		{`SET NAMES DEFAULT`, `SET client_encoding = DEFAULT`},
+		{`SET NAMES`, `SET client_encoding = DEFAULT`},
+
+		{`SHOW NAMES`, `SHOW client_encoding`},
+
+		{`SHOW TRANSACTION ISOLATION LEVEL`, `SHOW transaction_isolation`},
+		{`SHOW TRANSACTION PRIORITY`, `SHOW transaction_priority`},
+
+		{`RESET a`, `SET a = DEFAULT`},
+		{`RESET CLUSTER SETTING a`, `SET CLUSTER SETTING a = DEFAULT`},
+
+		{`RESET NAMES`, `SET client_encoding = DEFAULT`},
+
+		{`CREATE USER foo`,
+			`CREATE USER 'foo'`},
+		{`CREATE USER IF NOT EXISTS foo`,
+			`CREATE USER IF NOT EXISTS 'foo'`},
+		{`CREATE USER foo PASSWORD bar`,
+			`CREATE USER 'foo' WITH PASSWORD 'bar'`},
+		{`DROP USER foo, bar`,
+			`DROP USER 'foo', 'bar'`},
+		{`DROP USER IF EXISTS foo, bar`,
+			`DROP USER IF EXISTS 'foo', 'bar'`},
+		{`ALTER USER foo WITH PASSWORD bar`,
+			`ALTER USER 'foo' WITH PASSWORD 'bar'`},
+
+		// Alternative forms for table patterns.
+
+		{`SHOW GRANTS ON foo`,
+			`SHOW GRANTS ON TABLE foo`},
+		{`SHOW GRANTS ON foo, db.foo`,
+			`SHOW GRANTS ON TABLE foo, db.foo`},
+		{`BACKUP foo TO 'bar'`,
+			`BACKUP TABLE foo TO 'bar'`},
+		{`BACKUP foo.foo, baz.baz TO 'bar'`,
+			`BACKUP TABLE foo.foo, baz.baz TO 'bar'`},
+		{`BACKUP foo TO 'bar' AS OF SYSTEM TIME '1' INCREMENTAL FROM 'baz'`,
+			`BACKUP TABLE foo TO 'bar' AS OF SYSTEM TIME '1' INCREMENTAL FROM 'baz'`},
+		{`BACKUP foo TO $1 INCREMENTAL FROM 'bar', $2, 'baz'`,
+			`BACKUP TABLE foo TO $1 INCREMENTAL FROM 'bar', $2, 'baz'`},
+		// Tables named "role" are handled specially to support SHOW GRANTS ON ROLE,
+		// but that special handling should not impact BACKUP.
+		{`BACKUP role TO 'bar'`,
+			`BACKUP TABLE role TO 'bar'`},
+		{`RESTORE foo FROM 'bar'`,
+			`RESTORE TABLE foo FROM 'bar'`},
+		{`RESTORE foo FROM $1`,
+			`RESTORE TABLE foo FROM $1`},
+		{`RESTORE foo FROM $1, $2, 'bar'`,
+			`RESTORE TABLE foo FROM $1, $2, 'bar'`},
+		{`RESTORE foo, baz FROM 'bar'`,
+			`RESTORE TABLE foo, baz FROM 'bar'`},
+		{`RESTORE foo, baz FROM 'bar' AS OF SYSTEM TIME '1'`,
+			`RESTORE TABLE foo, baz FROM 'bar' AS OF SYSTEM TIME '1'`},
+		{`BACKUP foo TO 'bar' WITH key1, key2 = 'value'`,
+			`BACKUP TABLE foo TO 'bar' WITH key1, key2 = 'value'`},
+		{`RESTORE foo FROM 'bar' WITH key1, key2 = 'value'`,
+			`RESTORE TABLE foo FROM 'bar' WITH key1, key2 = 'value'`},
+
+		{`GRANT SELECT ON foo TO root`,
+			`GRANT SELECT ON TABLE foo TO root`},
+		{`GRANT SELECT, DELETE, UPDATE ON foo, db.foo TO root, bar`,
+			`GRANT SELECT, DELETE, UPDATE ON TABLE foo, db.foo TO root, bar`},
+		// Tables named "role" are handled specially to support SHOW GRANTS ON ROLE,
+		// but that special handling should not impact GRANT.
+		{`GRANT SELECT ON role TO root`,
+			`GRANT SELECT ON TABLE role TO root`},
+		{`REVOKE SELECT ON foo FROM root`,
+			`REVOKE SELECT ON TABLE foo FROM root`},
+		{`REVOKE UPDATE, DELETE ON foo, db.foo FROM root, bar`,
+			`REVOKE UPDATE, DELETE ON TABLE foo, db.foo FROM root, bar`},
+
+		// RBAC-related statements.
+
+		{`CREATE ROLE foo`,
+			`CREATE ROLE 'foo'`},
+		{`CREATE ROLE IF NOT EXISTS foo`,
+			`CREATE ROLE IF NOT EXISTS 'foo'`},
+		{`DROP ROLE foo, bar`,
+			`DROP ROLE 'foo', 'bar'`},
+		{`DROP ROLE IF EXISTS foo, bar`,
+			`DROP ROLE IF EXISTS 'foo', 'bar'`},
+
+		// Clarify the ambiguity between "ON ROLE" (RBAC) and "ON ROLE"
+		// (regular table named "role").
+		{`SHOW GRANTS ON role`, `SHOW GRANTS ON ROLE`},
+		{`SHOW GRANTS ON "role"`, `SHOW GRANTS ON TABLE role`},
+		{`SHOW GRANTS ON role foo`, `SHOW GRANTS ON ROLE foo`},
+		{`SHOW GRANTS ON role, foo`, `SHOW GRANTS ON TABLE role, foo`},
+		{`SHOW GRANTS ON role foo, bar`, `SHOW GRANTS ON ROLE foo, bar`},
+		{`SHOW GRANTS ON "role", foo`, `SHOW GRANTS ON TABLE role, foo`},
+		{`SHOW GRANTS ON "role".foo`, `SHOW GRANTS ON TABLE role.foo`},
+		{`SHOW GRANTS ON role.foo`, `SHOW GRANTS ON TABLE role.foo`},
+		{`SHOW GRANTS ON role.*`, `SHOW GRANTS ON TABLE role.*`},
+
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE NO ACTION ON DELETE NO ACTION)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE RESTRICT ON DELETE RESTRICT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT ON UPDATE RESTRICT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE RESTRICT ON DELETE NO ACTION)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE RESTRICT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE NO ACTION ON DELETE RESTRICT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE CASCADE ON DELETE CASCADE)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE ON UPDATE CASCADE)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE CASCADE ON DELETE NO ACTION)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE CASCADE)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE NO ACTION ON DELETE CASCADE)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET NULL ON DELETE SET NULL)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL ON UPDATE SET NULL)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET NULL ON DELETE NO ACTION)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET NULL)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE NO ACTION ON DELETE SET NULL)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET DEFAULT ON DELETE SET DEFAULT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT ON UPDATE SET DEFAULT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET DEFAULT ON DELETE NO ACTION)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET DEFAULT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE NO ACTION ON DELETE SET DEFAULT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE RESTRICT ON DELETE CASCADE)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE CASCADE ON UPDATE RESTRICT)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE CASCADE ON DELETE SET NULL)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET NULL ON UPDATE CASCADE)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET NULL ON DELETE SET DEFAULT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE SET DEFAULT ON UPDATE SET NULL)`,
+		},
+		{
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON UPDATE SET DEFAULT ON DELETE RESTRICT)`,
+			`CREATE TABLE a (b INT, FOREIGN KEY (b) REFERENCES other ON DELETE RESTRICT ON UPDATE SET DEFAULT)`,
+		},
+	}
+	for _, d := range testData {
+		stmts, err := Parse(d.sql)
+		if err != nil {
+			t.Errorf("%s: expected success, but found %s", d.sql, err)
+			continue
+		}
+		s := tree.AsStringWithFlags(&stmts, tree.FmtShowPasswords)
+		if d.expected != s {
+			t.Errorf("%s: expected %s, but found (%d statements): %s", d.sql, d.expected, len(stmts), s)
+		}
+		if _, err := Parse(s); err != nil {
+			t.Errorf("expected string found, but not parsable: %s:\n%s", err, s)
+		}
+	}
 }
 
 // TestParseTree checks that the implicit grouping done by the grammar
@@ -112,29 +1464,26 @@ func TestParseTree(t *testing.T) {
 		expected string
 	}{
 		{`SELECT 1`, `SELECT (1)`},
-		{`SELECT -1+2`, `SELECT ((-1) + (2))`},
-		{`SELECT -1:::INT8`, `SELECT (-((1):::INT8))`},
-		{`SELECT 1 = 2::INT8`, `SELECT ((1) = ((2)::INT8))`},
-		{`SELECT 1 = ANY 2::INT8`, `SELECT ((1) = ANY ((2)::INT8))`},
-		{`SELECT 1 = ANY ARRAY[1]:::INT8`, `SELECT ((1) = ANY ((ARRAY[(1)]):::INT8))`},
+		{`SELECT -1+2`, `SELECT (((-(1))) + (2))`},
+		{`SELECT -1:::INT`, `SELECT (-((1):::INT))`},
+		{`SELECT 1 = 2::INT`, `SELECT ((1) = ((2)::INT))`},
+		{`SELECT 1 = ANY 2::INT`, `SELECT ((1) = ANY ((2)::INT))`},
+		{`SELECT 1 = ANY ARRAY[1]:::INT`, `SELECT ((1) = ANY ((ARRAY[(1)]):::INT))`},
 	}
 
 	for _, d := range testData {
-		t.Run(d.sql, func(t *testing.T) {
-			stmts, err := parser.Parse(d.sql)
-			if err != nil {
-				t.Errorf("%s: expected success, but found %s", d.sql, err)
-				return
-			}
-			s := stmts.StringWithFlags(tree.FmtAlwaysGroupExprs)
-			if d.expected != s {
-				t.Errorf("%s: expected %s, but found (%d statements): %s", d.sql, d.expected, len(stmts), s)
-			}
-			if _, err := parser.Parse(s); err != nil {
-				t.Errorf("expected string found, but not parsable: %s:\n%s", err, s)
-			}
-			sqlutils.VerifyStatementPrettyRoundtrip(t, d.expected)
-		})
+		stmts, err := Parse(d.sql)
+		if err != nil {
+			t.Errorf("%s: expected success, but found %s", d.sql, err)
+			continue
+		}
+		s := tree.AsStringWithFlags(&stmts, tree.FmtAlwaysGroupExprs)
+		if d.expected != s {
+			t.Errorf("%s: expected %s, but found (%d statements): %s", d.sql, d.expected, len(stmts), s)
+		}
+		if _, err := Parse(s); err != nil {
+			t.Errorf("expected string found, but not parsable: %s:\n%s", err, s)
+		}
 	}
 }
 
@@ -151,12 +1500,424 @@ func TestParseSyntax(t *testing.T) {
 		{`SELECT '\x' FROM t`},
 	}
 	for _, d := range testData {
-		t.Run(d.sql, func(t *testing.T) {
-			if _, err := parser.Parse(d.sql); err != nil {
-				t.Fatalf("%s: expected success, but not parsable %s", d.sql, err)
+		if _, err := Parse(d.sql); err != nil {
+			t.Fatalf("%s: expected success, but not parsable %s", d.sql, err)
+		}
+	}
+}
+
+func TestParseError(t *testing.T) {
+	testData := []struct {
+		sql      string
+		expected string
+	}{
+		{`SELECT2 1`, `syntax error at or near "select2"
+SELECT2 1
+^
+`},
+		{`SELECT 1 FROM (t)`, `syntax error at or near ")"
+SELECT 1 FROM (t)
+                ^
+HINT: try \h <SOURCE>`},
+		{`SET TIME ZONE INTERVAL 'foobar'`, `could not parse "foobar" as type interval: interval: missing unit at position 0: "foobar" at or near "EOF"
+SET TIME ZONE INTERVAL 'foobar'
+                               ^
+`},
+		{`SELECT INTERVAL 'foo'`, `could not parse "foo" as type interval: interval: missing unit at position 0: "foo" at or near "EOF"
+SELECT INTERVAL 'foo'
+                     ^
+`},
+		{`SELECT 1 /* hello`, `unterminated comment
+SELECT 1 /* hello
+         ^
+`},
+		{`SELECT '1`, `unterminated string
+SELECT '1
+       ^
+HINT: try \h SELECT`},
+		{`SELECT * FROM t WHERE k=`,
+			`syntax error at or near "EOF"
+SELECT * FROM t WHERE k=
+                        ^
+HINT: try \h SELECT`,
+		},
+		{`CREATE TABLE test (
+  CONSTRAINT foo INDEX (bar)
+)`, `syntax error at or near "index"
+CREATE TABLE test (
+  CONSTRAINT foo INDEX (bar)
+                 ^
+HINT: try \h CREATE TABLE`},
+		{`CREATE TABLE test (
+  foo BIT(0)
+)`, `length for type bit must be at least 1 at or near ")"
+CREATE TABLE test (
+  foo BIT(0)
+           ^
+`},
+		{`CREATE TABLE test (
+  foo INT DEFAULT 1 DEFAULT 2
+)`, `multiple default values specified for column "foo" at or near ")"
+CREATE TABLE test (
+  foo INT DEFAULT 1 DEFAULT 2
+)
+^
+`},
+		{`CREATE TABLE test (
+  foo INT REFERENCES t1 REFERENCES t2
+)`, `multiple foreign key constraints specified for column "foo" at or near ")"
+CREATE TABLE test (
+  foo INT REFERENCES t1 REFERENCES t2
+)
+^
+`},
+		{`CREATE TABLE test (
+  foo INT FAMILY a FAMILY b
+)`, `multiple column families specified for column "foo" at or near ")"
+CREATE TABLE test (
+  foo INT FAMILY a FAMILY b
+)
+^
+`},
+		{`SELECT family FROM test`, `syntax error at or near "from"
+SELECT family FROM test
+              ^
+HINT: try \h SELECT`},
+		{`CREATE TABLE test (
+  foo INT NOT NULL NULL
+)`, `conflicting NULL/NOT NULL declarations for column "foo" at or near ")"
+CREATE TABLE test (
+  foo INT NOT NULL NULL
+)
+^
+`},
+		{`CREATE TABLE test (
+  foo INT NULL NOT NULL
+)`, `conflicting NULL/NOT NULL declarations for column "foo" at or near ")"
+CREATE TABLE test (
+  foo INT NULL NOT NULL
+)
+^
+`},
+		{`CREATE DATABASE a b`,
+			`syntax error at or near "b"
+CREATE DATABASE a b
+                  ^
+`},
+		{`CREATE DATABASE a b c`,
+			`syntax error at or near "b"
+CREATE DATABASE a b c
+                  ^
+`},
+		{`CREATE INDEX ON a (b) STORING ()`,
+			`syntax error at or near ")"
+CREATE INDEX ON a (b) STORING ()
+                               ^
+HINT: try \h CREATE INDEX`},
+		{`CREATE VIEW a`,
+			`syntax error at or near "EOF"
+CREATE VIEW a
+             ^
+HINT: try \h CREATE VIEW`},
+		{`CREATE VIEW a () AS select * FROM b`,
+			`syntax error at or near ")"
+CREATE VIEW a () AS select * FROM b
+               ^
+HINT: try \h CREATE VIEW`},
+		{`SELECT FROM t`,
+			`syntax error at or near "from"
+SELECT FROM t
+       ^
+HINT: try \h SELECT`},
+
+		{"SELECT 1e-\n-1",
+			`invalid floating point literal
+SELECT 1e-
+       ^
+HINT: try \h SELECT`},
+		{"SELECT foo''",
+			`syntax error at or near ""
+SELECT foo''
+          ^
+`},
+		{
+			`SELECT 0x FROM t`,
+			`invalid hexadecimal numeric literal
+SELECT 0x FROM t
+       ^
+HINT: try \h SELECT`,
+		},
+		{
+			`SELECT x'fail' FROM t`,
+			`invalid hexadecimal bytes literal
+SELECT x'fail' FROM t
+       ^
+HINT: try \h SELECT`,
+		},
+		{
+			`SELECT x'AAB' FROM t`,
+			`invalid hexadecimal bytes literal
+SELECT x'AAB' FROM t
+       ^
+HINT: try \h SELECT`,
+		},
+		{
+			`SELECT POSITION('high', 'a')`,
+			`syntax error at or near ","
+SELECT POSITION('high', 'a')
+                      ^
+HINT: try \h SELECT`,
+		},
+		{
+			`SELECT a FROM foo@{FORCE_INDEX}`,
+			`syntax error at or near "}"
+SELECT a FROM foo@{FORCE_INDEX}
+                              ^
+HINT: try \h <SOURCE>`,
+		},
+		{
+			`SELECT a FROM foo@{FORCE_INDEX=}`,
+			`syntax error at or near "}"
+SELECT a FROM foo@{FORCE_INDEX=}
+                               ^
+HINT: try \h <SOURCE>`,
+		},
+		{
+			`SELECT a FROM foo@{FORCE_INDEX=bar,FORCE_INDEX=baz}`,
+			`FORCE_INDEX specified multiple times at or near "baz"
+SELECT a FROM foo@{FORCE_INDEX=bar,FORCE_INDEX=baz}
+                                               ^
+`,
+		},
+		{
+			`SELECT a FROM foo@{FORCE_INDEX=bar,NO_INDEX_JOIN,FORCE_INDEX=baz}`,
+			`FORCE_INDEX specified multiple times at or near "baz"
+SELECT a FROM foo@{FORCE_INDEX=bar,NO_INDEX_JOIN,FORCE_INDEX=baz}
+                                                             ^
+`,
+		},
+		{
+			`SELECT a FROM foo@{NO_INDEX_JOIN,NO_INDEX_JOIN}`,
+			`NO_INDEX_JOIN specified multiple times at or near "no_index_join"
+SELECT a FROM foo@{NO_INDEX_JOIN,NO_INDEX_JOIN}
+                                 ^
+`,
+		},
+		{
+			`SELECT a FROM foo@{NO_INDEX_JOIN,FORCE_INDEX=baz,NO_INDEX_JOIN}`,
+			`NO_INDEX_JOIN specified multiple times at or near "no_index_join"
+SELECT a FROM foo@{NO_INDEX_JOIN,FORCE_INDEX=baz,NO_INDEX_JOIN}
+                                                 ^
+`,
+		},
+		{
+			`INSERT INTO a@b VALUES (1, 2)`,
+			`syntax error at or near "@"
+INSERT INTO a@b VALUES (1, 2)
+             ^
+HINT: try \h INSERT`,
+		},
+		{
+			`ALTER TABLE t RENAME COLUMN x TO family`,
+			`syntax error at or near "family"
+ALTER TABLE t RENAME COLUMN x TO family
+                                 ^
+HINT: try \h ALTER TABLE`,
+		},
+		{
+			`SELECT CAST(1.2+2.3 AS notatype)`,
+			`syntax error at or near "notatype"
+SELECT CAST(1.2+2.3 AS notatype)
+                       ^
+`,
+		},
+		{
+			`SELECT ANNOTATE_TYPE(1.2+2.3, notatype)`,
+			`syntax error at or near "notatype"
+SELECT ANNOTATE_TYPE(1.2+2.3, notatype)
+                              ^
+`,
+		},
+		{
+			`CREATE USER foo WITH PASSWORD`,
+			`syntax error at or near "EOF"
+CREATE USER foo WITH PASSWORD
+                             ^
+HINT: try \h CREATE USER`,
+		},
+		{
+			`ALTER TABLE t RENAME TO t[TRUE]`,
+			`syntax error at or near "["
+ALTER TABLE t RENAME TO t[TRUE]
+                         ^
+`,
+		},
+		{
+			`SELECT (1 + 2).*`,
+			`syntax error at or near "."
+SELECT (1 + 2).*
+              ^
+`,
+		},
+		{
+			`TABLE abc[TRUE]`,
+			`syntax error at or near "["
+TABLE abc[TRUE]
+         ^
+`,
+		},
+		{
+			`UPDATE kv SET k[0] = 9`,
+			`syntax error at or near "["
+UPDATE kv SET k[0] = 9
+               ^
+HINT: try \h UPDATE`,
+		},
+		{
+			`SELECT (ARRAY['a', 'b', 'c']).name`,
+			`syntax error at or near "."
+SELECT (ARRAY['a', 'b', 'c']).name
+                             ^
+`,
+		},
+		{
+			`SELECT (0) FROM y[array[]]`,
+			`syntax error at or near "["
+SELECT (0) FROM y[array[]]
+                 ^
+`,
+		},
+		{
+			`INSERT INTO kv (k[0]) VALUES ('hello')`,
+			`syntax error at or near "["
+INSERT INTO kv (k[0]) VALUES ('hello')
+                 ^
+HINT: try \h <SELECTCLAUSE>`,
+		},
+		{
+			`SELECT CASE 1 = 1 WHEN true THEN ARRAY[1, 2] ELSE ARRAY[2, 3] END[1]`,
+			`syntax error at or near "["
+SELECT CASE 1 = 1 WHEN true THEN ARRAY[1, 2] ELSE ARRAY[2, 3] END[1]
+                                                                 ^
+`,
+		},
+		{
+			`SELECT EXISTS(SELECT 1)[1]`,
+			`syntax error at or near "["
+SELECT EXISTS(SELECT 1)[1]
+                       ^
+`,
+		},
+		{
+			`SELECT 1 + ANY ARRAY[1, 2, 3]`,
+			`+ ANY <array> is invalid because "+" is not a boolean operator at or near "EOF"
+SELECT 1 + ANY ARRAY[1, 2, 3]
+                             ^
+`,
+		},
+		{
+			`SELECT 'f'::"blah"`,
+			`syntax error at or near "blah"
+SELECT 'f'::"blah"
+            ^
+`,
+		},
+		{
+			`INSERT INTO foo(a, a.b) VALUES (1,2)`,
+			`unimplemented at or near "b"
+INSERT INTO foo(a, a.b) VALUES (1,2)
+                     ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/8318`,
+		},
+		{
+			`UPSERT INTO foo(a, a.b) VALUES (1,2)`,
+			`unimplemented at or near "b"
+UPSERT INTO foo(a, a.b) VALUES (1,2)
+                     ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/8318`,
+		},
+		{
+			`UPDATE foo SET (a, a.b) = (1, 2)`,
+			`unimplemented at or near "b"
+UPDATE foo SET (a, a.b) = (1, 2)
+                     ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/8318`,
+		},
+		{
+			`UPDATE foo SET a.b = 1`,
+			`unimplemented at or near "b"
+UPDATE foo SET a.b = 1
+                 ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/8318`,
+		},
+		// Ensure that the support for ON ROLE <namelist> doesn't leak
+		// where it should not be recognized.
+		{
+			`GRANT SELECT ON ROLE foo, bar TO blix`,
+			`syntax error at or near "foo"
+GRANT SELECT ON ROLE foo, bar TO blix
+                     ^
+HINT: try \h GRANT`,
+		},
+		{
+			`REVOKE SELECT ON ROLE foo, bar FROM blix`,
+			`syntax error at or near "foo"
+REVOKE SELECT ON ROLE foo, bar FROM blix
+                      ^
+HINT: try \h REVOKE`,
+		},
+		{
+			`BACKUP ROLE foo, bar TO 'baz'`,
+			`syntax error at or near "foo"
+BACKUP ROLE foo, bar TO 'baz'
+            ^
+HINT: try \h BACKUP`,
+		},
+		{
+			`RESTORE ROLE foo, bar FROM 'baz'`,
+			`syntax error at or near "foo"
+RESTORE ROLE foo, bar FROM 'baz'
+             ^
+HINT: try \h RESTORE`,
+		},
+		{
+			`SELECT * FROM ab, LATERAL (SELECT * FROM kv)`,
+			`unimplemented at or near "EOF"
+SELECT * FROM ab, LATERAL (SELECT * FROM kv)
+                                            ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/24560`,
+		},
+		{
+			`SELECT * FROM ab, LATERAL foo(a)`,
+			`unimplemented at or near "EOF"
+SELECT * FROM ab, LATERAL foo(a)
+                                ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/24560`,
+		},
+		{
+			`SELECT max(a ORDER BY b) FROM ab`,
+			`unimplemented at or near ")"
+SELECT max(a ORDER BY b) FROM ab
+                       ^
+HINT: See: https://github.com/cockroachdb/cockroach/issues/23620`,
+		},
+	}
+	for _, d := range testData {
+		_, err := Parse(d.sql)
+		if err == nil {
+			t.Errorf("expected error, got nil")
+			continue
+		}
+		msg := err.Error()
+		if pgerr, ok := pgerror.GetPGCause(err); ok {
+			msg += strings.TrimPrefix(pgerr.Detail, "source SQL:") + "\n"
+			if pgerr.Hint != "" {
+				msg += "HINT: " + pgerr.Hint
 			}
-			sqlutils.VerifyStatementPrettyRoundtrip(t, d.sql)
-		})
+		}
+		if msg != d.expected {
+			t.Errorf("%s: expected\n%s, but found\n%v", d.sql, d.expected, msg)
+		}
 	}
 }
 
@@ -178,8 +1939,8 @@ func TestParsePanic(t *testing.T) {
 		"(F(F(F(F(F(F(F(F(F(F" +
 		"(F(F(F(F(F(F(F(F(F((" +
 		"F(0"
-	_, err := parser.Parse(s)
-	expected := `at or near "EOF": syntax error`
+	_, err := Parse(s)
+	expected := `syntax error at or near "EOF"`
 	if !testutils.IsError(err, expected) {
 		t.Fatalf("expected %s, but found %v", expected, err)
 	}
@@ -199,14 +1960,14 @@ func TestParsePrecedence(t *testing.T) {
 	//   9: AND
 	//  10: OR
 
-	unary := func(op tree.UnaryOperatorSymbol, expr tree.Expr) tree.Expr {
-		return &tree.UnaryExpr{Operator: tree.MakeUnaryOperator(op), Expr: expr}
+	unary := func(op tree.UnaryOperator, expr tree.Expr) tree.Expr {
+		return &tree.UnaryExpr{Operator: op, Expr: expr}
 	}
-	binary := func(op tree.BinaryOperatorSymbol, left, right tree.Expr) tree.Expr {
-		return &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(op), Left: left, Right: right}
+	binary := func(op tree.BinaryOperator, left, right tree.Expr) tree.Expr {
+		return &tree.BinaryExpr{Operator: op, Left: left, Right: right}
 	}
-	cmp := func(op tree.ComparisonOperatorSymbol, left, right tree.Expr) tree.Expr {
-		return &tree.ComparisonExpr{Operator: tree.MakeComparisonOperator(op), Left: left, Right: right}
+	cmp := func(op tree.ComparisonOperator, left, right tree.Expr) tree.Expr {
+		return &tree.ComparisonExpr{Operator: op, Left: left, Right: right}
 	}
 	not := func(expr tree.Expr) tree.Expr {
 		return &tree.NotExpr{Expr: expr}
@@ -218,20 +1979,18 @@ func TestParsePrecedence(t *testing.T) {
 		return &tree.OrExpr{Left: left, Right: right}
 	}
 	concat := func(left, right tree.Expr) tree.Expr {
-		return &tree.BinaryExpr{Operator: tree.MakeBinaryOperator(tree.Concat), Left: left, Right: right}
+		return &tree.BinaryExpr{Operator: tree.Concat, Left: left, Right: right}
 	}
 	regmatch := func(left, right tree.Expr) tree.Expr {
-		return &tree.ComparisonExpr{Operator: tree.MakeComparisonOperator(tree.RegMatch), Left: left, Right: right}
+		return &tree.ComparisonExpr{Operator: tree.RegMatch, Left: left, Right: right}
 	}
 	regimatch := func(left, right tree.Expr) tree.Expr {
-		return &tree.ComparisonExpr{Operator: tree.MakeComparisonOperator(tree.RegIMatch), Left: left, Right: right}
+		return &tree.ComparisonExpr{Operator: tree.RegIMatch, Left: left, Right: right}
 	}
 
-	one := tree.NewNumVal(constant.MakeInt64(1), "1", false /* negative */)
-	minusone := tree.NewNumVal(constant.MakeInt64(1), "1", true /* negative */)
-	two := tree.NewNumVal(constant.MakeInt64(2), "2", false /* negative */)
-	minustwo := tree.NewNumVal(constant.MakeInt64(2), "2", true /* negative */)
-	three := tree.NewNumVal(constant.MakeInt64(3), "3", false /* negative */)
+	one := &tree.NumVal{Value: constant.MakeInt64(1), OrigString: "1"}
+	two := &tree.NumVal{Value: constant.MakeInt64(2), OrigString: "2"}
+	three := &tree.NumVal{Value: constant.MakeInt64(3), OrigString: "3"}
 	a := tree.NewStrVal("a")
 	b := tree.NewStrVal("b")
 	c := tree.NewStrVal("c")
@@ -241,18 +2000,18 @@ func TestParsePrecedence(t *testing.T) {
 		expected tree.Expr
 	}{
 		// Unary plus and complement.
-		{`~-1`, unary(tree.UnaryComplement, minusone)},
+		{`~-1`, unary(tree.UnaryComplement, unary(tree.UnaryMinus, one))},
 		{`-~1`, unary(tree.UnaryMinus, unary(tree.UnaryComplement, one))},
 
 		// Mul, div, floordiv, mod combined with higher precedence.
-		{`-1*2`, binary(tree.Mult, minusone, two)},
-		{`1*-2`, binary(tree.Mult, one, minustwo)},
-		{`-1/2`, binary(tree.Div, minusone, two)},
-		{`1/-2`, binary(tree.Div, one, minustwo)},
-		{`-1//2`, binary(tree.FloorDiv, minusone, two)},
-		{`1//-2`, binary(tree.FloorDiv, one, minustwo)},
-		{`-1%2`, binary(tree.Mod, minusone, two)},
-		{`1%-2`, binary(tree.Mod, one, minustwo)},
+		{`-1*2`, binary(tree.Mult, unary(tree.UnaryMinus, one), two)},
+		{`1*-2`, binary(tree.Mult, one, unary(tree.UnaryMinus, two))},
+		{`-1/2`, binary(tree.Div, unary(tree.UnaryMinus, one), two)},
+		{`1/-2`, binary(tree.Div, one, unary(tree.UnaryMinus, two))},
+		{`-1//2`, binary(tree.FloorDiv, unary(tree.UnaryMinus, one), two)},
+		{`1//-2`, binary(tree.FloorDiv, one, unary(tree.UnaryMinus, two))},
+		{`-1%2`, binary(tree.Mod, unary(tree.UnaryMinus, one), two)},
+		{`1%-2`, binary(tree.Mod, one, unary(tree.UnaryMinus, two))},
 
 		// Mul, div, floordiv, mod combined with self (left associative).
 		{`1*2*3`, binary(tree.Mult, binary(tree.Mult, one, two), three)},
@@ -361,388 +2120,34 @@ func TestParsePrecedence(t *testing.T) {
 
 		// Unary ~ should have highest precedence.
 		{`~1+2`, binary(tree.Plus, unary(tree.UnaryComplement, one), two)},
-
-		// OPERATOR(pg_catalog.~) should not be error (#66861).
-		{
-			`'a' OPERATOR(pg_catalog.~) 'b'`,
-			&tree.ComparisonExpr{Operator: tree.ComparisonOperator{Symbol: tree.RegMatch, IsExplicitOperator: true}, Left: a, Right: b},
-		},
 	}
 	for _, d := range testData {
-		t.Run(d.sql, func(t *testing.T) {
-			expr, err := parser.ParseExpr(d.sql)
-			if err != nil {
-				t.Fatalf("%s: %v", d.sql, err)
-			}
-			if !reflect.DeepEqual(d.expected, expr) {
-				t.Fatalf("%s: expected %s, but found %s", d.sql, d.expected, expr)
-			}
-		})
-	}
-}
-
-func TestUnimplementedSyntax(t *testing.T) {
-	testData := []struct {
-		sql      string
-		issue    int
-		expected string
-		hint     string
-	}{
-		{`ALTER TABLE a ALTER CONSTRAINT foo`, 31632, `alter constraint`, ``},
-		{`ALTER TABLE a ADD CONSTRAINT foo EXCLUDE USING gist (bar WITH =)`, 46657, `add constraint exclude using`, ``},
-		{`ALTER TABLE a INHERITS b`, 22456, `alter table inherits`, ``},
-		{`ALTER TABLE a NO INHERITS b`, 22456, `alter table no inherits`, ``},
-
-		{`CREATE ACCESS METHOD a`, 0, `create access method`, ``},
-
-		{`COPY x FROM STDIN WHERE a = b`, 54580, ``, ``},
-
-		{`CREATE AGGREGATE a`, 0, `create aggregate`, ``},
-		{`CREATE CAST a`, 0, `create cast`, ``},
-		{`CREATE CONSTRAINT TRIGGER a`, 28296, `create constraint`, ``},
-		{`CREATE CONVERSION a`, 0, `create conversion`, ``},
-		{`CREATE DEFAULT CONVERSION a`, 0, `create def conv`, ``},
-		{`CREATE FOREIGN DATA WRAPPER a`, 0, `create fdw`, ``},
-		{`CREATE FOREIGN TABLE a`, 0, `create foreign table`, ``},
-		{`CREATE FUNCTION a`, 17511, `create`, ``},
-		{`CREATE OR REPLACE FUNCTION a`, 17511, `create`, ``},
-		{`CREATE LANGUAGE a`, 17511, `create language a`, ``},
-		{`CREATE OPERATOR a`, 65017, ``, ``},
-		{`CREATE PUBLICATION a`, 0, `create publication`, ``},
-		{`CREATE RULE a`, 0, `create rule`, ``},
-		{`CREATE SERVER a`, 0, `create server`, ``},
-		{`CREATE SUBSCRIPTION a`, 0, `create subscription`, ``},
-		{`CREATE TABLESPACE a`, 54113, `create tablespace`, ``},
-		{`CREATE TEXT SEARCH a`, 7821, `create text`, ``},
-		{`CREATE TRIGGER a`, 28296, `create`, ``},
-
-		{`DROP ACCESS METHOD a`, 0, `drop access method`, ``},
-		{`DROP AGGREGATE a`, 0, `drop aggregate`, ``},
-		{`DROP CAST a`, 0, `drop cast`, ``},
-		{`DROP COLLATION a`, 0, `drop collation`, ``},
-		{`DROP CONVERSION a`, 0, `drop conversion`, ``},
-		{`DROP DOMAIN a`, 27796, `drop`, ``},
-		{`DROP EXTENSION a`, 0, `drop extension a`, ``},
-		{`DROP FOREIGN TABLE a`, 0, `drop foreign table`, ``},
-		{`DROP FOREIGN DATA WRAPPER a`, 0, `drop fdw`, ``},
-		{`DROP FUNCTION a`, 17511, `drop `, ``},
-		{`DROP LANGUAGE a`, 17511, `drop language a`, ``},
-		{`DROP OPERATOR a`, 0, `drop operator`, ``},
-		{`DROP PUBLICATION a`, 0, `drop publication`, ``},
-		{`DROP RULE a`, 0, `drop rule`, ``},
-		{`DROP SERVER a`, 0, `drop server`, ``},
-		{`DROP SUBSCRIPTION a`, 0, `drop subscription`, ``},
-		{`DROP TEXT SEARCH a`, 7821, `drop text`, ``},
-		{`DROP TRIGGER a`, 28296, `drop`, ``},
-
-		{`DISCARD PLANS`, 0, `discard plans`, ``},
-		{`DISCARD SEQUENCES`, 0, `discard sequences`, ``},
-		{`DISCARD TEMP`, 0, `discard temp`, ``},
-		{`DISCARD TEMPORARY`, 0, `discard temp`, ``},
-
-		{`SET CONSTRAINTS foo`, 0, `set constraints`, ``},
-		{`SET LOCAL foo = bar`, 32562, ``, ``},
-		{`SET foo FROM CURRENT`, 0, `set from current`, ``},
-
-		{`CREATE TABLE a(x INT[][])`, 32552, ``, ``},
-		{`CREATE TABLE a(x INT[1][2])`, 32552, ``, ``},
-		{`CREATE TABLE a(x INT ARRAY[1][2])`, 32552, ``, ``},
-
-		{`CREATE TABLE a(b INT8) WITH OIDS`, 0, `create table with oids`, ``},
-
-		{`CREATE TABLE a AS SELECT b WITH NO DATA`, 0, `create table as with no data`, ``},
-
-		{`CREATE TABLE a(b INT8 REFERENCES c(x) MATCH PARTIAL`, 20305, `match partial`, ``},
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) MATCH PARTIAL)`, 20305, `match partial`, ``},
-
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) DEFERRABLE)`, 31632, `deferrable`, ``},
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) INITIALLY DEFERRED)`, 31632, `initially deferred`, ``},
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) INITIALLY IMMEDIATE)`, 31632, `initially immediate`, ``},
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) DEFERRABLE INITIALLY DEFERRED)`, 31632, `initially deferred`, ``},
-		{`CREATE TABLE a(b INT8, FOREIGN KEY (b) REFERENCES c(x) DEFERRABLE INITIALLY IMMEDIATE)`, 31632, `initially immediate`, ``},
-		{`CREATE TABLE a(b INT8, UNIQUE (b) DEFERRABLE)`, 31632, `deferrable`, ``},
-		{`CREATE TABLE a(b INT8, CHECK (b > 0) DEFERRABLE)`, 31632, `deferrable`, ``},
-
-		{`CREATE TABLE a (LIKE b INCLUDING COMMENTS)`, 47071, `like table`, ``},
-		{`CREATE TABLE a (LIKE b INCLUDING IDENTITY)`, 47071, `like table`, ``},
-		{`CREATE TABLE a (LIKE b INCLUDING STATISTICS)`, 47071, `like table`, ``},
-		{`CREATE TABLE a (LIKE b INCLUDING STORAGE)`, 47071, `like table`, ``},
-
-		{`CREATE TABLE a () INHERITS b`, 22456, `create table inherit`, ``},
-
-		{`CREATE TEMP TABLE a (a int) ON COMMIT DROP`, 46556, `drop`, ``},
-		{`CREATE TEMP TABLE a (a int) ON COMMIT DELETE ROWS`, 46556, `delete rows`, ``},
-		{`CREATE TEMP TABLE IF NOT EXISTS a (a int) ON COMMIT DROP`, 46556, `drop`, ``},
-		{`CREATE TEMP TABLE IF NOT EXISTS a (a int) ON COMMIT DELETE ROWS`, 46556, `delete rows`, ``},
-		{`CREATE TEMP TABLE b AS SELECT a FROM a ON COMMIT DROP`, 46556, `drop`, ``},
-		{`CREATE TEMP TABLE b AS SELECT a FROM a ON COMMIT DELETE ROWS`, 46556, `delete rows`, ``},
-		{`CREATE TEMP TABLE IF NOT EXISTS b AS SELECT a FROM a ON COMMIT DROP`, 46556, `drop`, ``},
-		{`CREATE TEMP TABLE IF NOT EXISTS b AS SELECT a FROM a ON COMMIT DELETE ROWS`, 46556, `delete rows`, ``},
-
-		{`CREATE SEQUENCE a AS DOUBLE PRECISION`, 25110, `FLOAT8`, ``},
-
-		{`CREATE RECURSIVE VIEW a AS SELECT b`, 0, `create recursive view`, ``},
-
-		{`CREATE TYPE a AS (b)`, 27792, ``, ``},
-		{`CREATE TYPE a AS RANGE b`, 27791, ``, ``},
-		{`CREATE TYPE a (b)`, 27793, `base`, ``},
-		{`CREATE TYPE a`, 27793, `shell`, ``},
-		{`CREATE DOMAIN a`, 27796, `create`, ``},
-
-		{`ALTER TYPE db.t RENAME ATTRIBUTE foo TO bar`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar COLLATE hello`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar RESTRICT`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar CASCADE`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t DROP ATTRIBUTE foo`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t DROP ATTRIBUTE foo RESTRICT`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t DROP ATTRIBUTE foo CASCADE`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ALTER ATTRIBUTE foo TYPE typ`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ALTER ATTRIBUTE foo TYPE typ COLLATE en`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ALTER ATTRIBUTE foo TYPE typ COLLATE en CASCADE`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ALTER ATTRIBUTE foo SET DATA TYPE typ COLLATE en RESTRICT`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar RESTRICT, DROP ATTRIBUTE foo`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
-
-		{`CREATE INDEX a ON b USING HASH (c)`, 0, `index using hash`, ``},
-		{`CREATE INDEX a ON b USING SPGIST (c)`, 0, `index using spgist`, ``},
-		{`CREATE INDEX a ON b USING BRIN (c)`, 0, `index using brin`, ``},
-
-		{`CREATE INDEX a ON b(c gin_trgm_ops)`, 41285, `index using gin_trgm_ops`, ``},
-		{`CREATE INDEX a ON b(c gist_trgm_ops)`, 41285, `index using gist_trgm_ops`, ``},
-		{`CREATE INDEX a ON b(c bobby)`, 47420, ``, ``},
-		{`CREATE INDEX a ON b(a NULLS LAST)`, 6224, ``, ``},
-		{`CREATE INDEX a ON b(a ASC NULLS LAST)`, 6224, ``, ``},
-		{`CREATE INDEX a ON b(a DESC NULLS FIRST)`, 6224, ``, ``},
-
-		{`INSERT INTO foo(a, a.b) VALUES (1,2)`, 27792, ``, ``},
-		{`INSERT INTO foo VALUES (1,2) ON CONFLICT ON CONSTRAINT a DO NOTHING`, 28161, ``, ``},
-
-		{`SELECT * FROM ROWS FROM (a(b) AS (d))`, 0, `ROWS FROM with col_def_list`, ``},
-
-		{`SELECT a(b) 'c'`, 0, `a(...) SCONST`, ``},
-		{`SELECT (a,b) OVERLAPS (c,d)`, 0, `overlaps`, ``},
-		{`SELECT UNIQUE (SELECT b)`, 0, `UNIQUE predicate`, ``},
-		{`SELECT GROUPING (a,b,c)`, 0, `d_expr grouping`, ``},
-		{`SELECT a(VARIADIC b)`, 0, `variadic`, ``},
-		{`SELECT a(b, c, VARIADIC b)`, 0, `variadic`, ``},
-		{`SELECT TREAT (a AS INT8)`, 0, `treat`, ``},
-
-		{`SELECT 1 FROM t GROUP BY ROLLUP (b)`, 46280, `rollup`, ``},
-		{`SELECT 1 FROM t GROUP BY a, ROLLUP (b)`, 46280, `rollup`, ``},
-		{`SELECT 1 FROM t GROUP BY CUBE (b)`, 46280, `cube`, ``},
-		{`SELECT 1 FROM t GROUP BY GROUPING SETS (b)`, 46280, `grouping sets`, ``},
-
-		{`SELECT a FROM t ORDER BY a NULLS LAST`, 6224, ``, ``},
-		{`SELECT a FROM t ORDER BY a ASC NULLS LAST`, 6224, ``, ``},
-		{`SELECT a FROM t ORDER BY a DESC NULLS FIRST`, 6224, ``, ``},
-
-		{`CREATE TABLE a(b BOX)`, 21286, `box`, ``},
-		{`CREATE TABLE a(b CIDR)`, 18846, `cidr`, ``},
-		{`CREATE TABLE a(b CIRCLE)`, 21286, `circle`, ``},
-		{`CREATE TABLE a(b JSONPATH)`, 22513, `jsonpath`, ``},
-		{`CREATE TABLE a(b LINE)`, 21286, `line`, ``},
-		{`CREATE TABLE a(b LSEG)`, 21286, `lseg`, ``},
-		{`CREATE TABLE a(b MACADDR)`, 0, `macaddr`, ``},
-		{`CREATE TABLE a(b MACADDR8)`, 0, `macaddr8`, ``},
-		{`CREATE TABLE a(b MONEY)`, 0, `money`, ``},
-		{`CREATE TABLE a(b PATH)`, 21286, `path`, ``},
-		{`CREATE TABLE a(b PG_LSN)`, 0, `pg_lsn`, ``},
-		{`CREATE TABLE a(b POINT)`, 21286, `point`, ``},
-		{`CREATE TABLE a(b POLYGON)`, 21286, `polygon`, ``},
-		{`CREATE TABLE a(b TSQUERY)`, 7821, `tsquery`, ``},
-		{`CREATE TABLE a(b TSVECTOR)`, 7821, `tsvector`, ``},
-		{`CREATE TABLE a(b TXID_SNAPSHOT)`, 0, `txid_snapshot`, ``},
-		{`CREATE TABLE a(b XML)`, 0, `xml`, ``},
-
-		{`CREATE TABLE a(a INT, PRIMARY KEY (a) NOT VALID)`, 0, `table constraint`,
-			`PRIMARY KEY constraints cannot be marked NOT VALID`},
-		{`CREATE TABLE a(a INT, UNIQUE (a) NOT VALID)`, 0, `table constraint`,
-			`UNIQUE constraints cannot be marked NOT VALID`},
-
-		{`UPDATE foo SET (a, a.b) = (1, 2)`, 27792, ``, ``},
-		{`UPDATE foo SET a.b = 1`, 27792, ``, ``},
-		{`UPDATE Foo SET x.y = z`, 27792, ``, ``},
-
-		{`REINDEX INDEX a`, 0, `reindex index`, `CockroachDB does not require reindexing.`},
-		{`REINDEX INDEX CONCURRENTLY a`, 0, `reindex index`, `CockroachDB does not require reindexing.`},
-		{`REINDEX TABLE a`, 0, `reindex table`, `CockroachDB does not require reindexing.`},
-		{`REINDEX SCHEMA a`, 0, `reindex schema`, `CockroachDB does not require reindexing.`},
-		{`REINDEX DATABASE a`, 0, `reindex database`, `CockroachDB does not require reindexing.`},
-		{`REINDEX SYSTEM a`, 0, `reindex system`, `CockroachDB does not require reindexing.`},
-
-		{`UPSERT INTO foo(a, a.b) VALUES (1,2)`, 27792, ``, ``},
-
-		{`SELECT 1 OPERATOR(public.+) 2`, 65017, ``, ``},
-	}
-	for _, d := range testData {
-		t.Run(d.sql, func(t *testing.T) {
-			_, err := parser.Parse(d.sql)
-			if err == nil {
-				t.Errorf("%s: expected error, got nil", d.sql)
-				return
-			}
-			if errMsg := err.Error(); !strings.Contains(errMsg, "unimplemented: this syntax") {
-				t.Errorf("%s: expected unimplemented in message, got %q", d.sql, errMsg)
-			}
-			tkeys := errors.GetTelemetryKeys(err)
-			if len(tkeys) == 0 {
-				t.Errorf("%s: expected telemetry key set", d.sql)
-			} else {
-				found := false
-				for _, tk := range tkeys {
-					if strings.Contains(tk, d.expected) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("%s: expected %q in telemetry keys, got %+v", d.sql, d.expected, tkeys)
-				}
-			}
-			if d.hint != "" {
-				hints := errors.GetAllHints(err)
-				assert.Contains(t, hints, d.hint)
-			}
-			if d.issue != 0 {
-				exp := fmt.Sprintf("syntax.#%d", d.issue)
-				found := false
-				for _, tk := range tkeys {
-					if strings.HasPrefix(tk, exp) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("%s: expected %q in telemetry keys, got %+v", d.sql, exp, tkeys)
-				}
-
-				exp2 := fmt.Sprintf("issue-v/%d", d.issue)
-				found = false
-				hints := errors.GetAllHints(err)
-				for _, h := range hints {
-					if strings.Contains(h, exp2) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("%s: expected %q at in hint, got %+v", d.sql, exp2, hints)
-				}
-			}
-		})
-	}
-}
-
-// TestParseSQL verifies that Statement.SQL is set correctly.
-func TestParseSQL(t *testing.T) {
-	testData := []struct {
-		in  string
-		exp []string
-	}{
-		{in: ``, exp: nil},
-		{in: `SELECT 1`, exp: []string{`SELECT 1`}},
-		{in: `SELECT 1;`, exp: []string{`SELECT 1`}},
-		{in: `SELECT 1 /* comment */`, exp: []string{`SELECT 1`}},
-		{in: `SELECT 1;SELECT 2`, exp: []string{`SELECT 1`, `SELECT 2`}},
-		{in: `SELECT 1 /* comment */ ;SELECT 2`, exp: []string{`SELECT 1`, `SELECT 2`}},
-		{in: `SELECT 1 /* comment */ ; /* comment */ SELECT 2`, exp: []string{`SELECT 1`, `SELECT 2`}},
-	}
-	var p parser.Parser // Verify that the same parser can be reused.
-	for _, d := range testData {
-		t.Run(d.in, func(t *testing.T) {
-			stmts, err := p.Parse(d.in)
-			if err != nil {
-				t.Fatalf("expected success, but found %s", err)
-			}
-			var res []string
-			for i := range stmts {
-				res = append(res, stmts[i].SQL)
-			}
-			if !reflect.DeepEqual(res, d.exp) {
-				t.Errorf("expected \n%v\n, but found %v", res, d.exp)
-			}
-		})
-	}
-}
-
-// TestParseNumPlaceholders verifies that Statement.NumPlaceholders is set
-// correctly.
-func TestParseNumPlaceholders(t *testing.T) {
-	testData := []struct {
-		in  string
-		exp []int
-	}{
-		{in: ``, exp: nil},
-
-		{in: `SELECT 1`, exp: []int{0}},
-		{in: `SELECT $1`, exp: []int{1}},
-		{in: `SELECT $1 + $1`, exp: []int{1}},
-		{in: `SELECT $1 + $2`, exp: []int{2}},
-		{in: `SELECT $1 + $2 + $1 + $2`, exp: []int{2}},
-		{in: `SELECT $2`, exp: []int{2}},
-		{in: `SELECT $1, $1 + $2, $1 + $2 + $3`, exp: []int{3}},
-
-		{in: `SELECT $1; SELECT $1`, exp: []int{1, 1}},
-		{in: `SELECT $1; SELECT $1 + $2 + $3; SELECT $1 + $2`, exp: []int{1, 3, 2}},
-	}
-
-	var p parser.Parser // Verify that the same parser can be reused.
-	for _, d := range testData {
-		t.Run(d.in, func(t *testing.T) {
-			stmts, err := p.Parse(d.in)
-			if err != nil {
-				t.Fatalf("expected success, but found %s", err)
-			}
-			var res []int
-			for i := range stmts {
-				res = append(res, stmts[i].NumPlaceholders)
-			}
-			if !reflect.DeepEqual(res, d.exp) {
-				t.Errorf("expected \n%v\n, but found %v", res, d.exp)
-			}
-		})
-	}
-}
-
-func TestParseOne(t *testing.T) {
-	_, err := parser.ParseOne("SELECT 1; SELECT 2")
-	if !testutils.IsError(err, "expected 1 statement") {
-		t.Errorf("unexpected error %s", err)
+		expr, err := ParseExpr(d.sql)
+		if err != nil {
+			t.Fatalf("%s: %v", d.sql, err)
+		}
+		if !reflect.DeepEqual(d.expected, expr) {
+			t.Fatalf("%s: expected %s, but found %s", d.sql, d.expected, expr)
+		}
 	}
 }
 
 func BenchmarkParse(b *testing.B) {
-	testCases := []struct {
-		name, query string
-	}{
-		{
-			"simple",
-			`SELECT a FROM t WHERE a = 1`,
-		},
-		{
-			"string",
-			`SELECT a FROM t WHERE a = 'some-string' AND b = 'some-other-string'`,
-		},
-		{
-			"tpcc-delivery",
-			`SELECT no_o_id FROM new_order WHERE no_w_id = $1 AND no_d_id = $2 ORDER BY no_o_id ASC LIMIT 1`,
-		},
-		{
-			"account",
-			`BEGIN;
-			 UPDATE pgbench_accounts SET abalance = abalance + 77 WHERE aid = 5;
-			 SELECT abalance FROM pgbench_accounts WHERE aid = 5;
-			 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (1, 2, 5, 77, CURRENT_TIMESTAMP);
-			 END`,
-		},
-	}
-	for _, tc := range testCases {
-		b.Run(tc.name, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				if _, err := parser.Parse(tc.query); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
+	for i := 0; i < b.N; i++ {
+		st, err := Parse(`
+			BEGIN;
+			UPDATE pgbench_accounts SET abalance = abalance + 77 WHERE aid = 5;
+			SELECT abalance FROM pgbench_accounts WHERE aid = 5;
+			INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (1, 2, 5, 77, CURRENT_TIMESTAMP);
+			END`)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(st) != 5 {
+			b.Fatal("parsed wrong number of statements: ", len(st))
+		}
+		if _, ok := st[1].(*tree.Update); !ok {
+			b.Fatalf("unexpected statement type: %T", st[1])
+		}
 	}
 }

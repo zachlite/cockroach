@@ -1,515 +1,544 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optgen/lang"
 )
 
-// factoryGen generates implementation code for the factory that supports
-// building normalized expression trees.
+// factoryGen generates implementation code for the opt.Factory interface. See
+// the ifactoryGen comment for more details.
 type factoryGen struct {
-	compiled *lang.CompiledExpr
-	md       *metadata
-	w        *matchWriter
-	ruleGen  newRuleGen
+	compiled   *lang.CompiledExpr
+	w          *matchWriter
+	uniquifier uniquifier
 }
 
 func (g *factoryGen) generate(compiled *lang.CompiledExpr, w io.Writer) {
 	g.compiled = compiled
-	g.md = newMetadata(compiled, "norm")
 	g.w = &matchWriter{writer: w}
-	g.ruleGen.init(compiled, g.md, g.w)
 
-	g.w.writeIndent("package norm\n\n")
+	g.w.writeIndent("package xform\n\n")
 
-	g.w.nestIndent("import (\n")
-	g.w.writeIndent("\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/memo\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/props\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/sem/tree\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/types\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/errors\"\n")
+	g.w.nest("import (\n")
+	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/opt\"\n")
 	g.w.unnest(")\n\n")
 
 	g.genConstructFuncs()
-	g.genReplace()
-	g.genCopyAndReplaceDefault()
-	g.genDynamicConstruct()
+	g.genDynamicConstructLookup()
 }
 
 // genConstructFuncs generates the factory Construct functions for each
-// expression type. The code is similar to this:
-//
-//   // ConstructSelect constructs an expression for the Select operator.
-//   func (_f *Factory) ConstructSelect(
-//     input memo.RelExpr,
-//     filters memo.FiltersExpr,
-//   ) memo.RelExpr {
-//
-//     ... normalization rule code goes here ...
-//
-//     nd := _f.mem.MemoizeSelect(input, filters)
-//     return _f.onConstructRelational(nd)
-//   }
-//
+// expression type.
 func (g *factoryGen) genConstructFuncs() {
-	defines := g.compiled.Defines.
-		WithoutTag("Enforcer").
-		WithoutTag("List").
-		WithoutTag("Private")
+	for _, define := range filterEnforcerDefines(g.compiled.Defines) {
+		varName := fmt.Sprintf("_%sExpr", unTitle(string(define.Name)))
 
-	for _, define := range defines {
-		fields := g.md.childAndPrivateFields(define)
-
-		// Generate Construct method.
 		format := "// Construct%s constructs an expression for the %s operator.\n"
 		g.w.writeIndent(format, define.Name, define.Name)
-		generateComments(g.w.writer, define.Comments, string(define.Name), string(define.Name))
+		generateDefineComments(g.w.writer, define, string(define.Name))
+		g.w.writeIndent("func (_f *factory) Construct%s(\n", define.Name)
 
-		g.w.nestIndent("func (_f *Factory) Construct%s(\n", define.Name)
-
-		for _, field := range fields {
-			fieldTyp := g.md.typeOf(field)
-			fieldName := g.md.fieldName(field)
-			g.w.writeIndent("%s %s,\n", unTitle(fieldName), fieldTyp.asParam())
+		for _, field := range define.Fields {
+			fieldName := unTitle(string(field.Name))
+			g.w.writeIndent("  %s opt.%s,\n", fieldName, mapType(string(field.Type)))
 		}
 
-		if define.Tags.Contains("ListItem") {
-			g.w.unnest(fmt.Sprintf(") memo.%s", define.Name))
-		} else if define.Tags.Contains("Relational") {
-			g.w.unnest(") memo.RelExpr")
-		} else {
-			g.w.unnest(") opt.ScalarExpr")
+		g.w.nest(") opt.GroupID {\n")
+
+		g.w.writeIndent("%s := make%sExpr(", varName, define.Name)
+
+		for i, field := range define.Fields {
+			if i != 0 {
+				g.w.write(", ")
+			}
+			g.w.write("%s", unTitle(string(field.Name)))
 		}
 
-		g.w.nest(" {\n")
+		g.w.write(")\n")
+		g.w.writeIndent("_group := _f.mem.lookupGroupByFingerprint(%s.fingerprint())\n", varName)
+		g.w.nest("if _group != 0 {\n")
+		g.w.writeIndent("return _group\n")
+		g.w.unnest("}\n\n")
 
-		if define.Tags.Contains("ListItem") {
-			g.w.writeIndent("item := memo.%s{", define.Name)
-			for i, field := range fields {
-				fieldTyp := g.md.typeOf(field)
-				fieldName := g.md.fieldName(field)
+		g.w.nest("if !_f.allowOptimizations() {\n")
+		g.w.writeIndent("return _f.mem.memoizeNormExpr((*memoExpr)(&%s))\n", varName)
+		g.w.unnest("}\n\n")
 
-				if i != 0 {
-					g.w.write(", ")
-				}
-
-				// Use fieldStorePrefix, since a parameter is being stored in a field.
-				g.w.write("%s: %s%s", fieldName, fieldStorePrefix(fieldTyp), unTitle(fieldName))
-			}
-			g.w.write("}\n")
-			if define.Tags.Contains("ScalarProps") {
-				g.w.writeIndent("item.PopulateProps(_f.mem)\n")
-			}
-			g.w.writeIndent("return item\n")
-		} else {
-			g.w.writeIndent("_f.constructorStackDepth++\n")
-			g.w.nestIndent("if _f.constructorStackDepth > maxConstructorStackDepth {\n")
-			g.w.writeIndent("// If the constructor call stack depth exceeds the limit, call\n")
-			g.w.writeIndent("// onMaxConstructorStackDepthExceeded and skip all rules.\n")
-			g.w.writeIndent("_f.onMaxConstructorStackDepthExceeded()\n")
-			g.w.writeIndent("goto SKIP_RULES\n")
-			g.w.unnest("}\n\n")
-
-			// Only include normalization rules for the current define.
-			rules := g.compiled.LookupMatchingRules(string(define.Name)).WithTag("Normalize")
-			sortRulesByPriority(rules)
+		rules := g.compiled.LookupMatchingRules(string(define.Name))
+		if len(rules) > 0 {
 			for _, rule := range rules {
-				g.ruleGen.genRule(rule)
-			}
-			if len(rules) > 0 {
-				g.w.newline()
+				g.genRule(rule)
 			}
 
-			g.w.writeIndent("SKIP_RULES:\n")
-
-			g.w.writeIndent("e := _f.mem.Memoize%s(", define.Name)
-			for i, field := range fields {
-				if i != 0 {
-					g.w.write(", ")
-				}
-				g.w.write("%s", unTitle(g.md.fieldName(field)))
-			}
-			g.w.write(")\n")
-
-			if define.Tags.Contains("Relational") {
-				g.w.writeIndent("expr := _f.onConstructRelational(e)\n")
-			} else {
-				g.w.writeIndent("expr := _f.onConstructScalar(e)\n")
-			}
-			g.w.writeIndent("_f.constructorStackDepth--\n")
-			g.w.writeIndent("return expr\n")
+			g.w.newline()
 		}
 
+		g.w.writeIndent("return _f.onConstruct(_f.mem.memoizeNormExpr((*memoExpr)(&%s)))\n", varName)
 		g.w.unnest("}\n\n")
 	}
 }
 
-// genReplace generates a method on the factory that offers a convenient way
-// to replace all or part of an expression tree.
-func (g *factoryGen) genReplace() {
-	g.w.writeIndent("// Replace enables an expression subtree to be rewritten under the control of\n")
-	g.w.writeIndent("// the caller. It passes each child of the given expression to the replace\n")
-	g.w.writeIndent("// callback. The caller can continue traversing the expression tree within the\n")
-	g.w.writeIndent("// callback by recursively calling Replace. It can also return a replacement\n")
-	g.w.writeIndent("// expression; if it does, then Replace will rebuild the operator and its\n")
-	g.w.writeIndent("// ancestors via a call to the corresponding factory Construct methods. Here\n")
-	g.w.writeIndent("// is example usage:\n")
-	g.w.writeIndent("//\n")
-	g.w.writeIndent("//   var replace func(e opt.Expr) opt.Expr\n")
-	g.w.writeIndent("//   replace = func(e opt.Expr) opt.Expr {\n")
-	g.w.writeIndent("//     if e.Op() == opt.VariableOp {\n")
-	g.w.writeIndent("//       return getReplaceVar(e)\n")
-	g.w.writeIndent("//     }\n")
-	g.w.writeIndent("//     return factory.Replace(e, replace)\n")
-	g.w.writeIndent("//   }\n")
-	g.w.writeIndent("//   replace(root, replace)\n")
-	g.w.writeIndent("//\n")
-	g.w.writeIndent("// Here, all variables in the tree are being replaced by some other expression\n")
-	g.w.writeIndent("// in a pre-order traversal of the tree. Post-order traversal is trivially\n")
-	g.w.writeIndent("// achieved by moving the factory.Replace call to the top of the replace\n")
-	g.w.writeIndent("// function rather than bottom.\n")
-	g.w.nestIndent("func (f *Factory) Replace(e opt.Expr, replace ReplaceFunc) opt.Expr {\n")
-	g.w.writeIndent("switch t := e.(type) {\n")
+// genRule generates match and replace code for one rule within the scope of
+// a particular op construction method.
+func (g *factoryGen) genRule(rule *lang.RuleExpr) {
+	matchName := string(rule.Match.Names[0])
+	define := g.compiled.LookupDefine(matchName)
+	varName := fmt.Sprintf("_%sExpr", unTitle(string(define.Name)))
 
-	defines := g.compiled.Defines.WithoutTag("Enforcer").WithoutTag("ListItem").WithoutTag("Private")
-	for _, define := range defines {
-		opTyp := g.md.typeOf(define)
-		childFields := g.md.childFields(define)
-		privateField := g.md.privateField(define)
+	g.uniquifier.init()
+	g.w.writeIndent("// [%s]\n", rule.Name)
+	marker := g.w.nest("{\n")
 
-		g.w.nestIndent("case *%s:\n", opTyp.name)
-
-		if len(childFields) != 0 {
-			for _, child := range childFields {
-				childName := g.md.fieldName(child)
-				childTyp := g.md.typeOf(child)
-
-				if childTyp.isListType() {
-					g.w.writeIndent("%s, %sChanged := f.replace%s(t.%s, replace)\n",
-						unTitle(childName), unTitle(childName), childTyp.friendlyName, childName)
-				} else {
-					g.w.writeIndent("%s := replace(t.%s).(%s)\n",
-						unTitle(childName), childName, childTyp.asField())
-				}
-			}
-
-			g.w.writeIndent("if ")
-			for i, child := range childFields {
-				childName := g.md.fieldName(child)
-				childTyp := g.md.typeOf(child)
-
-				if i != 0 {
-					g.w.write(" || ")
-				}
-				if childTyp.isListType() {
-					g.w.write("%sChanged", unTitle(childName))
-				} else {
-					g.w.write("%s != t.%s", unTitle(childName), childName)
-				}
-			}
-			g.w.nest(" {\n")
-
-			g.w.writeIndent("return f.Construct%s(", define.Name)
-			for i, child := range childFields {
-				childName := g.md.fieldName(child)
-				if i != 0 {
-					g.w.write(", ")
-				}
-				g.w.write("%s", unTitle(childName))
-			}
-			if privateField != nil {
-				if len(childFields) != 0 {
-					g.w.write(", ")
-				}
-
-				// Use fieldLoadPrefix, since the private field is being passed as
-				// a parameter to the Construct method.
-				privateTyp := g.md.typeOf(privateField)
-				g.w.write("%st.%s", fieldLoadPrefix(privateTyp), g.md.fieldName(privateField))
-			}
-			g.w.write(")\n")
-			g.w.unnest("}\n")
-		} else {
-			// If this is a list type, then call a list-specific reconstruct method.
-			if opTyp.isListType() {
-				g.w.nestIndent("if after, changed := f.replace%s(*t, replace); changed {\n",
-					opTyp.friendlyName)
-				g.w.writeIndent("return &after\n")
-				g.w.unnest("}\n")
-			}
-		}
-
-		g.w.writeIndent("return t\n")
-		g.w.unnest("\n")
+	for index, matchArg := range rule.Match.Args {
+		fieldName := unTitle(string(define.Fields[index].Name))
+		g.genMatch(matchArg, fieldName, false /* noMatch */)
 	}
 
-	g.w.writeIndent("}\n")
-	g.w.writeIndent("panic(errors.AssertionFailedf(\"unhandled op %%s\", errors.Safe(e.Op())))\n")
-	g.w.unnest("}\n\n")
+	g.w.writeIndent("_f.reportOptimization()\n")
+	g.w.writeIndent("_group = ")
+	g.genReplace(rule, rule.Replace)
+	g.w.newline()
+	g.w.writeIndent("_f.mem.addAltFingerprint(%s.fingerprint(), _group)\n", varName)
+	g.w.writeIndent("return _group\n")
 
-	for _, define := range g.compiled.Defines.WithTag("List") {
-		opTyp := g.md.typeOf(define)
-		itemTyp := opTyp.listItemType
-		itemDefine := g.compiled.LookupDefine(itemTyp.friendlyName)
-
-		g.w.nestIndent("func (f *Factory) replace%s(list %s, replace ReplaceFunc) (_ %s, changed bool) {\n",
-			opTyp.friendlyName, opTyp.name, opTyp.name)
-
-		// This is a list-typed child.
-		g.w.writeIndent("var newList []%s\n", itemTyp.name)
-		g.w.nestIndent("for i := range list {\n")
-		if itemTyp.isGenerated {
-			// Assume that first field in the item is the only expression.
-			firstFieldName := g.md.fieldName(itemDefine.Fields[0])
-			firstFieldTyp := g.md.lookupType(string(itemDefine.Fields[0].Type))
-			g.w.writeIndent("before := list[i].%s\n", firstFieldName)
-			g.w.writeIndent("after := replace(before).(%s)\n", firstFieldTyp.name)
-		} else {
-			// This is for cases like list of opt.ScalarExpr.
-			g.w.writeIndent("before := list[i]\n")
-			g.w.writeIndent("after := replace(before).(%s)\n", itemTyp.name)
-		}
-		g.w.nestIndent("if before != after {\n")
-		g.w.nestIndent("if newList == nil {\n")
-		g.w.writeIndent("newList = make([]%s, len(list))\n", itemTyp.name)
-		g.w.writeIndent("copy(newList, list[:i])\n")
-		g.w.unnest("}\n")
-		if itemTyp.isGenerated {
-			// Construct new list item.
-			g.w.writeIndent("newList[i] = f.Construct%s(after", itemDefine.Name)
-			for i, field := range g.md.childAndPrivateFields(itemDefine) {
-				if i == 0 {
-					continue
-				}
-
-				// Use fieldLoadPrefix, since the field is a parameter to the
-				// Construct method.
-				fieldName := g.md.fieldName(field)
-				fieldTyp := g.md.typeOf(field)
-				g.w.write(", %slist[i].%s", fieldLoadPrefix(fieldTyp), fieldName)
-			}
-			g.w.write(")\n")
-		} else {
-			g.w.writeIndent("newList[i] = after\n")
-		}
-		g.w.unnest("}")
-		g.w.nest(" else if newList != nil {")
-		g.w.writeIndent("newList[i] = list[i]\n")
-		g.w.unnest("}\n")
-		g.w.unnest("}\n")
-		g.w.nest("if newList == nil {\n")
-		g.w.writeIndent("  return list, false\n")
-		g.w.unnest("}\n")
-		g.w.writeIndent("return newList, true\n")
-		g.w.unnest("}\n\n")
-	}
+	g.w.unnestToMarker(marker, "}\n")
+	g.w.newline()
 }
 
-// genCopyAndReplaceDefault generates a method on the factory that performs the
-// default traversal and cloning behavior for the factory's CopyAndReplace
-// method.
-func (g *factoryGen) genCopyAndReplaceDefault() {
-	g.w.writeIndent("// CopyAndReplaceDefault performs the default traversal and cloning behavior\n")
-	g.w.writeIndent("// for the CopyAndReplace method. It constructs a copy of the given source\n")
-	g.w.writeIndent("// operator using children copied (and potentially remapped) by the given replace\n")
-	g.w.writeIndent("// function. See comments for CopyAndReplace for more details.\n")
-	g.w.nestIndent("func (f *Factory) CopyAndReplaceDefault(src opt.Expr, replace ReplaceFunc) (dst opt.Expr)")
-	g.w.nest("{\n")
-	g.w.writeIndent("switch t := src.(type) {\n")
-
-	defines := g.compiled.Defines.
-		WithoutTag("Enforcer").
-		WithoutTag("List").
-		WithoutTag("ListItem").
-		WithoutTag("Private")
-
-	for _, define := range defines {
-		opTyp := g.md.typeOf(define)
-		childFields := g.md.childFields(define)
-		privateField := g.md.privateField(define)
-
-		g.w.nestIndent("case *%s:\n", opTyp.name)
-		if define.Tags.Contains("Relational") || len(childFields) != 0 {
-			if len(childFields) != 0 {
-				if define.Tags.Contains("WithBinding") {
-					// Operators that create a with binding need a bit of special code:
-					// after building the first input, we must set the binding in the
-					// metadata so that other children can refer to it (via WithScan).
-					childTyp := g.md.typeOf(childFields[0])
-					childName := g.md.fieldName(childFields[0])
-					g.w.writeIndent(
-						"%s := f.invokeReplace(t.%s, replace).(%s)\n",
-						unTitle(childName), childName, childTyp.asField(),
-					)
-					g.w.nestIndent("if id := t.WithBindingID(); id != 0 {\n")
-					g.w.writeIndent("f.Metadata().AddWithBinding(id, %s)", unTitle(childName))
-					g.w.unnest("}\n")
-					g.w.nestIndent("return f.Construct%s(\n", define.Name)
-					g.w.writeIndent("%s,\n", unTitle(childName))
-					childFields = childFields[1:]
-				} else {
-					g.w.nestIndent("return f.Construct%s(\n", define.Name)
-				}
-				for _, child := range childFields {
-					childTyp := g.md.typeOf(child)
-					childName := g.md.fieldName(child)
-
-					if childTyp.isListType() {
-						g.w.writeIndent("f.copyAndReplaceDefault%s(t.%s, replace),\n",
-							childTyp.friendlyName, childName)
-					} else {
-						g.w.writeIndent("f.invokeReplace(t.%s, replace).(%s),\n", childName, childTyp.asField())
-					}
-				}
-				if privateField != nil {
-					// Use fieldLoadPrefix, since the field is a parameter to the
-					// Construct method.
-					fieldName := g.md.fieldName(privateField)
-					fieldTyp := g.md.typeOf(privateField)
-					g.w.writeIndent("%st.%s,\n", fieldLoadPrefix(fieldTyp), fieldName)
-				}
-				g.w.unnest(")\n")
-			} else {
-				// If the operator has no children, then call Memoize directly, since
-				// all normalizations were already applied on the source operator.
-				g.w.writeIndent("return f.mem.Memoize%s(", define.Name)
-				if privateField != nil {
-					// Use fieldLoadPrefix, since the field is a parameter to the
-					// Memoize method.
-					fieldName := g.md.fieldName(privateField)
-					fieldTyp := g.md.typeOf(privateField)
-					g.w.write("%st.%s", fieldLoadPrefix(fieldTyp), fieldName)
-				}
-				g.w.write(")\n")
-			}
-		} else {
-			g.w.writeIndent("return t\n")
-		}
-		g.w.unnest("\n")
-	}
-
-	for _, define := range g.compiled.Defines.WithTag("List") {
-		opTyp := g.md.typeOf(define)
-		g.w.nestIndent("case *%s:\n", opTyp.name)
-		g.w.writeIndent("newVal := f.copyAndReplaceDefault%s(*t, replace)\n", opTyp.friendlyName)
-		g.w.writeIndent("return &newVal\n")
-		g.w.unnest("\n")
-	}
-
-	g.w.nestIndent("default:\n")
-	g.w.writeIndent("panic(errors.AssertionFailedf(\"unhandled op %%s\", errors.Safe(src.Op())))\n")
-	g.w.unnest("}\n")
-	g.w.unnest("}\n\n")
-
-	for _, define := range g.compiled.Defines.WithTag("List") {
-		opTyp := g.md.typeOf(define)
-		itemType := opTyp.listItemType
-		itemDefine := g.compiled.LookupDefine(itemType.friendlyName)
-
-		g.w.nestIndent("func (f *Factory) copyAndReplaceDefault%s(src %s, replace ReplaceFunc) (dst %s) {\n",
-			opTyp.friendlyName, opTyp.name, opTyp.name)
-
-		g.w.writeIndent("dst = make(%s, len(src))\n", opTyp.name)
-		g.w.nestIndent("for i := range src {\n")
-		if itemType.isGenerated {
-			// All list item types generated by Optgen can have at most one input
-			// field (always the first field). Any other fields must be privates.
-			// And placeholders only need to be assigned for input fields.
-			firstFieldName := g.md.fieldName(itemDefine.Fields[0])
-			firstFieldType := g.md.lookupType(string(itemDefine.Fields[0].Type)).fullName
-			g.w.writeIndent("dst[i].%s = f.invokeReplace(src[i].%s, replace).(%s)\n",
-				firstFieldName, firstFieldName, firstFieldType)
-
-			// Now copy additional exported private fields.
-			for _, field := range expandFields(g.compiled, itemDefine)[1:] {
-				if isExportedField(field) {
-					fieldName := g.md.fieldName(field)
-					g.w.writeIndent("dst[i].%s = src[i].%s\n", fieldName, fieldName)
-				}
-			}
-
-			// Populate scalar properties.
-			if itemDefine.Tags.Contains("ScalarProps") {
-				g.w.writeIndent("dst[i].PopulateProps(f.mem)\n")
-			}
-
-			// Do validation checks on expression in race builds.
-			g.w.writeIndent("f.mem.CheckExpr(&dst[i])\n")
-		} else {
-			g.w.writeIndent("dst[i] = f.invokeReplace(src[i], replace).(%s)\n", itemType.fullName)
-		}
-
-		g.w.unnest("}\n")
-		g.w.writeIndent("return dst\n")
-		g.w.unnest("}\n\n")
-	}
-
-	g.w.writeIndent("// invokeReplace wraps the user-provided replace function. See comments for\n")
-	g.w.writeIndent("// CopyAndReplace for more details.\n")
-	g.w.nestIndent("func (f *Factory) invokeReplace(src opt.Expr, replace ReplaceFunc) (dst opt.Expr)")
-	g.w.nest("{\n")
-	g.w.nest("if rel, ok := src.(memo.RelExpr); ok {\n")
-	g.w.writeIndent("src = rel.FirstExpr()\n")
-	g.w.unnest("}\n")
-	g.w.nest("return replace(src)\n")
-	g.w.unnest("}\n\n")
-}
-
-// genDynamicConstruct generates the factory's DynamicConstruct method, which
-// constructs expressions from a dynamic type and arguments. The code looks
-// similar to this:
+// genMatch recursively generates matching code for a rule. The given match
+// expression can be anything supported within a match by the Optgen language.
+// The code generation strategy is fairly simple: matchers are generated as a
+// series of nested "if" statements. Within the final "if" statement, the
+// replacement expression is created. Because matchers are often nested within
+// one another, the matchWriter helper class allows the if nesting to be
+// independent of recursive genMatch calls.
 //
-//   func (f *Factory) DynamicConstruct(op opt.Operator, args ...interface{}) opt.Node {
-//     switch op {
-//     case opt.ProjectOp:
-//       return f.ConstructProject(
-//         args[0].(memo.RelNode),
-//         *args[1].(*memo.ProjectionsExpr),
-//         *args[2].(*opt.ColSet),
-//       )
+// The contextName parameter is the name of the Go variable or the Go field
+// expression that is bound to the expression that is currently being matched
+// against. For example:
 //
-//     ... cases for other ops ...
+//   for i, _listArg := range _f.mem.lookupList(projections) {
+//     _innerJoinExpr := _f.mem.lookupNormExpr(_listArg).asInnerJoin()
+//     if _innerJoinExpr != nil {
+//       _selectExpr := _f.mem.lookupNormExpr(_innerJoinExpr.left()).asSelect()
+//       ...
+//     }
 //   }
 //
-func (g *factoryGen) genDynamicConstruct() {
-	g.w.nestIndent("func (f *Factory) DynamicConstruct(op opt.Operator, args ...interface{}) opt.Expr {\n")
-	g.w.writeIndent("switch op {\n")
+// In that example, the contextName starts out as "projections", which is the
+// name of one of the top-level op fields that's being list matched. Then, the
+// contextName recursively becomes _listArg, which is bound to one of the
+// expressions in the list. And finally, it becomes _innerJoinExpr.left(),
+// which returns the left operand of the inner join op, and which is matched
+// against in the innermost if statement.
+//
+// Matchers test whether the context expression "matches" according to the
+// semantics of that matcher. For example, the child matcher will generate code
+// that tests whether the expression's opname and its children match the
+// pattern. The list matcher will generate code that tests whether a list
+// expression contains an item that matches the list item matcher.
+//
+// If true, the noMatch flag inverts the matching logic. The matcher will now
+// generate code that tests whether the context expression *doesn't* match
+// according to the semantics of the matcher. Some matchers do not currently
+// support generating code when noMatch is true.
+func (g *factoryGen) genMatch(match lang.Expr, contextName string, noMatch bool) {
+	switch t := match.(type) {
+	case *lang.MatchExpr:
+		g.genMatchNameAndChildren(t, contextName, noMatch)
 
-	defines := g.compiled.Defines.
-		WithoutTag("Enforcer").
-		WithoutTag("List").
-		WithoutTag("ListItem").
-		WithoutTag("Private")
+	case *lang.MatchInvokeExpr:
+		g.genMatchInvoke(t, noMatch)
 
-	for _, define := range defines {
-		g.w.writeIndent("case opt.%sOp:\n", define.Name)
-		g.w.nestIndent("return f.Construct%s(\n", define.Name)
-
-		for i, field := range g.md.childAndPrivateFields(define) {
-			// Use castFromDynamicParam, since a dynamic parameter of type interface{}
-			// is being passed as a parameter to Construct.
-			arg := fmt.Sprintf("args[%d]", i)
-			g.w.writeIndent("%s,\n", castFromDynamicParam(arg, g.md.typeOf(field)))
+	case *lang.MatchAndExpr:
+		if noMatch {
+			panic("noMatch is not yet supported by the and match op")
 		}
 
-		g.w.unnest(")\n")
+		g.genMatch(t.Left, contextName, noMatch)
+		g.genMatch(t.Right, contextName, noMatch)
+
+	case *lang.MatchNotExpr:
+		// Flip the noMatch flag so that the input expression will test for the
+		// inverse. No code needs to be generated here because each matcher is
+		// responsible for handling the noMatch flag (or not).
+		g.genMatch(t.Input, contextName, !noMatch)
+
+	case *lang.BindExpr:
+		if string(t.Label) != contextName {
+			g.w.writeIndent("%s := %s\n", t.Label, contextName)
+		}
+
+		g.genMatch(t.Target, contextName, noMatch)
+
+	case *lang.StringExpr:
+		if noMatch {
+			g.w.nest("if %s != m.mem.internPrivate(%s) {\n", contextName, t)
+		} else {
+			g.w.nest("if %s == m.mem.internPrivate(%s) {\n", contextName, t)
+		}
+
+	case *lang.MatchAnyExpr:
+		if noMatch {
+			g.w.nest("if false {\n")
+		}
+
+	case *lang.MatchListExpr:
+		if noMatch {
+			panic("noMatch is not yet supported by the list match op")
+		}
+
+		g.w.nest("for _, _item := range _f.mem.lookupList(%s) {\n", contextName)
+		g.genMatch(t.MatchItem, "_item", noMatch)
+
+	default:
+		panic(fmt.Sprintf("unrecognized match expression: %v", match))
+	}
+}
+
+// genMatchNameAndChildren generates code to match the opname and children of
+// the context expression.
+func (g *factoryGen) genMatchNameAndChildren(
+	match *lang.MatchExpr, contextName string, noMatch bool,
+) {
+	// The name/child matcher can match multiple parts of the context
+	// expression, including its name and zero or more of its children. If
+	// noMatch is false, then all of these parts must match in order for the
+	// whole to match. If noMatch is true, then at least one of the parts must
+	// *not* match in order for the whole to match. This is equivalent to
+	// negating an AND expression in boolean logic:
+	//   NOT(<cond1> AND <cond2>) == NOT(<cond1>) OR NOT(<cond2>)
+	//
+	// If either of the conditions does not match, then the overall expression
+	// matches.
+	//
+	// When noMatch is false, then the code generator generates a series of
+	// if statements, one for each part of the expression that needs to be
+	// matched. If execution enters the innermost if statement, then matching
+	// succeeded:
+	//   if <match-type> {
+	//     if <match-child1> {
+	//       if <match-child2> {
+	//         ...
+	//
+	// However, if noMatch is true and execution reaches the innermost if
+	// statement, then it means that matching failed, and the execution path
+	// needs to be inverted. The code generator does this by creating a match
+	// flag, and then testing that flag after breaking out of the nested if
+	// statements:
+	//   _match := false
+	//   if <match-type> {
+	//     if <match-child1> {
+	//       if <match-child2> {
+	//         _match = true
+	//       }
+	//     }
+	//   }
+	//
+	//   if !_match {
+	//     ...
+	//
+	// All of this is only necessary if there are actually multiple parts of
+	// the expression to match. If there's just an opname to match and no
+	// children (e.g. just matching (Eq) with no child match args), then that
+	// can easily be done by flipping == to/from != in one if statement.
+	// There's no need to invert execution logic in that case.
+	invertExecution := noMatch && len(match.Args) != 0
+	if invertExecution {
+		g.w.writeIndent("_match := false\n")
+
+		// Since execution is inverted, we now match the opname and children as
+		// if noMatch were false. The result of that will be inverted below.
+		noMatch = false
 	}
 
-	g.w.writeIndent("}\n")
-	g.w.writeIndent("panic(errors.AssertionFailedf(\"cannot dynamically construct operator %%s\", errors.Safe(op)))\n")
+	// Mark current nesting level, so that the noMatch case can close the right
+	// number of levels.
+	marker := g.w.marker()
+
+	// If the match expression matches more than one name, or if it matches a
+	// tag name, then more dynamic code must be generated.
+	matchName := string(match.Names[0])
+	isDynamicMatch := len(match.Names) > 1 || g.compiled.LookupDefine(matchName) == nil
+
+	// Match expression name.
+	if isDynamicMatch {
+		g.genDynamicMatch(match, match.Names, contextName, noMatch)
+	} else {
+		g.genConstantMatch(match, matchName, contextName, noMatch)
+	}
+
+	if invertExecution {
+		g.w.writeIndent("_match = true\n")
+		g.w.unnestToMarker(marker, "}\n")
+		g.w.newline()
+		g.w.nest("if !_match {\n")
+	}
+}
+
+// genConstantMatch is called when the MatchExpr has only one define name
+// to match (i.e. no tags). In this case, the type of the expression to match
+// is statically known, and so the generated code can directly manipulate
+// strongly-typed expression structs (e.g. selectExpr, innerJoinExpr, etc).
+func (g *factoryGen) genConstantMatch(
+	match *lang.MatchExpr, opName string, contextName string, noMatch bool,
+) {
+	varName := g.uniquifier.makeUnique(fmt.Sprintf("_%s", unTitle(opName)))
+
+	// Match expression name.
+	g.w.writeIndent("%s := _f.mem.lookupNormExpr(%s).as%s()\n", varName, contextName, opName)
+
+	if noMatch {
+		g.w.nest("if %s == nil {\n", varName)
+		if len(match.Args) > 0 {
+			panic("noMatch=true only supported without args")
+		}
+		return
+	}
+
+	g.w.nest("if %s != nil {\n", varName)
+
+	// Match expression children in the same order as arguments to the match
+	// operator. If there are fewer arguments than there are children, then
+	// only the first N children need to be matched.
+	for index, matchArg := range match.Args {
+		fieldName := unTitle(string(g.compiled.LookupDefine(opName).Fields[index].Name))
+		g.genMatch(matchArg, fmt.Sprintf("%s.%s()", varName, fieldName), false /* noMatch */)
+	}
+}
+
+// genDynamicMatch is called when the MatchExpr is matching a tag name, or
+// is matching multiple names. It matches expression children using ExprView,
+// which can dynamically get children by index without knowing the specific
+// type of operator.
+func (g *factoryGen) genDynamicMatch(
+	match *lang.MatchExpr, names lang.OpNamesExpr, contextName string, noMatch bool,
+) {
+	// Match expression name.
+	normName := g.uniquifier.makeUnique("_norm")
+	g.w.writeIndent("%s := _f.mem.lookupNormExpr(%s)\n", normName, contextName)
+
+	var buf bytes.Buffer
+	for i, name := range names {
+		if i != 0 {
+			buf.WriteString(" || ")
+		}
+
+		define := g.compiled.LookupDefine(string(name))
+		if define != nil {
+			// Match operator name.
+			fmt.Fprintf(&buf, "%s.op == %sOp", normName, name)
+		} else {
+			// Match tag name.
+			fmt.Fprintf(&buf, "is%sLookup[%s.op]", name, normName)
+		}
+	}
+
+	if noMatch {
+		g.w.nest("if !(%s) {\n", buf.String())
+		if len(match.Args) > 0 {
+			panic("noMatch=true only supported without args")
+		}
+		return
+	}
+
+	g.w.nest("if %s {\n", buf.String())
+
+	if len(match.Args) > 0 {
+		// Construct an Expr to use for matching children.
+		exprName := g.uniquifier.makeUnique("_e")
+		g.w.writeIndent("%s := makeExprView(_f.mem, %s, defaultPhysPropsID)\n", exprName, contextName)
+
+		// Match expression children in the same order as arguments to the match
+		// operator. If there are fewer arguments than there are children, then
+		// only the first N children need to be matched.
+		for index, matchArg := range match.Args {
+			g.genMatch(matchArg, fmt.Sprintf("%s.ChildGroup(%d)", exprName, index), false /* noMatch */)
+		}
+	}
+}
+
+// genMatchInvoke generates code to invoke a custom matching function.
+func (g *factoryGen) genMatchInvoke(matchInvoke *lang.MatchInvokeExpr, noMatch bool) {
+	funcName := unTitle(string(matchInvoke.FuncName))
+
+	if noMatch {
+		g.w.nest("if !_f.%s(", funcName)
+	} else {
+		g.w.nest("if _f.%s(", funcName)
+	}
+
+	for index, matchArg := range matchInvoke.Args {
+		ref := matchArg.(*lang.RefExpr)
+
+		if index != 0 {
+			g.w.write(", ")
+		}
+
+		g.w.write(string(ref.Label))
+	}
+
+	g.w.write(") {\n")
+}
+
+// genReplace recursively generates the replacement expression as one large Go
+// expression.
+func (g *factoryGen) genReplace(rule *lang.RuleExpr, replace lang.Expr) {
+	switch t := replace.(type) {
+	case *lang.ConstructExpr:
+		g.genConstruct(rule, t)
+
+	case *lang.ConstructListExpr:
+		// internList will store the list in the memo and return a ListID that can
+		// later retrieve it.
+		g.w.write("_f.mem.internList([]GroupID{")
+
+		for index, elem := range t.Items {
+			if index != 0 {
+				g.w.write(", ")
+			}
+
+			g.genReplace(rule, elem)
+		}
+
+		g.w.write("})")
+
+	case *lang.RefExpr:
+		g.w.write(string(t.Label))
+
+	case *lang.StringExpr:
+		// Literal string expressions construct DString datums.
+		g.w.write("m.mem.internPrivate(tree.NewDString(%s))", t)
+
+	case *lang.OpNameExpr:
+		// OpName literal expressions construct an op identifier like SelectOp,
+		// which can be passed to a custom constructor function.
+		g.w.write(t.String())
+
+	default:
+		panic(fmt.Sprintf("unrecognized replace expression: %v", replace))
+	}
+}
+
+// genConstruct generates code to invoke an op construction function or a user-
+// defined custom function.
+func (g *factoryGen) genConstruct(rule *lang.RuleExpr, construct *lang.ConstructExpr) {
+	switch t := construct.Name.(type) {
+	case *lang.StringExpr:
+		name := string(*t)
+		define := g.compiled.LookupDefine(name)
+		if define != nil {
+			// Standard op construction function.
+			g.w.write("_f.Construct%s(", name)
+		} else {
+			// Custom function.
+			g.w.write("_f.%s(", unTitle(name))
+		}
+
+	case *lang.OpNameExpr:
+		g.w.write("_f.Construct%s(", string(*t))
+
+	case *lang.ConstructExpr:
+		// Must be the OpName function.
+		ref := t.Args[0].(*lang.RefExpr)
+		g.w.write("_f.DynamicConstruct(_f.mem.lookupNormExpr(%s).op, []GroupID{", ref.Label)
+	}
+
+	for index, elem := range construct.Args {
+		if index != 0 {
+			g.w.write(", ")
+		}
+
+		g.genReplace(rule, elem)
+	}
+
+	if construct.Name.Op() == lang.ConstructOp {
+		g.w.write("}, 0)")
+	} else {
+		g.w.write(")")
+	}
+}
+
+// genDynamicConstructLookup generates a lookup table used by the factory's
+// DynamicConstruct method. This method constructs expressions from a dynamic
+// type and arguments.
+func (g *factoryGen) genDynamicConstructLookup() {
+	defines := filterEnforcerDefines(g.compiled.Defines)
+
+	funcType := "func(f *factory, children []opt.GroupID, private opt.PrivateID) opt.GroupID"
+	g.w.writeIndent("type dynConstructLookupFunc %s\n", funcType)
+
+	g.w.writeIndent("var dynConstructLookup [%d]dynConstructLookupFunc\n\n", len(defines)+1)
+
+	g.w.nest("func init() {\n")
+	g.w.writeIndent("// UnknownOp\n")
+	g.w.nest("dynConstructLookup[opt.UnknownOp] = %s {\n", funcType)
+	g.w.writeIndent("  panic(\"op type not initialized\")\n")
+	g.w.unnest("}\n\n")
+
+	for _, define := range defines {
+		g.w.writeIndent("// %sOp\n", define.Name)
+		g.w.nest("dynConstructLookup[opt.%sOp] = %s {\n", define.Name, funcType)
+
+		g.w.writeIndent("return f.Construct%s(", define.Name)
+		for i, field := range define.Fields {
+			if i != 0 {
+				g.w.write(", ")
+			}
+
+			if isListType(string(field.Type)) {
+				if i == 0 {
+					g.w.write("f.InternList(children)")
+				} else {
+					g.w.write("f.InternList(children[%d:])", i)
+				}
+			} else if isPrivateType(string(field.Type)) {
+				g.w.write("private")
+			} else {
+				g.w.write("children[%d]", i)
+			}
+		}
+		g.w.write(")\n")
+
+		g.w.unnest("}\n\n")
+	}
+
+	g.w.unnest("}\n\n")
+
+	args := "op opt.Operator, children []opt.GroupID, private opt.PrivateID"
+	g.w.nest("func (f *factory) DynamicConstruct(%s) opt.GroupID {\n", args)
+	g.w.writeIndent("return dynConstructLookup[op](f, children, private)\n")
 	g.w.unnest("}\n")
+}
+
+// filterEnforcerDefines constructs a new define set with any enforcer ops
+// removed from the specified set.
+func filterEnforcerDefines(defines lang.DefineSetExpr) lang.DefineSetExpr {
+	newDefines := make(lang.DefineSetExpr, 0, len(defines))
+	for _, define := range defines {
+		if define.Tags.Contains("Enforcer") {
+			// Don't create factory methods for enforcers, since they're only
+			// created by the optimizer.
+			continue
+		}
+		newDefines = append(newDefines, define)
+	}
+	return newDefines
 }

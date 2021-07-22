@@ -1,20 +1,23 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package settings
 
 import (
-	"context"
 	"math"
 
-	"github.com/cockroachdb/errors"
+	"github.com/pkg/errors"
 )
 
 // FloatSetting is the interface of a setting variable that will be
@@ -26,7 +29,7 @@ type FloatSetting struct {
 	validateFn   func(float64) error
 }
 
-var _ extendedSetting = &FloatSetting{}
+var _ Setting = &FloatSetting{}
 
 // Get retrieves the float value in the setting.
 func (f *FloatSetting) Get(sv *Values) float64 {
@@ -37,38 +40,17 @@ func (f *FloatSetting) String(sv *Values) string {
 	return EncodeFloat(f.Get(sv))
 }
 
-// Encoded returns the encoded value of the current value of the setting.
-func (f *FloatSetting) Encoded(sv *Values) string {
-	return f.String(sv)
-}
-
-// EncodedDefault returns the encoded value of the default value of the setting.
-func (f *FloatSetting) EncodedDefault() string {
-	return EncodeFloat(f.defaultValue)
-}
-
 // Typ returns the short (1 char) string denoting the type of setting.
 func (*FloatSetting) Typ() string {
 	return "f"
 }
 
-// Default returns default value for setting.
-func (f *FloatSetting) Default() float64 {
-	return f.defaultValue
-}
-
-// Defeat the linter.
-var _ = (*FloatSetting).Default
-
-// Override changes the setting panicking if validation fails and also overrides
-// the default value.
-//
+// Override changes the setting, panicking when validation fails.
 // For testing usage only.
-func (f *FloatSetting) Override(ctx context.Context, sv *Values, v float64) {
-	if err := f.set(ctx, sv, v); err != nil {
+func (f *FloatSetting) Override(sv *Values, v float64) {
+	if err := f.set(sv, v); err != nil {
 		panic(err)
 	}
-	sv.setDefaultOverrideInt64(f.slotIdx, int64(math.Float64bits(v)))
 }
 
 // Validate that a value conforms with the validation function.
@@ -81,53 +63,34 @@ func (f *FloatSetting) Validate(v float64) error {
 	return nil
 }
 
-func (f *FloatSetting) set(ctx context.Context, sv *Values, v float64) error {
+func (f *FloatSetting) set(sv *Values, v float64) error {
 	if err := f.Validate(v); err != nil {
 		return err
 	}
-	sv.setInt64(ctx, f.slotIdx, int64(math.Float64bits(v)))
+	sv.setInt64(f.slotIdx, int64(math.Float64bits(v)))
 	return nil
 }
 
-func (f *FloatSetting) setToDefault(ctx context.Context, sv *Values) {
-	// See if the default value was overridden.
-	ok, val, _ := sv.getDefaultOverride(f.slotIdx)
-	if ok {
-		// As per the semantics of override, these values don't go through
-		// validation.
-		_ = f.set(ctx, sv, math.Float64frombits(uint64((val))))
-		return
-	}
-	if err := f.set(ctx, sv, f.defaultValue); err != nil {
+func (f *FloatSetting) setToDefault(sv *Values) {
+	if err := f.set(sv, f.defaultValue); err != nil {
 		panic(err)
 	}
 }
 
-// WithSystemOnly indicates system-usage only and can be chained.
-func (f *FloatSetting) WithSystemOnly() *FloatSetting {
-	f.common.systemOnly = true
-	return f
+// Default returns the default value.
+func (f *FloatSetting) Default() float64 {
+	return f.defaultValue
 }
 
-// Defeat the linter.
-var _ = (*FloatSetting).WithSystemOnly
-
 // RegisterFloatSetting defines a new setting with type float.
-func RegisterFloatSetting(
-	key, desc string, defaultValue float64, validateFns ...func(float64) error,
-) *FloatSetting {
-	var validateFn func(float64) error
-	if len(validateFns) > 0 {
-		validateFn = func(v float64) error {
-			for _, fn := range validateFns {
-				if err := fn(v); err != nil {
-					return errors.Wrapf(err, "invalid value for %s", key)
-				}
-			}
-			return nil
-		}
-	}
+func RegisterFloatSetting(key, desc string, defaultValue float64) *FloatSetting {
+	return RegisterValidatedFloatSetting(key, desc, defaultValue, nil)
+}
 
+// RegisterValidatedFloatSetting defines a new setting with type float.
+func RegisterValidatedFloatSetting(
+	key, desc string, defaultValue float64, validateFn func(float64) error,
+) *FloatSetting {
 	if validateFn != nil {
 		if err := validateFn(defaultValue); err != nil {
 			panic(errors.Wrap(err, "invalid default"))
@@ -141,18 +104,12 @@ func RegisterFloatSetting(
 	return setting
 }
 
-// NonNegativeFloat can be passed to RegisterFloatSetting.
-func NonNegativeFloat(v float64) error {
-	if v < 0 {
-		return errors.Errorf("cannot set to a negative value: %f", v)
-	}
-	return nil
-}
-
-// PositiveFloat can be passed to RegisterFloatSetting.
-func PositiveFloat(v float64) error {
-	if v <= 0 {
-		return errors.Errorf("cannot set to a non-positive value: %f", v)
-	}
-	return nil
+// RegisterNonNegativeFloatSetting defines a new setting with type float.
+func RegisterNonNegativeFloatSetting(key, desc string, defaultValue float64) *FloatSetting {
+	return RegisterValidatedFloatSetting(key, desc, defaultValue, func(v float64) error {
+		if v < 0 {
+			return errors.Errorf("cannot set %s to a negative value: %f", key, v)
+		}
+		return nil
+	})
 }

@@ -1,3 +1,5 @@
+# LogicTest: default parallel-stmts distsql
+
 statement ok
 CREATE TABLE u (token uuid PRIMARY KEY,
                 token2 uuid,
@@ -40,10 +42,10 @@ INSERT INTO u VALUES (b'cafef00ddeadbee')
 statement error UUID must be exactly 16 bytes long, got 17 bytes
 INSERT INTO u VALUES (b'cafef00ddeadbeefs')
 
-statement error uuid: incorrect UUID format
+statement error uuid: incorrect UUID length
 INSERT INTO u VALUES ('63616665-6630-3064-6465-61646265656')
 
-statement error uuid: incorrect UUID format
+statement error uuid: incorrect UUID length
 INSERT INTO u VALUES ('63616665-6630-3064-6465-6164626565620')
 
 statement error unsupported comparison operator: <uuid> = <bytes>
@@ -85,13 +87,13 @@ INSERT INTO u VALUES ('urn:uuid:63616665-6630-3064-6465-616462656568'::uuid)
 statement ok
 INSERT INTO u VALUES (uuid_v4()::uuid)
 
-statement error value type bytes doesn't match type uuid
+statement error value type bytes doesn't match type UUID
 INSERT INTO u VALUES ('cafef00ddeadbeef'::bytes)
 
-statement error value type string doesn't match type uuid
+statement error value type string doesn't match type UUID
 INSERT INTO u VALUES ('63616665-6630-3064-6465-616462656562'::string)
 
-statement error value type bytes doesn't match type uuid
+statement error value type bytes doesn't match type UUID
 INSERT INTO u VALUES (uuid_v4())
 
 query T
@@ -109,7 +111,7 @@ SELECT token::bytes FROM u WHERE token=b'cafef00ddeadbeef'
 ----
 cafef00ddeadbeef
 
-statement error invalid cast: uuid -> int
+statement error invalid cast: uuid -> INT
 SELECT token::int FROM u
 
 query T

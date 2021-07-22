@@ -1,46 +1,45 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package timeutil
 
 import (
+	"errors"
 	"strings"
 	"time"
-	// embed tzdata in case system tzdata is not available.
-	_ "time/tzdata"
 )
 
-//go:generate go run gen/main.go
+var errTZDataNotFound = errors.New("timezone data cannot be found")
 
 // LoadLocation returns the time.Location with the given name.
 // The name is taken to be a location name corresponding to a file
 // in the IANA Time Zone database, such as "America/New_York".
 //
-// We do not use Go's time.LoadLocation() directly because it maps
-// "Local" to the local time zone, whereas we want UTC.
+// We do not use Go's time.LoadLocation() directly because:
+// 1) it maps "Local" to the local time zone, whereas we want UTC.
+// 2) when a tz is not found, it reports some garbage message
+// related to zoneinfo.zip, which we don't ship, instead
+// of a more useful message like "the tz file with such name
+// is not present in one of the standard tz locations".
 func LoadLocation(name string) (*time.Location, error) {
-	loweredName := strings.ToLower(name)
-	switch loweredName {
+	switch strings.ToLower(name) {
 	case "local", "default":
-		loweredName = "utc"
 		name = "UTC"
 	}
-	// If we know this is a lowercase name in tzdata, use the uppercase form.
-	if v, ok := lowercaseTimezones[loweredName]; ok {
-		// If this location is not found, we may have a case where the tzdata names
-		// have different values than the system tz names.
-		// If this is the case, allback onto the default logic, where the name is read
-		// off other sources before tzdata.
-		if loc, err := time.LoadLocation(v); err == nil {
-			return loc, nil
-		}
+	l, err := time.LoadLocation(name)
+	if err != nil && strings.Contains(err.Error(), "zoneinfo.zip") {
+		err = errTZDataNotFound
 	}
-	return time.LoadLocation(name)
+	return l, err
 }

@@ -1,18 +1,8 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 import { Action, Dispatch } from "redux";
 import * as protobuf from "protobufjs/minimal";
 
-import * as protos from "src/js/protos";
+import * as protos from  "src/js/protos";
 import { PayloadAction } from "src/interfaces/action";
 import { getUIData, setUIData } from "src/util/api";
 import { AdminUIState } from "./state";
@@ -58,13 +48,7 @@ export const VERSION_DISMISSED_KEY = "version_dismissed";
 
 // INSTRUCTIONS_BOX_COLLAPSED_KEY is the uiData key on the server that tracks whether the
 // instructions box on the cluster viz has been collapsed or not.
-export const INSTRUCTIONS_BOX_COLLAPSED_KEY =
-  "clusterviz_instructions_box_collapsed";
-
-// RELEASE_NOTES_SIGNUP_DISMISSED_KEY is the uiData key on the server that tracks when the user
-// dismisses Release Nodes signup form.
-export const RELEASE_NOTES_SIGNUP_DISMISSED_KEY =
-  "release_notes_signup_dismissed";
+export const INSTRUCTIONS_BOX_COLLAPSED_KEY = "clusterviz_instructions_box_collapsed";
 
 export enum UIDataStatus {
   UNINITIALIZED, // Data has not been loaded yet.
@@ -94,10 +78,7 @@ export class UIDataState {
 /**
  * Reducer which modifies a UIDataState.
  */
-export function uiDataReducer(
-  state = new UIDataState(),
-  action: Action,
-): UIDataState {
+export function uiDataReducer(state = new UIDataState(), action: Action): UIDataState {
   if (_.isNil(action)) {
     return state;
   }
@@ -122,10 +103,10 @@ export function uiDataReducer(
       return state;
     }
     case SAVE_ERROR: {
-      const {
-        key: saveErrorKey,
-        error: saveError,
-      } = (action as PayloadAction<KeyedError>).payload;
+      // TODO(tamird): https://github.com/palantir/tslint/issues/2551
+      //
+      // tslint:disable-next-line:no-use-before-declare
+      const { key: saveErrorKey, error: saveError } = (action as PayloadAction<KeyedError>).payload;
       state = _.clone(state);
       state[saveErrorKey] = _.clone(state[saveErrorKey]) || new UIData();
       state[saveErrorKey].status = UIDataStatus.SAVE_ERROR;
@@ -142,10 +123,10 @@ export function uiDataReducer(
       return state;
     }
     case LOAD_ERROR: {
-      const {
-        key: loadErrorKey,
-        error: loadError,
-      } = (action as PayloadAction<KeyedError>).payload;
+      // TODO(tamird): https://github.com/palantir/tslint/issues/2551
+      //
+      // tslint:disable-next-line:no-use-before-declare
+      const { key: loadErrorKey, error: loadError } = (action as PayloadAction<KeyedError>).payload;
       state = _.clone(state);
       state[loadErrorKey] = _.clone(state[loadErrorKey]) || new UIData();
       state[loadErrorKey].status = UIDataStatus.LOAD_ERROR;
@@ -160,10 +141,7 @@ export function uiDataReducer(
 /**
  * setUIDataKey sets the value of the given UIData key.
  */
-export function setUIDataKey(
-  key: string,
-  value: Object,
-): PayloadAction<KeyValue> {
+export function setUIDataKey(key: string, value: Object): PayloadAction<KeyValue> {
   return {
     type: SET,
     payload: { key, value },
@@ -174,10 +152,7 @@ export function setUIDataKey(
  * errorUIData occurs when an asynchronous function related to UIData encounters
  * an error.
  */
-export function loadErrorUIData(
-  key: string,
-  error: Error,
-): PayloadAction<KeyedError> {
+export function loadErrorUIData(key: string, error: Error): PayloadAction<KeyedError> {
   return {
     type: LOAD_ERROR,
     payload: { key, error },
@@ -188,10 +163,7 @@ export function loadErrorUIData(
  * errorUIData occurs when an asynchronous function related to UIData encounters
  * an error.
  */
-export function saveErrorUIData(
-  key: string,
-  error: Error,
-): PayloadAction<KeyedError> {
+export function saveErrorUIData(key: string, error: Error): PayloadAction<KeyedError> {
   return {
     type: SAVE_ERROR,
     payload: { key, error },
@@ -238,10 +210,7 @@ export interface KeyedError {
 
 // Returns true if the key exists and the data is valid.
 export function isValid(state: AdminUIState, key: string) {
-  return (
-    (state.uiData[key] && state.uiData[key].status === UIDataStatus.VALID) ||
-    false
-  );
+  return state.uiData[key] && (state.uiData[key].status === UIDataStatus.VALID) || false;
 }
 
 // Returns contents of the data field if the key is valid, undefined otherwise.
@@ -251,48 +220,29 @@ export function getData(state: AdminUIState, key: string) {
 
 // Returns true if the given key exists and is in the SAVING state.
 export function isSaving(state: AdminUIState, key: string) {
-  return (
-    (state.uiData[key] && state.uiData[key].status === UIDataStatus.SAVING) ||
-    false
-  );
+  return state.uiData[key] && (state.uiData[key].status === UIDataStatus.SAVING) || false;
 }
 
 // Returns true if the given key exists and is in the SAVING state.
 export function isLoading(state: AdminUIState, key: string) {
-  return (
-    (state.uiData[key] && state.uiData[key].status === UIDataStatus.LOADING) ||
-    false
-  );
+  return state.uiData[key] && (state.uiData[key].status === UIDataStatus.LOADING) || false;
 }
 
 // Returns true if the key exists and is in either the SAVING or LOADING state.
 export function isInFlight(state: AdminUIState, key: string) {
-  return (
-    (state.uiData[key] &&
-      (state.uiData[key].status === UIDataStatus.SAVING ||
-        state.uiData[key].status === UIDataStatus.LOADING)) ||
-    false
-  );
+  return state.uiData[key] && ((state.uiData[key].status === UIDataStatus.SAVING) || (state.uiData[key].status === UIDataStatus.LOADING)) || false;
 }
 
 // Returns the error field if the key exists and is in the SAVE_ERROR state.
 // Returns null otherwise.
 export function getSaveError(state: AdminUIState, key: string): Error {
-  return state.uiData[key] &&
-    (state.uiData[key].status === UIDataStatus.SAVE_ERROR ||
-      state.uiData[key].status === UIDataStatus.SAVING)
-    ? state.uiData[key].error
-    : null;
+  return (state.uiData[key] && (state.uiData[key].status === UIDataStatus.SAVE_ERROR || state.uiData[key].status === UIDataStatus.SAVING)) ? state.uiData[key].error : null;
 }
 
 // Returns the error field if the key exists and is in the LOAD_ERROR state.
 // Returns null otherwise.
 export function getLoadError(state: AdminUIState, key: string): Error {
-  return state.uiData[key] &&
-    (state.uiData[key].status === UIDataStatus.LOAD_ERROR ||
-      state.uiData[key].status === UIDataStatus.LOADING)
-    ? state.uiData[key].error
-    : null;
+  return (state.uiData[key] && (state.uiData[key].status === UIDataStatus.LOAD_ERROR || state.uiData[key].status === UIDataStatus.LOADING)) ? state.uiData[key].error : null;
 }
 
 /**
@@ -301,10 +251,7 @@ export function getLoadError(state: AdminUIState, key: string): Error {
  * in the local UIDataState store.
  */
 export function saveUIData(...values: KeyValue[]) {
-  return (
-    dispatch: Dispatch<Action, AdminUIState>,
-    getState: () => AdminUIState,
-  ): Promise<void> => {
+  return (dispatch: Dispatch<AdminUIState>, getState: () => AdminUIState): Promise<void> => {
     const state = getState();
     values = _.filter(values, (kv) => !isInFlight(state, kv.key));
     if (values.length === 0) {
@@ -316,27 +263,19 @@ export function saveUIData(...values: KeyValue[]) {
     const request = new protos.cockroach.server.serverpb.SetUIDataRequest();
     _.each(values, (kv) => {
       const stringifiedValue = JSON.stringify(kv.value);
-      const buffer = new Uint8Array(
-        protobuf.util.utf8.length(stringifiedValue),
-      );
+      const buffer = new Uint8Array(protobuf.util.utf8.length(stringifiedValue));
       protobuf.util.utf8.write(stringifiedValue, buffer, 0);
       request.key_values[kv.key] = buffer;
     });
 
-    return setUIData(request)
-      .then((_response) => {
-        // SetUIDataResponse is empty. A positive return indicates success.
-        _.each(values, (kv) => dispatch(setUIDataKey(kv.key, kv.value)));
-      })
-      .catch((error) => {
-        // TODO(maxlang): Fix error handling more comprehensively.
-        // Tracked in #8699
-        setTimeout(
-          () =>
-            _.each(values, (kv) => dispatch(saveErrorUIData(kv.key, error))),
-          1000,
-        );
-      });
+    return setUIData(request).then((_response) => {
+      // SetUIDataResponse is empty. A positive return indicates success.
+      _.each(values, (kv) => dispatch(setUIDataKey(kv.key, kv.value)));
+    }).catch((error) => {
+      // TODO(maxlang): Fix error handling more comprehensively.
+      // Tracked in #8699
+      setTimeout(() => _.each(values, (kv) => dispatch(saveErrorUIData(kv.key, error))), 1000);
+    });
   };
 }
 
@@ -344,10 +283,7 @@ export function saveUIData(...values: KeyValue[]) {
  * loadUIData loads the values of the give UIData keys from the server.
  */
 export function loadUIData(...keys: string[]) {
-  return (
-    dispatch: Dispatch<Action, AdminUIState>,
-    getState: () => AdminUIState,
-  ): Promise<void> => {
+  return (dispatch: Dispatch<AdminUIState>, getState: () => AdminUIState): Promise<void> => {
     const state = getState();
     keys = _.filter(keys, (k) => !isInFlight(state, k));
     if (keys.length === 0) {
@@ -355,34 +291,20 @@ export function loadUIData(...keys: string[]) {
     }
     dispatch(beginLoadUIData(keys));
 
-    return getUIData(
-      new protos.cockroach.server.serverpb.GetUIDataRequest({ keys }),
-    )
-      .then((response) => {
-        // Decode data for each UIData key.
-        _.each(keys, (key) => {
-          if (_.has(response.key_values, key)) {
-            const buffer = response.key_values[key].value;
-            dispatch(
-              setUIDataKey(
-                key,
-                JSON.parse(
-                  protobuf.util.utf8.read(buffer, 0, buffer.byteLength),
-                ),
-              ),
-            );
-          } else {
-            dispatch(setUIDataKey(key, undefined));
-          }
-        });
-      })
-      .catch((error) => {
-        // TODO(maxlang): Fix error handling more comprehensively.
-        // Tracked in #8699
-        setTimeout(
-          () => _.each(keys, (key) => dispatch(loadErrorUIData(key, error))),
-          1000,
-        );
+    return getUIData(new protos.cockroach.server.serverpb.GetUIDataRequest({ keys })).then((response) => {
+      // Decode data for each UIData key.
+      _.each(keys, (key) => {
+        if (_.has(response.key_values, key)) {
+          const buffer = response.key_values[key].value;
+          dispatch(setUIDataKey(key, JSON.parse(protobuf.util.utf8.read(buffer, 0, buffer.byteLength))));
+        } else {
+          dispatch(setUIDataKey(key, undefined));
+        }
       });
+    }).catch((error) => {
+      // TODO(maxlang): Fix error handling more comprehensively.
+      // Tracked in #8699
+      setTimeout(() => _.each(keys, (key) => dispatch(loadErrorUIData(key, error))), 1000);
+    });
   };
 }

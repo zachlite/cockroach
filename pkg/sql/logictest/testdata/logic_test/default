@@ -1,10 +1,15 @@
+# LogicTest: default parallel-stmts distsql
+
 statement error expected DEFAULT expression to have type int, but 'false' has type bool
 CREATE TABLE t (a INT PRIMARY KEY DEFAULT false)
 
-statement error variable sub-expressions are not allowed in DEFAULT
+statement error DEFAULT expression .* may not contain variable sub-expressions
+CREATE TABLE t (a INT PRIMARY KEY DEFAULT $1)
+
+statement error DEFAULT expression .* may not contain variable sub-expressions
 CREATE TABLE t (a INT PRIMARY KEY DEFAULT (SELECT 1))
 
-statement error variable sub-expressions are not allowed in DEFAULT
+statement error DEFAULT expression .* may not contain variable sub-expressions
 CREATE TABLE t (a INT PRIMARY KEY DEFAULT b)
 
 # Issue #14308: support tables with DEFAULT NULL columns.
@@ -12,49 +17,35 @@ statement ok
 CREATE TABLE null_default (ts TIMESTAMP PRIMARY KEY NULL DEFAULT NULL)
 
 # Aggregate function calls in CHECK are not ok.
-statement error aggregate functions are not allowed in DEFAULT
-CREATE TABLE bad (a INT DEFAULT count(1))
+statement error aggregate functions are not allowed in DEFAULT expressions
+CREATE TABLE bad (a INT DEFAULT COUNT(1))
 
 # Window function calls in CHECK are not ok.
-statement error window functions are not allowed in DEFAULT
-CREATE TABLE bad (a INT DEFAULT count(1) OVER ())
+statement error window functions are not allowed in DEFAULT expressions
+CREATE TABLE bad (a INT DEFAULT COUNT(1) OVER ())
 
 statement ok
 CREATE TABLE t (
   a INT PRIMARY KEY DEFAULT 42,
   b TIMESTAMP DEFAULT now(),
-  c FLOAT DEFAULT random(),
-  d DATE DEFAULT now()
+  c FLOAT DEFAULT random()
 )
 
-query TTBTTTB colnames
+query TTBTT colnames
 SHOW COLUMNS FROM t
 ----
-column_name  data_type  is_nullable  column_default     generation_expression  indices    is_hidden
-a            INT8       false        42:::INT8          ·                      {primary}  false
-b            TIMESTAMP  true         now():::TIMESTAMP  ·                      {primary}  false
-c            FLOAT8     true         random()           ·                      {primary}  false
-d            DATE       true         now():::DATE       ·                      {primary}  false
+Field Type      Null  Default  Indices
+a     INT       false 42:::INT {"primary"}
+b     TIMESTAMP true  now()    {}
+c     FLOAT     true  random() {}
 
 statement ok
-COMMENT ON COLUMN t.a IS 'a'
+INSERT INTO t VALUES (DEFAULT, DEFAULT, DEFAULT)
 
-query TTBTTTBT colnames
-SHOW COLUMNS FROM t WITH COMMENT
+query IBB
+SELECT a, b <= now(), c >= 0.0 FROM t
 ----
-column_name  data_type  is_nullable  column_default     generation_expression  indices    is_hidden  comment
-a            INT8       false        42:::INT8          ·                      {primary}  false      a
-b            TIMESTAMP  true         now():::TIMESTAMP  ·                      {primary}  false      NULL
-c            FLOAT8     true         random()           ·                      {primary}  false      NULL
-d            DATE       true         now():::DATE       ·                      {primary}  false      NULL
-
-statement ok
-INSERT INTO t VALUES (DEFAULT, DEFAULT, DEFAULT, DEFAULT)
-
-query IBBB
-SELECT a, b <= now(), c >= 0.0, d <= now() FROM t
-----
-42 true true true
+42 true true
 
 statement ok
 TRUNCATE TABLE t
@@ -62,26 +53,26 @@ TRUNCATE TABLE t
 statement ok
 INSERT INTO t DEFAULT VALUES
 
-query IBBB
-SELECT a, b <= now(), c >= 0.0, d <= now() FROM t
+query IBB
+SELECT a, b <= now(), c >= 0.0 FROM t
 ----
-42 true true true
+42 true true
 
 statement ok
 INSERT INTO t (a) VALUES (1)
 
-query IBBB
-SELECT a, b <= now(), c >= 0.0, d <= now() FROM t WHERE a = 1
+query IBB
+SELECT a, b <= now(), c >= 0.0 FROM t WHERE a = 1
 ----
-1 true true true
+1 true true
 
 statement ok
 INSERT INTO t VALUES (2)
 
-query IBBB
-SELECT a, b <= now(), c >= 0.0, d <= now() FROM t WHERE a = 2
+query IBB
+SELECT a, b <= now(), c >= 0.0 FROM t WHERE a = 2
 ----
-2 true true true
+2 true true
 
 statement ok
 UPDATE t SET (b, c) = ('2015-09-18 00:00:00', -1.0)
@@ -89,24 +80,24 @@ UPDATE t SET (b, c) = ('2015-09-18 00:00:00', -1.0)
 statement ok
 UPDATE t SET b = DEFAULT WHERE a = 1
 
-query IBBB
-SELECT a, b <= now(), c = -1.0, d <= now() FROM t WHERE a = 1
+query IBB
+SELECT a, b <= now(), c = -1.0 FROM t WHERE a = 1
 ----
-1 true true true
+1 true true
 
 statement ok
 UPDATE t SET (b, c) = (DEFAULT, DEFAULT) WHERE a = 2
 
-query IBBB
-SELECT a, b <= now(), c >= 0.0, d <= now() FROM t WHERE a = 2
+query IBB
+SELECT a, b <= now(), c >= 0.0 FROM t WHERE a = 2
 ----
-2 true true true
+2 true true
 
 statement ok
-UPDATE t SET b = DEFAULT, c = DEFAULT, d = DEFAULT
+UPDATE t SET b = DEFAULT, c = DEFAULT
 
 statement ok
-UPDATE t SET (b) = (DEFAULT), (c) = (DEFAULT), (d) = (DEFAULT)
+UPDATE t SET (b) = (DEFAULT), (c) = (DEFAULT)
 
 # Test a table without a default and with a null default
 statement ok
@@ -122,26 +113,10 @@ UPDATE v SET a = DEFAULT
 statement ok
 UPDATE v SET (a, c) = (DEFAULT, DEFAULT)
 
-query TTBTTTB colnames
+query TTBTT colnames
 SHOW COLUMNS FROM v
 ----
-column_name  data_type  is_nullable  column_default  generation_expression  indices    is_hidden
-a            INT8       false        NULL            ·                      {primary}  false
-b            TIMESTAMP  true         NULL            ·                      {primary}  false
-c            INT8       true         NULL            ·                      {primary}  false
-
-# Regression test for #34901: verify that builtins can be used in default value
-# expressions without a "memory budget exceeded" error while backfilling
-statement ok
-CREATE TABLE t34901 (x STRING)
-
-statement ok
-INSERT INTO t34901 VALUES ('a')
-
-statement ok
-ALTER TABLE t34901 ADD COLUMN y STRING DEFAULT (concat('b', 'c'))
-
-query TT
-SELECT * FROM t34901
-----
-a  bc
+Field Type      Null  Default  Indices
+a     INT       false NULL     {"primary"}
+b     TIMESTAMP true  NULL     {}
+c     INT       true  NULL     {}

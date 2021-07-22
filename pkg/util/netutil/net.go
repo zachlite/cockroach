@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package netutil
 
@@ -20,14 +24,14 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
+
+	"golang.org/x/net/http2"
+
 	"github.com/cockroachdb/cmux"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/errors"
-	"golang.org/x/net/http2"
-	"google.golang.org/grpc"
 )
 
 // ListenAndServeGRPC creates a listener and serves the specified grpc Server
@@ -42,44 +46,28 @@ func ListenAndServeGRPC(
 
 	ctx := context.TODO()
 
-	stopper.AddCloser(stop.CloserFn(server.Stop))
-	waitQuiesce := func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		<-stopper.ShouldQuiesce()
 		FatalIfUnexpected(ln.Close())
-	}
-	if err := stopper.RunAsyncTask(ctx, "listen-quiesce", waitQuiesce); err != nil {
-		waitQuiesce(ctx)
-		return nil, err
-	}
+		<-stopper.ShouldStop()
+		server.Stop()
+	})
 
-	if err := stopper.RunAsyncTask(ctx, "serve", func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		FatalIfUnexpected(server.Serve(ln))
-	}); err != nil {
-		return nil, err
-	}
+	})
 	return ln, nil
 }
 
-var httpLogger = log.NewStdLogger(severity.ERROR, "net/http")
+var httpLogger = log.NewStdLogger(log.Severity_ERROR)
 
 // Server is a thin wrapper around http.Server. See MakeServer for more detail.
 type Server struct {
 	*http.Server
 }
 
-// MakeServer constructs a Server that tracks active connections,
-// closing them when signaled by stopper.
-//
-// It can serve two different purposes simultaneously:
-//
-// - to serve as actual HTTP server, using the .Serve(net.Listener) method.
-// - to serve as plain TCP server, using the .ServeWith(...) method.
-//
-// The latter is used e.g. to accept SQL client connections.
-//
-// When the HTTP facility is not used, the Go HTTP server object is
-// still used internally to maintain/register the connections via the
-// ConnState() method, for convenience.
+// MakeServer constructs a Server that tracks active connections, closing them
+// when signaled by stopper.
 func MakeServer(stopper *stop.Stopper, tlsConfig *tls.Config, handler http.Handler) Server {
 	var mu syncutil.Mutex
 	activeConns := make(map[net.Conn]struct{})
@@ -106,21 +94,18 @@ func MakeServer(stopper *stop.Stopper, tlsConfig *tls.Config, handler http.Handl
 	// net/http.(*Server).Serve/http2.ConfigureServer are not thread safe with
 	// respect to net/http.(*Server).TLSConfig, so we call it synchronously here.
 	if err := http2.ConfigureServer(server.Server, nil); err != nil {
-		log.Fatalf(ctx, "%v", err)
+		log.Fatal(ctx, err)
 	}
 
-	waitQuiesce := func(context.Context) {
-		<-stopper.ShouldQuiesce()
+	stopper.RunWorker(ctx, func(context.Context) {
+		<-stopper.ShouldStop()
 
 		mu.Lock()
 		for conn := range activeConns {
 			conn.Close()
 		}
 		mu.Unlock()
-	}
-	if err := stopper.RunAsyncTask(ctx, "http2-wait-quiesce", waitQuiesce); err != nil {
-		waitQuiesce(ctx)
-	}
+	})
 
 	return server
 }
@@ -134,7 +119,7 @@ func (s *Server) ServeWith(
 	for {
 		rw, e := l.Accept()
 		if e != nil {
-			if ne := (net.Error)(nil); errors.As(e, &ne) && ne.Temporary() {
+			if ne, ok := e.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
 					tempDelay = 5 * time.Millisecond
 				} else {
@@ -162,7 +147,9 @@ func (s *Server) ServeWith(
 // IsClosedConnection returns true if err is cmux.ErrListenerClosed,
 // grpc.ErrServerStopped, io.EOF, or the net package's errClosed.
 func IsClosedConnection(err error) bool {
-	return errors.IsAny(err, cmux.ErrListenerClosed, grpc.ErrServerStopped, io.EOF) ||
+	return err == cmux.ErrListenerClosed ||
+		err == grpc.ErrServerStopped ||
+		err == io.EOF ||
 		strings.Contains(err.Error(), "use of closed network connection")
 }
 
@@ -170,7 +157,7 @@ func IsClosedConnection(err error) bool {
 // cmux.ErrListenerClosed, or the net package's errClosed.
 func FatalIfUnexpected(err error) {
 	if err != nil && !IsClosedConnection(err) {
-		log.Fatalf(context.TODO(), "%+v", err)
+		log.Fatal(context.TODO(), err)
 	}
 }
 
@@ -181,23 +168,8 @@ type InitialHeartbeatFailedError struct {
 	WrappedErr error
 }
 
-var _ error = (*InitialHeartbeatFailedError)(nil)
-var _ fmt.Formatter = (*InitialHeartbeatFailedError)(nil)
-var _ errors.Formatter = (*InitialHeartbeatFailedError)(nil)
-
-// Error implements error.
-func (e *InitialHeartbeatFailedError) Error() string { return fmt.Sprintf("%v", e) }
-
-// Cause implements causer.
-func (e *InitialHeartbeatFailedError) Cause() error { return e.WrappedErr }
-
-// Format implements fmt.Formatter.
-func (e *InitialHeartbeatFailedError) Format(s fmt.State, verb rune) { errors.FormatError(e, s, verb) }
-
-// FormatError implements errors.FormatError.
-func (e *InitialHeartbeatFailedError) FormatError(p errors.Printer) error {
-	p.Print("initial connection heartbeat failed")
-	return e.WrappedErr
+func (e InitialHeartbeatFailedError) Error() string {
+	return fmt.Sprintf("initial connection heartbeat failed: %s", e.WrappedErr)
 }
 
 // NewInitialHeartBeatFailedError creates a new InitialHeartbeatFailedError.

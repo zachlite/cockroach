@@ -1,3 +1,5 @@
+# LogicTest: default distsql
+
 # Case sensitivity of database names
 
 statement ok
@@ -6,13 +8,13 @@ CREATE DATABASE D
 statement ok
 SHOW TABLES FROM d
 
-statement error target database or schema does not exist
+statement error "D" does not match any valid database or schema
 SHOW TABLES FROM "D"
 
 statement ok
 CREATE DATABASE "E"
 
-statement error target database or schema does not exist
+statement error "e" does not match any valid database or schema
 SHOW TABLES FROM e
 
 statement ok
@@ -178,10 +180,10 @@ SELECT x, X, "Y" FROM foo
 ----
 x x Y
 
-statement error column "X" does not exist
+statement error column name "X" not found
 SELECT "X" FROM foo
 
-statement error column "y" does not exist
+statement error column name "y" not found
 SELECT Y FROM foo
 
 # The following should not be ambiguous.
@@ -198,7 +200,7 @@ CREATE VIEW XV AS SELECT X, "Y" FROM foo
 query TT
 SHOW CREATE VIEW xv
 ----
-xv  CREATE VIEW public.xv (x, "Y") AS SELECT x, "Y" FROM test.public.foo
+xv  CREATE VIEW xv (x, "Y") AS SELECT x, "Y" FROM test.public.foo
 
 query error pgcode 42P01 relation "XV" does not exist
 SHOW CREATE VIEW "XV"
@@ -209,7 +211,7 @@ CREATE VIEW "YV" AS SELECT X, "Y" FROM foo
 query TT
 SHOW CREATE VIEW "YV"
 ----
-"YV"  CREATE VIEW public."YV" (x, "Y") AS SELECT x, "Y" FROM test.public.foo
+"YV"  CREATE VIEW "YV" (x, "Y") AS SELECT x, "Y" FROM test.public.foo
 
 query error pgcode 42P01 relation "yv" does not exist
 SHOW CREATE VIEW YV
@@ -272,9 +274,3 @@ SELECT "Amélie", "Amélie" FROM Amelie
 ----
 Amélie Amélie
 2      1
-
-# Check that function names are also recognized case-insensitively.
-query I
-SELECT LENGTH('abc') -- lint: uppercase function OK
-----
-3

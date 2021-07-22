@@ -1,12 +1,16 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
@@ -16,7 +20,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 )
 
 // Visitor defines methods that are called for nodes during an expression or statement walk.
@@ -76,8 +80,8 @@ func (expr *BinaryExpr) Walk(v Visitor) Expr {
 	return expr
 }
 
-// copyNode makes a copy of this Expr without recursing in any child Exprs.
-func (expr *CaseExpr) copyNode() *CaseExpr {
+// CopyNode makes a copy of this Expr without recursing in any child Exprs.
+func (expr *CaseExpr) CopyNode() *CaseExpr {
 	exprCopy := *expr
 	// Copy the Whens slice.
 	exprCopy.Whens = make([]*When, len(expr.Whens))
@@ -95,7 +99,7 @@ func (expr *CaseExpr) Walk(v Visitor) Expr {
 	if expr.Expr != nil {
 		e, changed := WalkExpr(v, expr.Expr)
 		if changed {
-			ret = expr.copyNode()
+			ret = expr.CopyNode()
 			ret.Expr = e
 		}
 	}
@@ -104,7 +108,7 @@ func (expr *CaseExpr) Walk(v Visitor) Expr {
 		val, changedV := WalkExpr(v, w.Val)
 		if changedC || changedV {
 			if ret == expr {
-				ret = expr.copyNode()
+				ret = expr.CopyNode()
 			}
 			ret.Whens[i].Cond = cond
 			ret.Whens[i].Val = val
@@ -114,7 +118,7 @@ func (expr *CaseExpr) Walk(v Visitor) Expr {
 		e, changed := WalkExpr(v, expr.Else)
 		if changed {
 			if ret == expr {
-				ret = expr.copyNode()
+				ret = expr.CopyNode()
 			}
 			ret.Else = e
 		}
@@ -144,43 +148,24 @@ func (expr *CollateExpr) Walk(v Visitor) Expr {
 	return expr
 }
 
-// Walk implements the Expr interface.
-func (expr *ColumnAccessExpr) Walk(v Visitor) Expr {
-	e, changed := WalkExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = e
-		return &exprCopy
-	}
-	return expr
-}
-
-// Walk implements the Expr interface.
-func (expr *TupleStar) Walk(v Visitor) Expr {
-	e, changed := WalkExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = e
-		return &exprCopy
-	}
-	return expr
-}
-
-// copyNode makes a copy of this Expr without recursing in any child Exprs.
-func (expr *CoalesceExpr) copyNode() *CoalesceExpr {
+// CopyNode makes a copy of this Expr without recursing in any child Exprs.
+func (expr *CoalesceExpr) CopyNode() *CoalesceExpr {
 	exprCopy := *expr
+	exprCopy.Exprs = append(Exprs(nil), exprCopy.Exprs...)
 	return &exprCopy
 }
 
 // Walk implements the Expr interface.
 func (expr *CoalesceExpr) Walk(v Visitor) Expr {
 	ret := expr
-	exprs, changed := walkExprSlice(v, expr.Exprs)
-	if changed {
-		if ret == expr {
-			ret = expr.copyNode()
+	for i := range expr.Exprs {
+		e, changed := WalkExpr(v, expr.Exprs[i])
+		if changed {
+			if ret == expr {
+				ret = expr.CopyNode()
+			}
+			ret.Exprs[i] = e
 		}
-		ret.Exprs = exprs
 	}
 	return ret
 }
@@ -198,128 +183,69 @@ func (expr *ComparisonExpr) Walk(v Visitor) Expr {
 	return expr
 }
 
-// copyNode makes a copy of this Expr without recursing in any child Exprs.
-func (expr *FuncExpr) copyNode() *FuncExpr {
+// CopyNode makes a copy of this Expr without recursing in any child Exprs.
+func (expr *FuncExpr) CopyNode() *FuncExpr {
 	exprCopy := *expr
+	if expr.WindowDef != nil {
+		windowDefCopy := *expr.WindowDef
+		exprCopy.WindowDef = &windowDefCopy
+	}
 	exprCopy.Exprs = append(Exprs(nil), exprCopy.Exprs...)
+	if windowDef := exprCopy.WindowDef; windowDef != nil {
+		windowDef.Partitions = append(Exprs(nil), windowDef.Partitions...)
+		if len(windowDef.OrderBy) > 0 {
+			newOrderBy := make(OrderBy, len(windowDef.OrderBy))
+			for i, o := range windowDef.OrderBy {
+				newOrderBy[i] = &Order{OrderType: o.OrderType, Expr: o.Expr, Direction: o.Direction}
+			}
+			windowDef.OrderBy = newOrderBy
+		}
+	}
 	return &exprCopy
-}
-
-// copyNode makes a copy of this WindowFrame without recursing.
-func (node *WindowFrame) copyNode() *WindowFrame {
-	nodeCopy := *node
-	return &nodeCopy
-}
-
-func walkWindowFrame(v Visitor, frame *WindowFrame) (*WindowFrame, bool) {
-	ret := frame
-	if frame.Bounds.StartBound != nil {
-		b, changed := walkWindowFrameBound(v, frame.Bounds.StartBound)
-		if changed {
-			if ret == frame {
-				ret = frame.copyNode()
-			}
-			ret.Bounds.StartBound = b
-		}
-	}
-	if frame.Bounds.EndBound != nil {
-		b, changed := walkWindowFrameBound(v, frame.Bounds.EndBound)
-		if changed {
-			if ret == frame {
-				ret = frame.copyNode()
-			}
-			ret.Bounds.EndBound = b
-		}
-	}
-	return ret, ret != frame
-}
-
-// copyNode makes a copy of this WindowFrameBound without recursing.
-func (node *WindowFrameBound) copyNode() *WindowFrameBound {
-	nodeCopy := *node
-	return &nodeCopy
-}
-
-func walkWindowFrameBound(v Visitor, bound *WindowFrameBound) (*WindowFrameBound, bool) {
-	ret := bound
-	if bound.HasOffset() {
-		e, changed := WalkExpr(v, bound.OffsetExpr)
-		if changed {
-			if ret == bound {
-				ret = bound.copyNode()
-			}
-			ret.OffsetExpr = e
-		}
-	}
-	return ret, ret != bound
-}
-
-// copyNode makes a copy of this WindowDef without recursing.
-func (node *WindowDef) copyNode() *WindowDef {
-	nodeCopy := *node
-	return &nodeCopy
-}
-
-func walkWindowDef(v Visitor, windowDef *WindowDef) (*WindowDef, bool) {
-	ret := windowDef
-	if len(windowDef.Partitions) > 0 {
-		exprs, changed := walkExprSlice(v, windowDef.Partitions)
-		if changed {
-			if ret == windowDef {
-				ret = windowDef.copyNode()
-			}
-			ret.Partitions = exprs
-		}
-	}
-	if len(windowDef.OrderBy) > 0 {
-		order, changed := walkOrderBy(v, windowDef.OrderBy)
-		if changed {
-			if ret == windowDef {
-				ret = windowDef.copyNode()
-			}
-			ret.OrderBy = order
-		}
-	}
-	if windowDef.Frame != nil {
-		frame, changed := walkWindowFrame(v, windowDef.Frame)
-		if changed {
-			if ret == windowDef {
-				ret = windowDef.copyNode()
-			}
-			ret.Frame = frame
-		}
-	}
-
-	return ret, ret != windowDef
 }
 
 // Walk implements the Expr interface.
 func (expr *FuncExpr) Walk(v Visitor) Expr {
 	ret := expr
-	exprs, changed := walkExprSlice(v, expr.Exprs)
-	if changed {
-		if ret == expr {
-			ret = expr.copyNode()
+	for i := range expr.Exprs {
+		e, changed := WalkExpr(v, expr.Exprs[i])
+		if changed {
+			if ret == expr {
+				ret = expr.CopyNode()
+			}
+			ret.Exprs[i] = e
 		}
-		ret.Exprs = exprs
+	}
+	if expr.WindowDef != nil {
+		for i := range expr.WindowDef.Partitions {
+			e, changed := WalkExpr(v, expr.WindowDef.Partitions[i])
+			if changed {
+				if ret == expr {
+					ret = expr.CopyNode()
+				}
+				ret.WindowDef.Partitions[i] = e
+			}
+		}
+		for i := range expr.WindowDef.OrderBy {
+			if expr.WindowDef.OrderBy[i].OrderType != OrderByColumn {
+				continue
+			}
+			e, changed := WalkExpr(v, expr.WindowDef.OrderBy[i].Expr)
+			if changed {
+				if ret == expr {
+					ret = expr.CopyNode()
+				}
+				ret.WindowDef.OrderBy[i].Expr = e
+			}
+		}
 	}
 	if expr.Filter != nil {
 		e, changed := WalkExpr(v, expr.Filter)
 		if changed {
 			if ret == expr {
-				ret = expr.copyNode()
+				ret = expr.CopyNode()
 			}
 			ret.Filter = e
-		}
-	}
-
-	if expr.OrderBy != nil {
-		order, changed := walkOrderBy(v, expr.OrderBy)
-		if changed {
-			if ret == expr {
-				ret = expr.copyNode()
-			}
-			ret.OrderBy = order
 		}
 	}
 	return ret
@@ -340,31 +266,8 @@ func (expr *IfExpr) Walk(v Visitor) Expr {
 	return expr
 }
 
-// Walk implements the Expr interface.
-func (expr *IfErrExpr) Walk(v Visitor) Expr {
-	c, changedC := WalkExpr(v, expr.Cond)
-	t := expr.ErrCode
-	changedEC := false
-	if t != nil {
-		t, changedEC = WalkExpr(v, expr.ErrCode)
-	}
-	e := expr.Else
-	changedE := false
-	if e != nil {
-		e, changedE = WalkExpr(v, expr.Else)
-	}
-	if changedC || changedEC || changedE {
-		exprCopy := *expr
-		exprCopy.Cond = c
-		exprCopy.ErrCode = t
-		exprCopy.Else = e
-		return &exprCopy
-	}
-	return expr
-}
-
-// copyNode makes a copy of this Expr without recursing in any child Exprs.
-func (expr *IndirectionExpr) copyNode() *IndirectionExpr {
+// CopyNode makes a copy of this Expr without recursing in any child Exprs.
+func (expr *IndirectionExpr) CopyNode() *IndirectionExpr {
 	exprCopy := *expr
 	exprCopy.Indirection = append(ArraySubscripts(nil), exprCopy.Indirection...)
 	for i, t := range exprCopy.Indirection {
@@ -381,7 +284,7 @@ func (expr *IndirectionExpr) Walk(v Visitor) Expr {
 	e, changed := WalkExpr(v, expr.Expr)
 	if changed {
 		if ret == expr {
-			ret = expr.copyNode()
+			ret = expr.CopyNode()
 		}
 		ret.Expr = e
 	}
@@ -391,7 +294,7 @@ func (expr *IndirectionExpr) Walk(v Visitor) Expr {
 			e, changed := WalkExpr(v, t.Begin)
 			if changed {
 				if ret == expr {
-					ret = expr.copyNode()
+					ret = expr.CopyNode()
 				}
 				ret.Indirection[i].Begin = e
 			}
@@ -400,7 +303,7 @@ func (expr *IndirectionExpr) Walk(v Visitor) Expr {
 			e, changed := WalkExpr(v, t.End)
 			if changed {
 				if ret == expr {
-					ret = expr.copyNode()
+					ret = expr.CopyNode()
 				}
 				ret.Indirection[i].End = e
 			}
@@ -423,28 +326,6 @@ func (expr *IsOfTypeExpr) Walk(v Visitor) Expr {
 
 // Walk implements the Expr interface.
 func (expr *NotExpr) Walk(v Visitor) Expr {
-	e, changed := WalkExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = e
-		return &exprCopy
-	}
-	return expr
-}
-
-// Walk implements the Expr interface.
-func (expr *IsNullExpr) Walk(v Visitor) Expr {
-	e, changed := WalkExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = e
-		return &exprCopy
-	}
-	return expr
-}
-
-// Walk implements the Expr interface.
-func (expr *IsNotNullExpr) Walk(v Visitor) Expr {
 	e, changed := WalkExpr(v, expr.Expr)
 	if changed {
 		exprCopy := *expr
@@ -508,7 +389,7 @@ func (expr *RangeCond) Walk(v Visitor) Expr {
 
 // Walk implements the Expr interface.
 func (expr *Subquery) Walk(v Visitor) Expr {
-	sel, changed := walkStmt(v, expr.Select)
+	sel, changed := WalkStmt(v, expr.Select)
 	if changed {
 		exprCopy := *expr
 		exprCopy.Select = sel.(SelectStatement)
@@ -516,93 +397,6 @@ func (expr *Subquery) Walk(v Visitor) Expr {
 	}
 	return expr
 }
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *Subquery) WalkTableExpr(v Visitor) TableExpr {
-	sel, changed := walkStmt(v, expr.Select)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Select = sel.(SelectStatement)
-		return &exprCopy
-	}
-	return expr
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *AliasedTableExpr) WalkTableExpr(v Visitor) TableExpr {
-	newExpr, changed := walkTableExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = newExpr
-		return &exprCopy
-	}
-	return expr
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *ParenTableExpr) WalkTableExpr(v Visitor) TableExpr {
-	newExpr, changed := walkTableExpr(v, expr.Expr)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Expr = newExpr
-		return &exprCopy
-	}
-	return expr
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *JoinTableExpr) WalkTableExpr(v Visitor) TableExpr {
-	left, changedL := walkTableExpr(v, expr.Left)
-	right, changedR := walkTableExpr(v, expr.Right)
-	if changedL || changedR {
-		exprCopy := *expr
-		exprCopy.Left = left
-		exprCopy.Right = right
-		return &exprCopy
-	}
-	return expr
-}
-
-func (expr *RowsFromExpr) copyNode() *RowsFromExpr {
-	exprCopy := *expr
-	exprCopy.Items = append(Exprs(nil), exprCopy.Items...)
-	return &exprCopy
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *RowsFromExpr) WalkTableExpr(v Visitor) TableExpr {
-	ret := expr
-	for i := range expr.Items {
-		e, changed := WalkExpr(v, expr.Items[i])
-		if changed {
-			if ret == expr {
-				ret = expr.copyNode()
-			}
-			ret.Items[i] = e
-		}
-	}
-	return ret
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *StatementSource) WalkTableExpr(v Visitor) TableExpr {
-	s, changed := walkStmt(v, expr.Statement)
-	if changed {
-		exprCopy := *expr
-		exprCopy.Statement = s
-		return &exprCopy
-	}
-	return expr
-}
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *TableName) WalkTableExpr(_ Visitor) TableExpr { return expr }
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *TableRef) WalkTableExpr(_ Visitor) TableExpr { return expr }
-
-// WalkTableExpr implements the TableExpr interface.
-func (expr *UnresolvedObjectName) WalkTableExpr(_ Visitor) TableExpr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *UnaryExpr) Walk(v Visitor) Expr {
@@ -699,10 +493,10 @@ func (expr *ColumnItem) Walk(_ Visitor) Expr {
 func (expr DefaultVal) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
-func (expr PartitionMaxVal) Walk(_ Visitor) Expr { return expr }
+func (expr MaxVal) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
-func (expr PartitionMinVal) Walk(_ Visitor) Expr { return expr }
+func (expr MinVal) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *NumVal) Walk(_ Visitor) Expr { return expr }
@@ -712,9 +506,6 @@ func (expr *StrVal) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *Placeholder) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
-func (expr *DBitArray) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *DBool) Walk(_ Visitor) Expr { return expr }
@@ -729,13 +520,7 @@ func (expr *DDate) Walk(_ Visitor) Expr { return expr }
 func (expr *DTime) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
-func (expr *DTimeTZ) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
 func (expr *DFloat) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
-func (expr *DEnum) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *DDecimal) Walk(_ Visitor) Expr { return expr }
@@ -745,15 +530,6 @@ func (expr *DInt) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *DInterval) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
-func (expr *DBox2D) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
-func (expr *DGeography) Walk(_ Visitor) Expr { return expr }
-
-// Walk implements the Expr interface.
-func (expr *DGeometry) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
 func (expr *DJSON) Walk(_ Visitor) Expr { return expr }
@@ -786,6 +562,9 @@ func (expr *DTuple) Walk(_ Visitor) Expr { return expr }
 func (expr *DArray) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
+func (expr *DTable) Walk(_ Visitor) Expr { return expr }
+
+// Walk implements the Expr interface.
 func (expr *DOid) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
@@ -793,10 +572,10 @@ func (expr *DOidWrapper) Walk(_ Visitor) Expr { return expr }
 
 // WalkExpr traverses the nodes in an expression.
 //
-// NOTE: Do not count on the walkStmt/WalkExpr machinery to visit all
+// NOTE: Do not count on the WalkStmt/WalkExpr machinery to visit all
 // expressions contained in a query. Only a sub-set of all expressions are
-// found by walkStmt and subsequently traversed. See the comment below on
-// walkStmt for details.
+// found by WalkStmt and subsequently traversed. See the comment below on
+// WalkStmt for details.
 func WalkExpr(v Visitor, expr Expr) (newExpr Expr, changed bool) {
 	recurse, newExpr := v.VisitPre(expr)
 
@@ -809,11 +588,6 @@ func WalkExpr(v Visitor, expr Expr) (newExpr Expr, changed bool) {
 	return newExpr, (reflect.ValueOf(expr) != reflect.ValueOf(newExpr))
 }
 
-func walkTableExpr(v Visitor, expr TableExpr) (newExpr TableExpr, changed bool) {
-	newExpr = expr.WalkTableExpr(v)
-	return newExpr, (reflect.ValueOf(expr) != reflect.ValueOf(newExpr))
-}
-
 // WalkExprConst is a variant of WalkExpr for visitors that do not modify the expression.
 func WalkExprConst(v Visitor, expr Expr) {
 	WalkExpr(v, expr)
@@ -823,11 +597,11 @@ func WalkExprConst(v Visitor, expr Expr) {
 	// pointers (which will also remove the need for using reflect.ValueOf above).
 }
 
-// walkableStmt is implemented by statements that can appear inside an expression (selects) or
-// we want to start a walk from (using walkStmt).
-type walkableStmt interface {
+// WalkableStmt is implemented by statements that can appear inside an expression (selects) or
+// we want to start a walk from (using WalkStmt).
+type WalkableStmt interface {
 	Statement
-	walkStmt(Visitor) Statement
+	WalkStmt(Visitor) Statement
 }
 
 func walkReturningClause(v Visitor, clause ReturningClause) (ReturningClause, bool) {
@@ -838,7 +612,7 @@ func walkReturningClause(v Visitor, clause ReturningClause) (ReturningClause, bo
 			e, changed := WalkExpr(v, expr.Expr)
 			if changed {
 				if ret == t {
-					ret = t.copyNode()
+					ret = t.CopyNode()
 				}
 				(*ret)[i].Expr = e
 			}
@@ -847,61 +621,62 @@ func walkReturningClause(v Visitor, clause ReturningClause) (ReturningClause, bo
 	case *ReturningNothing, *NoReturningClause:
 		return t, false
 	default:
-		panic(errors.AssertionFailedf("unexpected ReturningClause type: %T", t))
+		panic(pgerror.NewErrorf(pgerror.CodeInternalError, "unexpected ReturningClause type: %T", t))
 	}
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Backup) copyNode() *Backup {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Backup) CopyNode() *Backup {
 	stmtCopy := *stmt
 	stmtCopy.IncrementalFrom = append(Exprs(nil), stmt.IncrementalFrom...)
+	stmtCopy.Options = append(KVOptions(nil), stmt.Options...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Backup) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Backup) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.AsOf.Expr != nil {
 		e, changed := WalkExpr(v, stmt.AsOf.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.AsOf.Expr = e
 		}
 	}
-	for i, expr := range stmt.To {
-		e, changed := WalkExpr(v, expr)
+	{
+		e, changed := WalkExpr(v, stmt.To)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
-			ret.To[i] = e
+			ret.To = e
 		}
 	}
 	for i, expr := range stmt.IncrementalFrom {
 		e, changed := WalkExpr(v, expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.IncrementalFrom[i] = e
 		}
 	}
-	if stmt.Options.EncryptionPassphrase != nil {
-		pw, changed := WalkExpr(v, stmt.Options.EncryptionPassphrase)
+	{
+		opts, changed := walkKVOptions(v, stmt.Options)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
-			ret.Options.EncryptionPassphrase = pw
+			ret.Options = opts
 		}
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Delete) copyNode() *Delete {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Delete) CopyNode() *Delete {
 	stmtCopy := *stmt
 	if stmt.Where != nil {
 		wCopy := *stmt.Where
@@ -910,78 +685,63 @@ func (stmt *Delete) copyNode() *Delete {
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Delete) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Delete) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.Where != nil {
 		e, changed := WalkExpr(v, stmt.Where.Expr)
 		if changed {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 			ret.Where.Expr = e
 		}
 	}
 	returning, changed := walkReturningClause(v, stmt.Returning)
 	if changed {
 		if ret == stmt {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 		}
 		ret.Returning = returning
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Explain) copyNode() *Explain {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Explain) CopyNode() *Explain {
 	stmtCopy := *stmt
+	stmtCopy.Options = append([]string(nil), stmt.Options...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Explain) walkStmt(v Visitor) Statement {
-	s, changed := walkStmt(v, stmt.Statement)
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Explain) WalkStmt(v Visitor) Statement {
+	s, changed := WalkStmt(v, stmt.Statement)
 	if changed {
-		stmt = stmt.copyNode()
+		stmt = stmt.CopyNode()
 		stmt.Statement = s
 	}
 	return stmt
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *ExplainAnalyze) copyNode() *ExplainAnalyze {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Insert) CopyNode() *Insert {
 	stmtCopy := *stmt
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *ExplainAnalyze) walkStmt(v Visitor) Statement {
-	s, changed := walkStmt(v, stmt.Statement)
-	if changed {
-		stmt = stmt.copyNode()
-		stmt.Statement = s
-	}
-	return stmt
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Insert) copyNode() *Insert {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Insert) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Insert) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.Rows != nil {
-		rows, changed := walkStmt(v, stmt.Rows)
+		rows, changed := WalkStmt(v, stmt.Rows)
 		if changed {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 			ret.Rows = rows.(*Select)
 		}
 	}
 	returning, changed := walkReturningClause(v, stmt.Returning)
 	if changed {
 		if ret == stmt {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 		}
 		ret.Returning = returning
 	}
@@ -990,105 +750,41 @@ func (stmt *Insert) walkStmt(v Visitor) Statement {
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *CreateTable) copyNode() *CreateTable {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *CreateTable) CopyNode() *CreateTable {
 	stmtCopy := *stmt
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *CreateTable) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *CreateTable) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.AsSource != nil {
-		rows, changed := walkStmt(v, stmt.AsSource)
+		rows, changed := WalkStmt(v, stmt.AsSource)
 		if changed {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 			ret.AsSource = rows.(*Select)
 		}
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *CancelQueries) copyNode() *CancelQueries {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *CancelQueries) walkStmt(v Visitor) Statement {
-	sel, changed := walkStmt(v, stmt.Queries)
-	if changed {
-		stmt = stmt.copyNode()
-		stmt.Queries = sel.(*Select)
-	}
-	return stmt
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *CancelSessions) copyNode() *CancelSessions {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *CancelSessions) walkStmt(v Visitor) Statement {
-	sel, changed := walkStmt(v, stmt.Sessions)
-	if changed {
-		stmt = stmt.copyNode()
-		stmt.Sessions = sel.(*Select)
-	}
-	return stmt
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *ControlJobs) copyNode() *ControlJobs {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *ControlJobs) walkStmt(v Visitor) Statement {
-	sel, changed := walkStmt(v, stmt.Jobs)
-	if changed {
-		stmt = stmt.copyNode()
-		stmt.Jobs = sel.(*Select)
-	}
-	return stmt
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (n *ControlSchedules) copyNode() *ControlSchedules {
-	stmtCopy := *n
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (n *ControlSchedules) walkStmt(v Visitor) Statement {
-	sel, changed := walkStmt(v, n.Schedules)
-	if changed {
-		n = n.copyNode()
-		n.Schedules = sel.(*Select)
-	}
-	return n
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Import) copyNode() *Import {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Import) CopyNode() *Import {
 	stmtCopy := *stmt
 	stmtCopy.Files = append(Exprs(nil), stmt.Files...)
 	stmtCopy.Options = append(KVOptions(nil), stmt.Options...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Import) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Import) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.CreateFile != nil {
 		e, changed := WalkExpr(v, stmt.CreateFile)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.CreateFile = e
 		}
@@ -1097,7 +793,7 @@ func (stmt *Import) walkStmt(v Visitor) Statement {
 		e, changed := WalkExpr(v, expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Files[i] = e
 		}
@@ -1106,7 +802,7 @@ func (stmt *Import) walkStmt(v Visitor) Statement {
 		opts, changed := walkKVOptions(v, stmt.Options)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Options = opts
 		}
@@ -1114,70 +810,58 @@ func (stmt *Import) walkStmt(v Visitor) Statement {
 	return ret
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *ParenSelect) walkStmt(v Visitor) Statement {
-	sel, changed := walkStmt(v, stmt.Select)
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *ParenSelect) WalkStmt(v Visitor) Statement {
+	sel, changed := WalkStmt(v, stmt.Select)
 	if changed {
 		return &ParenSelect{sel.(*Select)}
 	}
 	return stmt
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Restore) copyNode() *Restore {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Restore) CopyNode() *Restore {
 	stmtCopy := *stmt
-	stmtCopy.From = append([]StringOrPlaceholderOptList(nil), stmt.From...)
+	stmtCopy.From = append(Exprs(nil), stmt.From...)
+	stmtCopy.Options = append(KVOptions(nil), stmt.Options...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Restore) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Restore) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.AsOf.Expr != nil {
 		e, changed := WalkExpr(v, stmt.AsOf.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.AsOf.Expr = e
 		}
 	}
-	for i, backup := range stmt.From {
-		for j, expr := range backup {
-			e, changed := WalkExpr(v, expr)
-			if changed {
-				if ret == stmt {
-					ret = stmt.copyNode()
-				}
-				ret.From[i][j] = e
-			}
-		}
-	}
-
-	if stmt.Options.EncryptionPassphrase != nil {
-		pw, changed := WalkExpr(v, stmt.Options.EncryptionPassphrase)
+	for i, expr := range stmt.From {
+		e, changed := WalkExpr(v, expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
-			ret.Options.EncryptionPassphrase = pw
+			ret.From[i] = e
 		}
 	}
-
-	if stmt.Options.IntoDB != nil {
-		intoDB, changed := WalkExpr(v, stmt.Options.IntoDB)
+	{
+		opts, changed := walkKVOptions(v, stmt.Options)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
-			ret.Options.IntoDB = intoDB
+			ret.Options = opts
 		}
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *ReturningExprs) copyNode() *ReturningExprs {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *ReturningExprs) CopyNode() *ReturningExprs {
 	stmtCopy := append(ReturningExprs(nil), *stmt...)
 	return &stmtCopy
 }
@@ -1202,37 +886,28 @@ func walkOrderBy(v Visitor, order OrderBy) (OrderBy, bool) {
 	return order, copied
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Select) copyNode() *Select {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Select) CopyNode() *Select {
 	stmtCopy := *stmt
 	if stmt.Limit != nil {
 		lCopy := *stmt.Limit
 		stmtCopy.Limit = &lCopy
 	}
-	if stmt.With != nil {
-		withCopy := *stmt.With
-		stmtCopy.With = &withCopy
-		stmtCopy.With.CTEList = make([]*CTE, len(stmt.With.CTEList))
-		for i, cte := range stmt.With.CTEList {
-			cteCopy := *cte
-			stmtCopy.With.CTEList[i] = &cteCopy
-		}
-	}
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Select) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Select) WalkStmt(v Visitor) Statement {
 	ret := stmt
-	sel, changed := walkStmt(v, stmt.Select)
+	sel, changed := WalkStmt(v, stmt.Select)
 	if changed {
-		ret = stmt.copyNode()
+		ret = stmt.CopyNode()
 		ret.Select = sel.(SelectStatement)
 	}
 	order, changed := walkOrderBy(v, stmt.OrderBy)
 	if changed {
 		if ret == stmt {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 		}
 		ret.OrderBy = order
 	}
@@ -1241,7 +916,7 @@ func (stmt *Select) walkStmt(v Visitor) Statement {
 			e, changed := WalkExpr(v, stmt.Limit.Offset)
 			if changed {
 				if ret == stmt {
-					ret = stmt.copyNode()
+					ret = stmt.CopyNode()
 				}
 				ret.Limit.Offset = e
 			}
@@ -1250,34 +925,20 @@ func (stmt *Select) walkStmt(v Visitor) Statement {
 			e, changed := WalkExpr(v, stmt.Limit.Count)
 			if changed {
 				if ret == stmt {
-					ret = stmt.copyNode()
+					ret = stmt.CopyNode()
 				}
 				ret.Limit.Count = e
 			}
 		}
 	}
-	if stmt.With != nil {
-		for i := range stmt.With.CTEList {
-			if stmt.With.CTEList[i] != nil {
-				withStmt, changed := walkStmt(v, stmt.With.CTEList[i].Stmt)
-				if changed {
-					if ret == stmt {
-						ret = stmt.copyNode()
-					}
-					ret.With.CTEList[i].Stmt = withStmt
-				}
-			}
-		}
-	}
-
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SelectClause) copyNode() *SelectClause {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *SelectClause) CopyNode() *SelectClause {
 	stmtCopy := *stmt
 	stmtCopy.Exprs = append(SelectExprs(nil), stmt.Exprs...)
-	stmtCopy.From = From{
+	stmtCopy.From = &From{
 		Tables: append(TableExprs(nil), stmt.From.Tables...),
 		AsOf:   stmt.From.AsOf,
 	}
@@ -1291,29 +952,28 @@ func (stmt *SelectClause) copyNode() *SelectClause {
 		stmtCopy.Having = &hCopy
 	}
 	stmtCopy.Window = append(Window(nil), stmt.Window...)
-	stmtCopy.DistinctOn = append(DistinctOn(nil), stmt.DistinctOn...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SelectClause) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *SelectClause) WalkStmt(v Visitor) Statement {
 	ret := stmt
 
 	for i, expr := range stmt.Exprs {
 		e, changed := WalkExpr(v, expr.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Exprs[i].Expr = e
 		}
 	}
 
-	if stmt.From.AsOf.Expr != nil {
+	if stmt.From != nil && stmt.From.AsOf.Expr != nil {
 		e, changed := WalkExpr(v, stmt.From.AsOf.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.From.AsOf.Expr = e
 		}
@@ -1323,7 +983,7 @@ func (stmt *SelectClause) walkStmt(v Visitor) Statement {
 		e, changed := WalkExpr(v, stmt.Where.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Where.Expr = e
 		}
@@ -1333,7 +993,7 @@ func (stmt *SelectClause) walkStmt(v Visitor) Statement {
 		e, changed := WalkExpr(v, expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.GroupBy[i] = e
 		}
@@ -1343,72 +1003,50 @@ func (stmt *SelectClause) walkStmt(v Visitor) Statement {
 		e, changed := WalkExpr(v, stmt.Having.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Having.Expr = e
 		}
 	}
 
-	for i := range stmt.Window {
-		w, changed := walkWindowDef(v, stmt.Window[i])
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
+	for i, windowDef := range stmt.Window {
+		if windowDef.Partitions != nil {
+			exprs, changed := walkExprSlice(v, windowDef.Partitions)
+			if changed {
+				if ret == stmt {
+					ret = stmt.CopyNode()
+				}
+				ret.Window[i].Partitions = exprs
 			}
-			ret.Window[i] = w
+		}
+		if windowDef.OrderBy != nil {
+			order, changed := walkOrderBy(v, windowDef.OrderBy)
+			if changed {
+				if ret == stmt {
+					ret = stmt.CopyNode()
+				}
+				ret.Window[i].OrderBy = order
+			}
 		}
 	}
-
-	for i := range stmt.From.Tables {
-		t, changed := walkTableExpr(v, stmt.From.Tables[i])
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
-			}
-			ret.From.Tables[i] = t
-		}
-	}
-
-	for i := range stmt.DistinctOn {
-		e, changed := WalkExpr(v, stmt.DistinctOn[i])
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
-			}
-			ret.DistinctOn[i] = e
-		}
-	}
-
 	return ret
 }
 
-func (stmt *UnionClause) walkStmt(v Visitor) Statement {
-	left, changedL := walkStmt(v, stmt.Left)
-	right, changedR := walkStmt(v, stmt.Right)
-	if changedL || changedR {
-		stmtCopy := *stmt
-		stmtCopy.Left = left.(*Select)
-		stmtCopy.Right = right.(*Select)
-		return &stmtCopy
-	}
-	return stmt
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SetVar) copyNode() *SetVar {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *SetVar) CopyNode() *SetVar {
 	stmtCopy := *stmt
 	stmtCopy.Values = append(Exprs(nil), stmt.Values...)
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetVar) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *SetVar) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	for i, expr := range stmt.Values {
 		e, changed := WalkExpr(v, expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Values[i] = e
 		}
@@ -1416,73 +1054,27 @@ func (stmt *SetVar) walkStmt(v Visitor) Statement {
 	return ret
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetZoneConfig) walkStmt(v Visitor) Statement {
-	ret := stmt
-	if stmt.YAMLConfig != nil {
-		e, changed := WalkExpr(v, stmt.YAMLConfig)
-		if changed {
-			newStmt := *stmt
-			ret = &newStmt
-			ret.YAMLConfig = e
-		}
-	}
-	if stmt.Options != nil {
-		newOpts, changed := walkKVOptions(v, stmt.Options)
-		if changed {
-			if ret == stmt {
-				newStmt := *stmt
-				ret = &newStmt
-			}
-			ret.Options = newOpts
-		}
-	}
-	return ret
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SetTracing) copyNode() *SetTracing {
-	stmtCopy := *stmt
-	stmtCopy.Values = append(Exprs(nil), stmt.Values...)
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetTracing) walkStmt(v Visitor) Statement {
-	ret := stmt
-	for i, expr := range stmt.Values {
-		e, changed := WalkExpr(v, expr)
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
-			}
-			ret.Values[i] = e
-		}
-	}
-	return ret
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SetClusterSetting) copyNode() *SetClusterSetting {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *SetClusterSetting) CopyNode() *SetClusterSetting {
 	stmtCopy := *stmt
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetClusterSetting) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *SetClusterSetting) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	if stmt.Value != nil {
 		e, changed := WalkExpr(v, stmt.Value)
 		if changed {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 			ret.Value = e
 		}
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *Update) copyNode() *Update {
+// CopyNode makes a copy of this Statement without recursing in any child Statements.
+func (stmt *Update) CopyNode() *Update {
 	stmtCopy := *stmt
 	stmtCopy.Exprs = make(UpdateExprs, len(stmt.Exprs))
 	for i, e := range stmt.Exprs {
@@ -1496,14 +1088,14 @@ func (stmt *Update) copyNode() *Update {
 	return &stmtCopy
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *Update) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *Update) WalkStmt(v Visitor) Statement {
 	ret := stmt
 	for i, expr := range stmt.Exprs {
 		e, changed := WalkExpr(v, expr.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Exprs[i].Expr = e
 		}
@@ -1513,7 +1105,7 @@ func (stmt *Update) walkStmt(v Visitor) Statement {
 		e, changed := WalkExpr(v, stmt.Where.Expr)
 		if changed {
 			if ret == stmt {
-				ret = stmt.copyNode()
+				ret = stmt.CopyNode()
 			}
 			ret.Where.Expr = e
 		}
@@ -1522,82 +1114,57 @@ func (stmt *Update) walkStmt(v Visitor) Statement {
 	returning, changed := walkReturningClause(v, stmt.Returning)
 	if changed {
 		if ret == stmt {
-			ret = stmt.copyNode()
+			ret = stmt.CopyNode()
 		}
 		ret.Returning = returning
 	}
 	return ret
 }
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *ValuesClause) walkStmt(v Visitor) Statement {
+// WalkStmt is part of the WalkableStmt interface.
+func (stmt *ValuesClause) WalkStmt(v Visitor) Statement {
 	ret := stmt
-	for i, tuple := range stmt.Rows {
-		exprs, changed := walkExprSlice(v, tuple)
+	for i, tuple := range stmt.Tuples {
+		t, changed := WalkExpr(v, tuple)
 		if changed {
 			if ret == stmt {
-				ret = &ValuesClause{append([]Exprs(nil), stmt.Rows...)}
+				ret = &ValuesClause{append([]*Tuple(nil), stmt.Tuples...)}
 			}
-			ret.Rows[i] = exprs
+			ret.Tuples[i] = t.(*Tuple)
 		}
 	}
 	return ret
 }
 
-// copyNode makes a copy of this Statement.
-func (stmt *BeginTransaction) copyNode() *BeginTransaction {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
+var _ WalkableStmt = &CreateTable{}
+var _ WalkableStmt = &Backup{}
+var _ WalkableStmt = &Delete{}
+var _ WalkableStmt = &Explain{}
+var _ WalkableStmt = &Insert{}
+var _ WalkableStmt = &Import{}
+var _ WalkableStmt = &ParenSelect{}
+var _ WalkableStmt = &Restore{}
+var _ WalkableStmt = &Select{}
+var _ WalkableStmt = &SelectClause{}
+var _ WalkableStmt = &SetClusterSetting{}
+var _ WalkableStmt = &SetVar{}
+var _ WalkableStmt = &Update{}
+var _ WalkableStmt = &ValuesClause{}
 
-// walkStmt is part of the walkableStmt interface.
-func (stmt *BeginTransaction) walkStmt(v Visitor) Statement {
-	ret := stmt
-	if stmt.Modes.AsOf.Expr != nil {
-		e, changed := WalkExpr(v, stmt.Modes.AsOf.Expr)
-		if changed {
-			ret = stmt.copyNode()
-			ret.Modes.AsOf.Expr = e
-		}
-	}
-	return ret
-}
-
-var _ walkableStmt = &CreateTable{}
-var _ walkableStmt = &Backup{}
-var _ walkableStmt = &Delete{}
-var _ walkableStmt = &Explain{}
-var _ walkableStmt = &Insert{}
-var _ walkableStmt = &Import{}
-var _ walkableStmt = &ParenSelect{}
-var _ walkableStmt = &Restore{}
-var _ walkableStmt = &Select{}
-var _ walkableStmt = &SelectClause{}
-var _ walkableStmt = &SetClusterSetting{}
-var _ walkableStmt = &SetVar{}
-var _ walkableStmt = &Update{}
-var _ walkableStmt = &ValuesClause{}
-var _ walkableStmt = &CancelQueries{}
-var _ walkableStmt = &CancelSessions{}
-var _ walkableStmt = &ControlJobs{}
-var _ walkableStmt = &ControlSchedules{}
-var _ walkableStmt = &BeginTransaction{}
-var _ walkableStmt = &UnionClause{}
-
-// walkStmt walks the entire parsed stmt calling WalkExpr on each
+// WalkStmt walks the entire parsed stmt calling WalkExpr on each
 // expression, and replacing each expression with the one returned
 // by WalkExpr.
 //
-// NOTE: Beware that walkStmt does not necessarily traverse all parts of a
+// NOTE: Beware that WalkStmt does not necessarily traverse all parts of a
 // statement by itself. For example, it will not walk into Subquery nodes
 // within a FROM clause or into a JoinCond. Walk's logic is pretty
 // interdependent with the logic for constructing a query plan.
-func walkStmt(v Visitor, stmt Statement) (newStmt Statement, changed bool) {
-	walkable, ok := stmt.(walkableStmt)
+func WalkStmt(v Visitor, stmt Statement) (newStmt Statement, changed bool) {
+	walkable, ok := stmt.(WalkableStmt)
 	if !ok {
 		return stmt, false
 	}
-	newStmt = walkable.walkStmt(v)
+	newStmt = walkable.WalkStmt(v)
 	return newStmt, (stmt != newStmt)
 }
 
@@ -1612,7 +1179,7 @@ func (v *simpleVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
 	if v.err != nil {
 		return false, expr
 	}
-	recurse, newExpr, v.err = v.fn(expr)
+	v.err, recurse, newExpr = v.fn(expr)
 	if v.err != nil {
 		return false, expr
 	}
@@ -1623,7 +1190,7 @@ func (*simpleVisitor) VisitPost(expr Expr) Expr { return expr }
 
 // SimpleVisitFn is a function that is run for every node in the VisitPre stage;
 // see SimpleVisit.
-type SimpleVisitFn func(expr Expr) (recurse bool, newExpr Expr, err error)
+type SimpleVisitFn func(expr Expr) (err error, recurse bool, newExpr Expr)
 
 // SimpleVisit is a convenience wrapper for visitors that only have VisitPre
 // code and don't return any results except an error. The given function is
@@ -1636,19 +1203,6 @@ func SimpleVisit(expr Expr, preFn SimpleVisitFn) (Expr, error) {
 		return nil, v.err
 	}
 	return newExpr, nil
-}
-
-// SimpleStmtVisit is a convenience wrapper for visitors that want to visit
-// all part of a statement, only have VisitPre code and don't return
-// any results except an error. The given function is called in VisitPre
-// for every node. The visitor stops as soon as an error is returned.
-func SimpleStmtVisit(stmt Statement, preFn SimpleVisitFn) (Statement, error) {
-	v := simpleVisitor{fn: preFn}
-	newStmt, changed := walkStmt(&v, stmt)
-	if changed {
-		return newStmt, nil
-	}
-	return stmt, nil
 }
 
 type debugVisitor struct {
@@ -1685,7 +1239,7 @@ func ExprDebugString(expr Expr) string {
 // expressions that are part of the given statement.
 func StmtDebugString(stmt Statement) string {
 	v := debugVisitor{}
-	walkStmt(&v, stmt)
+	WalkStmt(&v, stmt)
 	return v.buf.String()
 }
 

@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
@@ -23,26 +27,15 @@ type matchWriter struct {
 	nesting int
 }
 
-// marker opaquely stores a nesting level. The nest methods return the marker
-// for the nesting level that existed before the nest call, and the
-// unnestToMarker method returns to that level given the marker.
+// marker opaquely stores a nesting level. The nest method returns the marker
+// for the nesting level that existed before the nest, and the unnestToMarker
+// method returns to that level given the marker.
 type marker int
 
-// nest writes a formatted string with no identation and then increases the
-// indentation. It returns a marker for the indentation level before the
-// increase. This marker can be passed to unnestToMarker to return to that
-// level.
+// nest writes an indented formatted string and then increases the indentation.
+// It returns a marker for the indentation level before the increase. This
+// marker can be passed to unnestToMarker to return to that level.
 func (w *matchWriter) nest(format string, args ...interface{}) marker {
-	w.write(format, args...)
-	w.nesting++
-	return marker(w.nesting - 1)
-}
-
-// nestIndent writes an indented formatted string and then increases the
-// indentation. It returns a marker for the indentation level before the
-// increase. This marker can be passed to unnestToMarker to return to that
-// level.
-func (w *matchWriter) nestIndent(format string, args ...interface{}) marker {
 	w.writeIndent(format, args...)
 	w.nesting++
 	return marker(w.nesting - 1)
@@ -59,7 +52,7 @@ func (w *matchWriter) write(format string, args ...interface{}) {
 }
 
 func (w *matchWriter) writeIndent(format string, args ...interface{}) {
-	fmt.Fprint(w.writer, strings.Repeat("  ", w.nesting))
+	fmt.Fprintf(w.writer, strings.Repeat("  ", w.nesting))
 	fmt.Fprintf(w.writer, format, args...)
 }
 
@@ -74,7 +67,7 @@ func (w *matchWriter) unnest(suffix string) {
 func (w *matchWriter) unnestToMarker(marker marker, suffix string) {
 	for w.nesting > int(marker) {
 		w.nesting--
-		fmt.Fprint(w.writer, strings.Repeat("  ", w.nesting))
-		fmt.Fprint(w.writer, suffix)
+		fmt.Fprintf(w.writer, strings.Repeat("  ", w.nesting))
+		fmt.Fprintf(w.writer, suffix)
 	}
 }

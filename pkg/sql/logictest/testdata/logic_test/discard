@@ -1,3 +1,5 @@
+# LogicTest: default distsql
+
 statement ok
 SET SEARCH_PATH = foo
 
@@ -12,7 +14,7 @@ DISCARD ALL
 query T
 SHOW SEARCH_PATH
 ----
-$user,public
+public
 
 query T
 SET timezone = 'Europe/Amsterdam'; SHOW TIMEZONE

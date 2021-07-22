@@ -1,25 +1,27 @@
+# LogicTest: default parallel-stmts
+
 statement ok
 CREATE TABLE kv (
   k INT PRIMARY KEY,
   v INT
 )
 
-statement error value type tuple{int, int} doesn't match type int of column "v"
+statement error value type tuple{int, int} doesn't match type INT of column "v"
 UPDATE kv SET v = (SELECT (10, 11))
 
-statement error value type decimal doesn't match type int of column "v"
+statement error value type decimal doesn't match type INT of column "v"
 UPDATE kv SET v = 3.2
 
-statement error value type decimal doesn't match type int of column "v"
+statement error value type decimal doesn't match type INT of column "v"
 UPDATE kv SET (k, v) = (3, 3.2)
 
-statement error value type decimal doesn't match type int of column "v"
+statement error value type decimal doesn't match type INT of column "v"
 UPDATE kv SET (k, v) = (SELECT 3, 3.2)
 
-statement count 4
+statement ok
 INSERT INTO kv VALUES (1, 2), (3, 4), (5, 6), (7, 8)
 
-statement count 2
+statement ok
 UPDATE kv SET v = 9 WHERE k IN (1, 3)
 
 query II rowsort
@@ -30,7 +32,7 @@ SELECT * FROM kv
 5 6
 7 8
 
-statement count 4
+statement ok
 UPDATE kv SET v = k + v
 
 query II rowsort
@@ -44,13 +46,13 @@ SELECT * FROM kv
 statement error pgcode 42703 column "m" does not exist
 UPDATE kv SET m = 9 WHERE k IN (1, 3)
 
-statement error at or near "k": syntax error: unimplemented
+statement error unimplemented at or near "k"
 UPDATE kv SET kv.k = 9
 
-statement error at or near "\*": syntax error: unimplemented
+statement error unimplemented at or near "*"
 UPDATE kv SET k.* = 9
 
-statement error at or near "v": syntax error: unimplemented
+statement error unimplemented at or near "v"
 UPDATE kv SET k.v = 9
 
 statement ok
@@ -84,7 +86,7 @@ CREATE TABLE kv2 (
   FAMILY (v)
 )
 
-statement count 4
+statement ok
 INSERT INTO kv2 VALUES ('a', 'b'), ('c', 'd'), ('e', 'f'), ('f', 'g')
 
 query TT rowsort
@@ -95,10 +97,71 @@ c   d
 e   f
 f   g
 
-statement error duplicate key value violates unique constraint "a"\nDETAIL: Key \(v\)=\('g'\) already exists\.
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM kv2]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+fetched: /kv2/primary/'a' -> NULL
+fetched: /kv2/primary/'a'/v -> 'b'
+output row: ['a' 'b']
+fetched: /kv2/primary/'c' -> NULL
+fetched: /kv2/primary/'c'/v -> 'd'
+output row: ['c' 'd']
+fetched: /kv2/primary/'e' -> NULL
+fetched: /kv2/primary/'e'/v -> 'f'
+output row: ['e' 'f']
+fetched: /kv2/primary/'f' -> NULL
+fetched: /kv2/primary/'f'/v -> 'g'
+output row: ['f' 'g']
+
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM kv2@a]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+fetched: /kv2/a/'b' -> /'a'
+output row: ['a' 'b']
+fetched: /kv2/a/'d' -> /'c'
+output row: ['c' 'd']
+fetched: /kv2/a/'f' -> /'e'
+output row: ['e' 'f']
+fetched: /kv2/a/'g' -> /'f'
+output row: ['f' 'g']
+
+
+statement error duplicate key value \(v\)=\('g'\) violates unique constraint "a"
 UPDATE kv2 SET v = 'g' WHERE k IN ('a')
 
-statement count 1
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM kv2]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+fetched: /kv2/primary/'a' -> NULL
+fetched: /kv2/primary/'a'/v -> 'b'
+output row: ['a' 'b']
+fetched: /kv2/primary/'c' -> NULL
+fetched: /kv2/primary/'c'/v -> 'd'
+output row: ['c' 'd']
+fetched: /kv2/primary/'e' -> NULL
+fetched: /kv2/primary/'e'/v -> 'f'
+output row: ['e' 'f']
+fetched: /kv2/primary/'f' -> NULL
+fetched: /kv2/primary/'f'/v -> 'g'
+output row: ['f' 'g']
+
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM kv2@a]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+fetched: /kv2/a/'b' -> /'a'
+output row: ['a' 'b']
+fetched: /kv2/a/'d' -> /'c'
+output row: ['c' 'd']
+fetched: /kv2/a/'f' -> /'e'
+output row: ['e' 'f']
+fetched: /kv2/a/'g' -> /'f'
+output row: ['f' 'g']
+
+statement ok
 UPDATE kv2 SET v = 'i' WHERE k IN ('a')
 
 query TT rowsort
@@ -109,42 +172,8 @@ c   d
 e   f
 f   g
 
-statement count 1
+statement ok
 UPDATE kv2 SET v = 'b' WHERE k IN ('a')
-
-query TT rowsort
-SELECT * FROM kv2
-----
-a   b
-c   d
-e   f
-f   g
-
-# Confirm ONLY and * are no-ops
-statement count 1
-UPDATE ONLY kv2 SET v = 'h' WHERE k IN ('a')
-
-query TT rowsort
-SELECT * FROM kv2
-----
-a   h
-c   d
-e   f
-f   g
-
-statement count 1
-UPDATE kv2 * SET v = 'b' WHERE k IN ('a')
-
-query TT rowsort
-SELECT * FROM kv2
-----
-a   b
-c   d
-e   f
-f   g
-
-statement count 1
-UPDATE ONLY kv2 * SET v = 'b' WHERE k IN ('a')
 
 query TT rowsort
 SELECT * FROM kv2
@@ -160,7 +189,7 @@ CREATE TABLE kv3 (
   v CHAR NOT NULL
 )
 
-statement count 1
+statement ok
 INSERT INTO kv3 VALUES ('a', 'b')
 
 statement error null value in column "v" violates not-null constraint
@@ -171,7 +200,7 @@ SELECT * FROM kv3
 ----
 a   b
 
-statement error column "nonexistent" does not exist
+statement error column name "nonexistent" not found
 UPDATE kv3 SET v = NULL WHERE nonexistent = 'a'
 
 statement ok
@@ -182,7 +211,7 @@ CREATE TABLE abc (
   UNIQUE INDEX d (c)
 )
 
-statement count 1
+statement ok
 INSERT INTO abc VALUES (1, 2, 3)
 
 statement error number of columns \(2\) does not match number of values \(1\)
@@ -191,7 +220,7 @@ UPDATE abc SET (b, c) = (4)
 statement error DEFAULT can only appear in a VALUES list within INSERT or on the right side of a SET
 UPDATE abc SET (b, c) = (SELECT (VALUES (DEFAULT, DEFAULT)))
 
-statement count 1
+statement ok
 UPDATE abc SET (b, c) = (4, 5)
 
 query III
@@ -199,14 +228,14 @@ SELECT * FROM abc
 ----
 1 4 5
 
-statement count 1
+statement ok
 UPDATE abc SET a = 1, (b, c) = (SELECT 1, 2)
 
 query III colnames
-UPDATE abc SET (b, c) = (8, 9) RETURNING abc.b, c, 4 AS d
+UPDATE abc SET (b, c) = (8, 9) RETURNING abc.b, c, 4
 ----
-b  c  d
-8  9  4
+b c 4
+8 9 4
 
 query III colnames
 UPDATE abc SET (b, c) = (8, 9) RETURNING b as col1, c as col2, 4 as col3
@@ -221,10 +250,10 @@ a
 1
 
 query IIII colnames
-UPDATE abc SET (b, c) = (5, 6) RETURNING a, b, c, 4 AS d
+UPDATE abc SET (b, c) = (5, 6) RETURNING a, b, c, 4
 ----
-a  b  c  d
-1  5  6  4
+a b c 4
+1 5 6 4
 
 query III colnames
 UPDATE abc SET (b, c) = (7, 8) RETURNING *
@@ -233,10 +262,10 @@ a b c
 1 7 8
 
 query IIII colnames
-UPDATE abc SET (b, c) = (7, 8) RETURNING *, 4 AS d
+UPDATE abc SET (b, c) = (7, 8) RETURNING *, 4
 ----
-a  b  c  d
-1  7  8  4
+a b c 4
+1 7 8 4
 
 query III colnames
 UPDATE abc SET (b, c) = (8, 9) RETURNING abc.*
@@ -252,13 +281,13 @@ SELECT * FROM abc
 ----
 1 8 9
 
-statement count 1
+statement ok
 INSERT INTO abc VALUES (4, 5, 6)
 
-statement error duplicate key value violates unique constraint "primary"\nDETAIL: Key \(a\)=\(4\) already exists\.
+statement error duplicate key value \(a\)=\(4\) violates unique constraint "primary"
 UPDATE abc SET a = 4, b = 3
 
-statement error duplicate key value violates unique constraint "d"\nDETAIL: Key \(c\)=\(6\) already exists\.
+statement error duplicate key value \(c\)=\(6\) violates unique constraint "d"
 UPDATE abc SET a = 2, c = 6
 
 query III
@@ -293,17 +322,58 @@ CREATE TABLE xyz (
   z INT
 )
 
-statement count 1
+statement ok
 INSERT INTO xyz VALUES (111, 222, 333)
 
-
-statement count 1
+statement ok
 UPDATE xyz SET (z, y) = (SELECT 666, 777), x = (SELECT 2)
 
 query III
 SELECT * from xyz
 ----
 2 777 666
+
+query TTT
+EXPLAIN UPDATE xyz SET y = x
+----
+update     ·      ·
+ │         table  xyz
+ │         set    y
+ └── scan  ·      ·
+·          table  xyz@primary
+·          spans  ALL
+
+query TTTTT
+EXPLAIN (METADATA) UPDATE xyz SET (x, y) = (1, 2)
+----
+update          ·      ·            ()                   ·
+ │              table  xyz          ·                    ·
+ │              set    x, y         ·                    ·
+ └── render     ·      ·            (x, y, z, "1", "2")  "1"=CONST; "2"=CONST; x!=NULL; key(x)
+      └── scan  ·      ·            (x, y, z)            x!=NULL; key(x)
+·               table  xyz@primary  ·                    ·
+·               spans  ALL          ·                    ·
+
+query TTTTT
+EXPLAIN (METADATA) UPDATE xyz SET (x, y) = (y, x)
+----
+update     ·      ·            ()         ·
+ │         table  xyz          ·          ·
+ │         set    x, y         ·          ·
+ └── scan  ·      ·            (x, y, z)  x!=NULL; key(x)
+·          table  xyz@primary  ·          ·
+·          spans  ALL          ·          ·
+
+query TTTTT
+EXPLAIN (METADATA) UPDATE xyz SET (x, y) = (2, 2)
+----
+update          ·      ·            ()              ·
+ │              table  xyz          ·               ·
+ │              set    x, y         ·               ·
+ └── render     ·      ·            (x, y, z, "2")  "2"=CONST; x!=NULL; key(x)
+      └── scan  ·      ·            (x, y, z)       x!=NULL; key(x)
+·               table  xyz@primary  ·               ·
+·               spans  ALL          ·               ·
 
 statement ok
 CREATE TABLE lots (
@@ -314,10 +384,10 @@ CREATE TABLE lots (
   k5 INT
 )
 
-statement count 1
+statement ok
 INSERT INTO lots VALUES (1, 2, 3, 4, 5)
 
-statement count 1
+statement ok
 UPDATE lots SET (k1, k2) = (6, 7), k3 = 8, (k4, k5) = (9, 10)
 
 query IIIII
@@ -325,7 +395,7 @@ SELECT * FROM lots
 ----
 6  7  8  9  10
 
-statement count 1
+statement ok
 UPDATE lots SET (k5, k4, k3, k2, k1) = (SELECT * FROM lots)
 
 query IIIII
@@ -344,49 +414,86 @@ CREATE TABLE pks (
   FAMILY (v)
 )
 
-statement count 2
+statement ok
 INSERT INTO pks VALUES (1, 2, 3), (4, 5, 3)
 
-statement error duplicate key value violates unique constraint "i"\nDETAIL: Key \(k2,v\)=\(5,3\) already exists\.
+statement error duplicate key value \(k2,v\)=\(5,3\) violates unique constraint "i"
 UPDATE pks SET k2 = 5 where k1 = 1
 
 # Test updating only one of the columns of a multi-column primary key.
 
-statement count 1
+statement ok
 UPDATE pks SET k1 = 2 WHERE k1 = 1
 
-query III rowsort
-SELECT * FROM pks
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT * FROM pks WHERE k1 = 2]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
 ----
-2  2  3
-4  5  3
+fetched: /pks/primary/2/2 -> NULL
+fetched: /pks/primary/2/2/v -> 3
+output row: [2 2 3]
 
 # Check that UPDATE properly supports ORDER BY (MySQL extension)
 
-statement count 0
+statement ok
 TRUNCATE kv
 
-statement count 4
+statement ok
 INSERT INTO kv VALUES (1, 9), (8, 2), (3, 7), (6, 4)
 
+query TTT
+EXPLAIN UPDATE kv SET v = v + 1 ORDER BY v DESC
+----
+update               ·      ·
+ │                   table  kv
+ │                   set    v
+ └── render          ·      ·
+      └── sort       ·      ·
+           │         order  -v
+           └── scan  ·      ·
+·                    table  kv@primary
+·                    spans  ALL
+
 query II
-UPDATE kv SET v = v + 1 ORDER BY v DESC LIMIT 3 RETURNING k,v
+UPDATE kv SET v = v + 1 ORDER BY v DESC RETURNING k,v
 ----
 1  10
 3  8
 6  5
+8  3
+
+# Use case for UPDATE ... ORDER BY: renumbering a PK without unique violation.
+
+statement error duplicate key value \(k\)=\(6\) violates unique constraint "primary"
+UPDATE kv SET k = k * 2
+
+statement ok
+UPDATE kv SET k = k * 2 ORDER BY k DESC
 
 # Check that UPDATE properly supports LIMIT (MySQL extension)
 
-statement count 3
+statement ok
 TRUNCATE kv; INSERT INTO kv VALUES (1, 2), (2, 3), (3, 4)
+
+query TTT
+EXPLAIN UPDATE kv SET v = v - 1 WHERE k < 3 LIMIT 1
+----
+update               ·      ·
+ │                   table  kv
+ │                   set    v
+ └── render          ·      ·
+      └── limit      ·      ·
+           └── scan  ·      ·
+·                    table  kv@primary
+·                    spans  -/2/#
+·                    limit  1
 
 query II
 UPDATE kv SET v = v - 1 WHERE k < 10 ORDER BY k LIMIT 1 RETURNING k, v
 ----
 1  1
 
-query II rowsort
+query II
 SELECT * FROM kv
 ----
 1  1
@@ -400,6 +507,21 @@ statement ok
 CREATE TABLE tu (a INT PRIMARY KEY, b INT, c INT, d INT, FAMILY (a), FAMILY (b), FAMILY (c,d));
   INSERT INTO tu VALUES (1, 2, 3, 4)
 
+query T
+SELECT message FROM [SHOW KV TRACE FOR UPDATE tu SET b = NULL, c = NULL, d = NULL]
+----
+Scan /Table/61/{1-2}
+querying next range at /Table/61/1
+r1: sending batch 1 Scan to (n1,s1):1
+fetched: /tu/primary/1 -> NULL
+fetched: /tu/primary/1/b -> 2
+fetched: /tu/primary/1/c/d -> /3/4
+Del /Table/61/1/1/1/1
+Del /Table/61/1/1/2/1
+output row: [1 NULL NULL NULL]
+querying next range at /Table/61/1/1/1/1
+r1: sending batch 2 Del, 1 BeginTxn to (n1,s1):1
+
 statement ok
 UPDATE tu SET b = NULL, c = NULL, d = NULL
 
@@ -408,139 +530,26 @@ SELECT * FROM tu
 ----
 1 NULL NULL NULL
 
-subtest contraint_check_validation_ordering
-
-# Verification of column constraints vs CHECK handling. The column
-# constraint verification must take place first.
-#
-# This test requires that the error message for a CHECK constraint
-# validation error be different than a column validation error. So we
-# test the former first, as a sanity check.
-statement ok
-CREATE TABLE tn(x INT NULL CHECK(x IS NOT NULL), y CHAR(4) CHECK(length(y) < 4));
-  INSERT INTO tn(x, y) VALUES (123, 'abc');
-
-statement error failed to satisfy CHECK constraint
-UPDATE tn SET x = NULL
-
-statement error failed to satisfy CHECK constraint
-UPDATE tn SET y = 'abcd'
-
-# Now we test that the column validation occurs before the CHECK constraint.
-statement ok
-CREATE TABLE tn2(x INT NOT NULL CHECK(x IS NOT NULL), y CHAR(3) CHECK(length(y) < 4));
-  INSERT INTO tn2(x, y) VALUES (123, 'abc');
-
-statement error null value in column "x" violates not-null constraint
-UPDATE tn2 SET x = NULL
-
-statement error value too long for type CHAR\(3\)
-UPDATE tn2 SET y = 'abcd'
-
-subtest fk_contraint_check_validation_ordering
-
-# Verify that column constraints and CHECK handling occur before
-# foreign key validation.
-statement ok
-CREATE TABLE src(x VARCHAR PRIMARY KEY);
-  INSERT INTO src(x) VALUES ('abc');
-  CREATE TABLE derived(x CHAR(3) REFERENCES src(x),
-                       y VARCHAR CHECK(length(y) < 4) REFERENCES src(x));
-  INSERT INTO derived(x, y) VALUES ('abc', 'abc')
-
-# Sanity check that the FK constraints gets actually validated
-statement error foreign key
-UPDATE derived SET x = 'xxx'
-
-statement error value too long for type CHAR\(3\)
-UPDATE derived SET x = 'abcd'
-
-statement error failed to satisfy CHECK constraint
-UPDATE derived SET y = 'abcd'
-
-subtest regression_29494
-
-statement ok
-CREATE TABLE t29494(x INT PRIMARY KEY); INSERT INTO t29494 VALUES (12)
-
-statement ok
-BEGIN; ALTER TABLE t29494 ADD COLUMN y INT NOT NULL DEFAULT 123
-
-# Check that the new column is not visible
-query T
-SELECT create_statement FROM [SHOW CREATE t29494]
-----
-CREATE TABLE public.t29494 (
-   x INT8 NOT NULL,
-   CONSTRAINT "primary" PRIMARY KEY (x ASC),
-   FAMILY "primary" (x)
-)
-
-# Check that the new column is not usable in RETURNING
-statement error column "y" does not exist
-UPDATE t29494 SET x = 123 RETURNING y
-
-# Check the new column is not assignable. We need to restart
-# the txn because the error above trashed it.
-statement ok
-ROLLBACK; BEGIN; ALTER TABLE t29494 ADD COLUMN y INT NOT NULL DEFAULT 123
-
-# Returning * doesn't return y
-query I
-UPDATE t29494 SET x = 124 WHERE x = 12 RETURNING *
-----
-124
-
-statement error column "y" does not exist
-UPDATE t29494 SET y = 123
-
-# Check the new column is not usable in assignments. We need to
-# restart the txn because the error above trashed it.
-statement ok
-ROLLBACK; BEGIN; ALTER TABLE t29494 ADD COLUMN y INT NOT NULL DEFAULT 123
-
-statement error column "y" is being backfilled
-UPDATE t29494 SET x = y
-
-statement ok
-COMMIT
-
-# Use delete-only mutation columns with default and computed expressions.
-statement ok
-CREATE TABLE mutation (m INT PRIMARY KEY, n INT)
-
-statement ok
-INSERT INTO mutation VALUES (1, 1)
-
-statement ok
-BEGIN; ALTER TABLE mutation add COLUMN o INT DEFAULT(10), ADD COLUMN p INT AS (o + n) STORED
-
-statement ok
-UPDATE mutation SET m=2 WHERE n=1
-
-statement ok
-COMMIT TRANSACTION
-
-query IIII colnames
-SELECT * FROM mutation
-----
-m  n  o   p
-2  1  10  11
-
 #regression test for #32477
 subtest reject_special_funcs_inset
 
 statement ok
-CREATE TABLE t32477(x) AS SELECT 1
+CREATE TABLE t32477(x, y, z) AS SELECT 1, 2, 3
 
 statement error aggregate functions are not allowed in UPDATE SET
 UPDATE t32477 SET x = count(x)
 
-statement error window functions are not allowed in UPDATE SET
-UPDATE t32477 SET x = rank() OVER ()
+statement error aggregate functions are not allowed in UPDATE SET
+UPDATE t32477 SET (y,z) = (count(y), count(z))
 
-statement error generator functions are not allowed in UPDATE SET
-UPDATE t32477 SET x = generate_series(1,2)
+statement error window functions are not allowed in UPDATE SET
+UPDATE t32477 SET x = rank() OVER ();
+
+statement error window functions are not allowed in UPDATE SET
+UPDATE t32477 SET (y,z) = (rank() OVER (), rank() OVER ())
+
+statement error value type setof tuple{int} doesn't match type INT of column "x"
+UPDATE t32477 SET x = generate_series(1, 2)
 
 #regression test for #32054
 subtest empty_update_subquery
@@ -558,44 +567,3 @@ query II
 SELECT * FROM t32054
 ----
 NULL  NULL
-
-# ------------------------------------------------------------------------------
-# Regression for #35364.
-# ------------------------------------------------------------------------------
-subtest regression_35364
-
-statement ok
-CREATE TABLE t35364(x DECIMAL(1,0) CHECK (x >= 1))
-
-statement ok
-INSERT INTO t35364 VALUES (2)
-
-statement ok
-UPDATE t35364 SET x=0.5
-
-query T
-SELECT x FROM t35364
-----
-1
-
-# ------------------------------------------------------------------------------
-# Regression for #35970.
-# ------------------------------------------------------------------------------
-statement ok
-CREATE TABLE table35970 (
-    a INT PRIMARY KEY,
-    b INT,
-    c INT8[],
-    FAMILY fam0 (a, b),
-    FAMILY fam1 (c)
-)
-
-statement ok
-INSERT INTO table35970 VALUES (1, 1, NULL);
-
-query I
-UPDATE table35970
-SET c = c
-RETURNING b
-----
-1

@@ -1,50 +1,24 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
 import (
-	"regexp"
-	"strings"
-
 	"github.com/gogo/protobuf/protoc-gen-gogo/descriptor"
 	"github.com/gogo/protobuf/vanity"
 	"github.com/gogo/protobuf/vanity/command"
 )
-
-// As we invoke it, the generator will sometimes prepend the cockroachdb github
-// URL to what should be unqualified standard library imports. This regexp
-// allows us to identify and fix those bad imports.
-var builtinRegex *regexp.Regexp = regexp.MustCompile(`github.com/cockroachdb/cockroach/pkg/(?P<capture>(bytes|context|encoding/binary|errors|fmt|io|math|github\.com|(google\.)?golang\.org)([^a-z]|$$))`)
-
-func fixImports(s string) string {
-	lines := strings.Split(s, "\n")
-	var builder strings.Builder
-	for _, line := range lines {
-		if strings.Contains(line, "import _ ") ||
-			strings.Contains(line, "import fmt \"github.com/cockroachdb/cockroach/pkg/fmt\"") ||
-			strings.Contains(line, "import math \"github.com/cockroachdb/cockroach/pkg/math\"") {
-			continue
-		}
-
-		line = strings.ReplaceAll(line, "github.com/cockroachdb/cockroach/pkg/etcd", "go.etcd.io/etcd")
-		line = strings.ReplaceAll(line, "github.com/cockroachdb/cockroach/pkg/errorspb", "github.com/cockroachdb/errors/errorspb")
-		line = strings.ReplaceAll(line, "golang.org/x/net/context", "context")
-		if builtinRegex.MatchString(line) {
-			line = builtinRegex.ReplaceAllString(line, "$1")
-		}
-		builder.WriteString(line)
-		builder.WriteByte('\n')
-	}
-	return builder.String()
-}
 
 func main() {
 	req := command.Read()
@@ -106,14 +80,7 @@ func main() {
 		// Something something extensions; we don't use 'em currently.
 		// vanity.TurnOffGoExtensionsMapAll,
 
-		// Disable generation of the following fields, which aren't worth
-		// their associated runtime cost:
-		// - XXX_unrecognized
-		// - XXX_NoUnkeyedLiteral
-		// - XXX_sizecache
 		vanity.TurnOffGoUnrecognizedAll,
-		vanity.TurnOffGoUnkeyedAll,
-		vanity.TurnOffGoSizecacheAll,
 
 		// Adds unnecessary dependency on golang/protobuf.
 		// vanity.TurnOffGogoImport,
@@ -122,8 +89,5 @@ func main() {
 	}
 
 	resp := command.Generate(req)
-	for i := 0; i < len(resp.File); i++ {
-		*resp.File[i].Content = fixImports(*resp.File[i].Content)
-	}
 	command.Write(resp)
 }

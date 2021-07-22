@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import { assert } from "chai";
 
 import { LocalityTier, LocalityTree } from "src/redux/localities";
@@ -19,8 +9,8 @@ const nycLocality: LocalityTier[] = [
   { key: "city", value: "nyc" },
 ];
 
-describe("findMostSpecificLocation", function () {
-  it("returns null when location tree is empty", function () {
+describe("findMostSpecificLocation", function() {
+  it("returns null when location tree is empty", function() {
     const locations: LocationTree = {};
 
     const location = findMostSpecificLocation(locations, nycLocality);
@@ -28,7 +18,7 @@ describe("findMostSpecificLocation", function () {
     assert.equal(location, null);
   });
 
-  it("returns the location of a locality", function () {
+  it("returns the location of a locality", function() {
     const locations = {
       region: {
         "us-east-1": {
@@ -45,7 +35,7 @@ describe("findMostSpecificLocation", function () {
     assert.deepEqual(location, locations.region["us-east-1"]);
   });
 
-  it("finds the most specific location for a locality", function () {
+  it("finds the most specific location for a locality", function() {
     const locations = {
       region: {
         "us-east-1": {
@@ -56,7 +46,7 @@ describe("findMostSpecificLocation", function () {
         },
       },
       city: {
-        nyc: {
+        "nyc": {
           locality_key: "city",
           locality_value: "nyc",
           latitude: 45.6,
@@ -71,12 +61,12 @@ describe("findMostSpecificLocation", function () {
   });
 });
 
-describe("findOrCalculateLocation", function () {
-  describe("when locality has location", function () {
-    it("returns the locality's location", function () {
+describe("findOrCalculateLocation", function() {
+  describe("when locality has location", function() {
+    it("returns the locality's location", function() {
       const locations = {
         city: {
-          nyc: {
+          "nyc": {
             locality_key: "region",
             locality_value: "us-east-1",
             latitude: 12.3,
@@ -97,9 +87,9 @@ describe("findOrCalculateLocation", function () {
     });
   });
 
-  describe("when locality doesn't have location", function () {
-    describe("when locality has nodes", function () {
-      it("returns null", function () {
+  describe("when locality doesn't have location", function() {
+    describe("when locality has nodes", function() {
+      it("returns null", function() {
         const locations = {
           region: {
             "us-east-1": {
@@ -132,8 +122,8 @@ describe("findOrCalculateLocation", function () {
       });
     });
 
-    describe("when locality has children without locations", function () {
-      it("returns null", function () {
+    describe("when locality has children without locations", function() {
+      it("returns null", function() {
         const locations = {};
 
         const locality: LocalityTree = {
@@ -156,12 +146,12 @@ describe("findOrCalculateLocation", function () {
       });
     });
 
-    describe("when locality has children with locations", function () {
+    describe("when locality has children with locations", function() {
       // TODO(couchand): actually test the centroid
-      it("returns their centroid", function () {
+      it("returns their centroid", function() {
         const locations = {
           city: {
-            nyc: {
+            "nyc": {
               locality_key: "region",
               locality_value: "us-east-1",
               latitude: 12.3,

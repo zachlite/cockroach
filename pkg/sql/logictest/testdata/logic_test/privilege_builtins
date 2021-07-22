@@ -1,31 +1,10 @@
-# LogicTest: !fakedist-spec-planning
+# LogicTest: default distsql
 
 statement ok
-CREATE USER bar; CREATE USER all_user_db; CREATE USER all_user_schema
-
-statement ok
-CREATE SCHEMA test_schema
+CREATE USER bar
 
 statement ok
 GRANT CREATE ON DATABASE test TO bar
-
-statement ok
-GRANT SELECT ON DATABASE test to testuser
-
-statement ok
-GRANT CREATE ON SCHEMA test_schema TO bar
-
-statement ok
-GRANT CREATE ON SCHEMA test_schema TO testuser
-
-statement ok
-GRANT USAGE ON SCHEMA test_schema TO testuser
-
-statement ok
-GRANT ALL ON DATABASE test to all_user_db;
-
-statement ok
-GRANT ALL ON SCHEMA test_schema to all_user_schema;
 
 statement ok
 CREATE TABLE t (a INT, b INT);
@@ -73,7 +52,7 @@ SELECT has_any_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_ty
        has_any_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'UPDATE'),
        has_any_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'REFERENCES')
 ----
-true  false  false  true
+false  false  false  false
 
 query BBBB
 SELECT has_any_column_privilege((SELECT oid FROM pg_class WHERE relname = 't'), 'SELECT'),
@@ -93,7 +72,7 @@ SELECT has_any_column_privilege('pg_type', 'SELECT'),
        has_any_column_privilege('pg_type', 'REFERENCES'),
        has_any_column_privilege('pg_type', 'SELECT, INSERT, UPDATE')
 ----
-true  false  false  true  false
+false  false  false  false  false
 
 query BBBBB
 SELECT has_any_column_privilege('t', 'SELECT'),
@@ -169,7 +148,7 @@ SELECT has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type')
        has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 1, 'UPDATE'),
        has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 1, 'REFERENCES')
 ----
-true  false  false  true
+false  false  false  false
 
 query BBBB
 SELECT has_column_privilege((SELECT oid FROM pg_class WHERE relname = 't'), 1, 'SELECT'),
@@ -182,11 +161,8 @@ true  true  true  true
 query error pgcode 42P01 relation "does_not_exist" does not exist
 SELECT has_column_privilege('does_not_exist', 1, 'SELECT')
 
-query error pgcode 42703 column 100 of relation pg_type does not exist
+query error pgcode 42703 column 100 of relation 'pg_type' does not exist
 SELECT has_column_privilege('pg_type', 100, 'SELECT')
-
-query error pgcode 42703 column 100 of relation pg_type does not exist
-SELECT has_column_privilege('pg_type'::regclass, 100, 'SELECT')
 
 query BBBBB
 SELECT has_column_privilege('pg_type', 1, 'SELECT'),
@@ -195,7 +171,7 @@ SELECT has_column_privilege('pg_type', 1, 'SELECT'),
        has_column_privilege('pg_type', 1, 'REFERENCES'),
        has_column_privilege('pg_type', 1, 'SELECT, INSERT, UPDATE')
 ----
-true  false  false  true  false
+false  false  false  false  false
 
 query BBBBB
 SELECT has_column_privilege('t', 1, 'SELECT'),
@@ -253,7 +229,7 @@ SELECT has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type')
        has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'typname', 'UPDATE'),
        has_column_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'typname', 'REFERENCES')
 ----
-true  false  false  true
+false  false  false  false
 
 query BBBB
 SELECT has_column_privilege((SELECT oid FROM pg_class WHERE relname = 't'), 'a', 'SELECT'),
@@ -266,11 +242,8 @@ true  true  true  true
 query error pgcode 42P01 relation "does_not_exist" does not exist
 SELECT has_column_privilege('does_not_exist', 'col', 'SELECT')
 
-query error pgcode 42703 column "does not exist" does not exist
+query error pgcode 42703 column 'does not exist' of relation 'pg_type' does not exist
 SELECT has_column_privilege('pg_type', 'does not exist', 'SELECT')
-
-query error pgcode 42703 column "does not exist" does not exist
-SELECT has_column_privilege('pg_type'::regclass, 'does not exist', 'SELECT')
 
 query BBBBB
 SELECT has_column_privilege('pg_type', 'typname', 'SELECT'),
@@ -279,7 +252,7 @@ SELECT has_column_privilege('pg_type', 'typname', 'SELECT'),
        has_column_privilege('pg_type', 'typname', 'REFERENCES'),
        has_column_privilege('pg_type', 'typname', 'SELECT, INSERT, UPDATE')
 ----
-true  false  false  true  false
+false  false  false  false  false
 
 query BBBBB
 SELECT has_column_privilege('t', 'a', 'SELECT'),
@@ -349,7 +322,7 @@ SELECT has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'syst
        has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'system'), 'TEMPORARY'),
        has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'system'), 'TEMP')
 ----
-false  false  false  false
+false  true  false  false
 
 query BBBB
 SELECT has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'test'), 'CREATE'),
@@ -369,7 +342,7 @@ SELECT has_database_privilege('system', '  CrEaTe      '),
        has_database_privilege('system', 'TEMP'),
        has_database_privilege('system', '  CrEaTe      ,CONNECT')
 ----
-false  false  false  false  false
+false  true  false  false  false
 
 query BBBBB
 SELECT has_database_privilege('test', '  CrEaTe      '),
@@ -398,34 +371,6 @@ SELECT has_database_privilege('test'::Name, 'CREATE'),
 ----
 true  true  true  true  true
 
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'CREATE') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'CONNECT') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'TEMP') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'TEMPORARY') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
 query error pgcode 22023 unrecognized privilege type: "UPDATE"
 SELECT has_database_privilege('test', 'UPDATE')
 
@@ -443,15 +388,7 @@ SELECT has_database_privilege('bar', 'test', 'CREATE'),
        has_database_privilege('bar', 'test', 'CREATE, CONNECT'),
        has_database_privilege('bar', 'test', 'CREATE, TEMP')
 ----
-true  false  true  true  false  true
-
-statement ok
-GRANT CONNECT ON DATABASE test TO bar
-
-query B
-SELECT has_database_privilege('bar', 'test', 'CONNECT')
-----
-true
+true  true  true  true  true  true
 
 query BBBBBB
 SELECT has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION'),
@@ -461,7 +398,7 @@ SELECT has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION'),
        has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION, CONNECT WITH GRANT OPTION'),
        has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION, TEMP WITH GRANT OPTION')
 ----
-false  false  false  false  false  false
+false  true  false  false  false  false
 
 
 ## has_foreign_data_wrapper_privilege
@@ -661,55 +598,6 @@ SELECT has_schema_privilege('bar', 'public', 'CREATE WITH GRANT OPTION'),
 ----
 false  false  false
 
-query BBB
-SELECT has_schema_privilege('testuser', 'public', 'CREATE'),
-       has_schema_privilege('testuser', 'public', 'USAGE'),
-       has_schema_privilege('testuser', 'public', 'CREATE, USAGE')
-----
-false  true  false
-
-query BBB
-SELECT has_schema_privilege('bar', 'test_schema', 'CREATE'),
-       has_schema_privilege('bar', 'test_schema', 'USAGE'),
-       has_schema_privilege('bar', 'test_schema', 'CREATE, USAGE')
-----
-true  false  false
-
-query BBB
-SELECT has_schema_privilege('testuser', 'test_schema', 'CREATE'),
-       has_schema_privilege('testuser', 'test_schema', 'USAGE'),
-       has_schema_privilege('testuser', 'test_schema', 'CREATE, USAGE')
-----
-true  true  true
-
-query BBB
-SELECT has_schema_privilege('all_user_db', 'public', 'CREATE'),
-       has_schema_privilege('all_user_db', 'public', 'USAGE'),
-       has_schema_privilege('all_user_db', 'public', 'CREATE, USAGE')
-----
-true  true  true
-
-query BBB
-SELECT has_schema_privilege('all_user_db', 'test_schema', 'CREATE'),
-       has_schema_privilege('all_user_db', 'test_schema', 'USAGE'),
-       has_schema_privilege('all_user_db', 'test_schema', 'CREATE, USAGE')
-----
-false  false  false
-
-query BBB
-SELECT has_schema_privilege('all_user_schema', 'public', 'CREATE'),
-       has_schema_privilege('all_user_schema', 'public', 'USAGE'),
-       has_schema_privilege('all_user_schema', 'public', 'CREATE, USAGE')
-----
-false  false  false
-
-query BBB
-SELECT has_schema_privilege('all_user_schema', 'test_schema', 'CREATE'),
-       has_schema_privilege('all_user_schema', 'test_schema', 'USAGE'),
-       has_schema_privilege('all_user_schema', 'test_schema', 'CREATE, USAGE')
-----
-true  true  true
-
 
 ## has_sequence_privilege
 
@@ -851,7 +739,7 @@ SELECT has_table_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'),
        has_table_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'REFERENCES'),
        has_table_privilege((SELECT oid FROM pg_class WHERE relname = 'pg_type'), 'TRIGGER')
 ----
-true  false  false  false  false  true  false
+false  false  false  false  false  false  false
 
 query BBBBBBB
 SELECT has_table_privilege((SELECT oid FROM pg_class WHERE relname = 't'), 'SELECT'),
@@ -878,7 +766,7 @@ SELECT has_table_privilege('pg_type', 'SELECT'),
        has_table_privilege('pg_type', 'SELECT, INSERT, UPDATE'),
        has_table_privilege('pg_type', 'SELECT, TRUNCATE')
 ----
-true  false  false  false  false  true  false  false  false
+false  false  false  false  false  false  false  false  false
 
 query BBBBBBBBB
 SELECT has_table_privilege('t', 'SELECT'),
@@ -1065,109 +953,3 @@ query B
 SELECT has_type_privilege('bar', 'text'::REGTYPE::OID, 'USAGE')
 ----
 true
-
-# Regression test for #39703.
-
-statement ok
-DROP TABLE IF EXISTS hcp_test; CREATE TABLE hcp_test (a INT8, b INT8, c INT8)
-
-statement ok
-ALTER TABLE hcp_test DROP COLUMN b
-
-query TI
-SELECT attname, attnum FROM pg_attribute WHERE attrelid = 'hcp_test'::REGCLASS
-----
-a     1
-c     3
-rowid 4
-
-query B
-SELECT has_column_privilege('hcp_test'::REGCLASS, 1, 'SELECT')
-----
-true
-
-statement error column 2 of relation hcp_test does not exist
-SELECT has_column_privilege('hcp_test'::REGCLASS, 2, 'SELECT')
-
-query B
-SELECT has_column_privilege('hcp_test'::REGCLASS, 3, 'SELECT')
-----
-true
-
-query B
-SELECT has_column_privilege('hcp_test'::REGCLASS, 4, 'SELECT')
-----
-true
-
-# Regression test for #58254. Tests privilege inheritance for roles (direct and indirect).
-
-user root
-
-statement ok
-DROP DATABASE IF EXISTS my_db;
-CREATE DATABASE my_db;
-
-statement ok
-CREATE ROLE my_role;
-
-statement ok
-GRANT CREATE ON DATABASE my_db TO my_role;
-GRANT my_role TO testuser;
-
-user testuser
-
-statement ok
-use my_db
-
-statement ok
-CREATE SCHEMA s;
-CREATE TABLE s.t()
-
-# Privilege check on direct member of role with CREATE privilege granted.
-query B
-SELECT has_schema_privilege('testuser', 's', 'create')
-----
-true
-
-# Privilege check on direct member of role without USAGE privilege granted.
-query B
-SELECT has_schema_privilege('testuser', 's', 'usage')
-----
-false
-
-# Confirm privilege checks on all objects.
-query BBB
-SELECT has_database_privilege('testuser', 'my_db', 'create'),
-       has_schema_privilege('testuser', 'public', 'usage'),
-       has_table_privilege('testuser', 's.t', 'select')
-----
-true  false  true
-
-user root
-
-statement ok
-CREATE USER testuser2;
-GRANT testuser TO testuser2;
-GRANT ALL ON SCHEMA my_db.s TO testuser2
-
-user testuser2
-
-statement ok
-use my_db
-
-# Make sure testuser only has CREATE privilege on schema s but testuser2 has both CREATE and USAGE.
-query BBBB
-SELECT has_schema_privilege('testuser', 's', 'create'),
-       has_schema_privilege('testuser', 's', 'usage'),
-       has_schema_privilege('testuser2', 's', 'create'),
-       has_schema_privilege('testuser2', 's', 'usage')
-----
-true false true true
-
-# Confirm privilege checks on all objects with testuser2, should match testuser.
-query BBB
-SELECT has_database_privilege('testuser2', 'my_db', 'create'),
-       has_schema_privilege('testuser2', 'public', 'usage'),
-       has_table_privilege('testuser2', 's.t', 'select')
-----
-true  false  true

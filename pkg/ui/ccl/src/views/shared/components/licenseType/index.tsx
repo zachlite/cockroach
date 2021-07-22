@@ -8,19 +8,23 @@
 
 import React from "react";
 
-import DebugAnnotation from "src/views/shared/components/debugAnnotation";
 import swapByLicense from "src/views/shared/containers/licenseSwap";
 import OSSLicenseType from "oss/src/views/shared/components/licenseType";
 
 class CCLLicenseType extends React.Component<{}, {}> {
   render() {
-    return <DebugAnnotation label="License type" value="CCL" />;
+    return (
+      <div>
+        <h3>License type: CCL</h3>
+      </div>
+    );
   }
 }
 
 /**
  * LicenseType is an indicator showing the current build license.
  */
+// tslint:disable-next-line:variable-name
 const LicenseType = swapByLicense(OSSLicenseType, CCLLicenseType);
 
 export default LicenseType;

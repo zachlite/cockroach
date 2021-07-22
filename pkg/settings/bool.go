@@ -1,16 +1,18 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package settings
-
-import "context"
 
 // BoolSetting is the interface of a setting variable that will be
 // updated automatically when the corresponding cluster-wide setting
@@ -20,7 +22,7 @@ type BoolSetting struct {
 	defaultValue bool
 }
 
-var _ extendedSetting = &BoolSetting{}
+var _ Setting = &BoolSetting{}
 
 // Get retrieves the bool value in the setting.
 func (b *BoolSetting) Get(sv *Values) bool {
@@ -31,75 +33,28 @@ func (b *BoolSetting) String(sv *Values) string {
 	return EncodeBool(b.Get(sv))
 }
 
-// Encoded returns the encoded value of the current value of the setting.
-func (b *BoolSetting) Encoded(sv *Values) string {
-	return b.String(sv)
-}
-
-// EncodedDefault returns the encoded value of the default value of the setting.
-func (b *BoolSetting) EncodedDefault() string {
-	return EncodeBool(b.defaultValue)
-}
-
 // Typ returns the short (1 char) string denoting the type of setting.
 func (*BoolSetting) Typ() string {
 	return "b"
 }
 
-// Default returns default value for setting.
-func (b *BoolSetting) Default() bool {
-	return b.defaultValue
-}
-
-// Defeat the linter.
-var _ = (*BoolSetting).Default
-
-// Override changes the setting without validation and also overrides the
-// default value.
-//
+// Override changes the setting without validation.
 // For testing usage only.
-func (b *BoolSetting) Override(ctx context.Context, sv *Values, v bool) {
-	b.set(ctx, sv, v)
-
+func (b *BoolSetting) Override(sv *Values, v bool) {
 	vInt := int64(0)
 	if v {
 		vInt = 1
 	}
-	sv.setDefaultOverrideInt64(b.slotIdx, vInt)
+	sv.setInt64(b.slotIdx, vInt)
 }
 
-func (b *BoolSetting) set(ctx context.Context, sv *Values, v bool) {
-	vInt := int64(0)
-	if v {
-		vInt = 1
-	}
-	sv.setInt64(ctx, b.slotIdx, vInt)
+func (b *BoolSetting) set(sv *Values, v bool) {
+	b.Override(sv, v)
 }
 
-func (b *BoolSetting) setToDefault(ctx context.Context, sv *Values) {
-	// See if the default value was overridden.
-	ok, val, _ := sv.getDefaultOverride(b.slotIdx)
-	if ok {
-		b.set(ctx, sv, val > 0)
-		return
-	}
-	b.set(ctx, sv, b.defaultValue)
+func (b *BoolSetting) setToDefault(sv *Values) {
+	b.set(sv, b.defaultValue)
 }
-
-// WithPublic sets public visibility and can be chained.
-func (b *BoolSetting) WithPublic() *BoolSetting {
-	b.SetVisibility(Public)
-	return b
-}
-
-// WithSystemOnly marks this setting as system-only and can be chained.
-func (b *BoolSetting) WithSystemOnly() *BoolSetting {
-	b.common.systemOnly = true
-	return b
-}
-
-// Defeat the linter.
-var _ = (*BoolSetting).WithSystemOnly
 
 // RegisterBoolSetting defines a new setting with type bool.
 func RegisterBoolSetting(key, desc string, defaultValue bool) *BoolSetting {

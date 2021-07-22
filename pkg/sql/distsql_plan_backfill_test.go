@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
@@ -16,21 +20,19 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func TestDistBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	skip.UnderShort(t, "13645")
+	if testing.Short() {
+		t.Skip("short flag #13645")
+	}
 
 	// This test sets up various queries using these tables:
 	//  - a NumToSquare table of size N that maps integers from 1 to n to their
@@ -44,7 +46,7 @@ func TestDistBackfill(t *testing.T) {
 	}
 	const numNodes = 5
 
-	tc := serverutils.StartNewTestCluster(t, numNodes,
+	tc := serverutils.StartTestCluster(t, numNodes,
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -59,7 +61,7 @@ func TestDistBackfill(t *testing.T) {
 				},
 			},
 		})
-	defer tc.Stopper().Stop(context.Background())
+	defer tc.Stopper().Stop(context.TODO())
 	cdb := tc.Server(0).DB()
 
 	sqlutils.CreateTable(
@@ -76,17 +78,15 @@ func TestDistBackfill(t *testing.T) {
 		sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowEnglishFn),
 	)
 	// Split the table into multiple ranges.
-	descNumToStr := catalogkv.TestingGetTableDescriptor(cdb, keys.SystemSQLCodec, "test", "numtostr")
-	var sps []SplitPoint
-	//for i := 1; i <= numNodes-1; i++ {
+	descNumToStr := sqlbase.GetTableDescriptor(cdb, "test", "numtostr")
+	// SplitTable moves the right range, so we split things back to front
+	// in order to move less data.
 	for i := numNodes - 1; i > 0; i-- {
-		sps = append(sps, SplitPoint{i, []interface{}{n * n / numNodes * i}})
+		SplitTable(t, tc, descNumToStr, i, n*n/numNodes*i)
 	}
-	SplitTable(t, tc, descNumToStr, sps)
 
-	db := tc.ServerConn(0)
-	db.SetMaxOpenConns(1)
-	r := sqlutils.MakeSQLRunner(db)
+	r := sqlutils.MakeSQLRunner(tc.ServerConn(0))
+	r.DB.SetMaxOpenConns(1)
 	r.Exec(t, "SET DISTSQL = OFF")
 	if _, err := tc.ServerConn(0).Exec(`CREATE INDEX foo ON numtostr (str)`); err != nil {
 		t.Fatal(err)

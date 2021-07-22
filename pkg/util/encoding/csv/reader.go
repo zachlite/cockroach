@@ -1,13 +1,3 @@
-// Copyright 2019 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in licenses/BSD-golang.txt.
@@ -64,12 +54,11 @@ package csv
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/cockroachdb/errors"
 )
 
 // A ParseError is returned for parsing errors.
@@ -81,29 +70,14 @@ type ParseError struct {
 	Err       error // The actual error
 }
 
-var _ error = (*ParseError)(nil)
-var _ fmt.Formatter = (*ParseError)(nil)
-var _ errors.Formatter = (*ParseError)(nil)
-
-// Error implements error.
-func (e *ParseError) Error() string { return fmt.Sprintf("%v", e) }
-
-// Cause implements causer.
-func (e *ParseError) Cause() error { return e.Err }
-
-// Format implements fmt.Formatter.
-func (e *ParseError) Format(s fmt.State, verb rune) { errors.FormatError(e, s, verb) }
-
-// FormatError implements errors.Formatter.
-func (e *ParseError) FormatError(p errors.Printer) error {
-	if errors.Is(e.Err, ErrFieldCount) {
-		p.Printf("record on line %d", e.Line)
-	} else if e.StartLine != e.Line {
-		p.Printf("record on line %d; parse error on line %d, column %d", e.StartLine, e.Line, e.Column)
-	} else {
-		p.Printf("parse error on line %d, column %d", e.Line, e.Column)
+func (e *ParseError) Error() string {
+	if e.Err == ErrFieldCount {
+		return fmt.Sprintf("record on line %d: %v", e.Line, e.Err)
 	}
-	return e.Err
+	if e.StartLine != e.Line {
+		return fmt.Sprintf("record on line %d; parse error on line %d, column %d: %v", e.StartLine, e.Line, e.Column, e.Err)
+	}
+	return fmt.Sprintf("parse error on line %d, column %d: %v", e.Line, e.Column, e.Err)
 }
 
 // These are the errors that can be returned in ParseError.Err.
@@ -228,9 +202,9 @@ func (r *Reader) ReadAll() (records [][]string, err error) {
 // The result is only valid until the next call to readLine.
 func (r *Reader) readLine() ([]byte, error) {
 	line, err := r.r.ReadSlice('\n')
-	if errors.Is(err, bufio.ErrBufferFull) {
+	if err == bufio.ErrBufferFull {
 		r.rawBuffer = append(r.rawBuffer[:0], line...)
-		for errors.Is(err, bufio.ErrBufferFull) {
+		for err == bufio.ErrBufferFull {
 			line, err = r.r.ReadSlice('\n')
 			r.rawBuffer = append(r.rawBuffer, line...)
 		}

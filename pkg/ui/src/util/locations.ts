@@ -1,17 +1,7 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 
 import { LocalityTier, LocalityTree } from "src/redux/localities";
-import { ILocation, LocationTree } from "src/redux/locations";
+import { Location, LocationTree } from "src/redux/locations";
 import * as vector from "src/util/vector";
 
 /*
@@ -40,10 +30,7 @@ export function hasLocation(locations: LocationTree, tier: LocalityTier) {
  * applies, and thus begins searching from the end of the list of tiers for a
  * tier with a matching location.  Returns null if none is found.
  */
-export function findMostSpecificLocation(
-  locations: LocationTree,
-  tiers: LocalityTier[],
-) {
+export function findMostSpecificLocation(locations: LocationTree, tiers: LocalityTier[]) {
   let currentIndex = tiers.length - 1;
   while (currentIndex >= 0) {
     const currentTier = tiers[currentIndex];
@@ -64,10 +51,7 @@ export function findMostSpecificLocation(
  * no location assigned to the locality itself, calculate the centroid of the
  * children.
  */
-export function findOrCalculateLocation(
-  locations: LocationTree,
-  locality: LocalityTree,
-) {
+export function findOrCalculateLocation(locations: LocationTree, locality: LocalityTree) {
   // If a location is assigned to this locality, return it.
   const thisTier = locality.tiers[locality.tiers.length - 1];
   const thisLocation = getLocation(locations, thisTier);
@@ -87,7 +71,7 @@ export function findOrCalculateLocation(
   }
 
   // Find (or calculate) the location of each child locality.
-  const childLocations: ILocation[] = [];
+  const childLocations: Location[] = [];
   _.values(locality.localities).forEach((tier) => {
     _.values(tier).forEach((child) => {
       childLocations.push(findOrCalculateLocation(locations, child));
@@ -101,9 +85,7 @@ export function findOrCalculateLocation(
 
   // Calculate the centroid of the child locations.
   let centroid: [number, number] = [0, 0];
-  childLocations.forEach(
-    (loc) => (centroid = vector.add(centroid, [loc.longitude, loc.latitude])),
-  );
+  childLocations.forEach((loc) => centroid = vector.add(centroid, [loc.longitude, loc.latitude]));
   centroid = vector.mult(centroid, 1 / childLocations.length);
   return { longitude: centroid[0], latitude: centroid[1] };
 }

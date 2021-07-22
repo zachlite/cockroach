@@ -1,12 +1,16 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package json
 
@@ -16,10 +20,10 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -62,7 +66,11 @@ func TestJSONRandomEncodeRoundTrip(t *testing.T) {
 }
 
 func TestFilesEncode(t *testing.T) {
-	dir := testutils.TestDataPath(t, "raw")
+	_, fname, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("couldn't get directory")
+	}
+	dir := filepath.Join(filepath.Dir(fname), "testdata", "raw")
 	dirContents, err := ioutil.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -109,8 +117,11 @@ func TestFilesEncode(t *testing.T) {
 			// rerun with -rewrite-results-in-testfiles.
 			t.Run(`explicit encoding`, func(t *testing.T) {
 				stringifiedEncoding := fmt.Sprintf("%v", encoded)
-				fixtureFilename := testutils.TestDataPath(
-					t, "encoded", tc.Name()+".bytes")
+				fixtureFilename := filepath.Join(
+					filepath.Dir(fname),
+					"testdata", "encoded",
+					tc.Name()+".bytes",
+				)
 
 				if *rewriteResultsInTestfiles {
 					err := ioutil.WriteFile(fixtureFilename, []byte(stringifiedEncoding), 0644)
@@ -154,7 +165,6 @@ func TestJSONEncodeRoundTrip(t *testing.T) {
 		`-1`,
 		`1000000000000000`,
 		`100000000000000000000000000000000000`,
-		`0e1`,
 		`[]`,
 		`["hello"]`,
 		`[1]`,
@@ -200,7 +210,6 @@ func TestJSONEncodeStrictRoundTrip(t *testing.T) {
 		`1.1231231230`,
 		`1.1231231230000`,
 		`1.1231231230000000`,
-		`0E+1`,
 	}
 
 	for _, tc := range cases {
@@ -222,6 +231,40 @@ func TestJSONEncodeStrictRoundTrip(t *testing.T) {
 		if newStr != tc {
 			t.Fatalf("expected %s, got %s", tc, newStr)
 		}
+	}
+}
+
+func TestJSONEncodeNonRoundTrip(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		// Due to the encoding used by the DECIMAL encoder, these values do not round trip perfectly.
+		{`0e+1`, `0`},
+		{`0e1`, `0`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			j, err := ParseJSON(tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			encoded, err := EncodeJSON(nil, j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, decoded, err := DecodeJSON(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			newStr := decoded.String()
+			if newStr != tc.expected {
+				t.Fatalf("expected %s, got %s", tc.expected, newStr)
+			}
+		})
 	}
 }
 

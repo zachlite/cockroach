@@ -1,3 +1,5 @@
+# LogicTest: default parallel-stmts distsql distsql-disk
+
 statement ok
 CREATE TABLE xyz (
   x INT PRIMARY KEY,
@@ -45,6 +47,16 @@ SELECT y FROM (SELECT DISTINCT y, z FROM xyz)
 3
 2
 
+# TODO(vivek): Use the secondary index. Use distinct in index selection.
+query TTT
+EXPLAIN SELECT DISTINCT y, z FROM xyz
+----
+distinct        ·      ·
+ └── render     ·      ·
+      └── scan  ·      ·
+·               table  xyz@primary
+·               spans  ALL
+
 query II partialsort(2)
 SELECT DISTINCT y, z FROM xyz ORDER BY z
 ----
@@ -53,6 +65,16 @@ SELECT DISTINCT y, z FROM xyz ORDER BY z
 2 6
 5 6
 2 9
+
+query TTT
+EXPLAIN SELECT DISTINCT y, z FROM xyz ORDER BY z
+----
+distinct        ·          ·
+ │              order key  y, z
+ └── render     ·          ·
+      └── scan  ·          ·
+·               table      xyz@foo
+·               spans      ALL
 
 query II partialsort(1)
 SELECT DISTINCT y, z FROM xyz ORDER BY y
@@ -63,6 +85,18 @@ SELECT DISTINCT y, z FROM xyz ORDER BY y
 3 5
 5 6
 
+query TTT
+EXPLAIN SELECT DISTINCT y, z FROM xyz ORDER BY y
+----
+distinct             ·          ·
+ │                   order key  y
+ └── sort            ·          ·
+      │              order      +y
+      └── render     ·          ·
+           └── scan  ·          ·
+·                    table      xyz@foo
+·                    spans      ALL
+
 query II
 SELECT DISTINCT y, z FROM xyz ORDER BY y, z
 ----
@@ -72,6 +106,18 @@ SELECT DISTINCT y, z FROM xyz ORDER BY y, z
 3 5
 5 6
 
+query TTT
+EXPLAIN SELECT DISTINCT y, z FROM xyz ORDER BY y, z
+----
+distinct             ·          ·
+ │                   order key  y, z
+ └── sort            ·          ·
+      │              order      +y,+z
+      └── render     ·          ·
+           └── scan  ·          ·
+·                    table      xyz@foo
+·                    spans      ALL
+
 query I
 SELECT DISTINCT y + z FROM xyz ORDER by (y + z)
 ----
@@ -79,14 +125,35 @@ SELECT DISTINCT y + z FROM xyz ORDER by (y + z)
 8
 11
 
-query II
-SELECT DISTINCT y AS w, z FROM xyz ORDER by z, w
+query TTT
+EXPLAIN SELECT DISTINCT y + z FROM xyz ORDER BY y + z
 ----
-2  3
-3  5
-2  6
-5  6
-2  9
+distinct             ·          ·
+ │                   order key  y + z
+ └── sort            ·          ·
+      │              order      +"y + z"
+      └── render     ·          ·
+           └── scan  ·          ·
+·                    table      xyz@primary
+·                    spans      ALL
+
+query I
+SELECT DISTINCT y AS w FROM xyz ORDER by z
+----
+2
+3
+5
+
+query TTT
+EXPLAIN SELECT DISTINCT y AS w FROM xyz ORDER BY z
+----
+distinct             ·      ·
+ └── nosort          ·      ·
+      │              order  +z
+      └── render     ·      ·
+           └── scan  ·      ·
+·                    table  xyz@foo
+·                    spans  ALL
 
 query I
 SELECT DISTINCT y AS w FROM xyz ORDER by y
@@ -94,6 +161,18 @@ SELECT DISTINCT y AS w FROM xyz ORDER by y
 2
 3
 5
+
+query TTT
+EXPLAIN SELECT DISTINCT y AS w FROM xyz ORDER BY y
+----
+distinct             ·          ·
+ │                   order key  w
+ └── sort            ·          ·
+      │              order      +w
+      └── render     ·          ·
+           └── scan  ·          ·
+·                    table      xyz@foo
+·                    spans      ALL
 
 # Insert NULL values for z.
 statement ok
@@ -120,15 +199,85 @@ SELECT DISTINCT (y,z) FROM xyz
 (2,)
 
 query I
-SELECT count(*) FROM (SELECT DISTINCT y FROM xyz)
+SELECT COUNT(*) FROM (SELECT DISTINCT y FROM xyz)
 ----
 3
+
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT x FROM xyz
+----
+render     ·      ·            (x)                          x!=NULL; key(x)
+ └── scan  ·      ·            (x, y[omitted], z[omitted])  x!=NULL; key(x)
+·          table  xyz@primary  ·                            ·
+·          spans  ALL          ·                            ·
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT x, y, z FROM xyz
+----
+scan  ·      ·            (x, y, z)  x!=NULL; key(x)
+·     table  xyz@primary  ·          ·
+·     spans  ALL          ·          ·
+
+statement ok
+CREATE TABLE abcd (
+  a INT,
+  b INT,
+  c INT,
+  d INT NOT NULL,
+  PRIMARY KEY (a, b, c),
+  UNIQUE INDEX (d, b)
+)
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT 1, d, b FROM abcd ORDER BY d, b
+----
+render     ·      ·                  ("1", d, b)                     "1"=CONST; d!=NULL; b!=NULL; key(d,b); +d,+b
+ └── scan  ·      ·                  (a[omitted], b, c[omitted], d)  b!=NULL; d!=NULL; key(b,d); +d,+b
+·          table  abcd@abcd_d_b_key  ·                               ·
+·          spans  ALL                ·                               ·
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT a, b FROM abcd
+----
+distinct        ·          ·             (a, b)                          a!=NULL; b!=NULL; key(a,b); +a,+b
+ │              order key  a, b          ·                               ·
+ └── render     ·          ·             (a, b)                          a!=NULL; b!=NULL; +a,+b
+      └── scan  ·          ·             (a, b, c[omitted], d[omitted])  a!=NULL; b!=NULL; c!=NULL; key(a,b,c); +a,+b
+·               table      abcd@primary  ·                               ·
+·               spans      ALL           ·                               ·
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT a, b, c FROM abcd
+----
+render     ·      ·             (a, b, c)              a!=NULL; b!=NULL; c!=NULL; key(a,b,c)
+ └── scan  ·      ·             (a, b, c, d[omitted])  a!=NULL; b!=NULL; c!=NULL; key(a,b,c)
+·          table  abcd@primary  ·                      ·
+·          spans  ALL           ·                      ·
+
+query TTTTT
+EXPLAIN (METADATA) SELECT DISTINCT a, b, c, d FROM abcd
+----
+scan  ·      ·             (a, b, c, d)  a!=NULL; b!=NULL; c!=NULL; key(a,b,c)
+·     table  abcd@primary  ·             ·
+·     spans  ALL           ·             ·
 
 statement ok
 CREATE TABLE kv (k INT PRIMARY KEY, v INT, UNIQUE INDEX idx(v))
 
 statement ok
 INSERT INTO kv VALUES (1, 1), (2, 2), (3, NULL), (4, NULL), (5, 5), (6, NULL)
+
+query TTTTT colnames
+EXPLAIN (VERBOSE) SELECT DISTINCT v FROM kv
+----
+Tree            Field     Description       Columns          Ordering
+distinct        ·         ·                 (v)              weak-key(v)
+ └── render     ·         ·                 (v)              ·
+      │         render 0  test.public.kv.v  ·                ·
+      └── scan  ·         ·                 (k[omitted], v)  k!=NULL; key(k)
+·               table     kv@primary        ·                ·
+·               spans     ALL               ·                ·
 
 query I rowsort
 SELECT DISTINCT v FROM kv
@@ -138,6 +287,19 @@ NULL
 2
 5
 
+# Verify we don't incorrectly elide the distinct node when we only have a weak key (#19343).
+query TTTTT colnames
+EXPLAIN (VERBOSE) SELECT DISTINCT v FROM kv@idx
+----
+Tree            Field      Description       Columns          Ordering
+distinct        ·          ·                 (v)              weak-key(v); +v
+ │              order key  v                 ·                ·
+ └── render     ·          ·                 (v)              weak-key(v); +v
+      │         render 0   test.public.kv.v  ·                ·
+      └── scan  ·          ·                 (k[omitted], v)  weak-key(v); +v
+·               table      kv@idx            ·                ·
+·               spans      ALL               ·                ·
+
 query I rowsort
 SELECT DISTINCT v FROM kv@idx
 ----
@@ -146,6 +308,17 @@ NULL
 2
 5
 
+# Here we can infer that v is not-NULL so eliding the node is correct.
+query TTTTT colnames
+EXPLAIN (VERBOSE) SELECT DISTINCT v FROM kv@idx WHERE v > 0
+----
+Tree       Field     Description       Columns          Ordering
+render     ·         ·                 (v)              v!=NULL; key(v)
+ │         render 0  test.public.kv.v  ·                ·
+ └── scan  ·         ·                 (k[omitted], v)  v!=NULL; key(v)
+·          table     kv@idx            ·                ·
+·          spans     /1-               ·                ·
+
 query I rowsort
 SELECT DISTINCT v FROM kv@idx WHERE v > 0
 ----
@@ -153,74 +326,16 @@ SELECT DISTINCT v FROM kv@idx WHERE v > 0
 2
 5
 
-# Regression test for #44296.
 statement ok
-CREATE TABLE t0(c0 INT UNIQUE);
+CREATE TABLE kv2 (k INT PRIMARY KEY, v INT NOT NULL, UNIQUE INDEX idx(v))
 
-statement ok
-CREATE VIEW v0(c0) AS SELECT DISTINCT t0.c0 FROM t0;
-
-statement ok
-INSERT INTO t0 (c0) VALUES (NULL), (NULL);
-
-query I
-SELECT * FROM v0 WHERE v0.c0 IS NULL
+# In this case it is correct to elide the distinct node.
+query TTTTT colnames
+EXPLAIN (VERBOSE) SELECT DISTINCT v FROM kv2@idx
 ----
-NULL
-
-# Regression test for #44079.
-statement ok
-CREATE TABLE t44079 (x INT[]);
-INSERT INTO t44079 VALUES (NULL), (ARRAY[NULL])
-
-query T rowsort
-SELECT DISTINCT * FROM t44079
-----
-NULL
-{NULL}
-
-statement ok
-DROP TABLE IF EXISTS t;
-CREATE TABLE t (x JSONB);
-INSERT INTO t VALUES
-  ('{"foo" : "bar"}'),
-  ('{"foo" : "bar"}'),
-  ('[1, 2]'),
-  ('[2, 1]'),
-  ('[1, 2]'),
-  ('{"foo": {"bar" : "baz"}}')
-
-query T rowsort
-SELECT DISTINCT (x) FROM t
-----
-[2, 1]
-[1, 2]
-{"foo": {"bar": "baz"}}
-{"foo": "bar"}
-
-statement ok
-DROP TABLE IF EXISTS t;
-CREATE TABLE t (x DECIMAL);
-INSERT INTO t VALUES (1.0), (1.00), (1.000)
-
-# We want to ensure that this only returns 1 element. We don't
-# check the element directly because it returns 1.0, 1.00, or
-# 1.000 non-deterministically in a distributed setting.
-query I
-SELECT COUNT (*) FROM (SELECT DISTINCT (array[x]) FROM t)
-----
-1
-
-# Regression for #46709.
-statement ok
-DROP TABLE IF EXISTS t;
-CREATE TABLE t (i INT, x INT, y INT, z STRING);
-INSERT INTO t VALUES
-  (1, 1, 2, 'hello'),
-  (2, 1, 2, 'hello'),
-  (3, 1, 2, 'hello there')
-
-query IT
-SELECT x, jsonb_agg(DISTINCT jsonb_build_object('y', y, 'z', z)) FROM (SELECT * FROM t ORDER BY i) GROUP BY x
-----
-1 [{"y": 2, "z": "hello"}, {"y": 2, "z": "hello there"}]
+Tree       Field     Description        Columns          Ordering
+render     ·         ·                  (v)              v!=NULL; key(v)
+ │         render 0  test.public.kv2.v  ·                ·
+ └── scan  ·         ·                  (k[omitted], v)  v!=NULL; key(v)
+·          table     kv2@idx            ·                ·
+·          spans     ALL                ·                ·

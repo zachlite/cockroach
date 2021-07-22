@@ -21,7 +21,9 @@ type StatelessComponent<P> = React.StatelessComponent<P>;
 type Component<P> = ComponentClass<P> | StatelessComponent<P>;
 
 function getComponentName<P>(wrappedComponent: Component<P>) {
-  return wrappedComponent.displayName || wrappedComponent.name || "Component";
+  return wrappedComponent.displayName
+    || wrappedComponent.name
+    || "Component";
 }
 
 function combineNames(a: string, b: string) {
@@ -36,7 +38,7 @@ interface OwnProps {
   enterpriseEnabled: boolean;
 }
 
-function mapStateToProps(state: AdminUIState): OwnProps {
+function mapStateToProps<T>(state: AdminUIState, _ownProps: T) {
   return {
     enterpriseEnabled: selectEnterpriseEnabled(state),
   };
@@ -47,29 +49,26 @@ function mapStateToProps(state: AdminUIState): OwnProps {
  * on the current license status.
  */
 export default function swapByLicense<TProps>(
-  OSSComponent: React.ComponentClass<TProps>,
-  CCLComponent: React.ComponentClass<TProps>,
-) {
+  // tslint:disable:variable-name
+  OSSComponent: Component<TProps>,
+  CCLComponent: Component<TProps>,
+  // tslint:enable:variable-name
+): ComponentClass<TProps> {
   const ossName = getComponentName(OSSComponent);
   const cclName = getComponentName(CCLComponent);
 
-  class LicenseSwap extends React.Component<TProps & OwnProps & any> {
-    public static displayName = `LicenseSwap(${combineNames(
-      ossName,
-      cclName,
-    )})`;
+  class LicenseSwap extends React.Component<TProps & OwnProps, {}> {
+    public static displayName = `LicenseSwap(${combineNames(ossName, cclName)})`;
 
     render() {
       const props = _.omit(this.props, ["enterpriseEnabled"]);
 
       if (!this.props.enterpriseEnabled) {
-        return <OSSComponent {...(props as TProps)} />;
+        return <OSSComponent {...props} />;
       }
-      return <CCLComponent {...(props as TProps)} />;
+      return <CCLComponent {...props} />;
     }
   }
 
-  return connect<OwnProps, null, TProps, AdminUIState>(mapStateToProps)(
-    LicenseSwap,
-  );
+  return connect(mapStateToProps)(LicenseSwap);
 }

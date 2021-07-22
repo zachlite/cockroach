@@ -1,43 +1,41 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql_test
 
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func TestTableRefs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, kvDB := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
+	defer s.Stopper().Stop(context.TODO())
 
 	// Populate the test database.
 	stmt := `
 CREATE DATABASE test;
 CREATE TABLE test.t(a INT PRIMARY KEY, xx INT, b INT, c INT);
-CREATE TABLE test.hidden(a INT, b INT);
 CREATE INDEX bc ON test.t(b, c);
 `
 	_, err := db.Exec(stmt)
@@ -46,32 +44,21 @@ CREATE INDEX bc ON test.t(b, c);
 	}
 
 	// Retrieve the numeric descriptors.
-	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
-	tID := tableDesc.GetID()
-	var aID, bID, cID descpb.ColumnID
-	for _, c := range tableDesc.PublicColumns() {
-		switch c.GetName() {
+	tableDesc := sqlbase.GetTableDescriptor(kvDB, "test", "t")
+	tID := tableDesc.ID
+	var aID, bID, cID sqlbase.ColumnID
+	for _, c := range tableDesc.Columns {
+		switch c.Name {
 		case "a":
-			aID = c.GetID()
+			aID = c.ID
 		case "b":
-			bID = c.GetID()
+			bID = c.ID
 		case "c":
-			cID = c.GetID()
+			cID = c.ID
 		}
 	}
-	pkID := tableDesc.GetPrimaryIndexID()
-	secID := tableDesc.PublicNonPrimaryIndexes()[0].GetID()
-
-	// Retrieve the numeric descriptors.
-	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "hidden")
-	tIDHidden := tableDesc.GetID()
-	var rowIDHidden descpb.ColumnID
-	for _, c := range tableDesc.PublicColumns() {
-		switch c.GetName() {
-		case "rowid":
-			rowIDHidden = c.GetID()
-		}
-	}
+	pkID := tableDesc.PrimaryIndex.ID
+	secID := tableDesc.Indexes[0].ID
 
 	// Make some schema changes meant to shuffle the ID/name mapping.
 	stmt = `
@@ -100,7 +87,7 @@ ALTER TABLE test.t DROP COLUMN xx;
 		{fmt.Sprintf("[%d(%d) as t]@bc", tID, cID), `(c)`, ``},
 		{fmt.Sprintf("[%d(%d, %d, %d) as t]", tID, cID, bID, aID), `(c, d, p)`, ``},
 		{fmt.Sprintf("[%d(%d, %d, %d) as t(c, b, a)]", tID, cID, bID, aID), `(c, b, a)`, ``},
-		{fmt.Sprintf("[%d() as t]", tID), ``, `pq: an explicit list of column IDs must include at least one column`},
+		{fmt.Sprintf("[%d() as t]", tID), `()`, ``},
 		{`[666() as t]`, ``, `pq: [666() AS t]: relation "[666]" does not exist`},
 		{fmt.Sprintf("[%d(666) as t]", tID), ``, `pq: column [666] does not exist`},
 		{fmt.Sprintf("test.t@[%d]", pkID), `(p, d, c)`, ``},
@@ -113,12 +100,11 @@ ALTER TABLE test.t DROP COLUMN xx;
 		{fmt.Sprintf("[%d(%d) as t]@[%d]", tID, aID, secID), `(p)`, ``},
 		{fmt.Sprintf("[%d(%d) as t]@[%d]", tID, bID, secID), `(d)`, ``},
 		{fmt.Sprintf("[%d(%d) as t]@[%d]", tID, cID, secID), `(c)`, ``},
-		{fmt.Sprintf("[%d(%d) as t]", tIDHidden, rowIDHidden), `()`, ``},
 	}
 
 	for i, d := range testData {
 		t.Run(d.tableExpr, func(t *testing.T) {
-			sql := `SELECT info FROM [EXPLAIN(VERBOSE) SELECT * FROM ` + d.tableExpr + `] WHERE info LIKE '%columns:%'`
+			sql := `SELECT "Columns" FROM [EXPLAIN(METADATA) SELECT * FROM ` + d.tableExpr + "]"
 			var columns string
 			if err := db.QueryRow(sql).Scan(&columns); err != nil {
 				if d.expectedError != "" {
@@ -129,8 +115,7 @@ ALTER TABLE test.t DROP COLUMN xx;
 					t.Fatalf("%d: %s: query failed: %v", i, d.tableExpr, err)
 				}
 			}
-			r := regexp.MustCompile("^.*columns: ")
-			columns = r.ReplaceAllString(columns, "")
+
 			if columns != d.expectedColumns {
 				t.Fatalf("%d: %s: expected: %s, got: %s", i, d.tableExpr, d.expectedColumns, columns)
 			}

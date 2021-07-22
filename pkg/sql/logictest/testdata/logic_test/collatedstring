@@ -1,3 +1,5 @@
+# LogicTest: default parallel-stmts distsql
+
 statement error pq: invalid locale bad_locale: language: subtag "locale" is well-formed but unknown
 SELECT 'a' COLLATE bad_locale
 
@@ -7,30 +9,15 @@ SELECT 'A' COLLATE en = 'a'
 statement error pq: unsupported comparison operator: <collatedstring{en}> = <collatedstring{de}>
 SELECT 'A' COLLATE en = 'a' COLLATE de
 
-statement error pq: unsupported comparison operator: \('a' COLLATE en_u_ks_level1\) IN \('A' COLLATE en_u_ks_level1, 'b' COLLATE en\): expected 'b' COLLATE en to be of type collatedstring\{en_u_ks_level1\}, found type collatedstring\{en\}
+statement error pq: unsupported comparison operator: \('a' COLLATE en_u_ks_level1\) IN \('A' COLLATE en_u_ks_level1, 'b' COLLATE en\): expected 'b' COLLATE en to be of type collatedstring{en_u_ks_level1}, found type collatedstring{en}
 SELECT ('a' COLLATE en_u_ks_level1) IN ('A' COLLATE en_u_ks_level1, 'b' COLLATE en)
 
-statement error pq: tuples \('a' COLLATE en_u_ks_level1, 'a' COLLATE en\), \('A' COLLATE en, 'B' COLLATE en\) are not comparable at index 1: unsupported comparison operator: <collatedstring\{en_u_ks_level1\}> < <collatedstring\{en\}>
+statement error pq: tuples \('a' COLLATE en_u_ks_level1, 'a' COLLATE en\), \('A' COLLATE en, 'B' COLLATE en\) are not comparable at index 1: unsupported comparison operator: <collatedstring{en_u_ks_level1}> < <collatedstring{en}
 SELECT ('a' COLLATE en_u_ks_level1, 'a' COLLATE en) < ('A' COLLATE en, 'B' COLLATE en)
 
 
 query T
 SELECT 'A' COLLATE en
-----
-A
-
-query T
-SELECT ('A' COLLATE de) COLLATE en
-----
-A
-
-query T
-SELECT NAME 'A' COLLATE en
-----
-A
-
-query T
-SELECT (NAME 'A' COLLATE de) COLLATE en
 ----
 A
 
@@ -192,17 +179,17 @@ SELECT 'ü' COLLATE de < 'x' COLLATE de
 true
 
 
-statement error syntax error: invalid locale e: language: tag is not well-formed
+statement error invalid locale e: language: tag is not well-formed at or near "\)"
 CREATE TABLE e1 (
   a STRING COLLATE e
 )
 
-statement error multiple COLLATE declarations for column "a"
+statement error multiple COLLATE declarations for column "a" at or near "\)"
 CREATE TABLE e2 (
   a STRING COLLATE en COLLATE de
 )
 
-statement error COLLATE declaration for non-string-typed column "a"
+statement error COLLATE declaration for non-string-typed column "a" at or near "\)"
 CREATE TABLE e3 (
   a INT COLLATE en
 )
@@ -215,12 +202,10 @@ CREATE TABLE t (
 query TT
 SHOW CREATE TABLE t
 ----
-t  CREATE TABLE public.t (
-   a STRING COLLATE en NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-   FAMILY "primary" (a, rowid)
-)
+t  CREATE TABLE t (
+     a STRING COLLATE en NULL,
+     FAMILY "primary" (a, rowid)
+   )
 
 statement ok
 INSERT INTO t VALUES
@@ -231,7 +216,7 @@ INSERT INTO t VALUES
   ('x' COLLATE en),
   ('ü' COLLATE en)
 
-statement error value type collatedstring{de} doesn't match type collatedstring{en} of column "a"
+statement error locale "de" doesn't match locale "en" of column "a"
 INSERT INTO t VALUES ('X' COLLATE de)
 
 query T
@@ -264,11 +249,6 @@ SELECT 'a' COLLATE en::STRING || 'b'
 ----
 ab
 
-query T
-SELECT 'a🐛b🏠c' COLLATE en::VARCHAR(3)
-----
-a🐛b
-
 query B
 SELECT 't' COLLATE en::BOOLEAN
 ----
@@ -300,14 +280,14 @@ SELECT '2017-01-10 16:05:50.734049+00:00' COLLATE en::TIMESTAMP
 2017-01-10 16:05:50.734049 +0000 +0000
 
 query T
-SELECT '2017-01-10 16:05:50.734049+00:00' COLLATE en::TIMESTAMPTZ
+SELECT '2017-01-10 16:05:50.734049+00:00' COLLATE en::TIMESTAMP WITH TIME ZONE
 ----
-2017-01-10 16:05:50.734049 +0000 UTC
+2017-01-10 16:05:50.734049 +0000 +0000
 
 query T
 SELECT '40 days' COLLATE en::INTERVAL
 ----
-40 days
+40d
 
 statement ok
 CREATE TABLE foo(a STRING COLLATE en_u_ks_level2)
@@ -339,200 +319,3 @@ query T
 SELECT * FROM foo WHERE a = 'abcd' COLLATE en_u_ks_level2
 ----
 aBcD
-
-# Test quoted collations.
-
-statement ok
-CREATE TABLE quoted_coll (
-  a STRING COLLATE "en",
-  b STRING COLLATE "en_US",
-  c STRING COLLATE "en-Us" DEFAULT ('c' COLLATE "en-Us"),
-  d STRING COLLATE "en-u-ks-level1" DEFAULT ('d'::STRING COLLATE "en-u-ks-level1"),
-  e STRING COLLATE "en-us" AS (a COLLATE "en-us") STORED,
-  FAMILY "primary" (a, b, c, d, e, rowid)
-)
-
-query TT
-SHOW CREATE TABLE quoted_coll
-----
-quoted_coll  CREATE TABLE public.quoted_coll (
-             a STRING COLLATE en NULL,
-             b STRING COLLATE en_US NULL,
-             c STRING COLLATE en_US NULL DEFAULT 'c':::STRING COLLATE en_US,
-             d STRING COLLATE en_u_ks_level1 NULL DEFAULT 'd':::STRING COLLATE en_u_ks_level1,
-             e STRING COLLATE en_US NULL AS (a COLLATE en_US) STORED,
-             rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-             CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-             FAMILY "primary" (a, b, c, d, e, rowid)
-)
-
-# Regression for #46570.
-statement ok
-CREATE TABLE t46570(c0 BOOL, c1 STRING COLLATE en);
-CREATE INDEX ON t46570(rowid, c1 DESC);
-INSERT INTO t46570(c1, rowid) VALUES('' COLLATE en, 0);
-UPSERT INTO t46570(rowid) VALUES (0), (1)
-
-# Test trailing spaces are truncated for char types.
-subtest regression_50015
-
-query T
-SELECT
-	t
-FROM
-	(
-		VALUES
-			('hello '::CHAR(100) COLLATE en_US),
-			('hello t'::CHAR(100) COLLATE en_US),
-			('hello '::STRING::CHAR(100) COLLATE en_US),
-			('hello t'::STRING::CHAR(100) COLLATE en_US)
-	) g(t)
-----
-hello
-hello t
-hello
-hello t
-
-statement ok
-CREATE TABLE t50015(id int PRIMARY KEY, a char(100), b char(100) COLLATE en);
-INSERT INTO t50015 VALUES
-  (1, 'hello', 'hello' COLLATE en),
-  (2, 'hello ', 'hello ' COLLATE en),
-  (3, repeat('hello ', 2), repeat('hello ', 2) COLLATE en)
-
-query ITITI
-SELECT id, a, length(a), b, length(b::string) FROM t50015 ORDER BY id ASC
-----
-1  hello                                                                                                 5   hello        5
-2  hello                                                                                                 5   hello        5
-3  hello hello                                                                                           11  hello hello  11
-
-statement ok
-CREATE TABLE t54989(
-  no_collation_str text,
-  no_collation_str_array text[],
-  collated_str text COLLATE en,
-  default_collation text COLLATE "default"
-)
-
-query TT
-SELECT
-    a.attname AS column_name,
-    collname AS collation
-FROM pg_attribute a
-LEFT JOIN pg_collation co ON a.attcollation = co.oid
-JOIN pg_class c ON a.attrelid = c.oid
-JOIN pg_namespace n ON c.relnamespace = n.oid
-WHERE c.relname = 't54989'
-ORDER BY column_name
-----
-collated_str            en
-default_collation       default
-no_collation_str        default
-no_collation_str_array  default
-rowid                   NULL
-
-# Regression test for collated string lowercase and hyphen/underscore equality.
-subtest nocase_strings
-
-statement ok
-CREATE TABLE nocase_strings (s STRING COLLATE "en-US-u-ks-level2");
-
-statement ok
-INSERT INTO nocase_strings VALUES ('Aaa' COLLATE "en-US-u-ks-level2"), ('Bbb' COLLATE "en-US-u-ks-level2");
-
-query T
-SELECT s FROM nocase_strings WHERE s = ('bbb' COLLATE "en-US-u-ks-level2")
-----
-Bbb
-
-query T
-SELECT s FROM nocase_strings WHERE s = ('bbb' COLLATE "en-us-u-ks-level2")
-----
-Bbb
-
-query T
-SELECT s FROM nocase_strings WHERE s = ('bbb' COLLATE "en_US_u_ks_level2")
-----
-Bbb
-
-statement ok
-CREATE TABLE collation_name_case (s STRING COLLATE en_us_u_ks_level2);
-
-query TT
-SHOW CREATE TABLE collation_name_case
-----
-collation_name_case  CREATE TABLE public.collation_name_case (
-                     s STRING COLLATE en_US_u_ks_level2 NULL,
-                     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-                     CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-                     FAMILY "primary" (s, rowid)
-)
-
-statement error invalid locale en-US-u-ks-le"vel2: language: tag is not well-formed
-CREATE TABLE nocase_strings (s STRING COLLATE "en-US-u-ks-le""vel2");
-
-statement error at or near "vel2": syntax error
-CREATE TABLE nocase_strings (s STRING COLLATE "en-US-u-ks-le"vel2");
-
-statement error invalid locale en-us-u-ks-l"evel2: language: tag is not well-formed
-SELECT s FROM nocase_strings WHERE s = ('bbb' COLLATE "en-us-u-ks-l""evel2")
-
-statement error at or near "evel2": syntax error
-SELECT s FROM nocase_strings WHERE s = ('bbb' COLLATE "en-us-u-ks-l"evel2")
-
-statement error DEFAULT collations are not supported
-SELECT 'default collate'::text collate "default"
-
-statement ok
-CREATE TABLE nocase_strings2 (
-  i INT,
-  s STRING COLLATE "en-US-u-ks-level2"
-);
-
-statement ok
-INSERT INTO nocase_strings2 VALUES (1, 'Aaa' COLLATE "en-US-u-ks-level2"), (2, 'Bbb' COLLATE "en-US-u-ks-level2");
-
-query T
-SELECT s FROM nocase_strings2 WHERE s = ('bbb' COLLATE "en-US-u-ks-level2")
-----
-Bbb
-
-query T
-SELECT s FROM nocase_strings2 WHERE s = ('bbb' COLLATE "en-us-u-ks-level2")
-----
-Bbb
-
-query T
-SELECT s FROM nocase_strings2 WHERE s = ('bbb' COLLATE "en_US_u_ks_level2")
-----
-Bbb
-
-# Test "char" is supposed to truncate long values
-subtest char_long_values
-
-statement ok
-CREATE TABLE t65631(a "char", b "char" COLLATE en)
-
-statement ok
-INSERT INTO t65631 VALUES ('abc', 'abc' COLLATE en)
-
-query TT
-SELECT a, b FROM t65631
-----
-a a
-
-subtest regression_45142
-
-statement ok
-CREATE TABLE t45142(c STRING COLLATE en);
-
-query error unsupported comparison operator
-SELECT * FROM t45142 WHERE c < SOME ('' COLLATE de, '' COLLATE en);
-
-query error unsupported comparison operator
-SELECT * FROM t45142 WHERE c < SOME ('' COLLATE en, '' COLLATE de);
-
-statement ok
-SELECT * FROM t45142 WHERE c < SOME (CASE WHEN true THEN NULL END, '' COLLATE en);
-SELECT * FROM t45142 WHERE c < SOME ('' COLLATE en, CASE WHEN true THEN NULL END);

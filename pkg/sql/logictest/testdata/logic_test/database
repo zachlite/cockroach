@@ -1,3 +1,5 @@
+# LogicTest: default
+
 statement ok
 CREATE DATABASE a
 
@@ -7,41 +9,25 @@ CREATE DATABASE a
 statement ok
 CREATE DATABASE IF NOT EXISTS a
 
-statement error pgcode 42601 empty database name
+statement error empty database name
 CREATE DATABASE ""
 
-query TTTTT colnames
+query T colnames
 SHOW DATABASES
 ----
-database_name  owner  primary_region  regions  survival_goal
-a              root   NULL            {}       NULL
-defaultdb      root   NULL            {}       NULL
-postgres       root   NULL            {}       NULL
-system         node   NULL            {}       NULL
-test           root   NULL            {}       NULL
+Database
+a
+system
+test
 
-statement ok
-COMMENT ON DATABASE a IS 'A'
-
-query TTTTTT colnames
-SHOW DATABASES WITH COMMENT
-----
-database_name  owner  primary_region  regions  survival_goal  comment
-a              root   NULL            {}       NULL           A
-defaultdb      root   NULL            {}       NULL           NULL
-postgres       root   NULL            {}       NULL           NULL
-system         node   NULL            {}       NULL           NULL
-test           root   NULL            {}       NULL           NULL
-
-query TT colnames
+query T colnames
 SHOW SCHEMAS FROM a
 ----
-schema_name         owner
-crdb_internal       NULL
-information_schema  NULL
-pg_catalog          NULL
-pg_extension        NULL
-public              admin
+Schema
+crdb_internal
+information_schema
+pg_catalog
+public
 
 statement ok
 CREATE DATABASE b TEMPLATE=template0
@@ -86,30 +72,21 @@ statement ok
 CREATE DATABASE b6 TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'
 
 statement ok
-CREATE DATABASE b7 WITH CONNECTION LIMIT -1
-
-statement error only connection limit -1 is supported, got: 1
-CREATE DATABASE b8 WITH CONNECTION LIMIT = 1
-
-statement ok
 CREATE DATABASE c
 
-query TTTTT
+query T
 SHOW DATABASES
 ----
-a          root  NULL  {}  NULL
-b          root  NULL  {}  NULL
-b2         root  NULL  {}  NULL
-b3         root  NULL  {}  NULL
-b4         root  NULL  {}  NULL
-b5         root  NULL  {}  NULL
-b6         root  NULL  {}  NULL
-b7         root  NULL  {}  NULL
-c          root  NULL  {}  NULL
-defaultdb  root  NULL  {}  NULL
-postgres   root  NULL  {}  NULL
-system     node  NULL  {}  NULL
-test       root  NULL  {}  NULL
+a
+b
+b2
+b3
+b4
+b5
+b6
+c
+system
+test
 
 statement ok
 CREATE TABLE b.a (id INT PRIMARY KEY)
@@ -144,22 +121,19 @@ DROP DATABASE b2 CASCADE;
   DROP DATABASE b3 CASCADE;
   DROP DATABASE b4 CASCADE;
   DROP DATABASE b5 CASCADE;
-  DROP DATABASE b6 CASCADE;
-  DROP DATABASE b7 CASCADE
+  DROP DATABASE b6 CASCADE
 
-statement error pgcode 42601 empty database name
+statement error empty database name
 DROP DATABASE ""
 
-query TTTTT colnames
+query T colnames
 SHOW DATABASES
 ----
-database_name  owner  primary_region  regions  survival_goal
-a              root   NULL            {}       NULL
-c              root   NULL            {}       NULL
-defaultdb      root   NULL            {}       NULL
-postgres       root   NULL            {}       NULL
-system         node   NULL            {}       NULL
-test           root   NULL            {}       NULL
+Database
+a
+c
+system
+test
 
 statement ok
 CREATE DATABASE b
@@ -174,68 +148,27 @@ query I
 SELECT * FROM b.a
 ----
 
-# Non-admin users need the CREATEDB role option to create databases.
 user testuser
 
-statement error permission denied to create database
+statement error only superusers are allowed to CREATE DATABASE
 CREATE DATABASE privs
 
 user root
 
 statement ok
-ALTER USER testuser CREATEDB
+CREATE DATABASE privs
 
 user testuser
 
-statement ok
-CREATE DATABASE privs
-
-# As the owner, testuser has DROP privileges.
-statement ok
+statement error user testuser does not have DROP privilege on database privs
 DROP DATABASE privs CASCADE
 
-# But needs explicit DROP privileges on databases where they're not the owner.
-statement error user testuser does not have DROP privilege on database a
-DROP DATABASE a CASCADE
-
 user root
 
 statement ok
-GRANT DROP ON DATABASE a TO testuser
+GRANT DROP ON DATABASE privs TO testuser
 
 user testuser
 
 statement ok
-DROP DATABASE a CASCADE
-
-# Test revoking CREATEDB.
-user root
-
-statement ok
-ALTER USER testuser NOCREATEDB
-
-user testuser
-
-statement error permission denied to create database
-CREATE DATABASE privs
-
-# Unit test for #61150
-user root
-
-statement ok
-CREATE DATABASE d1
-
-statement ok
-BEGIN
-
-statement ok
-DROP DATABASE d1
-
-statement error pgcode 55000 database "d1" is being dropped, try again later
-CREATE DATABASE IF NOT EXISTS d1
-
-statement ok
-END
-
-statement ok
-DROP DATABASE d1
+DROP DATABASE privs CASCADE

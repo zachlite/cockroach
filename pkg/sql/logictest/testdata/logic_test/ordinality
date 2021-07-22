@@ -1,5 +1,7 @@
+# LogicTest: default parallel-stmts distsql
+
 query TI colnames
-SELECT * FROM (VALUES ('a'), ('b')) WITH ORDINALITY AS x(name, i)
+SELECT * FROM (VALUES ('a'), ('b')) WITH ORDINALITY AS X(name, i)
 ----
 name i
 a 1
@@ -27,11 +29,11 @@ SELECT * FROM foo WITH ORDINALITY LIMIT 1
 a 1
 
 query I
-SELECT max(ordinality) FROM foo WITH ORDINALITY
+SELECT MAX(ordinality) FROM foo WITH ORDINALITY
 ----
 2
 
-query TITI rowsort
+query TITI
 SELECT * FROM foo WITH ORDINALITY AS a, foo WITH ORDINALITY AS b
 ----
 a 1 a 1
@@ -45,26 +47,11 @@ SELECT * FROM (SELECT x||x FROM foo) WITH ORDINALITY
 aa 1
 bb 2
 
-query TII rowsort
+query TII
 SELECT * FROM (SELECT x, ordinality*2 FROM foo WITH ORDINALITY AS a) JOIN foo WITH ORDINALITY AS b USING(x)
 ----
 a 2 1
 b 4 2
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x DESC) WITH ORDINALITY LIMIT 1
-----
-b 1
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x) WITH ORDINALITY ORDER BY x DESC LIMIT 1
-----
-b 2
-
-query TI
-SELECT * FROM (SELECT * FROM foo ORDER BY x) WITH ORDINALITY ORDER BY ordinality DESC LIMIT 1
-----
-b 2
 
 statement ok
 INSERT INTO foo(x) VALUES ('c')
@@ -94,12 +81,22 @@ true
 true
 true
 
-# Regression test for #33659
-statement ok
-TABLE [SHOW ZONE CONFIGURATIONS] WITH ORDINALITY
-
-# Regression test for #41760
-query TI
-SELECT * FROM (SELECT * FROM foo LIMIT 1) WITH ORDINALITY
+# Show that the primary key is used under ordinalityNode.
+query TTTTT
+EXPLAIN (METADATA) SELECT * FROM (SELECT * FROM foo WHERE x > 'a') WITH ORDINALITY
 ----
-a 1
+ordinality  ·      ·            (x, "ordinality")  x!=NULL; key(x); weak-key("ordinality")
+ └── scan   ·      ·            (x)                x!=NULL; key(x)
+·           table  foo@primary  ·                  ·
+·           spans  /"a\x00"-    ·                  ·
+
+# Show that the primary key cannot be used with a PK predicate
+# outside of ordinalityNode.
+query TTTTT
+EXPLAIN (METADATA) SELECT * FROM foo WITH ORDINALITY WHERE x > 'a'
+----
+filter           ·      ·            (x, "ordinality")  x!=NULL; key(x); weak-key("ordinality")
+ └── ordinality  ·      ·            (x, "ordinality")  x!=NULL; key(x); weak-key("ordinality")
+      └── scan   ·      ·            (x)                x!=NULL; key(x)
+·                table  foo@primary  ·                  ·
+·                spans  ALL          ·                  ·

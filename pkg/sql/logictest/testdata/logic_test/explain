@@ -1,24 +1,266 @@
-# LogicTest: local local-vec-off local-spec-planning
+# LogicTest: default distsql
+
+query TTT colnames
+EXPLAIN (PLAN) SELECT 1 FROM system.jobs WHERE FALSE
+----
+Tree         Field  Description
+render       ·      ·
+ └── norows  ·      ·
+
+query TTT colnames
+EXPLAIN (PLAN) SELECT 1 FROM system.jobs WHERE NULL
+----
+Tree         Field  Description
+render       ·      ·
+ └── norows  ·      ·
+
+query TTT colnames
+EXPLAIN (PLAN) SELECT 1 FROM system.jobs WHERE TRUE
+----
+Tree       Field  Description
+render     ·      ·
+└── scan  ·      ·
+·          table  jobs@primary
+·          spans  ALL
+
+query TTTTT colnames
+EXPLAIN (PLAN, METADATA) SELECT 1
+----
+Tree           Field  Description  Columns  Ordering
+render         ·      ·            ("1")    "1"=CONST
+ └── emptyrow  ·      ·            ()       ·
+
+query TTTTT colnames
+EXPLAIN (METADATA,PLAN) SELECT 1
+----
+Tree           Field  Description  Columns  Ordering
+render         ·      ·            ("1")    "1"=CONST
+ └── emptyrow  ·      ·            ()       ·
+
+query T
+SELECT message FROM [SHOW KV TRACE FOR SELECT 1]
+ WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
+----
+output row: [1]
+
+query TTTTT colnames
+EXPLAIN (TYPES) SELECT 1
+----
+Tree           Field     Description  Columns    Ordering
+render         ·         ·            ("1" int)  "1"=CONST
+ │             render 0  (1)[int]     ·          ·
+ └── emptyrow  ·         ·            ()         ·
+
+statement error cannot set EXPLAIN mode more than once
+EXPLAIN (PLAN,PLAN) SELECT 1
+
+statement error cannot set EXPLAIN mode more than once
+EXPLAIN (PLAN,DISTSQL) SELECT 1
+
+statement error unsupported EXPLAIN option
+EXPLAIN (PLAN,UNKNOWN) SELECT 1
+
+statement error could not determine data type of placeholder \$1
+EXPLAIN (TYPES) SELECT $1
+
+query TTTTT colnames
+EXPLAIN (TYPES) SELECT $1::INT
+----
+Tree           Field     Description               Columns          Ordering
+render         ·         ·                         ("$1::INT" int)  "$1::INT"=CONST
+ │             render 0  (($1)[string]::INT)[int]  ·                ·
+ └── emptyrow  ·         ·                         ()               ·
+
+# Ensure that tracing results are sorted after gathering
+query TTTTT
+EXPLAIN (METADATA) SHOW TRACE FOR SELECT 1
+----
+sort                                         ·      ·             ("timestamp", age, message, tag, loc, operation, span)                        +"timestamp"
+ │                                           order  +"timestamp"  ·                                                                             ·
+ └── window                                  ·      ·             ("timestamp", age, message, tag, loc, operation, span)                        ·
+      └── render                             ·      ·             ("timestamp", """timestamp""", message, tag, loc, operation, span)            "timestamp"="""timestamp"""
+           └── window                        ·      ·             ("timestamp", message, tag, loc, operation, span)                             ·
+                └── render                   ·      ·             ("timestamp", message, tag, loc, operation, span, message_idx)                ·
+                     └── show trace for      ·      ·             (span_idx, message_idx, "timestamp", duration, operation, loc, tag, message)  ·
+                          └── render         ·      ·             ("1")                                                                         "1"=CONST
+                               └── emptyrow  ·      ·             ()                                                                            ·
+
+# Ensure that all relevant statement types can be explained
+query TTT
+EXPLAIN CREATE DATABASE foo
+----
+create database  ·  ·
+
+query TTT
+EXPLAIN CREATE TABLE foo (x INT)
+----
+create table  ·  ·
 
 statement ok
-CREATE TABLE t (a INT PRIMARY KEY)
+CREATE TABLE foo (x INT)
 
-# Hide the line with "vectorized:", which differs depending on the config.
-query T
-SELECT info FROM [EXPLAIN (DISTSQL) SELECT * FROM (SELECT avg(a) OVER () FROM t)] WHERE info NOT LIKE 'vectorized%'
+query TTT
+EXPLAIN CREATE INDEX a ON foo(x)
 ----
-distribution: local
-·
-• window
-│
-└── • scan
-      missing stats
-      table: t@primary
-      spans: FULL SCAN
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkF1L8zAUx--fTxEOPKyVyNZd5mpDqxbrOtuyCaMXsTmOQpfUJJ0vo99d1gx0wkQvz__tF7ID81wDgyyMw4ucVPJJkas0uSOr8GEeT6MZ8S6jLM_uY58cMmcu4B1Ovl173CfJIkyJ5zvP-gVZ3oRp6AZnSU7i6DYkgy2WVunqHcX_AVCQSuCMb9AAW0EABYVGqxKNUXov7fpAJF6BjShUsmntXi4olEojsB3YytYIDHL-WGOKXKAejoCCQMurup-1k0ZXG67fgELWcGkYOYeio6Ba-zloLF8jsKCjv4cuKynUC-phcEycLq69SeADhaS1jEzGJ3Hjv-BSNI2SBo9gp5ZHXUEBxRrdPxrV6hLnWpU9xp1J3-sFgcY6N3BHJJ21f-DXcvBjefytXHT_PgIAAP__H3zBmg==
+create index  ·  ·
 
-# Test that explaining a query that contains a subquery the result of which is
-# needed to make the physical plan is rejected. See #40677.
-statement error running EXPLAIN \(DISTSQL\) on this query is unsupported because of the presence of subqueries
-EXPLAIN (DISTSQL) SELECT avg(a) OVER (ROWS (SELECT count(*) FROM t) PRECEDING) FROM t
+statement ok
+CREATE DATABASE foo
+
+query TTT
+EXPLAIN DROP DATABASE foo
+----
+drop database  ·  ·
+
+# explain SHOW JOBS - beware to test this before the CREATE INDEX
+# below, otherwise the result becomes non-deterministic.
+# Migrations with backfill will affect the number of rows.
+query TTT
+EXPLAIN SHOW JOBS
+----
+render       ·     ·
+ └── values  ·     ·
+·            size  13 columns, 1 row
+
+statement ok
+CREATE INDEX a ON foo(x)
+
+query TTT
+EXPLAIN DROP INDEX foo@a
+----
+drop index  ·  ·
+
+query TTT
+EXPLAIN ALTER TABLE foo ADD COLUMN y INT
+----
+alter table  ·  ·
+
+query TTT
+EXPLAIN (EXPRS) ALTER TABLE foo SPLIT AT VALUES (42)
+----
+split        ·              ·
+ └── values  ·              ·
+·            size           1 column, 1 row
+·            row 0, expr 0  42
+
+query TTT
+EXPLAIN DROP TABLE foo
+----
+drop table  ·  ·
+
+query TTT
+EXPLAIN SHOW DATABASES
+----
+distinct               ·          ·
+ │                     order key  Database
+ └── sort              ·          ·
+      │                order      +"Database"
+      └── render       ·          ·
+           └── values  ·          ·
+·                      size       4 columns, 12 rows
+
+query TTT
+EXPLAIN SHOW TABLES
+----
+sort                   ·      ·
+ │                     order  +table_schema,+"Table"
+ └── render            ·      ·
+      └── filter       ·      ·
+           └── values  ·      ·
+·                      size   6 columns, 81 rows
+
+query TTT
+EXPLAIN SHOW DATABASE
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  2 columns, 26 rows
+
+query TTT
+EXPLAIN SHOW TIME ZONE
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  2 columns, 26 rows
+
+query TTT
+EXPLAIN SHOW DEFAULT_TRANSACTION_ISOLATION
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  2 columns, 26 rows
+
+query TTT
+EXPLAIN SHOW TRANSACTION ISOLATION LEVEL
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  2 columns, 26 rows
+
+query TTT
+EXPLAIN SHOW TRANSACTION PRIORITY
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  2 columns, 26 rows
+
+query TTT
+EXPLAIN SHOW COLUMNS FROM foo
+----
+sort                                       ·         ·
+ │                                         order     +ordinal_position
+ └── render                                ·         ·
+      └── group                            ·         ·
+           │                               group by  @1-@5
+           └── render                      ·         ·
+                └── join                   ·         ·
+                     │                     type      left outer
+                     │                     equality  (column_name) = (column_name)
+                     ├── render            ·         ·
+                     │    └── filter       ·         ·
+                     │         └── values  ·         ·
+                     │                     size      17 columns, 739 rows
+                     └── render            ·         ·
+                          └── filter       ·         ·
+                               └── values  ·         ·
+·                                          size      13 columns, 3 rows
+
+query TTT
+EXPLAIN SHOW GRANTS ON foo
+----
+sort                   ·      ·
+ │                     order  +"Database",+"Schema",+"Table",+"User"
+ └── render            ·      ·
+      └── filter       ·      ·
+           └── values  ·      ·
+·                      size   8 columns, 130 rows
+
+
+query TTT
+EXPLAIN SHOW INDEX FROM foo
+----
+render            ·     ·
+ └── filter       ·     ·
+      └── values  ·     ·
+·                 size  13 columns, 3 rows
+
+query TTT
+EXPLAIN SHOW CONSTRAINTS FROM foo
+----
+sort         ·      ·
+ │           order  +"Table",+"Name"
+ └── values  ·      ·
+·            size   5 columns, 0 rows
+
+query TTT
+EXPLAIN SHOW USERS
+----
+render     ·      ·
+ └── scan  ·      ·
+·          table  users@primary
+·          spans  ALL

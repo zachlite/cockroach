@@ -1,27 +1,34 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
 	gosql "database/sql"
+	"fmt"
 	"testing"
 
+	"github.com/lib/pq"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/lib/pq"
 )
 
 // lowMemoryBudget is the memory budget used to test builtins are recording
@@ -29,7 +36,7 @@ import (
 // initial database connection, but small enough to overflow easily. It's set
 // to be comfortably large enough that the server can start up with a bit of
 // extra space to overflow.
-const lowMemoryBudget = 800000
+const lowMemoryBudget = 500000
 
 // rowSize is the length of the string present in each row of the table created
 // by createTableWithLongStrings.
@@ -52,7 +59,7 @@ CREATE TABLE d.t (a STRING)
 	}
 
 	for i := 0; i < numRows; i++ {
-		if _, err := sqlDB.Exec(`INSERT INTO d.t VALUES (repeat('a', $1))`, rowSize); err != nil {
+		if _, err := sqlDB.Exec(`INSERT INTO d.t VALUES (REPEAT('a', $1))`, rowSize); err != nil {
 			return err
 		}
 	}
@@ -63,15 +70,14 @@ CREATE TABLE d.t (a STRING)
 // record their memory usage as they build up their result.
 func TestAggregatesMonitorMemory(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	// By avoiding printing the aggregate results we prevent anything
 	// besides the aggregate itself from being able to catch the
 	// large memory usage.
 	statements := []string{
-		`SELECT length(concat_agg(a)) FROM d.t`,
-		`SELECT array_length(array_agg(a), 1) FROM d.t`,
-		`SELECT json_typeof(json_agg(A)) FROM d.t`,
+		`SELECT LENGTH(CONCAT_AGG(a)) FROM d.t`,
+		`SELECT ARRAY_LENGTH(ARRAY_AGG(a), 1) FROM d.t`,
+		`SELECT JSON_TYPEOF(JSON_AGG(A)) FROM d.t`,
 	}
 
 	for _, statement := range statements {
@@ -85,24 +91,72 @@ func TestAggregatesMonitorMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := sqlDB.Exec(statement)
-
-		if pqErr := (*pq.Error)(nil); !errors.As(err, &pqErr) || pgcode.MakeCode(string(pqErr.Code)) != pgcode.OutOfMemory {
+		if _, err := sqlDB.Exec(statement); err.(*pq.Error).Code != pgerror.CodeOutOfMemoryError {
 			t.Fatalf("Expected \"%s\" to consume too much memory", statement)
 		}
 	}
 }
 
+func TestBuiltinsAccountForMemory(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	testData := []struct {
+		builtin            tree.Builtin
+		args               tree.Datums
+		expectedAllocation int64
+	}{
+		{builtins.Builtins["repeat"][0],
+			tree.Datums{
+				tree.NewDString("abc"),
+				tree.NewDInt(123),
+			},
+			int64(3 * 123)},
+		{builtins.Builtins["concat"][0],
+			tree.Datums{
+				tree.NewDString("abc"),
+				tree.NewDString("abc"),
+			},
+			int64(3 + 3)},
+		{builtins.Builtins["concat_ws"][0],
+			tree.Datums{
+				tree.NewDString("!"),
+				tree.NewDString("abc"),
+				tree.NewDString("abc"),
+			},
+			int64(3 + 1 + 3)},
+		{builtins.Builtins["lower"][0],
+			tree.Datums{
+				tree.NewDString("ABC"),
+			},
+			int64(3)},
+	}
+
+	for _, test := range testData {
+		t.Run("", func(t *testing.T) {
+			evalCtx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
+			defer evalCtx.Stop(context.Background())
+			defer evalCtx.ActiveMemAcc.Close(context.Background())
+			previouslyAllocated := evalCtx.ActiveMemAcc.Used()
+			_, err := test.builtin.Fn(evalCtx, test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deltaAllocated := evalCtx.ActiveMemAcc.Used() - previouslyAllocated
+			if deltaAllocated != test.expectedAllocation {
+				t.Errorf("Expected to allocate %d, actually allocated %d", test.expectedAllocation, deltaAllocated)
+			}
+		})
+	}
+}
+
 func TestEvaluatedMemoryIsChecked(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
 	// We select the LENGTH here and elsewhere because if we passed the result of
 	// REPEAT up as a result, the memory error would be caught there even if
 	// REPEAT was not doing its accounting.
 	testData := []string{
-		`SELECT length(repeat('abc', 70000000))`,
-		`SELECT crdb_internal.no_constant_folding(length(repeat('abc', 70000000)))`,
+		`SELECT LENGTH(REPEAT('abc', 300000))`,
+		`SELECT crdb_internal.no_constant_folding(LENGTH(REPEAT('abc', 300000)))`,
 	}
 
 	for _, statement := range testData {
@@ -112,12 +166,47 @@ func TestEvaluatedMemoryIsChecked(t *testing.T) {
 			})
 			defer s.Stopper().Stop(context.Background())
 
-			_, err := sqlDB.Exec(
+			if _, err := sqlDB.Exec(
 				statement,
-			)
-			if pqErr := (*pq.Error)(nil); !errors.As(err, &pqErr) || pgcode.MakeCode(string(pqErr.Code)) != pgcode.ProgramLimitExceeded {
+			); err.(*pq.Error).Code != pgerror.CodeOutOfMemoryError {
 				t.Errorf("Expected \"%s\" to OOM, but it didn't", statement)
 			}
 		})
+	}
+}
+
+func TestMemoryGetsFreedOnEachRow(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	// This test verifies that the memory allocated during the computation of a
+	// row gets freed before moving on to subsequent rows.
+
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+		SQLMemoryPoolSize: lowMemoryBudget,
+	})
+	defer s.Stopper().Stop(context.Background())
+
+	stringLength := 300000
+	numRows := 100
+
+	// Check that if this string is allocated per-row, we don't OOM.
+	if _, err := sqlDB.Exec(
+		fmt.Sprintf(
+			`SELECT crdb_internal.no_constant_folding(LENGTH(REPEAT('a', %d))) FROM GENERATE_SERIES(1, %d)`,
+			stringLength,
+			numRows,
+		),
+	); err != nil {
+		t.Fatalf("Expected statement to run successfully, but got %s", err)
+	}
+
+	// Ensure that if this memory is all allocated at once, we OOM.
+	if _, err := sqlDB.Exec(
+		fmt.Sprintf(
+			`SELECT crdb_internal.no_constant_folding(LENGTH(REPEAT('a', %d * %d)))`,
+			stringLength,
+			numRows,
+		),
+	); err.(*pq.Error).Code != pgerror.CodeOutOfMemoryError {
+		t.Fatalf("Expected statement to OOM, but it didn't")
 	}
 }

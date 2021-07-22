@@ -1,19 +1,21 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package tree
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 )
 
 // A Name is an SQL identifier.
@@ -31,10 +33,10 @@ type Name string
 // Format implements the NodeFormatter interface.
 func (n *Name) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	if f.HasFlags(FmtAnonymize) && !isArityIndicatorString(string(*n)) {
+	if f.HasFlags(FmtAnonymize) {
 		ctx.WriteByte('_')
 	} else {
-		lexbase.EncodeRestrictedSQLIdent(&ctx.Buffer, string(*n), f.EncodeFlags())
+		lex.EncodeRestrictedSQLIdent(ctx.Buffer, string(*n), f.EncodeFlags())
 	}
 }
 
@@ -50,23 +52,17 @@ func NameString(s string) string {
 	return ((*Name)(&s)).String()
 }
 
-// ErrNameStringP escapes an identifier stored a string to a SQL
+// ErrNameString escapes an identifier stored a string to a SQL
 // identifier suitable for printing in error messages, avoiding a heap
 // allocation.
-func ErrNameStringP(s *string) string {
+func ErrNameString(s *string) string {
 	return ErrString(((*Name)(s)))
-}
-
-// ErrNameString escapes an identifier stored a string to a SQL
-// identifier suitable for printing in error messages.
-func ErrNameString(s string) string {
-	return ErrString(((*Name)(&s)))
 }
 
 // Normalize normalizes to lowercase and Unicode Normalization Form C
 // (NFC).
 func (n Name) Normalize() string {
-	return lexbase.NormalizeName(string(n))
+	return lex.NormalizeName(string(n))
 }
 
 // An UnrestrictedName is a Name that does not need to be escaped when it
@@ -89,7 +85,7 @@ func (u *UnrestrictedName) Format(ctx *FmtCtx) {
 	if f.HasFlags(FmtAnonymize) {
 		ctx.WriteByte('_')
 	} else {
-		lexbase.EncodeUnrestrictedSQLIdent(&ctx.Buffer, string(*u), f.EncodeFlags())
+		lex.EncodeUnrestrictedSQLIdent(ctx.Buffer, string(*u), f.EncodeFlags())
 	}
 }
 
@@ -171,11 +167,11 @@ func (u *UnresolvedName) Format(ctx *FmtCtx) {
 	if u.Star {
 		stopAt = 2
 	}
+	// Every part after that is necessarily an unrestricted name.
 	for i := u.NumParts; i >= stopAt; i-- {
 		// The first part to print is the last item in u.Parts.  It is also
 		// a potentially restricted name to disambiguate from keywords in
-		// the grammar, so print it out as a "Name". Every part after that is
-		// necessarily an unrestricted name.
+		// the grammar, so print it out as a "Name".
 		if i == u.NumParts {
 			ctx.FormatNode((*Name)(&u.Parts[i-1]))
 		} else {
@@ -193,27 +189,9 @@ func (u *UnresolvedName) String() string { return AsString(u) }
 
 // NewUnresolvedName constructs an UnresolvedName from some strings.
 func NewUnresolvedName(args ...string) *UnresolvedName {
-	n := MakeUnresolvedName(args...)
-	return &n
-}
-
-// MakeUnresolvedName constructs an UnresolvedName from some strings.
-func MakeUnresolvedName(args ...string) UnresolvedName {
-	n := UnresolvedName{NumParts: len(args)}
+	n := &UnresolvedName{NumParts: len(args)}
 	for i := 0; i < len(args); i++ {
 		n.Parts[i] = args[len(args)-1-i]
 	}
 	return n
-}
-
-// ToUnresolvedObjectName converts an UnresolvedName to an UnresolvedObjectName.
-func (u *UnresolvedName) ToUnresolvedObjectName(idx AnnotationIdx) (*UnresolvedObjectName, error) {
-	if u.NumParts == 4 {
-		return nil, pgerror.Newf(pgcode.Syntax, "improper qualified name (too many dotted names): %s", u)
-	}
-	return NewUnresolvedObjectName(
-		u.NumParts,
-		[3]string{u.Parts[0], u.Parts[1], u.Parts[2]},
-		idx,
-	)
 }

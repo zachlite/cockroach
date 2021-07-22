@@ -1,31 +1,145 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
-package execbuilder_test
+package execbuilder
 
 import (
+	"bytes"
+	"context"
+	"flag"
+	"fmt"
+	"path/filepath"
 	"testing"
+	"text/tabwriter"
+	"unicode/utf8"
 
-	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/logictest"
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/testutils/datadriven"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
-// TestExecBuild runs logic tests that are specific to how the optimizer builds
-// queries.
-//
-// The test files should use combinations of the local, fakedist and
-// 5node configs. For tests that only have EXPLAIN (PLAN) statements,
-// it's sufficient to run on a single configuration.
-func TestExecBuild(t *testing.T) {
+var (
+	testDataGlob = flag.String("d", "testdata/[^.]*", "test data glob")
+)
+
+func TestBuild(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer sql.TestingOverrideExplainEnvVersion("CockroachDB execbuilder test version")()
-	logictest.RunLogicTest(t, logictest.TestServerArgs{}, "testdata/[^.]*")
+
+	paths, err := filepath.Glob(*testDataGlob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatalf("no testfiles found matching: %s", *testDataGlob)
+	}
+
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			ctx := context.Background()
+			s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+			defer s.Stopper().Stop(ctx)
+
+			datadriven.RunTest(t, path, func(d *datadriven.TestData) string {
+				switch d.Cmd {
+				case "exec-raw":
+					_, err := sqlDB.Exec(d.Input)
+					if err != nil {
+						d.Fatalf(t, "%v", err)
+					}
+					return ""
+
+				case "build", "exec", "exec-explain":
+					// Parse the SQL.
+					stmt, err := parser.ParseOne(d.Input)
+					if err != nil {
+						d.Fatalf(t, "%v", err)
+					}
+
+					eng := s.Executor().(exec.TestEngineFactory).NewTestEngine()
+					defer eng.Close()
+
+					// Build and optimize the opt expression tree.
+					o := xform.NewOptimizer(eng.Catalog(), xform.OptimizeAll)
+					root, props, err := optbuilder.New(ctx, o.Factory(), stmt).Build()
+					if err != nil {
+						d.Fatalf(t, "BuildOpt: %v", err)
+					}
+					ev := o.Optimize(root, props)
+
+					if d.Cmd == "build" {
+						return ev.String()
+					}
+
+					// Build the execution node tree.
+					node, err := New(eng.Factory(), ev).Build()
+					if err != nil {
+						d.Fatalf(t, "BuildExec: %v", err)
+					}
+
+					// Execute the node tree.
+					var results []tree.Datums
+					if d.Cmd == "exec-explain" {
+						results, err = eng.Explain(node)
+					} else {
+						results, err = eng.Execute(node)
+					}
+					if err != nil {
+						d.Fatalf(t, "Exec: %v", err)
+					}
+
+					// Format the results.
+					var buf bytes.Buffer
+					tw := tabwriter.NewWriter(
+						&buf,
+						2,   /* minwidth */
+						1,   /* tabwidth */
+						2,   /* padding */
+						' ', /* padchar */
+						0,   /* flags */
+					)
+					for _, r := range results {
+						for j, val := range r {
+							if j > 0 {
+								fmt.Fprintf(tw, "\t")
+							}
+							if d, ok := val.(*tree.DString); ok && utf8.ValidString(string(*d)) {
+								str := string(*d)
+								if str == "" {
+									str = "·"
+								}
+								// Avoid the quotes on strings.
+								fmt.Fprintf(tw, "%s", str)
+							} else {
+								fmt.Fprintf(tw, "%s", val)
+							}
+						}
+						fmt.Fprintf(tw, "\n")
+					}
+					_ = tw.Flush()
+					return buf.String()
+
+				default:
+					d.Fatalf(t, "unsupported command: %s", d.Cmd)
+					return ""
+				}
+			})
+		})
+	}
 }

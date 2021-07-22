@@ -4,43 +4,9 @@ package lang
 
 import "strconv"
 
-func _() {
-	// An "invalid array index" compiler error signifies that the constant values have changed.
-	// Re-run the stringer command to generate them again.
-	var x [1]struct{}
-	_ = x[UnknownOp-0]
-	_ = x[RootOp-1]
-	_ = x[DefineSetOp-2]
-	_ = x[RuleSetOp-3]
-	_ = x[DefineOp-4]
-	_ = x[CommentsOp-5]
-	_ = x[CommentOp-6]
-	_ = x[TagsOp-7]
-	_ = x[TagOp-8]
-	_ = x[DefineFieldsOp-9]
-	_ = x[DefineFieldOp-10]
-	_ = x[RuleOp-11]
-	_ = x[FuncOp-12]
-	_ = x[NamesOp-13]
-	_ = x[NameOp-14]
-	_ = x[AndOp-15]
-	_ = x[NotOp-16]
-	_ = x[ListOp-17]
-	_ = x[ListAnyOp-18]
-	_ = x[BindOp-19]
-	_ = x[LetOp-20]
-	_ = x[RefOp-21]
-	_ = x[AnyOp-22]
-	_ = x[SliceOp-23]
-	_ = x[StringOp-24]
-	_ = x[StringsOp-25]
-	_ = x[NumberOp-26]
-	_ = x[CustomFuncOp-27]
-}
+const _Operator_name = "UnknownOpRootOpDefineSetOpRuleSetOpDefineOpCommentsOpCommentOpTagsOpTagOpDefineFieldsOpDefineFieldOpRuleOpBindOpRefOpMatchOpOpNamesOpOpNameOpMatchAndOpMatchInvokeOpMatchNotOpMatchAnyOpMatchListOpConstructOpConstructListOpListOpStringOp"
 
-const _Operator_name = "UnknownOpRootOpDefineSetOpRuleSetOpDefineOpCommentsOpCommentOpTagsOpTagOpDefineFieldsOpDefineFieldOpRuleOpFuncOpNamesOpNameOpAndOpNotOpListOpListAnyOpBindOpLetOpRefOpAnyOpSliceOpStringOpStringsOpNumberOpCustomFuncOp"
-
-var _Operator_index = [...]uint8{0, 9, 15, 26, 35, 43, 53, 62, 68, 73, 87, 100, 106, 112, 119, 125, 130, 135, 141, 150, 156, 161, 166, 171, 178, 186, 195, 203, 215}
+var _Operator_index = [...]uint8{0, 9, 15, 26, 35, 43, 53, 62, 68, 73, 87, 100, 106, 112, 117, 124, 133, 141, 151, 164, 174, 184, 195, 206, 221, 227, 235}
 
 func (i Operator) String() string {
 	if i < 0 || i >= Operator(len(_Operator_index)-1) {

@@ -1,21 +1,10 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 import { createSelector } from "reselect";
 
 import * as protos from "src/js/protos";
 import { AdminUIState } from "./state";
-import { util } from "@cockroachlabs/cluster-ui";
 import { Pick } from "src/util/pick";
-import { NoConnection } from "src/views/reports/containers/network";
+import { NodeStatus$Properties, MetricConstants, BytesUsed } from "src/util/proto";
 import { nullOfReturnType } from "src/util/types";
 
 /**
@@ -23,13 +12,7 @@ import { nullOfReturnType } from "src/util/types";
  * enumeration. As an enum, it needs to be imported rather than using the 'type'
  * keyword.
  */
-export import LivenessStatus = protos.cockroach.kv.kvserver.liveness.livenesspb.NodeLivenessStatus;
-import { cockroach } from "src/js/protos";
-import MembershipStatus = cockroach.kv.kvserver.liveness.livenesspb.MembershipStatus;
-import INodeStatus = cockroach.server.status.statuspb.INodeStatus;
-import ILocality = cockroach.roachpb.ILocality;
-
-const { MetricConstants, BytesUsed } = util;
+export import LivenessStatus = protos.cockroach.storage.NodeLivenessStatus;
 
 /**
  * livenessNomenclature resolves a mismatch between the terms used for liveness
@@ -39,13 +22,13 @@ const { MetricConstants, BytesUsed } = util;
  */
 export function livenessNomenclature(liveness: LivenessStatus) {
   switch (liveness) {
-    case LivenessStatus.NODE_STATUS_LIVE:
+    case LivenessStatus.LIVE:
       return "healthy";
-    case LivenessStatus.NODE_STATUS_UNAVAILABLE:
+    case LivenessStatus.UNAVAILABLE:
       return "suspect";
-    case LivenessStatus.NODE_STATUS_DECOMMISSIONING:
+    case LivenessStatus.DECOMMISSIONING:
       return "decommissioning";
-    case LivenessStatus.NODE_STATUS_DECOMMISSIONED:
+    case LivenessStatus.DECOMMISSIONED:
       return "decommissioned";
     default:
       return "dead";
@@ -53,29 +36,14 @@ export function livenessNomenclature(liveness: LivenessStatus) {
 }
 
 // Functions to select data directly from the redux state.
-const livenessesSelector = (state: AdminUIState) =>
-  state.cachedData.liveness.data;
+const livenessesSelector = (state: AdminUIState) => state.cachedData.liveness.data;
 
 /*
  * nodeStatusesSelector returns the current status for each node in the cluster.
  */
 type NodeStatusState = Pick<AdminUIState, "cachedData", "nodes">;
-export const nodeStatusesSelector = (state: NodeStatusState) =>
-  state.cachedData.nodes.data;
+export const nodeStatusesSelector = (state: NodeStatusState) => state.cachedData.nodes.data;
 
-/*
- * clusterSelector returns information about cluster.
- */
-export const clusterSelector = (state: AdminUIState) =>
-  state.cachedData.cluster.data;
-
-/*
- * clusterIdSelector returns Cluster Id (as UUID string).
- */
-export const clusterIdSelector = createSelector(
-  clusterSelector,
-  (clusterInfo) => clusterInfo && clusterInfo.cluster_id,
-);
 /*
  * selectNodeRequestStatus returns the current status of the node status request.
  */
@@ -110,7 +78,7 @@ export function selectLivenessRequestStatus(state: AdminUIState) {
  */
 export const livenessStatusByNodeIDSelector = createSelector(
   livenessesSelector,
-  (livenesses) => (livenesses ? livenesses.statuses || {} : {}),
+  (livenesses) => livenesses ? (livenesses.statuses || {}) : {},
 );
 
 /*
@@ -124,10 +92,7 @@ export const selectCommissionedNodeStatuses = createSelector(
     return _.filter(nodeStatuses, (node) => {
       const livenessStatus = livenessStatuses[`${node.desc.node_id}`];
 
-      return (
-        _.isNil(livenessStatus) ||
-        livenessStatus !== LivenessStatus.NODE_STATUS_DECOMMISSIONED
-      );
+      return _.isNil(livenessStatus) || livenessStatus !== LivenessStatus.DECOMMISSIONED;
     });
   },
 );
@@ -135,17 +100,20 @@ export const selectCommissionedNodeStatuses = createSelector(
 /**
  * nodeIDsSelector returns the NodeID of all nodes currently on the cluster.
  */
-const nodeIDsSelector = createSelector(nodeStatusesSelector, (nodeStatuses) => {
-  return _.map(nodeStatuses, (ns) => ns.desc.node_id.toString());
-});
+const nodeIDsSelector = createSelector(
+  nodeStatusesSelector,
+  (nodeStatuses) => {
+    return _.map(nodeStatuses, (ns) => ns.desc.node_id.toString());
+  },
+);
 
 /**
- * nodeStatusByIDSelector returns a map from NodeID to a current INodeStatus.
+ * nodeStatusByIDSelector returns a map from NodeID to a current NodeStatus$Properties.
  */
 const nodeStatusByIDSelector = createSelector(
   nodeStatusesSelector,
   (nodeStatuses) => {
-    const statuses: { [s: string]: INodeStatus } = {};
+    const statuses: {[s: string]: NodeStatus$Properties} = {};
     _.each(nodeStatuses, (ns) => {
       statuses[ns.desc.node_id.toString()] = ns;
     });
@@ -153,45 +121,20 @@ const nodeStatusByIDSelector = createSelector(
   },
 );
 
-export type NodeSummaryStats = {
-  nodeCounts: {
-    total: number;
-    healthy: number;
-    suspect: number;
-    dead: number;
-    decommissioned: number;
-  };
-  capacityUsed: number;
-  capacityAvailable: number;
-  capacityTotal: number;
-  capacityUsable: number;
-  usedBytes: number;
-  usedMem: number;
-  totalRanges: number;
-  underReplicatedRanges: number;
-  unavailableRanges: number;
-  replicas: number;
-};
-
-export type LivenessResponseStatuses = { [id: string]: LivenessStatus };
-
 /**
  * nodeSumsSelector returns an object with certain cluster-wide totals which are
  * used in different places in the UI.
  */
-export const nodeSumsSelector = createSelector(
+const nodeSumsSelector = createSelector(
   nodeStatusesSelector,
-  (state: AdminUIState): LivenessResponseStatuses =>
-    state.cachedData.liveness.data?.statuses,
-  (state: AdminUIState) =>
-    state.cachedData.liveness.valid && state.cachedData.nodes.valid,
+  livenessStatusByNodeIDSelector,
   sumNodeStats,
 );
 
 export function sumNodeStats(
-  nodeStatuses: INodeStatus[],
-  livenessStatusByNodeID: LivenessResponseStatuses,
-): NodeSummaryStats {
+  nodeStatuses: NodeStatus$Properties[],
+  livenessStatusByNodeID: { [id: string]: LivenessStatus },
+) {
   const result = {
     nodeCounts: {
       total: 0,
@@ -211,32 +154,29 @@ export function sumNodeStats(
     unavailableRanges: 0,
     replicas: 0,
   };
-  if (_.isArray(nodeStatuses) && !_.isEmpty(livenessStatusByNodeID)) {
+  if (_.isArray(nodeStatuses) && _.isObject(livenessStatusByNodeID)) {
     nodeStatuses.forEach((n) => {
       const status = livenessStatusByNodeID[n.desc.node_id];
-      if (status !== LivenessStatus.NODE_STATUS_DECOMMISSIONED) {
+      if (status !== LivenessStatus.DECOMMISSIONED) {
         result.nodeCounts.total += 1;
       }
       switch (status) {
-        case LivenessStatus.NODE_STATUS_LIVE:
+        case LivenessStatus.LIVE:
           result.nodeCounts.healthy++;
           break;
-        case LivenessStatus.NODE_STATUS_UNAVAILABLE:
-        case LivenessStatus.NODE_STATUS_DECOMMISSIONING:
+        case LivenessStatus.UNAVAILABLE:
+        case LivenessStatus.DECOMMISSIONING:
           result.nodeCounts.suspect++;
           break;
-        case LivenessStatus.NODE_STATUS_DECOMMISSIONED:
+        case LivenessStatus.DECOMMISSIONED:
           result.nodeCounts.decommissioned++;
           break;
-        case LivenessStatus.NODE_STATUS_DEAD:
+        case LivenessStatus.DEAD:
         default:
           result.nodeCounts.dead++;
           break;
       }
-      if (
-        status !== LivenessStatus.NODE_STATUS_DEAD &&
-        status !== LivenessStatus.NODE_STATUS_DECOMMISSIONED
-      ) {
+      if (status !== LivenessStatus.DEAD && status !== LivenessStatus.DECOMMISSIONED) {
         const { available, used, usable } = nodeCapacityStats(n);
 
         result.capacityUsed += used;
@@ -246,10 +186,8 @@ export function sumNodeStats(
         result.usedBytes += BytesUsed(n);
         result.usedMem += n.metrics[MetricConstants.rss];
         result.totalRanges += n.metrics[MetricConstants.ranges];
-        result.underReplicatedRanges +=
-          n.metrics[MetricConstants.underReplicatedRanges];
-        result.unavailableRanges +=
-          n.metrics[MetricConstants.unavailableRanges];
+        result.underReplicatedRanges += n.metrics[MetricConstants.underReplicatedRanges];
+        result.unavailableRanges += n.metrics[MetricConstants.unavailableRanges];
         result.replicas += n.metrics[MetricConstants.replicas];
       }
     });
@@ -263,7 +201,7 @@ export interface CapacityStats {
   available: number;
 }
 
-export function nodeCapacityStats(n: INodeStatus): CapacityStats {
+export function nodeCapacityStats(n: NodeStatus$Properties): CapacityStats {
   const used = n.metrics[MetricConstants.usedCapacity];
   const available = n.metrics[MetricConstants.availableCapacity];
   return {
@@ -273,29 +211,11 @@ export function nodeCapacityStats(n: INodeStatus): CapacityStats {
   };
 }
 
-export function getDisplayName(
-  node: INodeStatus | NoConnection,
-  livenessStatus = LivenessStatus.NODE_STATUS_LIVE,
-) {
-  const decommissionedString =
-    livenessStatus === LivenessStatus.NODE_STATUS_DECOMMISSIONED
-      ? "[decommissioned] "
-      : "";
-
-  if (isNoConnection(node)) {
-    return `${decommissionedString}(n${node.from.nodeID})`;
-  }
-  // as the only other type possible right now is INodeStatus we don't have a type guard for that
-  return `${decommissionedString}(n${node.desc.node_id}) ${node.desc.address.address_field}`;
-}
-
-function isNoConnection(
-  node: INodeStatus | NoConnection,
-): node is NoConnection {
-  return (
-    (node as NoConnection).to !== undefined &&
-    (node as NoConnection).from !== undefined
-  );
+export function getDisplayName(node: NodeStatus$Properties, livenessStatus = LivenessStatus.LIVE) {
+  const decommissionedString = livenessStatus === LivenessStatus.DECOMMISSIONED
+    ? "[decommissioned] "
+    : "";
+  return `${decommissionedString}${node.desc.address.address_field} (n${node.desc.node_id})`;
 }
 
 // nodeDisplayNameByIDSelector provides a unique, human-readable display name
@@ -304,34 +224,12 @@ export const nodeDisplayNameByIDSelector = createSelector(
   nodeStatusesSelector,
   livenessStatusByNodeIDSelector,
   (nodeStatuses, livenessStatusByNodeID) => {
-    const result: { [key: string]: string } = {};
+    const result: {[key: string]: string} = {};
     if (!_.isEmpty(nodeStatuses)) {
-      nodeStatuses.forEach((ns) => {
+      nodeStatuses.forEach(ns => {
         result[ns.desc.node_id] = getDisplayName(
-          ns,
-          livenessStatusByNodeID[ns.desc.node_id],
+          ns, livenessStatusByNodeID[ns.desc.node_id],
         );
-      });
-    }
-    return result;
-  },
-);
-
-export function getRegionFromLocality(locality: ILocality): string {
-  for (let i = 0; i < locality.tiers.length; i++) {
-    if (locality.tiers[i].key === "region") return locality.tiers[i].value;
-  }
-  return "";
-}
-
-// nodeRegionsByIDSelector provides the region for each node.
-export const nodeRegionsByIDSelector = createSelector(
-  nodeStatusesSelector,
-  (nodeStatuses) => {
-    const result: { [key: string]: string } = {};
-    if (!_.isEmpty(nodeStatuses)) {
-      nodeStatuses.forEach((ns) => {
-        result[ns.desc.node_id] = getRegionFromLocality(ns.desc.locality);
       });
     }
     return result;
@@ -343,13 +241,9 @@ export const nodeRegionsByIDSelector = createSelector(
 export const selectStoreIDsByNodeID = createSelector(
   nodeStatusesSelector,
   (nodeStatuses) => {
-    const result: { [key: string]: string[] } = {};
-    _.each(
-      nodeStatuses,
-      (ns) =>
-        (result[ns.desc.node_id] = _.map(ns.store_statuses, (ss) =>
-          ss.desc.store_id.toString(),
-        )),
+    const result: {[key: string]: string[]} = {};
+    _.each(nodeStatuses, ns =>
+        result[ns.desc.node_id] = _.map(ns.store_statuses, ss => ss.desc.store_id.toString()),
     );
     return result;
   },
@@ -369,16 +263,7 @@ export const nodesSummarySelector = createSelector(
   livenessStatusByNodeIDSelector,
   livenessByNodeIDSelector,
   selectStoreIDsByNodeID,
-  (
-    nodeStatuses,
-    nodeIDs,
-    nodeStatusByID,
-    nodeSums,
-    nodeDisplayNameByID,
-    livenessStatusByNodeID,
-    livenessByNodeID,
-    storeIDsByNodeID,
-  ) => {
+  (nodeStatuses, nodeIDs, nodeStatusByID, nodeSums, nodeDisplayNameByID, livenessStatusByNodeID, livenessByNodeID, storeIDsByNodeID) => {
     return {
       nodeStatuses,
       nodeIDs,
@@ -402,99 +287,3 @@ export type NodesSummary = typeof nodesSummaryType;
 export function selectNodesSummaryValid(state: AdminUIState) {
   return state.cachedData.nodes.valid && state.cachedData.liveness.valid;
 }
-
-/*
- * clusterNameSelector returns the name of cluster which has to be the same for every node in the cluster.
- * - That is why it is safe to get first non empty cluster name.
- * - Empty cluster name is possible in case `DisableClusterNameVerification` flag is used (see pkg/base/config.go:176).
- */
-export const clusterNameSelector = createSelector(
-  nodeStatusesSelector,
-  livenessStatusByNodeIDSelector,
-  (nodeStatuses, livenessStatusByNodeID): string => {
-    if (_.isUndefined(nodeStatuses) || _.isEmpty(livenessStatusByNodeID)) {
-      return undefined;
-    }
-    const liveNodesOnCluster = nodeStatuses.filter(
-      (nodeStatus) =>
-        livenessStatusByNodeID[nodeStatus.desc.node_id] ===
-        LivenessStatus.NODE_STATUS_LIVE,
-    );
-
-    const nodesWithUniqClusterNames = _.chain(liveNodesOnCluster)
-      .filter((node) => !_.isEmpty(node.desc.cluster_name))
-      .uniqBy((node) => node.desc.cluster_name)
-      .value();
-
-    if (_.isEmpty(nodesWithUniqClusterNames)) {
-      return undefined;
-    } else {
-      return _.head(nodesWithUniqClusterNames).desc.cluster_name;
-    }
-  },
-);
-
-export const versionsSelector = createSelector(
-  nodeStatusesSelector,
-  livenessByNodeIDSelector,
-  (nodeStatuses, livenessStatusByNodeID) =>
-    _.chain(nodeStatuses)
-      // Ignore nodes for which we don't have any build info.
-      .filter((status) => !!status.build_info)
-      // Exclude this node if it's known to be decommissioning.
-      .filter(
-        (status) =>
-          !status.desc ||
-          !livenessStatusByNodeID[status.desc.node_id] ||
-          !livenessStatusByNodeID[status.desc.node_id].membership ||
-          !(
-            livenessStatusByNodeID[status.desc.node_id].membership !==
-            MembershipStatus.ACTIVE
-          ),
-      )
-      // Collect the surviving nodes' build tags.
-      .map((status) => status.build_info.tag)
-      .uniq()
-      .value(),
-);
-
-// Select the current build version of the cluster, returning undefined if the
-// cluster's version is currently staggered.
-export const singleVersionSelector = createSelector(
-  versionsSelector,
-  (builds) => {
-    if (!builds || builds.length !== 1) {
-      return undefined;
-    }
-    return builds[0];
-  },
-);
-
-/**
- * partitionedStatuses divides the list of node statuses into "live" and "dead".
- */
-export const partitionedStatuses = createSelector(
-  nodesSummarySelector,
-  (summary) => {
-    return _.groupBy(summary.nodeStatuses, (ns) => {
-      switch (summary.livenessStatusByNodeID[ns.desc.node_id]) {
-        case LivenessStatus.NODE_STATUS_LIVE:
-        case LivenessStatus.NODE_STATUS_UNAVAILABLE:
-        case LivenessStatus.NODE_STATUS_DEAD:
-        case LivenessStatus.NODE_STATUS_DECOMMISSIONING:
-          return "live";
-        case LivenessStatus.NODE_STATUS_DECOMMISSIONED:
-          return "decommissioned";
-        default:
-          // TODO (koorosh): "live" has to be renamed to some partition which
-          // represent all except "partitioned" nodes.
-          return "live";
-      }
-    });
-  },
-);
-
-export const isSingleNodeCluster = createSelector(
-  nodeStatusesSelector,
-  (nodeStatuses) => nodeStatuses && nodeStatuses.length === 1,
-);

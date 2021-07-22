@@ -1,3 +1,5 @@
+# LogicTest: default distsql parallel-stmts
+
 # see also file `sequences`
 
 statement ok

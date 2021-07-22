@@ -3,151 +3,21 @@
 
 package roachpb
 
-import (
-	encoding_binary "encoding/binary"
-	fmt "fmt"
-	util "github.com/cockroachdb/cockroach/pkg/util"
-	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	io "io"
-	math "math"
-	math_bits "math/bits"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+import cockroach_util "github.com/cockroachdb/cockroach/pkg/util"
+
+import bytes "bytes"
+
+import binary "encoding/binary"
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
-
-// This is a compile-time assertion to ensure that this generated file
-// is compatible with the proto package it is being compiled against.
-// A compilation error at this line likely means your copy of the
-// proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
-
-// ReplicaType identifies which raft activities a replica participates in. In
-// normal operation, VOTER_FULL, NON_VOTER, and LEARNER are the only used
-// states. However, atomic replication changes require a transition through a
-// "joint config"; in this joint config, the VOTER_DEMOTING_{LEARNER, NON_VOTER}
-// and VOTER_INCOMING types are used as well to denote voters which are being
-// downgraded to learners and newly added by the change, respectively. When
-// being removed, a demoting voter is turning into a learner, which we prefer
-// over a direct removal, which was used prior to v20.1 and uses the
-// VOTER_OUTGOING type instead (see VersionChangeReplicasDemotion for details on
-// why we're not doing that any more).
-//
-// All VOTER* types indicate a replica that participates in all raft activities,
-// including voting for leadership and committing entries. Typically, this
-// requires a majority of voters to reach a decision. In a joint config, two
-// separate majorities are required: one from the set of replicas that have
-// either type VOTER or VOTER_OUTGOING or VOTER_DEMOTING_{LEARNER, NON_VOTER},
-// as well as that of the set of types VOTER and VOTER_INCOMING . For example,
-// when type VOTER_FULL is assigned to replicas 1 and 2, while 3 is
-// VOTER_OUTGOING and 4 is VOTER_INCOMING, then the two sets over which quorums
-// need to be achieved are {1,2,3} and {1,2,4}. Thus, {1,2} is a quorum of both,
-// {1,3} is a quorum of the first but not the second, {1,4} is a quorum of the
-// second but not the first, and {3,4} is a quorum of neither.
-type ReplicaType int32
-
-const (
-	// VOTER_FULL indicates a replica that is a voter both in the
-	// incoming and outgoing set.
-	VOTER_FULL ReplicaType = 0
-	// VOTER_INCOMING indicates a voting replica that will be a
-	// VOTER_FULL once the ongoing atomic replication change is finalized; that is,
-	// it is in the process of being added. In practice, this replica type should
-	// be treated like a VOTER_FULL.
-	VOTER_INCOMING ReplicaType = 2
-	// VOTER_OUTGOING indicates a voting replica that will not be part
-	// of the descriptor once the ongoing atomic replication change is finalized;
-	// that is, it is in the process of being removed. In practice, a replica of
-	// this type should be treated accordingly and no work should be assigned to
-	// it.
-	//
-	// Note: We're not using VOTER_OUTGOING since 20.1. We're using VOTER_DEMOTING
-	// instead. See #42251.
-	VOTER_OUTGOING ReplicaType = 3
-	// VOTER_DEMOTING_LEARNER indicates a voting replica that will become a
-	// learner once the ongoing atomic replication change is finalized; that is,
-	// it is in the process of being demoted. Since learners are currently
-	// short-lived, this replica is really being removed, with an intermediate
-	// step, and no work should be assigned to it.
-	VOTER_DEMOTING_LEARNER ReplicaType = 4
-	// LEARNER indicates a replica that applies committed entries, but does not
-	// count towards the quorum(s). Candidates will not ask for (or take into
-	// account) votes of (peers they consider) LEARNERs for leadership nor do
-	// their acknowledged log entries get taken into account for determining the
-	// committed index. Learners in CockroachDB are a short-term transient state:
-	// a replica being added and on its way to being a VOTER_{FULL,INCOMING}, or a
-	// VOTER_DEMOTING_LEARNER being removed.
-	//
-	// Note that once these replicas upreplicate after receiving their initial
-	// snapshot, they will count towards the raft leader's quota pool and throttle
-	// incoming proposals if they fall "too far behind".
-	LEARNER ReplicaType = 1
-	// NON_VOTER indicates a replica that applies committed entries, but does not
-	// count towards the quorum(s). Candidates will not ask for (or take into
-	// account) votes of (peers they consider) NON_VOTERs for leadership nor do
-	// their acknowledged log entries get taken into account for determining the
-	// committed index.
-	//
-	// Under the hood, it is based on an etcd/raft LearnerNode, like the LEARNER
-	// replica type defined above. They will also cause the quota pool on the
-	// leader to throttle incoming proposals if they fall behind.
-	//
-	// Unlike LEARNERs, these are a persistent state meant to serve user traffic
-	// via follower reads. See comment above ReplicaDescriptors.NonVoters() for
-	// differences in how LEARNERs and NON_VOTERs are handled internally.
-	NON_VOTER ReplicaType = 5
-	// VOTER_DEMOTING_NON_VOTER indicates a voting replica in the outgoing group
-	// of a joint state, which will become a non-voter when the atomic replication
-	// change is finalized (i.e. when we exit the joint state).
-	VOTER_DEMOTING_NON_VOTER ReplicaType = 6
-)
-
-var ReplicaType_name = map[int32]string{
-	0: "VOTER_FULL",
-	2: "VOTER_INCOMING",
-	3: "VOTER_OUTGOING",
-	4: "VOTER_DEMOTING_LEARNER",
-	1: "LEARNER",
-	5: "NON_VOTER",
-	6: "VOTER_DEMOTING_NON_VOTER",
-}
-
-var ReplicaType_value = map[string]int32{
-	"VOTER_FULL":               0,
-	"VOTER_INCOMING":           2,
-	"VOTER_OUTGOING":           3,
-	"VOTER_DEMOTING_LEARNER":   4,
-	"LEARNER":                  1,
-	"NON_VOTER":                5,
-	"VOTER_DEMOTING_NON_VOTER": 6,
-}
-
-func (x ReplicaType) Enum() *ReplicaType {
-	p := new(ReplicaType)
-	*p = x
-	return p
-}
-
-func (x ReplicaType) String() string {
-	return proto.EnumName(ReplicaType_name, int32(x))
-}
-
-func (x *ReplicaType) UnmarshalJSON(data []byte) error {
-	value, err := proto.UnmarshalJSONEnum(ReplicaType_value, data, "ReplicaType")
-	if err != nil {
-		return err
-	}
-	*x = ReplicaType(value)
-	return nil
-}
-
-func (ReplicaType) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{0}
-}
 
 // Attributes specifies a list of arbitrary strings describing
 // node topology, store type, and machine capabilities.
@@ -155,79 +25,23 @@ type Attributes struct {
 	Attrs []string `protobuf:"bytes,1,rep,name=attrs" json:"attrs,omitempty" yaml:"attrs,flow"`
 }
 
-func (m *Attributes) Reset()      { *m = Attributes{} }
-func (*Attributes) ProtoMessage() {}
-func (*Attributes) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{0}
-}
-func (m *Attributes) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *Attributes) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *Attributes) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Attributes.Merge(m, src)
-}
-func (m *Attributes) XXX_Size() int {
-	return m.Size()
-}
-func (m *Attributes) XXX_DiscardUnknown() {
-	xxx_messageInfo_Attributes.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_Attributes proto.InternalMessageInfo
+func (m *Attributes) Reset()                    { *m = Attributes{} }
+func (*Attributes) ProtoMessage()               {}
+func (*Attributes) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{0} }
 
 // ReplicationTarget identifies a node/store pair.
-//
-// TODO(aayush): There are a bunch of usages of ReplicaDescriptor in allocator
-// methods where we should really be using ReplicationTarget. We should instead
-// have something like a `ReplicationTargetI` interface that both
-// `ReplicaDescriptor` and `ReplicationTarget` implement and refactor our
-// utility methods for these operate on the interface instead.
 type ReplicationTarget struct {
 	NodeID  NodeID  `protobuf:"varint,1,opt,name=node_id,json=nodeId,casttype=NodeID" json:"node_id"`
 	StoreID StoreID `protobuf:"varint,2,opt,name=store_id,json=storeId,casttype=StoreID" json:"store_id"`
 }
 
-func (m *ReplicationTarget) Reset()      { *m = ReplicationTarget{} }
-func (*ReplicationTarget) ProtoMessage() {}
-func (*ReplicationTarget) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{1}
-}
-func (m *ReplicationTarget) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *ReplicationTarget) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *ReplicationTarget) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_ReplicationTarget.Merge(m, src)
-}
-func (m *ReplicationTarget) XXX_Size() int {
-	return m.Size()
-}
-func (m *ReplicationTarget) XXX_DiscardUnknown() {
-	xxx_messageInfo_ReplicationTarget.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_ReplicationTarget proto.InternalMessageInfo
+func (m *ReplicationTarget) Reset()                    { *m = ReplicationTarget{} }
+func (*ReplicationTarget) ProtoMessage()               {}
+func (*ReplicationTarget) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{1} }
 
 // ReplicaDescriptor describes a replica location by node ID
 // (corresponds to a host:port via lookup on gossip network) and store
 // ID (identifies the device).
-// TODO(jeffreyxiao): All nullable fields in ReplicaDescriptor can be made
-// non-nullable if #38302 is guaranteed to be on all nodes (I.E. 20.1).
 type ReplicaDescriptor struct {
 	NodeID  NodeID  `protobuf:"varint,1,opt,name=node_id,json=nodeId,casttype=NodeID" json:"node_id"`
 	StoreID StoreID `protobuf:"varint,2,opt,name=store_id,json=storeId,casttype=StoreID" json:"store_id"`
@@ -235,38 +49,11 @@ type ReplicaDescriptor struct {
 	// a store and then re-added to the same store, the new instance will have a
 	// higher replica_id.
 	ReplicaID ReplicaID `protobuf:"varint,3,opt,name=replica_id,json=replicaId,casttype=ReplicaID" json:"replica_id"`
-	// Type indicates which raft activities a replica participates in. A nil type
-	// is equivalent to VOTER.
-	Type *ReplicaType `protobuf:"varint,4,opt,name=type,enum=cockroach.roachpb.ReplicaType" json:"type,omitempty"`
 }
 
-func (m *ReplicaDescriptor) Reset()      { *m = ReplicaDescriptor{} }
-func (*ReplicaDescriptor) ProtoMessage() {}
-func (*ReplicaDescriptor) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{2}
-}
-func (m *ReplicaDescriptor) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *ReplicaDescriptor) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *ReplicaDescriptor) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_ReplicaDescriptor.Merge(m, src)
-}
-func (m *ReplicaDescriptor) XXX_Size() int {
-	return m.Size()
-}
-func (m *ReplicaDescriptor) XXX_DiscardUnknown() {
-	xxx_messageInfo_ReplicaDescriptor.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_ReplicaDescriptor proto.InternalMessageInfo
+func (m *ReplicaDescriptor) Reset()                    { *m = ReplicaDescriptor{} }
+func (*ReplicaDescriptor) ProtoMessage()               {}
+func (*ReplicaDescriptor) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{2} }
 
 // ReplicaIdent uniquely identifies a specific replica.
 type ReplicaIdent struct {
@@ -274,50 +61,17 @@ type ReplicaIdent struct {
 	Replica ReplicaDescriptor `protobuf:"bytes,2,opt,name=replica" json:"replica"`
 }
 
-func (m *ReplicaIdent) Reset()         { *m = ReplicaIdent{} }
-func (m *ReplicaIdent) String() string { return proto.CompactTextString(m) }
-func (*ReplicaIdent) ProtoMessage()    {}
-func (*ReplicaIdent) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{3}
-}
-func (m *ReplicaIdent) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *ReplicaIdent) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *ReplicaIdent) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_ReplicaIdent.Merge(m, src)
-}
-func (m *ReplicaIdent) XXX_Size() int {
-	return m.Size()
-}
-func (m *ReplicaIdent) XXX_DiscardUnknown() {
-	xxx_messageInfo_ReplicaIdent.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_ReplicaIdent proto.InternalMessageInfo
+func (m *ReplicaIdent) Reset()                    { *m = ReplicaIdent{} }
+func (m *ReplicaIdent) String() string            { return proto.CompactTextString(m) }
+func (*ReplicaIdent) ProtoMessage()               {}
+func (*ReplicaIdent) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{3} }
 
 // RangeDescriptor is the value stored in a range metadata key.
 // A range is described using an inclusive start key, a non-inclusive end key,
 // and a list of replicas where the range is stored.
 //
-// NOTE: Care must be taken when adding or removing fields from this proto
-// because we have code relies on the descriptor comparing Equal() after
-// round-tripping through a previous/next version node (i.e. in mixed-version
-// clusters). Note that we don't need to proto encoding to be stable since, when
-// doing CPuts we use the raw bytes we've read from the DB as the expected value
-// (instead of re-marshaling the proto), but unfortunately we also need the
-// Equal() method to work. Also note that we configure our protos to not
-// maintain unrecognized fields.
-//
-// TODO(jeffreyxiao): All nullable fields in RangeDescriptor can be made
-// non-nullable if #38302 is guaranteed to be on all nodes (I.E. 20.1).
+// NOTE: Care must be taken when changing the encoding of this proto
+// because it is used as part of conditional put operations.
 type RangeDescriptor struct {
 	RangeID RangeID `protobuf:"varint,1,opt,name=range_id,json=rangeId,casttype=RangeID" json:"range_id"`
 	// start_key is the first key which may be contained by this range.
@@ -326,126 +80,17 @@ type RangeDescriptor struct {
 	// contained in this range - it will be contained in the immediately
 	// subsequent range.
 	EndKey RKey `protobuf:"bytes,3,opt,name=end_key,json=endKey,casttype=RKey" json:"end_key,omitempty"`
-	// InternalReplicas is the is the set of nodes/stores on which replicas of
-	// this range are stored. DO NOT USE this field directly, use the `Replicas`
-	// method instead. The ordering is arbitrary and subject to permutation.
-	InternalReplicas []ReplicaDescriptor `protobuf:"bytes,4,rep,name=internal_replicas,json=internalReplicas" json:"internal_replicas"`
+	// replicas is the set of nodes/stores on which replicas of this
+	// range are stored, the ordering being arbitrary and subject to
+	// permutation.
+	Replicas []ReplicaDescriptor `protobuf:"bytes,4,rep,name=replicas" json:"replicas"`
 	// next_replica_id is a counter used to generate replica IDs.
 	NextReplicaID ReplicaID `protobuf:"varint,5,opt,name=next_replica_id,json=nextReplicaId,casttype=ReplicaID" json:"next_replica_id"`
-	// generation is incremented on every split, merge, and every replica change,
-	// i.e., whenever the span of the range or replica set changes. It is
-	// initialized to zero when the range is first created. The generation
-	// counter was first introduced to allow the range descriptor resulting from
-	// a split and then merge to be distinguishable from the initial range
-	// descriptor. This is important since changes to the range descriptors use
-	// CPuts to ensure mutual exclusion.
-	//
-	// See #28071 for details on the above.
-	//
-	// Generations are also useful to make local replicaGC decisions when applying
-	// a snapshot on keyspace that has overlapping replicas (but note that we do
-	// not use this at the time of writing due to migration concerns; see below).
-	//
-	// We want to be able to compare the snapshot range's generation counter to
-	// that of the overlapping replicas to draw a conclusion about whether the
-	// snapshot can be applied (in which case the overlapping replicas need to be
-	// safely removable). To that end, on a split, not only do we increment the
-	// left hand side's generation, we also copy the resultant generation to the
-	// newly created right hand side. On merges, we update the left hand side's
-	// generation so that it exceeds by one the maximum of the left hand side and
-	// the right hand side's generations from before the merge.
-	//
-	// If two replicas (perhaps one of them represented by a raft or preemptive
-	// snapshot) as defined by their full range descriptor (including, notably,
-	// the generation) overlap, then one of them has to be stale. This is because
-	// the keyspace cleanly shards into non-overlapping ranges at all times (i.e.
-	// for all consistent snapshots). Since meta ranges (or more generally, range
-	// descriptors) are only ever updated transactionally, mutations to the meta
-	// ranges can be serialized (i.e. put into some sequential ordering). We know
-	// that the descriptors corresponding to both of our replicas can't be from
-	// the same consistent snapshot of the meta ranges, so there is a version of
-	// the meta ranges that includes only the first replica, and there is a
-	// version that includes only the second replica. Without loss of generality,
-	// assume that the first version is "older". This means that there is a finite
-	// sequence of splits and merges that were applied to the consistent snapshot
-	// corresponding to the first version which resulted in the second version of
-	// the meta ranges.
-	//
-	// Each individual operation, thanks to the generational semantics above, has
-	// the invariant that the resulting descriptors have a strictly larger
-	// generation than any descriptors from the previous version that they cover.
-	// For example, if a descriptor [a,c) at generation 5 is split into [a,b) and
-	// [b,c), both of those latter range descriptors have generation 6. If [c,d)
-	// is at generation 12 and [d, f) is at generation 17, then the resulting
-	// merged range [c,f) will have generation 18.
-	//
-	// At the end of the day, for incoming snapshots, this means that we only have
-	// to collect the overlapping replicas and their generations. Any replica with
-	// a smaller generation is stale by the above argument and can be replicaGC'ed
-	// right away. Any replica with a larger generation indicates that the snapshot
-	// is stale and should be discarded. A replica with the same generation is
-	// necessarily a replica of the range the snapshot is addressing (this is the
-	// usual case, in which a snapshot "overlaps" precisely one replica, which is
-	// the replica it's supposed to update, and no splits and merges have taken
-	// place at all).
-	//
-	// For a third note, observe that the generational semantics above may
-	// possibly allow range merges without colocation, at least in the sense that
-	// the counter examples in #28071 are defused. This is because the
-	// generational counter can answer the question whether the overlapping
-	// replica is gc'able or not. If it is not gc'able, then by definition the
-	// replica applying the merge is.
-	Generation RangeGeneration `protobuf:"varint,6,opt,name=generation,casttype=RangeGeneration" json:"generation"`
-	// This field is not used any more, but we need to maintain it in 20.2 because
-	// 20.1 nodes need descriptors to round-trip through 20.2 nodes and compare
-	// Equal() when they come back. 20.2 nodes know to ignore this field when
-	// comparing, so the field can be removed in 21.1.
-	DeprecatedGenerationComparable *bool `protobuf:"varint,8,opt,name=deprecated_generation_comparable,json=deprecatedGenerationComparable" json:"deprecated_generation_comparable,omitempty"`
-	// The presence of the sticky_bit indicates that the range should not be
-	// automatically merged by the merge queue with the range to its left. It is
-	// set during a split operation and unset during an unsplit operation. Note
-	// that the unsplit operation is a different operation from the merge
-	// operation. Unsplit only unsets sticky_bit. It is represented by a
-	// timestamp that indicates when it expires. After the expiration time has
-	// passed, the split is eligible for automatic merging. A nil sticky bit is
-	// equivalent to hlc.Timestamp{}.
-	//
-	// The reason the sticky_bit exists is because when the merge queue is
-	// enabled and a manual split happens, the split ranges would immediately be
-	// merged by the merge queue. Previous, we threw an error when a user
-	// attempted to execute ALTER TABLE/INDEX ... SPLIT AT ... when the merge
-	// queue is enabled. With sticky_bit, users can manually split ranges without
-	// diabling the merge queue.
-	StickyBit *hlc.Timestamp `protobuf:"bytes,7,opt,name=sticky_bit,json=stickyBit" json:"sticky_bit,omitempty"`
 }
 
-func (m *RangeDescriptor) Reset()      { *m = RangeDescriptor{} }
-func (*RangeDescriptor) ProtoMessage() {}
-func (*RangeDescriptor) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{4}
-}
-func (m *RangeDescriptor) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *RangeDescriptor) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *RangeDescriptor) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_RangeDescriptor.Merge(m, src)
-}
-func (m *RangeDescriptor) XXX_Size() int {
-	return m.Size()
-}
-func (m *RangeDescriptor) XXX_DiscardUnknown() {
-	xxx_messageInfo_RangeDescriptor.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_RangeDescriptor proto.InternalMessageInfo
+func (m *RangeDescriptor) Reset()                    { *m = RangeDescriptor{} }
+func (*RangeDescriptor) ProtoMessage()               {}
+func (*RangeDescriptor) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{4} }
 
 // Percentiles contains a handful of hard-coded percentiles meant to summarize
 // a distribution.
@@ -458,33 +103,9 @@ type Percentiles struct {
 	PMax float64 `protobuf:"fixed64,6,opt,name=pMax" json:"pMax"`
 }
 
-func (m *Percentiles) Reset()      { *m = Percentiles{} }
-func (*Percentiles) ProtoMessage() {}
-func (*Percentiles) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{5}
-}
-func (m *Percentiles) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *Percentiles) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *Percentiles) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Percentiles.Merge(m, src)
-}
-func (m *Percentiles) XXX_Size() int {
-	return m.Size()
-}
-func (m *Percentiles) XXX_DiscardUnknown() {
-	xxx_messageInfo_Percentiles.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_Percentiles proto.InternalMessageInfo
+func (m *Percentiles) Reset()                    { *m = Percentiles{} }
+func (*Percentiles) ProtoMessage()               {}
+func (*Percentiles) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{5} }
 
 // StoreCapacity contains capacity information for a storage device.
 type StoreCapacity struct {
@@ -505,13 +126,11 @@ type StoreCapacity struct {
 	LogicalBytes int64 `protobuf:"varint,9,opt,name=logical_bytes,json=logicalBytes" json:"logical_bytes"`
 	RangeCount   int32 `protobuf:"varint,3,opt,name=range_count,json=rangeCount" json:"range_count"`
 	LeaseCount   int32 `protobuf:"varint,4,opt,name=lease_count,json=leaseCount" json:"lease_count"`
-	// queries_per_second tracks the average number of queries processed per
-	// second by replicas in the store. The stat is tracked over the time period
-	// defined in storage/replica_stats.go, which as of July 2018 is 30 minutes.
-	QueriesPerSecond float64 `protobuf:"fixed64,10,opt,name=queries_per_second,json=queriesPerSecond" json:"queries_per_second"`
 	// writes_per_second tracks the average number of keys written per second
 	// by ranges in the store. The stat is tracked over the time period defined
-	// in storage/replica_stats.go, which as of July 2018 is 30 minutes.
+	// in storage/replica_stats.go, which as of June 2017 is 25 minutes.
+	// TODO(a-robinson): We can currently only include writes, not reads served
+	// by leaseholders. Should we record those too? This may be enabled by #7611.
 	WritesPerSecond float64 `protobuf:"fixed64,5,opt,name=writes_per_second,json=writesPerSecond" json:"writes_per_second"`
 	// bytes_per_replica and writes_per_replica contain percentiles for the
 	// number of bytes and writes-per-second to each replica in the store.
@@ -520,114 +139,23 @@ type StoreCapacity struct {
 	WritesPerReplica Percentiles `protobuf:"bytes,7,opt,name=writes_per_replica,json=writesPerReplica" json:"writes_per_replica"`
 }
 
-func (m *StoreCapacity) Reset()      { *m = StoreCapacity{} }
-func (*StoreCapacity) ProtoMessage() {}
-func (*StoreCapacity) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{6}
-}
-func (m *StoreCapacity) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *StoreCapacity) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *StoreCapacity) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_StoreCapacity.Merge(m, src)
-}
-func (m *StoreCapacity) XXX_Size() int {
-	return m.Size()
-}
-func (m *StoreCapacity) XXX_DiscardUnknown() {
-	xxx_messageInfo_StoreCapacity.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_StoreCapacity proto.InternalMessageInfo
+func (m *StoreCapacity) Reset()                    { *m = StoreCapacity{} }
+func (*StoreCapacity) ProtoMessage()               {}
+func (*StoreCapacity) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{6} }
 
 // NodeDescriptor holds details on node physical/network topology.
 type NodeDescriptor struct {
-	NodeID          NodeID              `protobuf:"varint,1,opt,name=node_id,json=nodeId,casttype=NodeID" json:"node_id"`
-	Address         util.UnresolvedAddr `protobuf:"bytes,2,opt,name=address" json:"address"`
-	Attrs           Attributes          `protobuf:"bytes,3,opt,name=attrs" json:"attrs"`
-	Locality        Locality            `protobuf:"bytes,4,opt,name=locality" json:"locality"`
-	ServerVersion   Version             `protobuf:"bytes,5,opt,name=ServerVersion" json:"ServerVersion"`
-	BuildTag        string              `protobuf:"bytes,6,opt,name=build_tag,json=buildTag" json:"build_tag"`
-	StartedAt       int64               `protobuf:"varint,7,opt,name=started_at,json=startedAt" json:"started_at"`
-	LocalityAddress []LocalityAddress   `protobuf:"bytes,8,rep,name=locality_address,json=localityAddress" json:"locality_address"`
-	ClusterName     string              `protobuf:"bytes,9,opt,name=cluster_name,json=clusterName" json:"cluster_name"`
-	// The SQL address. If empty, indicates that the base address field
-	// is also used to accept SQL connections.
-	SQLAddress util.UnresolvedAddr `protobuf:"bytes,10,opt,name=sql_address,json=sqlAddress" json:"sql_address"`
+	NodeID        NodeID                        `protobuf:"varint,1,opt,name=node_id,json=nodeId,casttype=NodeID" json:"node_id"`
+	Address       cockroach_util.UnresolvedAddr `protobuf:"bytes,2,opt,name=address" json:"address"`
+	Attrs         Attributes                    `protobuf:"bytes,3,opt,name=attrs" json:"attrs"`
+	Locality      Locality                      `protobuf:"bytes,4,opt,name=locality" json:"locality"`
+	ServerVersion Version                       `protobuf:"bytes,5,opt,name=ServerVersion" json:"ServerVersion"`
 }
 
-func (m *NodeDescriptor) Reset()         { *m = NodeDescriptor{} }
-func (m *NodeDescriptor) String() string { return proto.CompactTextString(m) }
-func (*NodeDescriptor) ProtoMessage()    {}
-func (*NodeDescriptor) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{7}
-}
-func (m *NodeDescriptor) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *NodeDescriptor) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *NodeDescriptor) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_NodeDescriptor.Merge(m, src)
-}
-func (m *NodeDescriptor) XXX_Size() int {
-	return m.Size()
-}
-func (m *NodeDescriptor) XXX_DiscardUnknown() {
-	xxx_messageInfo_NodeDescriptor.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_NodeDescriptor proto.InternalMessageInfo
-
-// LocalityAddress holds the private address accessible only from other nodes
-// in the corresponding locality.
-type LocalityAddress struct {
-	Address      util.UnresolvedAddr `protobuf:"bytes,1,opt,name=address" json:"address"`
-	LocalityTier Tier                `protobuf:"bytes,2,opt,name=locality_tier,json=localityTier" json:"locality_tier"`
-}
-
-func (m *LocalityAddress) Reset()         { *m = LocalityAddress{} }
-func (m *LocalityAddress) String() string { return proto.CompactTextString(m) }
-func (*LocalityAddress) ProtoMessage()    {}
-func (*LocalityAddress) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{8}
-}
-func (m *LocalityAddress) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *LocalityAddress) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *LocalityAddress) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_LocalityAddress.Merge(m, src)
-}
-func (m *LocalityAddress) XXX_Size() int {
-	return m.Size()
-}
-func (m *LocalityAddress) XXX_DiscardUnknown() {
-	xxx_messageInfo_LocalityAddress.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_LocalityAddress proto.InternalMessageInfo
+func (m *NodeDescriptor) Reset()                    { *m = NodeDescriptor{} }
+func (m *NodeDescriptor) String() string            { return proto.CompactTextString(m) }
+func (*NodeDescriptor) ProtoMessage()               {}
+func (*NodeDescriptor) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{7} }
 
 // StoreDescriptor holds store information including store attributes, node
 // descriptor and store capacity.
@@ -638,34 +166,10 @@ type StoreDescriptor struct {
 	Capacity StoreCapacity  `protobuf:"bytes,4,opt,name=capacity" json:"capacity"`
 }
 
-func (m *StoreDescriptor) Reset()         { *m = StoreDescriptor{} }
-func (m *StoreDescriptor) String() string { return proto.CompactTextString(m) }
-func (*StoreDescriptor) ProtoMessage()    {}
-func (*StoreDescriptor) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{9}
-}
-func (m *StoreDescriptor) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *StoreDescriptor) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *StoreDescriptor) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_StoreDescriptor.Merge(m, src)
-}
-func (m *StoreDescriptor) XXX_Size() int {
-	return m.Size()
-}
-func (m *StoreDescriptor) XXX_DiscardUnknown() {
-	xxx_messageInfo_StoreDescriptor.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_StoreDescriptor proto.InternalMessageInfo
+func (m *StoreDescriptor) Reset()                    { *m = StoreDescriptor{} }
+func (m *StoreDescriptor) String() string            { return proto.CompactTextString(m) }
+func (*StoreDescriptor) ProtoMessage()               {}
+func (*StoreDescriptor) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{8} }
 
 // StoreDeadReplicas holds a storeID and a list of dead replicas on that store.
 // Used to let the range lease holder know about corrupted or otherwise
@@ -675,34 +179,10 @@ type StoreDeadReplicas struct {
 	Replicas []ReplicaIdent `protobuf:"bytes,2,rep,name=replicas" json:"replicas"`
 }
 
-func (m *StoreDeadReplicas) Reset()         { *m = StoreDeadReplicas{} }
-func (m *StoreDeadReplicas) String() string { return proto.CompactTextString(m) }
-func (*StoreDeadReplicas) ProtoMessage()    {}
-func (*StoreDeadReplicas) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{10}
-}
-func (m *StoreDeadReplicas) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *StoreDeadReplicas) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *StoreDeadReplicas) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_StoreDeadReplicas.Merge(m, src)
-}
-func (m *StoreDeadReplicas) XXX_Size() int {
-	return m.Size()
-}
-func (m *StoreDeadReplicas) XXX_DiscardUnknown() {
-	xxx_messageInfo_StoreDeadReplicas.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_StoreDeadReplicas proto.InternalMessageInfo
+func (m *StoreDeadReplicas) Reset()                    { *m = StoreDeadReplicas{} }
+func (m *StoreDeadReplicas) String() string            { return proto.CompactTextString(m) }
+func (*StoreDeadReplicas) ProtoMessage()               {}
+func (*StoreDeadReplicas) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{9} }
 
 // Locality is an ordered set of key value Tiers that describe a node's
 // location. The tier keys should be the same across all nodes.
@@ -710,33 +190,9 @@ type Locality struct {
 	Tiers []Tier `protobuf:"bytes,1,rep,name=tiers" json:"tiers"`
 }
 
-func (m *Locality) Reset()      { *m = Locality{} }
-func (*Locality) ProtoMessage() {}
-func (*Locality) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{11}
-}
-func (m *Locality) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *Locality) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *Locality) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Locality.Merge(m, src)
-}
-func (m *Locality) XXX_Size() int {
-	return m.Size()
-}
-func (m *Locality) XXX_DiscardUnknown() {
-	xxx_messageInfo_Locality.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_Locality proto.InternalMessageInfo
+func (m *Locality) Reset()                    { *m = Locality{} }
+func (*Locality) ProtoMessage()               {}
+func (*Locality) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{10} }
 
 // Tier represents one level of the locality hierarchy.
 type Tier struct {
@@ -746,76 +202,28 @@ type Tier struct {
 	Value string `protobuf:"bytes,2,opt,name=value" json:"value"`
 }
 
-func (m *Tier) Reset()      { *m = Tier{} }
-func (*Tier) ProtoMessage() {}
-func (*Tier) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{12}
-}
-func (m *Tier) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *Tier) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *Tier) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Tier.Merge(m, src)
-}
-func (m *Tier) XXX_Size() int {
-	return m.Size()
-}
-func (m *Tier) XXX_DiscardUnknown() {
-	xxx_messageInfo_Tier.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_Tier proto.InternalMessageInfo
+func (m *Tier) Reset()                    { *m = Tier{} }
+func (*Tier) ProtoMessage()               {}
+func (*Tier) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{11} }
 
 type Version struct {
+	// The names "major" and "minor" are reserved in C in
+	// some platforms (e.g. FreeBSD).
 	Major int32 `protobuf:"varint,1,opt,name=major_val,json=majorVal" json:"major_val"`
 	Minor int32 `protobuf:"varint,2,opt,name=minor_val,json=minorVal" json:"minor_val"`
 	// Note that patch is a placeholder and will always be zero.
 	Patch int32 `protobuf:"varint,3,opt,name=patch" json:"patch"`
-	// The internal version is used to introduce migrations during the development
-	// cycle. They are subversions that are never the end versions of a release,
-	// i.e. users of stable, public release will only use binaries with the
-	// internal version set to 0.
-	Internal int32 `protobuf:"varint,4,opt,name=internal" json:"internal"`
+	// The unstable version is used to migrate during development.
+	// Users of stable, public releases will only use binaries
+	// with unstable set to 0.
+	Unstable int32 `protobuf:"varint,4,opt,name=unstable" json:"unstable"`
 }
 
-func (m *Version) Reset()      { *m = Version{} }
-func (*Version) ProtoMessage() {}
-func (*Version) Descriptor() ([]byte, []int) {
-	return fileDescriptor_ecd7f5cc803f82c8, []int{13}
-}
-func (m *Version) XXX_Unmarshal(b []byte) error {
-	return m.Unmarshal(b)
-}
-func (m *Version) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
-	if err != nil {
-		return nil, err
-	}
-	return b[:n], nil
-}
-func (m *Version) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Version.Merge(m, src)
-}
-func (m *Version) XXX_Size() int {
-	return m.Size()
-}
-func (m *Version) XXX_DiscardUnknown() {
-	xxx_messageInfo_Version.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_Version proto.InternalMessageInfo
+func (m *Version) Reset()                    { *m = Version{} }
+func (*Version) ProtoMessage()               {}
+func (*Version) Descriptor() ([]byte, []int) { return fileDescriptorMetadata, []int{12} }
 
 func init() {
-	proto.RegisterEnum("cockroach.roachpb.ReplicaType", ReplicaType_name, ReplicaType_value)
 	proto.RegisterType((*Attributes)(nil), "cockroach.roachpb.Attributes")
 	proto.RegisterType((*ReplicationTarget)(nil), "cockroach.roachpb.ReplicationTarget")
 	proto.RegisterType((*ReplicaDescriptor)(nil), "cockroach.roachpb.ReplicaDescriptor")
@@ -824,139 +232,11 @@ func init() {
 	proto.RegisterType((*Percentiles)(nil), "cockroach.roachpb.Percentiles")
 	proto.RegisterType((*StoreCapacity)(nil), "cockroach.roachpb.StoreCapacity")
 	proto.RegisterType((*NodeDescriptor)(nil), "cockroach.roachpb.NodeDescriptor")
-	proto.RegisterType((*LocalityAddress)(nil), "cockroach.roachpb.LocalityAddress")
 	proto.RegisterType((*StoreDescriptor)(nil), "cockroach.roachpb.StoreDescriptor")
 	proto.RegisterType((*StoreDeadReplicas)(nil), "cockroach.roachpb.StoreDeadReplicas")
 	proto.RegisterType((*Locality)(nil), "cockroach.roachpb.Locality")
 	proto.RegisterType((*Tier)(nil), "cockroach.roachpb.Tier")
 	proto.RegisterType((*Version)(nil), "cockroach.roachpb.Version")
-}
-
-func init() { proto.RegisterFile("roachpb/metadata.proto", fileDescriptor_ecd7f5cc803f82c8) }
-
-var fileDescriptor_ecd7f5cc803f82c8 = []byte{
-	// 1455 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xbc, 0x56, 0xcf, 0x6f, 0x1b, 0xc5,
-	0x17, 0xf7, 0xc6, 0xeb, 0xd8, 0x7e, 0xf9, 0xe5, 0x8c, 0xbe, 0xdf, 0xd6, 0xf2, 0xf7, 0x8b, 0xed,
-	0x1a, 0x2a, 0xd2, 0x82, 0x92, 0x34, 0x28, 0xaa, 0x1a, 0x28, 0x52, 0x9c, 0xa4, 0xc1, 0x34, 0x71,
-	0xc2, 0xc6, 0x2d, 0x12, 0x97, 0xd5, 0x64, 0x77, 0x70, 0x96, 0xae, 0x77, 0xdd, 0xd9, 0x71, 0x5a,
-	0xdf, 0x11, 0x20, 0x21, 0x24, 0x8e, 0x48, 0x5c, 0x8a, 0x10, 0x07, 0xfe, 0x03, 0xfe, 0x84, 0x1e,
-	0x7b, 0xec, 0x29, 0x82, 0x54, 0x42, 0x9c, 0x39, 0xe6, 0x80, 0xd0, 0xbc, 0x9d, 0xfd, 0xe1, 0x34,
-	0x85, 0xb6, 0x48, 0xdc, 0x66, 0x3f, 0xef, 0xf3, 0x79, 0xfb, 0xe6, 0xcd, 0x7b, 0x6f, 0x06, 0xce,
-	0x71, 0x9f, 0x5a, 0x07, 0xfd, 0xfd, 0x85, 0x1e, 0x13, 0xd4, 0xa6, 0x82, 0xce, 0xf7, 0xb9, 0x2f,
-	0x7c, 0x32, 0x6b, 0xf9, 0xd6, 0x1d, 0xb4, 0xcd, 0x2b, 0x46, 0xa5, 0x32, 0x10, 0x8e, 0xbb, 0x30,
-	0xf0, 0x38, 0x0b, 0x7c, 0xf7, 0x90, 0xd9, 0x26, 0xb5, 0x6d, 0x1e, 0xd2, 0x2b, 0x65, 0xb4, 0x1d,
-	0xb8, 0xd6, 0x82, 0x70, 0x7a, 0x2c, 0x10, 0xb4, 0xd7, 0x57, 0x96, 0xff, 0x74, 0xfd, 0xae, 0x8f,
-	0xcb, 0x05, 0xb9, 0x0a, 0xd1, 0xc6, 0x1a, 0xc0, 0xaa, 0x10, 0xdc, 0xd9, 0x1f, 0x08, 0x16, 0x90,
-	0x37, 0x20, 0x47, 0x85, 0xe0, 0x41, 0x59, 0xab, 0x67, 0xe7, 0x8a, 0xcd, 0xff, 0xfe, 0x7e, 0x54,
-	0x9b, 0x1d, 0xd2, 0x9e, 0xbb, 0xd2, 0x40, 0xf8, 0xcd, 0x8f, 0x5d, 0xff, 0x5e, 0xc3, 0x08, 0x39,
-	0x2b, 0x85, 0x6f, 0x1e, 0xd4, 0x32, 0xbf, 0x3d, 0xa8, 0x69, 0x8d, 0xcf, 0x35, 0x98, 0x35, 0x58,
-	0xdf, 0x75, 0x2c, 0x2a, 0x1c, 0xdf, 0xeb, 0x50, 0xde, 0x65, 0x82, 0x5c, 0x81, 0xbc, 0xe7, 0xdb,
-	0xcc, 0x74, 0xec, 0xb2, 0x56, 0xd7, 0xe6, 0x72, 0xcd, 0xf2, 0xc3, 0xa3, 0x5a, 0xe6, 0xf8, 0xa8,
-	0x36, 0xde, 0xf6, 0x6d, 0xd6, 0x5a, 0x3f, 0x89, 0x57, 0xc6, 0xb8, 0x24, 0xb6, 0x6c, 0xb2, 0x0c,
-	0x85, 0x40, 0xf8, 0x1c, 0x35, 0x63, 0xa8, 0xa9, 0x28, 0x4d, 0x7e, 0x4f, 0xe2, 0x28, 0x8a, 0x96,
-	0x46, 0x1e, 0xb9, 0x2d, 0x3b, 0x15, 0xc9, 0x1f, 0x49, 0x24, 0xeb, 0x2c, 0xb0, 0xb8, 0xd3, 0x17,
-	0x3e, 0xff, 0xf7, 0x22, 0x21, 0xd7, 0x01, 0x78, 0xf8, 0x7b, 0x29, 0xcc, 0xa2, 0xb0, 0xaa, 0x84,
-	0x45, 0x15, 0x18, 0x4a, 0x93, 0x0f, 0xa3, 0xa8, 0x14, 0x2d, 0x9b, 0x2c, 0x81, 0x2e, 0x86, 0x7d,
-	0x56, 0xd6, 0xeb, 0xda, 0xdc, 0xf4, 0x52, 0x75, 0xfe, 0xa9, 0xb3, 0x9f, 0x57, 0xb2, 0xce, 0xb0,
-	0xcf, 0x0c, 0xe4, 0xae, 0x4c, 0xca, 0xcd, 0xff, 0xf4, 0xa0, 0xa6, 0x61, 0x02, 0xbe, 0xd4, 0x60,
-	0x32, 0x72, 0x6d, 0x33, 0x4f, 0xc8, 0x8d, 0x70, 0xea, 0x75, 0xe3, 0xcd, 0x67, 0x93, 0x8d, 0x18,
-	0x12, 0x0f, 0x37, 0xa2, 0x96, 0x46, 0x1e, 0xb9, 0x2d, 0x9b, 0xac, 0x43, 0x5e, 0x85, 0x85, 0xdb,
-	0x9f, 0x58, 0x7a, 0xed, 0xd9, 0xc1, 0x24, 0x99, 0x6e, 0xea, 0xd2, 0xb7, 0x11, 0x49, 0x1b, 0x9f,
-	0xe9, 0x30, 0x83, 0xae, 0x53, 0x87, 0xf1, 0x92, 0x01, 0x5d, 0x84, 0x62, 0x20, 0x28, 0x17, 0xe6,
-	0x1d, 0x36, 0xc4, 0x90, 0x26, 0x9b, 0x85, 0x93, 0xa3, 0x9a, 0x6e, 0xdc, 0x64, 0x43, 0xa3, 0x80,
-	0xa6, 0x9b, 0x6c, 0x48, 0x2e, 0x40, 0x9e, 0x79, 0x36, 0x92, 0xb2, 0xa7, 0x48, 0xe3, 0xcc, 0xb3,
-	0x25, 0xe5, 0x43, 0x98, 0x75, 0x3c, 0xc1, 0xb8, 0x47, 0x5d, 0x53, 0x05, 0x1a, 0x94, 0xf5, 0x7a,
-	0xf6, 0x05, 0x37, 0x59, 0x8a, 0x9c, 0x28, 0x42, 0x40, 0xde, 0x87, 0x19, 0x8f, 0xdd, 0x17, 0x66,
-	0xaa, 0x02, 0x72, 0x58, 0x01, 0x0d, 0xb5, 0xc1, 0xa9, 0x36, 0xbb, 0x2f, 0x9e, 0x51, 0x05, 0x53,
-	0x5e, 0xca, 0x66, 0x93, 0xab, 0x00, 0x5d, 0xe6, 0x31, 0x8e, 0x0d, 0x55, 0x1e, 0xc7, 0x3c, 0x9d,
-	0x97, 0x6e, 0x4e, 0x8e, 0x6a, 0x61, 0x4a, 0x37, 0x63, 0xb3, 0x91, 0xa2, 0x92, 0xf7, 0xa0, 0x6e,
-	0xb3, 0x3e, 0x67, 0x16, 0x15, 0xcc, 0x36, 0x13, 0x83, 0x69, 0xf9, 0xbd, 0x3e, 0xe5, 0x74, 0xdf,
-	0x65, 0xe5, 0x42, 0x5d, 0x9b, 0x2b, 0x18, 0xd5, 0x84, 0x97, 0xf8, 0x5a, 0x8b, 0x59, 0xe4, 0x1d,
-	0x80, 0x40, 0x38, 0xd6, 0x9d, 0xa1, 0xb9, 0xef, 0x88, 0x72, 0x1e, 0xab, 0xe0, 0x95, 0x54, 0x82,
-	0xe4, 0xa4, 0x99, 0x3f, 0x70, 0xad, 0xf9, 0x4e, 0x34, 0x69, 0x8c, 0x62, 0x28, 0x68, 0x3a, 0x62,
-	0xa4, 0x2c, 0x33, 0x8d, 0x1f, 0x34, 0x98, 0xd8, 0x65, 0xdc, 0x62, 0x9e, 0x70, 0x5c, 0x16, 0x90,
-	0x73, 0x90, 0xed, 0x5f, 0x59, 0xc4, 0xf3, 0xd7, 0x54, 0x3e, 0x25, 0x80, 0xf8, 0xd2, 0x32, 0x9e,
-	0x6f, 0x82, 0x2f, 0x2d, 0x23, 0xbe, 0xbc, 0x88, 0x47, 0x9a, 0xe0, 0xcb, 0x21, 0xff, 0xea, 0x32,
-	0xf6, 0x4b, 0x82, 0x5f, 0x0d, 0xf9, 0xd7, 0x16, 0x31, 0xfd, 0x09, 0x7e, 0x6d, 0x91, 0x94, 0x41,
-	0xef, 0x6f, 0xd3, 0xfb, 0x98, 0xd0, 0xc8, 0x80, 0xc8, 0x8a, 0x2e, 0xe3, 0x6d, 0x9c, 0x64, 0x61,
-	0x0a, 0x9b, 0x7a, 0x8d, 0xf6, 0xa9, 0xe5, 0x88, 0x21, 0xa9, 0x43, 0xc1, 0x52, 0x6b, 0x55, 0xae,
-	0xa1, 0x2a, 0x46, 0x49, 0x03, 0x8a, 0xf4, 0x90, 0x3a, 0x2e, 0xa6, 0x76, 0x2c, 0x45, 0x49, 0x60,
-	0xf9, 0xdf, 0x41, 0xc0, 0x6c, 0xcc, 0x7c, 0x64, 0x46, 0x84, 0x5c, 0x82, 0x29, 0xd7, 0xef, 0x3a,
-	0x16, 0x75, 0xcd, 0xfd, 0xa1, 0x60, 0x41, 0xb9, 0x98, 0xa2, 0x4c, 0x2a, 0x53, 0x53, 0x5a, 0xc8,
-	0x45, 0x98, 0x08, 0x3b, 0xc7, 0xf2, 0x07, 0x9e, 0x50, 0xd3, 0x25, 0x24, 0x02, 0x1a, 0xd6, 0x24,
-	0x2e, 0x69, 0x2e, 0xa3, 0x41, 0x44, 0xd3, 0xd3, 0x34, 0x34, 0x84, 0xb4, 0x25, 0x20, 0x77, 0x07,
-	0x8c, 0x3b, 0x2c, 0x30, 0xfb, 0x8c, 0x9b, 0x01, 0xb3, 0x7c, 0xcf, 0x2e, 0x43, 0x2a, 0x31, 0x25,
-	0x65, 0xdf, 0x65, 0x7c, 0x0f, 0xad, 0x64, 0x11, 0x66, 0xef, 0x71, 0x47, 0x8c, 0x4a, 0xd2, 0x49,
-	0x9e, 0x09, 0xcd, 0x89, 0x62, 0x17, 0x66, 0x71, 0x5b, 0x28, 0x88, 0x26, 0xca, 0x38, 0xd6, 0xd2,
-	0x59, 0xe3, 0x2d, 0x55, 0x23, 0x91, 0x47, 0x94, 0xef, 0x32, 0xae, 0x7a, 0x83, 0x18, 0x40, 0x52,
-	0x31, 0x44, 0x2e, 0xf3, 0x2f, 0xe0, 0xb2, 0x14, 0x07, 0xa9, 0x7c, 0xaa, 0xc3, 0xff, 0x55, 0x87,
-	0x69, 0x79, 0x0d, 0xfc, 0xb3, 0x9b, 0xe3, 0x5d, 0xc8, 0xcb, 0xfb, 0x98, 0x05, 0x81, 0x9a, 0x9c,
-	0xd5, 0xd3, 0x3d, 0x73, 0x2b, 0xbe, 0xb9, 0x57, 0x6d, 0x3b, 0x9e, 0x99, 0x4a, 0x44, 0xae, 0x45,
-	0x77, 0x70, 0xf6, 0xa9, 0x8e, 0x8b, 0xb6, 0x94, 0xdc, 0xd8, 0x4a, 0x1c, 0x2a, 0xc8, 0x75, 0x28,
-	0xb8, 0xbe, 0x45, 0x5d, 0x59, 0xab, 0x3a, 0xaa, 0xff, 0x77, 0x86, 0x7a, 0x4b, 0x51, 0xa2, 0x42,
-	0x8e, 0x24, 0xe4, 0x06, 0x4c, 0xed, 0x31, 0x7e, 0xc8, 0xf8, 0x6d, 0xc6, 0x03, 0x39, 0x76, 0x72,
-	0xe8, 0xa3, 0x72, 0x86, 0x0f, 0xc5, 0x50, 0x2e, 0x46, 0x65, 0xe4, 0x02, 0x14, 0xf7, 0x07, 0x8e,
-	0x6b, 0x9b, 0x82, 0x76, 0xf1, 0xac, 0x8b, 0xd1, 0xaf, 0x10, 0xee, 0xd0, 0x2e, 0x79, 0x55, 0xce,
-	0x16, 0xca, 0xe5, 0x88, 0xa2, 0xe1, 0x6c, 0x89, 0x9b, 0x46, 0xe1, 0xab, 0x82, 0xec, 0x41, 0x29,
-	0x8a, 0xcd, 0x8c, 0x52, 0x5a, 0xc0, 0x39, 0xdd, 0xf8, 0x8b, 0x6d, 0xad, 0x86, 0xcc, 0xa8, 0x7c,
-	0xdc, 0x51, 0x98, 0xbc, 0x0e, 0x93, 0x96, 0x3b, 0x08, 0x04, 0xe3, 0xa6, 0x47, 0x7b, 0x0c, 0xdb,
-	0x2d, 0x8a, 0x6f, 0x42, 0x59, 0xda, 0xb4, 0xc7, 0xc8, 0x1e, 0x4c, 0x04, 0x77, 0xdd, 0xf8, 0xc7,
-	0xf0, 0x5c, 0x67, 0x49, 0x54, 0x79, 0xc0, 0xde, 0x07, 0x5b, 0xea, 0x8f, 0x06, 0x04, 0x77, 0x5d,
-	0xb5, 0x5e, 0xd1, 0xf1, 0x92, 0xfe, 0x56, 0x83, 0x99, 0x53, 0xe1, 0xa6, 0xcb, 0x46, 0x7b, 0x99,
-	0xb2, 0x69, 0xca, 0x39, 0xa2, 0x92, 0x25, 0x1c, 0xc6, 0x55, 0xf1, 0x9d, 0x3f, 0x23, 0x53, 0x1d,
-	0x87, 0xf1, 0x64, 0xc0, 0x84, 0x1a, 0x89, 0xa9, 0xe8, 0x3e, 0x1d, 0x83, 0x19, 0x9c, 0x81, 0xa3,
-	0x97, 0x76, 0xfc, 0x1c, 0xd2, 0x9e, 0xff, 0x39, 0x14, 0xd7, 0xf2, 0xd8, 0x0b, 0xd7, 0xf2, 0xdb,
-	0xa0, 0xcb, 0x86, 0x52, 0x5d, 0x70, 0xe1, 0x0c, 0xe5, 0x68, 0xab, 0x46, 0x43, 0x55, 0x8a, 0x48,
-	0x33, 0x35, 0xb4, 0xc3, 0x46, 0xa8, 0x9f, 0xe1, 0x60, 0x64, 0xd0, 0x9f, 0x1e, 0xeb, 0x8d, 0xaf,
-	0x34, 0x98, 0x55, 0x69, 0xa0, 0x76, 0x7c, 0xc7, 0xbf, 0x64, 0x22, 0x56, 0xa1, 0x10, 0x3f, 0x35,
-	0xc6, 0xb0, 0x84, 0x6b, 0xcf, 0x7e, 0x6a, 0xe0, 0xc3, 0x2d, 0x8a, 0x27, 0x92, 0x35, 0x5a, 0x50,
-	0x88, 0x6a, 0x86, 0xbc, 0x05, 0x39, 0x79, 0xc6, 0xe1, 0x3b, 0xfd, 0x6f, 0x0f, 0x39, 0xe4, 0xa6,
-	0x5e, 0xc9, 0xeb, 0xa0, 0x4b, 0xb3, 0xbc, 0x25, 0xe5, 0x43, 0x49, 0x4b, 0xb5, 0x80, 0x04, 0x48,
-	0x05, 0x72, 0x87, 0xd4, 0x1d, 0x84, 0xb7, 0x59, 0x64, 0x09, 0xa1, 0x94, 0x97, 0x1f, 0x35, 0xc8,
-	0x47, 0x2d, 0x7f, 0x19, 0x8a, 0x3d, 0xfa, 0x89, 0xcf, 0xcd, 0x43, 0xea, 0xaa, 0xbc, 0x4c, 0xa9,
-	0xbc, 0xe4, 0xb6, 0xa5, 0xc1, 0x28, 0xa0, 0xfd, 0x36, 0x75, 0x91, 0xeb, 0x78, 0x8a, 0x3b, 0x76,
-	0x8a, 0x2b, 0x0d, 0x46, 0x01, 0xed, 0x92, 0x5b, 0x81, 0x5c, 0x9f, 0x0a, 0xeb, 0x60, 0xe4, 0xb2,
-	0x0b, 0x21, 0x79, 0x33, 0x47, 0x4f, 0xb0, 0x91, 0x4b, 0x2e, 0x46, 0x93, 0x58, 0x2f, 0x7f, 0xa7,
-	0xc1, 0x44, 0xea, 0xe9, 0x4c, 0xa6, 0x01, 0x6e, 0xef, 0x74, 0x36, 0x0c, 0xf3, 0xc6, 0xad, 0xad,
-	0xad, 0x52, 0x86, 0x10, 0x98, 0x0e, 0xbf, 0x5b, 0xed, 0xb5, 0x9d, 0xed, 0x56, 0x7b, 0xb3, 0x34,
-	0x96, 0x60, 0x3b, 0xb7, 0x3a, 0x9b, 0x3b, 0x12, 0xcb, 0x92, 0x0a, 0x9c, 0x0b, 0xb1, 0xf5, 0x8d,
-	0xed, 0x9d, 0x4e, 0xab, 0xbd, 0x69, 0x6e, 0x6d, 0xac, 0x1a, 0xed, 0x0d, 0xa3, 0xa4, 0x93, 0x09,
-	0xc8, 0x47, 0x1f, 0x1a, 0x99, 0x82, 0x62, 0x7b, 0xa7, 0x6d, 0x22, 0xb9, 0x94, 0x23, 0xff, 0x87,
-	0xf2, 0x29, 0x5d, 0x62, 0x1d, 0xaf, 0xe8, 0x5f, 0x7c, 0x5f, 0xcd, 0x34, 0x2f, 0x3d, 0xfc, 0xa5,
-	0x9a, 0x79, 0x78, 0x5c, 0xd5, 0x1e, 0x1d, 0x57, 0xb5, 0xc7, 0xc7, 0x55, 0xed, 0xe7, 0xe3, 0xaa,
-	0xf6, 0xf5, 0x93, 0x6a, 0xe6, 0xd1, 0x93, 0x6a, 0xe6, 0xf1, 0x93, 0x6a, 0xe6, 0xa3, 0xbc, 0x3a,
-	0xdc, 0x3f, 0x03, 0x00, 0x00, 0xff, 0xff, 0xbd, 0xf7, 0xb3, 0x07, 0x2d, 0x0e, 0x00, 0x00,
-}
-
-func (this *Attributes) Equal(that interface{}) bool {
-	if that == nil {
-		return this == nil
-	}
-
-	that1, ok := that.(*Attributes)
-	if !ok {
-		that2, ok := that.(Attributes)
-		if ok {
-			that1 = &that2
-		} else {
-			return false
-		}
-	}
-	if that1 == nil {
-		return this == nil
-	} else if this == nil {
-		return false
-	}
-	if len(this.Attrs) != len(that1.Attrs) {
-		return false
-	}
-	for i := range this.Attrs {
-		if this.Attrs[i] != that1.Attrs[i] {
-			return false
-		}
-	}
-	return true
 }
 func (this *ReplicationTarget) Equal(that interface{}) bool {
 	if that == nil {
@@ -1013,25 +293,16 @@ func (this *ReplicaDescriptor) Equal(that interface{}) bool {
 	if this.ReplicaID != that1.ReplicaID {
 		return false
 	}
-	if this.Type != nil && that1.Type != nil {
-		if *this.Type != *that1.Type {
-			return false
-		}
-	} else if this.Type != nil {
-		return false
-	} else if that1.Type != nil {
-		return false
-	}
 	return true
 }
-func (this *NodeDescriptor) Equal(that interface{}) bool {
+func (this *RangeDescriptor) Equal(that interface{}) bool {
 	if that == nil {
 		return this == nil
 	}
 
-	that1, ok := that.(*NodeDescriptor)
+	that1, ok := that.(*RangeDescriptor)
 	if !ok {
-		that2, ok := that.(NodeDescriptor)
+		that2, ok := that.(RangeDescriptor)
 		if ok {
 			that1 = &that2
 		} else {
@@ -1043,155 +314,24 @@ func (this *NodeDescriptor) Equal(that interface{}) bool {
 	} else if this == nil {
 		return false
 	}
-	if this.NodeID != that1.NodeID {
+	if this.RangeID != that1.RangeID {
 		return false
 	}
-	if !this.Address.Equal(&that1.Address) {
+	if !bytes.Equal(this.StartKey, that1.StartKey) {
 		return false
 	}
-	if !this.Attrs.Equal(&that1.Attrs) {
+	if !bytes.Equal(this.EndKey, that1.EndKey) {
 		return false
 	}
-	if !this.Locality.Equal(&that1.Locality) {
+	if len(this.Replicas) != len(that1.Replicas) {
 		return false
 	}
-	if !this.ServerVersion.Equal(&that1.ServerVersion) {
-		return false
-	}
-	if this.BuildTag != that1.BuildTag {
-		return false
-	}
-	if this.StartedAt != that1.StartedAt {
-		return false
-	}
-	if len(this.LocalityAddress) != len(that1.LocalityAddress) {
-		return false
-	}
-	for i := range this.LocalityAddress {
-		if !this.LocalityAddress[i].Equal(&that1.LocalityAddress[i]) {
+	for i := range this.Replicas {
+		if !this.Replicas[i].Equal(&that1.Replicas[i]) {
 			return false
 		}
 	}
-	if this.ClusterName != that1.ClusterName {
-		return false
-	}
-	if !this.SQLAddress.Equal(&that1.SQLAddress) {
-		return false
-	}
-	return true
-}
-func (this *LocalityAddress) Equal(that interface{}) bool {
-	if that == nil {
-		return this == nil
-	}
-
-	that1, ok := that.(*LocalityAddress)
-	if !ok {
-		that2, ok := that.(LocalityAddress)
-		if ok {
-			that1 = &that2
-		} else {
-			return false
-		}
-	}
-	if that1 == nil {
-		return this == nil
-	} else if this == nil {
-		return false
-	}
-	if !this.Address.Equal(&that1.Address) {
-		return false
-	}
-	if !this.LocalityTier.Equal(&that1.LocalityTier) {
-		return false
-	}
-	return true
-}
-func (this *Locality) Equal(that interface{}) bool {
-	if that == nil {
-		return this == nil
-	}
-
-	that1, ok := that.(*Locality)
-	if !ok {
-		that2, ok := that.(Locality)
-		if ok {
-			that1 = &that2
-		} else {
-			return false
-		}
-	}
-	if that1 == nil {
-		return this == nil
-	} else if this == nil {
-		return false
-	}
-	if len(this.Tiers) != len(that1.Tiers) {
-		return false
-	}
-	for i := range this.Tiers {
-		if !this.Tiers[i].Equal(&that1.Tiers[i]) {
-			return false
-		}
-	}
-	return true
-}
-func (this *Tier) Equal(that interface{}) bool {
-	if that == nil {
-		return this == nil
-	}
-
-	that1, ok := that.(*Tier)
-	if !ok {
-		that2, ok := that.(Tier)
-		if ok {
-			that1 = &that2
-		} else {
-			return false
-		}
-	}
-	if that1 == nil {
-		return this == nil
-	} else if this == nil {
-		return false
-	}
-	if this.Key != that1.Key {
-		return false
-	}
-	if this.Value != that1.Value {
-		return false
-	}
-	return true
-}
-func (this *Version) Equal(that interface{}) bool {
-	if that == nil {
-		return this == nil
-	}
-
-	that1, ok := that.(*Version)
-	if !ok {
-		that2, ok := that.(Version)
-		if ok {
-			that1 = &that2
-		} else {
-			return false
-		}
-	}
-	if that1 == nil {
-		return this == nil
-	} else if this == nil {
-		return false
-	}
-	if this.Major != that1.Major {
-		return false
-	}
-	if this.Minor != that1.Minor {
-		return false
-	}
-	if this.Patch != that1.Patch {
-		return false
-	}
-	if this.Internal != that1.Internal {
+	if this.NextReplicaID != that1.NextReplicaID {
 		return false
 	}
 	return true
@@ -1199,7 +339,7 @@ func (this *Version) Equal(that interface{}) bool {
 func (m *Attributes) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,31 +347,32 @@ func (m *Attributes) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Attributes) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Attributes) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
 	if len(m.Attrs) > 0 {
-		for iNdEx := len(m.Attrs) - 1; iNdEx >= 0; iNdEx-- {
-			i -= len(m.Attrs[iNdEx])
-			copy(dAtA[i:], m.Attrs[iNdEx])
-			i = encodeVarintMetadata(dAtA, i, uint64(len(m.Attrs[iNdEx])))
-			i--
+		for _, s := range m.Attrs {
 			dAtA[i] = 0xa
+			i++
+			l = len(s)
+			for l >= 1<<7 {
+				dAtA[i] = uint8(uint64(l)&0x7f | 0x80)
+				l >>= 7
+				i++
+			}
+			dAtA[i] = uint8(l)
+			i++
+			i += copy(dAtA[i:], s)
 		}
 	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *ReplicationTarget) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1239,28 +380,23 @@ func (m *ReplicationTarget) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *ReplicationTarget) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *ReplicationTarget) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
-	i--
-	dAtA[i] = 0x10
-	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
+	dAtA[i] = 0x10
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
+	return i, nil
 }
 
 func (m *ReplicaDescriptor) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1268,36 +404,26 @@ func (m *ReplicaDescriptor) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *ReplicaDescriptor) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *ReplicaDescriptor) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.Type != nil {
-		i = encodeVarintMetadata(dAtA, i, uint64(*m.Type))
-		i--
-		dAtA[i] = 0x20
-	}
-	i = encodeVarintMetadata(dAtA, i, uint64(m.ReplicaID))
-	i--
-	dAtA[i] = 0x18
-	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
-	i--
-	dAtA[i] = 0x10
-	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
+	dAtA[i] = 0x10
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.ReplicaID))
+	return i, nil
 }
 
 func (m *ReplicaIdent) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1305,35 +431,28 @@ func (m *ReplicaIdent) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *ReplicaIdent) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *ReplicaIdent) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.Replica.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeID))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeID))
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Replica.Size()))
+	n1, err := m.Replica.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n1
+	return i, nil
 }
 
 func (m *RangeDescriptor) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1341,81 +460,47 @@ func (m *RangeDescriptor) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *RangeDescriptor) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *RangeDescriptor) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.DeprecatedGenerationComparable != nil {
-		i--
-		if *m.DeprecatedGenerationComparable {
-			dAtA[i] = 1
-		} else {
-			dAtA[i] = 0
-		}
-		i--
-		dAtA[i] = 0x40
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeID))
+	if m.StartKey != nil {
+		dAtA[i] = 0x12
+		i++
+		i = encodeVarintMetadata(dAtA, i, uint64(len(m.StartKey)))
+		i += copy(dAtA[i:], m.StartKey)
 	}
-	if m.StickyBit != nil {
-		{
-			size, err := m.StickyBit.MarshalToSizedBuffer(dAtA[:i])
+	if m.EndKey != nil {
+		dAtA[i] = 0x1a
+		i++
+		i = encodeVarintMetadata(dAtA, i, uint64(len(m.EndKey)))
+		i += copy(dAtA[i:], m.EndKey)
+	}
+	if len(m.Replicas) > 0 {
+		for _, msg := range m.Replicas {
+			dAtA[i] = 0x22
+			i++
+			i = encodeVarintMetadata(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
 			if err != nil {
 				return 0, err
 			}
-			i -= size
-			i = encodeVarintMetadata(dAtA, i, uint64(size))
+			i += n
 		}
-		i--
-		dAtA[i] = 0x3a
 	}
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Generation))
-	i--
-	dAtA[i] = 0x30
-	i = encodeVarintMetadata(dAtA, i, uint64(m.NextReplicaID))
-	i--
 	dAtA[i] = 0x28
-	if len(m.InternalReplicas) > 0 {
-		for iNdEx := len(m.InternalReplicas) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.InternalReplicas[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintMetadata(dAtA, i, uint64(size))
-			}
-			i--
-			dAtA[i] = 0x22
-		}
-	}
-	if m.EndKey != nil {
-		i -= len(m.EndKey)
-		copy(dAtA[i:], m.EndKey)
-		i = encodeVarintMetadata(dAtA, i, uint64(len(m.EndKey)))
-		i--
-		dAtA[i] = 0x1a
-	}
-	if m.StartKey != nil {
-		i -= len(m.StartKey)
-		copy(dAtA[i:], m.StartKey)
-		i = encodeVarintMetadata(dAtA, i, uint64(len(m.StartKey)))
-		i--
-		dAtA[i] = 0x12
-	}
-	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeID))
-	i--
-	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.NextReplicaID))
+	return i, nil
 }
 
 func (m *Percentiles) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1423,46 +508,41 @@ func (m *Percentiles) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Percentiles) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Percentiles) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.PMax))))
-	i--
-	dAtA[i] = 0x31
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P90))))
-	i--
-	dAtA[i] = 0x29
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P75))))
-	i--
-	dAtA[i] = 0x21
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P50))))
-	i--
-	dAtA[i] = 0x19
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P25))))
-	i--
-	dAtA[i] = 0x11
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P10))))
-	i--
 	dAtA[i] = 0x9
-	return len(dAtA) - i, nil
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P10))))
+	i += 8
+	dAtA[i] = 0x11
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P25))))
+	i += 8
+	dAtA[i] = 0x19
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P50))))
+	i += 8
+	dAtA[i] = 0x21
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P75))))
+	i += 8
+	dAtA[i] = 0x29
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P90))))
+	i += 8
+	dAtA[i] = 0x31
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.PMax))))
+	i += 8
+	return i, nil
 }
 
 func (m *StoreCapacity) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1470,68 +550,55 @@ func (m *StoreCapacity) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *StoreCapacity) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *StoreCapacity) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.QueriesPerSecond))))
-	i--
-	dAtA[i] = 0x51
-	i = encodeVarintMetadata(dAtA, i, uint64(m.LogicalBytes))
-	i--
-	dAtA[i] = 0x48
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Used))
-	i--
-	dAtA[i] = 0x40
-	{
-		size, err := m.WritesPerReplica.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x3a
-	{
-		size, err := m.BytesPerReplica.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x32
-	i -= 8
-	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.WritesPerSecond))))
-	i--
-	dAtA[i] = 0x29
-	i = encodeVarintMetadata(dAtA, i, uint64(m.LeaseCount))
-	i--
-	dAtA[i] = 0x20
-	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeCount))
-	i--
-	dAtA[i] = 0x18
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Available))
-	i--
-	dAtA[i] = 0x10
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Capacity))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Capacity))
+	dAtA[i] = 0x10
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Available))
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.RangeCount))
+	dAtA[i] = 0x20
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.LeaseCount))
+	dAtA[i] = 0x29
+	i++
+	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.WritesPerSecond))))
+	i += 8
+	dAtA[i] = 0x32
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.BytesPerReplica.Size()))
+	n2, err := m.BytesPerReplica.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n2
+	dAtA[i] = 0x3a
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.WritesPerReplica.Size()))
+	n3, err := m.WritesPerReplica.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n3
+	dAtA[i] = 0x40
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Used))
+	dAtA[i] = 0x48
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.LogicalBytes))
+	return i, nil
 }
 
 func (m *NodeDescriptor) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1539,145 +606,52 @@ func (m *NodeDescriptor) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *NodeDescriptor) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *NodeDescriptor) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.SQLAddress.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x52
-	i -= len(m.ClusterName)
-	copy(dAtA[i:], m.ClusterName)
-	i = encodeVarintMetadata(dAtA, i, uint64(len(m.ClusterName)))
-	i--
-	dAtA[i] = 0x4a
-	if len(m.LocalityAddress) > 0 {
-		for iNdEx := len(m.LocalityAddress) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.LocalityAddress[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintMetadata(dAtA, i, uint64(size))
-			}
-			i--
-			dAtA[i] = 0x42
-		}
-	}
-	i = encodeVarintMetadata(dAtA, i, uint64(m.StartedAt))
-	i--
-	dAtA[i] = 0x38
-	i -= len(m.BuildTag)
-	copy(dAtA[i:], m.BuildTag)
-	i = encodeVarintMetadata(dAtA, i, uint64(len(m.BuildTag)))
-	i--
-	dAtA[i] = 0x32
-	{
-		size, err := m.ServerVersion.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x2a
-	{
-		size, err := m.Locality.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x22
-	{
-		size, err := m.Attrs.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.Address.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
-}
-
-func (m *LocalityAddress) Marshal() (dAtA []byte, err error) {
-	size := m.Size()
-	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
-	if err != nil {
-		return nil, err
-	}
-	return dAtA[:n], nil
-}
-
-func (m *LocalityAddress) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *LocalityAddress) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
-	_ = i
-	var l int
-	_ = l
-	{
-		size, err := m.LocalityTier.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.NodeID))
 	dAtA[i] = 0x12
-	{
-		size, err := m.Address.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Address.Size()))
+	n4, err := m.Address.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
 	}
-	i--
-	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i += n4
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Attrs.Size()))
+	n5, err := m.Attrs.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n5
+	dAtA[i] = 0x22
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Locality.Size()))
+	n6, err := m.Locality.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n6
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.ServerVersion.Size()))
+	n7, err := m.ServerVersion.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n7
+	return i, nil
 }
 
 func (m *StoreDescriptor) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1685,55 +659,44 @@ func (m *StoreDescriptor) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *StoreDescriptor) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *StoreDescriptor) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.Capacity.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x22
-	{
-		size, err := m.Node.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x1a
-	{
-		size, err := m.Attrs.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintMetadata(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Attrs.Size()))
+	n8, err := m.Attrs.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n8
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Node.Size()))
+	n9, err := m.Node.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n9
+	dAtA[i] = 0x22
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Capacity.Size()))
+	n10, err := m.Capacity.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n10
+	return i, nil
 }
 
 func (m *StoreDeadReplicas) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1741,39 +704,32 @@ func (m *StoreDeadReplicas) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *StoreDeadReplicas) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *StoreDeadReplicas) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
 	if len(m.Replicas) > 0 {
-		for iNdEx := len(m.Replicas) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.Replicas[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintMetadata(dAtA, i, uint64(size))
-			}
-			i--
+		for _, msg := range m.Replicas {
 			dAtA[i] = 0x12
+			i++
+			i = encodeVarintMetadata(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
 		}
 	}
-	i = encodeVarintMetadata(dAtA, i, uint64(m.StoreID))
-	i--
-	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *Locality) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1781,36 +737,29 @@ func (m *Locality) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Locality) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Locality) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
 	if len(m.Tiers) > 0 {
-		for iNdEx := len(m.Tiers) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.Tiers[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintMetadata(dAtA, i, uint64(size))
-			}
-			i--
+		for _, msg := range m.Tiers {
 			dAtA[i] = 0xa
+			i++
+			i = encodeVarintMetadata(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
 		}
 	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *Tier) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1818,32 +767,25 @@ func (m *Tier) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Tier) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Tier) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	i -= len(m.Value)
-	copy(dAtA[i:], m.Value)
-	i = encodeVarintMetadata(dAtA, i, uint64(len(m.Value)))
-	i--
-	dAtA[i] = 0x12
-	i -= len(m.Key)
-	copy(dAtA[i:], m.Key)
-	i = encodeVarintMetadata(dAtA, i, uint64(len(m.Key)))
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(len(m.Key)))
+	i += copy(dAtA[i:], m.Key)
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(len(m.Value)))
+	i += copy(dAtA[i:], m.Value)
+	return i, nil
 }
 
 func (m *Version) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -1851,40 +793,33 @@ func (m *Version) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Version) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Version) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Internal))
-	i--
-	dAtA[i] = 0x20
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Patch))
-	i--
-	dAtA[i] = 0x18
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Minor))
-	i--
-	dAtA[i] = 0x10
-	i = encodeVarintMetadata(dAtA, i, uint64(m.Major))
-	i--
 	dAtA[i] = 0x8
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Major))
+	dAtA[i] = 0x10
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Minor))
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Patch))
+	dAtA[i] = 0x20
+	i++
+	i = encodeVarintMetadata(dAtA, i, uint64(m.Unstable))
+	return i, nil
 }
 
 func encodeVarintMetadata(dAtA []byte, offset int, v uint64) int {
-	offset -= sovMetadata(v)
-	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return base
+	return offset + 1
 }
 func NewPopulatedReplicaDescriptor(r randyMetadata, easy bool) *ReplicaDescriptor {
 	this := &ReplicaDescriptor{}
@@ -1900,10 +835,6 @@ func NewPopulatedReplicaDescriptor(r randyMetadata, easy bool) *ReplicaDescripto
 	if r.Intn(2) == 0 {
 		this.ReplicaID *= -1
 	}
-	if r.Intn(5) != 0 {
-		v1 := ReplicaType([]int32{0, 2, 3, 4, 1, 5, 6}[r.Intn(7)])
-		this.Type = &v1
-	}
 	if !easy && r.Intn(10) != 0 {
 	}
 	return this
@@ -1915,42 +846,31 @@ func NewPopulatedRangeDescriptor(r randyMetadata, easy bool) *RangeDescriptor {
 	if r.Intn(2) == 0 {
 		this.RangeID *= -1
 	}
-	if r.Intn(5) != 0 {
-		v2 := r.Intn(100)
-		this.StartKey = make(RKey, v2)
-		for i := 0; i < v2; i++ {
+	if r.Intn(10) != 0 {
+		v1 := r.Intn(100)
+		this.StartKey = make(RKey, v1)
+		for i := 0; i < v1; i++ {
 			this.StartKey[i] = byte(r.Intn(256))
 		}
 	}
-	if r.Intn(5) != 0 {
-		v3 := r.Intn(100)
-		this.EndKey = make(RKey, v3)
-		for i := 0; i < v3; i++ {
+	if r.Intn(10) != 0 {
+		v2 := r.Intn(100)
+		this.EndKey = make(RKey, v2)
+		for i := 0; i < v2; i++ {
 			this.EndKey[i] = byte(r.Intn(256))
 		}
 	}
-	if r.Intn(5) != 0 {
-		v4 := r.Intn(5)
-		this.InternalReplicas = make([]ReplicaDescriptor, v4)
-		for i := 0; i < v4; i++ {
-			v5 := NewPopulatedReplicaDescriptor(r, easy)
-			this.InternalReplicas[i] = *v5
+	if r.Intn(10) != 0 {
+		v3 := r.Intn(5)
+		this.Replicas = make([]ReplicaDescriptor, v3)
+		for i := 0; i < v3; i++ {
+			v4 := NewPopulatedReplicaDescriptor(r, easy)
+			this.Replicas[i] = *v4
 		}
 	}
 	this.NextReplicaID = ReplicaID(r.Int31())
 	if r.Intn(2) == 0 {
 		this.NextReplicaID *= -1
-	}
-	this.Generation = RangeGeneration(r.Int63())
-	if r.Intn(2) == 0 {
-		this.Generation *= -1
-	}
-	if r.Intn(5) != 0 {
-		this.StickyBit = hlc.NewPopulatedTimestamp(r, easy)
-	}
-	if r.Intn(5) != 0 {
-		v6 := bool(bool(r.Intn(2) == 0))
-		this.DeprecatedGenerationComparable = &v6
 	}
 	if !easy && r.Intn(10) != 0 {
 	}
@@ -1976,9 +896,9 @@ func randUTF8RuneMetadata(r randyMetadata) rune {
 	return rune(ru + 61)
 }
 func randStringMetadata(r randyMetadata) string {
-	v7 := r.Intn(100)
-	tmps := make([]rune, v7)
-	for i := 0; i < v7; i++ {
+	v5 := r.Intn(100)
+	tmps := make([]rune, v5)
+	for i := 0; i < v5; i++ {
 		tmps[i] = randUTF8RuneMetadata(r)
 	}
 	return string(tmps)
@@ -2000,11 +920,11 @@ func randFieldMetadata(dAtA []byte, r randyMetadata, fieldNumber int, wire int) 
 	switch wire {
 	case 0:
 		dAtA = encodeVarintPopulateMetadata(dAtA, uint64(key))
-		v8 := r.Int63()
+		v6 := r.Int63()
 		if r.Intn(2) == 0 {
-			v8 *= -1
+			v6 *= -1
 		}
-		dAtA = encodeVarintPopulateMetadata(dAtA, uint64(v8))
+		dAtA = encodeVarintPopulateMetadata(dAtA, uint64(v6))
 	case 1:
 		dAtA = encodeVarintPopulateMetadata(dAtA, uint64(key))
 		dAtA = append(dAtA, byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)), byte(r.Intn(256)))
@@ -2030,9 +950,6 @@ func encodeVarintPopulateMetadata(dAtA []byte, v uint64) []byte {
 	return dAtA
 }
 func (m *Attributes) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	if len(m.Attrs) > 0 {
@@ -2045,9 +962,6 @@ func (m *Attributes) Size() (n int) {
 }
 
 func (m *ReplicationTarget) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.NodeID))
@@ -2056,24 +970,15 @@ func (m *ReplicationTarget) Size() (n int) {
 }
 
 func (m *ReplicaDescriptor) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.NodeID))
 	n += 1 + sovMetadata(uint64(m.StoreID))
 	n += 1 + sovMetadata(uint64(m.ReplicaID))
-	if m.Type != nil {
-		n += 1 + sovMetadata(uint64(*m.Type))
-	}
 	return n
 }
 
 func (m *ReplicaIdent) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.RangeID))
@@ -2083,9 +988,6 @@ func (m *ReplicaIdent) Size() (n int) {
 }
 
 func (m *RangeDescriptor) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.RangeID))
@@ -2097,28 +999,17 @@ func (m *RangeDescriptor) Size() (n int) {
 		l = len(m.EndKey)
 		n += 1 + l + sovMetadata(uint64(l))
 	}
-	if len(m.InternalReplicas) > 0 {
-		for _, e := range m.InternalReplicas {
+	if len(m.Replicas) > 0 {
+		for _, e := range m.Replicas {
 			l = e.Size()
 			n += 1 + l + sovMetadata(uint64(l))
 		}
 	}
 	n += 1 + sovMetadata(uint64(m.NextReplicaID))
-	n += 1 + sovMetadata(uint64(m.Generation))
-	if m.StickyBit != nil {
-		l = m.StickyBit.Size()
-		n += 1 + l + sovMetadata(uint64(l))
-	}
-	if m.DeprecatedGenerationComparable != nil {
-		n += 2
-	}
 	return n
 }
 
 func (m *Percentiles) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 9
@@ -2131,9 +1022,6 @@ func (m *Percentiles) Size() (n int) {
 }
 
 func (m *StoreCapacity) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.Capacity))
@@ -2147,14 +1035,10 @@ func (m *StoreCapacity) Size() (n int) {
 	n += 1 + l + sovMetadata(uint64(l))
 	n += 1 + sovMetadata(uint64(m.Used))
 	n += 1 + sovMetadata(uint64(m.LogicalBytes))
-	n += 9
 	return n
 }
 
 func (m *NodeDescriptor) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.NodeID))
@@ -2166,39 +1050,10 @@ func (m *NodeDescriptor) Size() (n int) {
 	n += 1 + l + sovMetadata(uint64(l))
 	l = m.ServerVersion.Size()
 	n += 1 + l + sovMetadata(uint64(l))
-	l = len(m.BuildTag)
-	n += 1 + l + sovMetadata(uint64(l))
-	n += 1 + sovMetadata(uint64(m.StartedAt))
-	if len(m.LocalityAddress) > 0 {
-		for _, e := range m.LocalityAddress {
-			l = e.Size()
-			n += 1 + l + sovMetadata(uint64(l))
-		}
-	}
-	l = len(m.ClusterName)
-	n += 1 + l + sovMetadata(uint64(l))
-	l = m.SQLAddress.Size()
-	n += 1 + l + sovMetadata(uint64(l))
-	return n
-}
-
-func (m *LocalityAddress) Size() (n int) {
-	if m == nil {
-		return 0
-	}
-	var l int
-	_ = l
-	l = m.Address.Size()
-	n += 1 + l + sovMetadata(uint64(l))
-	l = m.LocalityTier.Size()
-	n += 1 + l + sovMetadata(uint64(l))
 	return n
 }
 
 func (m *StoreDescriptor) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.StoreID))
@@ -2212,9 +1067,6 @@ func (m *StoreDescriptor) Size() (n int) {
 }
 
 func (m *StoreDeadReplicas) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.StoreID))
@@ -2228,9 +1080,6 @@ func (m *StoreDeadReplicas) Size() (n int) {
 }
 
 func (m *Locality) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	if len(m.Tiers) > 0 {
@@ -2243,9 +1092,6 @@ func (m *Locality) Size() (n int) {
 }
 
 func (m *Tier) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	l = len(m.Key)
@@ -2256,20 +1102,24 @@ func (m *Tier) Size() (n int) {
 }
 
 func (m *Version) Size() (n int) {
-	if m == nil {
-		return 0
-	}
 	var l int
 	_ = l
 	n += 1 + sovMetadata(uint64(m.Major))
 	n += 1 + sovMetadata(uint64(m.Minor))
 	n += 1 + sovMetadata(uint64(m.Patch))
-	n += 1 + sovMetadata(uint64(m.Internal))
+	n += 1 + sovMetadata(uint64(m.Unstable))
 	return n
 }
 
 func sovMetadata(x uint64) (n int) {
-	return (math_bits.Len64(x|1) + 6) / 7
+	for {
+		n++
+		x >>= 7
+		if x == 0 {
+			break
+		}
+	}
+	return n
 }
 func sozMetadata(x uint64) (n int) {
 	return sovMetadata(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -2289,7 +1139,7 @@ func (m *Attributes) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2317,7 +1167,7 @@ func (m *Attributes) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2327,9 +1177,6 @@ func (m *Attributes) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -2341,7 +1188,7 @@ func (m *Attributes) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -2371,7 +1218,7 @@ func (m *ReplicationTarget) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2399,7 +1246,7 @@ func (m *ReplicationTarget) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NodeID |= NodeID(b&0x7F) << shift
+				m.NodeID |= (NodeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2418,7 +1265,7 @@ func (m *ReplicationTarget) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.StoreID |= StoreID(b&0x7F) << shift
+				m.StoreID |= (StoreID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2429,7 +1276,7 @@ func (m *ReplicationTarget) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -2459,7 +1306,7 @@ func (m *ReplicaDescriptor) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2487,7 +1334,7 @@ func (m *ReplicaDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NodeID |= NodeID(b&0x7F) << shift
+				m.NodeID |= (NodeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2506,7 +1353,7 @@ func (m *ReplicaDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.StoreID |= StoreID(b&0x7F) << shift
+				m.StoreID |= (StoreID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2525,38 +1372,18 @@ func (m *ReplicaDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.ReplicaID |= ReplicaID(b&0x7F) << shift
+				m.ReplicaID |= (ReplicaID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-		case 4:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Type", wireType)
-			}
-			var v ReplicaType
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				v |= ReplicaType(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			m.Type = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipMetadata(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -2586,7 +1413,7 @@ func (m *ReplicaIdent) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2614,7 +1441,7 @@ func (m *ReplicaIdent) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.RangeID |= RangeID(b&0x7F) << shift
+				m.RangeID |= (RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2633,7 +1460,7 @@ func (m *ReplicaIdent) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2642,9 +1469,6 @@ func (m *ReplicaIdent) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -2658,7 +1482,7 @@ func (m *ReplicaIdent) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -2688,7 +1512,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2716,7 +1540,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.RangeID |= RangeID(b&0x7F) << shift
+				m.RangeID |= (RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2735,7 +1559,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				byteLen |= int(b&0x7F) << shift
+				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2744,9 +1568,6 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + byteLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -2769,7 +1590,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				byteLen |= int(b&0x7F) << shift
+				byteLen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2778,9 +1599,6 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + byteLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -2791,7 +1609,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 			iNdEx = postIndex
 		case 4:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field InternalReplicas", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Replicas", wireType)
 			}
 			var msglen int
 			for shift := uint(0); ; shift += 7 {
@@ -2803,7 +1621,7 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -2812,14 +1630,11 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.InternalReplicas = append(m.InternalReplicas, ReplicaDescriptor{})
-			if err := m.InternalReplicas[len(m.InternalReplicas)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+			m.Replicas = append(m.Replicas, ReplicaDescriptor{})
+			if err := m.Replicas[len(m.Replicas)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -2837,94 +1652,18 @@ func (m *RangeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NextReplicaID |= ReplicaID(b&0x7F) << shift
+				m.NextReplicaID |= (ReplicaID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-		case 6:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Generation", wireType)
-			}
-			m.Generation = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.Generation |= RangeGeneration(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 7:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StickyBit", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if m.StickyBit == nil {
-				m.StickyBit = &hlc.Timestamp{}
-			}
-			if err := m.StickyBit.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 8:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field DeprecatedGenerationComparable", wireType)
-			}
-			var v int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				v |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			b := bool(v != 0)
-			m.DeprecatedGenerationComparable = &b
 		default:
 			iNdEx = preIndex
 			skippy, err := skipMetadata(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -2954,7 +1693,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -2976,7 +1715,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.P10 = float64(math.Float64frombits(v))
 		case 2:
@@ -2987,7 +1726,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.P25 = float64(math.Float64frombits(v))
 		case 3:
@@ -2998,7 +1737,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.P50 = float64(math.Float64frombits(v))
 		case 4:
@@ -3009,7 +1748,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.P75 = float64(math.Float64frombits(v))
 		case 5:
@@ -3020,7 +1759,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.P90 = float64(math.Float64frombits(v))
 		case 6:
@@ -3031,7 +1770,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.PMax = float64(math.Float64frombits(v))
 		default:
@@ -3040,7 +1779,7 @@ func (m *Percentiles) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -3070,7 +1809,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -3098,7 +1837,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Capacity |= int64(b&0x7F) << shift
+				m.Capacity |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3117,7 +1856,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Available |= int64(b&0x7F) << shift
+				m.Available |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3136,7 +1875,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.RangeCount |= int32(b&0x7F) << shift
+				m.RangeCount |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3155,7 +1894,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.LeaseCount |= int32(b&0x7F) << shift
+				m.LeaseCount |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3168,7 +1907,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.WritesPerSecond = float64(math.Float64frombits(v))
 		case 6:
@@ -3185,7 +1924,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3194,9 +1933,6 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3218,7 +1954,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3227,9 +1963,6 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3251,7 +1984,7 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Used |= int64(b&0x7F) << shift
+				m.Used |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3270,29 +2003,18 @@ func (m *StoreCapacity) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.LogicalBytes |= int64(b&0x7F) << shift
+				m.LogicalBytes |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
-		case 10:
-			if wireType != 1 {
-				return fmt.Errorf("proto: wrong wireType = %d for field QueriesPerSecond", wireType)
-			}
-			var v uint64
-			if (iNdEx + 8) > l {
-				return io.ErrUnexpectedEOF
-			}
-			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
-			iNdEx += 8
-			m.QueriesPerSecond = float64(math.Float64frombits(v))
 		default:
 			iNdEx = preIndex
 			skippy, err := skipMetadata(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -3322,7 +2044,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -3350,7 +2072,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NodeID |= NodeID(b&0x7F) << shift
+				m.NodeID |= (NodeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3369,7 +2091,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3378,9 +2100,6 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3402,7 +2121,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3411,9 +2130,6 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3435,7 +2151,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3444,9 +2160,6 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3468,7 +2181,7 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3477,9 +2190,6 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3487,279 +2197,13 @@ func (m *NodeDescriptor) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
-		case 6:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field BuildTag", wireType)
-			}
-			var stringLen uint64
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			intStringLen := int(stringLen)
-			if intStringLen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.BuildTag = string(dAtA[iNdEx:postIndex])
-			iNdEx = postIndex
-		case 7:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StartedAt", wireType)
-			}
-			m.StartedAt = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				m.StartedAt |= int64(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 8:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LocalityAddress", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.LocalityAddress = append(m.LocalityAddress, LocalityAddress{})
-			if err := m.LocalityAddress[len(m.LocalityAddress)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 9:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field ClusterName", wireType)
-			}
-			var stringLen uint64
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			intStringLen := int(stringLen)
-			if intStringLen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.ClusterName = string(dAtA[iNdEx:postIndex])
-			iNdEx = postIndex
-		case 10:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field SQLAddress", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.SQLAddress.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipMetadata(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if (iNdEx + skippy) > l {
-				return io.ErrUnexpectedEOF
-			}
-			iNdEx += skippy
-		}
-	}
-
-	if iNdEx > l {
-		return io.ErrUnexpectedEOF
-	}
-	return nil
-}
-func (m *LocalityAddress) Unmarshal(dAtA []byte) error {
-	l := len(dAtA)
-	iNdEx := 0
-	for iNdEx < l {
-		preIndex := iNdEx
-		var wire uint64
-		for shift := uint(0); ; shift += 7 {
-			if shift >= 64 {
-				return ErrIntOverflowMetadata
-			}
-			if iNdEx >= l {
-				return io.ErrUnexpectedEOF
-			}
-			b := dAtA[iNdEx]
-			iNdEx++
-			wire |= uint64(b&0x7F) << shift
-			if b < 0x80 {
-				break
-			}
-		}
-		fieldNum := int32(wire >> 3)
-		wireType := int(wire & 0x7)
-		if wireType == 4 {
-			return fmt.Errorf("proto: LocalityAddress: wiretype end group for non-group")
-		}
-		if fieldNum <= 0 {
-			return fmt.Errorf("proto: LocalityAddress: illegal tag %d (wire type %d)", fieldNum, wire)
-		}
-		switch fieldNum {
-		case 1:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Address", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.Address.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 2:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LocalityTier", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowMetadata
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := dAtA[iNdEx]
-				iNdEx++
-				msglen |= int(b&0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.LocalityTier.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		default:
-			iNdEx = preIndex
-			skippy, err := skipMetadata(dAtA[iNdEx:])
-			if err != nil {
-				return err
-			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -3789,7 +2233,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -3817,7 +2261,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.StoreID |= StoreID(b&0x7F) << shift
+				m.StoreID |= (StoreID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3836,7 +2280,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3845,9 +2289,6 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3869,7 +2310,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3878,9 +2319,6 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3902,7 +2340,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -3911,9 +2349,6 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -3927,7 +2362,7 @@ func (m *StoreDescriptor) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -3957,7 +2392,7 @@ func (m *StoreDeadReplicas) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -3985,7 +2420,7 @@ func (m *StoreDeadReplicas) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.StoreID |= StoreID(b&0x7F) << shift
+				m.StoreID |= (StoreID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4004,7 +2439,7 @@ func (m *StoreDeadReplicas) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4013,9 +2448,6 @@ func (m *StoreDeadReplicas) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -4030,7 +2462,7 @@ func (m *StoreDeadReplicas) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -4060,7 +2492,7 @@ func (m *Locality) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -4088,7 +2520,7 @@ func (m *Locality) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4097,9 +2529,6 @@ func (m *Locality) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -4114,7 +2543,7 @@ func (m *Locality) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -4144,7 +2573,7 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -4172,7 +2601,7 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4182,9 +2611,6 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -4204,7 +2630,7 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4214,9 +2640,6 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthMetadata
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthMetadata
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -4228,7 +2651,7 @@ func (m *Tier) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -4258,7 +2681,7 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -4286,7 +2709,7 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Major |= int32(b&0x7F) << shift
+				m.Major |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4305,7 +2728,7 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Minor |= int32(b&0x7F) << shift
+				m.Minor |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4324,16 +2747,16 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Patch |= int32(b&0x7F) << shift
+				m.Patch |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
 			}
 		case 4:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Internal", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Unstable", wireType)
 			}
-			m.Internal = 0
+			m.Unstable = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowMetadata
@@ -4343,7 +2766,7 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Internal |= int32(b&0x7F) << shift
+				m.Unstable |= (int32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -4354,7 +2777,7 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if (skippy < 0) || (iNdEx+skippy) < 0 {
+			if skippy < 0 {
 				return ErrInvalidLengthMetadata
 			}
 			if (iNdEx + skippy) > l {
@@ -4372,7 +2795,6 @@ func (m *Version) Unmarshal(dAtA []byte) error {
 func skipMetadata(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
-	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -4404,8 +2826,10 @@ func skipMetadata(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			return iNdEx, nil
 		case 1:
 			iNdEx += 8
+			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -4422,34 +2846,125 @@ func skipMetadata(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthMetadata
 			}
-			iNdEx += length
+			return iNdEx, nil
 		case 3:
-			depth++
-		case 4:
-			if depth == 0 {
-				return 0, ErrUnexpectedEndOfGroupMetadata
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowMetadata
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipMetadata(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
 			}
-			depth--
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
 		case 5:
 			iNdEx += 4
+			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
-		if iNdEx < 0 {
-			return 0, ErrInvalidLengthMetadata
-		}
-		if depth == 0 {
-			return iNdEx, nil
-		}
 	}
-	return 0, io.ErrUnexpectedEOF
+	panic("unreachable")
 }
 
 var (
-	ErrInvalidLengthMetadata        = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowMetadata          = fmt.Errorf("proto: integer overflow")
-	ErrUnexpectedEndOfGroupMetadata = fmt.Errorf("proto: unexpected end of group")
+	ErrInvalidLengthMetadata = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowMetadata   = fmt.Errorf("proto: integer overflow")
 )
+
+func init() { proto.RegisterFile("roachpb/metadata.proto", fileDescriptorMetadata) }
+
+var fileDescriptorMetadata = []byte{
+	// 1054 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xbc, 0x56, 0xcf, 0x6f, 0x1b, 0x45,
+	0x14, 0xce, 0xda, 0xeb, 0xec, 0xfa, 0x25, 0x26, 0x78, 0x04, 0x65, 0x65, 0x84, 0x9d, 0xae, 0xa8,
+	0x54, 0x7e, 0x28, 0x71, 0x8d, 0xac, 0x2a, 0x41, 0x05, 0xe2, 0x86, 0x4a, 0xa6, 0xb4, 0x8a, 0x36,
+	0xa5, 0x07, 0x2e, 0xd6, 0x64, 0x77, 0x70, 0x97, 0x6c, 0x76, 0xad, 0xd9, 0xb1, 0x1b, 0xdf, 0x91,
+	0x38, 0x20, 0x24, 0x8e, 0x1c, 0x73, 0xe9, 0x7f, 0xc0, 0x81, 0x7f, 0x00, 0x14, 0x71, 0xe2, 0xc8,
+	0x29, 0x02, 0x73, 0xe1, 0xcc, 0xb1, 0x27, 0x34, 0x6f, 0x67, 0xec, 0xb5, 0xeb, 0x4a, 0xa4, 0x48,
+	0xdc, 0xc6, 0xdf, 0xfb, 0xbe, 0xb7, 0x6f, 0xbe, 0x37, 0xf3, 0xc6, 0x70, 0x85, 0x27, 0xd4, 0x7f,
+	0x34, 0x38, 0xda, 0x3e, 0x61, 0x82, 0x06, 0x54, 0xd0, 0xad, 0x01, 0x4f, 0x44, 0x42, 0xaa, 0x7e,
+	0xe2, 0x1f, 0x63, 0x6c, 0x4b, 0x31, 0x6a, 0xb5, 0xa1, 0x08, 0xa3, 0xed, 0x61, 0xcc, 0x59, 0x9a,
+	0x44, 0x23, 0x16, 0xf4, 0x68, 0x10, 0xf0, 0x8c, 0x5e, 0x7b, 0xa5, 0x9f, 0xf4, 0x13, 0x5c, 0x6e,
+	0xcb, 0x55, 0x86, 0xba, 0x1f, 0x02, 0xec, 0x09, 0xc1, 0xc3, 0xa3, 0xa1, 0x60, 0x29, 0x79, 0x07,
+	0x4a, 0x54, 0x08, 0x9e, 0x3a, 0xc6, 0x66, 0xf1, 0x7a, 0xb9, 0xf3, 0xea, 0xdf, 0x17, 0x8d, 0xea,
+	0x98, 0x9e, 0x44, 0xbb, 0x2e, 0xc2, 0xef, 0x7e, 0x11, 0x25, 0x8f, 0x5d, 0x2f, 0xe3, 0xec, 0x9a,
+	0xdf, 0x9f, 0x35, 0x56, 0xdc, 0xaf, 0x0d, 0xa8, 0x7a, 0x6c, 0x10, 0x85, 0x3e, 0x15, 0x61, 0x12,
+	0x3f, 0xa0, 0xbc, 0xcf, 0x04, 0xb9, 0x01, 0x56, 0x9c, 0x04, 0xac, 0x17, 0x06, 0x8e, 0xb1, 0x69,
+	0x5c, 0x2f, 0x75, 0x9c, 0xf3, 0x8b, 0xc6, 0xca, 0xe4, 0xa2, 0xb1, 0x7a, 0x3f, 0x09, 0x58, 0x77,
+	0xff, 0xe9, 0x74, 0xe5, 0xad, 0x4a, 0x62, 0x37, 0x20, 0x6d, 0xb0, 0x53, 0x91, 0x70, 0xd4, 0x14,
+	0x50, 0x53, 0x53, 0x1a, 0xeb, 0x50, 0xe2, 0x28, 0xd2, 0x4b, 0xcf, 0x42, 0x6e, 0x37, 0xd8, 0xb5,
+	0x65, 0x15, 0x7f, 0x9d, 0x35, 0x0c, 0xf7, 0x97, 0x59, 0x25, 0xfb, 0x2c, 0xf5, 0x79, 0x38, 0x10,
+	0x09, 0xff, 0xff, 0x2a, 0x21, 0xb7, 0x00, 0x78, 0xf6, 0x79, 0x29, 0x2c, 0xa2, 0xb0, 0xae, 0x84,
+	0x65, 0x55, 0x18, 0x4a, 0x67, 0x3f, 0xbc, 0xb2, 0x52, 0x74, 0x83, 0xdd, 0x75, 0xb9, 0x91, 0x1f,
+	0xcf, 0x1a, 0x06, 0x6e, 0xe6, 0x1b, 0x03, 0xd6, 0x35, 0x2d, 0x60, 0xb1, 0x90, 0x45, 0x71, 0x1a,
+	0xf7, 0xa7, 0x1b, 0x29, 0xce, 0x8a, 0xf2, 0x24, 0x9e, 0x15, 0xa5, 0x96, 0x9e, 0x85, 0xdc, 0x6e,
+	0x40, 0xf6, 0xc1, 0x52, 0x9f, 0xc0, 0xad, 0xac, 0xb5, 0xde, 0xdc, 0x7a, 0xe6, 0xd8, 0x6c, 0x3d,
+	0xe3, 0x5a, 0xc7, 0x94, 0xb9, 0x3d, 0x2d, 0x75, 0x7f, 0x28, 0xc0, 0x06, 0xa6, 0xce, 0x19, 0xfb,
+	0x82, 0x05, 0x5d, 0x83, 0x72, 0x2a, 0x28, 0x17, 0xbd, 0x63, 0x36, 0xc6, 0x92, 0xd6, 0x3b, 0xf6,
+	0xd3, 0x8b, 0x86, 0xe9, 0xdd, 0x65, 0x63, 0xcf, 0xc6, 0xd0, 0x5d, 0x36, 0x26, 0x57, 0xc1, 0x62,
+	0x71, 0x80, 0xa4, 0xe2, 0x02, 0x69, 0x95, 0xc5, 0x81, 0xa4, 0xdc, 0x01, 0x5b, 0xd5, 0x97, 0x3a,
+	0xe6, 0x66, 0xf1, 0x92, 0x7b, 0x9b, 0x6a, 0xc9, 0x27, 0xb0, 0x11, 0xb3, 0x53, 0xd1, 0xcb, 0x35,
+	0xaf, 0x84, 0xcd, 0x73, 0xd5, 0x7e, 0x2a, 0xf7, 0xd9, 0xa9, 0x78, 0x4e, 0x03, 0x2b, 0x71, 0x2e,
+	0xb6, 0xd8, 0xc4, 0x27, 0x06, 0xac, 0x1d, 0x30, 0xee, 0xb3, 0x58, 0x84, 0x11, 0x4b, 0xc9, 0x15,
+	0x28, 0x0e, 0x6e, 0x34, 0xd1, 0x2d, 0x43, 0x95, 0x21, 0x01, 0xc4, 0x5b, 0x6d, 0x74, 0x63, 0x86,
+	0xb7, 0xda, 0x88, 0xb7, 0x9b, 0x68, 0xc0, 0x0c, 0x6f, 0x67, 0xfc, 0x9b, 0x6d, 0xc7, 0x9c, 0xc3,
+	0x6f, 0x66, 0xfc, 0x9d, 0x26, 0x56, 0x3f, 0xc3, 0x77, 0x9a, 0xc4, 0x01, 0x73, 0x70, 0x8f, 0x9e,
+	0x3a, 0xab, 0xb9, 0x00, 0x22, 0xea, 0x0e, 0xff, 0x5c, 0x84, 0x0a, 0x1e, 0xe7, 0xdb, 0x74, 0x40,
+	0xfd, 0x50, 0x8c, 0xc9, 0x26, 0xd8, 0xbe, 0x5a, 0xab, 0xe6, 0x2a, 0xd7, 0x34, 0x4a, 0x5c, 0x28,
+	0xd3, 0x11, 0x0d, 0x23, 0x7a, 0x14, 0x31, 0xac, 0x5c, 0x53, 0x66, 0x30, 0xb9, 0x06, 0x6b, 0xd9,
+	0x11, 0xf1, 0x93, 0x61, 0x2c, 0xd4, 0x95, 0xc8, 0x58, 0x80, 0x81, 0xdb, 0x12, 0x97, 0xb4, 0x88,
+	0xd1, 0x54, 0xd3, 0xcc, 0x3c, 0x0d, 0x03, 0x19, 0xad, 0x09, 0xd5, 0xc7, 0x3c, 0x14, 0x2c, 0xed,
+	0x0d, 0x18, 0xef, 0xa5, 0xcc, 0x4f, 0xe2, 0x60, 0x6e, 0xaf, 0x1b, 0x59, 0xf8, 0x80, 0xf1, 0x43,
+	0x0c, 0x92, 0x03, 0xa8, 0x1e, 0x8d, 0xb5, 0x40, 0x5f, 0x83, 0x55, 0xbc, 0x06, 0xf5, 0x25, 0x47,
+	0x25, 0xd7, 0x2a, 0x9d, 0x11, 0xe5, 0x07, 0x8c, 0xab, 0x0e, 0x13, 0x0f, 0x48, 0xae, 0x06, 0x9d,
+	0xd2, 0xba, 0x44, 0xca, 0x97, 0xa7, 0x45, 0xea, 0x9c, 0x0e, 0x98, 0xc3, 0x94, 0x05, 0x8e, 0x9d,
+	0x33, 0x11, 0x11, 0xf2, 0x16, 0x54, 0xa2, 0xa4, 0x1f, 0xfa, 0x34, 0xea, 0x61, 0x21, 0x4e, 0x39,
+	0x47, 0x59, 0x57, 0xa1, 0x8e, 0x8c, 0xa8, 0x46, 0xfe, 0x54, 0x80, 0x97, 0xe4, 0x30, 0xfb, 0x6f,
+	0xf3, 0xef, 0x03, 0xb0, 0xe4, 0xbb, 0xc1, 0xd2, 0x54, 0xcd, 0x8c, 0xfc, 0xce, 0xe4, 0x0b, 0xb3,
+	0xf5, 0xd9, 0xf4, 0x85, 0xd9, 0x0b, 0x82, 0xe9, 0xb4, 0x50, 0x22, 0xb2, 0xa3, 0x5f, 0x91, 0x22,
+	0xaa, 0xdf, 0x58, 0xe2, 0xcb, 0xec, 0xcd, 0x51, 0xe2, 0x4c, 0x41, 0x6e, 0x81, 0x1d, 0x25, 0x3e,
+	0x8d, 0xe4, 0xb9, 0x33, 0x51, 0xfd, 0xfa, 0x12, 0xf5, 0xa7, 0x8a, 0xa2, 0x0f, 0xa5, 0x96, 0x90,
+	0x3b, 0x50, 0x39, 0x64, 0x7c, 0xc4, 0xf8, 0x43, 0xc6, 0xd3, 0x30, 0x89, 0xf1, 0x78, 0xac, 0xb5,
+	0x6a, 0x4b, 0x72, 0x28, 0x86, 0x4a, 0x31, 0x2f, 0x73, 0xbf, 0x2a, 0xc0, 0x06, 0x5e, 0x88, 0xf9,
+	0x79, 0x37, 0x7d, 0x15, 0x8c, 0x7f, 0xff, 0x2a, 0x4c, 0xcd, 0x28, 0x5c, 0xda, 0x8c, 0xf7, 0xc1,
+	0x94, 0x1d, 0x51, 0x36, 0x5e, 0x5d, 0xa2, 0x9c, 0xef, 0xb5, 0x3e, 0x3b, 0x52, 0x44, 0x3a, 0xb9,
+	0x1b, 0x9c, 0x39, 0xb9, 0xb9, 0x24, 0xc1, 0xdc, 0xad, 0x5f, 0xbc, 0xe3, 0xee, 0xb7, 0x06, 0x54,
+	0x95, 0x0d, 0x34, 0xf0, 0xf4, 0xbc, 0x7c, 0x41, 0x23, 0xf6, 0x72, 0xe3, 0xba, 0x80, 0xe3, 0xba,
+	0xf1, 0xfc, 0x71, 0x8d, 0x6f, 0xde, 0xe2, 0xa4, 0x76, 0x3f, 0x06, 0x5b, 0xb7, 0x9e, 0xbc, 0x07,
+	0x25, 0x11, 0x32, 0xf5, 0x57, 0x65, 0xad, 0xf5, 0xda, 0x92, 0x5c, 0x0f, 0x42, 0xa6, 0x3d, 0xc9,
+	0xb8, 0xea, 0x96, 0x7c, 0x04, 0xa6, 0x0c, 0xc9, 0x71, 0x29, 0xdf, 0x17, 0xb9, 0x87, 0xb2, 0x1e,
+	0x97, 0xc7, 0x6c, 0x4c, 0x6a, 0x50, 0x1a, 0xd1, 0x68, 0x98, 0x8d, 0x35, 0x1d, 0xc9, 0x20, 0x95,
+	0xe1, 0x89, 0x01, 0x96, 0x3a, 0x2b, 0xe4, 0x6d, 0x28, 0x9f, 0xd0, 0x2f, 0x13, 0xde, 0x1b, 0xd1,
+	0x48, 0xf9, 0x51, 0x51, 0x7e, 0x94, 0xee, 0xc9, 0x80, 0x67, 0x63, 0xfc, 0x21, 0x8d, 0x90, 0x1b,
+	0xc6, 0x8a, 0x5b, 0x58, 0xe0, 0xca, 0x80, 0x67, 0x63, 0x5c, 0x72, 0x6b, 0x50, 0x1a, 0x50, 0xe1,
+	0x3f, 0x9a, 0x1b, 0x9b, 0x19, 0x24, 0xc7, 0xf3, 0x30, 0x4e, 0x05, 0xce, 0xde, 0xfc, 0xb8, 0x9c,
+	0xa2, 0x59, 0x9d, 0x9d, 0xab, 0xe7, 0x7f, 0xd4, 0x57, 0xce, 0x27, 0x75, 0xe3, 0xd7, 0x49, 0xdd,
+	0xf8, 0x6d, 0x52, 0x37, 0x7e, 0x9f, 0xd4, 0x8d, 0xef, 0xfe, 0xac, 0xaf, 0x7c, 0x6e, 0x29, 0x93,
+	0xfe, 0x09, 0x00, 0x00, 0xff, 0xff, 0xcf, 0xa4, 0x30, 0xee, 0x5e, 0x0a, 0x00, 0x00,
+}

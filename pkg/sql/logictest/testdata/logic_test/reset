@@ -1,4 +1,6 @@
-statement error unrecognized configuration parameter "foo"
+# LogicTest: default
+
+statement error unknown variable: "foo"
 RESET FOO
 
 statement ok
@@ -15,12 +17,12 @@ RESET SEARCH_PATH
 query T
 SHOW SEARCH_PATH
 ----
-$user,public
+public
 
-statement error parameter "server_version" cannot be changed
+statement error variable "server_version" cannot be reset
 RESET SERVER_VERSION
 
-statement error parameter "server_version_num" cannot be changed
+statement error variable "server_version_num" cannot be reset
 RESET SERVER_VERSION_NUM
 
 # Lower case
@@ -39,7 +41,7 @@ RESET search_path
 query T
 SHOW search_path
 ----
-$user,public
+public
 
 statement ok
 RESET client_encoding; RESET NAMES

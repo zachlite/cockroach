@@ -1,18 +1,23 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package urlcheck
 
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -22,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/errors"
 	"github.com/ghemawat/stream"
 )
 
@@ -138,13 +142,13 @@ func checkURL(client *http.Client, url string) error {
 		return nil
 	}
 
-	return errors.Newf("%s", errors.Safe(resp.Status))
+	return errors.New(resp.Status)
 }
 
 func checkURLWithRetries(client *http.Client, url string) error {
 	for i := 0; i < timeoutRetries; i++ {
 		err := checkURL(client, url)
-		if netErr := (net.Error)(nil); errors.As(err, &netErr) && netErr.Timeout() {
+		if err, ok := err.(net.Error); ok && err.Timeout() {
 			// Back off exponentially if we hit a timeout.
 			time.Sleep((1 << uint(i)) * time.Second)
 			continue
@@ -193,7 +197,7 @@ func getURLs(filter stream.Filter) (map[string][]string, error) {
 			// Remove punctuation after the URL.
 			match = strings.TrimRight(match, ".,;\\\">`]")
 			// Remove the HTML target.
-			n := strings.LastIndexByte(match, '#')
+			n := strings.LastIndex(match, "#")
 			if n != -1 {
 				match = match[:n]
 			}
@@ -239,7 +243,7 @@ func checkURLs(uniqueURLs map[string][]string) error {
 				for _, loc := range locs {
 					fmt.Fprintln(&buf, "    ", loc)
 				}
-				errChan <- errors.Newf("%s", buf.String())
+				errChan <- errors.New(buf.String())
 			} else {
 				errChan <- nil
 			}
@@ -255,10 +259,10 @@ func checkURLs(uniqueURLs map[string][]string) error {
 	if len(errs) > 0 {
 		var buf bytes.Buffer
 		for _, err := range errs {
-			fmt.Fprintln(&buf, err)
+			fmt.Fprint(&buf, err)
 		}
 		fmt.Fprintf(&buf, "%d errors\n", len(errs))
-		return errors.Newf("%s", buf.String())
+		return errors.New(buf.String())
 	}
 	return nil
 }

@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import { assert } from "chai";
 import moment from "moment";
 
@@ -27,7 +17,7 @@ describe("Query Manager State", function () {
     const testError = new Error("err");
     let state: ManagedQueryState;
 
-    beforeEach(function () {
+    beforeEach(function() {
       state = managedQueryReducer(undefined, {} as any);
     });
 
@@ -55,10 +45,7 @@ describe("Query Manager State", function () {
       expected.completedAt = testMoment;
 
       state = managedQueryReducer(state, queryBegin("ID"));
-      state = managedQueryReducer(
-        state,
-        queryError("ID", testError, testMoment),
-      );
+      state = managedQueryReducer(state, queryError("ID", testError, testMoment));
       assert.deepEqual(state, expected);
     });
 
@@ -81,10 +68,7 @@ describe("Query Manager State", function () {
       expected.lastError = null;
       expected.completedAt = null;
 
-      state = managedQueryReducer(
-        state,
-        queryError("ID", testError, testMoment),
-      );
+      state = managedQueryReducer(state, queryError("ID", testError, testMoment));
       state = managedQueryReducer(state, queryBegin("ID"));
       assert.deepEqual(state, expected);
     });
@@ -101,7 +85,7 @@ describe("Query Manager State", function () {
     const testError = new Error("err");
     let state: QueryManagerState;
 
-    beforeEach(function () {
+    beforeEach(function() {
       state = queryManagerReducer(undefined, {} as any);
     });
 
@@ -112,24 +96,15 @@ describe("Query Manager State", function () {
     it("correctly dispatches based on ID", function () {
       const expected = {
         "1": managedQueryReducer(undefined, queryBegin("1")),
-        "2": managedQueryReducer(
-          undefined,
-          queryError("2", testError, testMoment),
-        ),
+        "2": managedQueryReducer(undefined, queryError("2", testError, testMoment)),
         "3": managedQueryReducer(undefined, queryComplete("3", testMoment)),
       };
 
       state = queryManagerReducer(state, queryBegin("1"));
       state = queryManagerReducer(state, queryBegin("2"));
       state = queryManagerReducer(state, queryBegin("3"));
-      state = queryManagerReducer(
-        state,
-        queryError("2", testError, testMoment),
-      );
-      state = queryManagerReducer(
-        state,
-        queryError("3", testError, testMoment),
-      );
+      state = queryManagerReducer(state, queryError("2", testError, testMoment));
+      state = queryManagerReducer(state, queryError("3", testError, testMoment));
       state = queryManagerReducer(state, queryBegin("3"));
       state = queryManagerReducer(state, queryComplete("3", testMoment));
 

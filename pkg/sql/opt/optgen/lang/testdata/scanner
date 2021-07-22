@@ -1,8 +1,8 @@
 #
-# Simple identifiers, strings, numbers, comments
+# Simple identifiers, strings, comments
 #
 scan
-foo define f123 "hello world" 1 0045 foo _ _123foo# comment ()[]
+foo define f123 "hello world" foo# comment ()[]
 ----
 (IDENT foo)
 (WHITESPACE  )
@@ -12,22 +12,14 @@ foo define f123 "hello world" 1 0045 foo _ _123foo# comment ()[]
 (WHITESPACE  )
 (STRING "hello world")
 (WHITESPACE  )
-(NUMBER 1)
-(WHITESPACE  )
-(NUMBER 0045)
-(WHITESPACE  )
 (IDENT foo)
-(WHITESPACE  )
-(IDENT _)
-(WHITESPACE  )
-(IDENT _123foo)
 (COMMENT # comment ()[])
 
 #
 # Symbols
 #
 scan
-()[]{}$:*==>&,^|.. . ...
+()[]{}$:*==>&,^|.. ...
 ----
 (LPAREN ()
 (RPAREN ))
@@ -44,10 +36,7 @@ scan
 (COMMA ,)
 (CARET ^)
 (PIPE |)
-(ILLEGAL ..)
-(WHITESPACE  )
-(DOT .)
-(WHITESPACE  )
+(ILLEGAL .)
 (ELLIPSES ...)
 
 #
@@ -90,7 +79,7 @@ scan fail=6
 scan fail=3
 ...
 ----
-(ILLEGAL ..)
+(ILLEGAL .)
 (ERROR io: read/write on closed pipe)
 
 #

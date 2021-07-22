@@ -1,117 +1,104 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/pkg/errors"
 )
 
-var errEmptyIndexName = pgerror.New(pgcode.Syntax, "empty index name")
-
-type renameIndexNode struct {
-	n         *tree.RenameIndex
-	tableDesc *tabledesc.Mutable
-	idx       catalog.Index
-}
+var errEmptyIndexName = errors.New("empty index name")
 
 // RenameIndex renames the index.
 // Privileges: CREATE on table.
 //   notes: postgres requires CREATE on the table.
 //          mysql requires ALTER, CREATE, INSERT on the table.
 func (p *planner) RenameIndex(ctx context.Context, n *tree.RenameIndex) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"RENAME INDEX",
-	); err != nil {
-		return nil, err
-	}
-
-	_, tableDesc, err := expandMutableIndexName(ctx, p, n.Index, !n.IfExists /* requireTable */)
+	var tableDesc *TableDescriptor
+	var err error
+	// DDL statements avoid the cache to avoid leases, and can view non-public descriptors.
+	// TODO(vivek): check if the cache can be used.
+	p.runWithOptions(resolveFlags{allowAdding: true, skipCache: true}, func() {
+		_, tableDesc, err = expandIndexName(ctx, p, n.Index, true /* requireTable */)
+	})
 	if err != nil {
 		return nil, err
 	}
-	if tableDesc == nil {
-		// IfExists specified and table did not exist -- noop.
-		return newZeroNode(nil /* columns */), nil
-	}
 
-	idx, err := tableDesc.FindIndexWithName(string(n.Index.Index))
+	idx, _, err := tableDesc.FindIndexByName(string(n.Index.Index))
 	if err != nil {
 		if n.IfExists {
 			// Noop.
 			return newZeroNode(nil /* columns */), nil
 		}
 		// Index does not exist, but we want it to: error out.
-		return nil, pgerror.WithCandidateCode(err, pgcode.UndefinedObject)
+		return nil, err
 	}
 
 	if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
 		return nil, err
 	}
 
-	return &renameIndexNode{n: n, idx: idx, tableDesc: tableDesc}, nil
-}
-
-// ReadingOwnWrites implements the planNodeReadingOwnWrites interface.
-// This is because RENAME DATABASE performs multiple KV operations on descriptors
-// and expects to see its own writes.
-func (n *renameIndexNode) ReadingOwnWrites() {}
-
-func (n *renameIndexNode) startExec(params runParams) error {
-	p := params.p
-	ctx := params.ctx
-	tableDesc := n.tableDesc
-	idx := n.idx
-
 	for _, tableRef := range tableDesc.DependedOnBy {
-		if tableRef.IndexID != idx.GetID() {
+		if tableRef.IndexID != idx.ID {
 			continue
 		}
-		return p.dependentViewError(
-			ctx, "index", n.n.Index.Index.String(), tableDesc.ParentID, tableRef.ID, "rename",
-		)
+		return nil, p.dependentViewRenameError(
+			ctx, "index", n.Index.Index.String(), tableDesc.ParentID, tableRef.ID)
 	}
 
-	if n.n.NewName == "" {
-		return errEmptyIndexName
+	if n.NewName == "" {
+		return nil, errEmptyIndexName
 	}
 
-	if n.n.Index.Index == n.n.NewName {
+	if n.Index.Index == n.NewName {
 		// Noop.
-		return nil
+		return newZeroNode(nil /* columns */), nil
 	}
 
-	if foundIndex, _ := tableDesc.FindIndexWithName(string(n.n.NewName)); foundIndex != nil {
-		return pgerror.Newf(pgcode.DuplicateRelation, "index name %q already exists", string(n.n.NewName))
+	if _, _, err := tableDesc.FindIndexByName(string(n.NewName)); err == nil {
+		return nil, fmt.Errorf("index name %q already exists", string(n.NewName))
 	}
 
-	idx.IndexDesc().Name = string(n.n.NewName)
-
-	if err := validateDescriptor(ctx, p, tableDesc); err != nil {
-		return err
+	if err := tableDesc.RenameIndexDescriptor(idx, string(n.NewName)); err != nil {
+		return nil, err
 	}
 
-	return p.writeSchemaChange(
-		ctx, tableDesc, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann()))
+	if err := tableDesc.SetUpVersion(); err != nil {
+		return nil, err
+	}
+	descKey := sqlbase.MakeDescMetadataKey(tableDesc.GetID())
+	if err := tableDesc.Validate(ctx, p.txn, p.EvalContext().Settings); err != nil {
+		return nil, err
+	}
+	if err := p.txn.Put(ctx, descKey, sqlbase.WrapDescriptor(tableDesc)); err != nil {
+		return nil, err
+	}
+
+	// TODO(vivek): the code above really should really be replaced by a call
+	// to writeTableDesc(). However if we do that then a couple of logic tests
+	// start failing. How can that be?
+	//
+	// if err := p.writeTableDesc(ctx, tableDesc); err != nil {
+	//	return nil, err
+	// }
+	p.notifySchemaChange(tableDesc, sqlbase.InvalidMutationID)
+	return newZeroNode(nil /* columns */), nil
 }
-
-func (n *renameIndexNode) Next(runParams) (bool, error) { return false, nil }
-func (n *renameIndexNode) Values() tree.Datums          { return tree.Datums{} }
-func (n *renameIndexNode) Close(context.Context)        {}

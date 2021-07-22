@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package main
 
@@ -20,61 +24,94 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optgen/lang"
 )
 
-func title(name string) string {
-	rune, size := utf8.DecodeRuneInString(name)
-	return fmt.Sprintf("%c%s", unicode.ToUpper(rune), name[size:])
-}
-
 func unTitle(name string) string {
 	rune, size := utf8.DecodeRuneInString(name)
 	return fmt.Sprintf("%c%s", unicode.ToLower(rune), name[size:])
 }
 
-// isExportedField is true if the name of a define field starts with an upper-
-// case letter.
-func isExportedField(field *lang.DefineFieldExpr) bool {
-	return unicode.IsUpper(rune(field.Name[0]))
-}
+func mapType(typ string) string {
+	switch typ {
+	case "Expr":
+		return "GroupID"
 
-// isEmbeddedField is true if the name of a define field is "_". All such fields
-// are generated as Go embedded structs.
-func isEmbeddedField(field *lang.DefineFieldExpr) bool {
-	return field.Name == "_"
-}
+	case "ExprList":
+		return "ListID"
 
-// expandFields returns all fields from the given define, with the fields of any
-// embedded structs recursively expanded into a flat list.
-func expandFields(compiled *lang.CompiledExpr, define *lang.DefineExpr) lang.DefineFieldsExpr {
-	var fields lang.DefineFieldsExpr
-	for _, field := range define.Fields {
-		if isEmbeddedField(field) {
-			embedded := expandFields(compiled, compiled.LookupDefine(string(field.Type)))
-			fields = append(fields, embedded...)
-		} else {
-			fields = append(fields, field)
-		}
+	default:
+		return "PrivateID"
 	}
-	return fields
 }
 
-// generateComments is a helper function that generates a block of comments by
-// converting an Optgen comment to a Go comment. The comments are assumed to
-// start with the name of an op or field and follow with a description, similar
-// to this:
-//   # <name> <description of what this op or field does>
+// isListType returns true if the given type is ExprList. An expression may
+// have at most one field with a list type.
+func isListType(typ string) bool {
+	return typ == "ExprList"
+}
+
+// isPrivateType returns true if the given type is anything besides Expr or
+// ExprList. An expression may have at most one field with a private type.
+func isPrivateType(typ string) bool {
+	return typ != "Expr" && typ != "ExprList"
+}
+
+// listField returns the field definition expression for the given define's
+// list field, or nil if it does not have a list field.
+func listField(d *lang.DefineExpr) *lang.DefineFieldExpr {
+	// If list-typed field is present, it will be the last field, or the second
+	// to last field if a private field is present.
+	index := len(d.Fields) - 1
+	if privateField(d) != nil {
+		index--
+	}
+
+	if index < 0 {
+		return nil
+	}
+
+	defineField := d.Fields[index]
+	if isListType(string(defineField.Type)) {
+		return defineField
+	}
+
+	return nil
+}
+
+// privateField returns the field definition expression for the given define's
+// private field, or nil if it does not have a private field.
+func privateField(d *lang.DefineExpr) *lang.DefineFieldExpr {
+	// If private is present, it will be the last field.
+	index := len(d.Fields) - 1
+	if index < 0 {
+		return nil
+	}
+
+	defineField := d.Fields[index]
+	if isPrivateType(string(defineField.Type)) {
+		return defineField
+	}
+
+	return nil
+}
+
+// generateDefineComments is a helper function that generates a block of
+// op definition comments by converting the Optgen comment to a Go comment.
+// The comments are assumed to start with the name of the op and follow with a
+// description of the op, like this:
+//   # <opname> <description of what this op does>
 //   # ...
 //
-// The initial name is replaced with the given replaceName, in order to adapt
+// The initial opname is replaced with the given replaceName, in order to adapt
 // it to different enums and structs that are generated.
-func generateComments(w io.Writer, comments lang.CommentsExpr, findName, replaceName string) {
-	for i, comment := range comments {
-		// Replace the # comment character used in Optgen with the Go comment
-		// character.
+func generateDefineComments(w io.Writer, define *lang.DefineExpr, replaceName string) {
+	for i, comment := range define.Comments {
+		// Replace the # comment character used in Optgen with the Go
+		// comment character.
 		s := strings.Replace(string(comment), "#", "//", 1)
 
-		// Replace the findName if it is the first word in the first comment.
-		if i == 0 && strings.HasPrefix(string(comment), "# "+findName) {
-			s = strings.Replace(s, findName, replaceName, 1)
+		// Replace the definition name if it is the first word in the first
+		// comment.
+		if i == 0 && strings.HasPrefix(string(comment), "# "+string(define.Name)) {
+			s = strings.Replace(s, string(define.Name), replaceName, 1)
 		}
 
 		fmt.Fprintf(w, "  %s\n", s)

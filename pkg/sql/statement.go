@@ -1,62 +1,57 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package sql
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 )
 
 // Statement contains a statement with optional expected result columns and metadata.
 type Statement struct {
-	parser.Statement
-
+	AST           tree.Statement
+	ExpectedTypes sqlbase.ResultColumns
 	AnonymizedStr string
-	QueryID       ClusterWideID
-
-	ExpectedTypes colinfo.ResultColumns
-
-	// Prepared is non-nil during the PREPARE phase, as well as during EXECUTE of
-	// a previously prepared statement. The Prepared statement can be modified
-	// during either phase; the PREPARE phase sets its initial state, and the
-	// EXECUTE phase can re-prepare it. This happens when the original plan has
-	// been invalidated by schema changes, session data changes, permission
-	// changes, or other changes to the context in which the original plan was
-	// prepared.
-	//
-	// Given that the PreparedStatement can be modified during planning, it is
-	// not safe for use on multiple threads.
-	Prepared *PreparedStatement
-}
-
-func makeStatement(parserStmt parser.Statement, queryID ClusterWideID) Statement {
-	return Statement{
-		Statement:     parserStmt,
-		AnonymizedStr: anonymizeStmt(parserStmt.AST),
-		QueryID:       queryID,
-	}
-}
-
-func makeStatementFromPrepared(prepared *PreparedStatement, queryID ClusterWideID) Statement {
-	return Statement{
-		Statement:     prepared.Statement,
-		Prepared:      prepared,
-		ExpectedTypes: prepared.Columns,
-		AnonymizedStr: prepared.AnonymizedStr,
-		QueryID:       queryID,
-	}
+	queryID       uint128.Uint128
 }
 
 func (s Statement) String() string {
-	// We have the original SQL, but we still use String() because it obfuscates
-	// passwords.
 	return s.AST.String()
+}
+
+// StatementList is a list of statements.
+type StatementList []Statement
+
+// NewStatementList creates a StatementList from a tree.StatementList.
+func NewStatementList(stmts tree.StatementList) StatementList {
+	sl := make(StatementList, len(stmts))
+	for i, s := range stmts {
+		sl[i] = Statement{AST: s}
+	}
+	return sl
+}
+
+func (l *StatementList) String() string { return tree.AsString(l) }
+
+// Format implements the NodeFormatter interface.
+func (l *StatementList) Format(ctx *tree.FmtCtx) {
+	for i := range *l {
+		if i > 0 {
+			ctx.WriteString("; ")
+		}
+		ctx.FormatNode((*l)[i].AST)
+	}
 }

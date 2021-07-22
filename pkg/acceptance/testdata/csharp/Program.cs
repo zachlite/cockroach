@@ -1,6 +1,5 @@
 using System;
 using System.Data;
-using System.Linq;
 using Npgsql;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography;
@@ -17,17 +16,15 @@ namespace CockroachDrivers
             connStringBuilder.Username = Environment.GetEnvironmentVariable("PGUSER");
             connStringBuilder.SslMode = SslMode.Require;
             connStringBuilder.TrustServerCertificate = true;
-            // Npgsql needs to connect to a database that already exists.
-            connStringBuilder.Database = "system";
+            connStringBuilder.Database = "";
             Simple(connStringBuilder.ConnectionString);
-            ArrayTest(connStringBuilder.ConnectionString);
             TxnSample(connStringBuilder.ConnectionString);
             UnitTest(connStringBuilder.ConnectionString);
         }
 
         static void ProvideClientCertificatesCallback(X509CertificateCollection clientCerts)
         {
-              clientCerts.Add(new X509Certificate2("/certs/client.root.pk12"));
+              clientCerts.Add(new X509Certificate2("node.pfx"));
         }
 
         static void Simple(string connString)
@@ -287,15 +284,6 @@ namespace CockroachDrivers
                     }
                 }
 
-                using (var cmd = new NpgsqlCommand("USE test", conn))
-                {
-                    cmd.Prepare();
-                    var rows = cmd.ExecuteNonQuery();
-                    if (rows != -1)
-                    {
-                        throw new DataException(String.Format("USE reports {0} rows changed, expecting -1", rows));
-                    }
-                }
 
                 using (var cmd = new NpgsqlCommand("CREATE TABLE accounts (id INT PRIMARY KEY, balance INT, cdate DATE)", conn))
                 {
@@ -401,33 +389,21 @@ namespace CockroachDrivers
                         throw new DataException(String.Format("INSERT reports {0} rows changed, expecting 1", rows));
                     }
                 }
-            }
-        }
 
-        static void ArrayTest(string connString)
-        {
-            using (var conn = new NpgsqlConnection(connString))
-            {
-                conn.ProvideClientCertificatesCallback += new ProvideClientCertificatesCallback(ProvideClientCertificatesCallback);
-                conn.Open();
-
-                new NpgsqlCommand("CREATE DATABASE IF NOT EXISTS test", conn).ExecuteNonQuery();
-                new NpgsqlCommand("CREATE TABLE IF NOT EXISTS test.arrays (a INT[])", conn).ExecuteNonQuery();
-                using (var cmd = new NpgsqlCommand())
+                using (var cmd = new NpgsqlCommand("SELECT nspname FROM pg_catalog.pg_namespace WHERE oid=@oid", conn))
                 {
-                    cmd.Connection = conn;
-                    cmd.CommandText = "INSERT INTO test.arrays(a) VALUES(@val)";
-                    cmd.Parameters.AddWithValue("val", new int[] {1, 2, 3});
-                    cmd.ExecuteNonQuery();
-                }
-                using (var cmd = new NpgsqlCommand("SELECT a FROM test.arrays", conn))
-                using (var reader = cmd.ExecuteReader())
-                    while (reader.Read()) {
-                      var ary = reader["a"] as long[];
-                      if (!ary.SequenceEqual(new long[] {1, 2, 3})) {
-                        throw new DataException(String.Format("Expected result to be [1, 2, 3], was {0}", String.Join(", ", ary)));
-                      }
+                    cmd.Parameters.Add("oid", NpgsqlTypes.NpgsqlDbType.Bigint).Value = 1782195457;
+                    cmd.Prepare();
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        reader.Read();
+                        var nspName = reader.GetString(0);
+                        if (nspName != "pg_catalog")
+                        {
+                            throw new DataException(String.Format("SELECT returns {0}, expected pg_catalog", nspName));
+                        }
                     }
+                }
             }
         }
     }

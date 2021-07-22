@@ -1,17 +1,12 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
-//
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 import { assert } from "chai";
 
 import { showInstructionsBox } from "src/views/clusterviz/components/instructionsBox";
 import { LocalityTier } from "src/redux/localities";
 
 describe("InstructionsBox component", () => {
+
   describe("showInstructionsBox", () => {
+
     interface TestCase {
       showMap: boolean;
       tiers: LocalityTier[];
@@ -48,11 +43,10 @@ describe("InstructionsBox component", () => {
 
     cases.forEach((testCase) => {
       it(`returns ${testCase.expected} for case "${testCase.desc}"`, () => {
-        assert.equal(
-          showInstructionsBox(testCase.showMap, testCase.tiers),
-          testCase.expected,
-        );
+        assert.equal(showInstructionsBox(testCase.showMap, testCase.tiers), testCase.expected);
       });
     });
+
   });
+
 });

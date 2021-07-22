@@ -18,20 +18,18 @@ const (
 	DefineFieldsOp
 	DefineFieldOp
 	RuleOp
-	FuncOp
-	NamesOp
-	NameOp
-	AndOp
-	NotOp
-	ListOp
-	ListAnyOp
 	BindOp
-	LetOp
 	RefOp
-	AnyOp
-	SliceOp
+	MatchOp
+	OpNamesOp
+	OpNameOp
+	MatchAndOp
+	MatchInvokeOp
+	MatchNotOp
+	MatchAnyOp
+	MatchListOp
+	ConstructOp
+	ConstructListOp
+	ListOp
 	StringOp
-	StringsOp
-	NumberOp
-	CustomFuncOp
 )

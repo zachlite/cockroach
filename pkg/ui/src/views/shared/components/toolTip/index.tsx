@@ -1,27 +1,15 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
-import { Tooltip } from "antd";
 import React from "react";
-import { AbstractTooltipProps } from "antd/es/tooltip";
-import classNames from "classnames/bind";
+import classNames from "classnames";
 
-import styles from "./tooltip.module.styl";
+import "./tooltip.styl";
 
-interface ToolTipWrapperProps extends AbstractTooltipProps {
+interface ToolTipWrapperProps {
   text: React.ReactNode;
-  short?: boolean;
-  children?: React.ReactNode;
 }
 
-const cx = classNames.bind(styles);
+interface ToolTipWrapperState {
+  hovered: boolean;
+}
 
 /**
  * ToolTipWrapper wraps its children with an area that detects mouseover events
@@ -32,22 +20,43 @@ const cx = classNames.bind(styles);
  * such as "float" will render parent elements unable to properly wrap their
  * contents.
  */
+export class ToolTipWrapper extends React.Component<ToolTipWrapperProps, ToolTipWrapperState> {
+  constructor(props?: ToolTipWrapperProps, context?: any) {
+    super(props, context);
+    this.state = {
+      hovered: false,
+    };
+  }
 
-export const ToolTipWrapper = (props: ToolTipWrapperProps) => {
-  const { text, children, placement = "bottom" } = props;
-  const overlayClassName = cx("tooltip-wrapper", "tooltip__preset--white");
-  return (
-    <Tooltip
-      title={text}
-      placement={placement}
-      overlayClassName={overlayClassName}
-      {...props}
-    >
-      {children}
-    </Tooltip>
-  );
-};
+  onMouseEnter = () => {
+    this.setState({hovered: true});
+  }
 
-ToolTipWrapper.defaultProps = {
-  placement: "bottom",
-};
+  onMouseLeave = () => {
+    this.setState({hovered: false});
+  }
+
+  render() {
+    const { text } = this.props;
+    const { hovered } = this.state;
+    const tooltipClassNames = classNames({
+      "hover-tooltip": true,
+      "hover-tooltip--hovered": hovered,
+    });
+
+    return (
+      <div
+        className={tooltipClassNames}
+        onMouseEnter={this.onMouseEnter}
+        onMouseLeave={this.onMouseLeave}
+      >
+        <div className="hover-tooltip__text">
+          { text }
+        </div>
+        <div className="hover-tooltip__content">
+          { this.props.children }
+        </div>
+      </div>
+    );
+  }
+}

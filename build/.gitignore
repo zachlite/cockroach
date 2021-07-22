@@ -7,6 +7,3 @@
 # NPM
 node_modules
 yarn.installed
-
-# Build system.
-defs.mk*

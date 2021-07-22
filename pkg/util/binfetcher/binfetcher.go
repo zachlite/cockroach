@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package binfetcher
 
@@ -16,17 +20,15 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
+	"github.com/pkg/errors"
 )
 
 // Options are the options to Download().
@@ -134,19 +136,12 @@ func (opts Options) filename() string {
 	return filepath.Base(opts.URL.Path[:len(opts.URL.Path)-len(opts.Suffix)])
 }
 
-// Downloading binaries may take some time, so give ourselves
-// some room before the timeout expires.
-var httpClient = httputil.NewClientWithTimeout(300 * time.Second)
-
 // Download downloads the binary for the given version, and skips the download
 // if the archive is already present in `destDir`.
 //
-// Do not use this to download the cockroach binary. It won't work for v20.2+
-// releases, which include the geos libraries along with the binary. On
-// roachprod, use `roachprod stage` instead.
-//
 // `version` can be:
 //
+// - a release, e.g. v1.0.5 (makes sense only for downloading `cockroach`)
 // - a SHA from the master branch, e.g. bd828feaa309578142fe7ad2d89ee1b70adbd52d
 // - the string "LATEST" for the most recent SHA from the master branch. Note that
 //   caching is disabled in that case.
@@ -161,15 +156,17 @@ func Download(ctx context.Context, opts Options) (string, error) {
 	destFileName := filepath.Join(opts.Dir, opts.filename())
 
 	if stat, err := os.Stat(destFileName); err != nil {
-		if !oserror.IsNotExist(err) {
+		if !os.IsNotExist(err) {
 			return "", err
 		}
 	} else if stat.Size() > 0 && opts.Version != "LATEST" {
+		log.Infof(ctx, "file already exists; skipping")
 		return destFileName, nil // cache hit
 	}
 
 	log.Infof(ctx, "downloading %s to %s", opts.URL.String(), destFileName)
-	resp, err := httpClient.Get(ctx, opts.URL.String())
+
+	resp, err := http.Get(opts.URL.String())
 	if err != nil {
 		return "", err
 	}
@@ -177,9 +174,6 @@ func Download(ctx context.Context, opts Options) (string, error) {
 	if resp.StatusCode != 200 {
 		body, _ := ioutil.ReadAll(resp.Body)
 		return "", errors.Errorf("unexpected HTTP response from %s: %d\n%s", opts.URL.String(), resp.StatusCode, body)
-	}
-	if opts.Version == "LATEST" {
-		log.Infof(ctx, "LATEST redirected to %s", resp.Request.URL.String())
 	}
 
 	destFile, err := os.Create(destFileName)
@@ -210,7 +204,7 @@ func Download(ctx context.Context, opts Options) (string, error) {
 		}
 	}
 
-	if stat, err := os.Stat(destFileName); err != nil && !oserror.IsNotExist(err) {
+	if stat, err := os.Stat(destFileName); err != nil && !os.IsNotExist(err) {
 		return "", errors.Wrap(err, "checking downloaded binary")
 	} else if stat.Size() == 0 {
 		return "", errors.Errorf("%s is unexpectedly empty", destFileName)

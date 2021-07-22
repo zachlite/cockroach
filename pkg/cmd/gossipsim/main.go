@@ -1,12 +1,16 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 /*
 Package simulation provides tools meant to visualize or test aspects
@@ -63,7 +67,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/gossip/simulation"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -182,7 +185,7 @@ func outputDotFile(
 		quiescent = false
 		nodeID, err := strconv.Atoi(strings.Split(key, ":")[0])
 		if err != nil {
-			log.Fatalf(context.TODO(), "%v", err)
+			log.Fatal(context.TODO(), err)
 		}
 		outgoingMap.addEdge(roachpb.NodeID(nodeID), e)
 		delete(edgeSet, key)
@@ -303,7 +306,7 @@ func main() {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.TODO())
 
-	n := simulation.NewNetwork(stopper, nodeCount, true, zonepb.DefaultZoneConfigRef())
+	n := simulation.NewNetwork(stopper, nodeCount, true)
 	n.SimulateNetwork(
 		func(cycle int, network *simulation.Network) bool {
 			// Output dot graph.

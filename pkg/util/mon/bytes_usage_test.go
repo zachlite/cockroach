@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package mon
 
@@ -42,10 +46,10 @@ func TestMemoryAllocations(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 
-	var pool *BytesMonitor
+	var pool BytesMonitor
+	var m BytesMonitor
 	var paramHeader func()
 
-	m := NewMonitor("test", MemoryResource, nil, nil, 0, 1000, st)
 	accs := make([]BoundAccount, 4)
 	for i := range accs {
 		accs[i] = m.MakeBoundAccount()
@@ -139,7 +143,7 @@ func TestMemoryAllocations(t *testing.T) {
 	}
 
 	for _, max := range maxs {
-		pool = NewMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
+		pool = MakeMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
 		pool.Start(ctx, nil, MakeStandaloneBudget(max))
 
 		for _, hf := range hysteresisFactors {
@@ -153,8 +157,8 @@ func TestMemoryAllocations(t *testing.T) {
 
 					// We start with a fresh monitor for every set of
 					// parameters.
-					m = NewMonitor("test", MemoryResource, nil, nil, pa, 1000, st)
-					m.Start(ctx, pool, MakeStandaloneBudget(pb))
+					m = MakeMonitor("test", MemoryResource, nil, nil, pa, 1000, st)
+					m.Start(ctx, &pool, MakeStandaloneBudget(pb))
 
 					for i := 0; i < numAccountOps; i++ {
 						if i%linesBetweenHeaderReminders == 0 {
@@ -218,7 +222,7 @@ func TestBoundAccount(t *testing.T) {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	m := NewMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
+	m := MakeMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
 	m.Start(ctx, nil, MakeStandaloneBudget(100))
 	m.poolAllocationSize = 1
 	maxAllocatedButUnusedBlocks = 1
@@ -266,7 +270,7 @@ func TestBoundAccount(t *testing.T) {
 		t.Fatal("closing spans leaves bytes in monitor")
 	}
 
-	if m2 := a1.Monitor(); m2 != m {
+	if m2 := a1.Monitor(); m2 != &m {
 		t.Fatalf("a1.Monitor() returned %v, wanted %v", m2, &m)
 	}
 
@@ -278,7 +282,7 @@ func TestBytesMonitor(t *testing.T) {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	m := NewMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
+	m := MakeMonitor("test", MemoryResource, nil, nil, 1, 1000, st)
 	m.Start(ctx, nil, MakeStandaloneBudget(100))
 	maxAllocatedButUnusedBlocks = 1
 
@@ -311,9 +315,9 @@ func TestBytesMonitor(t *testing.T) {
 		t.Fatalf("incorrect current allocation: got %d, expected %d", m.mu.curAllocated, 0)
 	}
 
-	limitedMonitor := NewMonitorWithLimit(
+	limitedMonitor := MakeMonitorWithLimit(
 		"testlimit", MemoryResource, 10, nil, nil, 1, 1000, cluster.MakeTestingClusterSettings())
-	limitedMonitor.Start(ctx, m, BoundAccount{})
+	limitedMonitor.Start(ctx, &m, BoundAccount{})
 
 	if err := limitedMonitor.reserveBytes(ctx, 10); err != nil {
 		t.Fatalf("limited monitor refused small allocation: %v", err)
@@ -332,7 +336,7 @@ func TestMemoryAllocationEdgeCases(t *testing.T) {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	m := NewMonitor("test", MemoryResource,
+	m := MakeMonitor("test", MemoryResource,
 		nil /* curCount */, nil /* maxHist */, 1e9 /* increment */, 1e9 /* noteworthy */, st)
 	m.Start(ctx, nil, MakeStandaloneBudget(1e9))
 
@@ -350,7 +354,7 @@ func TestMemoryAllocationEdgeCases(t *testing.T) {
 
 func BenchmarkBoundAccountGrow(b *testing.B) {
 	ctx := context.Background()
-	m := NewMonitor("test", MemoryResource,
+	m := MakeMonitor("test", MemoryResource,
 		nil /* curCount */, nil /* maxHist */, 1e9 /* increment */, 1e9, /* noteworthy */
 		cluster.MakeTestingClusterSettings())
 	m.Start(ctx, nil, MakeStandaloneBudget(1e9))

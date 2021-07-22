@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package lang
 
@@ -14,7 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -34,11 +37,11 @@ import (
 //go:generate langgen -out operator.og.go ops lang.opt
 //go:generate stringer -type=Operator operator.og.go
 
-// VisitFunc is called by the Visit method of an expression for each child of
-// that expression. The function can return the expression as-is, with no
-// changes, or it can construct and return a replacement expression that the
-// visitor will graft into a replacement tree.
-type VisitFunc func(e Expr) Expr
+// AcceptFunc is called by the visitor after visiting each node in a postorder
+// traversal of the expression tree. The function can return the expression
+// as-is, with no changes, or it can construct and return a replacement
+// expression that the visitor will graft into a replacement tree.
+type AcceptFunc func(expr Expr) Expr
 
 // Expr is implemented by all Optgen AST expressions, exposing its properties,
 // children, and string representation.
@@ -62,48 +65,13 @@ type Expr interface {
 	// types just return nil.
 	Value() interface{}
 
-	// Visit invokes the visit function for each child of the expression. The
-	// function can return the child as-is, with no changes, or it can construct
-	// and return a replacement expression. If any children have been replaced,
-	// then Visit will construct a new instance of this expression that has the
-	// new children. Callers can use the Visit function to traverse and rewrite
-	// the expression tree, in either pre or post order. Here is a pre-order
-	// example:
-	//
-	//   func myVisitFunc(e Expr) Expr {
-	//     // Replace SomeOp, leave everything else as-is. This check is before
-	//     // the call to Visit, so it's a pre-order traversal.
-	//     if e.Op() == SomeOp {
-	//       return &SomeOtherOp{}
-	//     }
-	//     return e.Visit(myVisitFunc)
-	//   }
-	//   newExpr := oldExpr.Visit(myVisitFunc)
-	Visit(visit VisitFunc) Expr
-
-	// InferredType describes the kind of data that will be returned when this
-	// expression is evaluated. Type inference rules work top-down and bottom-
-	// up to establish the type. For example:
-	//
-	//   define Select {
-	//     Input  Node
-	//     Filter Node
-	//   }
-	//
-	//   define True {}
-	//
-	//   (Select $input:* $filter:(True)) => $input
-	//
-	// The type of the $input binding and ref would be inferred as Node, since
-	// that's as specific as can be inferred. The type of $filter would be
-	// inferred as TrueOp, since a more specific type than Node is possible to
-	// infer in this case.
-	//
-	// The compiler uses this information to ensure that every match pattern has
-	// a statically known set of ops it can match, and that every replace pattern
-	// has a statically known set of ops it can construct. Code generators can
-	// also use this information to generate strongly-typed code.
-	InferredType() DataType
+	// Visit visits the subtree rooted at the expression using a postorder
+	// traversal. After visiting each child, the visitor will reconstruct the
+	// parent expression if any of the children have been replaced. The visitor
+	// then invokes the accept function with the original or replaced
+	// expression, which gives the acceptor a chance to replace it. Callers
+	// can use the Visit function to traverse and rewrite the expression tree.
+	Visit(accept AcceptFunc) Expr
 
 	// Source returns the original source location of the expression, including
 	// file name, line number, and column position. If the source location is
@@ -147,100 +115,16 @@ func (e TagsExpr) Contains(tag string) bool {
 	return false
 }
 
-// WithTag returns the subset of defines in the set that have the given tag.
-func (e DefineSetExpr) WithTag(tag string) DefineSetExpr {
-	var defines DefineSetExpr
-	for _, define := range e {
-		if define.Tags.Contains(tag) {
-			defines = append(defines, define)
-		}
-	}
-	return defines
-}
-
-// WithoutTag returns the subset of defines in the set that do not have the
-// given tag.
-func (e DefineSetExpr) WithoutTag(tag string) DefineSetExpr {
-	var defines DefineSetExpr
-	for _, define := range e {
-		if !define.Tags.Contains(tag) {
-			defines = append(defines, define)
-		}
-	}
-	return defines
-}
-
-// WithTag returns the subset of rules in the set that have the given tag.
-func (e RuleSetExpr) WithTag(tag string) RuleSetExpr {
-	var rules RuleSetExpr
-	for _, rule := range e {
-		if rule.Tags.Contains(tag) {
-			rules = append(rules, rule)
-		}
-	}
-	return rules
-}
-
-// Sort sorts the rules in the set, given a less function, while keeping the
-// original order of equal elements. A rule that is "less than" another rule is
-// stored stored earlier in the set.
-//
-// Note that the rule set is updated in place to reflect the sorted order.
-func (e RuleSetExpr) Sort(less func(left, right *RuleExpr) bool) {
-	sort.SliceStable(e, func(i, j int) bool {
-		return less(e[i], e[j])
-	})
-}
-
-// HasDynamicName returns true if this is a construction function which can
-// construct several different operators; which it constructs is not known until
-// runtime. For example:
-//
-//   (Select $input:(Left | InnerJoin $left:* $right:* $on))
-//   =>
-//   ((OpName $input) $left $right $on)
-//
-// The replace pattern uses a constructor function that dynamically constructs
-// either a Left or InnerJoin operator.
-func (e *FuncExpr) HasDynamicName() bool {
-	switch e.Name.(type) {
-	case *NameExpr, *NamesExpr:
-		return false
-	}
-	return true
-}
-
-// SingleName returns the name of the function when there is exactly one choice.
-// If there is zero or more than one choice, SingleName will panic.
-func (e *FuncExpr) SingleName() string {
-	if names, ok := e.Name.(*NamesExpr); ok {
-		if len(*names) > 1 {
-			panic("function cannot have more than one name")
-		}
-		return string((*names)[0])
-	}
-	return (string)(*e.Name.(*NameExpr))
-}
-
-// NameChoice returns the set of names that this function can have. Multiple
-// choices are possible when this is a match function.
-func (e *FuncExpr) NameChoice() NamesExpr {
-	if names, ok := e.Name.(*NamesExpr); ok {
-		return *names
-	}
-	return NamesExpr{*e.Name.(*NameExpr)}
-}
-
-// visitChildren is a helper function called by the Visit function on AST
-// expressions. It invokes the visit function on each child of the specified
-// expression and returns the resulting children as a slice. If none of the
-// children were replaced, then visitChildren returns nil.
-func visitChildren(e Expr, visit VisitFunc) []Expr {
+// visitExprChildren is a helper function called by the Visit function on AST
+// expressions. It visits each child of the specified expression and returns
+// the resulting children as a slice. If none of the children were replaced,
+// then visitExprChildren returns nil.
+func visitExprChildren(e Expr, accept AcceptFunc) []Expr {
 	var children []Expr
 
 	for i := 0; i < e.ChildCount(); i++ {
 		before := e.Child(i)
-		after := visit(before)
+		after := before.Visit(accept)
 		if children == nil && before != after {
 			children = make([]Expr, e.ChildCount())
 			for j := 0; j < i; j++ {
@@ -261,17 +145,15 @@ func visitChildren(e Expr, visit VisitFunc) []Expr {
 // expression to the given buffer, at the specified level of indentation.
 func formatExpr(e Expr, buf *bytes.Buffer, level int) {
 	if e.Value() != nil {
-		switch e.Op() {
-		case StringOp:
+		if e.Op() == StringOp {
 			buf.WriteByte('"')
 			buf.WriteString(e.Value().(string))
 			buf.WriteByte('"')
-
-		case NumberOp:
-			fmt.Fprintf(buf, "%d", e.Value().(int64))
-
-		default:
-			fmt.Fprintf(buf, "%v", e.Value())
+		} else if e.Op() == OpNameOp {
+			buf.WriteString(e.Value().(string))
+			buf.WriteString("Op")
+		} else {
+			buf.WriteString(fmt.Sprintf("%v", e.Value()))
 		}
 		return
 	}
@@ -305,12 +187,7 @@ func formatExpr(e Expr, buf *bytes.Buffer, level int) {
 			e.Child(i).Format(buf, level)
 		}
 
-		typ := e.InferredType()
-		if typ != nil && typ != AnyDataType {
-			buf.WriteString(fmt.Sprintf(" Typ=%s", e.InferredType()))
-		}
-
-		if src != nil && e.ChildCount() != 0 {
+		if src != nil {
 			buf.WriteString(fmt.Sprintf(" Src=<%s>", src))
 		}
 
@@ -334,13 +211,7 @@ func formatExpr(e Expr, buf *bytes.Buffer, level int) {
 			buf.WriteByte('\n')
 		}
 
-		typ := e.InferredType()
-		if typ != nil && typ != AnyDataType {
-			writeIndent(buf, level)
-			buf.WriteString(fmt.Sprintf("Typ=%s\n", e.InferredType()))
-		}
-
-		if src != nil && e.ChildCount() != 0 {
+		if src != nil {
 			writeIndent(buf, level)
 			buf.WriteString(fmt.Sprintf("Src=<%s>\n", src))
 		}

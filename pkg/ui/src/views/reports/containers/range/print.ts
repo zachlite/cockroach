@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 import _ from "lodash";
 import Long from "long";
 import moment from "moment";
@@ -21,15 +11,13 @@ export const dateFormat = "Y-MM-DD HH:mm:ss";
 // it uses passed in store, node and replica IDs instead.
 export function PrintReplicaID(
   rangeID: Long,
-  rep: protos.cockroach.roachpb.IReplicaDescriptor,
+  rep: protos.cockroach.roachpb.ReplicaDescriptor$Properties,
   nodeID?: number,
   storeID?: number,
   replicaID?: Long,
 ) {
   if (!_.isNil(rep)) {
-    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${
-      rep.replica_id
-    }`;
+    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${rep.replica_id}`;
   }
   // Fall back to the passed in node, store and replica IDs. If those are nil,
   // use a question mark instead.
@@ -44,17 +32,14 @@ export function PrintTime(time: moment.Moment) {
 }
 
 export function PrintTimestamp(
-  timestamp:
-    | protos.cockroach.util.hlc.ITimestamp
-    | protos.google.protobuf.ITimestamp,
+  timestamp: protos.cockroach.util.hlc.Timestamp$Properties |
+    protos.google.protobuf.Timestamp$Properties,
 ) {
   let time: moment.Moment = null;
   if (_.has(timestamp, "wall_time")) {
-    time = LongToMoment(
-      (timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time,
-    );
+    time = LongToMoment((timestamp as protos.cockroach.util.hlc.Timestamp$Properties).wall_time);
   } else if (_.has(timestamp, "seconds") || _.has(timestamp, "nanos")) {
-    time = TimestampToMoment(timestamp as protos.google.protobuf.ITimestamp);
+    time = TimestampToMoment((timestamp as protos.google.protobuf.Timestamp$Properties));
   } else {
     return "";
   }
@@ -86,8 +71,8 @@ export function PrintDuration(duration: moment.Duration) {
 }
 
 export function PrintTimestampDelta(
-  newTimestamp: protos.cockroach.util.hlc.ITimestamp,
-  oldTimestamp: protos.cockroach.util.hlc.ITimestamp,
+  newTimestamp: protos.cockroach.util.hlc.Timestamp$Properties,
+  oldTimestamp: protos.cockroach.util.hlc.Timestamp$Properties,
 ) {
   if (_.isNil(oldTimestamp) || _.isNil(newTimestamp)) {
     return "";
@@ -98,30 +83,10 @@ export function PrintTimestampDelta(
   return PrintDuration(diff);
 }
 
-// PrintTimestampDeltaFromNow is like PrintTimestampDelta, except it works both
-// when `timestamp` is below or above `now`, and at appends "ago" or "in the
-// future" to the result.
-export function PrintTimestampDeltaFromNow(
-  timestamp: protos.cockroach.util.hlc.ITimestamp,
-  now: moment.Moment,
-): string {
-  if (_.isNil(timestamp)) {
-    return "";
-  }
-  const time: moment.Moment = LongToMoment(timestamp.wall_time);
-  if (now.isAfter(time)) {
-    const diff = moment.duration(now.diff(time));
-    return `${PrintDuration(diff)} ago`;
-  }
-  const diff = moment.duration(time.diff(now));
-  return `${PrintDuration(diff)} in the future`;
-}
-
 export default {
   Duration: PrintDuration,
   ReplicaID: PrintReplicaID,
   Time: PrintTime,
   Timestamp: PrintTimestamp,
   TimestampDelta: PrintTimestampDelta,
-  TimestampDeltaFromNow: PrintTimestampDeltaFromNow,
 };

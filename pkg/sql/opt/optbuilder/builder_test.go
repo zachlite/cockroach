@@ -1,125 +1,171 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
-package optbuilder_test
+package optbuilder
 
-import (
-	"context"
-	"fmt"
-	"strings"
-	"testing"
-
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/opttester"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/datadriven"
-)
-
-// TestBuilder runs data-driven testcases of the form
-//   <command> [<args>]...
+// This file is home to TestBuilder, which is similar to the logic tests, except it
+// is used for optimizer builder-specific testcases.
+//
+// Each testfile contains testcases of the form
+//   <command>
 //   <SQL statement or expression>
 //   ----
 //   <expected results>
 //
-// See OptTester.Handle for supported commands. In addition to those, we
-// support:
+// The supported commands are:
 //
-//  - build-scalar [args]
+//  - build
+//
+//    Builds a memo structure from a SQL query and outputs a representation
+//    of the "expression view" of the memo structure.
+//
+//  - build-scalar
 //
 //    Builds a memo structure from a SQL scalar expression and outputs a
 //    representation of the "expression view" of the memo structure.
 //
-//    The supported args (in addition to the ones supported by OptTester):
+//  - exec-ddl
 //
-//      - vars=(var1 type1, var2 type2,...)
+//    Parses a CREATE TABLE statement, creates a test table, and adds the
+//    table to the catalog.
 //
-//        Information about columns that the scalar expression can refer to.
-//
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
+	"github.com/cockroachdb/cockroach/pkg/testutils/datadriven"
+	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+
+	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
+)
+
+var (
+	testDataGlob = flag.String("d", "testdata/[^.]*", "test data glob")
+)
+
 func TestBuilder(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	datadriven.Walk(t, "testdata", func(t *testing.T, path string) {
-		catalog := testcat.New()
+	paths, err := filepath.Glob(*testDataGlob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatalf("no testfiles found matching: %s", *testDataGlob)
+	}
 
-		datadriven.RunTest(t, path, func(t *testing.T, d *datadriven.TestData) string {
-			tester := opttester.New(catalog, d.Input)
-			tester.Flags.ExprFormat = memo.ExprFmtHideMiscProps |
-				memo.ExprFmtHideConstraints |
-				memo.ExprFmtHideFuncDeps |
-				memo.ExprFmtHideRuleProps |
-				memo.ExprFmtHideStats |
-				memo.ExprFmtHideCost |
-				memo.ExprFmtHideQualifications |
-				memo.ExprFmtHideScalars |
-				memo.ExprFmtHideTypes
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			ctx := context.Background()
+			catalog := testutils.NewTestCatalog()
 
-			switch d.Cmd {
-			case "build-scalar":
-				// Remove the HideScalars, HideTypes flag for build-scalars.
-				tester.Flags.ExprFormat &= ^(memo.ExprFmtHideScalars | memo.ExprFmtHideTypes)
-
-				ctx := context.Background()
-				semaCtx := tree.MakeSemaContext()
-				evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
-				evalCtx.SessionData.OptimizerUseHistograms = true
-				evalCtx.SessionData.OptimizerUseMultiColStats = true
-				evalCtx.SessionData.LocalityOptimizedSearch = true
-
-				var o xform.Optimizer
-				o.Init(&evalCtx, catalog)
-				var sv testutils.ScalarVars
+			datadriven.RunTest(t, path, func(d *datadriven.TestData) string {
+				var varTypes []types.T
+				var iVarHelper tree.IndexedVarHelper
 
 				for _, arg := range d.CmdArgs {
-					key, vals := arg.Key, arg.Vals
+					key := arg
+					val := ""
+					if pos := strings.Index(key, "="); pos >= 0 {
+						key = arg[:pos]
+						val = arg[pos+1:]
+					}
+					if len(val) > 2 && val[0] == '(' && val[len(val)-1] == ')' {
+						val = val[1 : len(val)-1]
+					}
+					vals := strings.Split(val, ",")
 					switch key {
 					case "vars":
-						err := sv.Init(o.Memo().Metadata(), vals)
+						varTypes, err = testutils.ParseTypes(vals)
 						if err != nil {
 							d.Fatalf(t, "%v", err)
 						}
 
+						iVarHelper = tree.MakeTypesOnlyIndexedVarHelper(varTypes)
+
 					default:
-						if err := tester.Flags.Set(arg); err != nil {
-							d.Fatalf(t, "%s", err)
-						}
+						d.Fatalf(t, "unknown argument: %s", key)
 					}
 				}
 
-				expr, err := parser.ParseExpr(d.Input)
-				if err != nil {
-					d.Fatalf(t, "%v", err)
-				}
+				switch d.Cmd {
+				case "build":
+					stmt, err := parser.ParseOne(d.Input)
+					if err != nil {
+						d.Fatalf(t, "%v", err)
+					}
 
-				// Disable normalization rules: we want the tests to check the result
-				// of the build process.
-				o.DisableOptimizations()
-				b := optbuilder.NewScalar(ctx, &semaCtx, &evalCtx, o.Factory())
-				err = b.Build(expr)
-				if err != nil {
-					return fmt.Sprintf("error: %s\n", strings.TrimSpace(err.Error()))
-				}
-				f := memo.MakeExprFmtCtx(tester.Flags.ExprFormat, o.Memo(), catalog)
-				f.FormatExpr(o.Memo().RootExpr())
-				return f.Buffer.String()
+					o := xform.NewOptimizer(catalog, xform.OptimizeNone)
+					b := New(ctx, o.Factory(), stmt)
+					root, props, err := b.Build()
+					if err != nil {
+						return fmt.Sprintf("error: %v\n", err)
+					}
+					exprView := o.Optimize(root, props)
+					return exprView.String()
 
-			default:
-				return tester.RunCommand(t, d)
-			}
+				case "build-scalar":
+					typedExpr, err := testutils.ParseScalarExpr(d.Input, iVarHelper.Container())
+					if err != nil {
+						d.Fatalf(t, "%v", err)
+					}
+
+					o := xform.NewOptimizer(catalog, xform.OptimizeNone)
+					b := NewScalar(ctx, o.Factory())
+					group, err := b.Build(typedExpr)
+					if err != nil {
+						return fmt.Sprintf("error: %v\n", err)
+					}
+					exprView := o.Optimize(group, &opt.PhysicalProps{})
+					return exprView.String()
+
+				case "exec-ddl":
+					stmt, err := parser.ParseOne(d.Input)
+					if err != nil {
+						d.Fatalf(t, "%v", err)
+					}
+
+					if stmt.StatementType() != tree.DDL {
+						d.Fatalf(t, "statement type is not DDL: %v", stmt.StatementType())
+					}
+
+					switch stmt := stmt.(type) {
+					case *tree.CreateTable:
+						tbl := catalog.CreateTable(stmt)
+						return tbl.String()
+
+					default:
+						d.Fatalf(t, "expected CREATE TABLE statement but found: %v", stmt)
+						return ""
+					}
+
+				default:
+					d.Fatalf(t, "unsupported command: %s", d.Cmd)
+					return ""
+				}
+			})
 		})
-	})
+	}
 }

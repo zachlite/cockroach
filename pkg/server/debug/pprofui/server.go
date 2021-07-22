@@ -1,12 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package pprofui
 
@@ -18,16 +22,17 @@ import (
 	"net/http/pprof"
 	"net/url"
 	"path"
-	runtimepprof "runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	runtimepprof "runtime/pprof"
+
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/errors"
 	"github.com/google/pprof/driver"
 	"github.com/google/pprof/profile"
+	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 )
 
@@ -40,54 +45,37 @@ type Server struct {
 	storage      Storage
 	profileSem   syncutil.Mutex
 	profileTypes map[string]http.HandlerFunc
-	hook         func(profile string, labels bool, do func())
 }
 
-// NewServer creates a new Server backed by the supplied Storage and optionally
-// a hook which is called when a new profile is created. The closure passed to
-// the hook will carry out the work involved in creating the profile and must
-// be called by the hook. The intention is that hook will be a method such as
-// this:
-//
-// func hook(profile string, do func()) {
-// 	if profile == "profile" {
-// 		something.EnableProfilerLabels()
-// 		defer something.DisableProfilerLabels()
-// 		do()
-// 	}
-// }
-func NewServer(storage Storage, hook func(profile string, labels bool, do func())) *Server {
-	if hook == nil {
-		hook = func(_ string, _ bool, do func()) { do() }
-	}
+// NewServer creates a new Server backed by the supplied Storage.
+func NewServer(storage Storage) *Server {
 	s := &Server{
 		storage: storage,
-		hook:    hook,
+	}
+
+	s.profileTypes = map[string]http.HandlerFunc{
+		// The CPU profile endpoint is special in that the handler actually blocks
+		// for a predetermined duration (recording the profile in the meantime).
+		// It is not included in `runtimepprof.Profiles` below.
+		"profile": func(w http.ResponseWriter, r *http.Request) {
+			const profileDurationSeconds = 5
+			r.Form = make(url.Values)
+			r.Form.Set("seconds", strconv.Itoa(profileDurationSeconds))
+			s.profileSem.Lock()
+			defer s.profileSem.Unlock()
+			pprof.Profile(w, r)
+		},
 	}
 
 	// Register the endpoints for heap, block, threadcreate, etc.
-	s.profileTypes = map[string]http.HandlerFunc{}
 	for _, p := range runtimepprof.Profiles() {
-		name := p.Name()
-		s.profileTypes[name] = func(w http.ResponseWriter, r *http.Request) {
-			pprof.Handler(name).ServeHTTP(w, r)
+		p := p // copy
+		s.profileTypes[p.Name()] = func(w http.ResponseWriter, r *http.Request) {
+			if err := p.WriteTo(w, 0 /* debug */); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(err.Error()))
+			}
 		}
-	}
-	// The CPU profile endpoint is special cased because a) it's not in the map
-	// yet and b) it always needs to block. We want to default to 5s if profiling
-	// if nothing is specified, we use a convenience mutex to serialize concurrent
-	// attempts to get a profile (the endpoint otherwise returns an error).
-	s.profileTypes["profile"] = func(w http.ResponseWriter, r *http.Request) {
-		const defaultProfileDurationSeconds = 5
-		if r.Form == nil {
-			r.Form = url.Values{}
-		}
-		if r.Form.Get("seconds") == "" {
-			r.Form.Set("seconds", strconv.Itoa(defaultProfileDurationSeconds))
-		}
-		s.profileSem.Lock()
-		defer s.profileSem.Unlock()
-		pprof.Profile(w, r)
 	}
 
 	return s
@@ -132,19 +120,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := s.storage.Get(id, func(io.Reader) error { return nil }); err != nil {
 			msg := fmt.Sprintf("profile for id %s not found: %s", id, err)
 			http.Error(w, msg, http.StatusNotFound)
-			return
-		}
-
-		if r.URL.Query().Get("download") != "" {
-			// TODO(tbg): this has zero discoverability.
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s_%s.pb.gz", profileName, id))
-			w.Header().Set("Content-Type", "application/octet-stream")
-			if err := s.storage.Get(id, func(r io.Reader) error {
-				_, err := io.Copy(w, r)
-				return err
-			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
 			return
 		}
 
@@ -209,15 +184,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-
-		// Pass through any parameters. Most notably, allow ?seconds=10 for
-		// CPU profiles.
-		_ = r.ParseForm()
-		req.Form = r.Form
-
 		rw := &responseBridge{target: w}
 
-		s.hook(profileName, r.Form.Get("labels") != "", func() { fetchHandler(rw, req) })
+		fetchHandler(rw, req)
 
 		if rw.statusCode != http.StatusOK && rw.statusCode != 0 {
 			return errors.Errorf("unexpected status: %d", rw.statusCode)
@@ -232,26 +201,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// shells out to `dot` for the default landing page and thus works
 	// only on hosts that have graphviz installed. You can still navigate
 	// to the dot page from there.
-	origURL, err := url.Parse(r.RequestURI)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// If this is a request issued by `go tool pprof`, just return the profile
-	// directly. This is convenient because it avoids having to expose the pprof
-	// endpoints separately, and also allows inserting hooks around CPU profiles
-	// in the future.
-	isGoPProf := strings.Contains(r.Header.Get("User-Agent"), "Go-http-client")
-	origURL.Path = path.Join(origURL.Path, id, "flamegraph")
-	if !isGoPProf {
-		http.Redirect(w, r, origURL.String(), http.StatusTemporaryRedirect)
-	} else {
-		_ = s.storage.Get(id, func(r io.Reader) error {
-			_, err := io.Copy(w, r)
-			return err
-		})
-	}
+	http.Redirect(w, r, r.RequestURI+"/"+id+"/flamegraph", http.StatusTemporaryRedirect)
 }
 
 type fetcherFn func(_ string, _, _ time.Duration) (*profile.Profile, string, error)

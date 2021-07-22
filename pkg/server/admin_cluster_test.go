@@ -1,12 +1,16 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
 
 package server_test
 
@@ -15,39 +19,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 )
 
 func TestAdminAPITableStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	const nodeCount = 3
 	tc := testcluster.StartTestCluster(t, nodeCount, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationAuto,
 		ServerArgs: base.TestServerArgs{
 			ScanInterval:    time.Millisecond,
-			ScanMinIdleTime: time.Millisecond,
 			ScanMaxIdleTime: time.Millisecond,
 		},
 	})
-	defer tc.Stopper().Stop(context.Background())
+	defer tc.Stopper().Stop(context.TODO())
 	server0 := tc.Server(0)
 
 	// Create clients (SQL, HTTP) connected to server 0.
 	db := tc.ServerConn(0)
 
-	client, err := server0.GetAdminAuthenticatedHTTPClient()
+	client, err := server0.GetAuthenticatedHTTPClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestAdminAPITableStats(t *testing.T) {
 	// this to occur, and for full replication.
 	testutils.SucceedsSoon(t, func() error {
 		if err := httputil.GetJSON(client, url, &tsResponse); err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if len(tsResponse.MissingNodes) != 0 {
 			return errors.Errorf("missing nodes: %+v", tsResponse.MissingNodes)
@@ -99,12 +101,14 @@ func TestAdminAPITableStats(t *testing.T) {
 		if a, e := tsResponse.ReplicaCount, int64(nodeCount); a != e {
 			return errors.Errorf("expected %d replicas, found %d", e, a)
 		}
-		if a, e := tsResponse.Stats.KeyCount, int64(30); a < e {
-			return errors.Errorf("expected at least %d total keys, found %d", e, a)
-		}
 		return nil
 	})
 
+	// These two conditions *must* be true, given that the above
+	// SucceedsSoon has succeeded.
+	if a, e := tsResponse.Stats.KeyCount, int64(20); a < e {
+		t.Fatalf("expected at least 20 total keys, found %d", a)
+	}
 	if len(tsResponse.MissingNodes) > 0 {
 		t.Fatalf("expected no missing nodes, found %v", tsResponse.MissingNodes)
 	}
@@ -143,9 +147,8 @@ func TestAdminAPITableStats(t *testing.T) {
 
 func TestLivenessAPI(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(context.Background())
+	defer tc.Stopper().Stop(context.TODO())
 
 	startTime := tc.Server(0).Clock().PhysicalNow()
 
@@ -159,7 +162,7 @@ func TestLivenessAPI(t *testing.T) {
 		if a, e := len(resp.Livenesses), tc.NumServers(); a != e {
 			return errors.Errorf("found %d liveness records, wanted %d", a, e)
 		}
-		livenessMap := make(map[roachpb.NodeID]livenesspb.Liveness)
+		livenessMap := make(map[roachpb.NodeID]storage.Liveness)
 		for _, l := range resp.Livenesses {
 			livenessMap[l.NodeID] = l
 		}
@@ -181,7 +184,7 @@ func TestLivenessAPI(t *testing.T) {
 			if !ok {
 				return errors.Errorf("found no liveness status for node %d", s.NodeID())
 			}
-			if a, e := status, livenesspb.NodeLivenessStatus_LIVE; a != e {
+			if a, e := status, storage.NodeLivenessStatus_LIVE; a != e {
 				return errors.Errorf(
 					"liveness status for node %s was %s, wanted %s", s.NodeID(), a, e,
 				)

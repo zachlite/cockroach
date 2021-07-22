@@ -1,13 +1,3 @@
-// Copyright 2018 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 /**
  * Monitors the currently hovered chart and point in time.
  */
@@ -38,19 +28,15 @@ export class HoverState {
   hoverTime: moment.Moment;
 }
 
-export function hoverReducer(
-  state = new HoverState(),
-  action: Action,
-): HoverState {
+export function hoverReducer(state = new HoverState(), action: Action): HoverState {
   switch (action.type) {
-    case HOVER_ON: {
+    case HOVER_ON:
       const { payload: hi } = action as PayloadAction<HoverInfo>;
       return {
         currentlyHovering: true,
         hoverChart: hi.hoverChart,
         hoverTime: hi.hoverTime,
       };
-    }
     case HOVER_OFF:
       return new HoverState();
     default:

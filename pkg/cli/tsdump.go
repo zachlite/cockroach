@@ -20,18 +20,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
-
-// TODO(knz): this struct belongs elsewhere.
-// See: https://github.com/cockroachdb/cockroach/issues/49509
-var debugTimeSeriesDumpOpts = struct {
-	format tsDumpFormat
-}{
-	format: tsDumpText,
-}
 
 var debugTimeSeriesDumpCmd = &cobra.Command{
 	Use:   "tsdump",
@@ -43,10 +35,7 @@ Dumps all of the raw timeseries values in a cluster.
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		var w tsWriter
-		switch debugTimeSeriesDumpOpts.format {
-		case tsDumpRaw:
-			// Special case, we don't go through the text output code.
+		if cliCtx.tableDisplayFormat == tableDisplayRaw {
 			conn, _, finish, err := getClientGRPCConn(ctx, serverCfg)
 			if err != nil {
 				return err
@@ -63,17 +52,19 @@ Dumps all of the raw timeseries values in a cluster.
 				return err
 			}
 			return os.Stdout.Sync()
+		}
 
-		case tsDumpCSV:
+		var w tsWriter
+		switch cliCtx.tableDisplayFormat {
+		case tableDisplayCSV:
 			w = csvTSWriter{w: csv.NewWriter(os.Stdout)}
-		case tsDumpTSV:
+		case tableDisplayTSV:
 			cw := csvTSWriter{w: csv.NewWriter(os.Stdout)}
 			cw.w.Comma = '\t'
 			w = cw
-		case tsDumpText:
-			w = defaultTSWriter{w: os.Stdout}
+
 		default:
-			return errors.Newf("unknown output format: %v", debugTimeSeriesDumpOpts.format)
+			w = defaultTSWriter{w: os.Stdout}
 		}
 
 		conn, _, finish, err := getClientGRPCConn(ctx, serverCfg)
@@ -85,7 +76,7 @@ Dumps all of the raw timeseries values in a cluster.
 		tsClient := tspb.NewTimeSeriesClient(conn)
 		stream, err := tsClient.Dump(context.Background(), &tspb.DumpRequest{})
 		if err != nil {
-			return err
+			log.Fatalf(context.Background(), "%v", err)
 		}
 
 		for {
@@ -144,50 +135,6 @@ func (w defaultTSWriter) Emit(data *tspb.TimeSeriesData) error {
 	}
 	for _, d := range data.Datapoints {
 		fmt.Fprintf(w.w, "%v %v\n", d.TimestampNanos, d.Value)
-	}
-	return nil
-}
-
-type tsDumpFormat int
-
-const (
-	tsDumpText tsDumpFormat = iota
-	tsDumpCSV
-	tsDumpTSV
-	tsDumpRaw
-)
-
-// Type implements the pflag.Value interface.
-func (m *tsDumpFormat) Type() string { return "string" }
-
-// String implements the pflag.Value interface.
-func (m *tsDumpFormat) String() string {
-	switch *m {
-	case tsDumpCSV:
-		return "csv"
-	case tsDumpTSV:
-		return "tsv"
-	case tsDumpText:
-		return "text"
-	case tsDumpRaw:
-		return "raw"
-	}
-	return ""
-}
-
-// Set implements the pflag.Value interface.
-func (m *tsDumpFormat) Set(s string) error {
-	switch s {
-	case "text":
-		*m = tsDumpText
-	case "csv":
-		*m = tsDumpCSV
-	case "tsv":
-		*m = tsDumpTSV
-	case "raw":
-		*m = tsDumpRaw
-	default:
-		return fmt.Errorf("invalid value for --format: %s", s)
 	}
 	return nil
 }

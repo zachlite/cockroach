@@ -534,8 +534,8 @@ func TestPGPreparedQuery(t *testing.T) {
 		{"SHOW COLUMNS FROM system.users", []preparedQueryTest{
 			baseTest.
 				Results("username", "STRING", false, gosql.NullBool{}, "", "{primary}", false).
-				Results("hashedPassword", "BYTES", true, gosql.NullBool{}, "", "{primary}", false).
-				Results("isRole", "BOOL", false, false, "", "{primary}", false),
+				Results("hashedPassword", "BYTES", true, gosql.NullBool{}, "", "{}", false).
+				Results("isRole", "BOOL", false, false, "", "{}", false),
 		}},
 		{"SELECT database_name, owner FROM [SHOW DATABASES]", []preparedQueryTest{
 			baseTest.Results("d", security.RootUser).
@@ -556,12 +556,10 @@ func TestPGPreparedQuery(t *testing.T) {
 				Results("system", "public", "users", security.RootUser, "UPDATE"),
 		}},
 		{"SHOW INDEXES FROM system.users", []preparedQueryTest{
-			baseTest.Results("users", "primary", false, 1, "username", "ASC", false, false).
-				Results("users", "primary", false, 2, "hashedPassword", "N/A", true, false).
-				Results("users", "primary", false, 3, "isRole", "N/A", true, false),
+			baseTest.Results("users", "primary", false, 1, "username", "ASC", false, false),
 		}},
 		{"SHOW TABLES FROM system", []preparedQueryTest{
-			baseTest.Results("public", "comments", "table", gosql.NullString{}, 0, gosql.NullString{}).Others(31),
+			baseTest.Results("public", "comments", "table", gosql.NullString{}, 0, gosql.NullString{}).Others(29),
 		}},
 		{"SHOW SCHEMAS FROM system", []preparedQueryTest{
 			baseTest.Results("crdb_internal", gosql.NullString{}).Others(4),
@@ -928,7 +926,7 @@ func TestPGPreparedQuery(t *testing.T) {
 					t.Errorf("%s: unexpected row: %s", query, b)
 				}
 				if test.others > 0 {
-					t.Fatalf("%s: expected %d more row(s)", query, test.others)
+					t.Fatalf("%s: expected %d more rows", query, test.others)
 				}
 			})
 		}

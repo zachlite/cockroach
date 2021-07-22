@@ -17,7 +17,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/migration"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -27,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
@@ -36,10 +38,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -67,9 +69,6 @@ type extendedEvalContext struct {
 	// tenants.
 	NodesStatusServer serverpb.OptionalNodesStatusServer
 
-	// RegionsServer gives access to valid regions in the cluster.
-	RegionsServer serverpb.RegionsServer
-
 	// SQLStatusServer gives access to a subset of the serverpb.Status service
 	// that is available to both system and non-system tenants.
 	SQLStatusServer serverpb.SQLStatusServer
@@ -95,9 +94,9 @@ type extendedEvalContext struct {
 	// SchemaChangeJobCache refers to schemaChangeJobsCache in extraTxnState.
 	SchemaChangeJobCache map[descpb.ID]*jobs.Job
 
-	statsStorage sqlstats.Storage
+	schemaAccessors *schemaInterface
 
-	indexUsageStatsWriter idxusage.Writer
+	sqlStatsCollector *sqlStatsCollector
 
 	SchemaChangerState *SchemaChangerState
 }
@@ -126,6 +125,12 @@ func (evalCtx *extendedEvalContext) QueueJob(
 	}
 	*evalCtx.Jobs = append(*evalCtx.Jobs, jobID)
 	return job, nil
+}
+
+// schemaInterface provides access to the database and table descriptors.
+// See schema_accessors.go.
+type schemaInterface struct {
+	logical catalog.Accessor
 }
 
 // planner is the centerpiece of SQL statement execution combining session
@@ -288,12 +293,7 @@ func newInternalPlanner(
 		// deprecatedDatabaseCache, so we can leave it uninitialized.
 		// Furthermore, we're not concerned about the efficiency of querying tables
 		// with user-defined types, hence the nil hydratedTables.
-		collection: descs.NewCollection(
-			execCfg.Settings,
-			execCfg.LeaseManager,
-			nil, // hydratedTables
-			execCfg.VirtualSchemas,
-		),
+		collection: descs.NewCollection(execCfg.Settings, execCfg.LeaseManager, nil /* hydratedTables */),
 	}
 	for _, opt := range opts {
 		opt(params)
@@ -363,7 +363,6 @@ func newInternalPlanner(
 	p.extendedEvalCtx.ClientNoticeSender = p
 	p.extendedEvalCtx.Sequence = p
 	p.extendedEvalCtx.Tenant = p
-	p.extendedEvalCtx.JoinTokenCreator = p
 	p.extendedEvalCtx.ClusterID = execCfg.ClusterID()
 	p.extendedEvalCtx.ClusterName = execCfg.RPCContext.ClusterName()
 	p.extendedEvalCtx.NodeID = execCfg.NodeID
@@ -416,20 +415,9 @@ func internalExtendedEvalCtx(
 ) extendedEvalContext {
 	evalContextTestingKnobs := execCfg.EvalContextTestingKnobs
 
-	var indexUsageStats idxusage.Writer
 	var sqlStatsResetter tree.SQLStatsResetter
 	if execCfg.InternalExecutor != nil {
 		sqlStatsResetter = execCfg.InternalExecutor.s
-		if execCfg.InternalExecutor.s != nil {
-			indexUsageStats = execCfg.InternalExecutor.s.indexUsageStats
-		} else {
-			// If the indexUsageStats is nil from the sql.Server, we create a dummy
-			// index usage stats collector. The sql.Server in the ExecutorConfig
-			// is only nil during tests.
-			indexUsageStats = idxusage.NewLocalIndexUsageStats(&idxusage.Config{
-				Setting: execCfg.Settings,
-			})
-		}
 	}
 
 	return extendedEvalContext{
@@ -448,21 +436,20 @@ func internalExtendedEvalCtx(
 			InternalExecutor: execCfg.InternalExecutor,
 			SQLStatsResetter: sqlStatsResetter,
 		},
-		SessionMutator:        dataMutator,
-		VirtualSchemas:        execCfg.VirtualSchemas,
-		Tracing:               &SessionTracing{},
-		NodesStatusServer:     execCfg.NodesStatusServer,
-		RegionsServer:         execCfg.RegionsServer,
-		Descs:                 tables,
-		ExecCfg:               execCfg,
-		DistSQLPlanner:        execCfg.DistSQLPlanner,
-		indexUsageStatsWriter: indexUsageStats,
+		SessionMutator:    dataMutator,
+		VirtualSchemas:    execCfg.VirtualSchemas,
+		Tracing:           &SessionTracing{},
+		NodesStatusServer: execCfg.NodesStatusServer,
+		Descs:             tables,
+		ExecCfg:           execCfg,
+		schemaAccessors:   newSchemaInterface(tables, execCfg.VirtualSchemas),
+		DistSQLPlanner:    execCfg.DistSQLPlanner,
 	}
 }
 
 // LogicalSchemaAccessor is part of the resolver.SchemaResolver interface.
-func (p *planner) Accessor() catalog.Accessor {
-	return p.Descriptors()
+func (p *planner) LogicalSchemaAccessor() catalog.Accessor {
+	return p.extendedEvalCtx.schemaAccessors.logical
 }
 
 // SemaCtx provides access to the planner's SemaCtx.
@@ -514,7 +501,7 @@ func (p *planner) GetOrInitSequenceCache() sessiondata.SequenceCache {
 }
 
 func (p *planner) LeaseMgr() *lease.Manager {
-	return p.execCfg.LeaseManager
+	return p.Descriptors().LeaseManager()
 }
 
 func (p *planner) Txn() *kv.Txn {
@@ -561,7 +548,7 @@ func (p *planner) ParseQualifiedTableName(sql string) (*tree.TableName, error) {
 // ResolveTableName implements the tree.EvalDatabase interface.
 func (p *planner) ResolveTableName(ctx context.Context, tn *tree.TableName) (tree.ID, error) {
 	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveAnyTableKind)
-	_, desc, err := resolver.ResolveExistingTableObject(ctx, p, tn, flags)
+	desc, err := resolver.ResolveExistingTableObject(ctx, p, tn, flags)
 	if err != nil {
 		return 0, err
 	}
@@ -569,13 +556,18 @@ func (p *planner) ResolveTableName(ctx context.Context, tn *tree.TableName) (tre
 }
 
 // LookupTableByID looks up a table, by the given descriptor ID. Based on the
-// CommonLookupFlags, it could use or skip the Collection cache.
+// CommonLookupFlags, it could use or skip the Collection cache. See
+// Collection.getTableVersionByID for how it's used.
+// TODO (SQLSchema): This should call into the set of SchemaAccessors instead
+//  of having its own logic for lookups.
 func (p *planner) LookupTableByID(
 	ctx context.Context, tableID descpb.ID,
 ) (catalog.TableDescriptor, error) {
-	const required = true // lookups by ID are always "required"
-	table, err := p.Descriptors().GetImmutableTableByID(ctx, p.txn, tableID, p.ObjectLookupFlags(
-		required, false /* requireMutable */))
+	if entry, err := p.getVirtualTabler().getVirtualTableEntryByID(tableID); err == nil {
+		return entry.desc, nil
+	}
+	flags := tree.ObjectLookupFlags{CommonLookupFlags: tree.CommonLookupFlags{AvoidCached: p.avoidCachedDescriptors}}
+	table, err := p.Descriptors().GetImmutableTableByID(ctx, p.txn, tableID, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -781,6 +773,29 @@ type txnModesSetter interface {
 	// transaction.
 	// asOfTs, if not empty, is the evaluation of modes.AsOf.
 	setTransactionModes(modes tree.TransactionModes, asOfTs hlc.Timestamp) error
+}
+
+// CompactEngineSpan is part of the EvalPlanner interface.
+func (p *planner) CompactEngineSpan(
+	ctx context.Context, nodeID int32, storeID int32, startKey []byte, endKey []byte,
+) error {
+	if !p.ExecCfg().Codec.ForSystemTenant() {
+		return errorutil.UnsupportedWithMultiTenancy(errorutil.FeatureNotAvailableToNonSystemTenantsIssue)
+	}
+	conn, err := p.ExecCfg().DistSender.NodeDialer().Dial(ctx, roachpb.NodeID(nodeID), rpc.DefaultClass)
+	if err != nil {
+		return errors.Wrapf(err, "could not dial node ID %d", nodeID)
+	}
+	client := kvserver.NewPerStoreClient(conn)
+	req := &kvserver.CompactEngineSpanRequest{
+		StoreRequestHeader: kvserver.StoreRequestHeader{
+			NodeID:  roachpb.NodeID(nodeID),
+			StoreID: roachpb.StoreID(storeID),
+		},
+		Span: roachpb.Span{Key: roachpb.Key(startKey), EndKey: roachpb.Key(endKey)},
+	}
+	_, err = client.CompactEngineSpan(ctx, req)
+	return err
 }
 
 // validateDescriptor is a convenience function for validating

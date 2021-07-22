@@ -40,7 +40,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
-	"github.com/containerd/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -48,11 +47,10 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
-	defaultImage  = "docker.io/library/ubuntu:focal-20210119"
+	defaultImage  = "docker.io/library/ubuntu:xenial-20170214"
 	networkPrefix = "cockroachdb_acceptance"
 )
 
@@ -222,14 +220,13 @@ func (l *DockerCluster) OneShot(
 	ipo types.ImagePullOptions,
 	containerConfig container.Config,
 	hostConfig container.HostConfig,
-	platformSpec specs.Platform,
 	name string,
 ) error {
 	if err := pullImage(ctx, l, ref, ipo); err != nil {
 		return err
 	}
 	hostConfig.VolumesFrom = []string{l.vols.id}
-	c, err := createContainer(ctx, l, containerConfig, hostConfig, platformSpec, name)
+	c, err := createContainer(ctx, l, containerConfig, hostConfig, name)
 	if err != nil {
 		return err
 	}
@@ -372,7 +369,6 @@ func (l *DockerCluster) initCluster(ctx context.Context) {
 			Binds:           binds,
 			PublishAllPorts: true,
 		},
-		platforms.DefaultSpec(),
 		fmt.Sprintf("volumes-%s", l.clusterID),
 	)
 	maybePanic(err)
@@ -441,7 +437,6 @@ func (l *DockerCluster) createRoach(
 			},
 		},
 		hostConfig,
-		platforms.DefaultSpec(),
 		node.nodeStr,
 	)
 	maybePanic(err)
@@ -535,7 +530,7 @@ func (l *DockerCluster) RunInitCommand(ctx context.Context, nodeIdx int) {
 
 	log.Infof(ctx, "trying to initialize via %v", containerConfig.Cmd)
 	maybePanic(l.OneShot(ctx, defaultImage, types.ImagePullOptions{},
-		containerConfig, container.HostConfig{}, platforms.DefaultSpec(), "init-command"))
+		containerConfig, container.HostConfig{}, "init-command"))
 	log.Info(ctx, "cluster successfully initialized")
 }
 

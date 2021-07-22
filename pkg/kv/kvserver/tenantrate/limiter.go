@@ -17,7 +17,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
-	"github.com/cockroachdb/cockroach/pkg/util/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -128,7 +127,7 @@ func (rl *limiter) RecordRead(ctx context.Context, readBytes int64) {
 	rl.metrics.readBytesAdmitted.Inc(readBytes)
 	rl.qp.Update(func(res quotapool.Resource) (shouldNotify bool) {
 		tb := res.(*tokenBucket)
-		amount := float64(readBytes) * float64(tb.config.CostModel.KVReadByte)
+		amount := float64(readBytes) * tb.config.ReadUnitsPerByte
 		tb.Adjust(quotapool.Tokens(-amount))
 		// Do not notify the head of the queue. In the best case we did not disturb
 		// the time at which it can be fulfilled and in the worst case, we made it
@@ -196,13 +195,13 @@ func (req *waitRequest) Acquire(
 	ctx context.Context, res quotapool.Resource,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
 	tb := res.(*tokenBucket)
-	var needed tenantcostmodel.RU
+	var needed float64
 	if req.isWrite {
-		needed = tb.config.CostModel.KVWriteCost(req.writeBytes)
+		needed = tb.config.WriteRequestUnits + float64(req.writeBytes)*tb.config.WriteUnitsPerByte
 	} else {
 		// We don't know the size of the read upfront; we will adjust the bucket
 		// after the fact in RecordRead.
-		needed = tb.config.CostModel.KVReadRequest
+		needed = tb.config.ReadRequestUnits
 	}
 	return tb.TryToFulfill(quotapool.Tokens(needed))
 }

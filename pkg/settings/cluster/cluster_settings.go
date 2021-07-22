@@ -12,7 +12,6 @@ package cluster
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -52,10 +51,6 @@ type Settings struct {
 	// Setting the active cluster version has a very specific, intended usage
 	// pattern. Look towards the interface itself for more commentary.
 	Version clusterversion.Handle
-
-	// Cache can be used for arbitrary caching, e.g. to cache decoded
-	// enterprises licenses for utilccl.CheckEnterpriseEnabled().
-	Cache sync.Map
 }
 
 // TelemetryOptOut is a place for controlling whether to opt out of telemetry or not.
@@ -123,7 +118,7 @@ func MakeClusterSettings() *Settings {
 
 	sv := &s.SV
 	s.Version = clusterversion.MakeVersionHandle(&s.SV)
-	sv.Init(context.TODO(), s.Version)
+	sv.Init(s.Version)
 
 	s.Tracer = tracing.NewTracer()
 	isActive := int32(0) // atomic
@@ -140,7 +135,7 @@ func MakeClusterSettings() *Settings {
 		}
 		return false
 	}
-	s.Tracer.Configure(context.TODO(), sv)
+	s.Tracer.Configure(sv)
 
 	return s
 }
@@ -171,10 +166,10 @@ func MakeTestingClusterSettingsWithVersions(
 	sv := &s.SV
 	s.Version = clusterversion.MakeVersionHandleWithOverride(
 		&s.SV, binaryVersion, binaryMinSupportedVersion)
-	sv.Init(context.TODO(), s.Version)
+	sv.Init(s.Version)
 
 	s.Tracer = tracing.NewTracer()
-	s.Tracer.Configure(context.TODO(), sv)
+	s.Tracer.Configure(sv)
 
 	if initializeVersion {
 		// Initialize cluster version to specified binaryVersion.

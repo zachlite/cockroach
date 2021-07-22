@@ -58,17 +58,12 @@ func TestCachedSettingsServerRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	stickyEngineRegistry := NewStickyInMemEnginesRegistry()
-	defer stickyEngineRegistry.CloseAllStickyInMemEngines()
+	storeDir, cleanupFn := testutils.TempDir(t)
+	defer cleanupFn()
 
 	serverArgs := base.TestServerArgs{
 		StoreSpecs: []base.StoreSpec{
-			{InMemory: true, StickyInMemoryEngineID: "1"},
-		},
-		Knobs: base.TestingKnobs{
-			Server: &TestingKnobs{
-				StickyEngineRegistry: stickyEngineRegistry,
-			},
+			{InMemory: false, Path: storeDir},
 		},
 	}
 

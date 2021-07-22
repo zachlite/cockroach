@@ -75,7 +75,7 @@ func descForTable(
 		stmt = parsed[0].AST.(*tree.CreateTable)
 	}
 	semaCtx := tree.MakeSemaContext()
-	table, err := MakeTestingSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
+	table, err := MakeSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
 	if err != nil {
 		t.Fatalf("could not interpret %q: %v", create, err)
 	}
@@ -271,9 +271,13 @@ func (es *generatorExternalStorage) Size(ctx context.Context, basename string) (
 	return int64(es.gen.size), nil
 }
 
-func (es *generatorExternalStorage) Writer(
-	ctx context.Context, basename string,
-) (io.WriteCloser, error) {
+func (es *generatorExternalStorage) WriteFile(
+	ctx context.Context, basename string, content io.ReadSeeker,
+) error {
+	return errors.New("unsupported")
+}
+
+func (es *generatorExternalStorage) ListFiles(ctx context.Context, _ string) ([]string, error) {
 	return nil, errors.New("unsupported")
 }
 

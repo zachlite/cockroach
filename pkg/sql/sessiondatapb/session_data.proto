@@ -12,7 +12,6 @@ syntax = "proto3";
 package cockroach.sql.sessiondatapb;
 option go_package = "sessiondatapb";
 
-import "util/duration/duration.proto";
 import "gogoproto/gogo.proto";
 
 // SessionData contains session parameters that are easily serializable and are
@@ -57,13 +56,10 @@ message SessionData {
   // SeqState gives access to the SQL sequences that have been manipulated by
   // the session.
   SequenceState seq_state = 11 [(gogoproto.nullable) = false];
-  // WorkMemLimit determines how much RAM (in bytes) a single operation of a
-  // single query can use before it has to spill to disk.
-  int64 WorkMemLimit = 12;
 }
 
-// DataConversionConfig contains the parameters that influence the output
-// of certain data types as strings or bytes.
+// DataConversionConfig contains the parameters that influence the conversion
+// between SQL data types and strings/byte arrays.
 message DataConversionConfig {
   // BytesEncodeFormat indicates how to encode byte arrays when converting to
   // string.
@@ -72,8 +68,6 @@ message DataConversionConfig {
   // to use for float conversions.This must be set to a value between -15 and
   // 3, inclusive.
   int32 extra_float_digits = 2;
-  // IntervalStyle indicates the style to display intervals as.
-  util.duration.IntervalStyle interval_style = 3;
 }
 
 // BytesEncodeFormat is the configuration for bytes to string conversions.
@@ -96,19 +90,20 @@ enum VectorizeExecMode {
   option (gogoproto.goproto_enum_prefix) = false;
   option (gogoproto.goproto_enum_stringer) = false;
 
-  // VectorizeUnset means the VectorizeExecMode wasn't explicitly set. Having
-  // the first enum value as zero is required by proto3. This is mapped to
-  // VectorizeOn.
-  VectorizeUnset = 0;
-  reserved 1;
+  // VectorizeOff means that columnar execution is disabled.
+  VectorizeOff = 0;
+  // DeprecatedVectorize201Auto means that queries only with streaming operators
+  // are run using the columnar execution. This was the default in 20.1.
+  //
+  // It exists only in order to handle the upgrade from 20.2 to 21.1 clusters
+  // without an error.
+  DeprecatedVectorize201Auto = 1;
   // VectorizeOn means that any supported queries will be run using the
   // columnar execution.
   VectorizeOn = 2;
   // VectorizeExperimentalAlways means that we attempt to vectorize all
   // queries; unsupported queries will fail. Mostly used for testing.
   VectorizeExperimentalAlways = 3;
-  // VectorizeOff means that columnar execution is disabled.
-  VectorizeOff = 4;
 }
 
 // SequenceState is used to marshall the sessiondata.SequenceState struct.

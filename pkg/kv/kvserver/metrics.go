@@ -406,18 +406,6 @@ var (
 		Measurement: "Storage",
 		Unit:        metric.Unit_BYTES,
 	}
-	metaRdbL0Sublevels = metric.Metadata{
-		Name:        "storage.l0-sublevels",
-		Help:        "Number of Level 0 sublevels",
-		Measurement: "Storage",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaRdbL0NumFiles = metric.Metadata{
-		Name:        "storage.l0-num-files",
-		Help:        "Number of Level 0 files",
-		Measurement: "Storage",
-		Unit:        metric.Unit_COUNT,
-	}
 
 	// Disk health metrics.
 	metaDiskSlow = metric.Metadata{
@@ -543,12 +531,6 @@ var (
 		Help:        "Nanoseconds spent waiting for a range to be processed by the Raft scheduler",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
-	}
-	metaRaftTimeoutCampaign = metric.Metadata{
-		Name:        "raft.timeoutcampaign",
-		Help:        "Number of Raft replicas campaigning after missed heartbeats from leader",
-		Measurement: "Elections called after timeout",
-		Unit:        metric.Unit_COUNT,
 	}
 
 	// Raft message metrics.
@@ -1051,47 +1033,13 @@ var (
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
-	// Export request counter.
-	metaExportEvalTotalDelay = metric.Metadata{
-		Name:        "exportrequest.delay.total",
-		Help:        "Amount by which evaluation of Export requests was delayed",
-		Measurement: "Nanoseconds",
-		Unit:        metric.Unit_NANOSECONDS,
-	}
-
 	// Encryption-at-rest metrics.
 	// TODO(mberhault): metrics for key age, per-key file/bytes counts.
 	metaEncryptionAlgorithm = metric.Metadata{
 		Name:        "rocksdb.encryption.algorithm",
-		Help:        "Algorithm in use for encryption-at-rest, see ccl/storageccl/engineccl/enginepbccl/key_registry.proto",
+		Help:        "algorithm in use for encryption-at-rest, see ccl/storageccl/engineccl/enginepbccl/key_registry.proto",
 		Measurement: "Encryption At Rest",
 		Unit:        metric.Unit_CONST,
-	}
-
-	// Concurrency control metrics.
-	metaConcurrencyLocks = metric.Metadata{
-		Name:        "kv.concurrency.locks",
-		Help:        "Number of active locks held in lock tables. Does not include replicated locks (intents) that are not held in memory",
-		Measurement: "Locks",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaConcurrencyLocksWithWaitQueues = metric.Metadata{
-		Name:        "kv.concurrency.locks_with_wait_queues",
-		Help:        "Number of active locks held in lock tables with active wait-queues",
-		Measurement: "Locks",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaConcurrencyLockWaitQueueWaiters = metric.Metadata{
-		Name:        "kv.concurrency.lock_wait_queue_waiters",
-		Help:        "Number of requests actively waiting in a lock wait-queue",
-		Measurement: "Lock-Queue Waiters",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaConcurrencyMaxLockWaitQueueWaitersForLock = metric.Metadata{
-		Name:        "kv.concurrency.max_lock_wait_queue_waiters_for_lock",
-		Help:        "Maximum number of requests actively waiting in any single lock wait-queue",
-		Measurement: "Lock-Queue Waiters",
-		Unit:        metric.Unit_COUNT,
 	}
 
 	// Closed timestamp metrics.
@@ -1105,6 +1053,19 @@ var (
 		Name:        "kv.closed_timestamp.failures_to_close",
 		Help:        "Number of times the min prop tracker failed to close timestamps due to epoch mismatch or pending evaluations",
 		Measurement: "Attempts",
+		Unit:        metric.Unit_COUNT,
+	}
+
+	metaConflictingIntentsResolveRejected = metric.Metadata{
+		Name:        "intents.resolve_conflicting.rejected",
+		Help:        "Number of conflicting intents resolutions rejected",
+		Measurement: "Intent Resolutions",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaFinalizedTxnCleanupTimedOut = metric.Metadata{
+		Name:        "intents.finalized_txns.timed_out",
+		Help:        "Number of finalized transaction resolution timeouts",
+		Measurement: "Intent Resolutions",
 		Unit:        metric.Unit_COUNT,
 	}
 )
@@ -1178,8 +1139,6 @@ type StoreMetrics struct {
 	RdbReadAmplification        *metric.Gauge
 	RdbNumSSTables              *metric.Gauge
 	RdbPendingCompaction        *metric.Gauge
-	RdbL0Sublevels              *metric.Gauge
-	RdbL0NumFiles               *metric.Gauge
 
 	// Disk health metrics.
 	DiskSlow    *metric.Gauge
@@ -1211,7 +1170,6 @@ type StoreMetrics struct {
 	RaftHandleReadyLatency    *metric.Histogram
 	RaftApplyCommittedLatency *metric.Histogram
 	RaftSchedulerLatency      *metric.Histogram
-	RaftTimeoutCampaign       *metric.Counter
 
 	// Raft message metrics.
 	//
@@ -1303,9 +1261,6 @@ type StoreMetrics struct {
 	AddSSTableProposalTotalDelay  *metric.Counter
 	AddSSTableProposalEngineDelay *metric.Counter
 
-	// Export request stats.
-	ExportRequestProposalTotalDelay *metric.Counter
-
 	// Encryption-at-rest stats.
 	// EncryptionAlgorithm is an enum representing the cipher in use, so we use a gauge.
 	EncryptionAlgorithm *metric.Gauge
@@ -1313,15 +1268,13 @@ type StoreMetrics struct {
 	// RangeFeed counts.
 	RangeFeedMetrics *rangefeed.Metrics
 
-	// Concurrency control metrics.
-	Locks                          *metric.Gauge
-	LocksWithWaitQueues            *metric.Gauge
-	LockWaitQueueWaiters           *metric.Gauge
-	MaxLockWaitQueueWaitersForLock *metric.Gauge
-
 	// Closed timestamp metrics.
 	ClosedTimestampMaxBehindNanos  *metric.Gauge
 	ClosedTimestampFailuresToClose *metric.Gauge
+
+	// Intent cleanup failures
+	ConflictingIntentsResolveRejected *metric.Counter
+	FinalizedTxnCleanupTimedOut       *metric.Counter
 }
 
 // TenantsStorageMetrics are metrics which are aggregated over all tenants
@@ -1550,7 +1503,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Server-side transaction metrics.
 		CommitWaitsBeforeCommitTrigger: metric.NewCounter(metaCommitWaitBeforeCommitTriggerCount),
 
-		// RocksDB/Pebble metrics.
+		// RocksDB metrics.
 		RdbBlockCacheHits:           metric.NewGauge(metaRdbBlockCacheHits),
 		RdbBlockCacheMisses:         metric.NewGauge(metaRdbBlockCacheMisses),
 		RdbBlockCacheUsage:          metric.NewGauge(metaRdbBlockCacheUsage),
@@ -1568,8 +1521,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RdbReadAmplification:        metric.NewGauge(metaRdbReadAmplification),
 		RdbNumSSTables:              metric.NewGauge(metaRdbNumSSTables),
 		RdbPendingCompaction:        metric.NewGauge(metaRdbPendingCompaction),
-		RdbL0Sublevels:              metric.NewGauge(metaRdbL0Sublevels),
-		RdbL0NumFiles:               metric.NewGauge(metaRdbL0NumFiles),
 
 		// Disk health metrics.
 		DiskSlow:    metric.NewGauge(metaDiskSlow),
@@ -1596,7 +1547,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftHandleReadyLatency:    metric.NewLatency(metaRaftHandleReadyLatency, histogramWindow),
 		RaftApplyCommittedLatency: metric.NewLatency(metaRaftApplyCommittedLatency, histogramWindow),
 		RaftSchedulerLatency:      metric.NewLatency(metaRaftSchedulerLatency, histogramWindow),
-		RaftTimeoutCampaign:       metric.NewCounter(metaRaftTimeoutCampaign),
 
 		// Raft message metrics.
 		RaftRcvdMessages: [...]*metric.Counter{
@@ -1681,7 +1631,6 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		GCPushTxn:                    metric.NewCounter(metaGCPushTxn),
 		GCResolveTotal:               metric.NewCounter(metaGCResolveTotal),
 		GCResolveSuccess:             metric.NewCounter(metaGCResolveSuccess),
-		GCResolveFailed:              metric.NewCounter(metaGCResolveFailed),
 		GCTxnIntentsResolveFailed:    metric.NewCounter(metaGCTxnIntentsResolveFailed),
 
 		// Wedge request counters.
@@ -1699,24 +1648,20 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		AddSSTableProposalTotalDelay:  metric.NewCounter(metaAddSSTableEvalTotalDelay),
 		AddSSTableProposalEngineDelay: metric.NewCounter(metaAddSSTableEvalEngineDelay),
 
-		// ExportRequest proposal.
-		ExportRequestProposalTotalDelay: metric.NewCounter(metaExportEvalTotalDelay),
-
 		// Encryption-at-rest.
 		EncryptionAlgorithm: metric.NewGauge(metaEncryptionAlgorithm),
 
 		// RangeFeed counters.
 		RangeFeedMetrics: rangefeed.NewMetrics(),
 
-		// Concurrency control metrics.
-		Locks:                          metric.NewGauge(metaConcurrencyLocks),
-		LocksWithWaitQueues:            metric.NewGauge(metaConcurrencyLocksWithWaitQueues),
-		LockWaitQueueWaiters:           metric.NewGauge(metaConcurrencyLockWaitQueueWaiters),
-		MaxLockWaitQueueWaitersForLock: metric.NewGauge(metaConcurrencyMaxLockWaitQueueWaitersForLock),
-
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos:  metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 		ClosedTimestampFailuresToClose: metric.NewGauge(metaClosedTimestampFailuresToClose),
+
+		// Intent leak metrics
+		ConflictingIntentsResolveRejected: metric.NewCounter(metaConflictingIntentsResolveRejected),
+		FinalizedTxnCleanupTimedOut:       metric.NewCounter(metaFinalizedTxnCleanupTimedOut),
+		GCResolveFailed:                   metric.NewCounter(metaGCResolveFailed),
 	}
 	storeRegistry.AddMetricStruct(sm)
 
@@ -1762,29 +1707,23 @@ func (sm *TenantsStorageMetrics) subtractMVCCStats(
 }
 
 func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
-	sm.RdbBlockCacheHits.Update(m.BlockCache.Hits)
-	sm.RdbBlockCacheMisses.Update(m.BlockCache.Misses)
-	sm.RdbBlockCacheUsage.Update(m.BlockCache.Size)
-	// TODO(jackson): Delete RdbBlockCachePinnedUsage or calculate the
-	// equivalent (the sum of IteratorMetrics.ReadAmp for all open iterator,
-	// times the block size).
-	sm.RdbBlockCachePinnedUsage.Update(0)
-	sm.RdbBloomFilterPrefixUseful.Update(m.Filter.Hits)
-	sm.RdbBloomFilterPrefixChecked.Update(m.Filter.Hits + m.Filter.Misses)
-	sm.RdbMemtableTotalSize.Update(int64(m.MemTable.Size))
-	sm.RdbFlushes.Update(m.Flush.Count)
-	sm.RdbFlushedBytes.Update(int64(m.Levels[0].BytesFlushed))
-	sm.RdbCompactions.Update(m.Compact.Count)
-	sm.RdbIngestedBytes.Update(int64(m.IngestedBytes()))
-	compactedRead, compactedWritten := m.CompactedBytes()
-	sm.RdbCompactedBytesRead.Update(int64(compactedRead))
-	sm.RdbCompactedBytesWritten.Update(int64(compactedWritten))
-	sm.RdbTableReadersMemEstimate.Update(m.TableCache.Size)
-	sm.RdbReadAmplification.Update(int64(m.ReadAmp()))
-	sm.RdbPendingCompaction.Update(int64(m.Compact.EstimatedDebt))
-	sm.RdbL0Sublevels.Update(int64(m.Levels[0].Sublevels))
-	sm.RdbL0NumFiles.Update(m.Levels[0].NumFiles)
-	sm.RdbNumSSTables.Update(m.NumSSTables())
+	sm.RdbBlockCacheHits.Update(m.BlockCacheHits)
+	sm.RdbBlockCacheMisses.Update(m.BlockCacheMisses)
+	sm.RdbBlockCacheUsage.Update(m.BlockCacheUsage)
+	sm.RdbBlockCachePinnedUsage.Update(m.BlockCachePinnedUsage)
+	sm.RdbBloomFilterPrefixUseful.Update(m.BloomFilterPrefixUseful)
+	sm.RdbBloomFilterPrefixChecked.Update(m.BloomFilterPrefixChecked)
+	sm.RdbMemtableTotalSize.Update(m.MemtableTotalSize)
+	sm.RdbFlushes.Update(m.Flushes)
+	sm.RdbFlushedBytes.Update(m.FlushedBytes)
+	sm.RdbCompactions.Update(m.Compactions)
+	sm.RdbIngestedBytes.Update(m.IngestedBytes)
+	sm.RdbCompactedBytesRead.Update(m.CompactedBytesRead)
+	sm.RdbCompactedBytesWritten.Update(m.CompactedBytesWritten)
+	sm.RdbTableReadersMemEstimate.Update(m.TableReadersMemEstimate)
+	sm.RdbReadAmplification.Update(m.ReadAmplification)
+	sm.RdbPendingCompaction.Update(m.PendingCompactionBytesEstimate)
+	sm.RdbNumSSTables.Update(m.NumSSTables)
 	sm.DiskSlow.Update(m.DiskSlowCount)
 	sm.DiskStalled.Update(m.DiskStallCount)
 }

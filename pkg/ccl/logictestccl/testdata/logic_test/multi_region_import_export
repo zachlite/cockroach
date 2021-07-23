@@ -1,4 +1,4 @@
-# LogicTest: multiregion-9node-3region-3azs multiregion-9node-3region-3azs-vec-off
+# LogicTest: multiregion-9node-3region-3azs
 
 query TTTT colnames
 SHOW REGIONS

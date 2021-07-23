@@ -9,7 +9,6 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/testutils/skip",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/build/bazel",
         "//pkg/util",
         "//pkg/util/envutil",
     ],

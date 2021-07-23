@@ -10,7 +10,7 @@
 
 package tree
 
-import "github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+import "github.com/cockroachdb/cockroach/pkg/sql/lex"
 
 // Prepare represents a PREPARE statement.
 type Prepare struct {
@@ -49,7 +49,7 @@ func (node *CannedOptPlan) Format(ctx *FmtCtx) {
 	// This node can only be used as the AST for a Prepare statement of the form:
 	//   PREPARE name AS OPT PLAN '...').
 	ctx.WriteString("OPT PLAN ")
-	ctx.WriteString(lexbase.EscapeSQLString(node.Plan))
+	ctx.WriteString(lex.EscapeSQLString(node.Plan))
 }
 
 // Execute represents an EXECUTE statement.

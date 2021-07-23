@@ -134,14 +134,12 @@ type mockReceiver struct {
 
 var _ sidetransportReceiver = &mockReceiver{}
 
-// GetClosedTimestamp is part of the sidetransportReceiver interface.
 func (r *mockReceiver) GetClosedTimestamp(
 	ctx context.Context, rangeID roachpb.RangeID, leaseholderNode roachpb.NodeID,
 ) (hlc.Timestamp, ctpb.LAI) {
 	return r.closed, r.lai
 }
 
-// HTML is part of the sidetransportReceiver interface.
 func (r *mockReceiver) HTML() string {
 	return ""
 }

@@ -1,3 +1,0 @@
-SELECT 123;
-\q
-SELECT 456;

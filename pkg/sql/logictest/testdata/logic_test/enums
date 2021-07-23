@@ -6,16 +6,16 @@ CREATE TYPE t AS ENUM ()
 statement error pq: relation "t" does not exist
 SELECT * FROM t
 
-statement error pq: type "test.public.t" already exists
+statement error pq: type "t" already exists
 CREATE TABLE t (x INT)
 
-statement error pq: type "test.public.t" already exists
+statement error pq: type "t" already exists
 CREATE TYPE t AS ENUM ()
 
 statement ok
 CREATE TABLE torename (x INT)
 
-statement error pq: type "test.public.t" already exists
+statement error pq: type "t" already exists
 ALTER TABLE torename RENAME TO t
 
 statement ok
@@ -365,7 +365,7 @@ SELECT b'\x80'::as_bytes, b'\x80':::as_bytes
 ----
 bytes bytes
 
-query error pq: could not find \[255\] in enum "public.as_bytes" representation
+query error pq: could not find \[255\] in enum representation
 SELECT b'\xFF'::as_bytes
 
 # Regression for #49300. Ensure that virtual tables have access to hydrated
@@ -375,8 +375,6 @@ SHOW CREATE t1
 ----
 t1  CREATE TABLE public.t1 (
     x public.greeting NULL,
-    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-    CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
     INDEX i (x ASC),
     FAMILY "primary" (x, rowid)
 )
@@ -388,8 +386,6 @@ SELECT create_statement FROM crdb_internal.create_statements WHERE descriptor_na
 ----
 CREATE TABLE public.t1 (
    x public.greeting NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    INDEX i (x ASC),
    FAMILY "primary" (x, rowid)
 )
@@ -437,10 +433,10 @@ FROM
 WHERE
   typname IN ('collision', '_collision', '__collision', '___collision')
 ----
-_collision    100085  0       100086
-__collision   100086  100085  0
-collision     100087  0       100088
-___collision  100088  100087  0
+_collision    100082  0       100083
+__collision   100083  100082  0
+collision     100084  0       100085
+___collision  100085  100084  0
 
 # Regression for #49756.
 query TT
@@ -451,7 +447,7 @@ FROM
 WHERE
   descriptor_name = 'enum_array' AND column_name = 'x'
 ----
-x  family:ArrayFamily width:0 precision:0 locale:"" visible_type:0 oid:100067 array_contents:<InternalType:<family:EnumFamily width:0 precision:0 locale:"" visible_type:0 oid:100066 time_precision_is_set:false udt_metadata:<array_type_oid:100067 > > TypeMeta:<Version:0 > > time_precision_is_set:false
+x  family:ArrayFamily width:0 precision:0 locale:"" visible_type:0 oid:100064 array_contents:<InternalType:<family:EnumFamily width:0 precision:0 locale:"" visible_type:0 oid:100063 time_precision_is_set:false udt_metadata:<array_type_oid:100064 > > TypeMeta:<Version:0 > > time_precision_is_set:false
 
 # Test tables using enums in DEFAULT expressions.
 statement ok
@@ -493,8 +489,6 @@ enum_default  CREATE TABLE public.enum_default (
               x INT8 NULL,
               y public.greeting NULL DEFAULT 'hello':::public.greeting,
               z BOOL NULL DEFAULT 'hello':::public.greeting IS OF (public.greeting, public.greeting),
-              rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-              CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
               FAMILY fam_0_x_y_z_rowid (x, y, z, rowid)
 )
 
@@ -551,8 +545,6 @@ enum_computed  CREATE TABLE public.enum_computed (
                y public.greeting NULL AS ('hello':::public.greeting) STORED,
                z BOOL NULL AS (w = 'howdy':::public.greeting) STORED,
                w public.greeting NULL,
-               rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-               CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
                FAMILY fam_0_x_y_z_w_rowid (x, y, z, w, rowid)
 )
 
@@ -585,8 +577,6 @@ SHOW CREATE enum_checks
 ----
 enum_checks  CREATE TABLE public.enum_checks (
              x public.greeting NULL,
-             rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-             CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
              FAMILY "primary" (x, rowid),
              CONSTRAINT check_x CHECK (x = 'hello':::public.greeting),
              CONSTRAINT "check" CHECK ('hello':::public.greeting = 'hello':::public.greeting)
@@ -1000,79 +990,6 @@ INSERT INTO enum_referenced VALUES ('howdy')
 statement error pq: foreign key violation: "enum_origin" row x='hello' has no match in "enum_referenced"
 ALTER TABLE enum_origin ADD FOREIGN KEY (x) REFERENCES enum_referenced (x)
 
-# Tests for ALTER COLUMN SET DATA TYPE.
-statement ok
-SET enable_experimental_alter_column_type_general = true;
-CREATE TABLE enum_data_type (x STRING);
-INSERT INTO enum_data_type VALUES ('hello'), ('howdy');
-ALTER TABLE enum_data_type ALTER COLUMN x SET DATA TYPE greeting;
-INSERT INTO enum_data_type VALUES ('hi')
-
-query T rowsort
-SELECT * FROM enum_data_type
-----
-hello
-howdy
-hi
-
-statement ok
-DROP TABLE enum_data_type;
-CREATE TABLE enum_data_type (x greeting);
-INSERT INTO enum_data_type VALUES ('hello'), ('howdy')
-
-# Enum to the same enum is a noop.
-statement ok
-ALTER TABLE enum_data_type ALTER COLUMN x SET DATA TYPE greeting
-
-# Now, set it to string.
-statement ok
-ALTER TABLE enum_data_type ALTER COLUMN x SET DATA TYPE STRING
-
-query T rowsort
-SELECT * FROM enum_data_type
-----
-hello
-howdy
-
-# Convert an enum type into another with USING.
-statement ok
-DROP TABLE enum_data_type;
-CREATE TABLE enum_data_type (x greeting);
-INSERT INTO enum_data_type VALUES ('hello'), ('hi')
-
-statement ok
-ALTER TABLE enum_data_type ALTER COLUMN x SET DATA TYPE dbs USING
-  (CASE WHEN x = 'hello' THEN 'cockroach' ELSE 'postgres' END)
-
-query T rowsort
-SELECT * FROM enum_data_type
-----
-cockroach
-postgres
-
-# Test when the conversion of string -> enum should fail.
-statement ok
-DROP TABLE enum_data_type;
-CREATE TABLE enum_data_type (x STRING);
-INSERT INTO enum_data_type VALUES ('notagreeting')
-
-statement error pq: invalid input value for enum greeting: "notagreeting"
-ALTER TABLE enum_data_type ALTER COLUMN x SET DATA TYPE greeting
-
-statement ok
-ALTER TABLE enum_data_type
-  ALTER COLUMN x SET DATA TYPE greeting USING (CASE WHEN x = 'notagreeting' THEN 'hello' ELSE 'hi' END)
-
-query T
-SELECT * FROM enum_data_type
-----
-hello
-
-query T
-SELECT to_json('hello'::greeting)
-----
-"hello"
-
 # Regression for #51474.
 statement ok
 CREATE TABLE t51474 (x greeting);
@@ -1092,10 +1009,10 @@ CREATE TYPE local_type AS ENUM ('local');
 CREATE TABLE local_table (x INT);
 INSERT INTO local_table VALUES (1), (2)
 
-query T
+query TTT
 SELECT * FROM [EXPLAIN SELECT * FROM local_table] LIMIT 1
 ----
-distribution: local
+·     distribution  local
 
 statement ok
 ROLLBACK
@@ -1106,10 +1023,10 @@ ALTER TYPE greeting RENAME TO greeting_local;
 CREATE TABLE local_table (x INT);
 INSERT INTO local_table VALUES (1), (2)
 
-query T
+query TTT
 SELECT * FROM [EXPLAIN SELECT * FROM local_table] LIMIT 1
 ----
-distribution: local
+·     distribution  local
 
 statement ok
 ROLLBACK
@@ -1131,61 +1048,65 @@ local
 statement ok
 ROLLBACK
 
-query TTTT colnames
+query TTTT
 SHOW ENUMS
 ----
-schema  name        values                              owner
-public  _collision  NULL                                root
-public  as_bytes    {bytes}                             root
-public  collision   NULL                                root
-public  dbs         {postgres,mysql,spanner,cockroach}  root
-public  empty       NULL                                root
-public  farewell    {bye,seeya}                         root
-public  greeting    {hello,howdy,hi}                    root
-public  greeting2   {hello}                             root
-public  int         {Z,"S of int"}                      root
-public  notbad      {dup,DUP}                           root
-public  t           NULL                                root
+public  as_bytes   bytes                             root
+public  dbs        postgres|mysql|spanner|cockroach  root
+public  farewell   bye|seeya                         root
+public  greeting   hello|howdy|hi                    root
+public  greeting2  hello                             root
+public  int        Z|S of int                        root
+public  notbad     dup|DUP                           root
 
-query TTT colnames
+query TTT
 SHOW TYPES
 ----
-schema  name        owner
-public  _collision  root
-public  as_bytes    root
-public  collision   root
-public  dbs         root
-public  empty       root
-public  farewell    root
-public  greeting    root
-public  greeting2   root
-public  int         root
-public  notbad      root
-public  t           root
+public  as_bytes   root
+public  dbs        root
+public  farewell   root
+public  greeting   root
+public  greeting2  root
+public  int        root
+public  notbad     root
 
 statement ok
 CREATE SCHEMA uds;
 CREATE TYPE uds.typ AS ENUM ('schema')
 
-query TTTT colnames
+query TTTT
 SHOW ENUMS
 ----
-schema  name        values                              owner
-public  _collision  NULL                                root
-public  as_bytes    {bytes}                             root
-public  collision   NULL                                root
-public  dbs         {postgres,mysql,spanner,cockroach}  root
-public  empty       NULL                                root
-public  farewell    {bye,seeya}                         root
-public  greeting    {hello,howdy,hi}                    root
-public  greeting2   {hello}                             root
-public  int         {Z,"S of int"}                      root
-public  notbad      {dup,DUP}                           root
-public  t           NULL                                root
-uds     typ         {schema}                            root
+public  as_bytes   bytes                             root
+public  dbs        postgres|mysql|spanner|cockroach  root
+public  farewell   bye|seeya                         root
+public  greeting   hello|howdy|hi                    root
+public  greeting2  hello                             root
+public  int        Z|S of int                        root
+public  notbad     dup|DUP                           root
+uds     typ        schema                            root
 
 statement error pq: cannot create "fakedb.typ" because the target database or schema does not exist
 CREATE TYPE fakedb.typ AS ENUM ('schema')
+
+# Regression test that hydrating descriptors does not happen on dropped
+# descriptors. See #54343.
+
+subtest dropped_database_with_enum
+
+statement ok
+CREATE DATABASE to_drop;
+USE to_drop;
+CREATE TYPE greeting AS ENUM ('hi');
+CREATE TABLE t(a greeting);
+USE defaultdb;
+DROP DATABASE to_drop CASCADE;
+
+# Before the bug-fix which introduced this test, this call would load all
+# descriptors, including dropped ones, and hydrate them, causing a panic as
+# the referenced type no longer exists.
+statement ok
+SELECT * FROM crdb_internal.tables;
 
 # Test the behavior of dropping a not-null enum colums
 
@@ -1245,72 +1166,6 @@ DROP DATABASE to_drop CASCADE;
 # the referenced type no longer exists.
 statement ok
 SELECT * FROM crdb_internal.tables
-
-statement ok
-create DATABASE test_57196;
-CREATE SCHEMA test_57196.sc;
-CREATE TYPE test_57196.public.greeting AS ENUM ('hi');
-CREATE TYPE test_57196.sc.greeting AS ENUM('hello');
-
-query TTTT colnames
-SHOW ENUMS FROM test_57196.public
-----
-schema  name      values  owner
-public  greeting  {hi}    root
-
-query TTTT colnames
-SHOW ENUMS FROM test_57196.sc
-----
-schema  name      values   owner
-sc      greeting  {hello}  root
-
-# In this context, test_57196 will be resolved to a database because of our
-# legacy name resolution compat. In other words, this is analogous to test_57196.public
-query TTTT colnames
-SHOW ENUMS FROM test_57196
-----
-schema  name      values  owner
-public  greeting  {hi}    root
-
-statement ok
-USE test_57196
-
-query TTTT colnames
-SHOW ENUMS
-----
-schema  name      values   owner
-public  greeting  {hi}     root
-sc      greeting  {hello}  root
-
-query TTTT colnames
-SHOW ENUMS FROM public
-----
-schema  name      values  owner
-public  greeting  {hi}    root
-
-query TTTT colnames
-SHOW ENUMS FROM sc
-----
-schema  name      values   owner
-sc      greeting  {hello}  root
-
-# Check that creating a type with IF NOT EXISTS succeeds.
-subtest if_not_exists
-
-statement ok
-CREATE TYPE ifne AS ENUM ('hi')
-
-statement error pq: type "test_57196.public.ifne" already exists
-CREATE TYPE ifne AS ENUM ('hi')
-
-statement ok
-CREATE TYPE IF NOT EXISTS ifne AS ENUM ('hi')
-
-statement ok
-CREATE TABLE table_ifne (x INT)
-
-statement error pq: relation "test_57196.public.table_ifne" already exists
-CREATE TYPE IF NOT EXISTS table_ifne AS ENUM ('hi')
 
 # Regression test for incorrectly serializing NULL expression type annotation in
 # a enum tuple.
@@ -1385,148 +1240,3 @@ query T
 SELECT * from arr_t5
 ----
 {a,b}
-
-
-# Test that if an enum value is being used by a default expression
-# or computed column, we disallow dropping it.
-subtest drop_used_enum_values
-
-statement ok
-SET enable_drop_enum_value = true
-
-statement ok
-CREATE TYPE default_abc AS ENUM ('a', 'b', 'c')
-
-statement ok
-CREATE TYPE default_abc2 AS ENUM('a', 'b', 'c')
-
-statement ok
-CREATE TABLE t (k INT PRIMARY KEY, v default_abc DEFAULT 'a')
-
-statement error pq: could not remove enum value "a" as it is being used in a default expresion of "t"
-ALTER TYPE default_abc DROP VALUE 'a'
-
-statement ok
-ALTER TYPE default_abc2 DROP VALUE 'a'
-
-statement ok
-CREATE TABLE t2 (k INT PRIMARY KEY, v string DEFAULT 'b'::default_abc::string)
-
-statement error pq: could not remove enum value "b" as it is being used in a default expresion of "t2"
-ALTER TYPE default_abc DROP VALUE 'b'
-
-statement ok
-ALTER TYPE default_abc DROP VALUE 'c'
-
-statement ok
-CREATE TABLE t3 (
-  x _default_abc2 DEFAULT ARRAY['b'::default_abc2],
-  y string DEFAULT ARRAY['c':::default_abc2][1]::string)
-
-statement error could not remove enum value "b" as it is being used in a default expresion of "t3"
-ALTER TYPE default_abc2 DROP VALUE 'b'
-
-statement error could not remove enum value "c" as it is being used in a default expresion of "t3"
-ALTER TYPE default_abc2 DROP VALUE 'c'
-
-statement ok
-CREATE TYPE default_abc3 AS ENUM ('a', 'b', 'c')
-
-statement ok
-CREATE TABLE t4 (
-  x default_abc3[] DEFAULT '{a}'::default_abc3[],
-  y string DEFAULT '{b}'::_default_abc3::string,
-  z default_abc3 DEFAULT ('{a, b, c}'::default_abc3[])[3])
-
-statement error could not remove enum value "a" as it is being used in a default expresion of "t4"
-ALTER TYPE default_abc3 DROP VALUE 'a'
-
-statement error could not remove enum value "b" as it is being used in a default expresion of "t4"
-ALTER TYPE default_abc3 DROP VALUE 'b'
-
-statement error could not remove enum value "c" as it is being used in a default expresion of "t4"
-ALTER TYPE default_abc3 DROP VALUE 'c'
-
-statement ok
-CREATE TYPE computed_abc AS ENUM ('a', 'b', 'c')
-
-statement ok
-CREATE TYPE computed_abc2 AS ENUM ('a', 'b', 'c')
-
-statement ok
-CREATE TABLE t5 (k INT PRIMARY KEY, y computed_abc AS ('a') STORED)
-
-statement error pq: could not remove enum value "a" as it is being used in a computed column of "t5"
-ALTER TYPE computed_abc DROP VALUE 'a'
-
-statement ok
-CREATE TABLE t6 (k INT PRIMARY KEY, y string AS ('b'::computed_abc::string) STORED)
-
-statement error pq: could not remove enum value "b" as it is being used in a computed column of "t6"
-ALTER TYPE computed_abc DROP VALUE 'b'
-
-statement ok
-ALTER TYPE computed_abc DROP VALUE 'c'
-
-statement ok
-CREATE TABLE t7 (x _computed_abc2 AS (ARRAY['a'::computed_abc2]) STORED, y computed_abc2[] AS (ARRAY['b':::computed_abc2]) STORED)
-
-statement error could not remove enum value "a" as it is being used in a computed column of "t7"
-ALTER TYPE computed_abc2 DROP VALUE 'a'
-
-statement error could not remove enum value "b" as it is being used in a computed column of "t7"
-ALTER TYPE computed_abc2 DROP VALUE 'b'
-
-
-# Test that types used in arrays can be renamed.
-subtest rename_type_in_array
-
-statement ok
-CREATE TYPE arr_typ AS ENUM ('a', 'b', 'c')
-
-statement ok
-CREATE TABLE arr_t6 (
-  i arr_typ[] DEFAULT ARRAY['a'::arr_typ],
-  j arr_typ DEFAULT ARRAY['b'::arr_typ][1],
-  k _arr_typ DEFAULT ARRAY['c'::arr_typ]::_arr_typ,
-  FAMILY (i, j, k))
-
-statement ok
-ALTER TYPE arr_typ RENAME TO arr_typ2
-
-statement ok
-INSERT INTO arr_t6 VALUES (default, default, default)
-
-query TT
-SHOW CREATE TABLE arr_t6
-----
-arr_t6  CREATE TABLE public.arr_t6 (
-        i public.arr_typ2[] NULL DEFAULT ARRAY['a':::public.arr_typ2]:::public.arr_typ2[],
-        j public.arr_typ2 NULL DEFAULT (ARRAY['b':::public.arr_typ2]:::public.arr_typ2[])[1:::INT8],
-        k public.arr_typ2[] NULL DEFAULT ARRAY['c':::public.arr_typ2]:::public.arr_typ2[],
-        rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-        CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
-        FAMILY fam_0_i_j_k_rowid (i, j, k, rowid)
-)
-
-
-subtest regression_63138
-
-statement ok
-CREATE TYPE typ2 AS ENUM ('a')
-
-statement ok
-CREATE TABLE tab (k typ2 PRIMARY KEY)
-
-statement ok
-CREATE INDEX foo ON tab(k) WHERE k = ANY (ARRAY['a', 'a']:::typ2[])
-
-subtest regression_66576
-
-let $oid
-SELECT oid FROM pg_type WHERE typname = 'typ2'
-
-query T
-SELECT typname FROM pg_type WHERE oid = $oid
-----
-typ2

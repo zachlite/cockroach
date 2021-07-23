@@ -12,8 +12,10 @@ package log
 
 import (
 	"context"
-	"fmt"
 	"strings"
+
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/errors"
 )
 
 // FormatWithContextTags formats the string and prepends the context
@@ -24,16 +26,28 @@ import (
 func FormatWithContextTags(ctx context.Context, format string, args ...interface{}) string {
 	var buf strings.Builder
 	formatTags(ctx, true /* brackets */, &buf)
-	formatArgs(&buf, format, args...)
+	renderArgs(false, &buf, format, args...)
 	return buf.String()
 }
 
-func formatArgs(buf *strings.Builder, format string, args ...interface{}) {
-	if len(args) == 0 {
-		buf.WriteString(format)
-	} else if len(format) == 0 {
-		fmt.Fprint(buf, args...)
-	} else {
-		fmt.Fprintf(buf, format, args...)
+// addStructured creates a structured log entry to be written to the
+// specified facility of the logger.
+func addStructured(
+	ctx context.Context, sev Severity, depth int, format string, args []interface{},
+) {
+	if sev == Severity_FATAL {
+		// We load the ReportingSettings from the a global singleton in this
+		// call path. See the singleton's comment for a rationale.
+		if sv := settings.TODO(); sv != nil {
+			err := errors.NewWithDepthf(depth+1, "log.Fatal: "+format, args...)
+			sendCrashReport(ctx, sv, err, ReportTypeLogFatal)
+		}
 	}
+
+	entry := MakeEntry(
+		ctx, sev, &mainLog.logCounter, depth+1, mainLog.redactableLogs.Get(), format, args...)
+	if sp, el, ok := getSpanOrEventLog(ctx); ok {
+		eventInternal(sp, el, (sev >= Severity_ERROR), entry)
+	}
+	mainLog.outputLogEntry(entry)
 }

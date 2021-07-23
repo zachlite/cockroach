@@ -161,7 +161,9 @@ func forEachPerm(exprs []copyableExpr, i int, fn func([]copyableExpr)) {
 
 func clonePlaceholderTypes(args tree.PlaceholderTypes) tree.PlaceholderTypes {
 	clone := make(tree.PlaceholderTypes, len(args))
-	copy(clone, args)
+	for k, v := range args {
+		clone[k] = v
+	}
 	return clone
 }
 

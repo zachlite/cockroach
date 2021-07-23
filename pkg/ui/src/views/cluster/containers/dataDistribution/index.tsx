@@ -15,8 +15,8 @@ import { connect } from "react-redux";
 import Helmet from "react-helmet";
 import { withRouter } from "react-router-dom";
 
-import { Loading } from "@cockroachlabs/cluster-ui";
-import { InfoTooltip } from "src/components/infoTooltip";
+import Loading from "src/views/shared/components/loading";
+import { ToolTipWrapper } from "src/views/shared/components/toolTip";
 import * as docsURL from "src/util/docs";
 import { FixLong } from "src/util/fixLong";
 import { cockroach } from "src/js/protos";
@@ -31,10 +31,7 @@ import { LocalityTree, selectLocalityTree } from "src/redux/localities";
 import ReplicaMatrix, { SchemaObject } from "./replicaMatrix";
 import { TreeNode, TreePath } from "./tree";
 import "./index.styl";
-import {
-  selectLivenessRequestStatus,
-  selectNodeRequestStatus,
-} from "src/redux/nodes";
+import {selectLivenessRequestStatus, selectNodeRequestStatus} from "src/redux/nodes";
 
 type DataDistributionResponse = cockroach.server.serverpb.DataDistributionResponse;
 type NodeDescriptor = cockroach.roachpb.INodeDescriptor;
@@ -42,15 +39,9 @@ type ZoneConfig$Properties = cockroach.server.serverpb.DataDistributionResponse.
 
 const ZONE_CONFIG_TEXT = (
   <span>
-    Zone configurations (
-    <a
-      href={docsURL.configureReplicationZones}
-      target="_blank"
-      rel="noreferrer"
-    >
-      see documentation
-    </a>
-    ) control how CockroachDB distributes data across nodes.
+    Zone configurations
+    (<a href={docsURL.configureReplicationZones} target="_blank">see documentation</a>)
+    control how CockroachDB distributes data across nodes.
   </span>
 );
 
@@ -61,6 +52,7 @@ interface DataDistributionProps {
 }
 
 class DataDistribution extends React.Component<DataDistributionProps> {
+
   renderZoneConfigs() {
     return (
       <div className="zone-config-list">
@@ -82,21 +74,15 @@ class DataDistribution extends React.Component<DataDistributionProps> {
     const nodeID = nodePath[nodePath.length - 1];
     const databaseInfo = this.props.dataDistribution.data.database_info;
 
-    const res =
-      databaseInfo[dbName].table_info[tableName].replica_count_by_node_id[
-        nodeID
-      ];
+    const res = databaseInfo[dbName].table_info[tableName].replica_count_by_node_id[nodeID];
     if (!res) {
       return 0;
     }
     return FixLong(res).toInt();
-  };
+  }
 
   render() {
-    const nodeTree = nodeTreeFromLocalityTree(
-      "Cluster",
-      this.props.localityTree,
-    );
+    const nodeTree = nodeTreeFromLocalityTree("Cluster", this.props.localityTree);
 
     const databaseInfo = this.props.dataDistribution.data.database_info;
     const dbTree: TreeNode<SchemaObject> = {
@@ -125,14 +111,20 @@ class DataDistribution extends React.Component<DataDistributionProps> {
       <div className="data-distribution">
         <div className="data-distribution__zone-config-sidebar">
           <h2 className="base-heading">
-            Zone Configs <InfoTooltip text={ZONE_CONFIG_TEXT} />
+            Zone Configs{" "}
+            <div className="section-heading__tooltip">
+              <ToolTipWrapper text={ZONE_CONFIG_TEXT}>
+                <div className="section-heading__tooltip-hover-area">
+                  <div className="section-heading__info-icon">i</div>
+                </div>
+              </ToolTipWrapper>
+            </div>
           </h2>
           {this.renderZoneConfigs()}
           <p style={{ maxWidth: 300, paddingTop: 10 }}>
-            Dropped tables appear{" "}
-            <span className="table-label--dropped">greyed out</span>. Their
-            replicas will be garbage collected according to the{" "}
-            <code>gc.ttlseconds</code> setting in their zone configs.
+            Dropped tables appear <span className="table-label--dropped">greyed out</span>.
+            Their replicas will be garbage collected according to
+            the <code>gc.ttlseconds</code> setting in their zone configs.
           </p>
         </div>
         <div>
@@ -158,6 +150,7 @@ interface DataDistributionPageProps {
 }
 
 export class DataDistributionPage extends React.Component<DataDistributionPageProps> {
+
   componentDidMount() {
     this.props.refreshDataDistribution();
     this.props.refreshNodes();
@@ -179,13 +172,8 @@ export class DataDistributionPage extends React.Component<DataDistributionPagePr
         </section>
         <section className="section">
           <Loading
-            loading={
-              !this.props.dataDistribution.data || !this.props.localityTree
-            }
-            error={[
-              this.props.dataDistribution.lastError,
-              ...this.props.localityTreeErrors,
-            ]}
+            loading={!this.props.dataDistribution.data || !this.props.localityTree}
+            error={[this.props.dataDistribution.lastError, ...this.props.localityTreeErrors]}
             render={() => (
               <DataDistribution
                 localityTree={this.props.localityTree}
@@ -216,21 +204,20 @@ const localityTreeErrors = createSelector(
   (nodes, liveness) => [nodes.lastError, liveness.lastError],
 );
 
-const DataDistributionPageConnected = withRouter(
-  connect(
-    (state: AdminUIState) => ({
-      dataDistribution: state.cachedData.dataDistribution,
-      sortedZoneConfigs: sortedZoneConfigs(state),
-      localityTree: selectLocalityTree(state),
-      localityTreeErrors: localityTreeErrors(state),
-    }),
-    {
-      refreshDataDistribution,
-      refreshNodes,
-      refreshLiveness,
-    },
-  )(DataDistributionPage),
-);
+// tslint:disable-next-line:variable-name
+const DataDistributionPageConnected = withRouter(connect(
+  (state: AdminUIState) => ({
+    dataDistribution: state.cachedData.dataDistribution,
+    sortedZoneConfigs: sortedZoneConfigs(state),
+    localityTree: selectLocalityTree(state),
+    localityTreeErrors: localityTreeErrors(state),
+  }),
+  {
+    refreshDataDistribution,
+    refreshNodes,
+    refreshLiveness,
+  },
+)(DataDistributionPage));
 
 export default DataDistributionPageConnected;
 
@@ -245,9 +232,7 @@ function nodeTreeFromLocalityTree(
   // Add child localities.
   _.forEach(localityTree.localities, (valuesForKey, key) => {
     _.forEach(valuesForKey, (subLocalityTree, value) => {
-      children.push(
-        nodeTreeFromLocalityTree(`${key}=${value}`, subLocalityTree),
-      );
+      children.push(nodeTreeFromLocalityTree(`${key}=${value}`, subLocalityTree));
     });
   });
 

@@ -19,7 +19,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"text/template"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/config"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/ssh"
@@ -33,7 +32,6 @@ var StartOpts struct {
 	Encrypt    bool
 	Sequential bool
 	SkipInit   bool
-	StoreCount int
 }
 
 // Cockroach TODO(peter): document
@@ -44,7 +42,7 @@ func cockroachNodeBinary(c *SyncedCluster, node int) string {
 		return config.Binary
 	}
 	if !c.IsLocal() {
-		return "${HOME}/" + config.Binary
+		return "./" + config.Binary
 	}
 
 	path := filepath.Join(fmt.Sprintf(os.ExpandEnv("${HOME}/local/%d"), node), config.Binary)
@@ -204,7 +202,7 @@ func (r Cockroach) Start(c *SyncedCluster, extraArgs []string) {
 			// addressing #51897.
 			//
 			// TODO(irfansharif): Remove this once #51897 is resolved.
-			markBootstrap := fmt.Sprintf("touch %s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
+			markBootstrap := fmt.Sprintf("touch %s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx]), "cluster-bootstrapped")
 			cmdOut, err := h.run(nodeIdx, markBootstrap)
 			if err != nil {
 				log.Fatalf("unable to run cmd: %v", err)
@@ -230,14 +228,11 @@ func (r Cockroach) Start(c *SyncedCluster, extraArgs []string) {
 }
 
 // NodeDir implements the ClusterImpl.NodeDir interface.
-func (Cockroach) NodeDir(c *SyncedCluster, index, storeIndex int) string {
+func (Cockroach) NodeDir(c *SyncedCluster, index int) string {
 	if c.IsLocal() {
-		if storeIndex != 1 {
-			panic("Cockroach.NodeDir only supports one store for local deployments")
-		}
 		return os.ExpandEnv(fmt.Sprintf("${HOME}/local/%d/data", index))
 	}
-	return fmt.Sprintf("/mnt/data%d/cockroach", storeIndex)
+	return "/mnt/data1/cockroach"
 }
 
 // LogDir implements the ClusterImpl.NodeDir interface.
@@ -378,88 +373,6 @@ func (h *crdbInstallHelper) startNode(
 func (h *crdbInstallHelper) generateStartCmd(
 	nodeIdx int, extraArgs []string, vers *version.Version,
 ) (string, error) {
-
-	tpl, err := template.New("start").Parse(`#!/bin/bash
-set -euo pipefail
-
-mkdir -p {{.LogDir}}
-helper="{{if .Local}}{{.LogDir}}{{else}}${HOME}{{end}}/cockroach-helper.sh"
-verb="{{if .Local}}run{{else}}run-systemd{{end}}"
-
-# 'EOF' disables parameter substitution in the heredoc.
-cat > "${helper}" << 'EOF' && chmod +x "${helper}" && "${helper}" "${verb}"
-#!/bin/bash
-set -euo pipefail
-
-if [[ "${1}" == "run" ]]; then
-  local="{{if .Local}}true{{end}}"
-  mkdir -p {{.LogDir}}
-  echo "cockroach start: $(date), logging to {{.LogDir}}" | tee -a {{.LogDir}}/{roachprod,cockroach.std{out,err}}.log
-  {{.KeyCmd}}
-  export ROACHPROD={{.NodeNum}}{{.Tag}} {{.EnvVars}}
-  background=""
-  if [[ "${local}" ]]; then
-    background="--background"
-  fi
-  CODE=0
-  {{.Binary}} {{.StartCmd}} {{.Args}} ${background} >> {{.LogDir}}/cockroach.stdout.log 2>> {{.LogDir}}/cockroach.stderr.log || CODE=$?
-  if [[ -z "${local}" || ${CODE} -ne 0 ]]; then
-    echo "cockroach exited with code ${CODE}: $(date)" | tee -a {{.LogDir}}/{roachprod,cockroach.{exit,std{out,err}}}.log
-  fi
-  exit ${CODE}
-fi
-
-if [[ "${1}" != "run-systemd" ]]; then
-  echo "unsupported: ${1}"
-  exit 1
-fi
-
-if systemctl is-active -q cockroach; then
-  echo "cockroach service already active"
-	echo "To get more information: systemctl status cockroach"
-	exit 1
-fi
-
-# If cockroach failed, the service still exists; we need to clean it up before
-# we can start it again.
-sudo systemctl reset-failed cockroach 2>/dev/null || true
-
-# The first time we run, install a small script that shows some helpful
-# information when we ssh in.
-if [ ! -e ${HOME}/.profile-cockroach ]; then
-  cat > ${HOME}/.profile-cockroach <<'EOQ'
-echo ""
-if systemctl is-active -q cockroach; then
-	echo "cockroach is running; see: systemctl status cockroach"
-elif systemctl is-failed -q cockroach; then
-	echo "cockroach stopped; see: systemctl status cockroach"
-else
-	echo "cockroach not started"
-fi
-echo ""
-EOQ
-  echo ". ${HOME}/.profile-cockroach" >> ${HOME}/.profile
-fi
-
-# We run this script (with arg "run") as a service unit. We do not use --user
-# because memory limiting doesn't work in that mode. Instead we pass the uid and
-# gid that the process will run under.
-# The "notify" service type means that systemd-run waits until cockroach
-# notifies systemd that it is ready; NotifyAccess=all is needed because this
-# notification doesn't come from the main PID (which is bash).
-sudo systemd-run --unit cockroach \
-  --same-dir --uid $(id -u) --gid $(id -g) \
-  --service-type=notify -p NotifyAccess=all \
-  -p MemoryMax={{.MemoryMax}} \
-  -p LimitCORE=infinity \
-  -p LimitNOFILE=65536 \
-	bash $0 run
-EOF
-`)
-	if err != nil {
-		return "", err
-	}
-
 	args, err := h.generateStartArgs(nodeIdx, extraArgs, vers)
 	if err != nil {
 		return "", err
@@ -473,28 +386,35 @@ EOF
 	} else {
 		startCmd = "start"
 	}
-	nodes := h.c.ServerNodes()
-	var buf strings.Builder
-	if err := tpl.Execute(&buf, struct {
-		LogDir, KeyCmd, Tag, EnvVars, Binary, StartCmd, Args, MemoryMax string
-		NodeNum                                                         int
-		Local                                                           bool
-	}{
-		LogDir:    h.c.Impl.LogDir(h.c, nodes[nodeIdx]),
-		KeyCmd:    h.generateKeyCmd(nodeIdx, extraArgs),
-		Tag:       h.c.Tag,
-		EnvVars:   "GOTRACEBACK=crash COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=1 " + h.getEnvVars(),
-		Binary:    cockroachNodeBinary(h.c, nodes[nodeIdx]),
-		StartCmd:  startCmd,
-		Args:      strings.Join(args, " "),
-		MemoryMax: config.MemoryMax,
-		NodeNum:   nodes[nodeIdx],
-		Local:     h.c.IsLocal(),
-	}); err != nil {
-		return "", err
-	}
 
-	return buf.String(), nil
+	nodes := h.c.ServerNodes()
+	logDir := h.c.Impl.LogDir(h.c, nodes[nodeIdx])
+	binary := cockroachNodeBinary(h.c, nodes[nodeIdx])
+	keyCmd := h.generateKeyCmd(nodeIdx, extraArgs)
+
+	// NB: this is awkward as when the process fails, the test runner will show an
+	// unhelpful empty error (since everything has been redirected away). This is
+	// unfortunately equally awkward to address.
+	cmd := fmt.Sprintf(`
+		ulimit -c unlimited; mkdir -p %[1]s;
+		echo ">>> roachprod start: $(date)" >> %[1]s/roachprod.log;
+		ps axeww -o pid -o command >> %[1]s/roachprod.log;
+		[ -x /usr/bin/lslocks ] && /usr/bin/lslocks >> %[1]s/roachprod.log; %[2]s
+		export ROACHPROD=%[3]d%[4]s;
+		GOTRACEBACK=crash COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=1 %[5]s \
+		%[6]s %[7]s %[8]s >> %[1]s/cockroach.stdout.log \
+		                 2>> %[1]s/cockroach.stderr.log \
+			|| (x=$?; cat %[1]s/cockroach.stderr.log; exit $x)`,
+		logDir,                  // [1]
+		keyCmd,                  // [2]
+		nodes[nodeIdx],          // [3]
+		h.c.Tag,                 // [4]
+		h.getEnvVars(),          // [5]
+		binary,                  // [6]
+		startCmd,                // [7]
+		strings.Join(args, " "), // [8]
+	)
+	return cmd, nil
 }
 
 func (h *crdbInstallHelper) generateStartArgs(
@@ -503,41 +423,19 @@ func (h *crdbInstallHelper) generateStartArgs(
 	var args []string
 	nodes := h.c.ServerNodes()
 
+	args = append(args, "--background")
 	if h.c.Secure {
 		args = append(args, "--certs-dir="+h.c.Impl.CertsDir(h.c, nodes[nodeIdx]))
 	} else {
 		args = append(args, "--insecure")
 	}
 
-	var storeDirs []string
-	if idx := argExists(extraArgs, "--store"); idx == -1 {
-		for i := 1; i <= StartOpts.StoreCount; i++ {
-			storeDir := h.c.Impl.NodeDir(h.c, nodes[nodeIdx], i)
-			storeDirs = append(storeDirs, storeDir)
-			args = append(args, "--store=path="+storeDir)
-		}
-	} else {
-		storeDir := strings.TrimPrefix(extraArgs[idx], "--store=")
-		storeDirs = append(storeDirs, storeDir)
-	}
-
-	if StartOpts.Encrypt {
-		// Encryption at rest is turned on for the cluster.
-		for _, storeDir := range storeDirs {
-			// TODO(windchan7): allow key size to be specified through flags.
-			encryptArgs := "--enterprise-encryption=path=%s,key=%s/aes-128.key,old-key=plain"
-			encryptArgs = fmt.Sprintf(encryptArgs, storeDir, storeDir)
-			args = append(args, encryptArgs)
-		}
-	}
-
+	dir := h.c.Impl.NodeDir(h.c, nodes[nodeIdx])
 	logDir := h.c.Impl.LogDir(h.c, nodes[nodeIdx])
-	if vers.AtLeast(version.MustParse("v21.1.0-alpha.0")) {
-		// Specify exit-on-error=false to work around #62763.
-		args = append(args, `--log "file-defaults: {dir: '`+logDir+`', exit-on-error: false}"`)
-	} else {
-		args = append(args, "--log-dir="+logDir)
+	if idx := argExists(extraArgs, "--store"); idx == -1 {
+		args = append(args, "--store=path="+dir)
 	}
+	args = append(args, "--log-dir="+logDir)
 
 	if vers.AtLeast(version.MustParse("v1.1.0")) {
 		cache := 25
@@ -589,6 +487,20 @@ func (h *crdbInstallHelper) generateStartArgs(
 		// prints all IP addresses for the host and then we'll select
 		// the first from the list.
 		args = append(args, "--advertise-host=$(hostname -I | awk '{print $1}')")
+	}
+
+	if StartOpts.Encrypt {
+		// Encryption at rest is turned on for the cluster.
+		// TODO(windchan7): allow key size to be specified through flags.
+		encryptArgs := "--enterprise-encryption=path=%s,key=%s/aes-128.key,old-key=plain"
+		var storeDir string
+		if idx := argExists(extraArgs, "--store"); idx == -1 {
+			storeDir = dir
+		} else {
+			storeDir = strings.TrimPrefix(extraArgs[idx], "--store=")
+		}
+		encryptArgs = fmt.Sprintf(encryptArgs, storeDir, storeDir)
+		args = append(args, encryptArgs)
 	}
 
 	// Argument template expansion is node specific (e.g. for {store-dir}).
@@ -654,19 +566,17 @@ func (h *crdbInstallHelper) generateClusterSettingCmd(nodeIdx int) string {
 	}
 
 	binary := cockroachNodeBinary(h.c, nodes[nodeIdx])
-	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "settings-initialized")
+	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx]), "settings-initialized")
 	url := h.r.NodeURL(h.c, "localhost", h.r.NodePort(h.c, 1))
 
-	// We ignore failures to set remote_debugging.mode, which was
-	// removed in v21.2.
 	clusterSettingCmd += fmt.Sprintf(`
 		if ! test -e %s ; then
-			COCKROACH_CONNECT_TIMEOUT=0 %s sql --url %s -e "SET CLUSTER SETTING server.remote_debugging.mode = 'any'" || true;
 			COCKROACH_CONNECT_TIMEOUT=0 %s sql --url %s -e "
+				SET CLUSTER SETTING server.remote_debugging.mode = 'any';
 				SET CLUSTER SETTING cluster.organization = 'Cockroach Labs - Production Testing';
 				SET CLUSTER SETTING enterprise.license = '%s';" \
 			&& touch %s
-		fi`, path, binary, url, binary, url, license, path)
+		fi`, path, binary, url, license, path)
 	return clusterSettingCmd
 }
 
@@ -678,7 +588,7 @@ func (h *crdbInstallHelper) generateInitCmd(nodeIdx int) string {
 		initCmd = `cd ${HOME}/local/1 ; `
 	}
 
-	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
+	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx]), "cluster-bootstrapped")
 	url := h.r.NodeURL(h.c, "localhost", h.r.NodePort(h.c, nodes[nodeIdx]))
 	binary := cockroachNodeBinary(h.c, nodes[nodeIdx])
 	initCmd += fmt.Sprintf(`
@@ -694,27 +604,20 @@ func (h *crdbInstallHelper) generateKeyCmd(nodeIdx int, extraArgs []string) stri
 	}
 
 	nodes := h.c.ServerNodes()
-	var storeDirs []string
+	var storeDir string
 	if idx := argExists(extraArgs, "--store"); idx == -1 {
-		for i := 1; i <= StartOpts.StoreCount; i++ {
-			storeDir := h.c.Impl.NodeDir(h.c, nodes[nodeIdx], i)
-			storeDirs = append(storeDirs, storeDir)
-		}
+		storeDir = h.c.Impl.NodeDir(h.c, nodes[nodeIdx])
 	} else {
-		storeDir := strings.TrimPrefix(extraArgs[idx], "--store=")
-		storeDirs = append(storeDirs, storeDir)
+		storeDir = strings.TrimPrefix(extraArgs[idx], "--store=")
 	}
 
 	// Command to create the store key.
-	var keyCmd strings.Builder
-	for _, storeDir := range storeDirs {
-		fmt.Fprintf(&keyCmd, `
-			mkdir -p %[1]s;
-			if [ ! -e %[1]s/aes-128.key ]; then
-				openssl rand -out %[1]s/aes-128.key 48;
-			fi;`, storeDir)
-	}
-	return keyCmd.String()
+	keyCmd := fmt.Sprintf(`
+		mkdir -p %[1]s;
+		if [ ! -e %[1]s/aes-128.key ]; then
+			openssl rand -out %[1]s/aes-128.key 48;
+		fi;`, storeDir)
+	return keyCmd
 }
 
 func (h *crdbInstallHelper) useStartSingleNode(vers *version.Version) bool {

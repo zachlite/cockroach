@@ -11,8 +11,9 @@
 import { connect } from "react-redux";
 import { createSelector } from "reselect";
 import { withRouter } from "react-router-dom";
-import { refreshStatements } from "src/redux/apiReducers";
-import { resetSQLStatsAction } from "src/redux/sqlStats";
+import {
+  refreshStatements,
+} from "src/redux/apiReducers";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { AdminUIState } from "src/redux/state";
 import { StatementsResponseMessage } from "src/util/api";
@@ -21,7 +22,6 @@ import { TimestampToMoment } from "src/util/convert";
 import { PrintTime } from "src/views/reports/containers/range/print";
 
 import { TransactionsPage } from "@cockroachlabs/cluster-ui";
-import { nodeRegionsByIDSelector } from "src/redux/nodes";
 
 // selectStatements returns the array of AggregateStatistics to show on the
 // TransactionsPage, based on if the appAttr route parameter is set.
@@ -45,25 +45,16 @@ export const selectLastReset = createSelector(
   },
 );
 
-const selectLastError = createSelector(
-  (state: AdminUIState) => state.cachedData.statements,
-  (state: CachedDataReducerState<StatementsResponseMessage>) => state.lastError,
-);
-
-const TransactionsPageConnected = withRouter(
-  connect(
-    (state: AdminUIState) => ({
-      data: selectData(state),
-      statementsError: state.cachedData.statements.lastError,
-      lastReset: selectLastReset(state),
-      error: selectLastError(state),
-      nodeRegions: nodeRegionsByIDSelector(state),
-    }),
-    {
-      refreshData: refreshStatements,
-      resetSQLStats: resetSQLStatsAction,
-    },
-  )(TransactionsPage),
-);
+// tslint:disable-next-line:variable-name
+const TransactionsPageConnected = withRouter(connect(
+  (state: AdminUIState) => ({
+    data: selectData(state),
+    statementsError: state.cachedData.statements.lastError,
+    lastReset: selectLastReset(state),
+  }),
+  {
+    refreshData: refreshStatements,
+  },
+)(TransactionsPage));
 
 export default TransactionsPageConnected;

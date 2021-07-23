@@ -43,7 +43,6 @@ Query {"String": "BEGIN AS OF SYSTEM TIME '1s'"}
 Sync
 ----
 
-
 # TODO(ajwerner): Why are there two ReadyForQuery?
 
 until
@@ -57,14 +56,12 @@ ReadyForQuery
 
 send
 Bind {"DestinationPortal": "p7", "PreparedStatement": "s7", "ParameterFormatCodes": [0], "Parameters": [[84]]}
-Execute {"Portal": "p7"}
 Sync
 ----
 
 until
+ErrorResponse
 ReadyForQuery
 ----
-{"Type":"BindComplete"}
-{"Type":"DataRow","Values":[{"text":"52"}]}
-{"Type":"CommandComplete","CommandTag":"SELECT 1"}
+{"Type":"ErrorResponse","Code":"42704"}
 {"Type":"ReadyForQuery","TxStatus":"I"}

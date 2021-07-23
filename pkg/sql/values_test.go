@@ -24,12 +24,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -46,19 +44,13 @@ func makeTestPlanner() *planner {
 				return uuid.MakeV4()
 			},
 		},
-		RootMemoryMonitor: mon.NewUnlimitedMonitor(context.Background(), "test", mon.MemoryResource, nil, nil, 0, nil),
 	}
 
 	// TODO(andrei): pass the cleanup along to the caller.
-	p, _ /* cleanup */ := NewInternalPlanner(
-		"test",
-		nil, /* txn */
-		security.RootUserName(),
-		&MemoryMetrics{},
-		&execCfg,
-		sessiondatapb.SessionData{},
+	p, _ /* cleanup */ := newInternalPlanner(
+		"test", nil /* txn */, security.RootUser, &MemoryMetrics{}, &execCfg,
 	)
-	return p.(*planner)
+	return p
 }
 
 func TestValues(t *testing.T) {

@@ -55,6 +55,7 @@ var passing90ThPercentile = map[string]time.Duration{
 
 // Result represents the outcome of a TPCC run.
 type Result struct {
+
 	// ActiveWarehouses is the number of warehouses used in the TPC-C run.
 	ActiveWarehouses int
 
@@ -154,11 +155,7 @@ func NewResultWithSnapshots(
 // TpmC returns a tpmC value with a warehouse factor of 12.86.
 // TpmC will panic if r does not contain a "newOrder" histogram in Cumulative.
 func (r *Result) TpmC() float64 {
-	no := r.Cumulative["newOrder"]
-	if no == nil {
-		return 0
-	}
-	return float64(no.TotalCount()) / (r.Elapsed.Seconds() / 60)
+	return float64(r.Cumulative["newOrder"].TotalCount()) / (r.Elapsed.Seconds() / 60)
 }
 
 // Efficiency returns the efficiency of a TPC-C run.
@@ -184,7 +181,7 @@ func (r *Result) FailureError() error {
 	var err error
 	if eff := r.Efficiency(); eff < PassingEfficiency {
 		err = errors.CombineErrors(err,
-			errors.Errorf("efficiency value of %v is below passing threshold of %v",
+			errors.Errorf("efficiency value of %v is below ppassing threshold of %v",
 				eff, PassingEfficiency))
 	}
 	for query, max90th := range passing90ThPercentile {

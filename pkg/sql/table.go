@@ -19,12 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -53,6 +50,10 @@ func (p *planner) createDropDatabaseJob(
 	for _, t := range typesToDrop {
 		typeIDs = append(typeIDs, t.ID)
 	}
+	formatVersion := jobspb.DatabaseJobFormatVersion
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		formatVersion--
+	}
 	jobRecord := jobs.Record{
 		Description:   jobDesc,
 		Username:      p.User(),
@@ -62,41 +63,45 @@ func (p *planner) createDropDatabaseJob(
 			DroppedTables:     tableDropDetails,
 			DroppedTypes:      typeIDs,
 			DroppedDatabaseID: databaseID,
-			FormatVersion:     jobspb.DatabaseJobFormatVersion,
+			FormatVersion:     formatVersion,
 		},
 		Progress:      jobspb.SchemaChangeProgress{},
 		NonCancelable: true,
 	}
-	newJob, err := p.extendedEvalCtx.QueueJob(ctx, jobRecord)
+	newJob, err := p.extendedEvalCtx.QueueJob(jobRecord)
 	if err != nil {
 		return err
 	}
-	log.Infof(ctx, "queued new drop database job %d for database %d", newJob.ID(), databaseID)
+	log.Infof(ctx, "queued new drop database job %d for database %d", *newJob.ID(), databaseID)
 	return nil
 }
 
-// CreateNonDropDatabaseChangeJob covers all database descriptor updates other
+// createNonDropDatabaseChangeJob covers all database descriptor updates other
 // than dropping the database.
 // TODO (lucy): This should ideally look into the set of queued jobs so that we
 // don't queue multiple jobs for the same database.
 func (p *planner) createNonDropDatabaseChangeJob(
 	ctx context.Context, databaseID descpb.ID, jobDesc string,
 ) error {
+	formatVersion := jobspb.DatabaseJobFormatVersion
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		formatVersion--
+	}
 	jobRecord := jobs.Record{
 		Description: jobDesc,
 		Username:    p.User(),
 		Details: jobspb.SchemaChangeDetails{
 			DescID:        databaseID,
-			FormatVersion: jobspb.DatabaseJobFormatVersion,
+			FormatVersion: formatVersion,
 		},
 		Progress:      jobspb.SchemaChangeProgress{},
 		NonCancelable: true,
 	}
-	newJob, err := p.extendedEvalCtx.QueueJob(ctx, jobRecord)
+	newJob, err := p.extendedEvalCtx.QueueJob(jobRecord)
 	if err != nil {
 		return err
 	}
-	log.Infof(ctx, "queued new database schema change job %d for database %d", newJob.ID(), databaseID)
+	log.Infof(ctx, "queued new database schema change job %d for database %d", *newJob.ID(), databaseID)
 	return nil
 }
 
@@ -106,14 +111,6 @@ func (p *planner) createNonDropDatabaseChangeJob(
 func (p *planner) createOrUpdateSchemaChangeJob(
 	ctx context.Context, tableDesc *tabledesc.Mutable, jobDesc string, mutationID descpb.MutationID,
 ) error {
-	if tableDesc.NewSchemaChangeJobID != 0 {
-		return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-			"cannot perform a schema change on table %q while it is undergoing a new-style schema change",
-			// We use the cluster version because the table may have been renamed.
-			// This is a bit of a hack.
-			tableDesc.ClusterVersion.GetName(),
-		)
-	}
 	var job *jobs.Job
 	if cachedJob, ok := p.extendedEvalCtx.SchemaChangeJobCache[tableDesc.ID]; ok {
 		job = cachedJob
@@ -153,7 +150,7 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 			},
 			Progress: jobspb.SchemaChangeProgress{},
 		}
-		newJob, err := p.extendedEvalCtx.QueueJob(ctx, jobRecord)
+		newJob, err := p.extendedEvalCtx.QueueJob(jobRecord)
 		if err != nil {
 			return err
 		}
@@ -162,10 +159,10 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 		// TODO (lucy): get rid of this when we get rid of MutationJobs.
 		if mutationID != descpb.InvalidMutationID {
 			tableDesc.MutationJobs = append(tableDesc.MutationJobs, descpb.TableDescriptor_MutationJob{
-				MutationID: mutationID, JobID: int64(newJob.ID())})
+				MutationID: mutationID, JobID: *newJob.ID()})
 		}
 		log.Infof(ctx, "queued new schema change job %d for table %d, mutation %d",
-			newJob.ID(), tableDesc.ID, mutationID)
+			*newJob.ID(), tableDesc.ID, mutationID)
 	} else {
 		// Update the existing job.
 		oldDetails := job.Details().(jobspb.SchemaChangeDetails)
@@ -193,15 +190,15 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 				// Also add a MutationJob on the table descriptor.
 				// TODO (lucy): get rid of this when we get rid of MutationJobs.
 				tableDesc.MutationJobs = append(tableDesc.MutationJobs, descpb.TableDescriptor_MutationJob{
-					MutationID: mutationID, JobID: int64(job.ID())})
+					MutationID: mutationID, JobID: *job.ID()})
 			}
 		}
-		if err := job.SetDetails(ctx, p.txn, newDetails); err != nil {
+		if err := job.WithTxn(p.txn).SetDetails(ctx, newDetails); err != nil {
 			return err
 		}
 		if jobDesc != "" {
-			if err := job.SetDescription(
-				ctx, p.txn,
+			if err := job.WithTxn(p.txn).SetDescription(
+				ctx,
 				func(ctx context.Context, description string) (string, error) {
 					return strings.Join([]string{description, jobDesc}, ";"), nil
 				},
@@ -210,7 +207,7 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 			}
 		}
 		log.Infof(ctx, "job %d: updated with schema change for table %d, mutation %d",
-			job.ID(), tableDesc.ID, mutationID)
+			*job.ID(), tableDesc.ID, mutationID)
 	}
 	return nil
 }
@@ -236,10 +233,8 @@ func (p *planner) writeSchemaChange(
 		return errors.Errorf("no schema changes allowed on table %q as it is being dropped",
 			tableDesc.Name)
 	}
-	if !tableDesc.IsNew() {
-		if err := p.createOrUpdateSchemaChangeJob(ctx, tableDesc, jobDesc, mutationID); err != nil {
-			return err
-		}
+	if err := p.createOrUpdateSchemaChangeJob(ctx, tableDesc, jobDesc, mutationID); err != nil {
+		return err
 	}
 	return p.writeTableDesc(ctx, tableDesc)
 }
@@ -292,7 +287,7 @@ func (p *planner) writeTableDescToBatch(
 		}
 	}
 
-	if err := catalog.ValidateSelf(tableDesc); err != nil {
+	if err := tableDesc.ValidateTable(); err != nil {
 		return errors.AssertionFailedf("table descriptor is not valid: %s\n%v", err, tableDesc)
 	}
 

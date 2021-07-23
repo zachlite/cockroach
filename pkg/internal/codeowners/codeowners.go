@@ -17,11 +17,26 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/internal/reporoot"
+	"github.com/cockroachdb/cockroach/pkg/internal/gopath"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	"github.com/cockroachdb/errors"
 	"github.com/zabawaba99/go-gitignore"
 )
+
+// DefaultCodeOwnersLocation is the default location for the CODEOWNERS file.
+var DefaultCodeOwnersLocation string
+
+func init() {
+	DefaultCodeOwnersLocation = filepath.Join(
+		gopath.Get(),
+		"src",
+		"github.com",
+		"cockroachdb",
+		"cockroach",
+		".github",
+		"CODEOWNERS",
+	)
+}
 
 // Rule is a single rule within a CODEOWNERS file.
 type Rule struct {
@@ -59,9 +74,7 @@ func LoadCodeOwners(r io.Reader, teams map[team.Alias]team.Team) (*CodeOwners, e
 		fields := strings.Fields(t)
 		rule := Rule{Pattern: fields[0]}
 		for _, field := range fields[1:] {
-			// @cockroachdb/kv[-noreview] --> cockroachdb/kv.
-			owner := team.Alias(strings.TrimSuffix(strings.TrimPrefix(field, "@"), "-noreview"))
-
+			owner := team.Alias(strings.TrimPrefix(field, "@"))
 			if _, ok := teams[owner]; !ok {
 				return nil, errors.Newf("owner %s does not exist", owner)
 			}
@@ -72,19 +85,13 @@ func LoadCodeOwners(r io.Reader, teams map[team.Alias]team.Team) (*CodeOwners, e
 	return ret, nil
 }
 
-// DefaultLoadCodeOwners loads teams from .github/CODEOWNERS
-// (relative to the repo root).
+// DefaultLoadCodeOwners loads teams from the DefaultCodeOwnersLocation.
 func DefaultLoadCodeOwners() (*CodeOwners, error) {
 	teams, err := team.DefaultLoadTeams()
 	if err != nil {
 		return nil, err
 	}
-	path := reporoot.GetFor(".", ".github/CODEOWNERS")
-	if path == "" {
-		return nil, errors.Errorf("CODEOWNERS not found")
-	}
-	path = filepath.Join(path, ".github/CODEOWNERS")
-	f, err := os.Open(path)
+	f, err := os.Open(DefaultCodeOwnersLocation)
 	if err != nil {
 		return nil, err
 	}
@@ -92,23 +99,19 @@ func DefaultLoadCodeOwners() (*CodeOwners, error) {
 	return LoadCodeOwners(f, teams)
 }
 
-// Match matches the given file to the rules and returns the owning team(s),
-// according to the supplied *relative* path (which must be relative to the
-// repository root, i.e. like the CODEOWNERS file).
-//
-// Returns the zero value if there are no owning teams or the passed-in path is
-// absolute.
-func (co *CodeOwners) Match(filePath string) []team.Team {
-	if filepath.IsAbs(filePath) {
-		// NB: don't try to look up the repository root here.
-		// The callers should do that.
-		return nil
+// Match matches the given file to the rules and returns the owning team(s).
+// Returns empty if there are no owning teams.
+func (co *CodeOwners) Match(inPath string) ([]team.Team, error) {
+	// Hack for now to get the same format as CODEOWNERS
+	fullPath, err := filepath.Abs(inPath)
+	if err != nil {
+		return nil, err
 	}
-	filePath = string(filepath.Separator) + filepath.Clean(filePath)
-	// filePath is now "absolute relative to the repo root", i.e.
-	// `/pkg/acceptance`, and the cleaning helps avoid inputs like
-	// `./pkg/acceptance` not working (when `pkg/acceptance` would).
-	//
+	filePath := strings.TrimPrefix(
+		fullPath,
+		filepath.Join(gopath.Get(), "src", "github.com", "cockroachdb", "cockroach"),
+	)
+
 	// Keep matching until we hit the root directory.
 	lastFilePath := ""
 	for filePath != lastFilePath {
@@ -122,11 +125,11 @@ func (co *CodeOwners) Match(filePath string) []team.Team {
 				for i, owner := range rule.Owners {
 					teams[i] = co.teams[owner]
 				}
-				return teams
+				return teams, nil
 			}
 		}
 		lastFilePath = filePath
 		filePath = filepath.Dir(filePath)
 	}
-	return nil
+	return nil, nil
 }

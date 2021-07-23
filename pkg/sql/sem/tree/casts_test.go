@@ -177,11 +177,6 @@ func TestTupleCastVolatility(t *testing.T) {
 			exp:  "immutable",
 		},
 		{
-			from: []*types.T{types.Int, types.Int},
-			to:   []*types.T{types.Any},
-			exp:  "stable",
-		},
-		{
 			from: []*types.T{types.TimestampTZ},
 			to:   []*types.T{types.Date},
 			exp:  "stable",

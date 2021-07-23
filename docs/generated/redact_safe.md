@@ -4,10 +4,7 @@ File | Type
 --|--
 pkg/cli/exit/exit.go | `Code`
 pkg/jobs/jobspb/wrap.go | `Type`
-pkg/kv/kvserver/closedts/ctpb/entry.go | `LAI`
-pkg/kv/kvserver/concurrency/lock/locking.go | `WaitPolicy`
 pkg/kv/kvserver/raft.go | `SnapshotRequest_Type`
-pkg/roachpb/data.go | `LeaseSequence`
 pkg/roachpb/data.go | `ReplicaChangeType`
 pkg/roachpb/metadata.go | `NodeID`
 pkg/roachpb/metadata.go | `StoreID`
@@ -15,7 +12,6 @@ pkg/roachpb/metadata.go | `RangeID`
 pkg/roachpb/metadata.go | `ReplicaID`
 pkg/roachpb/metadata.go | `RangeGeneration`
 pkg/roachpb/metadata.go | `ReplicaType`
-pkg/roachpb/method.go | `Method`
 pkg/sql/catalog/descpb/structured.go | `ID`
 pkg/sql/catalog/descpb/structured.go | `FamilyID`
 pkg/sql/catalog/descpb/structured.go | `IndexID`
@@ -33,7 +29,6 @@ pkg/sql/sem/tree/table_ref.go | `ColumnID`
 pkg/storage/enginepb/mvcc3.go | `MVCCStatsDelta`
 pkg/storage/enginepb/mvcc3.go | `*MVCCStats`
 pkg/util/hlc/timestamp.go | `Timestamp`
-pkg/util/hlc/timestamp.go | `ClockTimestamp`
 pkg/util/log/redact.go | `reflect.TypeOf(true)`
 pkg/util/log/redact.go | `reflect.TypeOf(123)`
 pkg/util/log/redact.go | `reflect.TypeOf(int8(0))`
@@ -51,5 +46,3 @@ pkg/util/log/redact.go | `reflect.TypeOf(complex128(0))`
 pkg/util/log/redact.go | `reflect.TypeOf(os.Interrupt)`
 pkg/util/log/redact.go | `reflect.TypeOf(time.Time{})`
 pkg/util/log/redact.go | `reflect.TypeOf(time.Duration(0))`
-pkg/util/log/redact.go | `reflect.TypeOf(encodingtype.T(0))`
-pkg/util/log/redact.go | `reflect.TypeOf(Channel(0))`

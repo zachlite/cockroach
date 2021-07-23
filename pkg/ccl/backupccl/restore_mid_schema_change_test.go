@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -22,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -55,9 +55,6 @@ import (
 func TestRestoreMidSchemaChange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-
-	skip.UnderRaceWithIssue(t, 56584)
-
 	const (
 		testdataBase = "testdata/restore_mid_schema_change"
 		exportDirs   = testdataBase + "/exports"
@@ -167,9 +164,9 @@ func validateTable(
 	sqlDB.QueryRow(t, fmt.Sprintf(`SELECT count(*) FROM %s.%s`, dbName, tableName)).Scan(&rowCount)
 	require.Greater(t, rowCount, 0, "expected table to have some rows")
 	// The number of entries in all indexes should be the same.
-	for _, index := range desc.AllIndexes() {
+	for _, index := range append(desc.GetPublicNonPrimaryIndexes(), *desc.GetPrimaryIndex()) {
 		var indexCount int
-		sqlDB.QueryRow(t, fmt.Sprintf(`SELECT count(*) FROM %s.%s@[%d]`, dbName, tableName, index.GetID())).Scan(&indexCount)
+		sqlDB.QueryRow(t, fmt.Sprintf(`SELECT count(*) FROM %s.%s@[%d]`, dbName, tableName, index.ID)).Scan(&indexCount)
 		require.Equal(t, rowCount, indexCount, `index should have the same number of rows as PK`)
 	}
 }
@@ -228,13 +225,11 @@ func restoreMidSchemaChange(
 ) func(t *testing.T) {
 	return func(t *testing.T) {
 		ctx := context.Background()
+		defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 		dir, dirCleanupFn := testutils.TempDir(t)
 		params := base.TestClusterArgs{
-			ServerArgs: base.TestServerArgs{
-				ExternalIODir: dir,
-				Knobs:         base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
-			},
+			ServerArgs: base.TestServerArgs{ExternalIODir: dir},
 		}
 		tc := testcluster.StartTestCluster(t, singleNode, params)
 		defer func() {
@@ -249,9 +244,9 @@ func restoreMidSchemaChange(
 		require.NoError(t, err)
 
 		sqlDB.Exec(t, "USE defaultdb")
-		restoreQuery := "RESTORE defaultdb.* from $1"
+		restoreQuery := fmt.Sprintf("RESTORE defaultdb.* from $1")
 		if isClusterRestore {
-			restoreQuery = "RESTORE from $1"
+			restoreQuery = fmt.Sprintf("RESTORE from $1")
 		}
 		log.Infof(context.Background(), "%+v", sqlDB.QueryStr(t, "SHOW BACKUP $1", LocalFoo))
 		sqlDB.Exec(t, restoreQuery, LocalFoo)

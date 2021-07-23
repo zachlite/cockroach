@@ -12,7 +12,6 @@ package base
 
 import (
 	"context"
-	"net"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -35,19 +34,15 @@ type TestServerArgs struct {
 	*cluster.Settings
 	RaftConfig
 
+	// LeaseManagerConfig holds configuration values specific to the LeaseManager.
+	LeaseManagerConfig *LeaseManagerConfig
+
 	// PartOfCluster must be set if the TestServer is joining others in a cluster.
 	// If not set (and hence the server is the only one in the cluster), the
 	// default zone config will be overridden to disable all replication - so that
 	// tests don't get log spam about ranges not being replicated enough. This
 	// is always set to true when the server is started via a TestCluster.
 	PartOfCluster bool
-
-	// Listener (if nonempty) is the listener to use for all incoming RPCs.
-	// If a listener is installed, it informs the RPC `Addr` used below. The
-	// Server itself knows to close it out. This is useful for when a test wants
-	// manual control over how the join flags (`JoinAddr`) are populated, and
-	// installs listeners manually to know which addresses to point to.
-	Listener net.Listener
 
 	// Addr (if nonempty) is the RPC address to use for the test server.
 	Addr string
@@ -65,7 +60,7 @@ type TestServerArgs struct {
 	// JoinAddr is the address of a node we are joining.
 	//
 	// If left empty and the TestServer is being added to a nonempty cluster, this
-	// will be set to the address of the cluster's first node.
+	// will be set to the the address of the cluster's first node.
 	JoinAddr string
 
 	// StoreSpecs define the stores for this server. If you want more than
@@ -84,10 +79,6 @@ type TestServerArgs struct {
 
 	// ExternalIODir is used to initialize field in cluster.Settings.
 	ExternalIODir string
-
-	// ExternalIODirConfig is used to initialize the same-named
-	// field on the server.Config struct.
-	ExternalIODirConfig ExternalIODirConfig
 
 	// Fields copied to the server.Config.
 	Insecure                    bool
@@ -126,9 +117,6 @@ type TestServerArgs struct {
 	// If set, web session authentication will be disabled, even if the server
 	// is running in secure mode.
 	DisableWebSessionAuthentication bool
-
-	// IF set, the demo login endpoint will be enabled.
-	EnableDemoLoginEndpoint bool
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -154,21 +142,16 @@ type TestClusterArgs struct {
 	// no entry in the map for a particular server, the default ServerArgs are
 	// used.
 	//
-	// These are indexes: the key 0 corresponds to the first node.
-	//
 	// A copy of an entry from this map will be copied to each individual server
 	// and potentially adjusted according to ReplicationMode.
 	ServerArgsPerNode map[int]TestServerArgs
 }
 
 var (
-	// DefaultTestStoreSpec is just a single in memory store of 512 MiB
+	// DefaultTestStoreSpec is just a single in memory store of 100 MiB
 	// with no special attributes.
 	DefaultTestStoreSpec = StoreSpec{
 		InMemory: true,
-		Size: SizeSpec{
-			InBytes: 512 << 20,
-		},
 	}
 )
 
@@ -197,7 +180,6 @@ func DefaultTestTempStorageConfigWithSize(
 	return TempStorageConfig{
 		InMemory: true,
 		Mon:      monitor,
-		Settings: st,
 	}
 }
 
@@ -213,9 +195,9 @@ const (
 	// If ReplicationAuto is used, StartTestCluster() blocks until the initial
 	// ranges are fully replicated.
 	ReplicationAuto TestClusterReplicationMode = iota
-	// ReplicationManual means that the split, merge and replication queues of all
-	// servers are stopped, and the test must manually control splitting, merging
-	// and replication through the TestServer.
+	// ReplicationManual means that the split and replication queues of all
+	// servers are stopped, and the test must manually control splitting and
+	// replication through the TestServer.
 	// Note that the server starts with a number of system ranges,
 	// all with a single replica on node 1.
 	ReplicationManual
@@ -230,13 +212,6 @@ type TestTenantArgs struct {
 	// to be created by StartTenant.
 	Existing bool
 
-	// IdleExitAfter, if set will cause the tenant process to exit if idle.
-	IdleExitAfter time.Duration
-
-	// Settings allows the caller to control the settings object used for the
-	// tenant cluster.
-	Settings *cluster.Settings
-
 	// AllowSettingClusterSettings, if true, allows the tenant to set in-memory
 	// cluster settings.
 	AllowSettingClusterSettings bool
@@ -247,32 +222,4 @@ type TestTenantArgs struct {
 
 	// TestingKnobs for the test server.
 	TestingKnobs TestingKnobs
-
-	// Test server starts with secure mode by default. When this is set to true
-	// it will switch to insecure
-	ForceInsecure bool
-
-	// MemoryPoolSize is the amount of memory in bytes that can be used by SQL
-	// clients to store row data in server RAM.
-	MemoryPoolSize int64
-
-	// TempStorageConfig is used to configure temp storage, which stores
-	// ephemeral data when processing large queries.
-	TempStorageConfig *TempStorageConfig
-
-	// ExternalIODirConfig is used to initialize the same-named
-	// field on the server.Config struct.
-	ExternalIODirConfig ExternalIODirConfig
-
-	// ExternalIODir is used to initialize the same-named field on
-	// the params.Settings struct.
-	ExternalIODir string
-
-	// If set, this will be appended to the Postgres URL by functions that
-	// automatically open a connection to the server. That's equivalent to running
-	// SET DATABASE=foo, which works even if the database doesn't (yet) exist.
-	UseDatabase string
-
-	// Skip check for tenant existence when running the test.
-	SkipTenantCheck bool
 }

@@ -18,75 +18,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
 )
-
-func TestMaybeAppendColumn(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	st := cluster.MakeTestingClusterSettings()
-	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
-	defer testMemMonitor.Stop(ctx)
-	memAcc := testMemMonitor.MakeBoundAccount()
-	defer memAcc.Close(ctx)
-	evalCtx := tree.MakeTestingEvalContext(st)
-	testColumnFactory := coldataext.NewExtendedColumnFactory(&evalCtx)
-	testAllocator := colmem.NewAllocator(ctx, &memAcc, testColumnFactory)
-
-	t.Run("VectorAlreadyPresent", func(t *testing.T) {
-		b := testAllocator.NewMemBatchWithMaxCapacity([]*types.T{types.Int})
-		b.SetLength(coldata.BatchSize())
-		colIdx := 0
-
-		// We expect an error to occur because of a type mismatch.
-		err := colexecerror.CatchVectorizedRuntimeError(func() {
-			testAllocator.MaybeAppendColumn(b, types.Float, colIdx)
-		})
-		require.NotNil(t, err)
-
-		// We expect that the old vector is reallocated because the present one
-		// is made to be of insufficient capacity.
-		b.ReplaceCol(testAllocator.NewMemColumn(types.Int, 1 /* capacity */), colIdx)
-		testAllocator.MaybeAppendColumn(b, types.Int, colIdx)
-		require.Equal(t, coldata.BatchSize(), b.ColVec(colIdx).Capacity())
-
-		// We expect that Bytes vector is reset when it is being reused (if it
-		// isn't, a panic will occur when we try to set at the same positions).
-		bytesColIdx := 1
-		testAllocator.MaybeAppendColumn(b, types.Bytes, bytesColIdx)
-		b.ColVec(bytesColIdx).Bytes().Set(0, []byte{0})
-		b.ColVec(bytesColIdx).Bytes().Set(1, []byte{1})
-		testAllocator.MaybeAppendColumn(b, types.Bytes, bytesColIdx)
-		b.ColVec(bytesColIdx).Bytes().Set(0, []byte{0})
-		b.ColVec(bytesColIdx).Bytes().Set(1, []byte{1})
-	})
-
-	t.Run("WindowedBatchZeroCapacity", func(t *testing.T) {
-		b := testAllocator.NewMemBatchWithFixedCapacity([]*types.T{}, 0 /* capacity */)
-		b.SetLength(coldata.BatchSize())
-		colIdx := 0
-
-		// We expect that although the batch is of zero capacity, the newly
-		// appended vectors are allocated of coldata.BatchSize() capacity.
-		testAllocator.MaybeAppendColumn(b, types.Int, colIdx)
-		require.Equal(t, 1, b.Width())
-		require.Equal(t, coldata.BatchSize(), b.ColVec(colIdx).Length())
-		_ = b.ColVec(colIdx).Int64()[0]
-	})
-}
 
 func TestResetMaybeReallocate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -167,86 +107,4 @@ func TestResetMaybeReallocate(t *testing.T) {
 			require.Equal(t, 2*minCapacity, b.Capacity())
 		}
 	})
-}
-
-func TestPerformAppend(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	// Include decimal and geometry columns because PerformAppend differs from
-	// PerformOperation for decimal and datum types.
-	var typs = []*types.T{types.Int, types.Decimal, types.Geometry}
-	const intIdx, decimalIdx, datumIdx = 0, 1, 2
-	const maxBatchSize = 100
-	const numRows = 1000
-	const nullOk = false
-	const resetChance = 0.5
-
-	ctx := context.Background()
-	rng, _ := randutil.NewPseudoRand()
-	st := cluster.MakeTestingClusterSettings()
-	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
-	defer testMemMonitor.Stop(ctx)
-	memAcc := testMemMonitor.MakeBoundAccount()
-	defer memAcc.Close(ctx)
-	evalCtx := tree.MakeTestingEvalContext(st)
-	testColumnFactory := coldataext.NewExtendedColumnFactory(&evalCtx)
-	testAllocator := colmem.NewAllocator(ctx, &memAcc, testColumnFactory)
-
-	batch1 := colexecutils.NewAppendOnlyBufferedBatch(testAllocator, typs, nil /* colsToStore */)
-	batch2 := colexecutils.NewAppendOnlyBufferedBatch(testAllocator, typs, nil /* colsToStore */)
-
-	getRandomInputBatch := func(count int) coldata.Batch {
-		b := testAllocator.NewMemBatchWithFixedCapacity(typs, count)
-		for i := 0; i < count; i++ {
-			datum := randgen.RandDatum(rng, typs[intIdx], nullOk)
-			b.ColVec(intIdx).Int64()[i] = int64(*(datum.(*tree.DInt)))
-			datum = randgen.RandDatum(rng, typs[decimalIdx], nullOk)
-			b.ColVec(decimalIdx).Decimal()[i] = datum.(*tree.DDecimal).Decimal
-			datum = randgen.RandDatum(rng, typs[datumIdx], nullOk)
-			b.ColVec(datumIdx).Datum().Set(i, datum)
-		}
-		b.SetLength(count)
-		return b
-	}
-
-	rowsLeft := numRows
-	for {
-		if rowsLeft <= 0 {
-			break
-		}
-		batchSize := rng.Intn(maxBatchSize-1) + 1 // Ensure a nonzero batch size.
-		if batchSize > rowsLeft {
-			batchSize = rowsLeft
-		}
-		rowsLeft -= batchSize
-		inputBatch := getRandomInputBatch(batchSize)
-
-		beforePerformOperation := testAllocator.Used()
-		testAllocator.PerformOperation(batch1.ColVecs(), func() {
-			for colIdx, destVec := range batch1.ColVecs() {
-				destVec.Append(coldata.SliceArgs{
-					Src:       inputBatch.ColVec(colIdx),
-					DestIdx:   batch1.Length(),
-					SrcEndIdx: inputBatch.Length(),
-				})
-			}
-			batch1.SetLength(batch1.Length() + inputBatch.Length())
-		})
-		afterPerformOperation := testAllocator.Used()
-
-		beforePerformAppend := afterPerformOperation
-		batch2.AppendTuples(inputBatch, 0 /* startIdx */, inputBatch.Length())
-		afterPerformAppend := testAllocator.Used()
-
-		performOperationMem := afterPerformOperation - beforePerformOperation
-		performAppendMem := afterPerformAppend - beforePerformAppend
-		require.Equal(t, performOperationMem, performAppendMem)
-
-		if rng.Float64() < resetChance {
-			// Reset the test batches in order to simulate reuse.
-			batch1.ResetInternalBatch()
-			batch2.ResetInternalBatch()
-		}
-	}
 }

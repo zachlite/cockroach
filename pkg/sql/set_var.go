@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -103,7 +102,7 @@ func (n *setVarNode) startExec(params runParams) error {
 
 	if _, ok := DummyVars[n.name]; ok {
 		telemetry.Inc(sqltelemetry.DummySessionVarValueCounter(n.name))
-		params.p.BufferClientNotice(
+		params.p.SendClientNotice(
 			params.ctx,
 			pgnotice.NewWithSeverityf("WARNING", "setting session var %q is a no-op", n.name),
 		)
@@ -133,9 +132,6 @@ func (n *setVarNode) startExec(params runParams) error {
 
 	if n.v.RuntimeSet != nil {
 		return n.v.RuntimeSet(params.ctx, params.extendedEvalCtx, strVal)
-	}
-	if n.v.SetWithPlanner != nil {
-		return n.v.SetWithPlanner(params.ctx, params.p, strVal)
 	}
 	return n.v.Set(params.ctx, params.p.sessionDataMutator, strVal)
 }
@@ -276,18 +272,12 @@ func makeTimeoutVarGetter(
 	}
 }
 
-func validateTimeoutVar(
-	style duration.IntervalStyle, timeString string, varName string,
-) (time.Duration, error) {
-	interval, err := tree.ParseDIntervalWithTypeMetadata(
-		style,
-		timeString,
-		types.IntervalTypeMetadata{
-			DurationField: types.IntervalDurationField{
-				DurationType: types.IntervalDurationType_MILLISECOND,
-			},
+func validateTimeoutVar(timeString string, varName string) (time.Duration, error) {
+	interval, err := tree.ParseDIntervalWithTypeMetadata(timeString, types.IntervalTypeMetadata{
+		DurationField: types.IntervalDurationField{
+			DurationType: types.IntervalDurationType_MILLISECOND,
 		},
-	)
+	})
 	if err != nil {
 		return 0, wrapSetVarError(varName, timeString, "%v", err)
 	}
@@ -305,11 +295,7 @@ func validateTimeoutVar(
 }
 
 func stmtTimeoutVarSet(ctx context.Context, m *sessionDataMutator, s string) error {
-	timeout, err := validateTimeoutVar(
-		m.data.GetIntervalStyle(),
-		s,
-		"statement_timeout",
-	)
+	timeout, err := validateTimeoutVar(s, "statement_timeout")
 	if err != nil {
 		return err
 	}
@@ -319,11 +305,7 @@ func stmtTimeoutVarSet(ctx context.Context, m *sessionDataMutator, s string) err
 }
 
 func idleInSessionTimeoutVarSet(ctx context.Context, m *sessionDataMutator, s string) error {
-	timeout, err := validateTimeoutVar(
-		m.data.GetIntervalStyle(),
-		s,
-		"idle_in_session_timeout",
-	)
+	timeout, err := validateTimeoutVar(s, "idle_in_session_timeout")
 	if err != nil {
 		return err
 	}
@@ -335,11 +317,8 @@ func idleInSessionTimeoutVarSet(ctx context.Context, m *sessionDataMutator, s st
 func idleInTransactionSessionTimeoutVarSet(
 	ctx context.Context, m *sessionDataMutator, s string,
 ) error {
-	timeout, err := validateTimeoutVar(
-		m.data.GetIntervalStyle(),
-		s,
-		"idle_in_transaction_session_timeout",
-	)
+	timeout, err := validateTimeoutVar(s,
+		"idle_in_transaction_session_timeout")
 	if err != nil {
 		return err
 	}

@@ -17,15 +17,14 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/schemafeed"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -38,19 +37,17 @@ import (
 type Config struct {
 	Settings           *cluster.Settings
 	DB                 *kv.DB
-	Codec              keys.SQLCodec
 	Clock              *hlc.Clock
 	Gossip             gossip.OptionalGossip
 	Spans              []roachpb.Span
-	BackfillCheckpoint []roachpb.Span
 	Targets            jobspb.ChangefeedTargets
-	Sink               kvevent.Writer
-	Metrics            *kvevent.Metrics
+	Sink               EventBufferWriter
+	LeaseMgr           *lease.Manager
+	Metrics            *Metrics
 	MM                 *mon.BytesMonitor
 	WithDiff           bool
 	SchemaChangeEvents changefeedbase.SchemaChangeEventClass
 	SchemaChangePolicy changefeedbase.SchemaChangePolicy
-	SchemaFeed         schemafeed.SchemaFeed
 
 	// If true, the feed will begin with a dump of data at exactly the
 	// InitialHighWater. This is a peculiar behavior. In general the
@@ -58,18 +55,23 @@ type Config struct {
 	// been seen.
 	NeedsInitialScan bool
 
-	// InitialHighWater is the timestamp after which new events are guaranteed to
+	// InitialHighWater is the timestamp from which new events are guaranteed to
 	// be produced.
 	InitialHighWater hlc.Timestamp
-
-	// Knobs are kvfeed testing knobs.
-	Knobs TestingKnobs
 }
 
 // Run will run the kvfeed. The feed runs synchronously and returns an
 // error when it finishes.
 func Run(ctx context.Context, cfg Config) error {
-
+	g := ctxgroup.WithContext(ctx)
+	var sf schemaFeed
+	{
+		rawSF := schemafeed.New(makeTablefeedConfig(cfg))
+		// Start polling the schemafeed, which must be done concurrently with
+		// the individual rangefeed routines.
+		g.GoCtx(rawSF.Run)
+		sf = rawSF
+	}
 	var sc kvScanner
 	{
 		sc = &scanRequestScanner{
@@ -84,22 +86,15 @@ func Run(ctx context.Context, cfg Config) error {
 		distSender := sender.(*kv.CrossRangeTxnWrapperSender).Wrapped().(*kvcoord.DistSender)
 		pff = rangefeedFactory(distSender.RangeFeed)
 	}
-
-	bf := func() kvevent.Buffer {
-		return kvevent.NewErrorWrapperEventBuffer(kvevent.NewMemBuffer(cfg.MM.MakeBoundAccount(), cfg.Metrics))
+	bf := func() EventBuffer {
+		return makeMemBuffer(cfg.MM.MakeBoundAccount(), cfg.Metrics)
 	}
-
 	f := newKVFeed(
-		cfg.Sink, cfg.Spans, cfg.BackfillCheckpoint,
+		cfg.Sink, cfg.Spans,
 		cfg.SchemaChangeEvents, cfg.SchemaChangePolicy,
 		cfg.NeedsInitialScan, cfg.WithDiff,
 		cfg.InitialHighWater,
-		cfg.Codec,
-		cfg.SchemaFeed,
-		sc, pff, bf, cfg.Knobs)
-
-	g := ctxgroup.WithContext(ctx)
-	g.GoCtx(cfg.SchemaFeed.Run)
+		sf, sc, pff, bf)
 	g.GoCtx(f.run)
 	err := g.Wait()
 	// NB: The higher layers of the changefeed should detect the boundary and the
@@ -122,69 +117,55 @@ type schemaChangeDetectedError struct {
 }
 
 func (e schemaChangeDetectedError) Error() string {
-	return fmt.Sprintf("schema change detected at %v", e.ts)
+	return fmt.Sprintf("schema change deteceted at %v", e.ts)
 }
 
-type unsupportedSchemaChangeDetected struct {
-	desc string
-	ts   hlc.Timestamp
-}
-
-func (e unsupportedSchemaChangeDetected) Error() string {
-	return fmt.Sprintf("unsupported schema change %s detected at %s", e.desc, e.ts.AsOfSystemTime())
+type schemaFeed interface {
+	Peek(ctx context.Context, atOrBefore hlc.Timestamp) (events []schemafeed.TableEvent, err error)
+	Pop(ctx context.Context, atOrBefore hlc.Timestamp) (events []schemafeed.TableEvent, err error)
 }
 
 type kvFeed struct {
 	spans               []roachpb.Span
-	checkpoint          []roachpb.Span
 	withDiff            bool
 	withInitialBackfill bool
 	initialHighWater    hlc.Timestamp
-	sink                kvevent.Writer
-	codec               keys.SQLCodec
+	sink                EventBufferWriter
 
 	schemaChangeEvents changefeedbase.SchemaChangeEventClass
 	schemaChangePolicy changefeedbase.SchemaChangePolicy
 
 	// These dependencies are made available for test injection.
-	bufferFactory func() kvevent.Buffer
-	tableFeed     schemafeed.SchemaFeed
+	bufferFactory func() EventBuffer
+	tableFeed     schemaFeed
 	scanner       kvScanner
 	physicalFeed  physicalFeedFactory
-	knobs         TestingKnobs
 }
 
-// TODO(yevgeniy): This method is a kitchen sink. Refactor.
 func newKVFeed(
-	sink kvevent.Writer,
+	sink EventBufferWriter,
 	spans []roachpb.Span,
-	checkpoint []roachpb.Span,
 	schemaChangeEvents changefeedbase.SchemaChangeEventClass,
 	schemaChangePolicy changefeedbase.SchemaChangePolicy,
 	withInitialBackfill, withDiff bool,
 	initialHighWater hlc.Timestamp,
-	codec keys.SQLCodec,
-	tf schemafeed.SchemaFeed,
+	tf schemaFeed,
 	sc kvScanner,
 	pff physicalFeedFactory,
-	bf func() kvevent.Buffer,
-	knobs TestingKnobs,
+	bf func() EventBuffer,
 ) *kvFeed {
 	return &kvFeed{
 		sink:                sink,
 		spans:               spans,
-		checkpoint:          checkpoint,
 		withInitialBackfill: withInitialBackfill,
 		withDiff:            withDiff,
 		initialHighWater:    initialHighWater,
 		schemaChangeEvents:  schemaChangeEvents,
 		schemaChangePolicy:  schemaChangePolicy,
-		codec:               codec,
 		tableFeed:           tf,
 		scanner:             sc,
 		physicalFeed:        pff,
 		bufferFactory:       bf,
-		knobs:               knobs,
 	}
 }
 
@@ -197,72 +178,25 @@ func (f *kvFeed) run(ctx context.Context) (err error) {
 		if err = f.scanIfShould(ctx, initialScan, highWater); err != nil {
 			return err
 		}
-
 		highWater, err = f.runUntilTableEvent(ctx, highWater)
 		if err != nil {
 			return err
 		}
 
-		boundaryType := jobspb.ResolvedSpan_BACKFILL
-		if f.schemaChangePolicy == changefeedbase.OptSchemaChangePolicyStop {
-			boundaryType = jobspb.ResolvedSpan_EXIT
-		} else if events, err := f.tableFeed.Peek(ctx, highWater.Next()); err == nil && isRegionalByRowChange(events) {
-			// NOTE(ssd): The user is unlikely to see this
-			// error. The schemafeed will fail with an
-			// non-retriable error, meaning we likely
-			// return right after runUntilTableEvent
-			// above.
-			return unsupportedSchemaChangeDetected{
-				desc: "SET REGIONAL BY ROW",
-				ts:   highWater.Next(),
-			}
-		} else if err == nil && isPrimaryKeyChange(events) {
-			boundaryType = jobspb.ResolvedSpan_RESTART
-		} else if err != nil {
-			return err
-		}
 		// Resolve all of the spans as a boundary if the policy indicates that
 		// we should do so.
-		if f.schemaChangePolicy != changefeedbase.OptSchemaChangePolicyNoBackfill ||
-			boundaryType == jobspb.ResolvedSpan_RESTART {
-			for _, sp := range f.spans {
-				if err := f.sink.AddResolved(ctx, sp, highWater, boundaryType); err != nil {
+		if f.schemaChangePolicy != changefeedbase.OptSchemaChangePolicyNoBackfill {
+			for _, span := range f.spans {
+				if err := f.sink.AddResolved(ctx, span, highWater, true); err != nil {
 					return err
 				}
 			}
 		}
 		// Exit if the policy says we should.
-		if boundaryType == jobspb.ResolvedSpan_RESTART || boundaryType == jobspb.ResolvedSpan_EXIT {
+		if f.schemaChangePolicy == changefeedbase.OptSchemaChangePolicyStop {
 			return schemaChangeDetectedError{highWater.Next()}
 		}
 	}
-}
-
-func isPrimaryKeyChange(events []schemafeed.TableEvent) bool {
-	for _, ev := range events {
-		if schemafeed.IsPrimaryIndexChange(ev) {
-			return true
-		}
-	}
-	return false
-}
-
-func isRegionalByRowChange(events []schemafeed.TableEvent) bool {
-	for _, ev := range events {
-		if schemafeed.IsRegionalByRowChange(ev) {
-			return true
-		}
-	}
-	return false
-}
-
-// filterCheckpointSpans filters spans which have already been completed,
-// and returns the list of spans that still need to be done.
-func filterCheckpointSpans(spans []roachpb.Span, completed []roachpb.Span) []roachpb.Span {
-	var sg roachpb.SpanGroup
-	sg.Add(spans...)
-	sg.Sub(completed...)
-	return sg.Slice()
 }
 
 func (f *kvFeed) scanIfShould(
@@ -278,33 +212,13 @@ func (f *kvFeed) scanIfShould(
 	// time with an initial backfill but if you use a cursor then you will get the
 	// updates after that timestamp.
 	isInitialScan := initialScan && f.withInitialBackfill
-	var spansToBackfill []roachpb.Span
 	if isInitialScan {
 		scanTime = highWater
-		spansToBackfill = f.spans
 	} else if len(events) > 0 {
-		// Only backfill for the tables which have events which may not be all
-		// of the targets.
+		// TODO(ajwerner): In this case we should only backfill for the tables
+		// which have events which may not be all of the targets.
 		for _, ev := range events {
-			// If the event corresponds to a primary index change, it does not
-			// indicate a need for a backfill. Furthermore, if the changefeed was
-			// started at this timestamp because of a restart due to a primary index
-			// change, then a backfill should not be performed for that table.
-			// Below the code detects whether the set of spans to backfill is empty
-			// and returns early. This is important because a change to a primary
-			// index may occur in the same transaction as a change requiring a
-			// backfill.
-			if schemafeed.IsOnlyPrimaryIndexChange(ev) {
-				continue
-			}
-			tablePrefix := f.codec.TablePrefix(uint32(ev.After.GetID()))
-			tableSpan := roachpb.Span{Key: tablePrefix, EndKey: tablePrefix.PrefixEnd()}
-			for _, sp := range f.spans {
-				if tableSpan.Overlaps(sp) {
-					spansToBackfill = append(spansToBackfill, sp)
-				}
-			}
-			if !scanTime.Equal(ev.After.GetModificationTime()) {
+			if !scanTime.Equal(ev.After.ModificationTime) {
 				log.Fatalf(ctx, "found event in shouldScan which did not occur at the scan time %v: %v",
 					scanTime, ev)
 			}
@@ -318,22 +232,14 @@ func (f *kvFeed) scanIfShould(
 		return err
 	}
 
-	// If we have initial checkpoint information specified, filter out
-	// spans which we no longer need to scan.
-	if initialScan {
-		spansToBackfill = filterCheckpointSpans(spansToBackfill, f.checkpoint)
-	}
-
-	if (!isInitialScan && f.schemaChangePolicy == changefeedbase.OptSchemaChangePolicyNoBackfill) ||
-		len(spansToBackfill) == 0 {
+	if !isInitialScan && f.schemaChangePolicy == changefeedbase.OptSchemaChangePolicyNoBackfill {
 		return nil
 	}
 
 	if err := f.scanner.Scan(ctx, f.sink, physicalConfig{
-		Spans:     spansToBackfill,
+		Spans:     f.spans,
 		Timestamp: scanTime,
 		WithDiff:  !isInitialScan && f.withDiff,
-		Knobs:     f.knobs,
 	}); err != nil {
 		return err
 	}
@@ -357,12 +263,7 @@ func (f *kvFeed) runUntilTableEvent(
 	defer memBuf.Close(ctx)
 
 	g := ctxgroup.WithContext(ctx)
-	physicalCfg := physicalConfig{
-		Spans:     f.spans,
-		Timestamp: startFrom,
-		WithDiff:  f.withDiff,
-		Knobs:     f.knobs,
-	}
+	physicalCfg := physicalConfig{Spans: f.spans, Timestamp: startFrom, WithDiff: f.withDiff}
 	g.GoCtx(func(ctx context.Context) error {
 		return copyFromSourceToSinkUntilTableEvent(ctx, f.sink, memBuf, physicalCfg, f.tableFeed)
 	})
@@ -397,27 +298,22 @@ func (e *errBoundaryReached) Error() string {
 }
 
 // copyFromSourceToSinkUntilTableEvents will pull read entries from source and
-// publish them to sink if there is no table event from the SchemaFeed. If a
+// publish them to sink if there is no table event from the schemaFeed. If a
 // tableEvent occurs then the function will return once all of the spans have
 // been resolved up to the event. The first such event will be returned as
 // *errBoundaryReached. A nil error will never be returned.
 func copyFromSourceToSinkUntilTableEvent(
 	ctx context.Context,
-	sink kvevent.Writer,
-	source kvevent.Reader,
+	sink EventBufferWriter,
+	source EventBufferReader,
 	cfg physicalConfig,
-	tables schemafeed.SchemaFeed,
+	tables schemaFeed,
 ) error {
 	// Maintain a local spanfrontier to tell when all the component rangefeeds
 	// being watched have reached the Scan boundary.
-	frontier, err := span.MakeFrontier(cfg.Spans...)
-	if err != nil {
-		return err
-	}
+	frontier := span.MakeFrontier(cfg.Spans...)
 	for _, span := range cfg.Spans {
-		if _, err := frontier.Forward(span, cfg.Timestamp); err != nil {
-			return err
-		}
+		frontier.Forward(span, cfg.Timestamp)
 	}
 	var (
 		scanBoundary         *errBoundaryReached
@@ -434,45 +330,41 @@ func copyFromSourceToSinkUntilTableEvent(
 			}
 			return nil
 		}
-		applyScanBoundary = func(e kvevent.Event) (skipEvent, reachedBoundary bool, err error) {
+		applyScanBoundary = func(e Event) (skipEvent, reachedBoundary bool) {
 			if scanBoundary == nil {
-				return false, false, nil
+				return false, false
 			}
 			if e.Timestamp().Less(scanBoundary.Timestamp()) {
-				return false, false, nil
+				return false, false
 			}
 			switch e.Type() {
-			case kvevent.TypeKV:
-				return true, false, nil
-			case kvevent.TypeResolved:
+			case KVEvent:
+				return true, false
+			case ResolvedEvent:
 				boundaryResolvedTimestamp := scanBoundary.Timestamp().Prev()
 				resolved := e.Resolved()
 				if resolved.Timestamp.LessEq(boundaryResolvedTimestamp) {
-					return false, false, nil
+					return false, false
 				}
-				if _, err := frontier.Forward(resolved.Span, boundaryResolvedTimestamp); err != nil {
-					return false, false, err
-				}
-				return true, frontier.Frontier().EqOrdering(boundaryResolvedTimestamp), nil
+				frontier.Forward(resolved.Span, boundaryResolvedTimestamp)
+				return true, frontier.Frontier() == boundaryResolvedTimestamp
 			default:
 				log.Fatal(ctx, "unknown event type")
-				return false, false, nil
+				return false, false
 			}
 		}
-		addEntry = func(e kvevent.Event) error {
+		addEntry = func(e Event) error {
 			switch e.Type() {
-			case kvevent.TypeKV:
+			case KVEvent:
 				return sink.AddKV(ctx, e.KV(), e.PrevValue(), e.BackfillTimestamp())
-			case kvevent.TypeResolved:
+			case ResolvedEvent:
 				// TODO(ajwerner): technically this doesn't need to happen for most
 				// events - we just need to make sure we forward for events which are
 				// at scanBoundary.Prev(). We may not yet know about that scanBoundary.
 				// The logic currently doesn't make this clean.
 				resolved := e.Resolved()
-				if _, err := frontier.Forward(resolved.Span, resolved.Timestamp); err != nil {
-					return err
-				}
-				return sink.AddResolved(ctx, resolved.Span, resolved.Timestamp, jobspb.ResolvedSpan_NONE)
+				frontier.Forward(resolved.Span, resolved.Timestamp)
+				return sink.AddResolved(ctx, resolved.Span, resolved.Timestamp, false)
 			default:
 				log.Fatal(ctx, "unknown event type")
 				return nil
@@ -487,10 +379,7 @@ func copyFromSourceToSinkUntilTableEvent(
 		if err := checkForScanBoundary(e.Timestamp()); err != nil {
 			return err
 		}
-		skipEntry, scanBoundaryReached, err := applyScanBoundary(e)
-		if err != nil {
-			return err
-		}
+		skipEntry, scanBoundaryReached := applyScanBoundary(e)
 		if scanBoundaryReached {
 			// All component rangefeeds are now at the boundary.
 			// Break out of the ctxgroup by returning the sentinel error.
@@ -502,5 +391,17 @@ func copyFromSourceToSinkUntilTableEvent(
 		if err := addEntry(e); err != nil {
 			return err
 		}
+	}
+}
+
+func makeTablefeedConfig(cfg Config) schemafeed.Config {
+	return schemafeed.Config{
+		DB:                 cfg.DB,
+		Clock:              cfg.Clock,
+		Settings:           cfg.Settings,
+		Targets:            cfg.Targets,
+		LeaseManager:       cfg.LeaseMgr,
+		SchemaChangeEvents: cfg.SchemaChangeEvents,
+		InitialHighWater:   cfg.InitialHighWater,
 	}
 }

@@ -105,7 +105,8 @@ func (c *CustomFuncs) MergeProjectWithValues(
 // 	1. The single output column is of type tuple.
 // 	2. All tuples in the single column are either TupleExpr's or ConstExpr's
 //     that wrap DTuples, as opposed to dynamically generated tuples.
-func (c *CustomFuncs) CanUnnestTuplesFromValues(values *memo.ValuesExpr) bool {
+func (c *CustomFuncs) CanUnnestTuplesFromValues(expr memo.RelExpr) bool {
+	values := expr.(*memo.ValuesExpr)
 	colTypeFam := c.mem.Metadata().ColumnMeta(values.Cols[0]).Type.Family()
 	if colTypeFam != types.TupleFamily {
 		return false
@@ -185,8 +186,9 @@ func (c *CustomFuncs) MakeColsForUnnestTuples(tupleColID opt.ColumnID) opt.ColLi
 //   (3, 4)
 //
 func (c *CustomFuncs) UnnestTuplesFromValues(
-	values *memo.ValuesExpr, valuesCols opt.ColList,
+	expr memo.RelExpr, valuesCols opt.ColList,
 ) memo.RelExpr {
+	values := expr.(*memo.ValuesExpr)
 	tupleColID := values.Cols[0]
 	tupleType := c.mem.Metadata().ColumnMeta(tupleColID).Type
 	outTuples := make(memo.ScalarListExpr, len(values.Rows))
@@ -265,8 +267,9 @@ func (c *CustomFuncs) FoldTupleColumnAccess(
 // (1) all references exist in the first row and (2) that all keys from the
 // first row also exist in all other rows.
 func (c *CustomFuncs) CanUnnestJSONFromValues(
-	values *memo.ValuesExpr, projections memo.ProjectionsExpr, jsonCol opt.ColumnID,
+	relExpr memo.RelExpr, projections memo.ProjectionsExpr, jsonCol opt.ColumnID,
 ) bool {
+	values := relExpr.(*memo.ValuesExpr)
 	colTypeFam := c.mem.Metadata().ColumnMeta(values.Cols[0]).Type.Family()
 	if colTypeFam != types.JsonFamily {
 		return false
@@ -397,9 +400,8 @@ func (c *CustomFuncs) CanUnnestJSONFromValues(
 // of JSON expressions and a ColList with columns corresponding to each JSON key
 // in the first row of the ValuesExpr. It returns a new Values operator with the
 // json fields expanded out into the Values rows.
-func (c *CustomFuncs) UnnestJSONFromValues(
-	values *memo.ValuesExpr, newCols opt.ColList,
-) memo.RelExpr {
+func (c *CustomFuncs) UnnestJSONFromValues(expr memo.RelExpr, newCols opt.ColList) memo.RelExpr {
+	values := expr.(*memo.ValuesExpr)
 	outTuples := make(memo.ScalarListExpr, len(values.Rows))
 	valTypes := make([]*types.T, len(newCols))
 	for i := range valTypes {
@@ -459,9 +461,10 @@ func (c *CustomFuncs) FoldJSONFieldAccess(
 	projections memo.ProjectionsExpr,
 	newCols opt.ColList,
 	oldColID opt.ColumnID,
-	oldValues *memo.ValuesExpr,
+	oldInput memo.RelExpr,
 ) memo.ProjectionsExpr {
 	newProjections := make(memo.ProjectionsExpr, len(projections))
+	oldValues := oldInput.(*memo.ValuesExpr)
 
 	// Create a mapping from JSON keys to the new columns that were created for
 	// them.
@@ -507,9 +510,8 @@ func (c *CustomFuncs) FoldJSONFieldAccess(
 // MakeColsForUnnestJSON creates a new column for each key in the first row of
 // the given ValuesExpr, and returns a ColList with those columns. The columns
 // will be in the same order as the corresponding keys from the first row.
-func (c *CustomFuncs) MakeColsForUnnestJSON(
-	values *memo.ValuesExpr, jsonCol opt.ColumnID,
-) opt.ColList {
+func (c *CustomFuncs) MakeColsForUnnestJSON(input memo.RelExpr, jsonCol opt.ColumnID) opt.ColList {
+	values := input.(*memo.ValuesExpr)
 	dJSON := values.Rows[0].(*memo.TupleExpr).Elems[0].(*memo.ConstExpr).Value.(*tree.DJSON)
 	mem := c.mem.Metadata()
 	jsonAlias := mem.ColumnMeta(jsonCol).Alias
@@ -536,9 +538,9 @@ func (c *CustomFuncs) MakeColsForUnnestJSON(
 // 2. The Values output column being remapped is not in the passthrough set.
 //
 func (c *CustomFuncs) CanPushColumnRemappingIntoValues(
-	projections memo.ProjectionsExpr, passthrough opt.ColSet, values *memo.ValuesExpr,
+	projections memo.ProjectionsExpr, passthrough opt.ColSet, values memo.RelExpr,
 ) bool {
-	outputCols := values.Relational().OutputCols
+	outputCols := values.(*memo.ValuesExpr).Relational().OutputCols
 	for i := range projections {
 		if variable, ok := projections[i].Element.(*memo.VariableExpr); ok {
 			if !passthrough.Contains(variable.Col) && outputCols.Contains(variable.Col) {
@@ -576,8 +578,9 @@ func (c *CustomFuncs) CanPushColumnRemappingIntoValues(
 // This allows other rules to fire. In the above example, EliminateProject can
 // now remove the Project altogether.
 func (c *CustomFuncs) PushColumnRemappingIntoValues(
-	oldValues *memo.ValuesExpr, oldProjections memo.ProjectionsExpr, oldPassthrough opt.ColSet,
+	oldInput memo.RelExpr, oldProjections memo.ProjectionsExpr, oldPassthrough opt.ColSet,
 ) memo.RelExpr {
+	oldValues := oldInput.(*memo.ValuesExpr)
 	oldValuesCols := oldValues.Relational().OutputCols
 	newPassthrough := oldPassthrough.Copy()
 	replacementCols := make(map[opt.ColumnID]opt.ColumnID)

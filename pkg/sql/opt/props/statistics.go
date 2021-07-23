@@ -103,24 +103,8 @@ func (s *Statistics) ApplySelectivity(selectivity Selectivity) {
 // RowCount and Selectivity are updated. Note that DistinctCounts, NullCounts,
 // and Histograms are not updated.
 func (s *Statistics) UnapplySelectivity(selectivity Selectivity) {
-	// Make sure that we don't increase the row count to something larger than it
-	// was at the beginning. Selectivity will never exceed 1, so use that fact to
-	// update the RowCount.
-	adjustedSelectivity := s.Selectivity
+	s.RowCount /= selectivity.AsFloat()
 	s.Selectivity.Divide(selectivity)
-	adjustedSelectivity.Divide(s.Selectivity)
-	s.RowCount /= adjustedSelectivity.AsFloat()
-}
-
-// LimitSelectivity limits the Selectivity to the given max selectivity.
-// RowCount and Selectivity are updated. Note that DistinctCounts, NullCounts,
-// and Histograms are not updated.
-func (s *Statistics) LimitSelectivity(maxSelectivity Selectivity) {
-	if s.Selectivity.selectivity > maxSelectivity.selectivity {
-		adjustedSelectivity := maxSelectivity
-		adjustedSelectivity.Divide(s.Selectivity)
-		s.ApplySelectivity(adjustedSelectivity)
-	}
 }
 
 // UnionWith unions this Statistics object with another Statistics object. It
@@ -245,14 +229,14 @@ func (c ColumnStatistics) Less(i, j int) bool {
 
 	prev := opt.ColumnID(0)
 	for {
-		nextI, ok := c[i].Cols.Next(prev + 1)
+		nextI, ok := c[i].Cols.Next(prev)
 		if !ok {
 			return false
 		}
 
 		// No need to check if ok since both ColSets are the same length and
 		// so far have had the same elements.
-		nextJ, _ := c[j].Cols.Next(prev + 1)
+		nextJ, _ := c[j].Cols.Next(prev)
 
 		if nextI != nextJ {
 			return nextI < nextJ

@@ -49,14 +49,7 @@ type Batch struct {
 	// The Header which will be used to send the resulting BatchRequest.
 	// To be modified directly.
 	Header roachpb.Header
-	// The AdmissionHeader which will be used when sending the resulting
-	// BatchRequest. To be modified directly.
-	AdmissionHeader roachpb.AdmissionHeader
-	reqs            []roachpb.RequestUnion
-
-	// approxMutationReqBytes tracks the approximate size of keys and values in
-	// mutations added to this batch via Put, CPut, InitPut, Del, etc.
-	approxMutationReqBytes int
+	reqs   []roachpb.RequestUnion
 	// Set when AddRawRequest is used, in which case using the "other"
 	// operations renders the batch unusable.
 	raw bool
@@ -260,6 +253,8 @@ func (b *Batch) fillResults(ctx context.Context) {
 			case *roachpb.TruncateLogRequest:
 			case *roachpb.RequestLeaseRequest:
 			case *roachpb.CheckConsistencyRequest:
+			case *roachpb.WriteBatchRequest:
+			case *roachpb.ImportRequest:
 			case *roachpb.AdminScatterRequest:
 			case *roachpb.AddSSTableRequest:
 			case *roachpb.MigrateRequest:
@@ -389,7 +384,6 @@ func (b *Batch) put(key, value interface{}, inline bool) {
 	} else {
 		b.appendReqs(roachpb.NewPut(k, v))
 	}
-	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	b.initResult(1, 1, notRaw, nil)
 }
 
@@ -495,7 +489,6 @@ func (b *Batch) cputInternal(
 	} else {
 		b.appendReqs(roachpb.NewConditionalPut(k, v, expValue, allowNotExist))
 	}
-	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	b.initResult(1, 1, notRaw, nil)
 }
 
@@ -519,7 +512,6 @@ func (b *Batch) InitPut(key, value interface{}, failOnTombstones bool) {
 		return
 	}
 	b.appendReqs(roachpb.NewInitPut(k, v, failOnTombstones))
-	b.approxMutationReqBytes += len(k) + len(v.RawBytes)
 	b.initResult(1, 1, notRaw, nil)
 }
 
@@ -621,7 +613,6 @@ func (b *Batch) Del(keys ...interface{}) {
 			return
 		}
 		reqs = append(reqs, roachpb.NewDelete(k))
-		b.approxMutationReqBytes += len(k)
 	}
 	b.appendReqs(reqs...)
 	b.initResult(len(reqs), len(reqs), notRaw, nil)
@@ -759,6 +750,28 @@ func (b *Batch) adminRelocateRange(
 	b.initResult(1, 0, notRaw, nil)
 }
 
+// writeBatch is only exported on DB.
+func (b *Batch) writeBatch(s, e interface{}, data []byte) {
+	begin, err := marshalKey(s)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	end, err := marshalKey(e)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	span := roachpb.Span{Key: begin, EndKey: end}
+	req := &roachpb.WriteBatchRequest{
+		RequestHeader: roachpb.RequestHeaderFromSpan(span),
+		DataSpan:      span,
+		Data:          data,
+	}
+	b.appendReqs(req)
+	b.initResult(1, 0, notRaw, nil)
+}
+
 // addSSTable is only exported on DB.
 func (b *Batch) addSSTable(
 	s, e interface{},
@@ -812,11 +825,4 @@ func (b *Batch) migrate(s, e interface{}, version roachpb.Version) {
 	}
 	b.appendReqs(req)
 	b.initResult(1, 0, notRaw, nil)
-}
-
-// ApproximateMutationBytes returns the approximate byte size of the mutations
-// added to this batch via Put, CPut, InitPut, Del, etc methods. Mutations added
-// via AddRawRequest are not tracked.
-func (b *Batch) ApproximateMutationBytes() int {
-	return b.approxMutationReqBytes
 }

@@ -76,7 +76,6 @@ func NewAppendOnlyBufferedBatch(
 	batch := allocator.NewMemBatchWithFixedCapacity(typs, 0 /* capacity */)
 	return &AppendOnlyBufferedBatch{
 		batch:       batch,
-		allocator:   allocator,
 		colVecs:     batch.ColVecs(),
 		colsToStore: colsToStore,
 	}
@@ -98,7 +97,6 @@ type AppendOnlyBufferedBatch struct {
 	// through the implementation of each method of coldata.Batch interface.
 	batch coldata.Batch
 
-	allocator   *colmem.Allocator
 	length      int
 	colVecs     []coldata.Vec
 	colsToStore []int
@@ -196,24 +194,22 @@ func (b *AppendOnlyBufferedBatch) String() string {
 
 // AppendTuples is a helper method that appends all tuples with indices in range
 // [startIdx, endIdx) from batch (paying attention to the selection vector)
-// into b. The newly allocated memory is registered with the allocator used to
-// create this AppendOnlyBufferedBatch.
+// into b.
+// NOTE: this does *not* perform memory accounting.
 // NOTE: batch must be of non-zero length.
 func (b *AppendOnlyBufferedBatch) AppendTuples(batch coldata.Batch, startIdx, endIdx int) {
-	b.allocator.PerformAppend(b, func() {
-		for _, colIdx := range b.colsToStore {
-			b.colVecs[colIdx].Append(
-				coldata.SliceArgs{
-					Src:         batch.ColVec(colIdx),
-					Sel:         batch.Selection(),
-					DestIdx:     b.length,
-					SrcStartIdx: startIdx,
-					SrcEndIdx:   endIdx,
-				},
-			)
-		}
-		b.length += endIdx - startIdx
-	})
+	for _, colIdx := range b.colsToStore {
+		b.colVecs[colIdx].Append(
+			coldata.SliceArgs{
+				Src:         batch.ColVec(colIdx),
+				Sel:         batch.Selection(),
+				DestIdx:     b.length,
+				SrcStartIdx: startIdx,
+				SrcEndIdx:   endIdx,
+			},
+		)
+	}
+	b.length += endIdx - startIdx
 }
 
 // MaybeAllocateUint64Array makes sure that the passed in array is allocated, of
@@ -293,18 +289,4 @@ func EnsureSelectionVectorLength(old []int, length int) []int {
 		return old[:length]
 	}
 	return make([]int, length)
-}
-
-// UpdateBatchState updates batch to have the specified length and the selection
-// vector. If usesSel is true, then sel must be non-nil; otherwise, sel is
-// ignored.
-func UpdateBatchState(batch coldata.Batch, length int, usesSel bool, sel []int) {
-	batch.SetSelection(usesSel)
-	if usesSel {
-		copy(batch.Selection()[:length], sel[:length])
-	}
-	// Note: when usesSel is true, we have to set the length on the batch
-	// **after** setting the selection vector because we might use the values
-	// in the selection vector to maintain invariants (like for flat bytes).
-	batch.SetLength(length)
 }

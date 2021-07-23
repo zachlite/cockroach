@@ -28,8 +28,8 @@ import (
 // GrantRoleNode creates entries in the system.role_members table.
 // This is called from GRANT <ROLE>
 type GrantRoleNode struct {
-	roles       []security.SQLUsername
-	members     []security.SQLUsername
+	roles       tree.NameList
+	members     tree.NameList
 	adminOption bool
 
 	run grantRoleRun
@@ -59,25 +59,13 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 	if err != nil {
 		return nil, err
 	}
+	for i := range n.Roles {
+		// TODO(solon): there are SQL identifiers (tree.Name) in
+		// n.Roles, but we want SQL usernames. Do we normalize or not? For
+		// reference, REASSIGN / OWNER TO do normalize.  Related:
+		// https://github.com/cockroachdb/cockroach/issues/54696
+		r := security.MakeSQLUsernameFromPreNormalizedString(string(n.Roles[i]))
 
-	inputRoles := make([]security.SQLUsername, len(n.Roles))
-	inputMembers := make([]security.SQLUsername, len(n.Members))
-	for i, role := range n.Roles {
-		normalizedRole, err := security.MakeSQLUsernameFromUserInput(string(role), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		inputRoles[i] = normalizedRole
-	}
-	for i, member := range n.Members {
-		normalizedMember, err := security.MakeSQLUsernameFromUserInput(string(member), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		inputMembers[i] = normalizedMember
-	}
-
-	for _, r := range inputRoles {
 		// If the user is an admin, don't check if the user is allowed to add/drop
 		// roles in the role. However, if the role being modified is the admin role, then
 		// make sure the user is an admin with the admin option.
@@ -87,10 +75,10 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 		if isAdmin, ok := allRoles[r]; !ok || !isAdmin {
 			if r.IsAdminRole() {
 				return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
-					"%s is not a role admin for role %s", p.User(), r)
+					"%s is not a role admin for role %s", p.User(), n.Roles[i])
 			}
 			return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
-				"%s is not a superuser or role admin for role %s", p.User(), r)
+				"%s is not a superuser or role admin for role %s", p.User(), n.Roles[i])
 		}
 	}
 
@@ -105,24 +93,37 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 	// NOTE: membership manipulation involving the "public" pseudo-role fails with
 	// "role public does not exist". This matches postgres behavior.
 
-	for _, r := range inputRoles {
+	for i := range n.Roles {
+		// TODO(solon): there are SQL identifiers (tree.Name) in
+		// n.Roles, but we want SQL usernames. Do we normalize or not? For
+		// reference, REASSIGN / OWNER TO do normalize.  Related:
+		// https://github.com/cockroachdb/cockroach/issues/54696
+		r := security.MakeSQLUsernameFromPreNormalizedString(string(n.Roles[i]))
+
 		if _, ok := roles[r]; !ok {
 			maybeOption := strings.ToUpper(r.Normalized())
 			for name := range roleoption.ByName {
 				if maybeOption == name {
 					return nil, errors.WithHintf(
 						pgerror.Newf(pgcode.UndefinedObject,
-							"role/user %s does not exist", r),
+							"role/user %s does not exist", n.Roles[i]),
 						"%s is a role option, try using ALTER ROLE to change a role's options.", maybeOption)
 				}
 			}
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", r)
+			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", n.Roles[i])
 		}
 	}
 
-	for _, m := range inputMembers {
+	for i := range n.Members {
+		// TODO(solon): there are SQL identifiers (tree.Name) in
+		// n.Members but we want SQL usernames. Do we normalize or not? For
+		// reference, REASSIGN / OWNER TO do normalize.  Related:
+		// https://github.com/cockroachdb/cockroach/issues/54696
+		m := security.MakeSQLUsernameFromPreNormalizedString(string(n.Members[i]))
+
 		if _, ok := roles[m]; !ok {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", m)
+			return nil, pgerror.Newf(pgcode.UndefinedObject,
+				"role/user %s does not exist", n.Members[i])
 		}
 	}
 
@@ -131,7 +132,13 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 	// For each grant.Role, we lookup all the roles it is a member of.
 	// After adding a given edge (grant.Member ∈ grant.Role), we add the edge to the list as well.
 	allRoleMemberships := make(map[security.SQLUsername]map[security.SQLUsername]bool)
-	for _, r := range inputRoles {
+	for _, rawR := range n.Roles {
+		// TODO(solon): there are SQL identifiers (tree.Name) in
+		// n.Roles but we want SQL usernames. Do we normalize or not? For
+		// reference, REASSIGN / OWNER TO do normalize.  Related:
+		// https://github.com/cockroachdb/cockroach/issues/54696
+		r := security.MakeSQLUsernameFromPreNormalizedString(string(rawR))
+
 		allRoles, err := p.MemberOfWithAdminOption(ctx, r)
 		if err != nil {
 			return nil, err
@@ -141,17 +148,24 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 
 	// Since we perform no queries here, check all role/member pairs for cycles.
 	// Only if there are no errors do we proceed to write them.
-	for _, r := range inputRoles {
-		for _, m := range inputMembers {
+	for _, rawR := range n.Roles {
+		// TODO(solon): there are SQL identifiers (tree.Name) in
+		// n.Roles but we want SQL usernames. Do we normalize or not? For
+		// reference, REASSIGN / OWNER TO do normalize.  Related:
+		// https://github.com/cockroachdb/cockroach/issues/54696
+		r := security.MakeSQLUsernameFromPreNormalizedString(string(rawR))
+		for _, rawM := range n.Members {
+			// TODO(solon): ditto above, names in n.Members.
+			m := security.MakeSQLUsernameFromPreNormalizedString(string(rawM))
 			if r == m {
 				// self-cycle.
-				return nil, pgerror.Newf(pgcode.InvalidGrantOperation, "%s cannot be a member of itself", m)
+				return nil, pgerror.Newf(pgcode.InvalidGrantOperation, "%s cannot be a member of itself", rawM)
 			}
 			// Check if grant.Role ∈ ... ∈ grant.Member
 			if memberOf, ok := allRoleMemberships[r]; ok {
 				if _, ok = memberOf[m]; ok {
 					return nil, pgerror.Newf(pgcode.InvalidGrantOperation,
-						"making %s a member of %s would create a cycle", m, r)
+						"making %s a member of %s would create a cycle", rawM, rawR)
 				}
 			}
 			// Add the new membership. We don't care about the actual bool value.
@@ -163,8 +177,8 @@ func (p *planner) GrantRoleNode(ctx context.Context, n *tree.GrantRole) (*GrantR
 	}
 
 	return &GrantRoleNode{
-		roles:       inputRoles,
-		members:     inputMembers,
+		roles:       n.Roles,
+		members:     n.Members,
 		adminOption: n.AdminOption,
 	}, nil
 }
@@ -191,7 +205,7 @@ func (n *GrantRoleNode) startExec(params runParams) error {
 				params.p.txn,
 				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 				memberStmt,
-				r.Normalized(), m.Normalized(), n.adminOption,
+				r, m, n.adminOption,
 			)
 			if err != nil {
 				return err

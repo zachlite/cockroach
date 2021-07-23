@@ -64,14 +64,14 @@ func (n *reassignOwnedByNode) startExec(params runParams) error {
 
 	// Filter for all objects in current database.
 	currentDatabase := params.p.CurrentDatabase()
-	currentDbDesc, err := params.p.Descriptors().GetMutableDatabaseByName(
+	_, currentDbDesc, err := params.p.Descriptors().GetMutableDatabaseByName(
 		params.ctx, params.p.txn, currentDatabase, tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return err
 	}
 
 	lCtx := newInternalLookupCtx(params.ctx, allDescs,
-		currentDbDesc.ImmutableCopy().(catalog.DatabaseDescriptor), nil /* fallback */)
+		currentDbDesc.ImmutableCopy().(*dbdesc.Immutable), nil /* fallback */)
 
 	// Iterate through each object, check for ownership by an old role.
 	for _, oldRole := range n.n.OldRoles {
@@ -98,7 +98,7 @@ func (n *reassignOwnedByNode) startExec(params runParams) error {
 			}
 		}
 		for _, typID := range lCtx.typIDs {
-			if IsOwner(lCtx.typDescs[typID], oldRole) && (lCtx.typDescs[typID].GetKind() != descpb.TypeDescriptor_ALIAS) {
+			if IsOwner(lCtx.typDescs[typID], oldRole) && (lCtx.typDescs[typID].Kind != descpb.TypeDescriptor_ALIAS) {
 				if err := n.reassignTypeOwner(lCtx.typDescs[typID], params); err != nil {
 					return err
 				}
@@ -109,9 +109,9 @@ func (n *reassignOwnedByNode) startExec(params runParams) error {
 }
 
 func (n *reassignOwnedByNode) reassignDatabaseOwner(
-	dbDesc catalog.DatabaseDescriptor, params runParams,
+	dbDesc *dbdesc.Immutable, params runParams,
 ) error {
-	mutableDbDesc, err := params.p.Descriptors().GetMutableDescriptorByID(params.ctx, dbDesc.GetID(), params.p.txn)
+	mutableDbDesc, err := params.p.Descriptors().GetMutableDescriptorByID(params.ctx, dbDesc.ID, params.p.txn)
 	if err != nil {
 		return err
 	}
@@ -130,10 +130,10 @@ func (n *reassignOwnedByNode) reassignDatabaseOwner(
 }
 
 func (n *reassignOwnedByNode) reassignSchemaOwner(
-	schemaDesc catalog.SchemaDescriptor, params runParams,
+	schemaDesc *schemadesc.Immutable, params runParams,
 ) error {
 	mutableSchemaDesc, err := params.p.Descriptors().GetMutableDescriptorByID(
-		params.ctx, schemaDesc.GetID(), params.p.txn)
+		params.ctx, schemaDesc.ID, params.p.txn)
 	if err != nil {
 		return err
 	}
@@ -171,15 +171,15 @@ func (n *reassignOwnedByNode) reassignTableOwner(
 }
 
 func (n *reassignOwnedByNode) reassignTypeOwner(
-	typDesc catalog.TypeDescriptor, params runParams,
+	typDesc *typedesc.Immutable, params runParams,
 ) error {
 	mutableTypDesc, err := params.p.Descriptors().GetMutableDescriptorByID(
-		params.ctx, typDesc.GetID(), params.p.txn)
+		params.ctx, typDesc.ID, params.p.txn)
 	if err != nil {
 		return err
 	}
 	arrayDesc, err := params.p.Descriptors().GetMutableTypeVersionByID(
-		params.ctx, params.p.txn, typDesc.GetArrayTypeID())
+		params.ctx, params.p.txn, typDesc.ArrayTypeID)
 	if err != nil {
 		return err
 	}

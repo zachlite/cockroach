@@ -4,9 +4,6 @@ go_library(
     name = "wkt",
     srcs = [
         "lex.go",
-        "lex_errors.go",
-        "lex_stack.go",
-        "lex_types.go",
         "wkt.go",
         ":wkt-generated",  # keep
     ],
@@ -38,7 +35,7 @@ genrule(
     cat $(location wkt_generated.go) | sed -e 's/wktErrorVerbose = false/wktErrorVerbose = true/' > wkt_generated.go.tmp
     mv wkt_generated.go.tmp $(location wkt_generated.go)
     """,
-    exec_tools = [
+    tools = [
         "@org_golang_x_tools//cmd/goyacc",
     ],
 )

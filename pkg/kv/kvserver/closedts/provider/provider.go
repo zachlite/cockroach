@@ -117,7 +117,7 @@ func (p *Provider) runCloser(ctx context.Context) {
 	defer close(ch)
 
 	confCh := make(chan struct{}, 1)
-	confChanged := func(ctx context.Context) {
+	confChanged := func() {
 		select {
 		case confCh <- struct{}{}:
 		default:

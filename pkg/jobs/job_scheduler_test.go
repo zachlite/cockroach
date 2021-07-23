@@ -202,31 +202,30 @@ func TestJobSchedulerDaemonInitialScanDelay(t *testing.T) {
 
 func getScopedSettings() (*settings.Values, func()) {
 	sv := &settings.Values{}
-	sv.Init(context.Background(), nil)
+	sv.Init(nil)
 	return sv, settings.TestingSaveRegistry()
 }
 
 func TestJobSchedulerDaemonGetWaitPeriod(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 
 	sv, cleanup := getScopedSettings()
 	defer cleanup()
 
-	schedulerEnabledSetting.Override(ctx, sv, false)
+	schedulerEnabledSetting.Override(sv, false)
 
 	// When disabled, we wait 5 minutes before rechecking.
 	require.EqualValues(t, 5*time.Minute, getWaitPeriod(sv, nil))
-	schedulerEnabledSetting.Override(ctx, sv, true)
+	schedulerEnabledSetting.Override(sv, true)
 
 	// When pace is too low, we use something more reasonable.
-	schedulerPaceSetting.Override(ctx, sv, time.Nanosecond)
+	schedulerPaceSetting.Override(sv, time.Nanosecond)
 	require.EqualValues(t, minPacePeriod, getWaitPeriod(sv, nil))
 
 	// Otherwise, we use user specified setting.
 	pace := 42 * time.Second
-	schedulerPaceSetting.Override(ctx, sv, pace)
+	schedulerPaceSetting.Override(sv, pace)
 	require.EqualValues(t, pace, getWaitPeriod(sv, nil))
 }
 
@@ -289,7 +288,7 @@ func TestJobSchedulerCanBeDisabledWhileSleeping(t *testing.T) {
 
 	knobs := fastDaemonKnobs(func() time.Duration {
 		// Disable daemon
-		schedulerEnabledSetting.Override(ctx, &h.cfg.Settings.SV, false)
+		schedulerEnabledSetting.Override(&h.cfg.Settings.SV, false)
 
 		// Before we return, create a job which should not be executed
 		// (since the daemon is disabled).  We use our special executor
@@ -423,7 +422,7 @@ func TestJobSchedulerDaemonHonorsMaxJobsLimit(t *testing.T) {
 	// Advance our fake time 1 hour forward (plus a bit) so that the daemon finds matching jobs.
 	h.env.AdvanceTime(time.Hour + time.Second)
 	const jobsPerIteration = 2
-	schedulerMaxJobsPerIterationSetting.Override(ctx, &h.cfg.Settings.SV, jobsPerIteration)
+	schedulerMaxJobsPerIterationSetting.Override(&h.cfg.Settings.SV, jobsPerIteration)
 
 	// Make daemon execute initial scan immediately, but block subsequent scans.
 	h.cfg.TestingKnobs = fastDaemonKnobs(overridePaceSetting(time.Hour))

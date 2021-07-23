@@ -57,19 +57,14 @@ func writeLogStream(
 		*fileInfo
 	}
 	render := func(ei entryInfo, w io.Writer) (err error) {
-		// TODO(postamar): add support for other output formats
-		// Currently, `render` applies the `crdb-v1-tty` format regardless of the
-		// output logging format defined for the stderr sink. It should instead
-		// apply the selected output format.
 		var prefixBytes []byte
 		if prefixBytes, err = getPrefix(ei.fileInfo); err != nil {
 			return err
 		}
-		err = log.FormatLegacyEntryPrefixTTY(prefixBytes, w)
-		if err != nil {
+		if _, err = w.Write(prefixBytes); err != nil {
 			return err
 		}
-		return log.FormatLegacyEntryTTY(ei.Entry, w)
+		return log.FormatLegacyEntry(ei.Entry, w)
 	}
 
 	g, ctx := errgroup.WithContext(context.Background())
@@ -175,7 +170,6 @@ func newMergedStreamFromPatterns(
 	filePattern, programFilter *regexp.Regexp,
 	from, to time.Time,
 	editMode log.EditSensitiveData,
-	format string,
 ) (logStream, error) {
 	paths, err := expandPatterns(patterns)
 	if err != nil {
@@ -186,7 +180,7 @@ func newMergedStreamFromPatterns(
 	if err != nil {
 		return nil, err
 	}
-	return newMergedStream(ctx, files, from, to, editMode, format)
+	return newMergedStream(ctx, files, from, to, editMode)
 }
 
 func groupIndex(re *regexp.Regexp, groupName string) int {
@@ -199,11 +193,7 @@ func groupIndex(re *regexp.Regexp, groupName string) int {
 }
 
 func newMergedStream(
-	ctx context.Context,
-	files []fileInfo,
-	from, to time.Time,
-	editMode log.EditSensitiveData,
-	format string,
+	ctx context.Context, files []fileInfo, from, to time.Time, editMode log.EditSensitiveData,
 ) (*mergedStream, error) {
 	// TODO(ajwerner): think about clock movement and PID
 	const maxConcurrentFiles = 256 // should be far less than the FD limit
@@ -214,7 +204,7 @@ func newMergedStream(
 		return func() error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			s, err := newFileLogStream(files[i], from, to, editMode, format)
+			s, err := newFileLogStream(files[i], from, to, editMode)
 			if s != nil {
 				res[i] = s
 			}
@@ -449,10 +439,9 @@ type fileLogStream struct {
 	prevTime int64
 	fi       fileInfo
 	f        *os.File
-	d        log.EntryDecoder
+	d        *log.EntryDecoder
 	read     bool
 	editMode log.EditSensitiveData
-	format   string
 
 	e   logpb.Entry
 	err error
@@ -465,14 +454,13 @@ type fileLogStream struct {
 // file is always closed before returning from this constructor so the initial
 // peek does not consume resources.
 func newFileLogStream(
-	fi fileInfo, from, to time.Time, editMode log.EditSensitiveData, format string,
+	fi fileInfo, from, to time.Time, editMode log.EditSensitiveData,
 ) (logStream, error) {
 	s := &fileLogStream{
 		fi:       fi,
 		from:     from,
 		to:       to,
 		editMode: editMode,
-		format:   format,
 	}
 	if _, ok := s.peek(); !ok {
 		if err := s.error(); err != io.EOF {
@@ -495,13 +483,10 @@ func (s *fileLogStream) open() bool {
 	if s.f, s.err = os.Open(s.fi.path); s.err != nil {
 		return false
 	}
-	if s.err = seekToFirstAfterFrom(s.f, s.from, s.editMode, s.format); s.err != nil {
+	if s.err = seekToFirstAfterFrom(s.f, s.from, s.editMode); s.err != nil {
 		return false
 	}
-	var err error
-	if s.d, err = log.NewEntryDecoderWithFormat(bufio.NewReaderSize(s.f, readBufSize), s.editMode, s.format); err != nil {
-		panic(err)
-	}
+	s.d = log.NewEntryDecoder(bufio.NewReaderSize(s.f, readBufSize), s.editMode)
 	return true
 }
 
@@ -556,9 +541,7 @@ func (s *fileLogStream) error() error        { return s.err }
 
 // seekToFirstAfterFrom uses binary search to seek to an offset after all
 // entries which occur before from.
-func seekToFirstAfterFrom(
-	f *os.File, from time.Time, editMode log.EditSensitiveData, format string,
-) (err error) {
+func seekToFirstAfterFrom(f *os.File, from time.Time, editMode log.EditSensitiveData) (err error) {
 	if from.IsZero() {
 		return nil
 	}
@@ -577,11 +560,8 @@ func seekToFirstAfterFrom(
 			panic(err)
 		}
 		var e logpb.Entry
-		d, err := log.NewEntryDecoderWithFormat(f, editMode, format)
+		err := log.NewEntryDecoder(f, editMode).Decode(&e)
 		if err != nil {
-			panic(err)
-		}
-		if err := d.Decode(&e); err != nil {
 			if err == io.EOF {
 				return true
 			}
@@ -593,11 +573,7 @@ func seekToFirstAfterFrom(
 		return err
 	}
 	var e logpb.Entry
-	d, err := log.NewEntryDecoderWithFormat(f, editMode, format)
-	if err != nil {
-		return err
-	}
-	if err := d.Decode(&e); err != nil {
+	if err := log.NewEntryDecoder(f, editMode).Decode(&e); err != nil {
 		return err
 	}
 	_, err = f.Seek(int64(offset), io.SeekStart)

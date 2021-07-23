@@ -978,7 +978,6 @@ func (r mvccStatsReplicaInQueue) GetMVCCStats() enginepb.MVCCStats {
 func TestQueueRateLimitedTimeoutFunc(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 	type testCase struct {
 		guaranteedProcessingTime time.Duration
 		rateLimit                int64 // bytes/s
@@ -988,8 +987,8 @@ func TestQueueRateLimitedTimeoutFunc(t *testing.T) {
 	makeTest := func(tc testCase) (string, func(t *testing.T)) {
 		return fmt.Sprintf("%+v", tc), func(t *testing.T) {
 			st := cluster.MakeTestingClusterSettings()
-			queueGuaranteedProcessingTimeBudget.Override(ctx, &st.SV, tc.guaranteedProcessingTime)
-			recoverySnapshotRate.Override(ctx, &st.SV, tc.rateLimit)
+			queueGuaranteedProcessingTimeBudget.Override(&st.SV, tc.guaranteedProcessingTime)
+			recoverySnapshotRate.Override(&st.SV, tc.rateLimit)
 			tf := makeRateLimitedTimeoutFunc(recoverySnapshotRate)
 			repl := mvccStatsReplicaInQueue{
 				size: tc.replicaSize,

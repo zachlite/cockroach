@@ -187,7 +187,6 @@ CREATE TABLE pg_catalog.pg_class (
 	relrewrite OID,
 	relrowsecurity BOOL,
 	relpartbound STRING,
-	relminmxid INT,
   INDEX (oid)
 )`
 
@@ -215,7 +214,7 @@ CREATE TABLE pg_catalog.pg_constraint (
 	oid OID,
 	conname NAME,
 	connamespace OID,
-	contype "char",
+	contype STRING,
 	condeferrable BOOL,
 	condeferred BOOL,
 	convalidated BOOL,
@@ -223,9 +222,9 @@ CREATE TABLE pg_catalog.pg_constraint (
 	contypid OID,
 	conindid OID,
 	confrelid OID,
-	confupdtype "char",
-	confdeltype "char",
-	confmatchtype "char",
+	confupdtype STRING,
+	confdeltype STRING,
+	confmatchtype STRING,
 	conislocal BOOL,
 	coninhcount INT4,
 	connoinherit BOOL,
@@ -240,7 +239,6 @@ CREATE TABLE pg_catalog.pg_constraint (
 	-- condef is a CockroachDB extension that provides a SHOW CREATE CONSTRAINT
 	-- style string, for use by pg_get_constraintdef().
 	condef STRING,
-	conparentid OID,
   INDEX (conrelid)
 )`
 
@@ -533,7 +531,7 @@ CREATE TABLE pg_catalog.pg_operator (
 	oprname NAME,
 	oprnamespace OID,
 	oprowner OID,
-	oprkind "char",
+	oprkind TEXT,
 	oprcanmerge BOOL,
 	oprcanhash BOOL,
 	oprleft OID,
@@ -600,7 +598,7 @@ CREATE TABLE pg_catalog.pg_proc (
 	prorettype OID,
 	proargtypes OIDVECTOR,
 	proallargtypes OID[],
-	proargmodes "char"[],
+	proargmodes STRING[],
 	proargnames STRING[],
 	proargdefaults STRING,
 	protrftypes OID[],
@@ -631,8 +629,8 @@ CREATE TABLE pg_catalog.pg_rewrite (
 	oid OID,
 	rulename NAME,
 	ev_class OID,
-	ev_type "char",
-	ev_enabled "char",
+	ev_type TEXT,
+	ev_enabled TEXT,
 	is_instead BOOL,
 	ev_qual TEXT,
 	ev_action TEXT
@@ -758,7 +756,7 @@ CREATE TABLE pg_catalog.pg_trigger (
 	tgname NAME,
 	tgfoid OID,
 	tgtype INT2,
-	tgenabled "char",
+	tgenabled TEXT,
 	tgisinternal BOOL,
 	tgconstrrelid OID,
 	tgconstrindid OID,
@@ -1272,139 +1270,4 @@ CREATE TABLE pg_catalog.pg_amop (
 	amopfamily OID,
 	amopsortfamily OID,
 	amopstrategy INT2
-)`
-
-//PgCatalogLargeobjectMetadata is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogLargeobjectMetadata = `
-CREATE TABLE pg_catalog.pg_largeobject_metadata (
-	oid OID,
-	lomacl STRING[],
-	lomowner OID
-)`
-
-//PgCatalogPartitionedTable is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogPartitionedTable = `
-CREATE TABLE pg_catalog.pg_partitioned_table (
-	partrelid OID,
-	partstrat "char",
-	partattrs INT2VECTOR,
-	partclass OIDVECTOR,
-	partcollation OIDVECTOR,
-	partdefid OID,
-	partexprs STRING,
-	partnatts INT2
-)`
-
-//PgCatalogReplicationOriginStatus is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogReplicationOriginStatus = `
-CREATE TABLE pg_catalog.pg_replication_origin_status (
-	local_lsn STRING,
-	remote_lsn STRING,
-	external_id STRING,
-	local_id OID
-)`
-
-//PgCatalogReplicationSlots is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogReplicationSlots = `
-CREATE TABLE pg_catalog.pg_replication_slots (
-	safe_wal_size INT,
-	wal_status STRING,
-	plugin NAME,
-	restart_lsn STRING,
-	xmin INT,
-	confirmed_flush_lsn STRING,
-	database NAME,
-	datoid OID,
-	active BOOL,
-	catalog_xmin INT,
-	slot_name NAME,
-	active_pid INT4,
-	slot_type STRING,
-	temporary BOOL
-)`
-
-//PgCatalogInitPrivs is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogInitPrivs = `
-CREATE TABLE pg_catalog.pg_init_privs (
-	classoid OID,
-	initprivs STRING[],
-	objoid OID,
-	objsubid INT4,
-	privtype "char"
-)`
-
-//PgCatalogPolicy is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogPolicy = `
-CREATE TABLE pg_catalog.pg_policy (
-	polrelid OID,
-	polroles OID[],
-	polwithcheck STRING,
-	oid OID,
-	polcmd "char",
-	polname NAME,
-	polpermissive BOOL,
-	polqual STRING
-)`
-
-//PgCatalogSequences is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogSequences = `
-CREATE TABLE pg_catalog.pg_sequences (
-	schemaname NAME,
-	sequencename NAME,
-	sequenceowner NAME,
-	data_type REGTYPE,
-	start_value INT,
-	min_value INT,
-	max_value INT,
-	increment_by INT,
-	cycle BOOL,
-	cache_size INT,
-	last_value INT
-)`
-
-//PgCatalogSubscriptionRel is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogSubscriptionRel = `
-CREATE TABLE pg_catalog.pg_subscription_rel (
-	srrelid OID,
-	srsubid OID,
-	srsublsn STRING,
-	srsubstate "char"
-)`
-
-//PgCatalogStatDatabase is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogStatDatabase = `
-CREATE TABLE pg_catalog.pg_stat_database (
-	datid OID,
-	datname NAME,
-	numbackends INT4,
-	xact_commit INT,
-  xact_rollback INT,
-	blks_read INT,
-	blks_hit INT,
-	tup_returned INT,
-	tup_fetched INT,
-	tup_inserted INT,
-	tup_updated INT,
-	tup_deleted INT,
-	conflicts INT,
-	temp_files INT,
-	temp_bytes INT,
-	deadlocks INT,
-	checksum_failures INT,
-	checksum_last_failure TIMESTAMPTZ,
-	blk_read_time FLOAT,
-	blk_write_time FLOAT,
-	stats_reset TIMESTAMPTZ
-)`
-
-//PgCatalogStatDatabaseConflicts is an empty table in the pg_catalog that is not implemented yet
-const PgCatalogStatDatabaseConflicts = `
-CREATE TABLE pg_catalog.pg_stat_database_conflicts (
-  datid OID,
-  datname NAME,
-  confl_tablespace INT,
-  confl_lock INT,
-	confl_snapshot INT,
-	confl_bufferpin INT,
-	confl_deadlock INT
 )`

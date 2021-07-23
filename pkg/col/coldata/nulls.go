@@ -192,6 +192,27 @@ func (n *Nulls) UnsetNull(i int) {
 	n.nulls[i>>3] |= bitMask[i&7]
 }
 
+// Remove the unused warning.
+var (
+	n = Nulls{}
+	_ = n.swap
+)
+
+// swap swaps the null values at the argument indices. We implement the logic
+// directly on the byte array rather than case on the result of NullAt to avoid
+// having to take some branches.
+func (n *Nulls) swap(iIdx, jIdx int) {
+	i, j := uint64(iIdx), uint64(jIdx)
+	// Get original null values.
+	ni := (n.nulls[i/8] >> (i % 8)) & 0x1
+	nj := (n.nulls[j/8] >> (j % 8)) & 0x1
+	// Write into the correct positions.
+	iMask := bitMask[i%8]
+	jMask := bitMask[j%8]
+	n.nulls[i/8] = (n.nulls[i/8] & ^iMask) | (nj << (i % 8))
+	n.nulls[j/8] = (n.nulls[j/8] & ^jMask) | (ni << (j % 8))
+}
+
 // setSmallRange is a helper that copies over a slice [startIdx, startIdx+toSet)
 // of src and puts it into this nulls starting at destIdx.
 func (n *Nulls) setSmallRange(src *Nulls, destIdx, startIdx, toSet int) {
@@ -311,27 +332,42 @@ func (n *Nulls) Slice(start int, end int) Nulls {
 	return s
 }
 
+// MaxNumElements returns the maximum number of elements that this Nulls can
+// accommodate.
+func (n *Nulls) MaxNumElements() int {
+	return len(n.nulls) * 8
+}
+
 // NullBitmap returns the null bitmap.
 func (n *Nulls) NullBitmap() []byte {
 	return n.nulls
 }
 
-// SetNullBitmap sets the validity of first size elements in n according to bm.
-// The bits past the end of this size will be set to valid. It is assumed that
-// n has enough capacity to store size number of elements. If bm is zero length
-// or if size is 0, then all elements will be set to valid.
+// SetNullBitmap sets the null bitmap. size corresponds to how many elements
+// this bitmap represents. The bits past the end of this size will be set to
+// valid.
 func (n *Nulls) SetNullBitmap(bm []byte, size int) {
-	if len(bm) == 0 || size == 0 {
-		n.UnsetNulls()
-		return
-	}
-	numBytesToCopy := (size-1)/8 + 1
-	copy(n.nulls, bm[:numBytesToCopy])
-	n.UnsetNullsAfter(size)
-	// Compute precisely whether we have any invalid values or not.
+	n.nulls = bm
 	n.maybeHasNulls = false
-	for i := 0; i < numBytesToCopy; i++ {
-		if n.nulls[i] != onesMask {
+	// Set all indices as valid past the last element.
+	if len(bm) > 0 && size != 0 {
+		// Set the last bits in the last element in which we want to preserve null
+		// information. mod, if non-zero, is the number of bits we don't want to
+		// overwrite (otherwise all bits are important). Note that we cast size to a
+		// uint64 to avoid extra instructions when modding.
+		mod := uint64(size) % 8
+		endIdx := size - 1
+		if mod != 0 {
+			bm[endIdx/8] |= onesMask << mod
+		}
+		// Fill the rest of the bitmap.
+		for i := (endIdx / 8) + 1; i < len(bm); {
+			i += copy(bm[i:], filledNulls[:])
+		}
+	}
+
+	for i := 0; i < len(bm); i++ {
+		if bm[i] != onesMask {
 			n.maybeHasNulls = true
 			return
 		}
@@ -370,23 +406,12 @@ func (n *Nulls) Or(n2 *Nulls) *Nulls {
 	return res
 }
 
-// makeCopy returns a copy of n which can be modified independently.
-func (n *Nulls) makeCopy() Nulls {
+// Copy returns a copy of n which can be modified independently.
+func (n *Nulls) Copy() Nulls {
 	c := Nulls{
 		maybeHasNulls: n.maybeHasNulls,
 		nulls:         make([]byte, len(n.nulls)),
 	}
 	copy(c.nulls, n.nulls)
 	return c
-}
-
-// Copy copies the contents of other into n.
-func (n *Nulls) Copy(other *Nulls) {
-	n.maybeHasNulls = other.maybeHasNulls
-	if cap(n.nulls) < len(other.nulls) {
-		n.nulls = make([]byte, len(other.nulls))
-	} else {
-		n.nulls = n.nulls[:len(other.nulls)]
-	}
-	copy(n.nulls, other.nulls)
 }

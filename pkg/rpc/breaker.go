@@ -106,10 +106,10 @@ type breakerLogger struct {
 
 func (r breakerLogger) Debugf(format string, v ...interface{}) {
 	if log.V(2) {
-		log.Dev.InfofDepth(r.ctx, 1, format, v...)
+		log.InfofDepth(r.ctx, 1, format, v...)
 	}
 }
 
 func (r breakerLogger) Infof(format string, v ...interface{}) {
-	log.Ops.InfofDepth(r.ctx, 1, format, v...)
+	log.InfofDepth(r.ctx, 1, format, v...)
 }

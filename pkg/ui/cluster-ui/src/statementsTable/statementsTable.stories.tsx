@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -16,7 +16,6 @@ import {
   StatementsSortedTable,
 } from "./statementsTable";
 import statementsPagePropsFixture from "src/statementsPage/statementsPage.fixture";
-import { calculateTotalWorkload } from "src/util";
 
 const { statements } = statementsPagePropsFixture;
 
@@ -26,16 +25,10 @@ storiesOf("StatementsSortedTable", module)
     <StatementsSortedTable
       className="statements-table"
       data={statements}
-      columns={makeStatementsColumns(
-        statements,
-        "(internal)",
-        calculateTotalWorkload(statements),
-        { "1": "gcp-europe-west1", "2": "gcp-us-east1", "3": "gcp-us-west1" },
-        "statement",
-      )}
+      columns={makeStatementsColumns(statements, "(internal)")}
       sortSetting={{
         ascending: false,
-        columnTitle: "rowsRead",
+        sortKey: 3,
       }}
       pagination={{
         pageSize: 20,

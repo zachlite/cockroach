@@ -22,10 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -65,17 +63,11 @@ type Connector struct {
 
 	mu struct {
 		syncutil.RWMutex
-		client               *client
+		client               roachpb.InternalClient
 		nodeDescs            map[roachpb.NodeID]*roachpb.NodeDescriptor
 		systemConfig         *config.SystemConfig
 		systemConfigChannels []chan<- struct{}
 	}
-}
-
-// client represents an RPC client that proxies to a KV instance.
-type client struct {
-	roachpb.InternalClient
-	serverpb.StatusClient
 }
 
 // Connector is capable of providing information on each of the KV nodes in the
@@ -89,18 +81,13 @@ var _ kvcoord.NodeDescStore = (*Connector)(nil)
 // directly. Instead, the RangeLookup requests are proxied through existing KV
 // nodes while being subject to additional validation (e.g. is the Range being
 // requested owned by the requesting tenant?).
-var _ rangecache.RangeDescriptorDB = (*Connector)(nil)
+var _ kvcoord.RangeDescriptorDB = (*Connector)(nil)
 
 // Connector is capable of providing a filtered view of the SystemConfig
 // containing only information applicable to secondary tenants. This obviates
 // the need for SQL-only tenant processes to join the cluster-wide gossip
 // network.
 var _ config.SystemConfigProvider = (*Connector)(nil)
-
-// Connector is capable of find the region of every node in the cluster.
-// This is necessary for region validation for zone configurations and
-// multi-region primitives.
-var _ serverpb.RegionsServer = (*Connector)(nil)
 
 // NewConnector creates a new Connector.
 // NOTE: Calling Start will set cfg.RPCContext.ClusterID.
@@ -130,14 +117,12 @@ func (connectorFactory) NewConnector(
 // cluster's ID and set Connector.rpcContext.ClusterID.
 func (c *Connector) Start(ctx context.Context) error {
 	startupC := c.startupC
-	if err := c.rpcContext.Stopper.RunAsyncTask(context.Background(), "connector", func(ctx context.Context) {
+	c.rpcContext.Stopper.RunWorker(context.Background(), func(ctx context.Context) {
 		ctx = c.AnnotateCtx(ctx)
 		ctx, cancel := c.rpcContext.Stopper.WithCancelOnQuiesce(ctx)
 		defer cancel()
 		c.runGossipSubscription(ctx)
-	}); err != nil {
-		return err
-	}
+	})
 	// Synchronously block until the first GossipSubscription event.
 	select {
 	case <-startupC:
@@ -341,8 +326,8 @@ func (c *Connector) RangeLookup(
 		})
 		if err != nil {
 			log.Warningf(ctx, "error issuing RangeLookup RPC: %v", err)
-			if grpcutil.IsAuthError(err) {
-				// Authentication or authorization error. Propagate.
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
 				return nil, nil, err
 			}
 			// Soft RPC error. Drop client and retry.
@@ -358,21 +343,6 @@ func (c *Connector) RangeLookup(
 	return nil, nil, ctx.Err()
 }
 
-// Regions implements the serverpb.RegionsServer interface.
-func (c *Connector) Regions(
-	ctx context.Context, req *serverpb.RegionsRequest,
-) (*serverpb.RegionsResponse, error) {
-	ctx = c.AnnotateCtx(ctx)
-	for ctx.Err() == nil {
-		client, err := c.getClient(ctx)
-		if err != nil {
-			continue
-		}
-		return client.Regions(ctx, req)
-	}
-	return nil, ctx.Err()
-}
-
 // FirstRange implements the kvcoord.RangeDescriptorDB interface.
 func (c *Connector) FirstRange() (*roachpb.RangeDescriptor, error) {
 	return nil, status.Error(codes.Unauthenticated, "kvtenant.Proxy does not have access to FirstRange")
@@ -382,7 +352,7 @@ func (c *Connector) FirstRange() (*roachpb.RangeDescriptor, error) {
 // not, the method attempts to dial one of the configured addresses. The method
 // blocks until either a connection is successfully established or the provided
 // context is canceled.
-func (c *Connector) getClient(ctx context.Context) (*client, error) {
+func (c *Connector) getClient(ctx context.Context) (roachpb.InternalClient, error) {
 	c.mu.RLock()
 	if client := c.mu.client; client != nil {
 		c.mu.RUnlock()
@@ -392,20 +362,12 @@ func (c *Connector) getClient(ctx context.Context) (*client, error) {
 		dialCtx := c.AnnotateCtx(context.Background())
 		dialCtx, cancel := c.rpcContext.Stopper.WithCancelOnQuiesce(dialCtx)
 		defer cancel()
-		var client *client
-		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial",
-			func(ctx context.Context) error {
-				var err error
-				client, err = c.dialAddrs(ctx)
-				return err
-			})
+		err := c.rpcContext.Stopper.RunTaskWithErr(dialCtx, "kvtenant.Connector: dial", c.dialAddrs)
 		if err != nil {
 			return nil, err
 		}
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.mu.client = client
-		return client, nil
+		// NB: read lock not needed.
+		return c.mu.client, nil
 	})
 	c.mu.RUnlock()
 
@@ -414,7 +376,7 @@ func (c *Connector) getClient(ctx context.Context) (*client, error) {
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		return res.Val.(*client), nil
+		return res.Val.(roachpb.InternalClient), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -422,7 +384,7 @@ func (c *Connector) getClient(ctx context.Context) (*client, error) {
 
 // dialAddrs attempts to dial each of the configured addresses in a retry loop.
 // The method will only return a non-nil error on context cancellation.
-func (c *Connector) dialAddrs(ctx context.Context) (*client, error) {
+func (c *Connector) dialAddrs(ctx context.Context) error {
 	for r := retry.StartWithCtx(ctx, c.rpcRetryOptions); r.Next(); {
 		// Try each address on each retry iteration.
 		randStart := rand.Intn(len(c.addrs))
@@ -433,13 +395,14 @@ func (c *Connector) dialAddrs(ctx context.Context) (*client, error) {
 				log.Warningf(ctx, "error dialing tenant KV address %s: %v", addr, err)
 				continue
 			}
-			return &client{
-				InternalClient: roachpb.NewInternalClient(conn),
-				StatusClient:   serverpb.NewStatusClient(conn),
-			}, nil
+			client := roachpb.NewInternalClient(conn)
+			c.mu.Lock()
+			c.mu.client = client
+			c.mu.Unlock()
+			return nil
 		}
 	}
-	return nil, ctx.Err()
+	return ctx.Err()
 }
 
 func (c *Connector) dialAddr(ctx context.Context, addr string) (conn *grpc.ClientConn, err error) {

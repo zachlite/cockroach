@@ -39,15 +39,6 @@ var distanceTestCases = []struct {
 		"LINESTRING (1 1, 1 1)",
 	},
 	{
-		"Same 3D POINTs",
-		"POINT(1.0 2.0 3.0)",
-		"POINT(1.0 2.0 3.0)",
-		0,
-		0,
-		"LINESTRING (1 2, 1 2)",
-		"LINESTRING (1 2, 1 2)",
-	},
-	{
 		"Different POINTs",
 		"POINT(1.0 1.0)",
 		"POINT(2.0 1.0)",
@@ -55,15 +46,6 @@ var distanceTestCases = []struct {
 		1,
 		"LINESTRING(1.0 1.0, 2.0 1.0)",
 		"LINESTRING (1 1, 2 1)",
-	},
-	{
-		"Different 3D POINTs",
-		"POINT(0.0 1.0 2.0)",
-		"POINT(0.0 3.0 5.0)",
-		2,
-		2,
-		"LINESTRING (0 1, 0 3)",
-		"LINESTRING (0 1, 0 3)",
 	},
 	{
 		"POINT on LINESTRING",
@@ -760,10 +742,10 @@ func TestFrechetDistanceDensify(t *testing.T) {
 	pf := func(f float64) *float64 { return &f }
 
 	testCases := []struct {
-		a           string
-		b           string
-		densifyFrac float64
-		expected    *float64
+		a        string
+		b        string
+		densify  float64
+		expected *float64
 	}{
 		{"LINESTRING EMPTY", "LINESTRING EMPTY", 0.5, nil},
 		{"LINESTRING (0 0, 3 7, 5 5)", "LINESTRING EMPTY", 0.5, nil},
@@ -780,13 +762,13 @@ func TestFrechetDistanceDensify(t *testing.T) {
 
 	for _, tc := range testCases {
 		tc := tc
-		t.Run(fmt.Sprintf("%v %v densify %v", tc.a, tc.b, tc.densifyFrac), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%v %v densify %v", tc.a, tc.b, tc.densify), func(t *testing.T) {
 			a, err := geo.ParseGeometry(tc.a)
 			require.NoError(t, err)
 			b, err := geo.ParseGeometry(tc.b)
 			require.NoError(t, err)
 
-			ret, err := FrechetDistanceDensify(a, b, tc.densifyFrac)
+			ret, err := FrechetDistanceDensify(a, b, tc.densify)
 			require.NoError(t, err)
 			if tc.expected != nil && ret != nil {
 				require.Equal(t, *tc.expected, *ret)
@@ -935,111 +917,6 @@ func TestHausdorffDistanceDensify(t *testing.T) {
 
 	t.Run("errors if SRIDs mismatch", func(t *testing.T) {
 		_, err := HausdorffDistanceDensify(mismatchingSRIDGeometryA, mismatchingSRIDGeometryB, 0.5)
-		requireMismatchingSRIDError(t, err)
-	})
-}
-
-func TestClosestPoint(t *testing.T) {
-
-	testCases := []struct {
-		name     string
-		geomA    string
-		geomB    string
-		expected string
-	}{
-		{"Closest point between a POINT and LINESTRING",
-			"POINT(100 100)",
-			"LINESTRING(20 80, 98 190, 110 180, 50 75 )",
-			"POINT(100 100)",
-		},
-		{"Closest point between a LINESTRING and POINT",
-			"LINESTRING(20 80, 98 190, 110 180, 50 75 )",
-			"POINT(100 100)",
-			"POINT(73.0769230769231 115.384615384615)",
-		},
-		{"Closest point between 2 POLYGONS",
-			"POLYGON((175 150, 20 40, 50 60, 125 100, 175 150))",
-			"POLYGON((15 50, 2 4, 5 6, 12 10, 15 50))",
-			"POINT(20 40)",
-		},
-		{"Closest point between overlapping POLYGONS",
-			"POLYGON((175 150, 20 40, 50 60, 125 100, 175 150))",
-			"POLYGON((175 150, 20 40, 50 60, 125 100, 175 150))",
-			"POINT(175 150)",
-		},
-		{"Closest point between partially-overlapping POLYGONS",
-			"POLYGON((10 10, 14 14, 20 14, 20 10, 10 10))",
-			"POLYGON((12 12, 16 12, 16 8, 12 8, 12 12))",
-			"POINT(12 12)",
-		},
-		{"Closest point between MULTILINESTRING and POLYGON",
-			"MULTILINESTRING((0 0, 1 1, 2 2),(3 3, 4 4, 5 5))",
-			"POLYGON((10 10, 11 11, 14 11, 14 10, 10 10))",
-			"POINT(5 5)",
-		},
-		{"Closest point between MULTILINESTRING and MULTIPOINT",
-			"MULTILINESTRING((0 0, 1 1, 2 2),(3 3, 4 4, 5 5))",
-			"MULTIPOINT((2 1),(10 10))",
-			"POINT(1.5 1.5)",
-		},
-		{"Closest point between MULTIPOLYGON and MULTIPOINT",
-			"MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0),(1 1,2 1,2 2,1 2,1 1)), ((-1 -1,-1 -2,-2 -2,-2 -1,-1 -1)))",
-			"MULTIPOINT((20 10),(10 10))",
-			"POINT(4 4)",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			gA, err := geo.ParseGeometry(tc.geomA)
-			require.NoError(t, err)
-			gB, err := geo.ParseGeometry(tc.geomB)
-			require.NoError(t, err)
-
-			expected, err := geo.ParseGeometry(tc.expected)
-			require.NoError(t, err)
-			ret, err := ClosestPoint(gA, gB)
-			require.NoError(t, err)
-
-			requireGeometryWithinEpsilon(t, expected, ret, 2e-10)
-		})
-	}
-
-	testCasesEmpty := []struct {
-		name  string
-		geomA string
-		geomB string
-	}{
-		{"Closest point when both geometries are empty",
-			"LINESTRING EMPTY",
-			"LINESTRING EMPTY",
-		},
-		{"Closest point when first geometry is empty",
-			"LINESTRING EMPTY",
-			"POINT(100 100)",
-		},
-		{"Closest point when second geometry is empty",
-			"POINT(100 100)",
-			"LINESTRING EMPTY",
-		},
-	}
-
-	t.Run("errors for EMPTY geometries", func(t *testing.T) {
-		for _, tc := range testCasesEmpty {
-			t.Run(tc.name, func(t *testing.T) {
-				a, err := geo.ParseGeometry(tc.geomA)
-				require.NoError(t, err)
-				b, err := geo.ParseGeometry(tc.geomB)
-				require.NoError(t, err)
-				_, err = ClosestPoint(a, b)
-				require.Error(t, err)
-				require.True(t, geo.IsEmptyGeometryError(err))
-			})
-		}
-	})
-
-	t.Run("errors if SRIDs mismatch", func(t *testing.T) {
-		_, err := ClosestPoint(mismatchingSRIDGeometryA, mismatchingSRIDGeometryB)
 		requireMismatchingSRIDError(t, err)
 	})
 }

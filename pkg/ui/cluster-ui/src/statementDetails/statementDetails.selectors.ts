@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -21,9 +21,7 @@ import {
   getMatchParamByName,
   implicitTxnAttr,
   statementAttr,
-  databaseAttr,
   StatementStatistics,
-  statementKey,
 } from "../util";
 import { AggregateStatistics } from "../statementsTable";
 import { Fraction } from "./statementDetails";
@@ -31,37 +29,35 @@ import { Fraction } from "./statementDetails";
 interface StatementDetailsData {
   nodeId: number;
   implicitTxn: boolean;
-  fullScan: boolean;
-  database: string;
   stats: StatementStatistics[];
+}
+
+function keyByNodeAndImplicitTxn(stmt: ExecutionStatistics): string {
+  return stmt.node_id.toString() + stmt.implicit_txn;
 }
 
 function coalesceNodeStats(
   stats: ExecutionStatistics[],
 ): AggregateStatistics[] {
-  const statsKey: { [nodeId: string]: StatementDetailsData } = {};
+  const byNodeAndImplicitTxn: { [nodeId: string]: StatementDetailsData } = {};
 
   stats.forEach(stmt => {
-    const key = statementKey(stmt);
-    if (!(key in statsKey)) {
-      statsKey[key] = {
+    const key = keyByNodeAndImplicitTxn(stmt);
+    if (!(key in byNodeAndImplicitTxn)) {
+      byNodeAndImplicitTxn[key] = {
         nodeId: stmt.node_id,
         implicitTxn: stmt.implicit_txn,
-        fullScan: stmt.full_scan,
-        database: stmt.database,
         stats: [],
       };
     }
-    statsKey[key].stats.push(stmt.stats);
+    byNodeAndImplicitTxn[key].stats.push(stmt.stats);
   });
 
-  return Object.keys(statsKey).map(key => {
-    const stmt = statsKey[key];
+  return Object.keys(byNodeAndImplicitTxn).map(key => {
+    const stmt = byNodeAndImplicitTxn[key];
     return {
       label: stmt.nodeId.toString(),
       implicitTxn: stmt.implicitTxn,
-      fullScan: stmt.fullScan,
-      database: stmt.database,
       stats: combineStatementStats(stmt.stats),
     };
   });
@@ -91,16 +87,13 @@ function filterByRouterParamsPredicate(
 ): (stat: ExecutionStatistics) => boolean {
   const statement = getMatchParamByName(match, statementAttr);
   const implicitTxn = getMatchParamByName(match, implicitTxnAttr) === "true";
-  const database = getMatchParamByName(match, databaseAttr);
   let app = getMatchParamByName(match, appAttr);
 
-  const filterByKeys = (stmt: ExecutionStatistics) =>
-    stmt.statement === statement &&
-    stmt.implicit_txn === implicitTxn &&
-    (stmt.database === database || database === null);
+  const filterByStatementAndImplicitTxn = (stmt: ExecutionStatistics) =>
+    stmt.statement === statement && stmt.implicit_txn === implicitTxn;
 
   if (!app) {
-    return filterByKeys;
+    return filterByStatementAndImplicitTxn;
   }
 
   if (app === "(unset)") {
@@ -109,10 +102,12 @@ function filterByRouterParamsPredicate(
 
   if (app === "(internal)") {
     return (stmt: ExecutionStatistics) =>
-      filterByKeys(stmt) && stmt.app.startsWith(internalAppNamePrefix);
+      filterByStatementAndImplicitTxn(stmt) &&
+      stmt.app.startsWith(internalAppNamePrefix);
   }
 
-  return (stmt: ExecutionStatistics) => filterByKeys(stmt) && stmt.app === app;
+  return (stmt: ExecutionStatistics) =>
+    filterByStatementAndImplicitTxn(stmt) && stmt.app === app;
 }
 
 export const selectStatement = createSelector(
@@ -137,12 +132,10 @@ export const selectStatement = createSelector(
       stats: combineStatementStats(results.map(s => s.stats)),
       byNode: coalesceNodeStats(results),
       app: _.uniq(results.map(s => s.app)),
-      database: getMatchParamByName(props.match, databaseAttr),
       distSQL: fractionMatching(results, s => s.distSQL),
       vec: fractionMatching(results, s => s.vec),
       opt: fractionMatching(results, s => s.opt),
       implicit_txn: fractionMatching(results, s => s.implicit_txn),
-      full_scan: fractionMatching(results, s => s.full_scan),
       failed: fractionMatching(results, s => s.failed),
       node_id: _.uniq(results.map(s => s.node_id)),
     };

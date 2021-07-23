@@ -11,27 +11,27 @@
 package schemadesc
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
 
-var _ catalog.SchemaDescriptor = (*immutable)(nil)
+var _ catalog.SchemaDescriptor = (*Immutable)(nil)
 var _ catalog.SchemaDescriptor = (*Mutable)(nil)
 var _ catalog.MutableDescriptor = (*Mutable)(nil)
 
-// immutable wraps a Schema descriptor and provides methods on it.
-type immutable struct {
+// Immutable wraps a Schema descriptor and provides methods on it.
+type Immutable struct {
 	descpb.SchemaDescriptor
 
 	// isUncommittedVersion is set to true if this descriptor was created from
@@ -39,13 +39,9 @@ type immutable struct {
 	isUncommittedVersion bool
 }
 
-func (desc *immutable) SchemaKind() catalog.ResolvedSchemaKind {
-	return catalog.SchemaUserDefined
-}
-
-// SafeMessage makes immutable a SafeMessager.
-func (desc *immutable) SafeMessage() string {
-	return formatSafeMessage("schemadesc.immutable", desc)
+// SafeMessage makes Immutable a SafeMessager.
+func (desc *Immutable) SafeMessage() string {
+	return formatSafeMessage("schemadesc.Immutable", desc)
 }
 
 // SafeMessage makes Mutable a SafeMessager.
@@ -70,16 +66,46 @@ func formatSafeMessage(typeName string, desc catalog.SchemaDescriptor) string {
 // moment. This is an intermediate state on the road to descriptors being
 // handled outside of the catalog entirely as interfaces.
 type Mutable struct {
-	immutable
+	Immutable
 
-	ClusterVersion *immutable
-
-	// changed represents whether or not the descriptor was changed
-	// after RunPostDeserializationChanges.
-	changed bool
+	ClusterVersion *Immutable
 }
 
-var _ redact.SafeMessager = (*immutable)(nil)
+var _ redact.SafeMessager = (*Immutable)(nil)
+
+// NewMutableExisting returns a Mutable from the
+// given schema descriptor with the cluster version also set to the descriptor.
+// This is for schemas that already exist.
+func NewMutableExisting(desc descpb.SchemaDescriptor) *Mutable {
+	return &Mutable{
+		Immutable:      makeImmutable(*protoutil.Clone(&desc).(*descpb.SchemaDescriptor)),
+		ClusterVersion: NewImmutable(desc),
+	}
+}
+
+// NewImmutable makes a new Schema descriptor.
+func NewImmutable(desc descpb.SchemaDescriptor) *Immutable {
+	m := makeImmutable(desc)
+	return &m
+}
+
+func makeImmutable(desc descpb.SchemaDescriptor) Immutable {
+	return Immutable{SchemaDescriptor: desc}
+}
+
+// Reference these functions to defeat the linter.
+var (
+	_ = NewImmutable
+)
+
+// NewCreatedMutable returns a Mutable from the
+// given SchemaDescriptor with the cluster version being the zero schema. This
+// is for a schema that is created within the current transaction.
+func NewCreatedMutable(desc descpb.SchemaDescriptor) *Mutable {
+	return &Mutable{
+		Immutable: makeImmutable(desc),
+	}
+}
 
 // SetDrainingNames implements the MutableDescriptor interface.
 func (desc *Mutable) SetDrainingNames(names []descpb.NameInfo) {
@@ -87,52 +113,52 @@ func (desc *Mutable) SetDrainingNames(names []descpb.NameInfo) {
 }
 
 // GetParentSchemaID implements the Descriptor interface.
-func (desc *immutable) GetParentSchemaID() descpb.ID {
+func (desc *Immutable) GetParentSchemaID() descpb.ID {
 	return keys.RootNamespaceID
 }
 
 // IsUncommittedVersion implements the Descriptor interface.
-func (desc *immutable) IsUncommittedVersion() bool {
+func (desc *Immutable) IsUncommittedVersion() bool {
 	return desc.isUncommittedVersion
 }
 
 // GetAuditMode implements the DescriptorProto interface.
-func (desc *immutable) GetAuditMode() descpb.TableDescriptor_AuditMode {
+func (desc *Immutable) GetAuditMode() descpb.TableDescriptor_AuditMode {
 	return descpb.TableDescriptor_DISABLED
 }
 
-// DescriptorType implements the DescriptorProto interface.
-func (desc *immutable) DescriptorType() catalog.DescriptorType {
-	return catalog.Schema
+// TypeName implements the DescriptorProto interface.
+func (desc *Immutable) TypeName() string {
+	return "schema"
 }
 
 // SchemaDesc implements the Descriptor interface.
-func (desc *immutable) SchemaDesc() *descpb.SchemaDescriptor {
+func (desc *Immutable) SchemaDesc() *descpb.SchemaDescriptor {
 	return &desc.SchemaDescriptor
 }
 
 // Public implements the Descriptor interface.
-func (desc *immutable) Public() bool {
+func (desc *Immutable) Public() bool {
 	return desc.State == descpb.DescriptorState_PUBLIC
 }
 
 // Adding implements the Descriptor interface.
-func (desc *immutable) Adding() bool {
+func (desc *Immutable) Adding() bool {
 	return false
 }
 
 // Offline implements the Descriptor interface.
-func (desc *immutable) Offline() bool {
+func (desc *Immutable) Offline() bool {
 	return desc.State == descpb.DescriptorState_OFFLINE
 }
 
 // Dropped implements the Descriptor interface.
-func (desc *immutable) Dropped() bool {
+func (desc *Immutable) Dropped() bool {
 	return desc.State == descpb.DescriptorState_DROP
 }
 
 // DescriptorProto wraps a SchemaDescriptor in a Descriptor.
-func (desc *immutable) DescriptorProto() *descpb.Descriptor {
+func (desc *Immutable) DescriptorProto() *descpb.Descriptor {
 	return &descpb.Descriptor{
 		Union: &descpb.Descriptor_Schema{
 			Schema: &desc.SchemaDescriptor,
@@ -140,72 +166,8 @@ func (desc *immutable) DescriptorProto() *descpb.Descriptor {
 	}
 }
 
-// ValidateSelf implements the catalog.Descriptor interface.
-func (desc *immutable) ValidateSelf(vea catalog.ValidationErrorAccumulator) {
-	// Validate local properties of the descriptor.
-	vea.Report(catalog.ValidateName(desc.GetName(), "descriptor"))
-	if desc.GetID() == descpb.InvalidID {
-		vea.Report(fmt.Errorf("invalid schema ID %d", desc.GetID()))
-	}
-
-	// Validate the privilege descriptor.
-	vea.Report(desc.Privileges.Validate(desc.GetID(), privilege.Schema))
-}
-
-// GetReferencedDescIDs returns the IDs of all descriptors referenced by
-// this descriptor, including itself.
-func (desc *immutable) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {
-	return catalog.MakeDescriptorIDSet(desc.GetID(), desc.GetParentID()), nil
-}
-
-// ValidateCrossReferences implements the catalog.Descriptor interface.
-func (desc *immutable) ValidateCrossReferences(
-	vea catalog.ValidationErrorAccumulator, vdg catalog.ValidationDescGetter,
-) {
-	// Check schema parent reference.
-	db, err := vdg.GetDatabaseDescriptor(desc.GetParentID())
-	if err != nil {
-		vea.Report(err)
-		return
-	}
-
-	// Check that parent has correct entry in schemas mapping.
-	isInDBSchemas := false
-	_ = db.ForEachSchemaInfo(func(id descpb.ID, name string, isDropped bool) error {
-		if id == desc.GetID() {
-			if isDropped {
-				if name == desc.GetName() {
-					vea.Report(errors.AssertionFailedf("present in parent database [%d] schemas mapping but marked as dropped",
-						desc.GetParentID()))
-				}
-				return nil
-			}
-			if name != desc.GetName() {
-				vea.Report(errors.AssertionFailedf("present in parent database [%d] schemas mapping but under name %q",
-					desc.GetParentID(), errors.Safe(name)))
-				return nil
-			}
-			isInDBSchemas = true
-			return nil
-		}
-		if name == desc.GetName() && !isDropped {
-			vea.Report(errors.AssertionFailedf("present in parent database [%d] schemas mapping but name maps to other schema [%d]",
-				desc.GetParentID(), id))
-		}
-		return nil
-	})
-	if !isInDBSchemas {
-		vea.Report(errors.AssertionFailedf("not present in parent database [%d] schemas mapping",
-			desc.GetParentID()))
-	}
-}
-
-// ValidateTxnCommit implements the catalog.Descriptor interface.
-func (desc *immutable) ValidateTxnCommit(
-	_ catalog.ValidationErrorAccumulator, _ catalog.ValidationDescGetter,
-) {
-	// No-op.
-}
+// NameResolutionResult implements the ObjectDescriptor interface.
+func (desc *Immutable) NameResolutionResult() {}
 
 // MaybeIncrementVersion implements the MutableDescriptor interface.
 func (desc *Mutable) MaybeIncrementVersion() {
@@ -243,8 +205,10 @@ func (desc *Mutable) OriginalVersion() descpb.DescriptorVersion {
 
 // ImmutableCopy implements the MutableDescriptor interface.
 func (desc *Mutable) ImmutableCopy() catalog.Descriptor {
-	imm := NewBuilder(desc.SchemaDesc()).BuildImmutable()
-	imm.(*immutable).isUncommittedVersion = desc.IsUncommittedVersion()
+	// TODO (lucy): Should the immutable descriptor constructors always make a
+	// copy, so we don't have to do it here?
+	imm := NewImmutable(*protoutil.Clone(desc.SchemaDesc()).(*descpb.SchemaDescriptor))
+	imm.isUncommittedVersion = desc.IsUncommittedVersion()
 	return imm
 }
 
@@ -287,20 +251,21 @@ func (desc *Mutable) IsUncommittedVersion() bool {
 	return desc.IsNew() || desc.GetVersion() != desc.ClusterVersion.GetVersion()
 }
 
-// HasPostDeserializationChanges returns if the MutableDescriptor was changed after running
-// RunPostDeserializationChanges.
-func (desc *Mutable) HasPostDeserializationChanges() bool {
-	return desc.changed
-}
-
 // IsSchemaNameValid returns whether the input name is valid for a user defined
 // schema.
 func IsSchemaNameValid(name string) error {
 	// Schemas starting with "pg_" are not allowed.
-	if strings.HasPrefix(name, catconstants.PgSchemaPrefix) {
+	if strings.HasPrefix(name, sessiondata.PgSchemaPrefix) {
 		err := pgerror.Newf(pgcode.ReservedName, "unacceptable schema name %q", name)
 		err = errors.WithDetail(err, `The prefix "pg_" is reserved for system schemas.`)
 		return err
 	}
 	return nil
+}
+
+// Validate validates that the schema descriptor is well formed.
+// This only checks that the privileges for the schema are valid.
+func (desc *Immutable) Validate() error {
+	descpb.MaybeFixSchemaPrivileges(&desc.Privileges)
+	return desc.Privileges.Validate(desc.GetID(), privilege.Schema)
 }

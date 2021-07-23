@@ -5,7 +5,6 @@
   justify-content: space-between;
   align-items: center;
   margin-bottom: 7px;
-  height: 32px;
 }
 
 .cl-count-title,
@@ -51,10 +50,6 @@ h2.base-heading {
 .root {
   flex-grow: 0;
   width: 100%;
-}
-
-.table-area {
-  width: fit-content;
 }
 
 .app-filter-dropdown {

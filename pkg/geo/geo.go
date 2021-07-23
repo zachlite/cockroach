@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo/geographiclib"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoprojbase"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 	"github.com/golang/geo/r1"
@@ -70,37 +71,12 @@ func SpatialObjectFitsColumnMetadata(
 	if srid != 0 && so.SRID != srid {
 		return errors.Newf("object SRID %d does not match column SRID %d", so.SRID, srid)
 	}
-	// Shape_Unset can take in any kind of shape.
-	// Shape_Geometry[ZM] must match dimensions.
+	// Shape_Geometry/Shape_Unset can take in any kind of shape.
 	// Otherwise, shapes must match.
-	switch shapeType {
-	case geopb.ShapeType_Unset:
-		break
-	case geopb.ShapeType_Geometry, geopb.ShapeType_GeometryM, geopb.ShapeType_GeometryZ, geopb.ShapeType_GeometryZM:
-		if ShapeTypeToLayout(shapeType) != ShapeTypeToLayout(so.ShapeType) {
-			return errors.Newf("object type %s does not match column dimensionality %s", so.ShapeType, shapeType)
-		}
-	default:
-		if shapeType != so.ShapeType {
-			return errors.Newf("object type %s does not match column type %s", so.ShapeType, shapeType)
-		}
+	if shapeType != geopb.ShapeType_Unset && shapeType != geopb.ShapeType_Geometry && shapeType != so.ShapeType {
+		return errors.Newf("object type %s does not match column type %s", so.ShapeType, shapeType)
 	}
 	return nil
-}
-
-// ShapeTypeToLayout returns the geom.Layout of the given ShapeType.
-// Note this is not a definition on ShapeType to prevent geopb from importing twpayne/go-geom.
-func ShapeTypeToLayout(s geopb.ShapeType) geom.Layout {
-	switch {
-	case (s&geopb.MShapeTypeFlag > 0) && (s&geopb.ZShapeTypeFlag > 0):
-		return geom.XYZM
-	case s&geopb.ZShapeTypeFlag > 0:
-		return geom.XYZ
-	case s&geopb.MShapeTypeFlag > 0:
-		return geom.XYM
-	default:
-		return geom.XY
-	}
 }
 
 //
@@ -115,8 +91,8 @@ type Geometry struct {
 // MakeGeometry returns a new Geometry. Assumes the input EWKB is validated and in little endian.
 func MakeGeometry(spatialObject geopb.SpatialObject) (Geometry, error) {
 	if spatialObject.SRID != 0 {
-		if _, err := geoprojbase.Projection(spatialObject.SRID); err != nil {
-			return Geometry{}, err
+		if _, ok := geoprojbase.Projection(spatialObject.SRID); !ok {
+			return Geometry{}, errors.Newf("unknown SRID for Geometry: %d", spatialObject.SRID)
 		}
 	}
 	if spatialObject.Type != geopb.SpatialObjectType_GeometryType {
@@ -133,23 +109,7 @@ func MakeGeometryUnsafe(spatialObject geopb.SpatialObject) Geometry {
 
 // MakeGeometryFromPointCoords makes a point from x, y coordinates.
 func MakeGeometryFromPointCoords(x, y float64) (Geometry, error) {
-	return MakeGeometryFromLayoutAndPointCoords(geom.XY, []float64{x, y})
-}
-
-// MakeGeometryFromLayoutAndPointCoords makes a point with a given layout and ordered slice of coordinates.
-func MakeGeometryFromLayoutAndPointCoords(
-	layout geom.Layout, flatCoords []float64,
-) (Geometry, error) {
-	// Validate that the stride matches what is expected for the layout.
-	switch {
-	case layout == geom.XY && len(flatCoords) == 2:
-	case layout == geom.XYM && len(flatCoords) == 3:
-	case layout == geom.XYZ && len(flatCoords) == 3:
-	case layout == geom.XYZM && len(flatCoords) == 4:
-	default:
-		return Geometry{}, errors.Newf("mismatch between layout %d and stride %d", layout, len(flatCoords))
-	}
-	s, err := spatialObjectFromGeomT(geom.NewPointFlat(layout, flatCoords), geopb.SpatialObjectType_GeometryType)
+	s, err := spatialObjectFromGeomT(geom.NewPointFlat(geom.XY, []float64{x, y}), geopb.SpatialObjectType_GeometryType)
 	if err != nil {
 		return Geometry{}, err
 	}
@@ -321,11 +281,6 @@ func (g *Geometry) ShapeType() geopb.ShapeType {
 	return g.spatialObject.ShapeType
 }
 
-// ShapeType2D returns the 2D shape type of the Geometry.
-func (g *Geometry) ShapeType2D() geopb.ShapeType {
-	return g.ShapeType().To2D()
-}
-
 // CartesianBoundingBox returns a Cartesian bounding box.
 func (g *Geometry) CartesianBoundingBox() *CartesianBoundingBox {
 	if g.spatialObject.BoundingBox == nil {
@@ -342,10 +297,10 @@ func (g *Geometry) BoundingBoxRef() *geopb.BoundingBox {
 // SpaceCurveIndex returns an uint64 index to use representing an index into a space-filling curve.
 // This will return 0 for empty spatial objects, and math.MaxUint64 for any object outside
 // the defined bounds of the given SRID projection.
-func (g *Geometry) SpaceCurveIndex() (uint64, error) {
+func (g *Geometry) SpaceCurveIndex() uint64 {
 	bbox := g.CartesianBoundingBox()
 	if bbox == nil {
-		return 0, nil
+		return 0
 	}
 	centerX := (bbox.BoundingBox.LoX + bbox.BoundingBox.HiX) / 2
 	centerY := (bbox.BoundingBox.LoY + bbox.BoundingBox.HiY) / 2
@@ -356,16 +311,12 @@ func (g *Geometry) SpaceCurveIndex() (uint64, error) {
 		MinY: math.MinInt32,
 		MaxY: math.MaxInt32,
 	}
-	if g.SRID() != 0 {
-		proj, err := geoprojbase.Projection(g.SRID())
-		if err != nil {
-			return 0, err
-		}
+	if proj, ok := geoprojbase.Projection(g.SRID()); ok {
 		bounds = proj.Bounds
 	}
 	// If we're out of bounds, give up and return a large number.
 	if centerX > bounds.MaxX || centerY > bounds.MaxY || centerX < bounds.MinX || centerY < bounds.MinY {
-		return math.MaxUint64, nil
+		return math.MaxUint64
 	}
 
 	const boxLength = 1 << 32
@@ -376,23 +327,15 @@ func (g *Geometry) SpaceCurveIndex() (uint64, error) {
 	// hilbertInverse returns values in the interval [0, boxLength^2-1], so return [0, 2^64-1].
 	xPos := uint64(((centerX - bounds.MinX) / xBounds) * boxLength)
 	yPos := uint64(((centerY - bounds.MinY) / yBounds) * boxLength)
-	return hilbertInverse(boxLength, xPos, yPos), nil
+	return hilbertInverse(boxLength, xPos, yPos)
 }
 
 // Compare compares a Geometry against another.
 // It compares using SpaceCurveIndex, followed by the byte representation of the Geometry.
 // This must produce the same ordering as the index mechanism.
 func (g *Geometry) Compare(o Geometry) int {
-	lhs, err := g.SpaceCurveIndex()
-	if err != nil {
-		// We should always be able to compare a valid geometry.
-		panic(err)
-	}
-	rhs, err := o.SpaceCurveIndex()
-	if err != nil {
-		// We should always be able to compare a valid geometry.
-		panic(err)
-	}
+	lhs := g.SpaceCurveIndex()
+	rhs := o.SpaceCurveIndex()
 	if lhs > rhs {
 		return 1
 	}
@@ -413,9 +356,9 @@ type Geography struct {
 
 // MakeGeography returns a new Geography. Assumes the input EWKB is validated and in little endian.
 func MakeGeography(spatialObject geopb.SpatialObject) (Geography, error) {
-	projection, err := geoprojbase.Projection(spatialObject.SRID)
-	if err != nil {
-		return Geography{}, err
+	projection, ok := geoprojbase.Projection(spatialObject.SRID)
+	if !ok {
+		return Geography{}, errors.Newf("unknown SRID for Geography: %d", spatialObject.SRID)
 	}
 	if !projection.IsLatLng {
 		return Geography{}, errors.Newf(
@@ -585,16 +528,11 @@ func (g *Geography) ShapeType() geopb.ShapeType {
 	return g.spatialObject.ShapeType
 }
 
-// ShapeType2D returns the 2D shape type of the Geography.
-func (g *Geography) ShapeType2D() geopb.ShapeType {
-	return g.ShapeType().To2D()
-}
-
 // Spheroid returns the spheroid represented by the given Geography.
 func (g *Geography) Spheroid() (*geographiclib.Spheroid, error) {
-	proj, err := geoprojbase.Projection(g.SRID())
-	if err != nil {
-		return nil, err
+	proj, ok := geoprojbase.Projection(g.SRID())
+	if !ok {
+		return nil, errors.Newf("expected spheroid for SRID %d", g.SRID())
 	}
 	return proj.Spheroid, nil
 }
@@ -893,7 +831,6 @@ func validateGeomT(t geom.T) error {
 			}
 		}
 	case *geom.GeometryCollection:
-		// TODO(ayang): verify that the geometries all have the same Layout
 		for i := 0; i < t.NumGeoms(); i++ {
 			if err := validateGeomT(t.Geom(i)); err != nil {
 				return errors.Wrapf(err, "invalid GeometryCollection component at position %d", i+1)
@@ -921,6 +858,17 @@ func spatialObjectFromGeomT(t geom.T, soType geopb.SpatialObjectType) (geopb.Spa
 	if err != nil {
 		return geopb.SpatialObject{}, err
 	}
+	switch t.Layout() {
+	case geom.XY:
+	case geom.NoLayout:
+		if gc, ok := t.(*geom.GeometryCollection); !ok || !gc.Empty() {
+			return geopb.SpatialObject{}, errors.Newf("no layout found on object")
+		}
+	case geom.XYM, geom.XYZ, geom.XYZM:
+		return geopb.SpatialObject{}, unimplemented.NewWithIssueDetailf(53091, t.Layout().String()+"_datum", "dimension %s is not currently supported", t.Layout())
+	default:
+		return geopb.SpatialObject{}, errors.Newf("unexpected layout: %s", geom.XY)
+	}
 	bbox, err := boundingBoxFromGeomT(t, soType)
 	if err != nil {
 		return geopb.SpatialObject{}, err
@@ -935,42 +883,24 @@ func spatialObjectFromGeomT(t geom.T, soType geopb.SpatialObjectType) (geopb.Spa
 }
 
 func shapeTypeFromGeomT(t geom.T) (geopb.ShapeType, error) {
-	var shapeType geopb.ShapeType
 	switch t := t.(type) {
 	case *geom.Point:
-		shapeType = geopb.ShapeType_Point
+		return geopb.ShapeType_Point, nil
 	case *geom.LineString:
-		shapeType = geopb.ShapeType_LineString
+		return geopb.ShapeType_LineString, nil
 	case *geom.Polygon:
-		shapeType = geopb.ShapeType_Polygon
+		return geopb.ShapeType_Polygon, nil
 	case *geom.MultiPoint:
-		shapeType = geopb.ShapeType_MultiPoint
+		return geopb.ShapeType_MultiPoint, nil
 	case *geom.MultiLineString:
-		shapeType = geopb.ShapeType_MultiLineString
+		return geopb.ShapeType_MultiLineString, nil
 	case *geom.MultiPolygon:
-		shapeType = geopb.ShapeType_MultiPolygon
+		return geopb.ShapeType_MultiPolygon, nil
 	case *geom.GeometryCollection:
-		shapeType = geopb.ShapeType_GeometryCollection
+		return geopb.ShapeType_GeometryCollection, nil
 	default:
 		return geopb.ShapeType_Unset, errors.Newf("unknown shape: %T", t)
 	}
-	switch t.Layout() {
-	case geom.NoLayout:
-		if gc, ok := t.(*geom.GeometryCollection); !ok || !gc.Empty() {
-			return geopb.ShapeType_Unset, errors.Newf("no layout found on object")
-		}
-	case geom.XY:
-		break
-	case geom.XYM:
-		shapeType = shapeType | geopb.MShapeTypeFlag
-	case geom.XYZ:
-		shapeType = shapeType | geopb.ZShapeTypeFlag
-	case geom.XYZM:
-		shapeType = shapeType | geopb.ZShapeTypeFlag | geopb.MShapeTypeFlag
-	default:
-		return geopb.ShapeType_Unset, errors.Newf("unknown layout: %s", t.Layout())
-	}
-	return shapeType, nil
 }
 
 // GeomTContainsEmpty returns whether a geom.T contains any empty element.

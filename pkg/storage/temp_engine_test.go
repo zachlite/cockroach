@@ -11,7 +11,6 @@
 package storage
 
 import (
-	"context"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -20,7 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
-func TestNewPebbleTempEngine(t *testing.T) {
+func TestNewRocksDBTempEngine(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -28,14 +27,14 @@ func TestNewPebbleTempEngine(t *testing.T) {
 	tempDir, tempDirCleanup := testutils.TempDir(t)
 	defer tempDirCleanup()
 
-	db, fs, err := NewPebbleTempEngine(context.Background(), base.TempStorageConfig{Path: tempDir}, base.StoreSpec{Path: tempDir})
+	engine, _, err := NewRocksDBTempEngine(base.TempStorageConfig{Path: tempDir}, base.StoreSpec{Path: tempDir})
 	if err != nil {
 		t.Fatalf("error encountered when invoking NewRocksDBTempEngine: %+v", err)
 	}
-	defer db.Close()
+	defer engine.Close()
 
 	// Temp engine initialized with the temporary directory.
-	if dir := fs.(*Pebble).path; tempDir != dir {
+	if dir := engine.(*rocksDBTempEngine).db.cfg.StorageConfig.Dir; tempDir != dir {
 		t.Fatalf("temp engine initialized with unexpected parent directory.\nexpected %s\nactual %s",
 			tempDir, dir)
 	}

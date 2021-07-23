@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -11,10 +11,9 @@
 /* eslint-disable @typescript-eslint/camelcase */
 import _ from "lodash";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import { FixLong, uniqueLong } from "src/util";
+import { FixLong } from "src/util/fixLong";
 
 export type StatementStatistics = protos.cockroach.sql.IStatementStatistics;
-export type ExecStats = protos.cockroach.sql.IExecStats;
 export type CollectedStatementStatistics = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
 
 export interface NumericStat {
@@ -23,7 +22,7 @@ export interface NumericStat {
 }
 
 export function variance(stat: NumericStat, count: number) {
-  return (stat?.squared_diffs || 0) / (count - 1);
+  return stat.squared_diffs / (count - 1);
 }
 
 export function stdDev(stat: NumericStat, count: number) {
@@ -65,62 +64,10 @@ export function coalesceSensitiveInfo(
   };
 }
 
-export function addMaybeUnsetNumericStat(
-  a: NumericStat,
-  b: NumericStat,
-  countA: number,
-  countB: number,
-): NumericStat {
-  return a && b ? aggregateNumericStats(a, b, countA, countB) : null;
-}
-
-export function addExecStats(a: ExecStats, b: ExecStats): Required<ExecStats> {
-  let countA = FixLong(a.count).toInt();
-  const countB = FixLong(b.count).toInt();
-  if (countA === 0 && countB === 0) {
-    // If both counts are zero, artificially set the one count to one to avoid
-    // division by zero when calculating the mean in addNumericStats.
-    countA = 1;
-  }
-  return {
-    count: a.count.add(b.count),
-    network_bytes: addMaybeUnsetNumericStat(
-      a.network_bytes,
-      b.network_bytes,
-      countA,
-      countB,
-    ),
-    max_mem_usage: addMaybeUnsetNumericStat(
-      a.max_mem_usage,
-      b.max_mem_usage,
-      countA,
-      countB,
-    ),
-    contention_time: addMaybeUnsetNumericStat(
-      a.contention_time,
-      b.contention_time,
-      countA,
-      countB,
-    ),
-    network_messages: addMaybeUnsetNumericStat(
-      a.network_messages,
-      b.network_messages,
-      countA,
-      countB,
-    ),
-    max_disk_usage: addMaybeUnsetNumericStat(
-      a.max_disk_usage,
-      b.max_disk_usage,
-      countA,
-      countB,
-    ),
-  };
-}
-
 export function addStatementStats(
   a: StatementStatistics,
   b: StatementStatistics,
-): Required<StatementStatistics> {
+) {
   const countA = FixLong(a.count).toInt();
   const countB = FixLong(b.count).toInt();
   return {
@@ -145,23 +92,7 @@ export function addStatementStats(
       countA,
       countB,
     ),
-    bytes_read: aggregateNumericStats(
-      a.bytes_read,
-      b.bytes_read,
-      countA,
-      countB,
-    ),
-    rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
     sensitive_info: coalesceSensitiveInfo(a.sensitive_info, b.sensitive_info),
-    legacy_last_err: "",
-    legacy_last_err_redacted: "",
-    exec_stats: addExecStats(a.exec_stats, b.exec_stats),
-    sql_type: a.sql_type,
-    last_exec_timestamp:
-      a.last_exec_timestamp.seconds > b.last_exec_timestamp.seconds
-        ? a.last_exec_timestamp
-        : b.last_exec_timestamp,
-    nodes: uniqueLong([...a.nodes, ...b.nodes]),
   };
 }
 
@@ -192,12 +123,10 @@ export function aggregateStatementStats(
 export interface ExecutionStatistics {
   statement: string;
   app: string;
-  database: string;
   distSQL: boolean;
   vec: boolean;
   opt: boolean;
   implicit_txn: boolean;
-  full_scan: boolean;
   failed: boolean;
   node_id: number;
   stats: StatementStatistics;
@@ -209,12 +138,10 @@ export function flattenStatementStats(
   return statementStats.map(stmt => ({
     statement: stmt.key.key_data.query,
     app: stmt.key.key_data.app,
-    database: stmt.key.key_data.database,
     distSQL: stmt.key.key_data.distSQL,
     vec: stmt.key.key_data.vec,
     opt: stmt.key.key_data.opt,
     implicit_txn: stmt.key.key_data.implicit_txn,
-    full_scan: stmt.key.key_data.full_scan,
     failed: stmt.key.key_data.failed,
     node_id: stmt.key.node_id,
     stats: stmt.stats,
@@ -229,13 +156,5 @@ export function combineStatementStats(
 
 export const getSearchParams = (searchParams: string) => {
   const sp = new URLSearchParams(searchParams);
-  return (key: string, defaultValue?: string | boolean | number) =>
-    sp.get(key) || defaultValue;
+  return (key: string, defaultValue?: string) => sp.get(key) || defaultValue;
 };
-
-// This function returns a key based on all parameters
-// that should be used to group statements.
-// Parameters being used: node_id, implicit_txn and database.
-export function statementKey(stmt: ExecutionStatistics): string {
-  return stmt.statement + stmt.implicit_txn + stmt.database;
-}

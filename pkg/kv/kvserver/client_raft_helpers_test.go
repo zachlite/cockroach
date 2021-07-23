@@ -16,7 +16,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -131,53 +130,48 @@ func (h *unreliableRaftHandler) HandleSnapshot(
 	return h.RaftMessageHandler.HandleSnapshot(header, respStream)
 }
 
-// testClusterStoreRaftMessageHandler exists to allows a store to be stopped and
+// mtcStoreRaftMessageHandler exists to allows a store to be stopped and
 // restarted while maintaining a partition using an unreliableRaftHandler.
-type testClusterStoreRaftMessageHandler struct {
-	tc       *testcluster.TestCluster
+type mtcStoreRaftMessageHandler struct {
+	mtc      *multiTestContext
 	storeIdx int
 }
 
-func (h *testClusterStoreRaftMessageHandler) getStore() (*kvserver.Store, error) {
-	ts := h.tc.Servers[h.storeIdx]
-	return ts.Stores().GetStore(ts.GetFirstStoreID())
-}
-
-func (h *testClusterStoreRaftMessageHandler) HandleRaftRequest(
+func (h *mtcStoreRaftMessageHandler) HandleRaftRequest(
 	ctx context.Context,
 	req *kvserver.RaftMessageRequest,
 	respStream kvserver.RaftMessageResponseStream,
 ) *roachpb.Error {
-	store, err := h.getStore()
-	if err != nil {
-		return roachpb.NewError(err)
+	store := h.mtc.Store(h.storeIdx)
+	if store == nil {
+		return roachpb.NewErrorf("store not found")
 	}
 	return store.HandleRaftRequest(ctx, req, respStream)
 }
 
-func (h *testClusterStoreRaftMessageHandler) HandleRaftResponse(
+func (h *mtcStoreRaftMessageHandler) HandleRaftResponse(
 	ctx context.Context, resp *kvserver.RaftMessageResponse,
 ) error {
-	store, err := h.getStore()
-	if err != nil {
-		return err
+	store := h.mtc.Store(h.storeIdx)
+	if store == nil {
+		return errors.New("store not found")
 	}
 	return store.HandleRaftResponse(ctx, resp)
 }
 
-func (h *testClusterStoreRaftMessageHandler) HandleSnapshot(
+func (h *mtcStoreRaftMessageHandler) HandleSnapshot(
 	header *kvserver.SnapshotRequest_Header, respStream kvserver.SnapshotResponseStream,
 ) error {
-	store, err := h.getStore()
-	if err != nil {
-		return err
+	store := h.mtc.Store(h.storeIdx)
+	if store == nil {
+		return errors.New("store not found")
 	}
 	return store.HandleSnapshot(header, respStream)
 }
 
-// testClusterPartitionedRange is a convenient abstraction to create a range on a node
+// mtcPartitionedRange is a convenient abstraction to create a range on a node
 // in a multiTestContext which can be partitioned and unpartitioned.
-type testClusterPartitionedRange struct {
+type mtcPartitionedRange struct {
 	rangeID roachpb.RangeID
 	mu      struct {
 		syncutil.RWMutex
@@ -188,9 +182,8 @@ type testClusterPartitionedRange struct {
 	handlers []kvserver.RaftMessageHandler
 }
 
-// setupPartitionedRange sets up an testClusterPartitionedRange for the provided
-// TestCluster, rangeID, and node index in the TestCluster. The range is
-// initially not partitioned.
+// setupPartitionedRange sets up an mtcPartitionedRange for the provided mtc,
+// rangeID, and node index in the mtc. The range is initially not partitioned.
 //
 // We're going to set up the cluster with partitioning so that we can
 // partition node p from the others. We do this by installing
@@ -212,45 +205,40 @@ type testClusterPartitionedRange struct {
 // If replicaID is zero then it is resolved by looking up the replica for the
 // partitionedNode of from the current range descriptor of rangeID.
 func setupPartitionedRange(
-	tc *testcluster.TestCluster,
+	mtc *multiTestContext,
 	rangeID roachpb.RangeID,
 	replicaID roachpb.ReplicaID,
 	partitionedNode int,
 	activated bool,
 	funcs unreliableRaftHandlerFuncs,
-) (*testClusterPartitionedRange, error) {
-	handlers := make([]kvserver.RaftMessageHandler, 0, len(tc.Servers))
-	for i := range tc.Servers {
-		handlers = append(handlers, &testClusterStoreRaftMessageHandler{
-			tc:       tc,
+) (*mtcPartitionedRange, error) {
+	handlers := make([]kvserver.RaftMessageHandler, 0, len(mtc.stores))
+	for i := range mtc.stores {
+		handlers = append(handlers, &mtcStoreRaftMessageHandler{
+			mtc:      mtc,
 			storeIdx: i,
 		})
 	}
-	return setupPartitionedRangeWithHandlers(tc, rangeID, replicaID, partitionedNode, activated, handlers, funcs)
+	return setupPartitionedRangeWithHandlers(mtc, rangeID, replicaID, partitionedNode, activated, handlers, funcs)
 }
 
 func setupPartitionedRangeWithHandlers(
-	tc *testcluster.TestCluster,
+	mtc *multiTestContext,
 	rangeID roachpb.RangeID,
 	replicaID roachpb.ReplicaID,
 	partitionedNode int,
 	activated bool,
 	handlers []kvserver.RaftMessageHandler,
 	funcs unreliableRaftHandlerFuncs,
-) (*testClusterPartitionedRange, error) {
-	pr := &testClusterPartitionedRange{
+) (*mtcPartitionedRange, error) {
+	pr := &mtcPartitionedRange{
 		rangeID:  rangeID,
 		handlers: make([]kvserver.RaftMessageHandler, 0, len(handlers)),
 	}
 	pr.mu.partitioned = activated
 	pr.mu.partitionedNode = partitionedNode
 	if replicaID == 0 {
-		ts := tc.Servers[partitionedNode]
-		store, err := ts.Stores().GetStore(ts.GetFirstStoreID())
-		if err != nil {
-			return nil, err
-		}
-		partRepl, err := store.GetReplica(rangeID)
+		partRepl, err := mtc.Store(partitionedNode).GetReplica(rangeID)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +251,7 @@ func setupPartitionedRangeWithHandlers(
 	pr.mu.partitionedReplicas = map[roachpb.ReplicaID]bool{
 		replicaID: true,
 	}
-	for i := range tc.Servers {
+	for i := range mtc.stores {
 		s := i
 		h := &unreliableRaftHandler{
 			rangeID:                    rangeID,
@@ -308,32 +296,32 @@ func setupPartitionedRangeWithHandlers(
 			}
 		}
 		pr.handlers = append(pr.handlers, h)
-		tc.Servers[s].RaftTransport().Listen(tc.Target(s).StoreID, h)
+		mtc.transport.Listen(mtc.stores[s].Ident.StoreID, h)
 	}
 	return pr, nil
 }
 
-func (pr *testClusterPartitionedRange) deactivate() { pr.set(false) }
-func (pr *testClusterPartitionedRange) activate()   { pr.set(true) }
-func (pr *testClusterPartitionedRange) set(active bool) {
+func (pr *mtcPartitionedRange) deactivate() { pr.set(false) }
+func (pr *mtcPartitionedRange) activate()   { pr.set(true) }
+func (pr *mtcPartitionedRange) set(active bool) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	pr.mu.partitioned = active
 }
 
-func (pr *testClusterPartitionedRange) addReplica(replicaID roachpb.ReplicaID) {
+func (pr *mtcPartitionedRange) addReplica(replicaID roachpb.ReplicaID) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	pr.mu.partitionedReplicas[replicaID] = true
 }
 
-func (pr *testClusterPartitionedRange) extend(
-	tc *testcluster.TestCluster,
+func (pr *mtcPartitionedRange) extend(
+	mtc *multiTestContext,
 	rangeID roachpb.RangeID,
 	replicaID roachpb.ReplicaID,
 	partitionedNode int,
 	activated bool,
 	funcs unreliableRaftHandlerFuncs,
-) (*testClusterPartitionedRange, error) {
-	return setupPartitionedRangeWithHandlers(tc, rangeID, replicaID, partitionedNode, activated, pr.handlers, funcs)
+) (*mtcPartitionedRange, error) {
+	return setupPartitionedRangeWithHandlers(mtc, rangeID, replicaID, partitionedNode, activated, pr.handlers, funcs)
 }

@@ -118,8 +118,3 @@ func TestingOverrideTag(t string) func() {
 	tag = t
 	return func() { tag = prev }
 }
-
-// MakeIssueURL produces a URL to a CockroachDB issue.
-func MakeIssueURL(issue int) string {
-	return fmt.Sprintf("https://go.crdb.dev/issue-v/%d/%s", issue, VersionPrefix())
-}

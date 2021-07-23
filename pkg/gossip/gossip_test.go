@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 )
 
 // TestGossipInfoStore verifies operation of gossip instance infostore.
@@ -82,7 +83,7 @@ func TestGossipMoveNode(t *testing.T) {
 	for _, node := range nodes {
 		if val, err := g.GetNodeDescriptor(node.NodeID); err != nil {
 			t.Fatal(err)
-		} else if !node.Equal(val) {
+		} else if !proto.Equal(node, val) {
 			t.Fatalf("expected node %+v, got %+v", node, val)
 		}
 	}
@@ -98,7 +99,7 @@ func TestGossipMoveNode(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		if val, err := g.GetNodeDescriptor(movedNode.NodeID); err != nil {
 			return err
-		} else if !movedNode.Equal(val) {
+		} else if !proto.Equal(movedNode, val) {
 			return fmt.Errorf("expected node %+v, got %+v", movedNode, val)
 		}
 		return nil

@@ -21,12 +21,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -54,7 +52,6 @@ type mysqldumpReader struct {
 	kvCh     chan row.KVBatch
 	debugRow func(tree.Datums)
 	walltime int64
-	opts     roachpb.MysqldumpOptions
 }
 
 var _ inputConverter = &mysqldumpReader{}
@@ -65,9 +62,8 @@ func newMysqldumpReader(
 	walltime int64,
 	tables map[string]*execinfrapb.ReadImportDataSpec_ImportTable,
 	evalCtx *tree.EvalContext,
-	opts roachpb.MysqldumpOptions,
 ) (*mysqldumpReader, error) {
-	res := &mysqldumpReader{evalCtx: evalCtx, kvCh: kvCh, walltime: walltime, opts: opts}
+	res := &mysqldumpReader{evalCtx: evalCtx, kvCh: kvCh, walltime: walltime}
 
 	converters := make(map[string]*row.DatumRowConverter, len(tables))
 	for name, table := range tables {
@@ -75,8 +71,8 @@ func newMysqldumpReader(
 			converters[name] = nil
 			continue
 		}
-		conv, err := row.NewDatumRowConverter(ctx, tabledesc.NewBuilder(table.Desc).BuildImmutableTable(),
-			nil /* targetColNames */, evalCtx, kvCh, nil /* seqChunkProvider */)
+		conv, err := row.NewDatumRowConverter(ctx, tabledesc.NewImmutable(*table.Desc),
+			nil /* targetColNames */, evalCtx, kvCh)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +91,7 @@ func (m *mysqldumpReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user security.SQLUsername,
+	user string,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, m.readFile, makeExternalStorage, user)
 }
@@ -105,8 +101,6 @@ func (m *mysqldumpReader) readFile(
 ) error {
 	var inserts, count int64
 	r := bufio.NewReaderSize(input, 1024*64)
-	tableNameToRowsProcessed := make(map[string]int64)
-	rowLimit := m.opts.RowLimit
 	tokens := mysql.NewTokenizer(r)
 	tokens.SkipSpecialComments = true
 
@@ -132,7 +126,7 @@ func (m *mysqldumpReader) readFile(
 		switch i := stmt.(type) {
 		case *mysql.Insert:
 			name := safeString(i.Table.Name)
-			conv, ok := m.tables[lexbase.NormalizeName(name)]
+			conv, ok := m.tables[lex.NormalizeName(name)]
 			if !ok {
 				// not importing this table.
 				continue
@@ -151,13 +145,9 @@ func (m *mysqldumpReader) readFile(
 			startingCount := count
 			for _, inputRow := range rows {
 				count++
-				tableNameToRowsProcessed[name]++
 
 				if count <= resumePos {
 					continue
-				}
-				if rowLimit != 0 && tableNameToRowsProcessed[name] > rowLimit {
-					break
 				}
 				if expected, got := len(conv.VisibleCols), len(inputRow); expected != got {
 					return errors.Errorf("expected %d values, got %d: %v", expected, got, inputRow)
@@ -213,7 +203,7 @@ func mysqlValueToDatum(
 			return tree.DBoolTrue, nil
 		}
 		return tree.DBoolFalse, nil
-	case *mysql.Literal:
+	case *mysql.SQLVal:
 		switch v.Type {
 		case mysql.StrVal:
 			s := string(v.Val)
@@ -251,7 +241,7 @@ func mysqlValueToDatum(
 
 	case *mysql.UnaryExpr:
 		switch v.Operator {
-		case mysql.UMinusOp:
+		case "-":
 			parsed, err := mysqlValueToDatum(v.Expr, desired, evalContext)
 			if err != nil {
 				return nil, err
@@ -269,7 +259,7 @@ func mysqlValueToDatum(
 			default:
 				return nil, errors.Errorf("unsupported negation of %T", i)
 			}
-		case mysql.UBinaryOp:
+		case "_binary", "_binary ":
 			// TODO(dt): do we want to use this hint to change our decoding logic?
 			return mysqlValueToDatum(v.Expr, desired, evalContext)
 		default:
@@ -295,16 +285,13 @@ func readMysqlCreateTable(
 	ctx context.Context,
 	input io.Reader,
 	evalCtx *tree.EvalContext,
-	p sql.JobExecContext,
-	startingID descpb.ID,
-	parentDB catalog.DatabaseDescriptor,
+	p sql.PlanHookState,
+	startingID, parentID descpb.ID,
 	match string,
 	fks fkHandler,
 	seqVals map[descpb.ID]int64,
-	owner security.SQLUsername,
-	walltime int64,
 ) ([]*tabledesc.Mutable, error) {
-	match = lexbase.NormalizeName(match)
+	match = lex.NormalizeName(match)
 	r := bufio.NewReaderSize(input, 1024*64)
 	tokens := mysql.NewTokenizer(r)
 	tokens.SkipSpecialComments = true
@@ -327,14 +314,14 @@ func readMysqlCreateTable(
 		if err != nil {
 			return nil, errors.Wrap(err, "mysql parse error")
 		}
-		if i, ok := stmt.(*mysql.DDL); ok && i.Action == mysql.CreateDDLAction {
-			name := safeString(i.Table.Name)
+		if i, ok := stmt.(*mysql.DDL); ok && i.Action == mysql.CreateStr {
+			name := safeString(i.NewName.Name)
 			if match != "" && match != name {
 				names = append(names, name)
 				continue
 			}
 			id := descpb.ID(int(startingID) + len(ret))
-			tbl, moreFKs, err := mysqlTableToCockroach(ctx, evalCtx, p, parentDB, id, name, i.TableSpec, fks, seqVals, owner, walltime)
+			tbl, moreFKs, err := mysqlTableToCockroach(ctx, evalCtx, p, parentID, id, name, i.TableSpec, fks, seqVals)
 			if err != nil {
 				return nil, err
 			}
@@ -361,7 +348,7 @@ func readMysqlCreateTable(
 type mysqlIdent interface{ CompliantName() string }
 
 func safeString(in mysqlIdent) string {
-	return lexbase.NormalizeName(in.CompliantName())
+	return lex.NormalizeName(in.CompliantName())
 }
 
 func safeName(in mysqlIdent) tree.Name {
@@ -374,21 +361,18 @@ func safeName(in mysqlIdent) tree.Name {
 func mysqlTableToCockroach(
 	ctx context.Context,
 	evalCtx *tree.EvalContext,
-	p sql.JobExecContext,
-	parentDB catalog.DatabaseDescriptor,
-	id descpb.ID,
+	p sql.PlanHookState,
+	parentID, id descpb.ID,
 	name string,
 	in *mysql.TableSpec,
 	fks fkHandler,
 	seqVals map[descpb.ID]int64,
-	owner security.SQLUsername,
-	walltime int64,
 ) ([]*tabledesc.Mutable, []delayedFK, error) {
 	if in == nil {
 		return nil, nil, errors.Errorf("could not read definition for table %q (possible unsupported type?)", name)
 	}
 
-	time := hlc.Timestamp{WallTime: walltime}
+	time := hlc.Timestamp{WallTime: evalCtx.GetStmtTimestamp().UnixNano()}
 
 	const seqOpt = "auto_increment="
 	var seqName string
@@ -416,6 +400,7 @@ func mysqlTableToCockroach(
 
 	var seqDesc *tabledesc.Mutable
 	// If we have an auto-increment seq, create it and increment the id.
+	owner := security.AdminRole
 	if seqName != "" {
 		var opts tree.SequenceOptions
 		if startingValue != 0 {
@@ -424,42 +409,40 @@ func mysqlTableToCockroach(
 		}
 		var err error
 		if p != nil {
+			params := p.RunParams(ctx)
+			if params.SessionData() != nil {
+				owner = params.SessionData().User
+			}
 			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
 			seqDesc, err = sql.NewSequenceTableDesc(
-				ctx,
 				seqName,
 				opts,
-				parentDB.GetID(),
+				parentID,
 				keys.PublicSchemaID,
 				id,
 				time,
 				priv,
 				tree.PersistencePermanent,
-				nil, /* params */
-				// If this is multi-region, this will get added by WriteDescriptors.
-				false, /* isMultiRegion */
+				&params,
 			)
 		} else {
 			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
 			seqDesc, err = sql.NewSequenceTableDesc(
-				ctx,
 				seqName,
 				opts,
-				parentDB.GetID(),
+				parentID,
 				keys.PublicSchemaID,
 				id,
 				time,
 				priv,
 				tree.PersistencePermanent,
 				nil, /* params */
-				// If this is multi-region, this will get added by WriteDescriptors.
-				false, /* isMultiRegion */
 			)
 		}
 		if err != nil {
 			return nil, nil, err
 		}
-		fks.resolver.tableNameToDesc[seqName] = seqDesc
+		fks.resolver[seqName] = seqDesc
 		id++
 	}
 
@@ -508,10 +491,7 @@ func mysqlTableToCockroach(
 	if p != nil {
 		semaCtxPtr = p.SemaCtx()
 	}
-	desc, err := MakeSimpleTableDescriptor(
-		ctx, semaCtxPtr, evalCtx.Settings, stmt, parentDB,
-		schemadesc.GetPublicSchema(), id, fks, time.WallTime,
-	)
+	desc, err := MakeSimpleTableDescriptor(evalCtx.Ctx(), semaCtxPtr, evalCtx.Settings, stmt, parentID, keys.PublicSchemaID, id, fks, time.WallTime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -534,7 +514,7 @@ func mysqlTableToCockroach(
 			)
 			toCols := i.ReferencedColumns
 			d := &tree.ForeignKeyConstraintTableDef{
-				Name:     tree.Name(lexbase.NormalizeName(raw.Name)),
+				Name:     tree.Name(lex.NormalizeName(raw.Name)),
 				FromCols: toNameList(fromCols),
 				ToCols:   toNameList(toCols),
 			}
@@ -547,15 +527,10 @@ func mysqlTableToCockroach(
 			}
 
 			d.Table = toTable
-			fkDefs = append(fkDefs, delayedFK{
-				db:  parentDB,
-				sc:  schemadesc.GetPublicSchema(),
-				tbl: desc,
-				def: d,
-			})
+			fkDefs = append(fkDefs, delayedFK{desc, d})
 		}
 	}
-	fks.resolver.tableNameToDesc[desc.Name] = desc
+	fks.resolver[desc.Name] = desc
 	if seqDesc != nil {
 		return []*tabledesc.Mutable{seqDesc, desc}, fkDefs, nil
 	}
@@ -577,8 +552,6 @@ func mysqlActionToCockroach(action mysql.ReferenceAction) tree.ReferenceAction {
 }
 
 type delayedFK struct {
-	db  catalog.DatabaseDescriptor
-	sc  catalog.SchemaDescriptor
 	tbl *tabledesc.Mutable
 	def *tree.ForeignKeyConstraintTableDef
 }
@@ -587,18 +560,15 @@ func addDelayedFKs(
 	ctx context.Context, defs []delayedFK, resolver fkResolver, evalCtx *tree.EvalContext,
 ) error {
 	for _, def := range defs {
-		backrefs := map[descpb.ID]*tabledesc.Mutable{}
 		if err := sql.ResolveFK(
-			ctx, nil, &resolver, def.db, def.sc, def.tbl, def.def,
-			backrefs, sql.NewTable,
-			tree.ValidationDefault, evalCtx,
+			ctx, nil, resolver, def.tbl, def.def, map[descpb.ID]*tabledesc.Mutable{}, sql.NewTable, tree.ValidationDefault, evalCtx,
 		); err != nil {
 			return err
 		}
 		if err := fixDescriptorFKState(def.tbl); err != nil {
 			return err
 		}
-		if err := def.tbl.AllocateIDs(ctx); err != nil {
+		if err := def.tbl.AllocateIDs(); err != nil {
 			return err
 		}
 	}
@@ -689,26 +659,20 @@ func mysqlColToCockroach(
 
 	case mysqltypes.Date:
 		def.Type = types.Date
-		if col.Default != nil {
-			if lit, ok := col.Default.(*mysql.Literal); ok && bytes.Equal(lit.Val, []byte(zeroDate)) {
-				col.Default = nil
-			}
+		if col.Default != nil && bytes.Equal(col.Default.Val, []byte(zeroDate)) {
+			col.Default = nil
 		}
 	case mysqltypes.Time:
 		def.Type = types.Time
 	case mysqltypes.Timestamp:
 		def.Type = types.TimestampTZ
-		if col.Default != nil {
-			if lit, ok := col.Default.(*mysql.Literal); ok && bytes.Equal(lit.Val, []byte(zeroTime)) {
-				col.Default = nil
-			}
+		if col.Default != nil && bytes.Equal(col.Default.Val, []byte(zeroTime)) {
+			col.Default = nil
 		}
 	case mysqltypes.Datetime:
 		def.Type = types.TimestampTZ
-		if col.Default != nil {
-			if lit, ok := col.Default.(*mysql.Literal); ok && bytes.Equal(lit.Val, []byte(zeroTime)) {
-				col.Default = nil
-			}
+		if col.Default != nil && bytes.Equal(col.Default.Val, []byte(zeroTime)) {
+			col.Default = nil
 		}
 	case mysqltypes.Year:
 		def.Type = types.Int2
@@ -749,20 +713,16 @@ func mysqlColToCockroach(
 		def.Nullable.Nullability = tree.Null
 	}
 
-	if col.Default != nil {
-		if _, ok := col.Default.(*mysql.NullVal); !ok {
-			if literal, ok := col.Default.(*mysql.Literal); ok && literal.Type == mysql.StrVal {
-				// mysql.String(col.Default) returns a quoted string for string
-				// literals. We should use the literal's Val instead.
-				def.DefaultExpr.Expr = tree.NewStrVal(string(literal.Val))
-			} else {
-				exprString := mysql.String(col.Default)
-				expr, err := parser.ParseExpr(exprString)
-				if err != nil {
-					return nil, unimplemented.Newf("import.mysql.default", "unsupported default expression %q for column %q: %v", exprString, name, err)
-				}
-				def.DefaultExpr.Expr = expr
+	if col.Default != nil && !bytes.EqualFold(col.Default.Val, []byte("null")) {
+		exprString := string(col.Default.Val)
+		if col.Default.Type == mysql.StrVal {
+			def.DefaultExpr.Expr = tree.NewStrVal(exprString)
+		} else {
+			expr, err := parser.ParseExpr(exprString)
+			if err != nil {
+				return nil, unimplemented.Newf("import.mysql.default", "unsupported default expression %q for column %q: %v", exprString, name, err)
 			}
+			def.DefaultExpr.Expr = expr
 		}
 	}
 	return def, nil

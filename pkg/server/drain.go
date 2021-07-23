@@ -12,6 +12,7 @@ package server
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"time"
 
@@ -26,18 +27,30 @@ import (
 )
 
 var (
-	queryWait = settings.RegisterDurationSetting(
+	// DeprecatedDrainParameter the special value that must be
+	// passed in DrainRequest.DeprecatedProbeIndicator to signal the
+	// drain request is not a probe.
+	// This variable is also used in the v20.1 "quit" client
+	// to provide a valid input to the request sent to
+	// v19.1 nodes.
+	//
+	// TODO(knz): Remove this in v20.2 and whenever the "quit" command
+	// is not meant to work with 19.x servers any more, whichever comes
+	// later.
+	DeprecatedDrainParameter = []int32{0, 1}
+
+	queryWait = settings.RegisterPublicDurationSetting(
 		"server.shutdown.query_wait",
 		"the server will wait for at least this amount of time for active queries to finish",
 		10*time.Second,
-	).WithPublic()
+	)
 
-	drainWait = settings.RegisterDurationSetting(
+	drainWait = settings.RegisterPublicDurationSetting(
 		"server.shutdown.drain_wait",
 		"the amount of time a server waits in an unready state before proceeding with the rest "+
 			"of the shutdown process",
 		0*time.Second,
-	).WithPublic()
+	)
 )
 
 // Drain puts the node into the specified drain mode(s) and optionally
@@ -47,26 +60,30 @@ func (s *adminServer) Drain(req *serverpb.DrainRequest, stream serverpb.Admin_Dr
 	ctx := stream.Context()
 	ctx = s.server.AnnotateCtx(ctx)
 
-	if len(req.Pre201Marker) > 0 {
-		return status.Errorf(codes.InvalidArgument,
-			"Drain request coming from unsupported client version older than 20.1.")
+	doDrain := req.DoDrain
+	if len(req.DeprecatedProbeIndicator) > 0 {
+		// Pre-20.1 behavior.
+		// TODO(knz): Remove this condition in 20.2.
+		doDrain = true
+		if !reflect.DeepEqual(req.DeprecatedProbeIndicator, DeprecatedDrainParameter) {
+			return status.Errorf(codes.InvalidArgument, "Invalid drain request parameter.")
+		}
 	}
 
-	doDrain := req.DoDrain
-
-	log.Ops.Infof(ctx, "drain request received with doDrain = %v, shutdown = %v", doDrain, req.Shutdown)
+	log.Infof(ctx, "drain request received with doDrain = %v, shutdown = %v", doDrain, req.Shutdown)
 
 	res := serverpb.DrainResponse{}
 	if doDrain {
 		remaining, info, err := s.server.Drain(ctx)
 		if err != nil {
-			log.Ops.Errorf(ctx, "drain failed: %v", err)
+			log.Errorf(ctx, "drain failed: %v", err)
 			return err
 		}
 		res.DrainRemainingIndicator = remaining
 		res.DrainRemainingDescription = info.StripMarkers()
 	}
 	if s.server.isDraining() {
+		res.DeprecatedDrainStatus = DeprecatedDrainParameter
 		res.IsDraining = true
 	}
 
@@ -78,7 +95,7 @@ func (s *adminServer) Drain(req *serverpb.DrainRequest, stream serverpb.Admin_Dr
 		if doDrain {
 			// The condition "if doDrain" is because we don't need an info
 			// message for just a probe.
-			log.Ops.Infof(ctx, "drain request completed without server shutdown")
+			log.Infof(ctx, "drain request completed without server shutdown")
 		}
 		return nil
 	}
@@ -154,9 +171,9 @@ func (s *Server) Drain(
 			comma = ", "
 		}
 		info = redact.RedactableString(descBuf.String())
-		log.Ops.Infof(ctx, "drain remaining: %d", remaining)
+		log.Infof(ctx, "drain remaining: %d", remaining)
 		if info != "" {
-			log.Ops.Infof(ctx, "drain details: %s", info)
+			log.Infof(ctx, "drain details: %s", info)
 		}
 	}()
 
@@ -216,8 +233,6 @@ func (s *Server) drainClients(ctx context.Context, reporter func(int, redact.Saf
 // drainNode initiates the draining mode for the node, which
 // starts draining range leases.
 func (s *Server) drainNode(ctx context.Context, reporter func(int, redact.SafeString)) error {
-	if err := s.nodeLiveness.SetDraining(ctx, true /* drain */, reporter); err != nil {
-		return err
-	}
+	s.nodeLiveness.SetDraining(ctx, true /* drain */, reporter)
 	return s.node.SetDraining(true /* drain */, reporter)
 }

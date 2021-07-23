@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -11,7 +11,7 @@
 import React from "react";
 import _ from "lodash";
 import { assert } from "chai";
-import { mount, ReactWrapper } from "enzyme";
+import { mount } from "enzyme";
 import * as sinon from "sinon";
 import classNames from "classnames/bind";
 import {
@@ -81,10 +81,6 @@ function makeExpandableTable(data: TestRow[], sortSetting: SortSetting) {
   );
 }
 
-function rowsOf(wrapper: ReactWrapper): Array<Array<string>> {
-  return wrapper.find("tr").map(tr => tr.find("td").map(td => td.text()));
-}
-
 describe("<SortedTable>", function() {
   it("renders the expected table structure.", function() {
     const wrapper = makeTable([new TestRow("test", 1)]);
@@ -107,6 +103,7 @@ describe("<SortedTable>", function() {
       .simulate("click");
     assert.isTrue(spy.calledOnce);
     assert.deepEqual(spy.getCall(0).args[0], {
+      sortKey: 0,
       ascending: false,
       columnTitle: "first",
     } as SortSetting);
@@ -143,16 +140,10 @@ describe("<SortedTable>", function() {
       });
     };
     assertMatches(data);
-    wrapper = makeTable(data, {
-      ascending: true,
-      columnTitle: "first",
-    });
+    wrapper = makeTable(data, { sortKey: 0, ascending: true });
     assertMatches(_.sortBy(data, r => r.name));
     wrapper.setProps({
-      uiSortSetting: {
-        ascending: true,
-        columnTitle: "second",
-      } as SortSetting,
+      uiSortSetting: { sortKey: 1, ascending: true } as SortSetting,
     });
     assertMatches(_.sortBy(data, r => r.value));
   });
@@ -256,15 +247,10 @@ describe("<SortedTable>", function() {
       "first row column at seconds page match",
     );
 
-    wrapper = makeTable(
-      data,
-      { ascending: true, columnTitle: "first" },
-      undefined,
-      {
-        current: 1,
-        pageSize: 2,
-      },
-    );
+    wrapper = makeTable(data, { sortKey: 0, ascending: true }, undefined, {
+      current: 1,
+      pageSize: 2,
+    });
     rows = wrapper.find("tbody");
     assert.equal(
       rows
@@ -276,15 +262,10 @@ describe("<SortedTable>", function() {
       "second row column at first page match",
     );
 
-    wrapper = makeTable(
-      data,
-      { ascending: true, columnTitle: "first" },
-      undefined,
-      {
-        current: 2,
-        pageSize: 2,
-      },
-    );
+    wrapper = makeTable(data, { sortKey: 0, ascending: true }, undefined, {
+      current: 2,
+      pageSize: 2,
+    });
     rows = wrapper.find("tbody");
     assert.equal(
       rows
@@ -295,34 +276,5 @@ describe("<SortedTable>", function() {
       "c",
       "first row column at seconds page match",
     );
-  });
-
-  it("should update when pagination changes", function() {
-    const table = makeTable(
-      [
-        new TestRow("c", 3),
-        new TestRow("d", 4),
-        new TestRow("a", 1),
-        new TestRow("b", 2),
-      ],
-      undefined,
-      undefined,
-      {
-        current: 1,
-        pageSize: 2,
-      },
-    );
-
-    assert.deepEqual(rowsOf(table.find("tbody")), [
-      ["c", "3"],
-      ["d", "4"],
-    ]);
-
-    table.setProps({ pagination: { current: 2, pageSize: 2 } });
-
-    assert.deepEqual(rowsOf(table.find("tbody")), [
-      ["a", "1"],
-      ["b", "2"],
-    ]);
   });
 });

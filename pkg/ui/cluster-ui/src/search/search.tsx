@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -104,7 +104,7 @@ export class Search extends React.Component<TSearchProps, ISearchState> {
         <Form.Item>
           <Input
             className={className}
-            placeholder="Search Statements"
+            placeholder="Search Statement"
             onChange={this.onChange}
             prefix={<SearchIcon className={cx("prefix-icon")} />}
             suffix={this.renderSuffix()}

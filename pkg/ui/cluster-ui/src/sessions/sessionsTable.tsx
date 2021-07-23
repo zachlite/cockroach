@@ -71,7 +71,7 @@ const SessionLink = (props: { session: ISession; onClick?: () => void }) => {
         content={<>Session started at {start.format(DATE_FORMAT)}</>}
       >
         <Link onClick={onClick} to={`${base}/${encodeURIComponent(sessionID)}`}>
-          <div>{start.fromNow(true)}</div>
+          {start.fromNow(true)}
         </Link>
       </Tooltip>
     </div>

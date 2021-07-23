@@ -17,7 +17,6 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -38,25 +37,25 @@ const AutoStatsClusterSettingName = "sql.stats.automatic_collection.enabled"
 
 // AutomaticStatisticsClusterMode controls the cluster setting for enabling
 // automatic table statistics collection.
-var AutomaticStatisticsClusterMode = settings.RegisterBoolSetting(
+var AutomaticStatisticsClusterMode = settings.RegisterPublicBoolSetting(
 	AutoStatsClusterSettingName,
 	"automatic statistics collection mode",
 	true,
-).WithPublic()
+)
 
 // MultiColumnStatisticsClusterMode controls the cluster setting for enabling
 // automatic collection of multi-column statistics.
-var MultiColumnStatisticsClusterMode = settings.RegisterBoolSetting(
+var MultiColumnStatisticsClusterMode = settings.RegisterPublicBoolSetting(
 	"sql.stats.multi_column_collection.enabled",
 	"multi-column statistics collection mode",
 	true,
-).WithPublic()
+)
 
 // AutomaticStatisticsMaxIdleTime controls the maximum fraction of time that
 // the sampler processors will be idle when scanning large tables for automatic
 // statistics (in high load scenarios). This value can be tuned to trade off
 // the runtime vs performance impact of automatic stats.
-var AutomaticStatisticsMaxIdleTime = settings.RegisterFloatSetting(
+var AutomaticStatisticsMaxIdleTime = settings.RegisterValidatedFloatSetting(
 	"sql.stats.automatic_collection.max_fraction_idle",
 	"maximum fraction of time that automatic statistics sampler processors are idle",
 	0.9,
@@ -74,11 +73,10 @@ var AutomaticStatisticsMaxIdleTime = settings.RegisterFloatSetting(
 // statistics on that table are refreshed, in addition to the constant value
 // AutomaticStatisticsMinStaleRows.
 var AutomaticStatisticsFractionStaleRows = func() *settings.FloatSetting {
-	s := settings.RegisterFloatSetting(
+	s := settings.RegisterNonNegativeFloatSetting(
 		"sql.stats.automatic_collection.fraction_stale_rows",
 		"target fraction of stale rows per table that will trigger a statistics refresh",
 		0.2,
-		settings.NonNegativeFloat,
 	)
 	s.SetVisibility(settings.Public)
 	return s
@@ -88,11 +86,10 @@ var AutomaticStatisticsFractionStaleRows = func() *settings.FloatSetting {
 // number of rows that should be updated before a table is refreshed, in
 // addition to the fraction AutomaticStatisticsFractionStaleRows.
 var AutomaticStatisticsMinStaleRows = func() *settings.IntSetting {
-	s := settings.RegisterIntSetting(
+	s := settings.RegisterNonNegativeIntSetting(
 		"sql.stats.automatic_collection.min_stale_rows",
 		"target minimum number of stale rows per table that will trigger a statistics refresh",
 		500,
-		settings.NonNegativeInt,
 	)
 	s.SetVisibility(settings.Public)
 	return s
@@ -117,6 +114,11 @@ var bufferedChanFullLogLimiter = log.Every(time.Second)
 // Constants for automatic statistics collection.
 // TODO(rytaft): Should these constants be configurable?
 const (
+	// AutoStatsName is the name to use for statistics created automatically.
+	// The name is chosen to be something that users are unlikely to choose when
+	// running CREATE STATISTICS manually.
+	AutoStatsName = "__auto__"
+
 	// defaultAverageTimeBetweenRefreshes is the default time to use as the
 	// "average" time between refreshes when there is no information for a given
 	// table.
@@ -240,7 +242,7 @@ func MakeRefresher(
 func (r *Refresher) Start(
 	ctx context.Context, stopper *stop.Stopper, refreshInterval time.Duration,
 ) error {
-	_ = stopper.RunAsyncTask(context.Background(), "refresher", func(ctx context.Context) {
+	stopper.RunWorker(context.Background(), func(ctx context.Context) {
 		// We always sleep for r.asOfTime at the beginning of each refresh, so
 		// subtract it from the refreshInterval.
 		refreshInterval -= r.asOfTime
@@ -302,7 +304,7 @@ func (r *Refresher) Start(
 			case mut := <-r.mutations:
 				r.mutationCounts[mut.tableID] += int64(mut.rowsAffected)
 
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 			}
 		}
@@ -329,33 +331,24 @@ AND drop_time IS NULL
 `,
 		initialTableCollectionDelay)
 
-	it, err := r.ex.QueryIterator(
+	rows, err := r.ex.Query(
 		ctx,
 		"get-tables",
 		nil, /* txn */
 		getAllTablesQuery,
 	)
-	if err == nil {
-		var ok bool
-		for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-			row := it.Cur()
-			tableID := descpb.ID(*row[0].(*tree.DInt))
-			// Don't create statistics for system tables or virtual tables.
-			// TODO(rytaft): Don't add views here either. Unfortunately views are not
-			// identified differently from tables in crdb_internal.tables.
-			if !descpb.IsReservedID(tableID) && !descpb.IsVirtualTable(tableID) {
-				r.mutationCounts[tableID] += 0
-			}
-		}
-	}
 	if err != nil {
-		// Note that it is ok if the iterator returned partial results before
-		// encountering an error - in that case we added entries to
-		// r.mutationCounts for some of the tables and operation of adding an
-		// entry is idempotent (i.e. we didn't mess up anything for the next
-		// call to this method).
 		log.Errorf(ctx, "failed to get tables for automatic stats: %v", err)
 		return
+	}
+	for _, row := range rows {
+		tableID := descpb.ID(*row[0].(*tree.DInt))
+		// Don't create statistics for system tables or virtual tables.
+		// TODO(rytaft): Don't add views here either. Unfortunately views are not
+		// identified differently from tables in crdb_internal.tables.
+		if !descpb.IsReservedID(tableID) && !descpb.IsVirtualTable(tableID) {
+			r.mutationCounts[tableID] += 0
+		}
 	}
 }
 
@@ -483,7 +476,7 @@ func (r *Refresher) refreshStats(ctx context.Context, tableID descpb.ID, asOf ti
 		nil, /* txn */
 		fmt.Sprintf(
 			"CREATE STATISTICS %s FROM [%d] WITH OPTIONS THROTTLING %g AS OF SYSTEM TIME '-%s'",
-			jobspb.AutoStatsName,
+			AutoStatsName,
 			tableID,
 			AutomaticStatisticsMaxIdleTime.Get(&r.st.SV),
 			asOf.String(),
@@ -497,7 +490,7 @@ func (r *Refresher) refreshStats(ctx context.Context, tableID descpb.ID, asOf ti
 func mostRecentAutomaticStat(tableStats []*TableStatistic) *TableStatistic {
 	// Stats are sorted with the most recent first.
 	for _, stat := range tableStats {
-		if stat.Name == jobspb.AutoStatsName {
+		if stat.Name == AutoStatsName {
 			return stat
 		}
 	}
@@ -518,7 +511,7 @@ func avgRefreshTime(tableStats []*TableStatistic) time.Duration {
 	var sum time.Duration
 	var count int
 	for _, stat := range tableStats {
-		if stat.Name != jobspb.AutoStatsName {
+		if stat.Name != AutoStatsName {
 			continue
 		}
 		if reference == nil {

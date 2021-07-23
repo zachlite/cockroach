@@ -28,14 +28,13 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/cockroach/pkg/workload/workloadsql"
 	"github.com/cockroachdb/errors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/time/rate"
@@ -58,18 +57,10 @@ var sharedFlags = pflag.NewFlagSet(`shared`, pflag.ContinueOnError)
 var pprofport = sharedFlags.Int("pprofport", 33333, "Port for pprof endpoint.")
 var dataLoader = sharedFlags.String("data-loader", `INSERT`,
 	"How to load initial table data. Options are INSERT and IMPORT")
-var initConns = sharedFlags.Int("init-conns", 16,
-	"The number of connections to use during INSERT init")
 
 var displayEvery = runFlags.Duration("display-every", time.Second, "How much time between every one-line activity reports.")
 
 var displayFormat = runFlags.String("display-format", "simple", "Output display format (simple, incremental-json)")
-
-var prometheusPort = sharedFlags.Int(
-	"prometheus-port",
-	2112,
-	"Port to expose prometheus metrics if the workload has a prometheus gatherer set.",
-)
 
 var histograms = runFlags.String(
 	"histograms", "",
@@ -78,18 +69,7 @@ var histogramsMaxLatency = runFlags.Duration(
 	"histograms-max-latency", 100*time.Second,
 	"Expected maximum latency of running a query")
 
-var securityFlags = pflag.NewFlagSet(`security`, pflag.ContinueOnError)
-var secure = securityFlags.Bool("secure", false,
-	"Run in secure mode (sslmode=require). "+
-		"Running in secure mode expects the relevant certs to have been created for the user in the certs/ directory."+
-		"For example when using root, certs/client.root.crt certs/client.root.key should exist.")
-var user = securityFlags.String("user", "root", "Specify a user to run the workload as")
-var password = securityFlags.String("password", "", "Optionally specify a password for the user")
-
 func init() {
-
-	_ = sharedFlags.MarkHidden("pprofport")
-
 	AddSubCmd(func(userFacing bool) *cobra.Command {
 		var initCmd = SetCmdDefaults(&cobra.Command{
 			Use:   `init`,
@@ -111,7 +91,6 @@ func init() {
 			genInitCmd.Flags().AddFlagSet(initFlags)
 			genInitCmd.Flags().AddFlagSet(sharedFlags)
 			genInitCmd.Flags().AddFlagSet(genFlags)
-			genInitCmd.Flags().AddFlagSet(securityFlags)
 			genInitCmd.Run = CmdHelper(gen, runInit)
 			if userFacing && !meta.PublicFacing {
 				genInitCmd.Hidden = true
@@ -147,7 +126,6 @@ func init() {
 			genRunCmd.Flags().AddFlagSet(runFlags)
 			genRunCmd.Flags().AddFlagSet(sharedFlags)
 			genRunCmd.Flags().AddFlagSet(genFlags)
-			genRunCmd.Flags().AddFlagSet(securityFlags)
 			initFlags.VisitAll(func(initFlag *pflag.Flag) {
 				// Every init flag is a valid run flag that implies the --init option.
 				f := *initFlag
@@ -170,15 +148,14 @@ func init() {
 func CmdHelper(
 	gen workload.Generator, fn func(gen workload.Generator, urls []string, dbName string) error,
 ) func(*cobra.Command, []string) {
+	const crdbDefaultURL = `postgres://root@localhost:26257?sslmode=disable`
+
 	return HandleErrs(func(cmd *cobra.Command, args []string) error {
-		// Apply the logging configuration if none was set already.
-		if active, _ := log.IsActive(); !active {
-			cfg := logconfig.DefaultStderrConfig()
-			if err := cfg.Validate(nil /* no default log directory */); err != nil {
-				return err
-			}
-			if _, err := log.ApplyConfig(cfg); err != nil {
-				return err
+		if ls := cmd.Flags().Lookup(logflags.LogToStderrName); ls != nil {
+			if !ls.Changed {
+				// Unless the settings were overridden by the user, default to logging
+				// to stderr.
+				_ = ls.Value.Set(log.Severity_INFO.String())
 			}
 		}
 
@@ -196,23 +173,8 @@ func CmdHelper(
 		if dbFlag := cmd.Flag(`db`); dbFlag != nil {
 			dbOverride = dbFlag.Value.String()
 		}
-
 		urls := args
 		if len(urls) == 0 {
-			crdbDefaultURL := fmt.Sprintf(`postgres://%s@localhost:26257?sslmode=disable`, *user)
-			if *secure {
-				if *password != "" {
-					crdbDefaultURL = fmt.Sprintf(
-						`postgres://%s:%s@localhost:26257?sslmode=require&sslrootcert=certs/ca.crt`,
-						*user, *password)
-				} else {
-					crdbDefaultURL = fmt.Sprintf(
-						// This URL expects the certs to have been created by the user.
-						`postgres://%s@localhost:26257?sslcert=certs/client.%s.crt&sslkey=certs/client.%s.key&sslrootcert=certs/ca.crt&sslmode=require`,
-						*user, *user, *user)
-				}
-			}
-
 			urls = []string{crdbDefaultURL}
 		}
 		dbName, err := workload.SanitizeUrls(gen, dbOverride, urls)
@@ -312,7 +274,10 @@ func runInitImpl(
 	switch strings.ToLower(*dataLoader) {
 	case `insert`, `inserts`:
 		l = workloadsql.InsertsDataLoader{
-			Concurrency: *initConns,
+			// TODO(dan): Don't hardcode this. Similar to dbOverride, this should be
+			// hooked up to a flag directly once once more of run.go moves inside
+			// workload.
+			Concurrency: 16,
 		}
 	case `import`, `imports`:
 		l = workload.ImportDataLoader
@@ -385,20 +350,7 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 	if !ok {
 		return errors.Errorf(`no operations defined for %s`, gen.Meta().Name)
 	}
-	reg := histogram.NewRegistry(
-		*histogramsMaxLatency,
-		gen.Meta().Name,
-	)
-	// Expose the prometheus gatherer.
-	go func() {
-		if err := http.ListenAndServe(
-			fmt.Sprintf(":%d", *prometheusPort),
-			promhttp.HandlerFor(reg.Gatherer(), promhttp.HandlerOpts{}),
-		); err != nil {
-			log.Errorf(context.Background(), "error serving prometheus: %v", err)
-		}
-	}()
-
+	reg := histogram.NewRegistry(*histogramsMaxLatency)
 	var ops workload.QueryLoad
 	prepareStart := timeutil.Now()
 	log.Infof(ctx, "creating load generator...")
@@ -530,7 +482,7 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 			})
 
 		// Once the load generator is fully ramped up, we reset the histogram
-		// and the start time to throw away the stats for the ramp up period.
+		// and the start time to throw away the stats for the the ramp up period.
 		case <-rampDone:
 			rampDone = nil
 			start = timeutil.Now()

@@ -197,7 +197,7 @@ func hashTableInitialData(
 	var scratch [8]byte
 	b := coldata.NewMemBatchWithCapacity(nil /* typs */, 0 /* capacity */, coldata.StandardColumnFactory)
 	for batchIdx := 0; batchIdx < data.NumBatches; batchIdx++ {
-		*a = a.Truncate()
+		*a = (*a)[:0]
 		data.FillBatch(batchIdx, b, a)
 		for _, col := range b.ColVecs() {
 			switch t := col.Type(); col.CanonicalTypeFamily() {

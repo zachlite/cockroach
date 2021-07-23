@@ -169,14 +169,8 @@ func (r *databaseRegionChangeFinalizer) repartitionRegionalByRowTables(
 		// the table descriptor with the new type metadata.
 		for i := range tableDesc.Columns {
 			col := &tableDesc.Columns[i]
-			if col.Type.UserDefined() {
-				tid, err := typedesc.UserDefinedTypeOIDToID(col.Type.Oid())
-				if err != nil {
-					return err
-				}
-				if tid == r.typeID {
-					col.Type.TypeMeta = types.UserDefinedTypeMetadata{}
-				}
+			if col.Type.UserDefined() && typedesc.UserDefinedTypeOIDToID(col.Type.Oid()) == r.typeID {
+				col.Type.TypeMeta = types.UserDefinedTypeMetadata{}
 			}
 		}
 		if err := typedesc.HydrateTypesInTableDescriptor(
@@ -193,16 +187,15 @@ func (r *databaseRegionChangeFinalizer) repartitionRegionalByRowTables(
 		}
 		partitionAllBy := partitionByForRegionalByRow(regionConfig, colName)
 
-		// oldPartitionings saves the old partitionings for each
+		// oldPartitioningDescs saves the old partitioning descriptors for each
 		// index that is repartitioned. This is later used to remove zone
 		// configurations from any partitions that are removed.
-		oldPartitionings := make(map[descpb.IndexID]catalog.Partitioning)
+		oldPartitioningDescs := make(map[descpb.IndexID]descpb.PartitioningDescriptor)
 
 		// Update the partitioning on all indexes of the table that aren't being
 		// dropped.
 		for _, index := range tableDesc.NonDropIndexes() {
-			oldPartitionings[index.GetID()] = index.GetPartitioning().DeepCopy()
-			newImplicitCols, newPartitioning, err := CreatePartitioning(
+			newIdx, err := CreatePartitioning(
 				ctx,
 				r.localPlanner.extendedEvalCtx.Settings,
 				r.localPlanner.EvalContext(),
@@ -215,7 +208,11 @@ func (r *databaseRegionChangeFinalizer) repartitionRegionalByRowTables(
 			if err != nil {
 				return err
 			}
-			tabledesc.UpdateIndexPartitioning(index.IndexDesc(), index.Primary(), newImplicitCols, newPartitioning)
+
+			oldPartitioningDescs[index.GetID()] = index.IndexDesc().Partitioning
+
+			// Update the index descriptor proto's partitioning.
+			index.IndexDesc().Partitioning = newIdx.Partitioning
 		}
 
 		// Remove zone configurations that applied to partitions that were removed
@@ -228,15 +225,17 @@ func (r *databaseRegionChangeFinalizer) repartitionRegionalByRowTables(
 		// remove the partition from all indexes before trying to delete zone
 		// configurations.
 		for _, index := range tableDesc.NonDropIndexes() {
+			oldPartitioning := oldPartitioningDescs[index.GetID()]
+
 			// Remove zone configurations that reference partition values we removed
 			// in the previous step.
 			if err = deleteRemovedPartitionZoneConfigs(
 				ctx,
 				txn,
 				tableDesc,
-				index.GetID(),
-				oldPartitionings[index.GetID()],
-				index.GetPartitioning(),
+				index.IndexDesc(),
+				&oldPartitioning,
+				&index.IndexDesc().Partitioning,
 				r.localPlanner.ExecCfg(),
 			); err != nil {
 				return err

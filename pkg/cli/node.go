@@ -20,8 +20,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
@@ -52,12 +50,12 @@ To retrieve the IDs for inactive members, see 'node status --decommission'.
 	RunE: MaybeDecorateGRPCError(runLsNodes),
 }
 
-func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
+func runLsNodes(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach node ls", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if cliCtx.cmdTimeout != 0 {
 		if err := conn.Exec(fmt.Sprintf("SET statement_timeout=%d", cliCtx.cmdTimeout), nil); err != nil {
@@ -65,9 +63,9 @@ func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
 		}
 	}
 
-	_, rows, err := sqlExecCtx.RunQuery(
+	_, rows, err := runQuery(
 		conn,
-		clisqlclient.MakeQuery(`SELECT node_id FROM crdb_internal.gossip_liveness
+		makeQuery(`SELECT node_id FROM crdb_internal.gossip_liveness
                WHERE membership = 'active' OR split_part(expiration,',',1)::decimal > now()::decimal`),
 		false,
 	)
@@ -76,8 +74,7 @@ func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
 		return err
 	}
 
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, lsNodesColumnHeaders,
-		clisqlexec.NewRowSliceIter(rows, "r"))
+	return printQueryOutput(os.Stdout, lsNodesColumnHeaders, newRowSliceIter(rows, "r"))
 }
 
 var baseNodeColumnHeaders = []string{
@@ -132,13 +129,11 @@ func runStatusNode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	sliceIter := clisqlexec.NewRowSliceIter(rows, getStatusNodeAlignment())
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, getStatusNodeHeaders(), sliceIter)
+	sliceIter := newRowSliceIter(rows, getStatusNodeAlignment())
+	return printQueryOutput(os.Stdout, getStatusNodeHeaders(), sliceIter)
 }
 
-func runStatusNodeInner(
-	showDecommissioned bool, args []string,
-) (colNames []string, rowVals [][]string, resErr error) {
+func runStatusNodeInner(showDecommissioned bool, args []string) ([]string, [][]string, error) {
 	joinUsingID := func(queries []string) (query string) {
 		for i, q := range queries {
 			if i == 0 {
@@ -206,7 +201,7 @@ FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (n
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	queriesToJoin := []string{baseQuery}
 
@@ -230,15 +225,15 @@ FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (n
 
 	switch len(args) {
 	case 0:
-		query := clisqlclient.MakeQuery(queryString + " ORDER BY id")
-		return sqlExecCtx.RunQuery(conn, query, false)
+		query := makeQuery(queryString + " ORDER BY id")
+		return runQuery(conn, query, false)
 	case 1:
 		nodeID, err := strconv.Atoi(args[0])
 		if err != nil {
 			return nil, nil, errors.Errorf("could not parse node_id %s", args[0])
 		}
-		query := clisqlclient.MakeQuery(queryString+" WHERE id = $1", nodeID)
-		headers, rows, err := sqlExecCtx.RunQuery(conn, query, false)
+		query := makeQuery(queryString+" WHERE id = $1", nodeID)
+		headers, rows, err := runQuery(conn, query, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -533,8 +528,8 @@ signaling the affected nodes to participate in the cluster again.
 }
 
 func printDecommissionStatus(resp serverpb.DecommissionStatusResponse) error {
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, decommissionNodesColumnHeaders,
-		clisqlexec.NewRowSliceIter(decommissionResponseValueToRows(resp.Status), decommissionResponseAlignment()))
+	return printQueryOutput(os.Stdout, decommissionNodesColumnHeaders,
+		newRowSliceIter(decommissionResponseValueToRows(resp.Status), decommissionResponseAlignment()))
 }
 
 func runRecommissionNode(cmd *cobra.Command, args []string) error {

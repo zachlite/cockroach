@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"sync/atomic"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -60,7 +61,7 @@ type CreatedByInfo struct {
 // Record bundles together the user-managed fields in jobspb.Payload.
 type Record struct {
 	Description   string
-	Statements    []string
+	Statement     string
 	Username      security.SQLUsername
 	DescriptorIDs descpb.IDs
 	Details       jobspb.Details
@@ -96,7 +97,7 @@ type StartableJob struct {
 type TraceableJob interface {
 	// ForceRealSpan forces the registry to create a real Span instead of a
 	// low-overhead non-recordable noop span.
-	ForceRealSpan() bool
+	ForceRealSpan()
 }
 
 func init() {
@@ -154,10 +155,6 @@ const (
 	// job will change its state to StatusPaused the next time it runs
 	// maybeAdoptJobs and will stop running it.
 	StatusPauseRequested Status = "pause-requested"
-	// StatusRevertFailed is for jobs that encountered an non-retryable error when
-	// reverting their changes. Manual cleanup is required when a job ends up in
-	// this state.
-	StatusRevertFailed Status = "revert-failed"
 )
 
 var (
@@ -183,7 +180,7 @@ func deprecatedIsOldSchemaChangeJob(payload *jobspb.Payload) bool {
 // Terminal returns whether this status represents a "terminal" state: a state
 // after which the job should never be updated again.
 func (s Status) Terminal() bool {
-	return s == StatusFailed || s == StatusSucceeded || s == StatusCanceled || s == StatusRevertFailed
+	return s == StatusFailed || s == StatusSucceeded || s == StatusCanceled
 }
 
 // InvalidStatusError is the error returned when the desired operation is
@@ -415,6 +412,9 @@ func (j *Job) unpaused(ctx context.Context, txn *kv.Txn) error {
 		} else {
 			ju.UpdateStatus(StatusReverting)
 		}
+		// NB: A nil lease indicates the job is not resumable, whereas an empty
+		// lease is always considered expired.
+		md.Payload.Lease = &jobspb.Lease{}
 		ju.UpdatePayload(md.Payload)
 		return nil
 	})
@@ -592,28 +592,6 @@ func (j *Job) failed(
 	})
 }
 
-// RevertFailed marks the tracked job as having failed during revert with the
-// given error. Manual cleanup is required when the job is in this state.
-func (j *Job) revertFailed(
-	ctx context.Context, txn *kv.Txn, err error, fn func(context.Context, *kv.Txn) error,
-) error {
-	return j.Update(ctx, txn, func(txn *kv.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Status != StatusReverting {
-			return fmt.Errorf("job with status %s cannot fail during a revert", md.Status)
-		}
-		if fn != nil {
-			if err := fn(ctx, txn); err != nil {
-				return err
-			}
-		}
-		ju.UpdateStatus(StatusRevertFailed)
-		md.Payload.FinishedMicros = timeutil.ToUnixMicros(j.registry.clock.Now().GoTime())
-		md.Payload.Error = err.Error()
-		ju.UpdatePayload(md.Payload)
-		return nil
-	})
-}
-
 // succeeded marks the tracked job as having succeeded and sets its fraction
 // completed to 1.0.
 func (j *Job) succeeded(
@@ -735,7 +713,13 @@ func (j *Job) load(ctx context.Context, txn *kv.Txn) error {
 	var createdBy *CreatedByInfo
 
 	if err := j.runInTxn(ctx, txn, func(ctx context.Context, txn *kv.Txn) error {
-		const stmt = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
+		const newStmt = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
+		const oldStmt = "SELECT payload, progress FROM system.jobs WHERE id = $1"
+		hasCreatedBy := j.registry.settings.Version.IsActive(ctx, clusterversion.AlterSystemJobsAddCreatedByColumns)
+		stmt := oldStmt
+		if hasCreatedBy {
+			stmt = newStmt
+		}
 		row, err := j.registry.ex.QueryRowEx(
 			ctx, "load-job-query", txn, sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			stmt, j.ID())
@@ -753,8 +737,11 @@ func (j *Job) load(ctx context.Context, txn *kv.Txn) error {
 		if err != nil {
 			return err
 		}
-		createdBy, err = unmarshalCreatedBy(row[2], row[3])
-		return err
+		if hasCreatedBy {
+			createdBy, err = unmarshalCreatedBy(row[2], row[3])
+			return err
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -842,7 +829,7 @@ func (sj *StartableJob) Start(ctx context.Context) (err error) {
 			"StartableJob %d cannot be started more than once", sj.ID())
 	}
 
-	if sj.sessionID == "" {
+	if sj.registry.startUsingSQLLivenessAdoption(ctx) && sj.sessionID == "" {
 		return errors.AssertionFailedf(
 			"StartableJob %d cannot be started without sqlliveness session", sj.ID())
 	}

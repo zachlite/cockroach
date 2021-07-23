@@ -65,14 +65,6 @@ func backupRestoreTestSetupWithParams(
 	dir, dirCleanupFn := testutils.TempDir(t)
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.UseDatabase = "data"
-	if len(params.ServerArgsPerNode) > 0 {
-		for i := range params.ServerArgsPerNode {
-			param := params.ServerArgsPerNode[i]
-			param.ExternalIODir = dir
-			param.UseDatabase = "data"
-			params.ServerArgsPerNode[i] = param
-		}
-	}
 
 	tc = testcluster.StartTestCluster(t, clusterSize, params)
 	init(tc)
@@ -152,9 +144,6 @@ func verifyBackupRestoreStatementResult(
 	var unused int64
 
 	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return err
-		}
 		return errors.New("zero rows in result")
 	}
 	if err := rows.Scan(
@@ -248,13 +237,6 @@ func backupRestoreTestSetupEmptyWithParams(
 	ctx = context.Background()
 
 	params.ServerArgs.ExternalIODir = dir
-	if len(params.ServerArgsPerNode) > 0 {
-		for i := range params.ServerArgsPerNode {
-			param := params.ServerArgsPerNode[i]
-			param.ExternalIODir = dir
-			params.ServerArgsPerNode[i] = param
-		}
-	}
 	tc = testcluster.StartTestCluster(t, clusterSize, params)
 	init(tc)
 
@@ -423,11 +405,11 @@ func getSpansFromManifest(t *testing.T, backupPath string) roachpb.Spans {
 	decompressedBytes, err := decompressData(backupManifestBytes)
 	require.NoError(t, err)
 	require.NoError(t, protoutil.Unmarshal(decompressedBytes, &backupManifest))
-	spans := make([]roachpb.Span, 0, len(backupManifest.Files))
+	spans := make(roachpb.Spans, 0, len(backupManifest.Files))
 	for _, file := range backupManifest.Files {
 		spans = append(spans, file.Span)
 	}
-	mergedSpans, _ := roachpb.MergeSpans(&spans)
+	mergedSpans, _ := roachpb.MergeSpans(spans)
 	return mergedSpans
 }
 
@@ -437,25 +419,4 @@ func getKVCount(ctx context.Context, kvDB *kv.DB, dbName, tableName string) (int
 	tableEnd := tablePrefix.PrefixEnd()
 	kvs, err := kvDB.Scan(ctx, tablePrefix, tableEnd, 0)
 	return len(kvs), err
-}
-
-// uriFmtStringAndArgs returns format strings like "$1" or "($1, $2, $3)" and
-// an []interface{} of URIs for the BACKUP/RESTORE queries.
-func uriFmtStringAndArgs(uris []string) (string, []interface{}) {
-	urisForFormat := make([]interface{}, len(uris))
-	var fmtString strings.Builder
-	if len(uris) > 1 {
-		fmtString.WriteString("(")
-	}
-	for i, uri := range uris {
-		if i > 0 {
-			fmtString.WriteString(", ")
-		}
-		fmtString.WriteString(fmt.Sprintf("$%d", i+1))
-		urisForFormat[i] = uri
-	}
-	if len(uris) > 1 {
-		fmtString.WriteString(")")
-	}
-	return fmtString.String(), urisForFormat
 }

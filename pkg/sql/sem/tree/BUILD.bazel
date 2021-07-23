@@ -1,12 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 load("//build:STRINGER.bzl", "stringer")
 
-filegroup(
-    name = "testdata",
-    srcs = glob(["testdata/**"]),
-    visibility = ["//pkg/sql/sem/tree/eval_test:__subpackages__"],
-)
-
 go_library(
     name = "tree",
     srcs = [
@@ -61,7 +55,7 @@ go_library(
         "operators.go",
         "overload.go",
         "parse_array.go",
-        "parse_string.go",  # keep
+        "parse_string.go",
         "persistence.go",
         "pgwire_encode.go",
         "placeholders.go",
@@ -105,7 +99,6 @@ go_library(
         "with.go",
         "zone.go",
         ":gen-createtypevariety-stringer",  # keep
-        ":gen-statementreturntype-stringer",  # keep
         ":gen-statementtype-stringer",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/sem/tree",
@@ -117,12 +110,11 @@ go_library(
         "//pkg/geo/geopb",
         "//pkg/keys",
         "//pkg/kv",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/server/telemetry",
         "//pkg/settings",
         "//pkg/settings/cluster",
-        "//pkg/sql/catalog/catconstants",
         "//pkg/sql/lex",
         "//pkg/sql/lexbase",
         "//pkg/sql/pgwire/pgcode",
@@ -159,7 +151,6 @@ go_library(
         "//pkg/util/uuid",
         "@com_github_cockroachdb_apd_v2//:apd",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_cockroachdb_redact//:redact",
         "@com_github_google_go_cmp//cmp",
         "@com_github_lib_pq//oid",
         "@org_golang_x_text//collate",
@@ -207,10 +198,11 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":tree"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/internal/rsg",
         "//pkg/kv",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/security/securitytest",
         "//pkg/settings/cluster",
@@ -220,14 +212,12 @@ go_test(
         "//pkg/sql/opt/optbuilder",
         "//pkg/sql/opt/xform",
         "//pkg/sql/parser",
-        "//pkg/sql/randgen",
+        "//pkg/sql/rowenc",
         "//pkg/sql/sem/builtins",
         "//pkg/sql/sessiondata",
-        "//pkg/sql/sessiondatapb",
         "//pkg/sql/types",
         "//pkg/testutils",
         "//pkg/testutils/sqlutils",
-        "//pkg/util/duration",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",
         "//pkg/util/log",
@@ -250,12 +240,6 @@ stringer(
     name = "gen-createtypevariety-stringer",
     src = "create.go",
     typ = "CreateTypeVariety",
-)
-
-stringer(
-    name = "gen-statementreturntype-stringer",
-    src = "stmt.go",
-    typ = "StatementReturnType",
 )
 
 stringer(

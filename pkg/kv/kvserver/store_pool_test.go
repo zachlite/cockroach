@@ -113,7 +113,7 @@ func createTestStorePool(
 	g := gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
 	mnl := newMockNodeLiveness(defaultNodeStatus)
 
-	TimeUntilStoreDead.Override(context.Background(), &st.SV, timeUntilStoreDeadValue)
+	TimeUntilStoreDead.Override(&st.SV, timeUntilStoreDeadValue)
 	storePool := NewStorePool(
 		log.AmbientContext{Tracer: st.Tracer},
 		st,
@@ -1227,7 +1227,7 @@ func TestNodeLivenessLivenessStatus(t *testing.T) {
 			},
 			expected: livenesspb.NodeLivenessStatus_DECOMMISSIONED,
 		},
-		// Draining
+		// Draining (reports as unavailable).
 		{
 			liveness: livenesspb.Liveness{
 				NodeID: 1,
@@ -1238,31 +1238,6 @@ func TestNodeLivenessLivenessStatus(t *testing.T) {
 				Draining: true,
 			},
 			expected: livenesspb.NodeLivenessStatus_DRAINING,
-		},
-		// Decommissioning that is unavailable.
-		{
-			liveness: livenesspb.Liveness{
-				NodeID: 1,
-				Epoch:  1,
-				Expiration: hlc.LegacyTimestamp{
-					WallTime: now.UnixNano(),
-				},
-				Draining:   false,
-				Membership: livenesspb.MembershipStatus_DECOMMISSIONING,
-			},
-			expected: livenesspb.NodeLivenessStatus_UNAVAILABLE,
-		},
-		// Draining that is unavailable.
-		{
-			liveness: livenesspb.Liveness{
-				NodeID: 1,
-				Epoch:  1,
-				Expiration: hlc.LegacyTimestamp{
-					WallTime: now.UnixNano(),
-				},
-				Draining: true,
-			},
-			expected: livenesspb.NodeLivenessStatus_UNAVAILABLE,
 		},
 	} {
 		t.Run("", func(t *testing.T) {

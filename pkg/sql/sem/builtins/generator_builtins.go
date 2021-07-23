@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
@@ -130,13 +130,6 @@ var generators = map[string]builtinDefinition{
 			seriesTSValueGeneratorType,
 			makeTSSeriesGenerator,
 			"Produces a virtual table containing the timestamp values from `start` to `end`, inclusive, by increment of `step`.",
-			tree.VolatilityImmutable,
-		),
-		makeGeneratorOverload(
-			tree.ArgTypes{{"start", types.TimestampTZ}, {"end", types.TimestampTZ}, {"step", types.Interval}},
-			seriesTSTZValueGeneratorType,
-			makeTSTZSeriesGenerator,
-			"Produces a virtual table containing the timestampTZ values from `start` to `end`, inclusive, by increment of `step`.",
 			tree.VolatilityImmutable,
 		),
 	),
@@ -497,13 +490,13 @@ func (k *keywordsValueGenerator) Start(_ context.Context, _ *kv.Txn) error {
 // Next implements the tree.ValueGenerator interface.
 func (k *keywordsValueGenerator) Next(_ context.Context) (bool, error) {
 	k.curKeyword++
-	return k.curKeyword < len(lexbase.KeywordNames), nil
+	return k.curKeyword < len(lex.KeywordNames), nil
 }
 
 // Values implements the tree.ValueGenerator interface.
 func (k *keywordsValueGenerator) Values() (tree.Datums, error) {
-	kw := lexbase.KeywordNames[k.curKeyword]
-	cat := lexbase.KeywordsCategories[kw]
+	kw := lex.KeywordNames[k.curKeyword]
+	cat := lex.KeywordsCategories[kw]
 	desc := keywordCategoryDescriptions[cat]
 	return tree.Datums{tree.NewDString(kw), tree.NewDString(cat), tree.NewDString(desc)}, nil
 }
@@ -528,8 +521,6 @@ type seriesValueGenerator struct {
 var seriesValueGeneratorType = types.Int
 
 var seriesTSValueGeneratorType = types.Timestamp
-
-var seriesTSTZValueGeneratorType = types.TimestampTZ
 
 var errStepCannotBeZero = pgerror.New(pgcode.InvalidParameterValue, "step cannot be 0")
 
@@ -587,14 +578,6 @@ func seriesGenTSValue(s *seriesValueGenerator) (tree.Datums, error) {
 	return tree.Datums{ts}, nil
 }
 
-func seriesGenTSTZValue(s *seriesValueGenerator) (tree.Datums, error) {
-	ts, err := tree.MakeDTimestampTZ(s.value.(time.Time), time.Microsecond)
-	if err != nil {
-		return nil, err
-	}
-	return tree.Datums{ts}, nil
-}
-
 func makeSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGenerator, error) {
 	start := int64(tree.MustBeDInt(args[0]))
 	stop := int64(tree.MustBeDInt(args[1]))
@@ -630,25 +613,6 @@ func makeTSSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGen
 		step:      step,
 		genType:   seriesTSValueGeneratorType,
 		genValue:  seriesGenTSValue,
-		next:      seriesTSNext,
-	}, nil
-}
-
-func makeTSTZSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGenerator, error) {
-	start := args[0].(*tree.DTimestampTZ).Time
-	stop := args[1].(*tree.DTimestampTZ).Time
-	step := args[2].(*tree.DInterval).Duration
-
-	if step.Compare(duration.Duration{}) == 0 {
-		return nil, errStepCannotBeZero
-	}
-
-	return &seriesValueGenerator{
-		origStart: start,
-		stop:      stop,
-		step:      step,
-		genType:   seriesTSTZValueGeneratorType,
-		genValue:  seriesGenTSTZValue,
 		next:      seriesTSNext,
 	}, nil
 }
@@ -1548,7 +1512,7 @@ func (p *payloadsForSpanGenerator) Next(_ context.Context) (bool, error) {
 			return false, nil
 		}
 		currRecording := p.span.GetRecording()[p.recordingIndex]
-		currRecording.Structured(func(item *pbtypes.Any, _ time.Time) {
+		currRecording.Structured(func(item *pbtypes.Any) {
 			payload, err := protoreflect.MessageToJSON(item, true /* emitDefaults */)
 			if err != nil {
 				return
@@ -1575,11 +1539,9 @@ func (p *payloadsForSpanGenerator) Values() (tree.Datums, error) {
 	// leftover from JSON value conversion.
 	payloadTypeAsString := strings.TrimSuffix(
 		strings.TrimPrefix(
-			strings.TrimPrefix(
-				payloadTypeAsJSON.String(),
-				"\"type.googleapis.com/",
-			),
-			"cockroach."),
+			payloadTypeAsJSON.String(),
+			"\"type.googleapis.com/cockroach.",
+		),
 		"\"",
 	)
 
@@ -1794,12 +1756,12 @@ func (s *showCreateAllTablesGenerator) Next(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 
-		statementReturnType := alterAddFKStatements
+		statementType := alterAddFKStatements
 		if s.phase == alterValidateFks {
-			statementReturnType = alterValidateFKStatements
+			statementType = alterValidateFKStatements
 		}
 		alterStmt, err := getAlterStatements(
-			ctx, s.ie, s.txn, s.ids[s.idx], s.timestamp, s.dbName, statementReturnType,
+			ctx, s.ie, s.txn, s.ids[s.idx], s.timestamp, s.dbName, statementType,
 		)
 		if err != nil {
 			return false, err

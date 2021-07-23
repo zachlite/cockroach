@@ -39,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -53,7 +52,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/redact"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -172,8 +170,6 @@ type Node struct {
 	additionalStoreInitCh chan struct{}
 
 	perReplicaServer kvserver.Server
-
-	admissionQ *admission.WorkQueue
 }
 
 var _ roachpb.InternalServer = &Node{}
@@ -622,12 +618,8 @@ func (n *Node) startGossiping(ctx context.Context, stopper *stop.Stopper) {
 		statusTicker := time.NewTicker(gossipStatusInterval)
 		storesTicker := time.NewTicker(gossip.StoresInterval)
 		nodeTicker := time.NewTicker(gossip.NodeDescriptorInterval)
-		defer func() {
-			nodeTicker.Stop()
-			storesTicker.Stop()
-			statusTicker.Stop()
-		}()
-
+		defer storesTicker.Stop()
+		defer nodeTicker.Stop()
 		n.gossipStores(ctx) // one-off run before going to sleep
 		for {
 			select {
@@ -686,17 +678,6 @@ func (n *Node) computePeriodicMetrics(ctx context.Context, tick int) error {
 		}
 		return nil
 	})
-}
-
-// GetPebbleMetrics implements admission.PebbleMetricsProvider.
-func (n *Node) GetPebbleMetrics() []*pebble.Metrics {
-	var metrics []*pebble.Metrics
-	_ = n.stores.VisitStores(func(store *kvserver.Store) error {
-		m := store.Engine().GetMetrics()
-		metrics = append(metrics, m.Metrics)
-		return nil
-	})
-	return metrics
 }
 
 func (n *Node) startGraphiteStatsExporter(st *cluster.Settings) {
@@ -917,46 +898,7 @@ func (n *Node) Batch(
 	// log tags more expensive and makes local calls differ from remote calls.
 	ctx = n.storeCfg.AmbientCtx.ResetAndAnnotateCtx(ctx)
 
-	var callAdmittedWorkDone bool
-	var tenantID roachpb.TenantID
-	if n.admissionQ != nil {
-		var ok bool
-		tenantID, ok = roachpb.TenantFromContext(ctx)
-		if !ok {
-			tenantID = roachpb.SystemTenantID
-		}
-		bypassAdmission := args.IsAdmin()
-		source := args.AdmissionHeader.Source
-		if !roachpb.IsSystemTenantID(tenantID.ToUint64()) {
-			// Request is from a SQL node.
-			bypassAdmission = false
-			source = roachpb.AdmissionHeader_FROM_SQL
-		}
-		if source == roachpb.AdmissionHeader_OTHER {
-			bypassAdmission = true
-		}
-		createTime := args.AdmissionHeader.CreateTime
-		if !bypassAdmission && createTime == 0 {
-			// TODO(sumeer): revisit this for multi-tenant. Specifically, the SQL use
-			// of zero CreateTime needs to be revisited. It should use high priority.
-			createTime = timeutil.Now().UnixNano()
-		}
-		admissionInfo := admission.WorkInfo{
-			TenantID:        tenantID,
-			Priority:        admission.WorkPriority(args.AdmissionHeader.Priority),
-			CreateTime:      createTime,
-			BypassAdmission: bypassAdmission,
-		}
-		var err error
-		callAdmittedWorkDone, err = n.admissionQ.Admit(ctx, admissionInfo)
-		if err != nil {
-			return nil, err
-		}
-	}
 	br, err := n.batchInternal(ctx, args)
-	if callAdmittedWorkDone {
-		n.admissionQ.AdmittedWorkDone(tenantID)
-	}
 
 	// We always return errors via BatchResponse.Error so structure is
 	// preserved; plain errors are presumed to be from the RPC

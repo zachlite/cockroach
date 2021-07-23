@@ -591,7 +591,6 @@ func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
 			for _, pt := range recordHistogramQuantiles {
 				fn(name+pt.suffix, float64(curr.ValueAtQuantile(pt.quantile)))
 			}
-			fn(name+"-count", float64(curr.TotalCount()))
 		} else {
 			val, err := extractValue(mtr)
 			if err != nil {

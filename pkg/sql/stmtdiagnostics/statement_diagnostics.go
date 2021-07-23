@@ -136,7 +136,7 @@ func (r *Registry) poll(ctx context.Context) {
 			lastPoll = timeutil.Now()
 		}
 	)
-	pollingInterval.SetOnChange(&r.st.SV, func(ctx context.Context) {
+	pollingInterval.SetOnChange(&r.st.SV, func() {
 		select {
 		case pollIntervalChanged <- struct{}{}:
 		default:
@@ -333,6 +333,7 @@ func (r *Registry) InsertStatementDiagnostics(
 	requestID RequestID,
 	stmtFingerprint string,
 	stmt string,
+	traceJSON tree.Datum,
 	bundle []byte,
 	collectionErr error,
 ) (CollectedInstanceID, error) {

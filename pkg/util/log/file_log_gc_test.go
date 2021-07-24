@@ -49,13 +49,11 @@ func TestSecondaryGC(t *testing.T) {
 	common.Format = &f
 	bf := false
 	fc := logconfig.FileSinkConfig{
-		FileDefaults: logconfig.FileDefaults{
-			CommonSinkConfig: common,
-			Dir:              &s.logDir,
-			MaxFileSize:      &m,
-			MaxGroupSize:     &m,
-			BufferedWrites:   &bf,
-		},
+		CommonSinkConfig: common,
+		Dir:              &s.logDir,
+		MaxFileSize:      &m,
+		MaxGroupSize:     &m,
+		BufferedWrites:   &bf,
 	}
 	logger := &loggerT{}
 	si, fileSink, err := newFileSinkInfo("gctest", fc)

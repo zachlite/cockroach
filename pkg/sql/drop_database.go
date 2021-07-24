@@ -18,7 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
@@ -62,12 +62,12 @@ func (p *planner) DropDatabase(ctx context.Context, n *tree.DropDatabase) (planN
 	}
 
 	// Check that the database exists.
-	dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
+	found, dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
 		tree.DatabaseLookupFlags{Required: !n.IfExists})
 	if err != nil {
 		return nil, err
 	}
-	if dbDesc == nil {
+	if !found {
 		// IfExists was specified and database was not found.
 		return newZeroNode(nil /* columns */), nil
 	}
@@ -84,16 +84,15 @@ func (p *planner) DropDatabase(ctx context.Context, n *tree.DropDatabase) (planN
 	d := newDropCascadeState()
 
 	for _, schema := range schemas {
-		res, err := p.Descriptors().GetSchemaByName(
-			ctx, p.txn, dbDesc, schema, tree.SchemaLookupFlags{
-				Required:       true,
-				RequireMutable: true,
-			},
-		)
+		found, res, err := p.ResolveMutableSchemaDescriptor(ctx, dbDesc.ID, schema, true /* required */)
 		if err != nil {
 			return nil, err
 		}
-		if err := d.collectObjectsInSchema(ctx, p, dbDesc, res); err != nil {
+		if !found {
+			log.Warningf(ctx, "could not find schema %s under database %d", schema, dbDesc.ID)
+			continue
+		}
+		if err := d.collectObjectsInSchema(ctx, p, dbDesc, &res); err != nil {
 			return nil, err
 		}
 	}
@@ -134,24 +133,29 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 	var schemasIDsToDelete []descpb.ID
 	for _, schemaWithDbDesc := range n.d.schemasToDelete {
 		schemaToDelete := schemaWithDbDesc.schema
-		switch schemaToDelete.SchemaKind() {
+		switch schemaToDelete.Kind {
 		case catalog.SchemaTemporary, catalog.SchemaPublic:
 			// The public schema and temporary schemas are cleaned up by just removing
 			// the existing namespace entries.
-			key := catalogkeys.MakeSchemaNameKey(p.ExecCfg().Codec, n.dbDesc.GetID(), schemaToDelete.GetName())
-			if err := p.txn.Del(ctx, key); err != nil {
+			if err := catalogkv.RemoveSchemaNamespaceEntry(
+				ctx,
+				p.txn,
+				p.ExecCfg().Codec,
+				n.dbDesc.GetID(),
+				schemaToDelete.Name,
+			); err != nil {
 				return err
 			}
 		case catalog.SchemaUserDefined:
 			// For user defined schemas, we have to do a bit more work.
-			mutDesc, ok := schemaToDelete.(*schemadesc.Mutable)
+			mutDesc, ok := schemaToDelete.Desc.(*schemadesc.Mutable)
 			if !ok {
-				return errors.AssertionFailedf("expected Mutable, found %T", schemaToDelete)
+				return errors.AssertionFailedf("expected Mutable, found %T", schemaToDelete.Desc)
 			}
 			if err := params.p.dropSchemaImpl(ctx, n.dbDesc, mutDesc); err != nil {
 				return err
 			}
-			schemasIDsToDelete = append(schemasIDsToDelete, schemaToDelete.GetID())
+			schemasIDsToDelete = append(schemasIDsToDelete, schemaToDelete.ID)
 		}
 	}
 

@@ -189,10 +189,7 @@ func (h *filteringSingleFunctionHashHelper) applyFilter(
 		return vecs, inputLen, sel, false
 	}
 	h.filterInput.reset(vecs, inputLen, sel)
-	// Note that it is ok that we call Init on every iteration - it is a noop
-	// every time except for the first one.
-	h.filter.Init(ctx)
-	newBatch := h.filter.Next()
+	newBatch := h.filter.Next(ctx)
 	return newBatch.ColVecs(), newBatch.Length(), newBatch.Selection(), true
 }
 
@@ -297,7 +294,7 @@ func newDistinctAggregatorHelperBase(
 			}
 		}
 	}
-	b.aggColsConverter = colconv.NewVecToDatumConverter(len(args.InputTypes), vecIdxsToConvert, false /* willRelease */)
+	b.aggColsConverter = colconv.NewVecToDatumConverter(len(args.InputTypes), vecIdxsToConvert)
 	b.scratch.converted = []tree.Datum{nil}
 	b.scratch.sel = make([]int, maxBatchSize)
 	return b
@@ -517,9 +514,9 @@ func newSingleBatchOperator(
 	}
 }
 
-func (o *singleBatchOperator) Init(context.Context) {}
+func (o *singleBatchOperator) Init() {}
 
-func (o *singleBatchOperator) Next() coldata.Batch {
+func (o *singleBatchOperator) Next(context.Context) coldata.Batch {
 	if o.nexted {
 		return coldata.ZeroBatch
 	}
@@ -532,7 +529,11 @@ func (o *singleBatchOperator) reset(vecs []coldata.Vec, inputLen int, sel []int)
 	for i, vec := range vecs {
 		o.batch.ReplaceCol(vec, i)
 	}
-	colexecutils.UpdateBatchState(o.batch, inputLen, sel != nil, sel)
+	o.batch.SetSelection(sel != nil)
+	if sel != nil {
+		copy(o.batch.Selection(), sel[:inputLen])
+	}
+	o.batch.SetLength(inputLen)
 }
 
 // aggBucket stores the aggregation functions for the corresponding aggregation

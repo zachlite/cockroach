@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -30,9 +29,8 @@ import (
 )
 
 type alterTypeNode struct {
-	n      *tree.AlterType
-	prefix catalog.ResolvedObjectPrefix
-	desc   *typedesc.Mutable
+	n    *tree.AlterType
+	desc *typedesc.Mutable
 }
 
 // alterTypeNode implements planNode. We set n here to satisfy the linter.
@@ -48,7 +46,7 @@ func (p *planner) AlterType(ctx context.Context, n *tree.AlterType) (planNode, e
 	}
 
 	// Resolve the type.
-	prefix, desc, err := p.ResolveMutableTypeDescriptor(ctx, n.Type, true /* required */)
+	desc, err := p.ResolveMutableTypeDescriptor(ctx, n.Type, true /* required */)
 	if err != nil {
 		return nil, err
 	}
@@ -79,9 +77,8 @@ func (p *planner) AlterType(ctx context.Context, n *tree.AlterType) (planNode, e
 	}
 
 	return &alterTypeNode{
-		n:      n,
-		prefix: prefix,
-		desc:   desc,
+		n:    n,
+		desc: desc,
 	}, nil
 }
 
@@ -222,7 +219,7 @@ func (p *planner) renameType(ctx context.Context, n *alterTypeNode, newName stri
 		p.ExecCfg().Codec,
 		n.desc.ParentID,
 		n.desc.ParentSchemaID,
-		tree.NewUnqualifiedTypeName(newName),
+		tree.NewUnqualifiedTypeName(tree.Name(newName)),
 	)
 	if err != nil {
 		return err
@@ -291,8 +288,16 @@ func (p *planner) performRenameTypeDesc(
 	if err := p.writeTypeSchemaChange(ctx, desc, jobDesc); err != nil {
 		return err
 	}
-	// Write the new namespace key.
-	return p.writeNameKey(ctx, desc, desc.ID)
+	// Construct the new namespace key.
+	key := catalogkv.MakeObjectNameKey(
+		ctx,
+		p.ExecCfg().Settings,
+		desc.ParentID,
+		desc.ParentSchemaID,
+		newName,
+	)
+
+	return p.writeNameKey(ctx, key, desc.ID)
 }
 
 func (p *planner) renameTypeValue(
@@ -346,7 +351,7 @@ func (p *planner) setTypeSchema(ctx context.Context, n *alterTypeNode, schema st
 		return err
 	}
 
-	desiredSchemaID, err := p.prepareSetSchema(ctx, n.prefix.Database, typeDesc, schema)
+	desiredSchemaID, err := p.prepareSetSchema(ctx, typeDesc, schema)
 	if err != nil {
 		return err
 	}

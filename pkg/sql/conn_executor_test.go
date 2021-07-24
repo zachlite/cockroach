@@ -44,7 +44,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -922,6 +921,9 @@ func TestTrimSuspendedPortals(t *testing.T) {
 		}
 	}
 
+	// explicitly close portal
+	require.NoError(t, p.SendOneLine(fmt.Sprintf(`Close {"ObjectType": 80,"Name": "%s"}`, portalName)))
+
 	// send commit
 	require.NoError(t, p.SendOneLine(`Query {"String": "COMMIT"}`))
 
@@ -934,7 +936,6 @@ func TestTrimSuspendedPortals(t *testing.T) {
 
 func TestShowLastQueryStatistics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	params := base.TestServerArgs{}
@@ -1003,19 +1004,19 @@ ALTER TABLE t1 ADD COLUMN b INT DEFAULT 1`,
 		)
 		require.NoError(t, err, "unexpected error while reading last query statistics")
 
-		parseInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, parseLatency)
+		parseInterval, err := tree.ParseDInterval(parseLatency)
 		require.NoError(t, err)
 
-		planInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, planLatency)
+		planInterval, err := tree.ParseDInterval(planLatency)
 		require.NoError(t, err)
 
-		execInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, execLatency)
+		execInterval, err := tree.ParseDInterval(execLatency)
 		require.NoError(t, err)
 
-		serviceInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, serviceLatency)
+		serviceInterval, err := tree.ParseDInterval(serviceLatency)
 		require.NoError(t, err)
 
-		postCommitJobsInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, postCommitJobsLatency)
+		postCommitJobsInterval, err := tree.ParseDInterval(postCommitJobsLatency)
 		require.NoError(t, err)
 
 		if parseInterval.AsFloat64() <= 0 || parseInterval.AsFloat64() > 1 {

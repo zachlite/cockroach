@@ -208,7 +208,7 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       false,
 			includeSystem:          false,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		nil, /* indexFlags */
@@ -294,7 +294,7 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       true,
 			includeSystem:          true,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		nil, /* indexFlags */
@@ -446,10 +446,8 @@ func (mb *mutationBuilder) projectPartialArbiterDistinctColumn(
 	}
 	texpr := insertScope.resolveAndRequireType(expr, types.Bool)
 
-	// Use an anonymous name because the column cannot be referenced
-	// in other expressions.
-	colName := scopeColName("").WithMetadataName(fmt.Sprintf("arbiter_%s_distinct", arbiterName))
-	scopeCol := projectionScope.addColumn(colName, texpr)
+	alias := fmt.Sprintf("arbiter_%s_distinct", arbiterName)
+	scopeCol := projectionScope.addColumn(alias, texpr)
 	mb.b.buildScalar(texpr, mb.outScope, projectionScope, scopeCol, nil)
 
 	mb.b.constructProjectForScope(mb.outScope, projectionScope)
@@ -502,7 +500,7 @@ func (h *arbiterPredicateHelper) tableScope() *scope {
 			h.tabMeta, tableOrdinals(h.tabMeta.Table, columnKinds{
 				includeMutations:       false,
 				includeSystem:          false,
-				includeInverted:        false,
+				includeVirtualInverted: false,
 				includeVirtualComputed: true,
 			}),
 			nil, /* indexFlags */

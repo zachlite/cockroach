@@ -1105,7 +1105,7 @@ func tableSpecifier(
 ) tree.ZoneSpecifier {
 	return tree.ZoneSpecifier{
 		TableOrIndex: tree.TableIndexName{
-			Table: tree.MakeTableNameWithSchema(db, tree.PublicSchemaName, tbl),
+			Table: tree.MakeTableName(db, tbl),
 			Index: idx,
 		},
 		Partition: partition,

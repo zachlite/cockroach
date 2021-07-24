@@ -13,17 +13,16 @@ package sql
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/authentication"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -35,6 +34,11 @@ type CreateRoleNode struct {
 	roleOptions roleoption.List
 	userNameInfo
 }
+
+var userTableName = tree.NewTableName("system", "users")
+
+// RoleOptionsTableName represents system.role_options.
+var RoleOptionsTableName = tree.NewTableName("system", "role_options")
 
 // CreateRole represents a CREATE ROLE statement.
 // Privileges: INSERT on system.users.
@@ -111,7 +115,7 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 		return err
 	}
 	// Reject the "public" role. It does not have an entry in the users table but is reserved.
-	if normalizedUsername.IsPublicRole() {
+	if normalizedUsername == security.PublicRole {
 		return pgerror.Newf(pgcode.ReservedName, "role name %q is reserved", security.PublicRole)
 	}
 
@@ -154,8 +158,8 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-		fmt.Sprintf(`select "isRole" from %s where username = $1`, authentication.UsersTableName),
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		fmt.Sprintf(`select "isRole" from %s where username = $1`, userTableName),
 		normalizedUsername,
 	)
 	if err != nil {
@@ -174,7 +178,7 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		fmt.Sprintf("insert into %s values ($1, $2, $3)", authentication.UsersTableName),
+		fmt.Sprintf("insert into %s values ($1, $2, $3)", userTableName),
 		normalizedUsername,
 		hashedPassword,
 		n.isRole,
@@ -216,7 +220,7 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 			params.ctx,
 			opName,
 			params.p.txn,
-			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			stmt,
 			qargs...,
 		)
@@ -225,19 +229,7 @@ func (n *CreateRoleNode) startExec(params runParams) error {
 		}
 	}
 
-	if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		// Bump role-related table versions to force a refresh of AuthInfo cache.
-		if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
-	}
-
-	return params.p.logEvent(params.ctx,
-		0, /* no target */
-		&eventpb.CreateRole{RoleName: normalizedUsername.Normalized()})
+	return nil
 }
 
 // Next implements the planNode interface.
@@ -249,34 +241,40 @@ func (*CreateRoleNode) Values() tree.Datums { return tree.Datums{} }
 // Close implements the planNode interface.
 func (*CreateRoleNode) Close(context.Context) {}
 
-var blocklistedUsernames = map[security.SQLUsername]struct{}{
-	security.NodeUserName(): {},
+const usernameHelp = "Usernames are case insensitive, must start with a letter, " +
+	"digit or underscore, may contain letters, digits, dashes, periods, or underscores, and must not exceed 63 characters."
+
+var usernameRE = regexp.MustCompile(`^[\p{Ll}0-9_][---\p{Ll}0-9_.]*$`)
+
+var blocklistedUsernames = map[string]struct{}{
+	security.NodeUser: {},
 }
 
 // NormalizeAndValidateUsername case folds the specified username and verifies
 // it validates according to the usernameRE regular expression.
 // It rejects reserved user names.
-func NormalizeAndValidateUsername(input string) (security.SQLUsername, error) {
-	username, err := NormalizeAndValidateUsernameNoBlocklist(input)
+func NormalizeAndValidateUsername(username string) (string, error) {
+	username, err := NormalizeAndValidateUsernameNoBlocklist(username)
 	if err != nil {
-		return username, err
+		return "", err
 	}
 	if _, ok := blocklistedUsernames[username]; ok {
-		return username, pgerror.Newf(pgcode.ReservedName, "username %q reserved", username)
+		return "", pgerror.Newf(pgcode.ReservedName, "username %q reserved", username)
 	}
 	return username, nil
 }
 
 // NormalizeAndValidateUsernameNoBlocklist case folds the specified username and verifies
 // it validates according to the usernameRE regular expression.
-func NormalizeAndValidateUsernameNoBlocklist(input string) (security.SQLUsername, error) {
-	username, err := security.MakeSQLUsernameFromUserInput(input, security.UsernameCreation)
-	if errors.Is(err, security.ErrUsernameTooLong) {
-		err = pgerror.WithCandidateCode(err, pgcode.NameTooLong)
-	} else if errors.IsAny(err, security.ErrUsernameInvalid, security.ErrUsernameEmpty) {
-		err = pgerror.WithCandidateCode(err, pgcode.InvalidName)
+func NormalizeAndValidateUsernameNoBlocklist(username string) (string, error) {
+	username = tree.Name(username).Normalize()
+	if !usernameRE.MatchString(username) {
+		return "", errors.WithHint(pgerror.Newf(pgcode.InvalidName, "username %q invalid", username), usernameHelp)
 	}
-	return username, errors.Wrapf(err, "%q", username)
+	if len(username) > 63 {
+		return "", errors.WithHint(pgerror.Newf(pgcode.NameTooLong, "username %q is too long", username), usernameHelp)
+	}
+	return username, nil
 }
 
 var errNoUserNameSpecified = errors.New("no username specified")
@@ -297,17 +295,17 @@ func (p *planner) getUserAuthInfo(
 }
 
 // resolveUsername returns the actual user name.
-func (ua *userNameInfo) resolveUsername() (res security.SQLUsername, err error) {
+func (ua *userNameInfo) resolveUsername() (string, error) {
 	name, err := ua.name()
 	if err != nil {
-		return res, err
+		return "", err
 	}
 	if name == "" {
-		return res, errNoUserNameSpecified
+		return "", errNoUserNameSpecified
 	}
 	normalizedUsername, err := NormalizeAndValidateUsername(name)
 	if err != nil {
-		return res, err
+		return "", err
 	}
 
 	return normalizedUsername, nil
@@ -321,14 +319,14 @@ func (p *planner) checkPasswordAndGetHash(
 	}
 
 	st := p.ExecCfg().Settings
-	if st.Version.IsActive(ctx, clusterversion.MinPasswordLength) {
+	if st.Version.IsActive(ctx, clusterversion.VersionMinPasswordLength) {
 		if minLength := security.MinPasswordLength.Get(&st.SV); minLength >= 1 && int64(len(password)) < minLength {
 			return hashedPassword, errors.WithHintf(security.ErrPasswordTooShort,
 				"Passwords must be %d characters or longer.", minLength)
 		}
 	}
 
-	hashedPassword, err = security.HashPassword(ctx, password)
+	hashedPassword, err = security.HashPassword(password)
 	if err != nil {
 		return hashedPassword, err
 	}

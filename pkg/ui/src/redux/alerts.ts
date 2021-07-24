@@ -21,20 +21,10 @@ import { ThunkAction } from "redux-thunk";
 
 import { LocalSetting } from "./localsettings";
 import {
-  VERSION_DISMISSED_KEY,
-  INSTRUCTIONS_BOX_COLLAPSED_KEY,
-  saveUIData,
-  loadUIData,
-  isInFlight,
-  UIDataState,
-  UIDataStatus,
+  VERSION_DISMISSED_KEY, INSTRUCTIONS_BOX_COLLAPSED_KEY,
+  saveUIData, loadUIData, isInFlight, UIDataState, UIDataStatus,
 } from "./uiData";
-import {
-  refreshCluster,
-  refreshNodes,
-  refreshVersion,
-  refreshHealth,
-} from "./apiReducers";
+import { refreshCluster, refreshNodes, refreshVersion, refreshHealth } from "./apiReducers";
 import { singleVersionSelector, versionsSelector } from "src/redux/nodes";
 import { AdminUIState } from "./state";
 import * as docsURL from "src/util/docs";
@@ -74,26 +64,26 @@ const localSettingsSelector = (state: AdminUIState) => state.localSettings;
 // Clusterviz Instruction Box collapsed
 
 export const instructionsBoxCollapsedSetting = new LocalSetting(
-  INSTRUCTIONS_BOX_COLLAPSED_KEY,
-  localSettingsSelector,
-  false,
+  INSTRUCTIONS_BOX_COLLAPSED_KEY, localSettingsSelector, false,
 );
 
 const instructionsBoxCollapsedPersistentLoadedSelector = createSelector(
   (state: AdminUIState) => state.uiData,
-  (uiData): boolean =>
-    uiData &&
-    _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
-    uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID,
+  (uiData): boolean => (
+    uiData
+      && _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY)
+      && uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID
+  ),
 );
 
 const instructionsBoxCollapsedPersistentSelector = createSelector(
   (state: AdminUIState) => state.uiData,
-  (uiData): boolean =>
-    uiData &&
-    _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY) &&
-    uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID &&
-    uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].data,
+  (uiData): boolean => (
+    uiData
+      && _.has(uiData, INSTRUCTIONS_BOX_COLLAPSED_KEY)
+      && uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].status === UIDataStatus.VALID
+      && uiData[INSTRUCTIONS_BOX_COLLAPSED_KEY].data
+  ),
 );
 
 export const instructionsBoxCollapsedSelector = createSelector(
@@ -111,12 +101,10 @@ export const instructionsBoxCollapsedSelector = createSelector(
 export function setInstructionsBoxCollapsed(collapsed: boolean) {
   return (dispatch: Dispatch<Action, AdminUIState>) => {
     dispatch(instructionsBoxCollapsedSetting.set(collapsed));
-    dispatch(
-      saveUIData({
-        key: INSTRUCTIONS_BOX_COLLAPSED_KEY,
-        value: collapsed,
-      }),
-    );
+    dispatch(saveUIData({
+      key: INSTRUCTIONS_BOX_COLLAPSED_KEY,
+      value: collapsed,
+    }));
   };
 }
 
@@ -124,9 +112,7 @@ export function setInstructionsBoxCollapsed(collapsed: boolean) {
 // Version mismatch.
 ////////////////////////////////////////
 export const staggeredVersionDismissedSetting = new LocalSetting(
-  "staggered_version_dismissed",
-  localSettingsSelector,
-  false,
+  "staggered_version_dismissed", localSettingsSelector, false,
 );
 
 /**
@@ -156,8 +142,7 @@ export const staggeredVersionWarningSelector = createSelector(
         return Promise.resolve();
       },
     };
-  },
-);
+  });
 
 // A boolean that indicates whether the server has yet been checked for a
 // persistent dismissal of this notification.
@@ -171,24 +156,19 @@ const newVersionDismissedPersistentLoadedSelector = createSelector(
 const newVersionDismissedPersistentSelector = createSelector(
   (state: AdminUIState) => state.uiData,
   (uiData) => {
-    return (
-      (uiData &&
-        uiData[VERSION_DISMISSED_KEY] &&
-        uiData[VERSION_DISMISSED_KEY].data &&
-        moment(uiData[VERSION_DISMISSED_KEY].data)) ||
-      moment(0)
-    );
+    return (uiData
+            && uiData[VERSION_DISMISSED_KEY]
+            && uiData[VERSION_DISMISSED_KEY].data
+            && moment(uiData[VERSION_DISMISSED_KEY].data)
+            ) || moment(0);
   },
 );
 
 export const newVersionDismissedLocalSetting = new LocalSetting(
-  "new_version_dismissed",
-  localSettingsSelector,
-  moment(0),
+  "new_version_dismissed", localSettingsSelector, moment(0),
 );
 
-export const newerVersionsSelector = (state: AdminUIState) =>
-  state.cachedData.version.valid ? state.cachedData.version.data : null;
+export const newerVersionsSelector = (state: AdminUIState) => state.cachedData.version.valid ? state.cachedData.version.data : null;
 
 /**
  * Notification when a new version of CockroachDB is available.
@@ -198,36 +178,22 @@ export const newVersionNotificationSelector = createSelector(
   newVersionDismissedPersistentLoadedSelector,
   newVersionDismissedPersistentSelector,
   newVersionDismissedLocalSetting.selector,
-  (
-    newerVersions,
-    newVersionDismissedPersistentLoaded,
-    newVersionDismissedPersistent,
-    newVersionDismissedLocal,
-  ): Alert => {
+  (newerVersions, newVersionDismissedPersistentLoaded, newVersionDismissedPersistent, newVersionDismissedLocal): Alert => {
     // Check if there are new versions available.
-    if (
-      !newerVersions ||
-      !newerVersions.details ||
-      newerVersions.details.length === 0
-    ) {
+    if (!newerVersions || !newerVersions.details || newerVersions.details.length === 0) {
       return undefined;
     }
 
     // Check local dismissal. Local dismissal is valid for one day.
     const yesterday = moment().subtract(1, "day");
-    if (
-      newVersionDismissedLocal.isAfter &&
-      newVersionDismissedLocal.isAfter(yesterday)
-    ) {
+    if (newVersionDismissedLocal.isAfter && newVersionDismissedLocal.isAfter(yesterday)) {
       return undefined;
     }
 
     // Check persistent dismissal, also valid for one day.
-    if (
-      !newVersionDismissedPersistentLoaded ||
-      !newVersionDismissedPersistent ||
-      newVersionDismissedPersistent.isAfter(yesterday)
-    ) {
+    if (!newVersionDismissedPersistentLoaded
+        || !newVersionDismissedPersistent
+        || newVersionDismissedPersistent.isAfter(yesterday)) {
       return undefined;
     }
 
@@ -241,21 +207,16 @@ export const newVersionNotificationSelector = createSelector(
         // Dismiss locally.
         dispatch(newVersionDismissedLocalSetting.set(dismissedAt));
         // Dismiss persistently.
-        return dispatch(
-          saveUIData({
-            key: VERSION_DISMISSED_KEY,
-            value: dismissedAt.valueOf(),
-          }),
-        );
+        return dispatch(saveUIData({
+          key: VERSION_DISMISSED_KEY,
+          value: dismissedAt.valueOf(),
+        }));
       },
     };
-  },
-);
+  });
 
 export const disconnectedDismissedLocalSetting = new LocalSetting(
-  "disconnected_dismissed",
-  localSettingsSelector,
-  moment(0),
+  "disconnected_dismissed", localSettingsSelector, moment(0),
 );
 
 /**
@@ -277,8 +238,7 @@ export const disconnectedAlertSelector = createSelector(
 
     return {
       level: AlertLevel.CRITICAL,
-      title:
-        "We're currently having some trouble fetching updated data. If this persists, it might be a good idea to check your network connection to the CockroachDB cluster.",
+      title: "We're currently having some trouble fetching updated data. If this persists, it might be a good idea to check your network connection to the CockroachDB cluster.",
       dismiss: (dispatch: Dispatch<Action, AdminUIState>) => {
         dispatch(disconnectedDismissedLocalSetting.set(moment()));
         return Promise.resolve();
@@ -288,14 +248,12 @@ export const disconnectedAlertSelector = createSelector(
 );
 
 export const emailSubscriptionAlertLocalSetting = new LocalSetting(
-  "email_subscription_alert",
-  localSettingsSelector,
-  false,
+  "email_subscription_alert", localSettingsSelector, false,
 );
 
 export const emailSubscriptionAlertSelector = createSelector(
   emailSubscriptionAlertLocalSetting.selector,
-  (emailSubscriptionAlert): Alert => {
+  ( emailSubscriptionAlert): Alert => {
     if (!emailSubscriptionAlert) {
       return undefined;
     }
@@ -318,18 +276,14 @@ type CreateStatementDiagnosticsAlertPayload = {
   status?: "SUCCESS" | "FAILED";
 };
 
-export const createStatementDiagnosticsAlertLocalSetting = new LocalSetting<
-  AdminUIState,
-  CreateStatementDiagnosticsAlertPayload
->("create_stmnt_diagnostics_alert", localSettingsSelector, { show: false });
+export const createStatementDiagnosticsAlertLocalSetting = new LocalSetting<AdminUIState, CreateStatementDiagnosticsAlertPayload>(
+  "create_stmnt_diagnostics_alert", localSettingsSelector, { show: false },
+);
 
 export const createStatementDiagnosticsAlertSelector = createSelector(
   createStatementDiagnosticsAlertLocalSetting.selector,
-  (createStatementDiagnosticsAlert): Alert => {
-    if (
-      !createStatementDiagnosticsAlert ||
-      !createStatementDiagnosticsAlert.show
-    ) {
+  ( createStatementDiagnosticsAlert): Alert => {
+    if (!createStatementDiagnosticsAlert || !createStatementDiagnosticsAlert.show) {
       return undefined;
     }
     const { status } = createStatementDiagnosticsAlert;
@@ -338,13 +292,10 @@ export const createStatementDiagnosticsAlertSelector = createSelector(
       return {
         level: AlertLevel.CRITICAL,
         title: "There was an error activating statement diagnostics",
-        text:
-          "Please try activating again. If the problem continues please reach out to customer support.",
+        text: "Please try activating again. If the problem continues please reach out to customer support.",
         showAsAlert: true,
         dismiss: (dispatch: Dispatch<Action, AdminUIState>) => {
-          dispatch(
-            createStatementDiagnosticsAlertLocalSetting.set({ show: false }),
-          );
+          dispatch(createStatementDiagnosticsAlertLocalSetting.set({ show: false }));
           return Promise.resolve();
         },
       };
@@ -356,9 +307,7 @@ export const createStatementDiagnosticsAlertSelector = createSelector(
       autoClose: true,
       closable: false,
       dismiss: (dispatch: Dispatch<Action, AdminUIState>) => {
-        dispatch(
-          createStatementDiagnosticsAlertLocalSetting.set({ show: false }),
-        );
+        dispatch(createStatementDiagnosticsAlertLocalSetting.set({ show: false }));
         return Promise.resolve();
       },
     };
@@ -370,10 +319,9 @@ type TerminateSessionAlertPayload = {
   status?: "SUCCESS" | "FAILED";
 };
 
-export const terminateSessionAlertLocalSetting = new LocalSetting<
-  AdminUIState,
-  TerminateSessionAlertPayload
->("terminate_session_alert", localSettingsSelector, { show: false });
+export const terminateSessionAlertLocalSetting = new LocalSetting<AdminUIState, TerminateSessionAlertPayload>(
+  "terminate_session_alert", localSettingsSelector, { show: false },
+);
 
 export const terminateSessionAlertSelector = createSelector(
   terminateSessionAlertLocalSetting.selector,
@@ -387,8 +335,7 @@ export const terminateSessionAlertSelector = createSelector(
       return {
         level: AlertLevel.CRITICAL,
         title: "There was an error terminating the session.",
-        text:
-          "Please try activating again. If the problem continues please reach out to customer support.",
+        text: "Please try activating again. If the problem continues please reach out to customer support.",
         showAsAlert: true,
         dismiss: (dispatch: Dispatch<Action, AdminUIState>) => {
           dispatch(terminateSessionAlertLocalSetting.set({ show: false }));
@@ -415,10 +362,9 @@ type TerminateQueryAlertPayload = {
   status?: "SUCCESS" | "FAILED";
 };
 
-export const terminateQueryAlertLocalSetting = new LocalSetting<
-  AdminUIState,
-  TerminateQueryAlertPayload
->("terminate_query_alert", localSettingsSelector, { show: false });
+export const terminateQueryAlertLocalSetting = new LocalSetting<AdminUIState, TerminateQueryAlertPayload>(
+  "terminate_query_alert", localSettingsSelector, { show: false },
+);
 
 export const terminateQueryAlertSelector = createSelector(
   terminateQueryAlertLocalSetting.selector,
@@ -432,8 +378,7 @@ export const terminateQueryAlertSelector = createSelector(
       return {
         level: AlertLevel.CRITICAL,
         title: "There was an error terminating the query.",
-        text:
-          "Please try terminating again. If the problem continues please reach out to customer support.",
+        text: "Please try terminating again. If the problem continues please reach out to customer support.",
         showAsAlert: true,
         dismiss: (dispatch: Dispatch<Action, AdminUIState>) => {
           dispatch(terminateQueryAlertLocalSetting.set({ show: false }));
@@ -508,10 +453,7 @@ export function alertDataSync(store: Store<AdminUIState>) {
     const uiData = state.uiData;
     if (uiData !== lastUIData) {
       lastUIData = uiData;
-      const keysToMaybeLoad = [
-        VERSION_DISMISSED_KEY,
-        INSTRUCTIONS_BOX_COLLAPSED_KEY,
-      ];
+      const keysToMaybeLoad = [VERSION_DISMISSED_KEY, INSTRUCTIONS_BOX_COLLAPSED_KEY];
       const keysToLoad = _.filter(keysToMaybeLoad, (key) => {
         return !(_.has(uiData, key) || isInFlight(state, key));
       });
@@ -539,12 +481,10 @@ export function alertDataSync(store: Store<AdminUIState>) {
     const currentVersion = singleVersionSelector(state);
     if (_.isNil(newerVersionsSelector(state))) {
       if (cluster.data && cluster.data.cluster_id && currentVersion) {
-        dispatch(
-          refreshVersion({
-            clusterID: cluster.data.cluster_id,
-            buildtag: currentVersion,
-          }),
-        );
+        dispatch(refreshVersion({
+          clusterID: cluster.data.cluster_id,
+          buildtag: currentVersion,
+        }));
       }
     }
   };

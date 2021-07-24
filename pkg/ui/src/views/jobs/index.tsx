@@ -20,12 +20,9 @@ import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { LocalSetting } from "src/redux/localsettings";
 import { AdminUIState } from "src/redux/state";
 import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
-import { Loading } from "@cockroachlabs/cluster-ui";
-import {
-  PageConfig,
-  PageConfigItem,
-} from "src/views/shared/components/pageconfig";
-import { SortSetting } from "src/views/shared/components/sortabletable";
+import Loading from "src/views/shared/components/loading";
+import { PageConfig, PageConfigItem } from "src/views/shared/components/pageconfig";
+import { SortSetting} from "src/views/shared/components/sortabletable";
 import "./index.styl";
 import { statusOptions } from "./jobStatusOptions";
 import { JobTable } from "src/views/jobs/jobTable";
@@ -35,9 +32,7 @@ import JobsRequest = cockroach.server.serverpb.JobsRequest;
 import JobsResponse = cockroach.server.serverpb.JobsResponse;
 
 export const statusSetting = new LocalSetting<AdminUIState, string>(
-  "jobs/status_setting",
-  (s) => s.localSettings,
-  statusOptions[0].value,
+  "jobs/status_setting", s => s.localSettings, statusOptions[0].value,
 );
 
 const typeOptions = [
@@ -46,18 +41,13 @@ const typeOptions = [
   { value: JobType.RESTORE.toString(), label: "Restores" },
   { value: JobType.IMPORT.toString(), label: "Imports" },
   { value: JobType.SCHEMA_CHANGE.toString(), label: "Schema Changes" },
-  { value: JobType.CHANGEFEED.toString(), label: "Changefeed" },
-  { value: JobType.CREATE_STATS.toString(), label: "Statistics Creation" },
-  {
-    value: JobType.AUTO_CREATE_STATS.toString(),
-    label: "Auto-Statistics Creation",
-  },
+  { value: JobType.CHANGEFEED.toString(), label: "Changefeed"},
+  { value: JobType.CREATE_STATS.toString(), label: "Statistics Creation"},
+  { value: JobType.AUTO_CREATE_STATS.toString(), label: "Auto-Statistics Creation"},
 ];
 
 export const typeSetting = new LocalSetting<AdminUIState, number>(
-  "jobs/type_setting",
-  (s) => s.localSettings,
-  JobType.UNSPECIFIED,
+  "jobs/type_setting", s => s.localSettings, JobType.UNSPECIFIED,
 );
 
 const showOptions = [
@@ -66,9 +56,7 @@ const showOptions = [
 ];
 
 export const showSetting = new LocalSetting<AdminUIState, string>(
-  "jobs/show_setting",
-  (s) => s.localSettings,
-  showOptions[0].value,
+  "jobs/show_setting", s => s.localSettings, showOptions[0].value,
 );
 
 // Moment cannot render durations (moment/moment#1048). Hack it ourselves.
@@ -79,7 +67,7 @@ export const formatDuration = (d: moment.Duration) =>
 
 export const sortSetting = new LocalSetting<AdminUIState, SortSetting>(
   "jobs/sort_setting",
-  (s) => s.localSettings,
+  s => s.localSettings,
   { sortKey: 3 /* creation time */, ascending: false },
 );
 
@@ -98,52 +86,46 @@ interface JobsTableProps {
 
 export class JobsTable extends React.Component<JobsTableProps> {
   refresh(props = this.props) {
-    props.refreshJobs(
-      new JobsRequest({
-        status: props.status,
-        type: props.type,
-        limit: parseInt(props.show, 10),
-      }),
-    );
+    props.refreshJobs(new JobsRequest({
+      status: props.status,
+      type: props.type,
+      limit: parseInt(props.show, 10),
+    }));
   }
 
   componentDidMount() {
     this.refresh();
   }
 
-  componentDidUpdate(prevProps: JobsTableProps) {
-    if (
-      prevProps.status !== this.props.status ||
-      prevProps.type !== this.props.type ||
-      prevProps.show !== this.props.show
-    ) {
-      this.refresh(this.props);
-    }
+  componentDidUpdate() {
+    this.refresh(this.props);
   }
 
   onStatusSelected = (selected: DropdownOption) => {
-    const filter = selected.value === "" ? "all" : selected.value;
+    const filter = (selected.value === "") ? "all" : selected.value;
     trackFilter("Status", filter);
     this.props.setStatus(selected.value);
-  };
+  }
 
   onTypeSelected = (selected: DropdownOption) => {
     const type = parseInt(selected.value, 10);
     const typeLabel = typeOptions[type].label;
     trackFilter("Type", typeLabel);
     this.props.setType(type);
-  };
+  }
 
   onShowSelected = (selected: DropdownOption) => {
     this.props.setShow(selected.value);
-  };
+  }
 
   render() {
     return (
       <div className="jobs-page">
         <Helmet title="Jobs" />
         <section className="section">
-          <h1 className="base-heading">Jobs</h1>
+          <h1 className="base-heading">
+            Jobs
+          </h1>
         </section>
         <div>
           <PageConfig>
@@ -177,16 +159,7 @@ export class JobsTable extends React.Component<JobsTableProps> {
           <Loading
             loading={!this.props.jobs || !this.props.jobs.data}
             error={this.props.jobs && this.props.jobs.lastError}
-            render={() => (
-              <JobTable
-                isUsedFilter={
-                  this.props.status.length > 0 || this.props.type > 0
-                }
-                jobs={this.props.jobs}
-                setSort={this.props.setSort}
-                sort={this.props.sort}
-              />
-            )}
+            render={() => <JobTable isUsedFilter={this.props.status.length > 0 || this.props.type > 0} jobs={this.props.jobs}  setSort={this.props.setSort} sort={this.props.sort}/>}
           />
         </section>
       </div>
@@ -202,11 +175,7 @@ const mapStateToProps = (state: AdminUIState) => {
   const key = jobsKey(status, type, parseInt(show, 10));
   const jobs = state.cachedData.jobs[key];
   return {
-    sort,
-    status,
-    show,
-    type,
-    jobs,
+    sort, status, show, type, jobs,
   };
 };
 
@@ -218,6 +187,4 @@ const mapDispatchToProps = {
   refreshJobs,
 };
 
-export default withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(JobsTable),
-);
+export default withRouter(connect(mapStateToProps, mapDispatchToProps)(JobsTable));

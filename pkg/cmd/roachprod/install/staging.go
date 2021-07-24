@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
@@ -54,11 +53,11 @@ func getEdgeURL(urlPathBase, SHA, arch string, ext string) (*url.URL, error) {
 }
 
 // StageRemoteBinary downloads a cockroach edge binary with the provided
-// application path to each specified by the cluster to the specified directory.
-// If no SHA is specified, the latest build of the binary is used instead.
-// Returns the SHA of the resolved binary.
+// application path to each specified by the cluster. If no SHA is specified,
+// the latest build of the binary is used instead.
+// Returns the SHA of the resolve binary.
 func StageRemoteBinary(
-	c *SyncedCluster, applicationName, urlPathBase, SHA, arch, dir string,
+	c *SyncedCluster, applicationName, urlPathBase, SHA, arch string,
 ) (string, error) {
 	binURL, err := getEdgeURL(urlPathBase, SHA, arch, "")
 	if err != nil {
@@ -66,34 +65,30 @@ func StageRemoteBinary(
 	}
 	fmt.Printf("Resolved binary url for %s: %s\n", applicationName, binURL)
 	urlSplit := strings.Split(binURL.Path, ".")
-	target := filepath.Join(dir, applicationName)
 	cmdStr := fmt.Sprintf(
-		`curl -sfSL -o "%s" "%s" && chmod 755 %s`, target, binURL, target,
+		`curl -sfSL -o %s "%s" && chmod 755 ./%s`, applicationName, binURL, applicationName,
 	)
 	return urlSplit[len(urlSplit)-1], c.Run(
 		os.Stdout, os.Stderr, c.Nodes, fmt.Sprintf("staging binary (%s)", applicationName), cmdStr,
 	)
 }
 
-// StageOptionalRemoteLibrary downloads a library from the cockroach edge with
-// the provided application path to each specified by the cluster to <dir>/lib.
+// StageOptionalRemoteLibrary downloads a library from the cockroach edge with the provided
+// application path to each specified by the cluster.
 // If no SHA is specified, the latest build of the library is used instead.
 // It will not error if the library does not exist on the edge.
 func StageOptionalRemoteLibrary(
-	c *SyncedCluster, libraryName, urlPathBase, SHA, arch, ext, dir string,
+	c *SyncedCluster, libraryName, urlPathBase, SHA, arch, ext string,
 ) error {
 	url, err := getEdgeURL(urlPathBase, SHA, arch, ext)
 	if err != nil {
 		return err
 	}
-	libDir := filepath.Join(dir, "lib")
-	target := filepath.Join(libDir, libraryName+ext)
 	fmt.Printf("Resolved library url for %s: %s\n", libraryName, url)
 	cmdStr := fmt.Sprintf(
-		`mkdir -p "%s" && \
-curl -sfSL -o "%s" "%s" 2>/dev/null || echo 'optional library %s not found; continuing...'`,
-		libDir,
-		target,
+		`mkdir -p ./lib && \
+curl -sfSL -o "./lib/%s" "%s" 2>/dev/null || echo 'optional library %s not found; continuing...'`,
+		libraryName+ext,
 		url,
 		libraryName+ext,
 	)
@@ -104,7 +99,7 @@ curl -sfSL -o "%s" "%s" 2>/dev/null || echo 'optional library %s not found; cont
 
 // StageCockroachRelease downloads an official CockroachDB release binary with
 // the specified version.
-func StageCockroachRelease(c *SyncedCluster, version, arch, dir string) error {
+func StageCockroachRelease(c *SyncedCluster, version, arch string) error {
 	if len(version) == 0 {
 		return fmt.Errorf(
 			"release application cannot be staged without specifying a specific version",
@@ -120,17 +115,16 @@ func StageCockroachRelease(c *SyncedCluster, version, arch, dir string) error {
 	// This command incantation:
 	// - Creates a temporary directory on the remote machine
 	// - Downloads and unpacks the cockroach release into the temp directory
-	// - Moves the cockroach executable from the binary to the provided directory
-	//   and gives it the correct permissions.
+	// - Moves the cockroach executable from the binary to '/.' and gives it
+	// the correct permissions.
 	cmdStr := fmt.Sprintf(`
 tmpdir="$(mktemp -d /tmp/cockroach-release.XXX)" && \
-dir=%s && \
 curl -f -s -S -o- %s | tar xfz - -C "${tmpdir}" --strip-components 1 && \
-mv ${tmpdir}/cockroach ${dir}/cockroach && \
-mkdir -p ${dir}/lib && \
-if [ -d ${tmpdir}/lib ]; then mv ${tmpdir}/lib/* ${dir}/lib; fi && \
-chmod 755 ${dir}/cockroach
-`, dir, binURL)
+mv ${tmpdir}/cockroach ./cockroach && \
+mkdir -p ./lib && \
+if [ -d ${tmpdir}/lib ]; then mv ${tmpdir}/lib/* ./lib; fi && \
+chmod 755 ./cockroach
+`, binURL)
 	return c.Run(
 		os.Stdout, os.Stderr, c.Nodes, "staging cockroach release binary", cmdStr,
 	)

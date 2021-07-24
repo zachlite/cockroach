@@ -1,9 +1,7 @@
 ---
-name: 'Feature request'
-title: ''
-about: 'Suggest an idea for this project'
-labels: 'C-enhancement'
-assignees: ''
+name: Feature request
+about: Suggest an idea for this project
+
 ---
 
 **Is your feature request related to a problem? Please describe.**

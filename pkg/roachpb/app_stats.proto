@@ -15,9 +15,6 @@ option go_package = "roachpb";
 import "gogoproto/gogo.proto";
 import "google/protobuf/timestamp.proto";
 
-// StatementStatistics represent the statement statistics sent to the DB
-// Console for a given statement fingerprint. Note that these stats are cleared
-// ever diagnostics.sql_stat_reset_interval.
 // N.B. When fields are added to this struct, make sure to update
 // (*StatementStatistics).Add and (*StatementStatistics).AlmostEqual
 // in app_stats.go.
@@ -81,28 +78,15 @@ message StatementStatistics {
   // sent to the reg cluster.
   optional SensitiveInfo sensitive_info = 12 [(gogoproto.nullable) = false];
 
+  reserved 13, 14;
+
   // BytesRead collects the number of bytes read from disk.
   optional NumericStat bytes_read = 15 [(gogoproto.nullable) = false];
 
   // RowsRead collects the number of rows read from disk.
   optional NumericStat rows_read = 16 [(gogoproto.nullable) = false];
 
-  // ExecStats are the execution statistics for this statement. These statistics
-  // are sampled.
-  optional ExecStats exec_stats = 21 [(gogoproto.nullable) = false];
-
-  // SQLType is the type of the sql (DDL, DML, DCL or TCL)
-  optional string sql_type = 22 [(gogoproto.nullable) = false, (gogoproto.customname) = "SQLType"];
-
-  // LastExecTimestamp is the last timestamp the statement was executed.
-  optional google.protobuf.Timestamp last_exec_timestamp = 23 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-
-  // Nodes is the ordered list of nodes ids on which the statement was executed.
-  repeated int64 nodes = 24;
-
   // Note: be sure to update `sql/app_stats.go` when adding/removing fields here!
-
-  reserved 13, 14, 17, 18, 19, 20;
 }
 
 message TransactionStatistics {
@@ -128,17 +112,6 @@ message TransactionStatistics {
   // CommitLat is the amount of time required to commit the transaction after
   // all statement operations have been applied.
   optional NumericStat commit_lat = 6 [(gogoproto.nullable) = false];
-
-  // BytesRead collects the number of bytes read from disk.
-  optional NumericStat bytes_read = 7 [(gogoproto.nullable) = false];
-
-  // RowsRead collects the number of rows read from disk.
-  optional NumericStat rows_read = 8 [(gogoproto.nullable) = false];
-
-  // ExecStats are the execution statistics for this transaction, i.e. an
-  // aggregation of all its statements' execution statistics. These statistics
-  // are sampled.
-  optional ExecStats exec_stats = 9 [(gogoproto.nullable) = false];
 }
 
 
@@ -177,8 +150,6 @@ message StatementStatisticsKey {
   optional bool opt = 5 [(gogoproto.nullable) = false];
   optional bool implicit_txn = 6 [(gogoproto.nullable) = false];
   optional bool vec = 7 [(gogoproto.nullable) = false];
-  optional bool full_scan = 8 [(gogoproto.nullable) = false];
-  optional string database = 9 [(gogoproto.nullable) = false];
 }
 
 // CollectedStatementStatistics wraps collected timings and metadata for some
@@ -187,7 +158,7 @@ message CollectedStatementStatistics {
   // ID is a hash of the statement key (query fingerprint, failure status,
   // implicit txn or not) which can be used to identify the statement
   // for instance in transaction statistics.
-  optional uint64 id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID", (gogoproto.casttype) = "StmtFingerprintID"];
+  optional uint64 id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID", (gogoproto.casttype) = "StmtID"];
   optional StatementStatisticsKey key = 1 [(gogoproto.nullable) = false];
   optional StatementStatistics stats = 2 [(gogoproto.nullable) = false];
 }
@@ -196,12 +167,12 @@ message CollectedStatementStatistics {
 // CollectedTransactionStatistics wraps collected timings and metadata for some
 // transaction executions.
 message CollectedTransactionStatistics {
-  // StatementFingerprintIDs is the fingerprint IDs of the statements which this
-  // transaction comprises, in order.
-  repeated uint64 statement_fingerprint_ids = 1 [(gogoproto.customname) = "StatementFingerprintIDs", (gogoproto.casttype) = "StmtFingerprintID"] ;
+  // StatementIDs is the IDs of the statements which this transaction comprises,
+  // in order.
+  repeated uint64 statement_ids = 1 [(gogoproto.customname) = "StatementIDs", (gogoproto.casttype) = "StmtID"] ;
   // App is the name of the app which executed the transaction.
   optional string app = 2 [(gogoproto.nullable) = false];
-  optional TransactionStatistics stats = 3 [(gogoproto.nullable) = false];
+  optional TransactionStatistics stats = 3[(gogoproto.nullable) = false];
 }
 
 
@@ -238,35 +209,4 @@ message TxnStats {
   optional int64 implicit_count = 4 [(gogoproto.nullable) = false];
 
   // Note: be sure to update `sql/app_stats.go` when adding/removing fields here!
-}
-
-// ExecStats contains execution statistics that apply to both statements
-// and transactions. These stats are currently collected using a sampling
-// approach.
-message ExecStats {
-  // Count keeps track of how many times execution stats were recorded. This is
-  // not necessarily equal to the number of times a statement/transaction was
-  // run.
-  optional int64 count = 1 [(gogoproto.nullable) = false];
-
-  // NetworkBytes collects the number of bytes sent over the network.
-  optional NumericStat network_bytes = 2 [(gogoproto.nullable) = false];
-
-  // MaxMemUsage collects the maximum memory usage that occurred on a node.
-  optional NumericStat max_mem_usage = 3 [(gogoproto.nullable) = false];
-
-  // ContentionTime collects the time this statement spent contending.
-  optional NumericStat contention_time = 4 [(gogoproto.nullable) = false];
-
-  // NetworkMessages collects the number of messages that were sent over the
-  // network.
-  optional NumericStat network_messages = 5 [(gogoproto.nullable) = false];
-
-  // MaxDiskUsage collects the maximum temporary disk usage that occurred. This
-  // is set in cases where a query had to spill to disk, e.g. when performing a
-  // large sort where not all of the tuples fit in memory.
-  optional NumericStat max_disk_usage = 6 [(gogoproto.nullable) = false];
-
-  // Note: be sure to update `sql/app_stats.go` when adding/removing fields
-  // here!
 }

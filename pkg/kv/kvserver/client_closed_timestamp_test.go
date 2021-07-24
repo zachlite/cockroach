@@ -17,10 +17,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -36,7 +35,6 @@ import (
 // becomes the leaseholder. See #48553 for more details.
 func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, 60682, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
@@ -63,13 +61,11 @@ func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) 
 	const closeInterval = 10 * time.Millisecond
 	sqlRunner.Exec(t, "SET CLUSTER SETTING kv.closed_timestamp.target_duration = '"+
 		closeInterval.String()+"'")
-	sqlRunner.Exec(t, "SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '"+
-		closeInterval.String()+"'")
 
 	// To make node3 have a large epoch, synthesize a liveness record for with
 	// epoch 1000 before starting the node.
 	require.NoError(t, db1.Put(ctx, keys.NodeLivenessKey(3),
-		&livenesspb.Liveness{
+		&kvserverpb.Liveness{
 			NodeID:     3,
 			Epoch:      1000,
 			Expiration: hlc.LegacyTimestamp{WallTime: 1},
@@ -78,7 +74,7 @@ func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) 
 
 	// Create our scratch range and up-replicate it.
 	k := tc.ScratchRange(t)
-	_, err := tc.AddVoters(k, tc.Target(1), tc.Target(2))
+	_, err := tc.AddReplicas(k, tc.Target(1), tc.Target(2))
 	require.NoError(t, err)
 	require.NoError(t, tc.WaitForVoters(k, tc.Target(1), tc.Target(2)))
 
@@ -100,7 +96,7 @@ func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) 
 		target := tc.Target(serverIdx)
 		transferLease(repl.Desc(), target)
 		testutils.SucceedsSoon(t, func() error {
-			if !repl.OwnsValidLease(ctx, db1.Clock().NowAsClockTimestamp()) {
+			if !repl.OwnsValidLease(ctx, db1.Clock().Now()) {
 				return errors.Errorf("don't yet have the lease")
 			}
 			return nil

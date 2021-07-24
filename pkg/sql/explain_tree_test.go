@@ -17,11 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -61,34 +57,25 @@ func TestPlanToTreeAndPlanToString(t *testing.T) {
 			internalPlanner, cleanup := NewInternalPlanner(
 				"test",
 				kv.NewTxn(ctx, db, s.NodeID()),
-				security.RootUserName(),
+				security.RootUser,
 				&MemoryMetrics{},
 				&execCfg,
-				sessiondatapb.SessionData{},
 			)
 			defer cleanup()
 			p := internalPlanner.(*planner)
 
-			ih := &p.instrumentation
-			ih.codec = execCfg.Codec
-			ih.collectBundle = true
-			ih.savePlanForStats = true
-
-			p.stmt = makeStatement(stmt, ClusterWideID{})
+			p.stmt = &Statement{Statement: stmt}
+			p.curPlan.savePlanString = true
+			p.curPlan.savePlanForStats = true
 			if err := p.makeOptimizerPlan(ctx); err != nil {
 				t.Fatal(err)
 			}
 			p.curPlan.flags.Set(planFlagExecDone)
 			p.curPlan.close(ctx)
 			if d.Cmd == "plan-string" {
-				ob := ih.buildExplainAnalyzePlan(
-					explain.Flags{Verbose: true, ShowTypes: true},
-					sessionphase.NewTimes(),
-					&execstats.QueryLevelStats{},
-				)
-				return ob.BuildString()
+				return p.curPlan.planString
 			}
-			treeYaml, err := yaml.Marshal(ih.PlanForStats(ctx))
+			treeYaml, err := yaml.Marshal(p.curPlan.planForStats)
 			if err != nil {
 				t.Fatal(err)
 			}

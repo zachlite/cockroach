@@ -35,13 +35,13 @@ func (node *ScheduledBackup) Format(ctx *FmtCtx) {
 
 	if node.ScheduleLabel != nil {
 		ctx.WriteString(" ")
-		ctx.FormatNode(node.ScheduleLabel)
+		node.ScheduleLabel.Format(ctx)
 	}
 
 	ctx.WriteString(" FOR BACKUP")
 	if node.Targets != nil {
 		ctx.WriteString(" ")
-		ctx.FormatNode(node.Targets)
+		node.Targets.Format(ctx)
 	}
 
 	ctx.WriteString(" INTO ")
@@ -49,21 +49,21 @@ func (node *ScheduledBackup) Format(ctx *FmtCtx) {
 
 	if !node.BackupOptions.IsDefault() {
 		ctx.WriteString(" WITH ")
-		ctx.FormatNode(&node.BackupOptions)
+		node.BackupOptions.Format(ctx)
 	}
 
 	ctx.WriteString(" RECURRING ")
 	if node.Recurrence == nil {
 		ctx.WriteString("NEVER")
 	} else {
-		ctx.FormatNode(node.Recurrence)
+		node.Recurrence.Format(ctx)
 	}
 
 	if node.FullBackup != nil {
 
 		if node.FullBackup.Recurrence != nil {
 			ctx.WriteString(" FULL BACKUP ")
-			ctx.FormatNode(node.FullBackup.Recurrence)
+			node.FullBackup.Recurrence.Format(ctx)
 		} else if node.FullBackup.AlwaysFull {
 			ctx.WriteString(" FULL BACKUP ALWAYS")
 		}
@@ -71,6 +71,6 @@ func (node *ScheduledBackup) Format(ctx *FmtCtx) {
 
 	if node.ScheduleOptions != nil {
 		ctx.WriteString(" WITH SCHEDULE OPTIONS ")
-		ctx.FormatNode(&node.ScheduleOptions)
+		node.ScheduleOptions.Format(ctx)
 	}
 }

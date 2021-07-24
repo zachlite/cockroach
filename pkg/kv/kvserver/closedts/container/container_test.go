@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -78,8 +77,8 @@ func prepareContainer() *TestContainer {
 	// Set the target duration to a second and the close fraction so small
 	// that the Provider will essentially close in a hot loop. In this test
 	// we'll block in the clock to pace the Provider's closer loop.
-	closedts.TargetDuration.Override(context.Background(), &st.SV, time.Second)
-	closedts.CloseFraction.Override(context.Background(), &st.SV, 1e-9)
+	closedts.TargetDuration.Override(&st.SV, time.Second)
+	closedts.CloseFraction.Override(&st.SV, 1e-9)
 
 	// We perform a little dance with the Dialer. It needs to be hooked up to the
 	// Server, but that's only created in NewContainer. The Dialer isn't used until
@@ -124,13 +123,11 @@ func setupTwoNodeTest() (_ *TestContainer, _ *TestContainer, shutdown func()) {
 			defer wg.Done()
 			c2.Stopper.Stop(context.Background())
 		}()
-		wg.Wait()
 	}
 }
 
 func TestTwoNodes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, closedts.IssueTrackingRemovalOfOldClosedTimestampsCode)
 
 	ctx := context.Background()
 

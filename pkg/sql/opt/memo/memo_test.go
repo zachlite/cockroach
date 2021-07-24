@@ -12,18 +12,14 @@ package memo_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	opttestutils "github.com/cockroachdb/cockroach/pkg/sql/opt/testutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/opttester"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/datadriven"
@@ -54,47 +50,6 @@ func TestStatsQuality(t *testing.T) {
 	flags := memo.ExprFmtHideCost | memo.ExprFmtHideRuleProps | memo.ExprFmtHideQualifications |
 		memo.ExprFmtHideScalars
 	runDataDrivenTest(t, "testdata/stats_quality/", flags)
-}
-
-func TestCompositeSensitive(t *testing.T) {
-	datadriven.RunTest(t, "testdata/composite_sensitive", func(t *testing.T, d *datadriven.TestData) string {
-		semaCtx := tree.MakeSemaContext()
-		evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
-
-		var f norm.Factory
-		f.Init(&evalCtx, nil /* catalog */)
-		md := f.Metadata()
-
-		if d.Cmd != "composite-sensitive" {
-			d.Fatalf(t, "unsupported command: %s\n", d.Cmd)
-		}
-		var sv opttestutils.ScalarVars
-
-		for _, arg := range d.CmdArgs {
-			key, vals := arg.Key, arg.Vals
-			switch key {
-			case "vars":
-				err := sv.Init(md, vals)
-				if err != nil {
-					d.Fatalf(t, "%v", err)
-				}
-
-			default:
-				d.Fatalf(t, "unknown argument: %s\n", key)
-			}
-		}
-
-		expr, err := parser.ParseExpr(d.Input)
-		if err != nil {
-			d.Fatalf(t, "error parsing: %v", err)
-		}
-
-		b := optbuilder.NewScalar(context.Background(), &semaCtx, &evalCtx, &f)
-		if err := b.Build(expr); err != nil {
-			d.Fatalf(t, "error building: %v", err)
-		}
-		return fmt.Sprintf("%v", memo.CanBeCompositeSensitive(md, f.Memo().RootExpr()))
-	})
 }
 
 func TestMemoInit(t *testing.T) {
@@ -137,7 +92,7 @@ func TestMemoIsStale(t *testing.T) {
 
 	// Revoke access to the underlying table. The user should retain indirect
 	// access via the view.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).Revoked = true
+	catalog.Table(tree.NewTableName("t", "abc")).Revoked = true
 
 	// Initialize context with starting values.
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
@@ -204,12 +159,6 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.SessionData.OptimizerUseMultiColStats = false
 	notStale()
 
-	// Stale locality optimized search enable.
-	evalCtx.SessionData.LocalityOptimizedSearch = true
-	stale()
-	evalCtx.SessionData.LocalityOptimizedSearch = false
-	notStale()
-
 	// Stale safe updates.
 	evalCtx.SessionData.SafeUpdates = true
 	stale()
@@ -235,24 +184,24 @@ func TestMemoIsStale(t *testing.T) {
 	}
 
 	// User no longer has access to view.
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = true
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = true
 	_, err = o.Memo().IsStale(ctx, &evalCtx, catalog)
 	if exp := "user does not have privilege"; !testutils.IsError(err, exp) {
 		t.Fatalf("expected %q error, but got %+v", exp, err)
 	}
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = false
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = false
 	notStale()
 
 	// Table ID changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 53
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 53
 	notStale()
 
 	// Table Version changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 0
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 0
 	notStale()
 }
 

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/errors"
@@ -32,16 +33,16 @@ import (
 // The file will have restrictive file permissions (0600), making it
 // appropriate for usage by libraries that require security assets to have such
 // restrictive permissions.
-func RestrictedCopy(path, tempdir, name string) (string, error) {
+func RestrictedCopy(t testing.TB, path, tempdir, name string) string {
 	contents, err := Asset(path)
 	if err != nil {
-		return "", err
+		t.Fatal(err)
 	}
 	tempPath := filepath.Join(tempdir, name)
 	if err := ioutil.WriteFile(tempPath, contents, 0600); err != nil {
-		return "", err
+		t.Fatal(err)
 	}
-	return tempPath, nil
+	return tempPath
 }
 
 // AssetReadDir mimics ioutil.ReadDir, returning a list of []os.FileInfo for

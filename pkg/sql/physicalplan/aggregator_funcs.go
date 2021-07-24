@@ -85,35 +85,135 @@ var passThroughLocalIdxs = []uint32{0}
 // DistAggregationTable is DistAggregationInfo look-up table. Functions that
 // don't have an entry in the table are not optimized with a local stage.
 var DistAggregationTable = map[execinfrapb.AggregatorSpec_Func]DistAggregationInfo{
-	execinfrapb.AnyNotNull: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AnyNotNull},
+	execinfrapb.AggregatorSpec_ANY_NOT_NULL: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_ANY_NOT_NULL},
 		FinalStage: []FinalStageInfo{
 			{
-				Fn:        execinfrapb.AnyNotNull,
+				Fn:        execinfrapb.AggregatorSpec_ANY_NOT_NULL,
 				LocalIdxs: passThroughLocalIdxs,
 			},
 		},
 	},
 
-	// AVG is more tricky than others; we need two intermediate values in the
-	// local and final stages:
+	execinfrapb.AggregatorSpec_BIT_AND: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_BIT_AND},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_BIT_AND,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_BIT_OR: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_BIT_OR},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_BIT_OR,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_BOOL_AND: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_BOOL_AND},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_BOOL_AND,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_BOOL_OR: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_BOOL_OR},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_BOOL_OR,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_COUNT: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_COUNT},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_SUM_INT,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_COUNT_ROWS: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_COUNT_ROWS},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_SUM_INT,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_MAX: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_MAX},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_MAX,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_MIN: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_MIN},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_MIN,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_SUM: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_SUM},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_SUM,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	execinfrapb.AggregatorSpec_XOR_AGG: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.AggregatorSpec_XOR_AGG},
+		FinalStage: []FinalStageInfo{
+			{
+				Fn:        execinfrapb.AggregatorSpec_XOR_AGG,
+				LocalIdxs: passThroughLocalIdxs,
+			},
+		},
+	},
+
+	// AVG is more tricky than the ones above; we need two intermediate values in
+	// the local and final stages:
 	//  - the local stage accumulates the SUM and the COUNT;
 	//  - the final stage sums these partial results (SUM and SUM_INT);
 	//  - a final rendering then divides the two results.
 	//
 	// At a high level, this is analogous to rewriting AVG(x) as SUM(x)/COUNT(x).
-	execinfrapb.Avg: {
+	execinfrapb.AggregatorSpec_AVG: {
 		LocalStage: []execinfrapb.AggregatorSpec_Func{
-			execinfrapb.Sum,
-			execinfrapb.Count,
+			execinfrapb.AggregatorSpec_SUM,
+			execinfrapb.AggregatorSpec_COUNT,
 		},
 		FinalStage: []FinalStageInfo{
 			{
-				Fn:        execinfrapb.Sum,
+				Fn:        execinfrapb.AggregatorSpec_SUM,
 				LocalIdxs: []uint32{0},
 			},
 			{
-				Fn:        execinfrapb.SumInt,
+				Fn:        execinfrapb.AggregatorSpec_SUM_INT,
 				LocalIdxs: []uint32{1},
 			},
 		},
@@ -125,7 +225,7 @@ var DistAggregationTable = map[execinfrapb.AggregatorSpec_Func]DistAggregationIn
 			count := h.IndexedVar(varIdxs[1])
 
 			expr := &tree.BinaryExpr{
-				Operator: tree.MakeBinaryOperator(tree.Div),
+				Operator: tree.Div,
 				Left:     sum,
 				Right:    count,
 			}
@@ -145,90 +245,6 @@ var DistAggregationTable = map[execinfrapb.AggregatorSpec_Func]DistAggregationIn
 		},
 	},
 
-	execinfrapb.BoolAnd: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.BoolAnd},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.BoolAnd,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.BoolOr: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.BoolOr},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.BoolOr,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.Count: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.Count},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.SumInt,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.Max: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.Max},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.Max,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.Min: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.Min},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.Min,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.Stddev: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{
-			execinfrapb.Sqrdiff,
-			execinfrapb.Sum,
-			execinfrapb.Count,
-		},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.FinalStddev,
-				LocalIdxs: []uint32{0, 1, 2},
-			},
-		},
-	},
-
-	execinfrapb.Sum: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.Sum},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.Sum,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.SumInt: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.SumInt},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.SumInt,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
 	// For VARIANCE/STDDEV the local stage consists of three aggregations,
 	// and the final stage aggregation uses all three values.
 	// respectively:
@@ -237,11 +253,11 @@ var DistAggregationTable = map[execinfrapb.AggregatorSpec_Func]DistAggregationIn
 	//
 	// At a high level, this is analogous to rewriting VARIANCE(x) as
 	// SQRDIFF(x)/(COUNT(x) - 1) (and STDDEV(x) as sqrt(VARIANCE(x))).
-	execinfrapb.Variance: {
+	execinfrapb.AggregatorSpec_VARIANCE: {
 		LocalStage: []execinfrapb.AggregatorSpec_Func{
-			execinfrapb.Sqrdiff,
-			execinfrapb.Sum,
-			execinfrapb.Count,
+			execinfrapb.AggregatorSpec_SQRDIFF,
+			execinfrapb.AggregatorSpec_SUM,
+			execinfrapb.AggregatorSpec_COUNT,
 		},
 		// Instead of have a SUM_SQRDIFFS and SUM_INT (for COUNT) stage
 		// for VARIANCE (and STDDEV) then tailoring a FinalRendering
@@ -255,48 +271,22 @@ var DistAggregationTable = map[execinfrapb.AggregatorSpec_Func]DistAggregationIn
 		// have one or the other
 		FinalStage: []FinalStageInfo{
 			{
-				Fn:        execinfrapb.FinalVariance,
+				Fn:        execinfrapb.AggregatorSpec_FINAL_VARIANCE,
 				LocalIdxs: []uint32{0, 1, 2},
 			},
 		},
 	},
 
-	execinfrapb.XorAgg: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.XorAgg},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.XorAgg,
-				LocalIdxs: passThroughLocalIdxs,
-			},
+	execinfrapb.AggregatorSpec_STDDEV: {
+		LocalStage: []execinfrapb.AggregatorSpec_Func{
+			execinfrapb.AggregatorSpec_SQRDIFF,
+			execinfrapb.AggregatorSpec_SUM,
+			execinfrapb.AggregatorSpec_COUNT,
 		},
-	},
-
-	execinfrapb.CountRows: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.CountRows},
 		FinalStage: []FinalStageInfo{
 			{
-				Fn:        execinfrapb.SumInt,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.BitAnd: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.BitAnd},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.BitAnd,
-				LocalIdxs: passThroughLocalIdxs,
-			},
-		},
-	},
-
-	execinfrapb.BitOr: {
-		LocalStage: []execinfrapb.AggregatorSpec_Func{execinfrapb.BitOr},
-		FinalStage: []FinalStageInfo{
-			{
-				Fn:        execinfrapb.BitOr,
-				LocalIdxs: passThroughLocalIdxs,
+				Fn:        execinfrapb.AggregatorSpec_FINAL_STDDEV,
+				LocalIdxs: []uint32{0, 1, 2},
 			},
 		},
 	},

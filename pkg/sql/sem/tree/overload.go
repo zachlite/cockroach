@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 )
 
 // SpecializedVectorizedBuiltin is used to map overloads
@@ -86,10 +85,6 @@ type Overload struct {
 	// volatility against Postgres's volatility at test time.
 	// This should be used with caution.
 	IgnoreVolatilityCheck bool
-
-	// Oid is the cached oidHasher.BuiltinOid result for this Overload. It's
-	// populated at init-time.
-	Oid oid.Oid
 }
 
 // params implements the overloadImpl interface.
@@ -796,49 +791,6 @@ func typeCheckOverloadedExprs(
 				}
 				if rightIsNull {
 					rightType = leftType
-				}
-				s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
-					func(o overloadImpl) bool {
-						return o.params().GetAt(0).Equivalent(leftType) &&
-							o.params().GetAt(1).Equivalent(rightType)
-					})
-			}
-		}); ok {
-			return typedExprs, fns, err
-		}
-	}
-
-	// After the previous heuristic, in a binary expression, in the case of one of the arguments being untyped
-	// NULL, we prefer overloads where we infer the type of the NULL to be a STRING. This is used
-	// to choose INT || NULL::STRING over INT || NULL::INT[].
-	if inBinOp && len(s.exprs) == 2 {
-		if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
-			var err error
-			left := s.typedExprs[0]
-			if left == nil {
-				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			right := s.typedExprs[1]
-			if right == nil {
-				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			leftType := left.ResolvedType()
-			rightType := right.ResolvedType()
-			leftIsNull := leftType.Family() == types.UnknownFamily
-			rightIsNull := rightType.Family() == types.UnknownFamily
-			oneIsNull := (leftIsNull || rightIsNull) && !(leftIsNull && rightIsNull)
-			if oneIsNull {
-				if leftIsNull {
-					leftType = types.String
-				}
-				if rightIsNull {
-					rightType = types.String
 				}
 				s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
 					func(o overloadImpl) bool {

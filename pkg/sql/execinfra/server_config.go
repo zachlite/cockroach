@@ -13,34 +13,37 @@
 package execinfra
 
 import (
-	"time"
-
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/errors"
 	"github.com/marusama/semaphore"
+)
+
+// SettingWorkMemBytes is a cluster setting that determines the maximum amount
+// of RAM that a processor can use.
+var SettingWorkMemBytes = settings.RegisterByteSizeSetting(
+	"sql.distsql.temp_storage.workmem",
+	"maximum amount of memory in bytes a processor can use before falling back to temp storage",
+	64*1024*1024, /* 64MB */
 )
 
 // ServerConfig encompasses the configuration required to create a
@@ -98,12 +101,10 @@ type ServerConfig struct {
 	// used by the column and index backfillers.
 	BackfillerMonitor *mon.BytesMonitor
 
-	// ParentDiskMonitor is normally the root disk monitor. It should only be used
-	// when setting up a server, a child monitor (usually belonging to a sql
-	// execution flow), or in tests. It is used to monitor temporary storage disk
-	// usage. Actual disk space used will be a small multiple (~1.1) of this
-	// because of RocksDB space amplification.
-	ParentDiskMonitor *mon.BytesMonitor
+	// DiskMonitor is used to monitor temporary storage disk usage. Actual disk
+	// space used will be a small multiple (~1.1) of this because of RocksDB
+	// space amplification.
+	DiskMonitor *mon.BytesMonitor
 
 	Metrics *DistSQLMetrics
 
@@ -113,7 +114,7 @@ type ServerConfig struct {
 	// JobRegistry manages jobs being used by this Server.
 	JobRegistry *jobs.Registry
 
-	// LeaseManager is a *lease.Manager. It's stored as an `interface{}` due
+	// LeaseManager is a *sql.LeaseManager. It's stored as an `interface{}` due
 	// to package dependency cycles
 	LeaseManager interface{}
 
@@ -140,22 +141,11 @@ type ServerConfig struct {
 	// the leaseholders of the data ranges that they're consuming. These
 	// processors query the cache to see if they should communicate updates to the
 	// gateway.
-	RangeCache *rangecache.RangeCache
+	RangeCache *kvcoord.RangeDescriptorCache
 
 	// HydratedTables is a node-level cache of table descriptors which utilize
 	// user-defined types.
 	HydratedTables *hydratedtables.Cache
-
-	// SQLStatsResetter is an interface used to reset SQL stats without the need to
-	// introduce dependency on the sql package.
-	SQLStatsResetter tree.SQLStatsResetter
-
-	// VirtualSchemas hold the virtual table schemas.
-	VirtualSchemas catalog.VirtualSchemas
-
-	// SQLSQLResponseAdmissionQ is the admission queue to use for
-	// SQLSQLResponseWork.
-	SQLSQLResponseAdmissionQ *admission.WorkQueue
 }
 
 // RuntimeStats is an interface through which the rowexec layer can get
@@ -171,45 +161,27 @@ type TestingKnobs struct {
 	// RunBeforeBackfillChunk is called before executing each chunk of a
 	// backfill during a schema change operation. It is called with the
 	// current span and returns an error which eventually is returned to the
-	// caller of SchemaChanger.exec(). In the case of a column backfill, it is
-	// called at the start of the backfill function passed into the transaction
-	// executing the chunk.
+	// caller of SchemaChanger.exec(). It is called at the start of the
+	// backfill function passed into the transaction executing the chunk.
 	RunBeforeBackfillChunk func(sp roachpb.Span) error
 
-	// RunAfterBackfillChunk is called after executing each chunk of a backfill
-	// during a schema change operation. In the case of a column backfill, it is
-	// called just before returning from the backfill function passed into the
-	// transaction executing the chunk. It is always called even when the backfill
+	// RunAfterBackfillChunk is called after executing each chunk of a
+	// backfill during a schema change operation. It is called just before
+	// returning from the backfill function passed into the transaction
+	// executing the chunk. It is always called even when the backfill
 	// function returns an error, or if the table has already been dropped.
 	RunAfterBackfillChunk func()
 
-	// SerializeIndexBackfillCreationAndIngestion ensures that every index batch
-	// created during an index backfill is also ingested before moving on to the
-	// next batch or returning.
-	// Ingesting does not mean that the index entries are necessarily written to
-	// storage but instead that they are buffered in the index backfillers' bulk
-	// adder.
-	SerializeIndexBackfillCreationAndIngestion chan struct{}
-
-	// IndexBackfillProgressReportInterval is the periodic interval at which the
-	// processor pushes the spans for which it has successfully backfilled the
-	// indexes.
-	IndexBackfillProgressReportInterval time.Duration
-
 	// ForceDiskSpill forces any processors/operators that can fall back to disk
 	// to fall back to disk immediately.
-	//
-	// Cannot be set together with MemoryLimitBytes.
 	ForceDiskSpill bool
 
 	// MemoryLimitBytes specifies a maximum amount of working memory that a
 	// processor that supports falling back to disk can use. Must be >= 1 to
 	// enable. This is a more fine-grained knob than ForceDiskSpill when the
-	// available memory needs to be controlled. Once this limit is hit,
-	// processors employ their on-disk implementation regardless of applicable
-	// cluster settings.
-	//
-	// Cannot be set together with ForceDiskSpill.
+	// available memory needs to be controlled. Once this limit is hit, processors
+	// employ their on-disk implementation regardless of applicable cluster
+	// settings.
 	MemoryLimitBytes int64
 
 	// DrainFast, if enabled, causes the server to not wait for any currently
@@ -222,11 +194,23 @@ type TestingKnobs struct {
 	// checked by a test receiver on the gateway.
 	MetadataTestLevel MetadataTestLevel
 
+	// DeterministicStats overrides stats which don't have reliable values, like
+	// stall time and bytes sent. It replaces them with a zero value.
+	DeterministicStats bool
+
+	// CheckVectorizedFlowIsClosedCorrectly checks that all components in a flow
+	// were closed explicitly in flow.Cleanup.
+	CheckVectorizedFlowIsClosedCorrectly bool
+
 	// Changefeed contains testing knobs specific to the changefeed system.
 	Changefeed base.ModuleTestingKnobs
 
 	// Flowinfra contains testing knobs specific to the flowinfra system
 	Flowinfra base.ModuleTestingKnobs
+
+	// EnableVectorizedInvariantsChecker, if enabled, will allow for planning
+	// the invariant checkers between all columnar operators.
+	EnableVectorizedInvariantsChecker bool
 
 	// Forces bulk adder flush every time a KV batch is processed.
 	BulkAdderFlushesEveryBatch bool
@@ -255,24 +239,12 @@ const (
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
 func (*TestingKnobs) ModuleTestingKnobs() {}
 
-// DefaultMemoryLimit is the default value of
-// sql.distsql.temp_storage.workmem cluster setting.
-const DefaultMemoryLimit = 64 << 20 /* 64 MiB */
-
 // GetWorkMemLimit returns the number of bytes determining the amount of RAM
 // available to a single processor or operator.
-func GetWorkMemLimit(flowCtx *FlowCtx) int64 {
-	if flowCtx.Cfg.TestingKnobs.ForceDiskSpill && flowCtx.Cfg.TestingKnobs.MemoryLimitBytes != 0 {
-		panic(errors.AssertionFailedf("both ForceDiskSpill and MemoryLimitBytes set"))
+func GetWorkMemLimit(config *ServerConfig) int64 {
+	limit := config.TestingKnobs.MemoryLimitBytes
+	if limit <= 0 {
+		limit = SettingWorkMemBytes.Get(&config.Settings.SV)
 	}
-	if flowCtx.Cfg.TestingKnobs.ForceDiskSpill {
-		return 1
-	} else if flowCtx.Cfg.TestingKnobs.MemoryLimitBytes != 0 {
-		return flowCtx.Cfg.TestingKnobs.MemoryLimitBytes
-	}
-	if flowCtx.EvalCtx.SessionData.WorkMemLimit <= 0 {
-		// If for some reason workmem limit is not set, use the default value.
-		return DefaultMemoryLimit
-	}
-	return flowCtx.EvalCtx.SessionData.WorkMemLimit
+	return limit
 }

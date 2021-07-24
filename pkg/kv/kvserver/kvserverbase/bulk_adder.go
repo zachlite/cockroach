@@ -32,7 +32,6 @@ type BulkAdderOptions struct {
 
 	// SplitAndScatterAfter is the number of bytes which if added without hitting
 	// an existing split will cause the adder to split and scatter the next span.
-	// A function returning -1 is interpreted as indicating not to split.
 	SplitAndScatterAfter func() int64
 
 	// MinBufferSize is the initial size of the BulkAdder buffer. It indicates the
@@ -47,10 +46,10 @@ type BulkAdderOptions struct {
 	// BulkAdder buffer if the memory monitor permits.
 	StepBufferSize int64
 
-	// SkipDuplicates configures handling of duplicate keys within a local sorted
-	// batch. When true if the same key/value pair is added more than once
+	// SkipLocalDuplicates configures handling of duplicate keys within a local
+	// sorted batch. When true if the same key/value pair is added more than once
 	// subsequent additions will be ignored instead of producing an error. If an
-	// attempt to add the same key has a different value, it is always an error.
+	// attempt to add the same key has a differnet value, it is always an error.
 	// Once a batch is flushed – explicitly or automatically – local duplicate
 	// detection does not apply.
 	SkipDuplicates bool
@@ -64,10 +63,6 @@ type BulkAdderOptions struct {
 	// actually applied to each key).
 	BatchTimestamp hlc.Timestamp
 }
-
-// DisableExplicitSplits can be returned by a SplitAndScatterAfter function to
-// indicate that the SSTBatcher should not issue explicit splits.
-const DisableExplicitSplits = -1
 
 // BulkAdderFactory describes a factory function for BulkAdders.
 type BulkAdderFactory func(

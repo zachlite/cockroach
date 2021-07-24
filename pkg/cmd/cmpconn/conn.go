@@ -19,7 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgx"
 	"github.com/lib/pq"
@@ -133,7 +134,7 @@ func NewConn(uri string, initSQL ...string) (Conn, error) {
 type connWithMutators struct {
 	Conn
 	rng         *rand.Rand
-	sqlMutators []randgen.Mutator
+	sqlMutators []rowenc.Mutator
 }
 
 var _ Conn = &connWithMutators{}
@@ -142,7 +143,7 @@ var _ Conn = &connWithMutators{}
 // on it. The mutators are applied to initSQL and will be applied to all
 // queries to be executed in CompareConns.
 func NewConnWithMutators(
-	uri string, rng *rand.Rand, sqlMutators []randgen.Mutator, initSQL ...string,
+	uri string, rng *rand.Rand, sqlMutators []rowenc.Mutator, initSQL ...string,
 ) (Conn, error) {
 	mutatedInitSQL := make([]string, len(initSQL))
 	for i, s := range initSQL {
@@ -151,7 +152,7 @@ func NewConnWithMutators(
 			continue
 		}
 
-		mutatedInitSQL[i], _ = randgen.ApplyString(rng, s, sqlMutators...)
+		mutatedInitSQL[i], _ = mutations.ApplyString(rng, s, sqlMutators...)
 	}
 	conn, err := NewConn(uri, mutatedInitSQL...)
 	if err != nil {
@@ -174,7 +175,7 @@ func CompareConns(
 	conns map[string]Conn,
 	prep, exec string,
 	ignoreSQLErrors bool,
-) (ignoredErr bool, err error) {
+) (err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	connRows := make(map[string]*pgx.Rows)
@@ -182,11 +183,11 @@ func CompareConns(
 	for name, conn := range conns {
 		connExecs[name] = exec
 		if cwm, withMutators := conn.(*connWithMutators); withMutators {
-			connExecs[name], _ = randgen.ApplyString(cwm.rng, exec, cwm.sqlMutators...)
+			connExecs[name], _ = mutations.ApplyString(cwm.rng, exec, cwm.sqlMutators...)
 		}
 		rows, err := conn.Values(ctx, prep, connExecs[name])
 		if err != nil {
-			return true, nil //nolint:returnerrcheck
+			return nil //nolint:returnerrcheck
 		}
 		defer rows.Close()
 		connRows[name] = rows
@@ -219,9 +220,7 @@ func CompareConns(
 // It always returns an error if there are any differences. Additionally,
 // ignoreSQLErrors specifies whether SQL errors should be ignored (in which
 // case the function returns nil if SQL error occurs).
-func compareRows(
-	connRows map[string]*pgx.Rows, ignoreSQLErrors bool,
-) (ignoredErr bool, retErr error) {
+func compareRows(connRows map[string]*pgx.Rows, ignoreSQLErrors bool) error {
 	var first []interface{}
 	var firstName string
 	var minCount int
@@ -242,16 +241,16 @@ ReadRows:
 					// This function can fail if, for example,
 					// a number doesn't fit into a float64. Ignore
 					// them and move along to another query.
-					return true, nil
+					err = nil
 				}
-				return false, err
+				return err
 			}
 			if firstName == "" {
 				firstName = name
 				first = vals
 			} else {
 				if err := CompareVals(first, vals); err != nil {
-					return false, fmt.Errorf("compare %s to %s:\n%v", firstName, name, err)
+					return fmt.Errorf("compare %s to %s:\n%v", firstName, name, err)
 				}
 			}
 		}
@@ -265,16 +264,16 @@ ReadRows:
 			if ignoreSQLErrors {
 				// Aww someone had a SQL error maybe, so we can't use this
 				// query.
-				return true, nil
+				err = nil
 			}
-			return false, err
+			return err
 		}
 	}
 	// Ensure each connection returned the same number of rows.
 	for name, count := range rowCounts {
 		if minCount != count {
-			return false, fmt.Errorf("%s had %d rows, expected %d", name, count, minCount)
+			return fmt.Errorf("%s had %d rows, expected %d", name, count, minCount)
 		}
 	}
-	return false, nil
+	return nil
 }

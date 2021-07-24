@@ -15,7 +15,6 @@ import (
 	"math/bits"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -101,12 +100,6 @@ func NewRowContainerWithCapacity(
 	return c
 }
 
-var rowsPerChunkShift = uint(util.ConstantWithMetamorphicTestValue(
-	"row-container-rows-per-chunk-shift",
-	6, /* defaultValue */
-	1, /* metamorphicValue */
-))
-
 // Init can be used instead of NewRowContainer if we have a RowContainer that is
 // already part of an on-heap structure.
 func (c *RowContainer) Init(acc mon.BoundAccount, ti colinfo.ColTypeInfo, rowCapacity int) {
@@ -124,7 +117,7 @@ func (c *RowContainer) Init(acc mon.BoundAccount, ti colinfo.ColTypeInfo, rowCap
 		c.rowsPerChunkShift = 64 - uint(bits.LeadingZeros64(uint64(rowCapacity-1)))
 	} else if nCols != 0 {
 		// If the rows have columns, we use 64 rows per chunk.
-		c.rowsPerChunkShift = rowsPerChunkShift
+		c.rowsPerChunkShift = 6
 	} else {
 		// If there are no columns, every row gets mapped to the first chunk,
 		// which ends up being a zero-length slice because each row contains no
@@ -146,14 +139,10 @@ func (c *RowContainer) Init(acc mon.BoundAccount, ti colinfo.ColTypeInfo, rowCap
 		}
 	}
 
-	if nCols > 0 {
-		// Precalculate the memory used for a chunk, specifically by the Datums
-		// in the chunk and the slice pointing at the chunk.
-		// Note that when there are no columns, we simply track the number of
-		// rows added in c.numRows and don't allocate any memory.
-		c.chunkMemSize = memsize.DatumOverhead * int64(c.rowsPerChunk*c.numCols)
-		c.chunkMemSize += memsize.DatumsOverhead
-	}
+	// Precalculate the memory used for a chunk, specifically by the Datums in the
+	// chunk and the slice pointing at the chunk.
+	c.chunkMemSize = tree.SizeOfDatum * int64(c.rowsPerChunk*c.numCols)
+	c.chunkMemSize += tree.SizeOfDatums
 }
 
 // Clear resets the container and releases the associated memory. This allows
@@ -328,4 +317,9 @@ func (c *RowContainer) Replace(ctx context.Context, i int, newRow tree.Datums) e
 	}
 	copy(row, newRow)
 	return nil
+}
+
+// MemUsage returns the current accounted memory usage.
+func (c *RowContainer) MemUsage() int64 {
+	return c.memAcc.Used()
 }

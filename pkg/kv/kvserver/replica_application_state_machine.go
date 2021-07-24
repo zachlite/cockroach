@@ -17,19 +17,15 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/apply"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 	"github.com/kr/pretty"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -73,7 +69,7 @@ type nonDeterministicFailure struct {
 
 // The provided format string should be safe for reporting.
 func makeNonDeterministicFailure(format string, args ...interface{}) error {
-	err := errors.AssertionFailedWithDepthf(1, format, args...)
+	err := errors.Newf(format, args...)
 	return &nonDeterministicFailure{
 		wrapped:  err,
 		safeExpl: err.Error(),
@@ -138,17 +134,13 @@ func (r *Replica) shouldApplyCommand(
 		ctx, cmd.idKey, &cmd.raftCmd, cmd.IsLocal(), replicaState,
 	)
 	if filter := r.store.cfg.TestingKnobs.TestingApplyFilter; cmd.forcedErr == nil && filter != nil {
-		args := kvserverbase.ApplyFilterArgs{
+		var newPropRetry int
+		newPropRetry, cmd.forcedErr = filter(kvserverbase.ApplyFilterArgs{
 			CmdID:                cmd.idKey,
 			ReplicatedEvalResult: *cmd.replicatedResult(),
 			StoreID:              r.store.StoreID(),
 			RangeID:              r.RangeID,
-		}
-		if cmd.IsLocal() {
-			args.Req = cmd.proposal.Request
-		}
-		var newPropRetry int
-		newPropRetry, cmd.forcedErr = filter(args)
+		})
 		if cmd.proposalRetry == 0 {
 			cmd.proposalRetry = proposalReevaluationReason(newPropRetry)
 		}
@@ -269,11 +261,10 @@ func checkForcedErr(
 		// We return a NotLeaseHolderError so that the DistSender retries.
 		// NB: we set proposerStoreID to 0 because we don't know who proposed the
 		// Raft command. This is ok, as this is only used for debug information.
-		nlhe := newNotLeaseHolderError(
-			*replicaState.Lease, 0 /* proposerStoreID */, replicaState.Desc,
-			fmt.Sprintf(
-				"stale proposal: command was proposed under lease #%d but is being applied "+
-					"under lease: %s", raftCmd.ProposerLeaseSequence, replicaState.Lease))
+		nlhe := newNotLeaseHolderError(replicaState.Lease, 0 /* proposerStoreID */, replicaState.Desc)
+		nlhe.CustomMsg = fmt.Sprintf(
+			"stale proposal: command was proposed under lease #%d but is being applied "+
+				"under lease: %s", raftCmd.ProposerLeaseSequence, replicaState.Lease)
 		return leaseIndex, proposalNoReevaluation, roachpb.NewError(nlhe)
 	}
 
@@ -322,19 +313,16 @@ func checkForcedErr(
 		)
 	}
 
-	// Verify that command is not trying to write below the GC threshold. This is
+	// Verify that the batch timestamp is after the GC threshold. This is
 	// necessary because not all commands declare read access on the GC
 	// threshold key, even though they implicitly depend on it. This means
 	// that access to this state will not be serialized by latching,
 	// so we must perform this check upstream and downstream of raft.
-	// TODO(andrei,nvanbenschoten,bdarnell): Is this check below-Raft actually
-	// necessary, given that we've check at evaluation time that the request
-	// evaluates at a timestamp above the GC threshold? Does it actually matter if
-	// the GC threshold has advanced since then?
-	wts := raftCmd.ReplicatedEvalResult.WriteTimestamp
-	if !wts.IsEmpty() && wts.LessEq(*replicaState.GCThreshold) {
+	// See #14833.
+	ts := raftCmd.ReplicatedEvalResult.Timestamp
+	if ts.LessEq(*replicaState.GCThreshold) {
 		return leaseIndex, proposalNoReevaluation, roachpb.NewError(&roachpb.BatchTimestampBeforeGCError{
-			Timestamp: wts,
+			Timestamp: ts,
 			Threshold: *replicaState.GCThreshold,
 		})
 	}
@@ -360,7 +348,6 @@ func (sm *replicaStateMachine) NewBatch(ephemeral bool) apply.Batch {
 	b.state = r.mu.state
 	b.state.Stats = &b.stats
 	*b.state.Stats = *r.mu.state.Stats
-	b.closedTimestampSetter = r.mu.closedTimestampSetter
 	r.mu.RUnlock()
 	b.start = timeutil.Now()
 	return b
@@ -383,19 +370,14 @@ type replicaAppBatch struct {
 	// under the Replica.mu when the batch is initialized and is updated in
 	// stageTrivialReplicatedEvalResult.
 	state kvserverpb.ReplicaState
-	// closedTimestampSetter maintains historical information about the
-	// advancement of the closed timestamp.
-	closedTimestampSetter closedTimestampSetterInfo
 	// stats is stored on the application batch to avoid an allocation in
 	// tracking the batch's view of replicaState. All pointer fields in
 	// replicaState other than Stats are overwritten completely rather than
 	// updated in-place.
 	stats enginepb.MVCCStats
-	// maxTS is the maximum clock timestamp that this command carries. Timestamps
-	// come from the writes that are part of this command, and also from the
-	// closed timestamp carried by this command. Synthetic timestamps are not
-	// registered here.
-	maxTS hlc.ClockTimestamp
+	// maxTS is the maximum timestamp that any command that was staged in this
+	// batch was evaluated at.
+	maxTS hlc.Timestamp
 	// migrateToAppliedStateKey tracks whether any command in the batch
 	// triggered a migration to the replica applied state key. If so, this
 	// migration will be performed when the application batch is committed.
@@ -445,8 +427,7 @@ func (b *replicaAppBatch) Stage(cmdI apply.Command) (apply.CheckedCommand, error
 		return nil, makeNonDeterministicFailure("applied index jumped from %d to %d", applied, idx)
 	}
 	if log.V(4) {
-		log.Infof(ctx, "processing command %x: raftIndex=%d maxLeaseIndex=%d closedts=%s",
-			cmd.idKey, cmd.ent.Index, cmd.raftCmd.MaxLeaseIndex, cmd.raftCmd.ClosedTimestamp)
+		log.Infof(ctx, "processing command %x: maxLeaseIndex=%d", cmd.idKey, cmd.raftCmd.MaxLeaseIndex)
 	}
 
 	// Determine whether the command should be applied to the replicated state
@@ -460,14 +441,7 @@ func (b *replicaAppBatch) Stage(cmdI apply.Command) (apply.CheckedCommand, error
 		cmd.raftCmd.ReplicatedEvalResult = kvserverpb.ReplicatedEvalResult{}
 		cmd.raftCmd.WriteBatch = nil
 		cmd.raftCmd.LogicalOpLog = nil
-		cmd.raftCmd.ClosedTimestamp = nil
 	} else {
-		if err := b.assertNoCmdClosedTimestampRegression(cmd); err != nil {
-			return nil, err
-		}
-		if err := b.assertNoWriteBelowClosedTimestamp(cmd); err != nil {
-			return nil, err
-		}
 		log.Event(ctx, "applying command")
 	}
 
@@ -489,9 +463,7 @@ func (b *replicaAppBatch) Stage(cmdI apply.Command) (apply.CheckedCommand, error
 	}
 
 	// Update the batch's max timestamp.
-	if clockTS, ok := cmd.replicatedResult().WriteTimestamp.TryToClockTimestamp(); ok {
-		b.maxTS.Forward(clockTS)
-	}
+	b.maxTS.Forward(cmd.replicatedResult().Timestamp)
 
 	// Normalize the command, accounting for past migrations.
 	b.migrateReplicatedResult(ctx, cmd)
@@ -579,7 +551,7 @@ func changeRemovesStore(
 	// a new range descriptor. Check first if this is 19.1 or earlier command which
 	// uses DeprecatedChangeType and DeprecatedReplica
 	if change.Desc == nil {
-		return change.DeprecatedChangeType == roachpb.REMOVE_VOTER && change.DeprecatedReplica.ReplicaID == curReplica.ReplicaID
+		return change.DeprecatedChangeType == roachpb.REMOVE_REPLICA && change.DeprecatedReplica.ReplicaID == curReplica.ReplicaID
 	}
 	// In 19.2 and beyond we supply the new range descriptor in the change.
 	// We know we're removed if we do not appear in the new descriptor.
@@ -648,7 +620,7 @@ func (b *replicaAppBatch) runPreApplyTriggersAfterStagingWriteBatch(
 		//
 		// Alternatively if we discover that the RHS has already been removed
 		// from this store, clean up its data.
-		splitPreApply(ctx, b.r, b.batch, res.Split.SplitTrigger, cmd.raftCmd.ClosedTimestamp)
+		splitPreApply(ctx, b.batch, res.Split.SplitTrigger, b.r)
 
 		// The rangefeed processor will no longer be provided logical ops for
 		// its entire range, so it needs to be shut down and all registrations
@@ -729,19 +701,8 @@ func (b *replicaAppBatch) runPreApplyTriggersAfterStagingWriteBatch(
 	}
 
 	if res.State != nil && res.State.TruncatedState != nil {
-		activeVersion := b.r.ClusterSettings().Version.ActiveVersion(ctx).Version
-		migrationVersion := clusterversion.ByKey(clusterversion.TruncatedAndRangeAppliedStateMigration)
-		// NB: We're being deliberate here in using the less-than operator (as
-		// opposed to LessEq). TruncatedAndRangeAppliedStateMigration indicates
-		// that the migration to move to the unreplicated truncated
-		// state is currently underway. It's only when the active cluster
-		// version has moved past it that we can assume that the migration has
-		// completed.
-		assertNoLegacy := migrationVersion.Less(activeVersion)
-
 		if apply, err := handleTruncatedStateBelowRaft(
 			ctx, b.state.TruncatedState, res.State.TruncatedState, b.r.raftMu.stateLoader, b.batch,
-			assertNoLegacy,
 		); err != nil {
 			return wrapWithNonDeterministicFailure(err, "unable to handle truncated state")
 		} else if !apply {
@@ -836,22 +797,48 @@ func (b *replicaAppBatch) stageTrivialReplicatedEvalResult(
 	if leaseAppliedIndex := cmd.leaseIndex; leaseAppliedIndex != 0 {
 		b.state.LeaseAppliedIndex = leaseAppliedIndex
 	}
-	if cts := cmd.raftCmd.ClosedTimestamp; cts != nil && !cts.IsEmpty() {
-		b.state.RaftClosedTimestamp = *cts
-		b.closedTimestampSetter.record(cmd, b.state.Lease)
-		if clockTS, ok := cts.TryToClockTimestamp(); ok {
-			b.maxTS.Forward(clockTS)
-		}
-	}
-
 	res := cmd.replicatedResult()
+
+	// Detect whether the incoming stats contain estimates that resulted from the
+	// evaluation of a command under the 19.1 cluster version. These were either
+	// evaluated on a 19.1 node (where ContainsEstimates is a bool, which maps
+	// to 0 and 1 in 19.2+) or on a 19.2 node which hadn't yet had its cluster
+	// version bumped.
+	//
+	// 19.2 nodes will never emit a ContainsEstimates outside of 0 or 1 until
+	// the cluster version is active (during command evaluation). When the
+	// version is active, they will never emit odd positive numbers (1, 3, ...).
+	//
+	// As a result, we can pinpoint exactly when the proposer of this command
+	// has used the old cluster version: it's when the incoming
+	// ContainsEstimates is 1. If so, we need to assume that an old node is processing
+	// the same commands (as `true + true = true`), so make sure that `1 + 1 = 1`.
+	_ = clusterversion.VersionContainsEstimatesCounter // see for info on ContainsEstimates migration
+	deltaStats := res.Delta.ToStats()
+	if deltaStats.ContainsEstimates == 1 && b.state.Stats.ContainsEstimates == 1 {
+		deltaStats.ContainsEstimates = 0
+	}
 
 	// Special-cased MVCC stats handling to exploit commutativity of stats delta
 	// upgrades. Thanks to commutativity, the spanlatch manager does not have to
 	// serialize on the stats key.
-	deltaStats := res.Delta.ToStats()
 	b.state.Stats.Add(deltaStats)
-
+	// Exploit the fact that a split will result in a full stats
+	// recomputation to reset the ContainsEstimates flag.
+	// If we were running the new VersionContainsEstimatesCounter cluster version,
+	// the consistency checker will be able to reset the stats itself, and splits
+	// will as a side effect also remove estimates from both the resulting left and right hand sides.
+	//
+	// TODO(tbg): this can be removed in v20.2 and not earlier.
+	// Consider the following scenario:
+	// - all nodes are running 19.2
+	// - all nodes rebooted into 20.1
+	// - cluster version bumped, but node1 doesn't receive the gossip update for that
+	// node1 runs a split that should emit ContainsEstimates=-1, but it clamps it to 0/1 because it
+	// doesn't know that 20.1 is active.
+	if res.Split != nil && deltaStats.ContainsEstimates == 0 {
+		b.state.Stats.ContainsEstimates = 0
+	}
 	if res.State != nil && res.State.UsingAppliedStateKey && !b.state.UsingAppliedStateKey {
 		b.migrateToAppliedStateKey = true
 	}
@@ -897,22 +884,10 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 	b.batch.Close()
 	b.batch = nil
 
-	// Update the replica's applied indexes, mvcc stats and closed timestamp.
+	// Update the replica's applied indexes and mvcc stats.
 	r.mu.Lock()
 	r.mu.state.RaftAppliedIndex = b.state.RaftAppliedIndex
 	r.mu.state.LeaseAppliedIndex = b.state.LeaseAppliedIndex
-
-	// Sanity check that the RaftClosedTimestamp doesn't go backwards.
-	existingClosed := r.mu.state.RaftClosedTimestamp
-	newClosed := b.state.RaftClosedTimestamp
-	if !newClosed.IsEmpty() && newClosed.Less(existingClosed) && raftClosedTimestampAssertionsEnabled {
-		return errors.AssertionFailedf(
-			"raft closed timestamp regression; replica has: %s, new batch has: %s.",
-			existingClosed.String(), newClosed.String())
-	}
-	r.mu.closedTimestampSetter = b.closedTimestampSetter
-
-	closedTimestampUpdated := r.mu.state.RaftClosedTimestamp.Forward(b.state.RaftClosedTimestamp)
 	prevStats := *r.mu.state.Stats
 	*r.mu.state.Stats = *b.state.Stats
 
@@ -928,13 +903,6 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 	needsTruncationByLogSize := r.needsRaftLogTruncationLocked()
 	tenantID := r.mu.tenantID
 	r.mu.Unlock()
-	if closedTimestampUpdated {
-		// TODO(andrei): Pass in the new closed timestamp to
-		// r.handleClosedTimestampUpdateRaftMuLocked directly after the old closed
-		// ts tracker goes away. Until then we can't do it; we have to let the
-		// method consult r.maxClosed().
-		r.handleClosedTimestampUpdateRaftMuLocked(ctx)
-	}
 
 	// Record the stats delta in the StoreMetrics.
 	deltaStats := *b.state.Stats
@@ -947,13 +915,13 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 
 	now := timeutil.Now()
 	if needsSplitBySize && r.splitQueueThrottle.ShouldProcess(now) {
-		r.store.splitQueue.MaybeAddAsync(ctx, r, r.store.Clock().NowAsClockTimestamp())
+		r.store.splitQueue.MaybeAddAsync(ctx, r, r.store.Clock().Now())
 	}
 	if needsMergeBySize && r.mergeQueueThrottle.ShouldProcess(now) {
-		r.store.mergeQueue.MaybeAddAsync(ctx, r, r.store.Clock().NowAsClockTimestamp())
+		r.store.mergeQueue.MaybeAddAsync(ctx, r, r.store.Clock().Now())
 	}
 	if needsTruncationByLogSize {
-		r.store.raftLogQueue.MaybeAddAsync(ctx, r, r.store.Clock().NowAsClockTimestamp())
+		r.store.raftLogQueue.MaybeAddAsync(ctx, r, r.store.Clock().Now())
 	}
 
 	b.recordStatsOnCommit()
@@ -982,8 +950,7 @@ func (b *replicaAppBatch) addAppliedStateKeyToBatch(ctx context.Context) error {
 		// Set the range applied state, which includes the last applied raft and
 		// lease index along with the mvcc stats, all in one key.
 		if err := loader.SetRangeAppliedState(
-			ctx, b.batch, b.state.RaftAppliedIndex, b.state.LeaseAppliedIndex,
-			b.state.Stats, &b.state.RaftClosedTimestamp,
+			ctx, b.batch, b.state.RaftAppliedIndex, b.state.LeaseAppliedIndex, b.state.Stats,
 		); err != nil {
 			return wrapWithNonDeterministicFailure(err, "unable to set range applied state")
 		}
@@ -1023,89 +990,6 @@ func (b *replicaAppBatch) Close() {
 		b.batch.Close()
 	}
 	*b = replicaAppBatch{}
-}
-
-// raftClosedTimestampAssertionsEnabled provides an emergency way of shutting
-// down assertions.
-var raftClosedTimestampAssertionsEnabled = envutil.EnvOrDefaultBool("COCKROACH_RAFT_CLOSEDTS_ASSERTIONS_ENABLED", true)
-
-// Assert that the current command is not writing under the closed timestamp.
-// This check only applies to IntentWrite commands, since others (for example,
-// EndTxn) can operate below the closed timestamp.
-//
-// Note that we check that we're we're writing under b.state.RaftClosedTimestamp
-// (i.e. below the timestamp closed by previous commands), not below
-// cmd.raftCmd.ClosedTimestamp. A command is allowed to write below the closed
-// timestamp carried by itself; in other words cmd.raftCmd.ClosedTimestamp is a
-// promise about future commands, not the command carrying it.
-func (b *replicaAppBatch) assertNoWriteBelowClosedTimestamp(cmd *replicatedCmd) error {
-	if !cmd.IsLocal() || !cmd.proposal.Request.IsIntentWrite() {
-		return nil
-	}
-	if !raftClosedTimestampAssertionsEnabled {
-		return nil
-	}
-	wts := cmd.raftCmd.ReplicatedEvalResult.WriteTimestamp
-	if !wts.IsEmpty() && wts.LessEq(b.state.RaftClosedTimestamp) {
-		wts := wts // Make a shadow variable that escapes to the heap.
-		var req redact.StringBuilder
-		if cmd.proposal != nil {
-			req.Print(cmd.proposal.Request)
-		} else {
-			req.SafeString("request unknown; not leaseholder")
-		}
-		return wrapWithNonDeterministicFailure(errors.AssertionFailedf(
-			"command writing below closed timestamp; cmd: %x, write ts: %s, "+
-				"batch state closed: %s, command closed: %s, request: %s, lease: %s",
-			cmd.idKey, wts,
-			b.state.RaftClosedTimestamp, cmd.raftCmd.ClosedTimestamp,
-			req, b.state.Lease),
-			"command writing below closed timestamp")
-	}
-	return nil
-}
-
-// Assert that the closed timestamp carried by the command is not below one from
-// previous commands.
-func (b *replicaAppBatch) assertNoCmdClosedTimestampRegression(cmd *replicatedCmd) error {
-	if !raftClosedTimestampAssertionsEnabled {
-		return nil
-	}
-	existingClosed := &b.state.RaftClosedTimestamp
-	newClosed := cmd.raftCmd.ClosedTimestamp
-	if newClosed != nil && !newClosed.IsEmpty() && newClosed.Less(*existingClosed) {
-		var req redact.StringBuilder
-		if cmd.IsLocal() {
-			req.Print(cmd.proposal.Request)
-		} else {
-			req.SafeString("<unknown; not leaseholder>")
-		}
-		var prevReq redact.StringBuilder
-		if req := b.closedTimestampSetter.leaseReq; req != nil {
-			prevReq.Printf("lease acquisition: %s (prev: %s)", req.Lease, req.PrevLease)
-		} else {
-			prevReq.SafeString("<unknown; not leaseholder or not lease request>")
-		}
-
-		logTail, err := b.r.printRaftTail(cmd.ctx, 100 /* maxEntries */, 2000 /* maxCharsPerEntry */)
-		if err != nil {
-			if logTail != "" {
-				logTail = logTail + "\n; error printing log: " + err.Error()
-			} else {
-				logTail = "error printing log: " + err.Error()
-			}
-		}
-
-		return errors.AssertionFailedf(
-			"raft closed timestamp regression in cmd: %x (term: %d, index: %d); batch state: %s, command: %s, lease: %s, req: %s, applying at LAI: %d.\n"+
-				"Closed timestamp was set by req: %s under lease: %s; applied at LAI: %d. Batch idx: %d.\n"+
-				"This assertion will fire again on restart; to ignore run with env var COCKROACH_RAFT_CLOSEDTS_ASSERTIONS_ENABLED=true"+
-				"Raft log tail:\n%s",
-			cmd.idKey, cmd.ent.Term, cmd.ent.Index, existingClosed, newClosed, b.state.Lease, req, cmd.leaseIndex,
-			prevReq, b.closedTimestampSetter.lease, b.closedTimestampSetter.leaseIdx, b.entries,
-			logTail)
-	}
-	return nil
 }
 
 // ephemeralReplicaAppBatch implements the apply.Batch interface.
@@ -1185,12 +1069,12 @@ func (sm *replicaStateMachine) ApplySideEffects(
 		if shouldAssert {
 			// Assert that the on-disk state doesn't diverge from the in-memory
 			// state as a result of the side effects.
-			sm.r.mu.RLock()
-			sm.r.assertStateRaftMuLockedReplicaMuRLocked(ctx, sm.r.store.Engine())
-			sm.r.mu.RUnlock()
+			sm.r.mu.Lock()
+			sm.r.assertStateLocked(ctx, sm.r.store.Engine())
+			sm.r.mu.Unlock()
 			sm.stats.stateAssertions++
 		}
-	} else if res := cmd.replicatedResult(); !res.IsZero() {
+	} else if res := cmd.replicatedResult(); !res.Equal(kvserverpb.ReplicatedEvalResult{}) {
 		log.Fatalf(ctx, "failed to handle all side-effects of ReplicatedEvalResult: %v", res)
 	}
 
@@ -1246,19 +1130,18 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 	ctx context.Context, rResult *kvserverpb.ReplicatedEvalResult,
 ) (shouldAssert, isRemoved bool) {
 	// Assert that this replicatedResult implies at least one side-effect.
-	if rResult.IsZero() {
+	if rResult.Equal(kvserverpb.ReplicatedEvalResult{}) {
 		log.Fatalf(ctx, "zero-value ReplicatedEvalResult passed to handleNonTrivialReplicatedEvalResult")
 	}
 
 	if rResult.State != nil {
 		if newLease := rResult.State.Lease; newLease != nil {
-			sm.r.handleLeaseResult(ctx, newLease, rResult.PriorReadSummary)
+			sm.r.handleLeaseResult(ctx, newLease)
 			rResult.State.Lease = nil
-			rResult.PriorReadSummary = nil
 		}
 
-		if newTruncState := rResult.State.TruncatedState; newTruncState != nil {
-			rResult.RaftLogDelta += sm.r.handleTruncatedStateResult(ctx, newTruncState)
+		if rResult.State.TruncatedState != nil {
+			rResult.RaftLogDelta += sm.r.handleTruncatedStateResult(ctx, rResult.State.TruncatedState)
 			rResult.State.TruncatedState = nil
 		}
 
@@ -1267,10 +1150,6 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 			rResult.State.GCThreshold = nil
 		}
 
-		if newVersion := rResult.State.Version; newVersion != nil {
-			sm.r.handleVersionResult(ctx, newVersion)
-			rResult.State.Version = nil
-		}
 		if (*rResult.State == kvserverpb.ReplicaState{}) {
 			rResult.State = nil
 		}
@@ -1281,10 +1160,15 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 		rResult.RaftLogDelta = 0
 	}
 
+	if rResult.SuggestedCompactions != nil {
+		sm.r.handleSuggestedCompactionsResult(ctx, rResult.SuggestedCompactions)
+		rResult.SuggestedCompactions = nil
+	}
+
 	// The rest of the actions are "nontrivial" and may have large effects on the
 	// in-memory and on-disk ReplicaStates. If any of these actions are present,
 	// we want to assert that these two states do not diverge.
-	shouldAssert = !rResult.IsZero()
+	shouldAssert = !rResult.Equal(kvserverpb.ReplicatedEvalResult{})
 	if !shouldAssert {
 		return false, false
 	}
@@ -1325,7 +1209,7 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 		rResult.ComputeChecksum = nil
 	}
 
-	if !rResult.IsZero() {
+	if !rResult.Equal(kvserverpb.ReplicatedEvalResult{}) {
 		log.Fatalf(ctx, "unhandled field in ReplicatedEvalResult: %s", pretty.Diff(rResult, kvserverpb.ReplicatedEvalResult{}))
 	}
 	return true, isRemoved
@@ -1355,52 +1239,4 @@ func (sm *replicaStateMachine) moveStats() applyCommittedEntriesStats {
 	stats := sm.stats
 	sm.stats = applyCommittedEntriesStats{}
 	return stats
-}
-
-// closedTimestampSetterInfo contains information about the command that last
-// bumped the closed timestamp.
-type closedTimestampSetterInfo struct {
-	// lease represents the lease under which the command is being applied.
-	lease *roachpb.Lease
-	// leaseIdx is the LAI of the command.
-	leaseIdx ctpb.LAI
-	// leaseReq is set if the request that generated this command was a
-	// RequestLeaseRequest. This is only ever set on the leaseholder replica since
-	// only the leaseholder has information about the request corresponding to a
-	// command.
-	// NOTE: We only keep track of lease requests because keeping track of all
-	// requests would be too expensive: cloning the request is expensive and also
-	// requests can be large in memory.
-	leaseReq *roachpb.RequestLeaseRequest
-	// split and merge are set if the request was an EndTxn with the respective
-	// commit trigger set.
-	split, merge bool
-}
-
-// record saves information about the command that update's the replica's closed
-// timestamp.
-func (s *closedTimestampSetterInfo) record(cmd *replicatedCmd, lease *roachpb.Lease) {
-	*s = closedTimestampSetterInfo{}
-	s.leaseIdx = ctpb.LAI(cmd.leaseIndex)
-	s.lease = lease
-	if !cmd.IsLocal() {
-		return
-	}
-	req := cmd.proposal.Request
-	et, ok := req.GetArg(roachpb.EndTxn)
-	if ok {
-		endTxn := et.(*roachpb.EndTxnRequest)
-		if trig := endTxn.InternalCommitTrigger; trig != nil {
-			if trig.SplitTrigger != nil {
-				s.split = true
-			} else if trig.MergeTrigger != nil {
-				s.merge = true
-			}
-		}
-	} else if req.IsLeaseRequest() {
-		// Make a deep copy since we're not allowed to hold on to request
-		// memory.
-		lr, _ := req.GetArg(roachpb.RequestLease)
-		s.leaseReq = protoutil.Clone(lr).(*roachpb.RequestLeaseRequest)
-	}
 }

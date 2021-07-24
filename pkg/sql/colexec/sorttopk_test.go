@@ -14,8 +14,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -28,32 +27,32 @@ func init() {
 	topKSortTestCases = []sortTestCase{
 		{
 			description: "k < input length",
-			tuples:      colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
-			expected:    colexectestutils.Tuples{{1}, {2}, {3}},
+			tuples:      tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			expected:    tuples{{1}, {2}, {3}},
 			typs:        []*types.T{types.Int},
 			ordCols:     []execinfrapb.Ordering_Column{{ColIdx: 0}},
 			k:           3,
 		},
 		{
 			description: "k > input length",
-			tuples:      colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
-			expected:    colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			tuples:      tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			expected:    tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
 			typs:        []*types.T{types.Int},
 			ordCols:     []execinfrapb.Ordering_Column{{ColIdx: 0}},
 			k:           10,
 		},
 		{
 			description: "nulls",
-			tuples:      colexectestutils.Tuples{{1}, {2}, {nil}, {3}, {4}, {5}, {6}, {7}, {nil}},
-			expected:    colexectestutils.Tuples{{nil}, {nil}, {1}},
+			tuples:      tuples{{1}, {2}, {nil}, {3}, {4}, {5}, {6}, {7}, {nil}},
+			expected:    tuples{{nil}, {nil}, {1}},
 			typs:        []*types.T{types.Int},
 			ordCols:     []execinfrapb.Ordering_Column{{ColIdx: 0}},
 			k:           3,
 		},
 		{
 			description: "descending",
-			tuples:      colexectestutils.Tuples{{0, 1}, {0, 2}, {0, 3}, {0, 4}, {0, 5}, {1, 5}},
-			expected:    colexectestutils.Tuples{{0, 5}, {1, 5}, {0, 4}},
+			tuples:      tuples{{0, 1}, {0, 2}, {0, 3}, {0, 4}, {0, 5}, {1, 5}},
+			expected:    tuples{{0, 5}, {1, 5}, {0, 4}},
 			typs:        []*types.T{types.Int, types.Int},
 			ordCols: []execinfrapb.Ordering_Column{
 				{ColIdx: 1, Direction: execinfrapb.Ordering_Column_DESC},
@@ -70,7 +69,7 @@ func TestTopKSorter(t *testing.T) {
 
 	for _, tc := range topKSortTestCases {
 		log.Infof(context.Background(), "%s", tc.description)
-		colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, tc.expected, colexectestutils.OrderedVerifier, func(input []colexecop.Operator) (colexecop.Operator, error) {
+		runTests(t, []tuples{tc.tuples}, tc.expected, orderedVerifier, func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 			return NewTopKSorter(testAllocator, input[0], tc.typs, tc.ordCols, tc.k), nil
 		})
 	}

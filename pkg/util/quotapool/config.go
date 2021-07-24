@@ -18,7 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-// Option is used to configure a quotapool.
+// Option is used to configure a QuotaPool.
 type Option interface {
 	apply(*config)
 }
@@ -37,22 +37,6 @@ func OnAcquisition(f AcquisitionFunc) Option {
 	})
 }
 
-// OnWaitFunc is the prototype for functions called to notify the start or
-// finish of a waiting period when a request is blocked.
-type OnWaitFunc func(
-	ctx context.Context, poolName string, r Request,
-)
-
-// OnWait creates an Option to configure two callbacks which are called when a
-// request blocks and has to wait for quota (at the start and end of the
-// wait).
-func OnWait(onStart, onFinish OnWaitFunc) Option {
-	return optionFunc(func(cfg *config) {
-		cfg.onWaitStart = onStart
-		cfg.onWaitFinish = onFinish
-	})
-}
-
 // OnSlowAcquisition creates an Option to configure a callback upon slow
 // acquisitions. Only one OnSlowAcquisition may be used. If multiple are
 // specified only the last will be used.
@@ -66,10 +50,10 @@ func OnSlowAcquisition(threshold time.Duration, f SlowAcquisitionFunc) Option {
 // LogSlowAcquisition is a SlowAcquisitionFunc.
 func LogSlowAcquisition(ctx context.Context, poolName string, r Request, start time.Time) func() {
 	log.Warningf(ctx, "have been waiting %s attempting to acquire %s quota",
-		timeutil.Since(start), log.Safe(poolName))
+		timeutil.Since(start), poolName)
 	return func() {
 		log.Infof(ctx, "acquired %s quota after %s",
-			log.Safe(poolName), timeutil.Since(start))
+			poolName, timeutil.Since(start))
 	}
 }
 
@@ -93,32 +77,19 @@ func WithTimeSource(ts timeutil.TimeSource) Option {
 }
 
 // WithCloser allows the client to provide a channel which will lead to the
-// AbstractPool being closed.
+// QuotaPool being closed.
 func WithCloser(closer <-chan struct{}) Option {
 	return optionFunc(func(cfg *config) {
 		cfg.closer = closer
 	})
 }
 
-// WithMinimumWait is used with the RateLimiter to control the minimum duration
-// which a goroutine will sleep waiting for quota to accumulate. This
-// can help avoid expensive spinning when the workload consists of many
-// small acquisitions. If used with a regular (not rate limiting) quotapool,
-// this option has no effect.
-func WithMinimumWait(duration time.Duration) Option {
-	return optionFunc(func(cfg *config) {
-		cfg.minimumWait = duration
-	})
-}
-
 type config struct {
-	onAcquisition             AcquisitionFunc
-	onSlowAcquisition         SlowAcquisitionFunc
-	onWaitStart, onWaitFinish OnWaitFunc
-	slowAcquisitionThreshold  time.Duration
-	timeSource                timeutil.TimeSource
-	closer                    <-chan struct{}
-	minimumWait               time.Duration
+	onAcquisition            AcquisitionFunc
+	onSlowAcquisition        SlowAcquisitionFunc
+	slowAcquisitionThreshold time.Duration
+	timeSource               timeutil.TimeSource
+	closer                   <-chan struct{}
 }
 
 var defaultConfig = config{

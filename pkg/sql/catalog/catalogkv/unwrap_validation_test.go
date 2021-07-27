@@ -37,7 +37,7 @@ import (
 // will hold a file "descriptors.csv" which is a csv of id,descriptor where
 // descriptor is hex encoded.
 func TestUnwrapValidation(t *testing.T) {
-	testdata := testutils.TestDataPath(t, "unwrap_validation")
+	testdata := testutils.TestDataPath("testdata", "unwrap_validation")
 	const descriptorsCSVFilename = "descriptors.csv"
 	dirs, err := ioutil.ReadDir(testdata)
 	require.NoError(t, err)
@@ -100,7 +100,6 @@ func (o oneLevelMapDescGetter) GetDesc(
 		bestEffort,
 		nil, /* dg */ // Not required for self-validation.
 		catalog.ValidationLevelSelfOnly,
-		true, /* shouldRunPostDeserializationChanges */
 	)
 }
 

@@ -24,8 +24,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -238,61 +238,43 @@ type schemaParsingObjects struct {
 func createPostgresSchemas(
 	ctx context.Context,
 	parentID descpb.ID,
-	schemasToCreate map[string]*tree.CreateSchema,
+	createSchema map[string]*tree.CreateSchema,
 	execCfg *sql.ExecutorConfig,
 	user security.SQLUsername,
 ) ([]*schemadesc.Mutable, error) {
-	createSchema := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-		dbDesc catalog.DatabaseDescriptor, schema *tree.CreateSchema,
-	) (*schemadesc.Mutable, error) {
-		desc, _, err := sql.CreateUserDefinedSchemaDescriptor(
-			ctx, user, schema, txn, descriptors, execCfg, dbDesc, false, /* allocateID */
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// This is true when the schema exists and we are processing a
-		// CREATE SCHEMA IF NOT EXISTS statement.
-		if desc == nil {
-			return nil, nil
-		}
-
-		// We didn't allocate an ID above, so we must assign it a mock ID until it
-		// is assigned an actual ID later in the import.
-		desc.ID = getNextPlaceholderDescID()
-		desc.SetOffline("importing")
-		return desc, nil
+	var dbDesc *dbdesc.Immutable
+	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		var err error
+		dbDesc, err = catalogkv.MustGetDatabaseDescByID(ctx, txn, execCfg.Codec, parentID)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	var schemaDescs []*schemadesc.Mutable
-	createSchemaDescs := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-	) error {
-		schemaDescs = nil // reset for retries
-		_, dbDesc, err := descriptors.GetImmutableDatabaseByID(ctx, txn, parentID, tree.DatabaseLookupFlags{
-			Required:    true,
-			AvoidCached: true,
-		})
-		if err != nil {
-			return err
-		}
-		for _, schema := range schemasToCreate {
-			scDesc, err := createSchema(ctx, txn, descriptors, dbDesc, schema)
+	schemaDescs := make([]*schemadesc.Mutable, 0)
+	for _, schema := range createSchema {
+		if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			desc, _, err := sql.CreateUserDefinedSchemaDescriptor(ctx, user, schema, txn, execCfg,
+				dbDesc, false /* allocateID */)
 			if err != nil {
 				return err
 			}
-			if scDesc != nil {
-				schemaDescs = append(schemaDescs, scDesc)
+
+			// This is true when the schema exists and we are processing a
+			// CREATE SCHEMA IF NOT EXISTS statement.
+			if desc == nil {
+				return nil
 			}
+
+			// We didn't allocate an ID above, so we must assign it a mock ID until it
+			// is assigned an actual ID later in the import.
+			desc.ID = getNextPlaceholderDescID()
+			desc.State = descpb.DescriptorState_OFFLINE
+			desc.OfflineReason = "importing"
+			schemaDescs = append(schemaDescs, desc)
+			return err
+		}); err != nil {
+			return nil, err
 		}
-		return nil
-	}
-	if err := descs.Txn(
-		ctx, execCfg.Settings, execCfg.LeaseManager, execCfg.InternalExecutor,
-		execCfg.DB, createSchemaDescs,
-	); err != nil {
-		return nil, err
 	}
 	return schemaDescs, nil
 }
@@ -308,16 +290,22 @@ func createPostgresSequences(
 ) ([]*tabledesc.Mutable, error) {
 	ret := make([]*tabledesc.Mutable, 0)
 	for schemaAndTableName, seq := range createSeq {
-		schema, err := getSchemaByNameFromMap(schemaAndTableName, schemaNameToDesc)
-		if err != nil {
-			return nil, err
+		schemaID := descpb.ID(keys.PublicSchemaID)
+		if schemaAndTableName.schema != "" && schemaAndTableName.schema != "public" {
+			var desc *schemadesc.Mutable
+			var ok bool
+			if desc, ok = schemaNameToDesc[schemaAndTableName.schema]; !ok {
+				return nil, errors.Newf("schema %s not found in the schemas created from the pgdump",
+					schemaAndTableName.schema)
+			}
+			schemaID = desc.ID
 		}
 		desc, err := sql.NewSequenceTableDesc(
 			ctx,
 			schemaAndTableName.table,
 			seq.Options,
 			parentID,
-			schema.GetID(),
+			schemaID,
 			getNextPlaceholderDescID(),
 			hlc.Timestamp{WallTime: walltime},
 			descpb.NewDefaultPrivilegeDescriptor(owner),
@@ -336,30 +324,13 @@ func createPostgresSequences(
 	return ret, nil
 }
 
-func getSchemaByNameFromMap(
-	schemaAndTableName schemaAndTableName, schemaNameToDesc map[string]*schemadesc.Mutable,
-) (catalog.SchemaDescriptor, error) {
-	var schema catalog.SchemaDescriptor
-	switch schemaAndTableName.schema {
-	case "", "public":
-		schema = schemadesc.GetPublicSchema()
-	default:
-		var ok bool
-		if schema, ok = schemaNameToDesc[schemaAndTableName.schema]; !ok {
-			return nil, errors.Newf("schema %q not found in the schemas created from the pgdump",
-				schema)
-		}
-	}
-	return schema, nil
-}
-
 func createPostgresTables(
 	evalCtx *tree.EvalContext,
 	p sql.JobExecContext,
 	createTbl map[schemaAndTableName]*tree.CreateTable,
 	fks fkHandler,
 	backrefs map[descpb.ID]*tabledesc.Mutable,
-	parentDB catalog.DatabaseDescriptor,
+	parentID descpb.ID,
 	walltime int64,
 	schemaNameToDesc map[string]*schemadesc.Mutable,
 ) ([]*tabledesc.Mutable, error) {
@@ -368,13 +339,19 @@ func createPostgresTables(
 		if create == nil {
 			continue
 		}
-		schema, err := getSchemaByNameFromMap(schemaAndTableName, schemaNameToDesc)
-		if err != nil {
-			return nil, err
+		schemaID := descpb.ID(keys.PublicSchemaID)
+		if schemaAndTableName.schema != "" && schemaAndTableName.schema != tree.PublicSchema {
+			var desc *schemadesc.Mutable
+			var ok bool
+			if desc, ok = schemaNameToDesc[schemaAndTableName.schema]; !ok {
+				return nil, errors.Newf("schema %s not found in the schemas created from the pgdump",
+					schemaAndTableName.schema)
+			}
+			schemaID = desc.ID
 		}
 		removeDefaultRegclass(create)
 		desc, err := MakeSimpleTableDescriptor(evalCtx.Ctx(), p.SemaCtx(), p.ExecCfg().Settings,
-			create, parentDB, schema, getNextPlaceholderDescID(), fks, walltime)
+			create, parentID, schemaID, getNextPlaceholderDescID(), fks, walltime)
 		if err != nil {
 			return nil, err
 		}
@@ -388,20 +365,14 @@ func createPostgresTables(
 
 func resolvePostgresFKs(
 	evalCtx *tree.EvalContext,
-	parentDB catalog.DatabaseDescriptor,
 	tableFKs map[schemaAndTableName][]*tree.ForeignKeyConstraintTableDef,
 	fks fkHandler,
 	backrefs map[descpb.ID]*tabledesc.Mutable,
-	schemaNameToDesc map[string]*schemadesc.Mutable,
 ) error {
 	for schemaAndTableName, constraints := range tableFKs {
 		desc := fks.resolver.tableNameToDesc[schemaAndTableName.String()]
 		if desc == nil {
 			continue
-		}
-		schema, err := getSchemaByNameFromMap(schemaAndTableName, schemaNameToDesc)
-		if err != nil {
-			return err
 		}
 		for _, constraint := range constraints {
 			if constraint.Table.Schema() == "" {
@@ -415,9 +386,7 @@ func resolvePostgresFKs(
 				constraint.Table.CatalogName = "defaultdb"
 			}
 			if err := sql.ResolveFK(
-				evalCtx.Ctx(), nil /* txn */, &fks.resolver,
-				parentDB, schema, desc,
-				constraint, backrefs, sql.NewTable,
+				evalCtx.Ctx(), nil /* txn */, &fks.resolver, desc, constraint, backrefs, sql.NewTable,
 				tree.ValidationDefault, evalCtx,
 			); err != nil {
 				return err
@@ -456,7 +425,7 @@ func readPostgresCreateTable(
 	evalCtx *tree.EvalContext,
 	p sql.JobExecContext,
 	match string,
-	parentDB catalog.DatabaseDescriptor,
+	parentID descpb.ID,
 	walltime int64,
 	fks fkHandler,
 	max int,
@@ -479,72 +448,68 @@ func readPostgresCreateTable(
 	for {
 		stmt, err := ps.Next()
 		if err == io.EOF {
-			break
+			tables := make([]*tabledesc.Mutable, 0, len(schemaObjects.createTbl))
+			schemaNameToDesc := make(map[string]*schemadesc.Mutable)
+			schemaDescs, err := createPostgresSchemas(ctx, parentID, schemaObjects.createSchema,
+				p.ExecCfg(), p.User())
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for _, schemaDesc := range schemaDescs {
+				schemaNameToDesc[schemaDesc.GetName()] = schemaDesc
+			}
+
+			// Construct sequence descriptors.
+			seqs, err := createPostgresSequences(
+				ctx,
+				parentID,
+				schemaObjects.createSeq,
+				fks,
+				walltime,
+				owner,
+				schemaNameToDesc,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			tables = append(tables, seqs...)
+
+			// Construct table descriptors.
+			backrefs := make(map[descpb.ID]*tabledesc.Mutable)
+			tableDescs, err := createPostgresTables(evalCtx, p, schemaObjects.createTbl, fks, backrefs,
+				parentID, walltime, schemaNameToDesc)
+			if err != nil {
+				return nil, nil, err
+			}
+			tables = append(tables, tableDescs...)
+
+			// Resolve FKs.
+			err = resolvePostgresFKs(evalCtx, schemaObjects.tableFKs, fks, backrefs)
+			if err != nil {
+				return nil, nil, err
+			}
+			if match != "" && len(tables) != 1 {
+				found := make([]string, 0, len(schemaObjects.createTbl))
+				for schemaAndTableName := range schemaObjects.createTbl {
+					found = append(found, schemaAndTableName.String())
+				}
+				return nil, nil, errors.Errorf("table %q not found in file (found tables: %s)", match,
+					strings.Join(found, ", "))
+			}
+			if len(tables) == 0 {
+				return nil, nil, errors.Errorf("no table definition found")
+			}
+			return tables, schemaDescs, nil
 		}
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "postgres parse error")
 		}
 		if err := readPostgresStmt(ctx, evalCtx, match, fks, &schemaObjects, stmt, p,
-			parentDB.GetID(), unsupportedStmtLogger); err != nil {
+			parentID, unsupportedStmtLogger); err != nil {
 			return nil, nil, err
 		}
 	}
-
-	tables := make([]*tabledesc.Mutable, 0, len(schemaObjects.createTbl))
-	schemaNameToDesc := make(map[string]*schemadesc.Mutable)
-	schemaDescs, err := createPostgresSchemas(ctx, parentDB.GetID(), schemaObjects.createSchema,
-		p.ExecCfg(), p.User())
-	if err != nil {
-		return nil, nil, err
-	}
-
-	for _, schemaDesc := range schemaDescs {
-		schemaNameToDesc[schemaDesc.GetName()] = schemaDesc
-	}
-
-	// Construct sequence descriptors.
-	seqs, err := createPostgresSequences(
-		ctx,
-		parentDB.GetID(),
-		schemaObjects.createSeq,
-		fks,
-		walltime,
-		owner,
-		schemaNameToDesc,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	tables = append(tables, seqs...)
-
-	// Construct table descriptors.
-	backrefs := make(map[descpb.ID]*tabledesc.Mutable)
-	tableDescs, err := createPostgresTables(evalCtx, p, schemaObjects.createTbl, fks, backrefs,
-		parentDB, walltime, schemaNameToDesc)
-	if err != nil {
-		return nil, nil, err
-	}
-	tables = append(tables, tableDescs...)
-
-	// Resolve FKs.
-	err = resolvePostgresFKs(
-		evalCtx, parentDB, schemaObjects.tableFKs, fks, backrefs, schemaNameToDesc,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	if match != "" && len(tables) != 1 {
-		found := make([]string, 0, len(schemaObjects.createTbl))
-		for schemaAndTableName := range schemaObjects.createTbl {
-			found = append(found, schemaAndTableName.String())
-		}
-		return nil, nil, errors.Errorf("table %q not found in file (found tables: %s)", match,
-			strings.Join(found, ", "))
-	}
-	if len(tables) == 0 {
-		return nil, nil, errors.Errorf("no table definition found")
-	}
-	return tables, schemaDescs, nil
 }
 
 func readPostgresStmt(
@@ -1185,7 +1150,7 @@ func (m *pgDumpReader) readFile(
 							if err != nil {
 								col := conv.VisibleCols[idx]
 								return wrapRowErr(err, "", count, pgcode.Syntax,
-									"parse %q as %s", col.GetName(), col.GetType().SQLString())
+									"parse %q as %s", col.Name, col.Type.SQLString())
 							}
 						}
 					}

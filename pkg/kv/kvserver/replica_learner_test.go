@@ -309,8 +309,6 @@ func TestLearnerSnapshotFailsRollback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderShort(t) // Takes 90s.
-
 	runTest := func(t *testing.T, replicaType roachpb.ReplicaType) {
 		var rejectSnapshots int64
 		knobs, ltk := makeReplicationTestKnobs()
@@ -671,16 +669,7 @@ func TestLearnerAdminChangeReplicasRace(t *testing.T) {
 	scratchStartKey := tc.ScratchRange(t)
 	g := ctxgroup.WithContext(ctx)
 	g.GoCtx(func(ctx context.Context) error {
-		// NB: we don't use tc.AddVoters because that will auto-retry
-		// and the test expects to see the error that results on the
-		// first attempt.
-		desc, err := tc.LookupRange(scratchStartKey)
-		if err != nil {
-			return err
-		}
-		_, err = tc.Servers[0].DB().AdminChangeReplicas(
-			ctx, scratchStartKey, desc, roachpb.MakeReplicationChanges(roachpb.ADD_VOTER, tc.Target(1)),
-		)
+		_, err := tc.AddVoters(scratchStartKey, tc.Target(1))
 		return err
 	})
 

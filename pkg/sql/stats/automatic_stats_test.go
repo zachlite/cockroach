@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
@@ -49,8 +49,8 @@ func TestMaybeRefreshStats(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
-	AutomaticStatisticsMinStaleRows.Override(ctx, &st.SV, 5)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
+	AutomaticStatisticsMinStaleRows.Override(&st.SV, 5)
 
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	sqlRun.Exec(t,
@@ -64,6 +64,7 @@ func TestMaybeRefreshStats(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
@@ -131,7 +132,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	sqlRun.Exec(t,
@@ -144,6 +145,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
@@ -159,6 +161,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	curTime := timeutil.Now()
 
 	checkAverageRefreshTime := func(expected time.Duration) error {
+		cache.RefreshTableStats(ctx, tableID)
 		return testutils.SucceedsSoonError(func() error {
 			stats, err := cache.GetTableStats(ctx, tableID)
 			if err != nil {
@@ -175,6 +178,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	// Checks that the most recent statistic was created less than (greater than)
 	// expectedAge time ago if lessThan is true (false).
 	checkMostRecentStat := func(expectedAge time.Duration, lessThan bool) error {
+		cache.RefreshTableStats(ctx, tableID)
 		return testutils.SucceedsSoonError(func() error {
 			stats, err := cache.GetTableStats(ctx, tableID)
 			if err != nil {
@@ -276,7 +280,7 @@ func TestAverageRefreshTime(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if err := insertStat(txn, jobspb.AutoStatsName, columnIDsVal, createdAt); err != nil {
+			if err := insertStat(txn, AutoStatsName, columnIDsVal, createdAt); err != nil {
 				return err
 			}
 		}
@@ -327,7 +331,7 @@ func TestAverageRefreshTime(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if err := insertStat(txn, jobspb.AutoStatsName, columnIDsVal, createdAt); err != nil {
+			if err := insertStat(txn, AutoStatsName, columnIDsVal, createdAt); err != nil {
 				return err
 			}
 		}
@@ -373,7 +377,7 @@ func TestAutoStatsReadOnlyTables(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	st := cluster.MakeTestingClusterSettings()
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
@@ -391,6 +395,7 @@ func TestAutoStatsReadOnlyTables(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
@@ -400,7 +405,7 @@ func TestAutoStatsReadOnlyTables(t *testing.T) {
 	)
 	refresher := MakeRefresher(st, executor, cache, time.Microsecond /* asOfTime */)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, true)
+	AutomaticStatisticsClusterMode.Override(&st.SV, true)
 
 	if err := refresher.Start(
 		ctx, s.Stopper(), time.Millisecond, /* refreshInterval */
@@ -439,6 +444,7 @@ func TestNoRetryOnFailure(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
@@ -467,7 +473,7 @@ func TestMutationsChannel(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, true)
+	AutomaticStatisticsClusterMode.Override(&st.SV, true)
 	r := Refresher{
 		st:        st,
 		mutations: make(chan mutation, refreshChanBufferLen),
@@ -493,7 +499,7 @@ func TestDefaultColumns(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	st := cluster.MakeTestingClusterSettings()
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
@@ -522,6 +528,7 @@ func TestDefaultColumns(t *testing.T) {
 func checkStatsCount(
 	ctx context.Context, cache *TableStatisticsCache, tableID descpb.ID, expected int,
 ) error {
+	cache.RefreshTableStats(ctx, tableID)
 	return testutils.SucceedsSoonError(func() error {
 		stats, err := cache.GetTableStats(ctx, tableID)
 		if err != nil {

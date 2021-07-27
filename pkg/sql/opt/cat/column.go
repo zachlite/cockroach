@@ -50,11 +50,11 @@ func (c *Column) Ordinal() int {
 // dropped and then re-added with the same name; the new column will have a
 // different ID. See the comment for StableID for more detail.
 //
-// Inverted columns don't have stable IDs; for these columns ColID() must not be
-// called.
+// Virtual inverted columns don't have stable IDs; for these columns ColID()
+// must not be called.
 func (c *Column) ColID() StableID {
-	if c.kind == Inverted {
-		panic(errors.AssertionFailedf("inverted columns have no StableID"))
+	if c.kind == VirtualInverted {
+		panic(errors.AssertionFailedf("virtual inverted columns have no StableID"))
 	}
 	return c.stableID
 }
@@ -123,19 +123,18 @@ func (c *Column) IsVirtualComputed() bool {
 	return c.virtualComputed
 }
 
-// InvertedSourceColumnOrdinal is used for inverted columns that are part of
-// inverted indexes. It returns the ordinal of the table column from which the
-// inverted column is derived.
+// InvertedSourceColumnOrdinal is used for virtual columns that are part
+// of inverted indexes. It returns the ordinal of the table column from which
+// the inverted column is derived.
 //
-// For example, if we have an inverted index on a JSON column `j`, then the
-// index contains keys of an implicit inverted `j_inverted` column. Calling
-// InvertedSourceColumnOrdinal() on `j_inverted` returns the ordinal of the `j`
-// column.
+// For example, if we have an inverted index on a JSON column `j`, the index is
+// on a virtual `j_inverted` column and calling InvertedSourceColumnOrdinal() on
+// `j_inverted` returns the ordinal of the `j` column.
 //
-// Must not be called if this is not an inverted column.
+// Must not be called if this is not a virtual column.
 func (c *Column) InvertedSourceColumnOrdinal() int {
-	if c.kind != Inverted {
-		panic(errors.AssertionFailedf("non-inverted columns have no inverted source column ordinal"))
+	if c.kind != VirtualInverted {
+		panic(errors.AssertionFailedf("non-virtual columns have no inverted source column ordinal"))
 	}
 	return c.invertedSourceColumnOrdinal
 }
@@ -158,9 +157,9 @@ const (
 	// as part of mutations. They also cannot be part of the lax or key columns
 	// for indexes. System columns are not members of any column family.
 	System
-	// Inverted columns are implicit columns that represent the keys of inverted
+	// VirtualInverted columns are implicit columns that are used by inverted
 	// indexes.
-	Inverted
+	VirtualInverted
 )
 
 // ColumnVisibility controls if a column is visible for queries and if it is
@@ -189,9 +188,9 @@ func MaybeHidden(hidden bool) ColumnVisibility {
 	return Visible
 }
 
-// Init is used by catalog implementations to populate a non-inverted and
-// non-virtual Column. It should not be used anywhere else.
-func (c *Column) Init(
+// InitNonVirtual is used by catalog implementations to populate a non-virtual
+// Column. It should not be used anywhere else.
+func (c *Column) InitNonVirtual(
 	ordinal int,
 	stableID StableID,
 	name tree.Name,
@@ -202,7 +201,7 @@ func (c *Column) Init(
 	defaultExpr *string,
 	computedExpr *string,
 ) {
-	if kind == Inverted {
+	if kind == VirtualInverted {
 		panic(errors.AssertionFailedf("incorrect init method"))
 	}
 	if (kind == WriteOnly || kind == DeleteOnly) && visibility != Inaccessible {
@@ -228,9 +227,9 @@ func (c *Column) Init(
 	}
 }
 
-// InitInverted is used by catalog implementations to populate a
-// Inverted Column. It should not be used anywhere else.
-func (c *Column) InitInverted(
+// InitVirtualInverted is used by catalog implementations to populate a
+// VirtualInverted Column. It should not be used anywhere else.
+func (c *Column) InitVirtualInverted(
 	ordinal int, name tree.Name, datumType *types.T, nullable bool, invertedSourceColumnOrdinal int,
 ) {
 	// This initialization pattern ensures that fields are not unwittingly
@@ -239,7 +238,7 @@ func (c *Column) InitInverted(
 		ordinal:                     ordinal,
 		stableID:                    0,
 		name:                        name,
-		kind:                        Inverted,
+		kind:                        VirtualInverted,
 		datumType:                   datumType,
 		nullable:                    nullable,
 		visibility:                  Inaccessible,

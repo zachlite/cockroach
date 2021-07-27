@@ -57,7 +57,7 @@ func benchmarkInitialData(b *testing.B, gen workload.Generator) {
 		var a bufalloc.ByteAllocator
 		for _, table := range tables {
 			for rowIdx := 0; rowIdx < table.InitialRows.NumBatches; rowIdx++ {
-				a = a.Truncate()
+				a = a[:0]
 				table.InitialRows.FillBatch(rowIdx, cb, &a)
 				for _, col := range cb.ColVecs() {
 					bytes += columnByteSize(col)

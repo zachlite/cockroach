@@ -142,17 +142,9 @@ type constraintCacheItem struct {
 // Init initializes an Implicator with the given factory, metadata, and eval
 // context. It also resets the constraint cache.
 func (im *Implicator) Init(f *norm.Factory, md *opt.Metadata, evalCtx *tree.EvalContext) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*im = Implicator{
-		f:       f,
-		md:      md,
-		evalCtx: evalCtx,
-	}
-}
-
-// ClearCache empties the Implicator's constraint cache.
-func (im *Implicator) ClearCache() {
+	im.f = f
+	im.md = md
+	im.evalCtx = evalCtx
 	im.constraintCache = nil
 }
 
@@ -510,6 +502,15 @@ func (im *Implicator) atomImpliesAtom(
 		return res
 	}
 
+	// If e is a FalseExpr, then it is a contradiction and it represents an
+	// empty set of rows. The empty set is contained by all sets, so a
+	// contradiction implies all predicates. This check is performed before
+	// building constraints because the constraint builder does not build a
+	// contradiction constraint for the FalseExpr.
+	if _, ok := e.(*memo.FalseExpr); ok {
+		return true
+	}
+
 	// Build constraint sets for e and pred, unless they have been cached.
 	eSet, eTight, ok := im.fetchConstraint(e)
 	if !ok {
@@ -720,12 +721,8 @@ func (im *Implicator) warmCache(filters memo.FiltersExpr) {
 func (im *Implicator) simplifyFiltersExpr(
 	e memo.FiltersExpr, exactMatches exprSet,
 ) memo.FiltersExpr {
-	// If exactMatches is empty, then e cannot be simplified.
-	if exactMatches.empty() {
-		return e
-	}
-
 	filters := make(memo.FiltersExpr, 0, len(e))
+
 	for i := range e {
 		// If an entire FiltersItem exists in exactMatches, don't add it to the
 		// output filters.
@@ -841,11 +838,6 @@ func (s exprSet) addIf(e opt.Expr, fn func() bool) {
 	if s != nil && fn() {
 		s[e] = struct{}{}
 	}
-}
-
-// empty returns true if the set is nil or empty.
-func (s exprSet) empty() bool {
-	return len(s) == 0
 }
 
 // contains returns true if the set is non-nil and the given expression exists

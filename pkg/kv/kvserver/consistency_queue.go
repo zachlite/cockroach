@@ -24,15 +24,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
-var consistencyCheckInterval = settings.RegisterDurationSetting(
+var consistencyCheckInterval = settings.RegisterNonNegativeDurationSetting(
 	"server.consistency_check.interval",
 	"the time between range consistency checks; set to 0 to disable consistency checking."+
 		" Note that intervals that are too short can negatively impact performance.",
 	24*time.Hour,
-	settings.NonNegativeDuration,
 )
 
-var consistencyCheckRate = settings.RegisterByteSizeSetting(
+var consistencyCheckRate = settings.RegisterPublicValidatedByteSizeSetting(
 	"server.consistency_check.max_rate",
 	"the rate limit (bytes/sec) to use for consistency checks; used in "+
 		"conjunction with server.consistency_check.interval to control the "+
@@ -40,19 +39,7 @@ var consistencyCheckRate = settings.RegisterByteSizeSetting(
 		"negatively impact performance.",
 	8<<20, // 8MB
 	validatePositive,
-).WithPublic()
-
-// consistencyCheckRateBurstFactor we use this to set the burst parameter on the
-// quotapool.RateLimiter. It seems overkill to provide a user setting for this,
-// so we use a factor to scale the burst setting based on the rate defined above.
-const consistencyCheckRateBurstFactor = 8
-
-// consistencyCheckRateMinWait is the minimum time to wait once the rate limit
-// is reached. We check the limit on every key/value pair, which can lead to
-// a lot of nano-second waits because each pair could be very small. Instead we
-// force a larger pause every time the timer is breached to reduce the
-// churn on timers.
-const consistencyCheckRateMinWait = 100 * time.Millisecond
+)
 
 var testingAggressiveConsistencyChecks = envutil.EnvOrDefaultBool("COCKROACH_CONSISTENCY_AGGRESSIVE", false)
 
@@ -97,7 +84,7 @@ func newConsistencyQueue(store *Store, gossip *gossip.Gossip) *consistencyQueue 
 }
 
 func (q *consistencyQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ *config.SystemConfig,
+	ctx context.Context, now hlc.Timestamp, repl *Replica, _ *config.SystemConfig,
 ) (bool, float64) {
 	return consistencyQueueShouldQueueImpl(ctx, now,
 		consistencyShouldQueueData{
@@ -120,7 +107,7 @@ func (q *consistencyQueue) shouldQueue(
 // ConsistencyQueueShouldQueueImpl is exposed for testability without having
 // to setup a fully fledged replica.
 func consistencyQueueShouldQueueImpl(
-	ctx context.Context, now hlc.ClockTimestamp, data consistencyShouldQueueData,
+	ctx context.Context, now hlc.Timestamp, data consistencyShouldQueueData,
 ) (bool, float64) {
 	if data.interval <= 0 {
 		return false, 0
@@ -132,12 +119,12 @@ func consistencyQueueShouldQueueImpl(
 		if err != nil {
 			return false, 0
 		}
-		if shouldQ, priority = shouldQueueAgain(now.ToTimestamp(), lpTS, data.interval); !shouldQ {
+		if shouldQ, priority = shouldQueueAgain(now, lpTS, data.interval); !shouldQ {
 			return false, 0
 		}
 	}
 	// Check if all replicas are available.
-	for _, rep := range data.desc.Replicas().Descriptors() {
+	for _, rep := range data.desc.Replicas().All() {
 		if !data.isNodeAvailable(rep.NodeID) {
 			return false, 0
 		}

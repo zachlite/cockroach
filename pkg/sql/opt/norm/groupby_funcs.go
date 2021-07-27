@@ -13,7 +13,7 @@ package norm
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -111,7 +111,7 @@ func (c *CustomFuncs) HasNoGroupingCols(private *memo.GroupingPrivate) bool {
 }
 
 // GroupingInputOrdering returns the Ordering in the private.
-func (c *CustomFuncs) GroupingInputOrdering(private *memo.GroupingPrivate) props.OrderingChoice {
+func (c *CustomFuncs) GroupingInputOrdering(private *memo.GroupingPrivate) physical.OrderingChoice {
 	return private.Ordering
 }
 
@@ -141,8 +141,8 @@ func (c *CustomFuncs) ConstructProjectionFromDistinctOn(
 
 // AreValuesDistinct returns true if a constant Values operator input contains
 // only rows that are already distinct with respect to the given grouping
-// columns. The Values operator can be wrapped by Select, Project, LeftJoin
-// and/or AntiJoin operators.
+// columns. The Values operator can be wrapped by Select, Project, and/or
+// LeftJoin operators.
 //
 // If nullsAreDistinct is true, then NULL values are treated as not equal to one
 // another, and therefore rows containing a NULL value in any grouping column
@@ -189,13 +189,6 @@ func (c *CustomFuncs) AreValuesDistinct(
 		}
 
 		return c.AreValuesDistinct(t.Left, groupingCols, nullsAreDistinct)
-
-	case *memo.AntiJoinExpr:
-		// Pass through call to left input if grouping on its columns.
-		leftCols := t.Left.Relational().OutputCols
-		if groupingCols.SubsetOf(leftCols) {
-			return c.AreValuesDistinct(t.Left, groupingCols, nullsAreDistinct)
-		}
 
 	case *memo.UpsertDistinctOnExpr:
 		// Pass through call to input if grouping on passthrough columns.
@@ -280,30 +273,9 @@ func (c *CustomFuncs) areRowsDistinct(
 	return true
 }
 
-// SingleRegressionCountArgument checks if either arg is non-null and returns
-// the other one. If neither is non-null it returns ok=false.
-func (c *CustomFuncs) SingleRegressionCountArgument(
-	y, x opt.ScalarExpr, input memo.RelExpr,
-) (_ opt.ScalarExpr, ok bool) {
-	notNullCols := c.NotNullCols(input)
-	if c.ExprIsNeverNull(y, notNullCols) {
-		return x, true
-	}
-	if c.ExprIsNeverNull(x, notNullCols) {
-		return y, true
-	}
-
-	return nil, false
-}
-
-// CanMergeAggs returns true if one of the following applies to each of the
-// given outer aggregation expressions:
-//   1. The aggregation can be merged with a single inner aggregation.
-//   2. The aggregation takes an inner grouping column as input and ignores
-//      duplicates.
-func (c *CustomFuncs) CanMergeAggs(
-	innerAggs, outerAggs memo.AggregationsExpr, innerGroupingCols opt.ColSet,
-) bool {
+// CanMergeAggs returns true if the given inner and outer AggregationsExprs can
+// be replaced with a single equivalent AggregationsExpr.
+func (c *CustomFuncs) CanMergeAggs(innerAggs, outerAggs memo.AggregationsExpr) bool {
 	// Create a mapping from the output ColumnID of each inner aggregate to its
 	// operator type.
 	innerColsToAggOps := map[opt.ColumnID]opt.Operator{}
@@ -332,15 +304,9 @@ func (c *CustomFuncs) CanMergeAggs(
 			// The outer aggregate does not directly aggregate on a column.
 			return false
 		}
-		if innerGroupingCols.Contains(input.Col) && opt.AggregateIgnoresDuplicates(outerAgg.Op()) {
-			// The outer aggregate ignores duplicates and references an inner grouping
-			// column.
-			continue
-		}
 		innerOp, ok := innerColsToAggOps[input.Col]
 		if !ok {
-			// This outer aggregate does not reference an inner aggregate or an inner
-			// grouping column.
+			// This outer aggregate does not reference an inner aggregate.
 			return false
 		}
 		if !opt.AggregatesCanMerge(innerOp, outerAgg.Op()) {
@@ -353,9 +319,7 @@ func (c *CustomFuncs) CanMergeAggs(
 
 // MergeAggs returns an AggregationsExpr that is equivalent to the two given
 // AggregationsExprs. MergeAggs will panic if CanMergeAggs is false.
-func (c *CustomFuncs) MergeAggs(
-	innerAggs, outerAggs memo.AggregationsExpr, innerGroupingCols opt.ColSet,
-) memo.AggregationsExpr {
+func (c *CustomFuncs) MergeAggs(innerAggs, outerAggs memo.AggregationsExpr) memo.AggregationsExpr {
 	// Create a mapping from the output ColumnIDs of the inner aggregates to their
 	// indices in innerAggs.
 	innerColsToAggs := map[opt.ColumnID]int{}
@@ -373,17 +337,9 @@ func (c *CustomFuncs) MergeAggs(
 		// same, but in the count and count-rows cases the inner aggregate must
 		// be used (see opt.AggregatesCanMerge for details). The column from the
 		// outer aggregate has to be used to preserve logical equivalency.
-		//
-		// In the case when the outer aggregate takes an inner grouping column as
-		// input, simply reuse the outer aggregate. This works because CanMergeAggs
-		// has already ensured that the aggregate ignores duplicate values.
 		inputCol := outerAggs[i].Agg.Child(0).(*memo.VariableExpr).Col
-		if innerGroupingCols.Contains(inputCol) {
-			newAggs[i] = outerAggs[i]
-		} else {
-			innerAgg := innerAggs[innerColsToAggs[inputCol]].Agg
-			newAggs[i] = c.f.ConstructAggregationsItem(innerAgg, outerAggs[i].Col)
-		}
+		innerAgg := innerAggs[innerColsToAggs[inputCol]].Agg
+		newAggs[i] = c.f.ConstructAggregationsItem(innerAgg, outerAggs[i].Col)
 	}
 	return newAggs
 }

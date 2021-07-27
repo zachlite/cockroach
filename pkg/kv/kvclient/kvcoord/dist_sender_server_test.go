@@ -36,10 +36,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/kvclientutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -317,65 +317,6 @@ func checkReverseScanResults(
 ) {
 	checkSpanResults(t, spans, results, expResults, expSatisfied, opt)
 	checkResumeSpanReverseScanResults(t, spans, results, expResults, expSatisfied, opt)
-}
-
-// Tests limited scan requests across many ranges with multiple bounds.
-func TestMultiRangeBoundedBatchScanSimple(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	s, _ := startNoSplitMergeServer(t)
-	ctx := context.Background()
-	defer s.Stopper().Stop(ctx)
-
-	db := s.DB()
-	if err := setupMultipleRanges(ctx, db, "a", "b", "c", "d", "e", "f", "g", "h"); err != nil {
-		t.Fatal(err)
-	}
-
-	expResultsWithoutBound := [][]string{
-		{"a1", "a2", "a3", "b1", "b2"},
-		{"c1", "c2", "d1"},
-		{"g1", "g2"},
-	}
-
-	for _, key := range []string{"a1", "a2", "a3", "b1", "b2", "c1", "c2", "d1", "f1", "f2", "f3", "g1", "g2", "h1"} {
-		require.NoError(t, db.Put(ctx, key, "value"))
-	}
-
-	for bound := 1; bound <= 20; bound++ {
-		t.Run(fmt.Sprintf("bound=%d", bound), func(t *testing.T) {
-
-			b := &kv.Batch{}
-			b.Header.MaxSpanRequestKeys = int64(bound)
-			spans := [][]string{{"a", "c"}, {"c", "e"}, {"g", "h"}}
-			for _, span := range spans {
-				b.Scan(span[0], span[1])
-			}
-			if err := db.Run(ctx, b); err != nil {
-				t.Fatal(err)
-			}
-
-			require.Equal(t, len(expResultsWithoutBound), len(b.Results))
-
-			expResults := make([][]string, len(expResultsWithoutBound))
-			expSatisfied := make(map[int]struct{})
-			var count int
-		Loop:
-			for i, expRes := range expResultsWithoutBound {
-				for _, key := range expRes {
-					if count == bound {
-						break Loop
-					}
-					expResults[i] = append(expResults[i], key)
-					count++
-				}
-				// NB: only works because requests are sorted and non-overlapping.
-				expSatisfied[i] = struct{}{}
-			}
-
-			checkScanResults(t, spans, b.Results, expResults, expSatisfied, checkOptions{mode: Strict})
-		})
-	}
 }
 
 // Tests multiple scans, forward and reverse, across many ranges with multiple
@@ -757,9 +698,318 @@ func TestMultiRangeBoundedBatchScanPartialResponses(t *testing.T) {
 	}
 }
 
+// checks the results of a DelRange.
+func checkDelRangeResults(
+	t *testing.T,
+	spans [][]string,
+	results []kv.Result,
+	expResults [][]string,
+	expSatisfied map[int]struct{},
+) {
+	checkDelRangeSpanResults(t, results, expResults)
+	checkResumeSpanDelRangeResults(t, spans, results, expResults, expSatisfied)
+}
+
+// checks the keys returned from a DelRange.
+func checkDelRangeSpanResults(t *testing.T, results []kv.Result, expResults [][]string) {
+	t.Helper()
+	require.Equal(t, len(expResults), len(results))
+	for i, res := range results {
+		require.Equal(t, len(expResults[i]), len(res.Keys))
+		for j, key := range res.Keys {
+			require.Equal(t, expResults[i][j], string(key))
+		}
+	}
+}
+
+// checks the ResumeSpan in the DelRange results.
+func checkResumeSpanDelRangeResults(
+	t *testing.T,
+	spans [][]string,
+	results []kv.Result,
+	expResults [][]string,
+	expSatisfied map[int]struct{},
+) {
+	t.Helper()
+	for i, res := range results {
+		keyLen := len(res.Keys)
+		// Check that satisfied requests don't have resume spans.
+		if _, satisfied := expSatisfied[i]; satisfied {
+			require.Nil(t, res.ResumeSpan)
+			continue
+		}
+
+		// Check ResumeSpan when request has been processed.
+		require.NotNil(t, res.ResumeSpan)
+		require.Equal(t, roachpb.RESUME_KEY_LIMIT, res.ResumeReason)
+
+		// The key can be empty once the entire span has been deleted.
+		if keyLen == 0 {
+			// The request was not processed; the resume span key >= first seen key.
+			require.LessOrEqual(t, spans[i][0], string(res.ResumeSpan.Key), "ResumeSpan.Key")
+		} else {
+			// The next start key is always greater than the last key seen.
+			lastRes := expResults[i][keyLen-1]
+			require.Less(t, lastRes, string(res.ResumeSpan.Key), "ResumeSpan.Key")
+		}
+		// The EndKey is untouched.
+		require.Equal(t, spans[i][1], string(res.ResumeSpan.EndKey), "ResumeSpan.EndKey")
+	}
+}
+
+// Tests multiple delete range requests across many ranges with multiple bounds.
+func TestMultiRangeBoundedBatchDelRange(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	s, _ := startNoSplitMergeServer(t)
+	ctx := context.Background()
+	defer s.Stopper().Stop(ctx)
+
+	db := s.DB()
+	if err := setupMultipleRanges(ctx, db, "a", "b", "c", "d", "e", "f", "g", "h"); err != nil {
+		t.Fatal(err)
+	}
+
+	expResultsWithoutBound := [][]string{
+		{"a1", "a2", "a3", "b1", "b2"},
+		{"c1", "c2", "d1"},
+		{"g1", "g2"},
+	}
+
+	for bound := 1; bound <= 20; bound++ {
+		t.Run(fmt.Sprintf("bound=%d", bound), func(t *testing.T) {
+			for _, key := range []string{"a1", "a2", "a3", "b1", "b2", "c1", "c2", "d1", "f1", "f2", "f3", "g1", "g2", "h1"} {
+				if err := db.Put(ctx, key, "value"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			b := &kv.Batch{}
+			b.Header.MaxSpanRequestKeys = int64(bound)
+			spans := [][]string{{"a", "c"}, {"c", "e"}, {"g", "h"}}
+			for _, span := range spans {
+				b.DelRange(span[0], span[1], true /* returnKeys */)
+			}
+			if err := db.Run(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+
+			require.Equal(t, len(expResultsWithoutBound), len(b.Results))
+
+			expResults := make([][]string, len(expResultsWithoutBound))
+			expSatisfied := make(map[int]struct{})
+			var count int
+		Loop:
+			for i, expRes := range expResultsWithoutBound {
+				for _, key := range expRes {
+					if count == bound {
+						break Loop
+					}
+					expResults[i] = append(expResults[i], key)
+					count++
+				}
+				// NB: only works because requests are sorted and non-overlapping.
+				expSatisfied[i] = struct{}{}
+			}
+
+			checkDelRangeResults(t, spans, b.Results, expResults, expSatisfied)
+		})
+	}
+}
+
+// TestMultiRangeBoundedBatchScanPartialResponses runs multiple delete range
+// requests either out-of-order or over overlapping key spans and shows how the
+// batch responses can contain partial responses.
+func TestMultiRangeBoundedBatchDelRangePartialResponses(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	s, _ := startNoSplitMergeServer(t)
+	ctx := context.Background()
+	defer s.Stopper().Stop(ctx)
+
+	db := s.DB()
+	if err := setupMultipleRanges(ctx, db, "a", "b", "c", "d", "e", "f"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		bound        int64
+		spans        [][]string
+		expResults   [][]string
+		expSatisfied []int
+	}{
+		{
+			name:  "unsorted, non-overlapping, neither satisfied",
+			bound: 6,
+			spans: [][]string{
+				{"b1", "d"}, {"a", "b1"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3"},
+			},
+		},
+		{
+			name:  "unsorted, non-overlapping, first satisfied",
+			bound: 6,
+			spans: [][]string{
+				{"b1", "c"}, {"a", "b1"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3"},
+			},
+			expSatisfied: []int{0},
+		},
+		{
+			name:  "unsorted, non-overlapping, second satisfied",
+			bound: 6,
+			spans: [][]string{
+				{"b1", "d"}, {"a", "b"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3"},
+			},
+			expSatisfied: []int{1},
+		},
+		{
+			name:  "unsorted, non-overlapping, both satisfied",
+			bound: 6,
+			spans: [][]string{
+				{"b1", "c"}, {"a", "b"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3"},
+			},
+			expSatisfied: []int{0, 1},
+		},
+		{
+			// NOTE: the first request will have already deleted the keys, so
+			// the second request has no keys to delete.
+			name:  "sorted, overlapping, neither satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"a", "d"}, {"b", "g"},
+			},
+			expResults: [][]string{
+				{"a1", "a2", "a3", "b1", "b2", "b3", "c1"}, {},
+			},
+		},
+		{
+			name:  "sorted, overlapping, first satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"a", "c"}, {"b", "g"},
+			},
+			expResults: [][]string{
+				{"a1", "a2", "a3", "b1", "b2", "b3"}, {"c1"},
+			},
+			expSatisfied: []int{0},
+		},
+		{
+			name:  "sorted, overlapping, second satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"a", "d"}, {"b", "c"},
+			},
+			expResults: [][]string{
+				{"a1", "a2", "a3", "b1", "b2", "b3", "c1"}, {},
+			},
+			expSatisfied: []int{1},
+		},
+		{
+			name:  "sorted, overlapping, both satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"a", "c"}, {"b", "c"},
+			},
+			expResults: [][]string{
+				{"a1", "a2", "a3", "b1", "b2", "b3"}, {},
+			},
+			expSatisfied: []int{0, 1},
+		},
+		{
+			name:  "unsorted, overlapping, neither satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"b", "g"}, {"a", "d"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3", "c1"}, {"a1", "a2", "a3"},
+			},
+		},
+		{
+			name:  "unsorted, overlapping, first satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"b", "c"}, {"a", "d"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3", "c1"},
+			},
+			expSatisfied: []int{0},
+		},
+		{
+			name:  "unsorted, overlapping, second satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"b", "g"}, {"a", "b2"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3", "c1"}, {"a1", "a2", "a3"},
+			},
+			expSatisfied: []int{1},
+		},
+		{
+			name:  "unsorted, overlapping, both satisfied",
+			bound: 7,
+			spans: [][]string{
+				{"b", "c"}, {"a", "b2"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {"a1", "a2", "a3"},
+			},
+			expSatisfied: []int{0, 1},
+		},
+		{
+			name:  "unsorted, overlapping, unreached",
+			bound: 6,
+			spans: [][]string{
+				{"b", "g"}, {"c", "f"}, {"a", "d"},
+			},
+			expResults: [][]string{
+				{"b1", "b2", "b3"}, {}, {"a1", "a2", "a3"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Re-write all keys before each subtest.
+			for _, key := range []string{"a1", "a2", "a3", "b1", "b2", "b3", "c1", "c2", "c3", "d1", "d2", "d3"} {
+				if err := db.Put(ctx, key, "value"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			b := &kv.Batch{}
+			b.Header.MaxSpanRequestKeys = tc.bound
+			for _, span := range tc.spans {
+				b.DelRange(span[0], span[1], true /* returnKeys */)
+			}
+			if err := db.Run(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+
+			expSatisfied := make(map[int]struct{})
+			for _, exp := range tc.expSatisfied {
+				expSatisfied[exp] = struct{}{}
+			}
+			checkDelRangeResults(t, tc.spans, b.Results, tc.expResults, expSatisfied)
+		})
+	}
+}
+
 // Test that a bounded range delete request that gets terminated at a range
 // boundary uses the range boundary as the start key in the response ResumeSpan.
-func TestMultiRangeBoundedBatchScanBoundary(t *testing.T) {
+func TestMultiRangeBoundedBatchDelRangeBoundary(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	s, _ := startNoSplitMergeServer(t)
@@ -778,7 +1028,7 @@ func TestMultiRangeBoundedBatchScanBoundary(t *testing.T) {
 
 	b := &kv.Batch{}
 	b.Header.MaxSpanRequestKeys = 3
-	b.Scan("a", "c")
+	b.DelRange("a", "c", true /* returnKeys */)
 	if err := db.Run(ctx, b); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +1041,7 @@ func TestMultiRangeBoundedBatchScanBoundary(t *testing.T) {
 
 	b = &kv.Batch{}
 	b.Header.MaxSpanRequestKeys = 1
-	b.Scan("b", "c")
+	b.DelRange("b", "c", true /* returnKeys */)
 	if err := db.Run(ctx, b); err != nil {
 		t.Fatal(err)
 	}
@@ -940,7 +1190,7 @@ func TestMultiRangeScanReverseScanInconsistent(t *testing.T) {
 					t.Fatal(err)
 				}
 				ts[i] = s.Clock().Now()
-				log.Infof(ctx, "%d: %s %s", i, key, ts[i])
+				log.Infof(ctx, "%d: %s %d", i, key, ts[i])
 				if i == 0 {
 					testutils.SucceedsSoon(t, func() error {
 						// Enforce that when we write the second key, it's written
@@ -1245,7 +1495,9 @@ func TestReverseScanWithSplitAndMerge(t *testing.T) {
 func TestBadRequest(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-
+	skip.WithIssue(t, 51795, "TODO(andreimatei): This last assertion in this test was broken by #33150. "+
+		"I suspect the reason is that there is no longer a single Range "+
+		"that spans [KeyMin, z), so we're not hitting the error.")
 	s, db := startNoSplitMergeServer(t)
 	defer s.Stopper().Stop(context.Background())
 	ctx := context.Background()
@@ -1267,13 +1519,8 @@ func TestBadRequest(t *testing.T) {
 		t.Fatalf("unexpected error on deletion on [x, a): %v", err)
 	}
 
-	// To make the last check fail we need to search the replica that starts at
-	// KeyMin i.e. typically it's Range(1).
-	store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
-	require.NoError(t, err)
-	repl := store.LookupReplica(roachpb.RKeyMin)
-	if err := db.DelRange(ctx, "", repl.Desc().EndKey); !testutils.IsError(err, "must be greater than LocalMax") {
-		t.Fatalf("unexpected error on deletion on [KeyMin, %s): %v", repl.Desc().EndKey, err)
+	if err := db.DelRange(ctx, "", "z"); !testutils.IsError(err, "must be greater than LocalMax") {
+		t.Fatalf("unexpected error on deletion on [KeyMin, z): %v", err)
 	}
 }
 
@@ -1288,12 +1535,12 @@ func TestPropagateTxnOnError(t *testing.T) {
 	// response that does not result in an error. Even though the batch as a
 	// whole results in an error, the transaction should still propagate this
 	// information.
-	ot1 := roachpb.ObservedTimestamp{NodeID: 7, Timestamp: hlc.ClockTimestamp{WallTime: 15}}
-	ot2 := roachpb.ObservedTimestamp{NodeID: 8, Timestamp: hlc.ClockTimestamp{WallTime: 16}}
+	ot1 := roachpb.ObservedTimestamp{NodeID: 7, Timestamp: hlc.Timestamp{WallTime: 15}}
+	ot2 := roachpb.ObservedTimestamp{NodeID: 8, Timestamp: hlc.Timestamp{WallTime: 16}}
 	containsObservedTSs := func(txn *roachpb.Transaction) bool {
 		contains := func(ot roachpb.ObservedTimestamp) bool {
 			for _, ts := range txn.ObservedTimestamps {
-				if ts == ot {
+				if ts.Equal(ot) {
 					return true
 				}
 			}
@@ -1322,7 +1569,7 @@ func TestPropagateTxnOnError(t *testing.T) {
 			case *roachpb.ConditionalPutRequest:
 				if k.Equal(keyB) {
 					if atomic.AddInt32(&numCPuts, 1) == 1 {
-						pErr := roachpb.NewReadWithinUncertaintyIntervalError(hlc.Timestamp{}, hlc.Timestamp{}, hlc.Timestamp{}, nil)
+						pErr := roachpb.NewReadWithinUncertaintyIntervalError(hlc.Timestamp{}, hlc.Timestamp{}, nil)
 						return roachpb.NewErrorWithTxn(pErr, fArgs.Hdr.Txn)
 					}
 				}
@@ -1566,7 +1813,7 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 					return nil
 				}
 				err := roachpb.NewReadWithinUncertaintyIntervalError(
-					fArgs.Hdr.Timestamp, s.Clock().Now(), hlc.Timestamp{}, fArgs.Hdr.Txn)
+					fArgs.Hdr.Timestamp, s.Clock().Now(), fArgs.Hdr.Txn)
 				return roachpb.NewErrorWithTxn(err, fArgs.Hdr.Txn)
 			}
 			return nil
@@ -1903,6 +2150,7 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 				return db.Put(ctx, "a", "put")
 			},
 			retryable: func(ctx context.Context, txn *kv.Txn) error {
+				fmt.Println("TXN IS", txn.TestingCloneTxn())
 				return txn.Put(ctx, "a", "put")
 			},
 		},
@@ -2239,38 +2487,6 @@ func TestTxnCoordSenderRetries(t *testing.T) {
 				return txn.Run(ctx, b)
 			},
 			txnCoordRetry: true,
-		},
-		{
-			name: "write too old with delete range after prior read on other key",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "a", "put")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.DelRange(ctx, "a", "b")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				if _, err := txn.Get(ctx, "c"); err != nil {
-					return err
-				}
-				return txn.DelRange(ctx, "a", "b")
-			},
-			txnCoordRetry: true, // can refresh
-		},
-		{
-			name: "write too old with delete range after prior read on same key",
-			beforeTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.Put(ctx, "a", "put")
-			},
-			afterTxnStart: func(ctx context.Context, db *kv.DB) error {
-				return db.DelRange(ctx, "a", "b")
-			},
-			retryable: func(ctx context.Context, txn *kv.Txn) error {
-				if _, err := txn.Get(ctx, "a"); err != nil {
-					return err
-				}
-				return txn.DelRange(ctx, "a", "b")
-			},
-			clientRetry: true, // can't refresh
 		},
 		{
 			// This test sends a 1PC batch with Put+EndTxn.
@@ -2950,9 +3166,8 @@ func TestTxnCoordSenderRetriesAcrossEndTxn(t *testing.T) {
 			})
 
 			require.Regexp(t, "injected", txn.CommitInBatch(ctx, b))
-			tr := s.Tracer().(*tracing.Tracer)
 			err = kvclientutils.CheckPushResult(
-				ctx, db, tr, *origTxn, kvclientutils.ExpectAborted, tc.txnRecExpectation)
+				ctx, db, *origTxn, kvclientutils.ExpectAborted, tc.txnRecExpectation)
 			require.NoError(t, err)
 		})
 	}

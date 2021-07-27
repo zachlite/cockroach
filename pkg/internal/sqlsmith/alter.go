@@ -12,16 +12,15 @@ package sqlsmith
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 var (
-	alters               = append(append(append(altersTableExistence, altersExistingTable...), altersTypeExistence...), altersExistingTypes...)
+	alters               = append(append(altersTableExistence, altersExistingTable...), altersTypeExistence...)
 	altersTableExistence = []statementWeight{
 		{10, makeCreateTable},
-		{2, makeCreateSchema},
 		{1, makeDropTable},
 	}
 	altersExistingTable = []statementWeight{
@@ -41,9 +40,6 @@ var (
 	altersTypeExistence = []statementWeight{
 		{5, makeCreateType},
 	}
-	altersExistingTypes = []statementWeight{
-		{5, makeAlterTypeDropValue},
-	}
 )
 
 func makeAlter(s *Smither) (tree.Statement, bool) {
@@ -55,14 +51,7 @@ func makeAlter(s *Smither) (tree.Statement, bool) {
 		// up the change). This has the added benefit of leaving
 		// behind old column references for a bit, which should
 		// test some additional logic.
-		err := s.ReloadSchemas()
-		if err != nil {
-			// If we fail to load any schema information, then
-			// the actual statement generation could panic, so
-			// fail out here.
-			return nil, false
-		}
-
+		_ = s.ReloadSchemas()
 		for i := 0; i < retryCount; i++ {
 			stmt, ok := s.alterSampler.Next()(s)
 			if ok {
@@ -73,20 +62,9 @@ func makeAlter(s *Smither) (tree.Statement, bool) {
 	return nil, false
 }
 
-func makeCreateSchema(s *Smither) (tree.Statement, bool) {
-	return &tree.CreateSchema{
-		Schema: tree.ObjectNamePrefix{
-			SchemaName:     s.name("schema"),
-			ExplicitSchema: true,
-		},
-	}, true
-}
-
 func makeCreateTable(s *Smither) (tree.Statement, bool) {
-	table := randgen.RandCreateTable(s.rnd, "", 0)
-	schemaOrd := s.rnd.Intn(len(s.schemas))
-	schema := s.schemas[schemaOrd]
-	table.Table = tree.MakeTableNameWithSchema(tree.Name(s.dbName), schema.SchemaName, s.name("tab"))
+	table := rowenc.RandCreateTable(s.rnd, "", 0)
+	table.Table = tree.MakeUnqualifiedTableName(s.name("tab"))
 	return table, true
 }
 
@@ -140,7 +118,7 @@ func makeAlterColumnType(s *Smither) (tree.Statement, bool) {
 	if !ok {
 		return nil, false
 	}
-	typ := randgen.RandColumnType(s.rnd)
+	typ := rowenc.RandColumnType(s.rnd)
 	col := tableRef.Columns[s.rnd.Intn(len(tableRef.Columns))]
 
 	return &tree.AlterTable{
@@ -160,7 +138,7 @@ func makeAddColumn(s *Smither) (tree.Statement, bool) {
 		return nil, false
 	}
 	colRefs.stripTableName()
-	t := randgen.RandColumnType(s.rnd)
+	t := rowenc.RandColumnType(s.rnd)
 	col, err := tree.NewColumnTableDef(s.name("col"), t, false /* isSerial */, nil)
 	if err != nil {
 		return nil, false
@@ -214,12 +192,7 @@ func makeJSONComputedColumn(s *Smither) (tree.Statement, bool) {
 		return nil, false
 	}
 	col.Computed.Computed = true
-	col.Computed.Expr = tree.NewTypedBinaryExpr(
-		tree.MakeBinaryOperator(tree.JSONFetchText),
-		ref.typedExpr(),
-		randgen.RandDatumSimple(s.rnd, types.String),
-		types.String,
-	)
+	col.Computed.Expr = tree.NewTypedBinaryExpr(tree.JSONFetchText, ref.typedExpr(), rowenc.RandDatumSimple(s.rnd, types.String), types.String)
 
 	return &tree.AlterTable{
 		Table: tableRef.TableName.ToUnresolvedObjectName(),
@@ -355,18 +328,5 @@ func makeRenameIndex(s *Smither) (tree.Statement, bool) {
 
 func makeCreateType(s *Smither) (tree.Statement, bool) {
 	name := s.name("typ")
-	return randgen.RandCreateType(s.rnd, string(name), letters), true
-}
-
-func makeAlterTypeDropValue(s *Smither) (tree.Statement, bool) {
-	enumVal, udtName, ok := s.getRandUserDefinedTypeLabel()
-	if !ok {
-		return nil, false
-	}
-	return &tree.AlterType{
-		Type: udtName.ToUnresolvedObjectName(),
-		Cmd: &tree.AlterTypeDropValue{
-			Val: *enumVal,
-		},
-	}, ok
+	return rowenc.RandCreateType(s.rnd, string(name), letters), true
 }

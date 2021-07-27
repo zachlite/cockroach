@@ -23,21 +23,11 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
-)
-
-// Workaround for bazel auto-generated code. goimports does not automatically
-// pick up the right packages when run within the bazel sandbox.
-var (
-	_ coldataext.Datum
-	_ tree.AggType
 )
 
 // {{/*
@@ -134,22 +124,21 @@ type sort_TYPE_DIR_HANDLES_NULLSOp struct {
 	sortCol       _GOTYPESLICE
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(ctx context.Context, col coldata.Vec, order []int) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.TemplateType()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort() {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -163,7 +152,7 @@ func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 

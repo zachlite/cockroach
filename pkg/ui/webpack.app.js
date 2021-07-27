@@ -158,7 +158,8 @@ module.exports = (env, argv) => {
       }),
       new CopyWebpackPlugin([{ from: "favicon.ico", to: "favicon.ico" }]),
       new VisualizerPlugin({ filename: `../dist/stats.${env.dist}.html` }),
-      // use WebpackBar instead of webpack dashboard to fit multiple webpack dev server outputs (db-console and cluster-ui)
+      // use WebpackBar instead of webpack dashboard to fit multiple webpack dev
+      // server outputs (db-console and cluster-ui)
       new WebpackBar({
         name: "db-console",
         color: "orange",
@@ -206,13 +207,13 @@ module.exports = (env, argv) => {
         replacements: [
           {
             pattern: /import rootSaga from ".\/sagas";/gi, // match last 'import' expression in module.
-            replacement: function (match, p) {
+            replacement: function(match, p) {
               return `${match}\nimport { fakeMetricsDataGenerationMiddleware } from "src/test-utils/fakeMetricsDataGenerationMiddleware";`;
             },
           },
           {
             pattern: /(?<=applyMiddleware\((.*))\),$/gm,
-            replacement: function (match) {
+            replacement: function(match) {
               return `, fakeMetricsDataGenerationMiddleware${match}`;
             },
           },

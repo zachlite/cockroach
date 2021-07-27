@@ -35,9 +35,6 @@ import _ from "lodash";
  * @param changes A set of new properties which should replace properties of the
  * previous object.
  */
-export default function nextState<T extends Object>(
-  lastState: T,
-  changes: Partial<T>,
-): T {
-  return _.assign({}, lastState, changes);
+export default function nextState<T extends Object>(lastState: T, changes: Partial<T>): T {
+    return _.assign({}, lastState, changes);
 }

@@ -17,9 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -175,7 +174,7 @@ func (a *avroConsumer) convertNative(x interface{}, conv *row.DatumRowConverter)
 	}
 
 	for f, v := range record {
-		field := lexbase.NormalizeName(f)
+		field := lex.NormalizeName(f)
 		idx, ok := a.fieldNameToIdx[field]
 		if !ok {
 			if a.strict {
@@ -187,7 +186,7 @@ func (a *avroConsumer) convertNative(x interface{}, conv *row.DatumRowConverter)
 		typ := conv.VisibleColTypes[idx]
 		avroT, ok := familyToAvroT[typ.Family()]
 		if !ok {
-			return fmt.Errorf("cannot convert avro value %v to col %s", v, conv.VisibleCols[idx].GetType().Name())
+			return fmt.Errorf("cannot convert avro value %v to col %s", v, conv.VisibleCols[idx].Type.Name())
 		}
 
 		datum, err := nativeToDatum(v, typ, avroT, conv.EvalCtx)
@@ -210,9 +209,9 @@ func (a *avroConsumer) FillDatums(
 	// Set any nil datums to DNull (in case native
 	// record didn't have the value set at all)
 	for i := range conv.Datums {
-		if conv.TargetColOrds.Contains(i) && conv.Datums[i] == nil {
+		if _, isTargetCol := conv.IsTargetCol[i]; isTargetCol && conv.Datums[i] == nil {
 			if a.strict {
-				return fmt.Errorf("field %s was not set in the avro import", conv.VisibleCols[i].GetName())
+				return fmt.Errorf("field %s was not set in the avro import", conv.VisibleCols[i].Name)
 			}
 			conv.Datums[i] = tree.DNull
 		}
@@ -398,7 +397,7 @@ func newImportAvroPipeline(
 ) (importRowProducer, importRowConsumer, error) {
 	fieldIdxByName := make(map[string]int)
 	for idx, col := range avro.importContext.tableDesc.VisibleColumns() {
-		fieldIdxByName[col.GetName()] = idx
+		fieldIdxByName[col.Name] = idx
 	}
 
 	consumer := &avroConsumer{
@@ -454,7 +453,7 @@ var _ inputConverter = &avroInputReader{}
 
 func newAvroInputReader(
 	kvCh chan row.KVBatch,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	avroOpts roachpb.AvroOptions,
 	walltime int64,
 	parallelism int,
@@ -481,7 +480,7 @@ func (a *avroInputReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user security.SQLUsername,
+	user string,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, a.readFile, makeExternalStorage, user)
 }
@@ -498,7 +497,6 @@ func (a *avroInputReader) readFile(
 		source:   inputIdx,
 		skip:     resumePos,
 		rejected: rejected,
-		rowLimit: a.opts.RowLimit,
 	}
 	return runParallelImport(ctx, a.importContext, fileCtx, producer, consumer)
 }

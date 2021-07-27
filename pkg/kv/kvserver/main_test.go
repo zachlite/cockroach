@@ -47,6 +47,7 @@ func TestMain(m *testing.M) {
 	// to also doing it in race builds.
 	if util.RaceEnabled {
 		os.Exit(m.Run())
+		return
 	}
 
 	// Create a set of all protos we believe to be marshaled downstream of raft.

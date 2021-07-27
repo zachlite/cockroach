@@ -9,10 +9,9 @@ Aborted{}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
 		SavepointRollback{}
-		TxnFinishAborted{}
+		TxnFinish{}
 		TxnRestart{}
 	missing events:
-		TxnFinishCommitted{}
 		TxnReleased{}
 		TxnStart{ImplicitTxn:false}
 		TxnStart{ImplicitTxn:true}
@@ -20,14 +19,13 @@ CommitWait{}
 	handled events:
 		NonRetriableErr{IsCommit:false}
 		NonRetriableErr{IsCommit:true}
-		TxnFinishCommitted{}
+		TxnFinish{}
 	missing events:
 		RetriableErr{CanAutoRetry:false, IsCommit:false}
 		RetriableErr{CanAutoRetry:false, IsCommit:true}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
 		SavepointRollback{}
-		TxnFinishAborted{}
 		TxnReleased{}
 		TxnRestart{}
 		TxnStart{ImplicitTxn:false}
@@ -44,8 +42,7 @@ NoTxn{}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
 		SavepointRollback{}
-		TxnFinishAborted{}
-		TxnFinishCommitted{}
+		TxnFinish{}
 		TxnReleased{}
 		TxnRestart{}
 Open{ImplicitTxn:false}
@@ -56,8 +53,7 @@ Open{ImplicitTxn:false}
 		RetriableErr{CanAutoRetry:false, IsCommit:true}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
-		TxnFinishAborted{}
-		TxnFinishCommitted{}
+		TxnFinish{}
 		TxnReleased{}
 		TxnRestart{}
 	missing events:
@@ -72,8 +68,7 @@ Open{ImplicitTxn:true}
 		RetriableErr{CanAutoRetry:false, IsCommit:true}
 		RetriableErr{CanAutoRetry:true, IsCommit:false}
 		RetriableErr{CanAutoRetry:true, IsCommit:true}
-		TxnFinishAborted{}
-		TxnFinishCommitted{}
+		TxnFinish{}
 	missing events:
 		SavepointRollback{}
 		TxnReleased{}

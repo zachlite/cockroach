@@ -28,20 +28,18 @@ type Kind uint32
 
 // List of privileges. ALL is specifically encoded so that it will automatically
 // pick up new privileges.
-// Do not change values of privileges. These correspond to the position
-// of the privilege in a bit field and are expected to stay constant.
 const (
-	ALL        Kind = 1
-	CREATE     Kind = 2
-	DROP       Kind = 3
-	GRANT      Kind = 4
-	SELECT     Kind = 5
-	INSERT     Kind = 6
-	DELETE     Kind = 7
-	UPDATE     Kind = 8
-	USAGE      Kind = 9
-	ZONECONFIG Kind = 10
-	CONNECT    Kind = 11
+	_ Kind = iota
+	ALL
+	CREATE
+	DROP
+	GRANT
+	SELECT
+	INSERT
+	DELETE
+	UPDATE
+	USAGE
+	ZONECONFIG
 )
 
 // ObjectType represents objects that can have privileges.
@@ -62,13 +60,12 @@ const (
 
 // Predefined sets of privileges.
 var (
-	AllPrivileges    = List{ALL, CONNECT, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE, ZONECONFIG}
-	ReadData         = List{GRANT, SELECT}
-	ReadWriteData    = List{GRANT, SELECT, INSERT, DELETE, UPDATE}
-	DBPrivileges     = List{ALL, CONNECT, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, ZONECONFIG}
-	TablePrivileges  = List{ALL, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, ZONECONFIG}
-	SchemaPrivileges = List{ALL, GRANT, CREATE, USAGE}
-	TypePrivileges   = List{ALL, GRANT, USAGE}
+	AllPrivileges     = List{ALL, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE, ZONECONFIG}
+	ReadData          = List{GRANT, SELECT}
+	ReadWriteData     = List{GRANT, SELECT, INSERT, DELETE, UPDATE}
+	DBTablePrivileges = List{ALL, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, ZONECONFIG}
+	SchemaPrivileges  = List{ALL, GRANT, CREATE, USAGE}
+	TypePrivileges    = List{ALL, GRANT, USAGE}
 )
 
 // Mask returns the bitmask for a given privilege.
@@ -78,13 +75,12 @@ func (k Kind) Mask() uint32 {
 
 // ByValue is just an array of privilege kinds sorted by value.
 var ByValue = [...]Kind{
-	ALL, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE, ZONECONFIG, CONNECT,
+	ALL, CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE, ZONECONFIG,
 }
 
 // ByName is a map of string -> kind value.
 var ByName = map[string]Kind{
 	"ALL":        ALL,
-	"CONNECT":    CONNECT,
 	"CREATE":     CREATE,
 	"DROP":       DROP,
 	"GRANT":      GRANT,
@@ -206,9 +202,11 @@ func ListFromStrings(strs []string) (List, error) {
 
 // ValidatePrivileges returns an error if any privilege in
 // privileges cannot be granted on the given objectType.
+// Currently db/schema/table can all be granted the same privileges.
 func ValidatePrivileges(privileges List, objectType ObjectType) error {
 	validPrivs := GetValidPrivilegesForObject(objectType)
 	for _, priv := range privileges {
+		// Check if priv is in DBTablePrivileges.
 		if validPrivs.ToBitField()&priv.Mask() == 0 {
 			return pgerror.Newf(pgcode.InvalidGrantOperation,
 				"invalid privilege type %s for %s", priv.String(), objectType)
@@ -222,12 +220,10 @@ func ValidatePrivileges(privileges List, objectType ObjectType) error {
 // specified object type.
 func GetValidPrivilegesForObject(objectType ObjectType) List {
 	switch objectType {
-	case Table:
-		return TablePrivileges
+	case Table, Database:
+		return DBTablePrivileges
 	case Schema:
 		return SchemaPrivileges
-	case Database:
-		return DBPrivileges
 	case Type:
 		return TypePrivileges
 	case Any:

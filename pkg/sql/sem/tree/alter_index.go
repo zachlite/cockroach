@@ -57,10 +57,10 @@ var _ AlterIndexCmd = &AlterIndexPartitionBy{}
 // AlterIndexPartitionBy represents an ALTER INDEX PARTITION BY
 // command.
 type AlterIndexPartitionBy struct {
-	*PartitionByIndex
+	*PartitionBy
 }
 
 // Format implements the NodeFormatter interface.
 func (node *AlterIndexPartitionBy) Format(ctx *FmtCtx) {
-	ctx.FormatNode(node.PartitionByIndex)
+	ctx.FormatNode(node.PartitionBy)
 }

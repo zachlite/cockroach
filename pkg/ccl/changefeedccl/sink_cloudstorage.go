@@ -19,15 +19,13 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
-	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -36,9 +34,8 @@ import (
 
 func isCloudStorageSink(u *url.URL) bool {
 	switch u.Scheme {
-	case changefeedbase.SinkSchemeCloudStorageS3, changefeedbase.SinkSchemeCloudStorageGCS,
-		changefeedbase.SinkSchemeCloudStorageNodelocal, changefeedbase.SinkSchemeCloudStorageHTTP,
-		changefeedbase.SinkSchemeCloudStorageHTTPS, changefeedbase.SinkSchemeCloudStorageAzure:
+	case `experimental-s3`, `experimental-gs`, `experimental-nodelocal`, `experimental-http`,
+		`experimental-https`, `experimental-azure`:
 		return true
 	default:
 		return false
@@ -183,7 +180,7 @@ func (f *cloudStorageSinkFile) Write(p []byte) (int, error) {
 //
 // The resolved timestamp files are named `<timestamp>.RESOLVED`. This is
 // carefully done so that we can offer the following external guarantee: At any
-// given time, if the files are iterated in lexicographic filename order,
+// given time, if the the files are iterated in lexicographic filename order,
 // then encountering any filename containing `RESOLVED` means that everything
 // before it is finalized (and thus can be ingested into some other system and
 // deleted, included in hive queries, etc). A typical user of cloudStorageSink
@@ -269,7 +266,7 @@ func (f *cloudStorageSinkFile) Write(p []byte) (int, error) {
 // induction we have the required proof.
 //
 type cloudStorageSink struct {
-	srcID             base.SQLInstanceID
+	nodeID            roachpb.NodeID
 	sinkID            int64
 	targetMaxFileSize int64
 	settings          *cluster.Settings
@@ -306,31 +303,23 @@ var cloudStorageSinkIDAtomic int64
 
 func makeCloudStorageSink(
 	ctx context.Context,
-	u sinkURL,
-	srcID base.SQLInstanceID,
+	baseURI string,
+	nodeID roachpb.NodeID,
+	targetMaxFileSize int64,
 	settings *cluster.Settings,
 	opts map[string]string,
 	timestampOracle timestampLowerBoundOracle,
 	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
-	user security.SQLUsername,
+	user string,
 	acc mon.BoundAccount,
 ) (Sink, error) {
-	var targetMaxFileSize int64 = 16 << 20 // 16MB
-	if fileSizeParam := u.consumeParam(changefeedbase.SinkParamFileSize); fileSizeParam != `` {
-		var err error
-		if targetMaxFileSize, err = humanizeutil.ParseBytes(fileSizeParam); err != nil {
-			return nil, pgerror.Wrapf(err, pgcode.Syntax, `parsing %s`, fileSizeParam)
-		}
-	}
-	u.Scheme = strings.TrimPrefix(u.Scheme, `experimental-`)
-
 	// Date partitioning is pretty standard, so no override for now, but we could
 	// plumb one down if someone needs it.
 	const defaultPartitionFormat = `2006-01-02`
 
 	sinkID := atomic.AddInt64(&cloudStorageSinkIDAtomic, 1)
 	s := &cloudStorageSink{
-		srcID:             srcID,
+		nodeID:            nodeID,
 		sinkID:            sinkID,
 		settings:          settings,
 		targetMaxFileSize: targetMaxFileSize,
@@ -378,15 +367,17 @@ func makeCloudStorageSink(
 	}
 
 	var err error
-	if s.es, err = makeExternalStorageFromURI(ctx, u.String(), user); err != nil {
+	if s.es, err = makeExternalStorageFromURI(ctx, baseURI, user); err != nil {
 		return nil, err
 	}
 
 	return s, nil
 }
 
-func (s *cloudStorageSink) getOrCreateFile(topic TopicDescriptor) *cloudStorageSinkFile {
-	key := cloudStorageSinkKey{topic.GetName(), int64(topic.GetVersion())}
+func (s *cloudStorageSink) getOrCreateFile(
+	topic string, schemaID descpb.DescriptorVersion,
+) *cloudStorageSinkFile {
+	key := cloudStorageSinkKey{topic, schemaID}
 	if item := s.files.Get(key); item != nil {
 		return item.(*cloudStorageSinkFile)
 	}
@@ -403,13 +394,13 @@ func (s *cloudStorageSink) getOrCreateFile(topic TopicDescriptor) *cloudStorageS
 
 // EmitRow implements the Sink interface.
 func (s *cloudStorageSink) EmitRow(
-	ctx context.Context, topic TopicDescriptor, key, value []byte, updated hlc.Timestamp,
+	ctx context.Context, table catalog.TableDescriptor, key, value []byte, updated hlc.Timestamp,
 ) error {
 	if s.files == nil {
 		return errors.New(`cannot EmitRow on a closed sink`)
 	}
 
-	file := s.getOrCreateFile(topic)
+	file := s.getOrCreateFile(table.GetName(), table.GetVersion())
 
 	oldCap := file.buf.Cap()
 	if _, err := file.Write(value); err != nil {
@@ -453,7 +444,7 @@ func (s *cloudStorageSink) EmitResolvedTimestamp(
 	if log.V(1) {
 		log.Infof(ctx, "writing file %s %s", filename, resolved.AsOfSystemTime())
 	}
-	return cloud.WriteFile(ctx, s.es, filepath.Join(part, filename), bytes.NewReader(payload))
+	return s.es.WriteFile(ctx, filepath.Join(part, filename), bytes.NewReader(payload))
 }
 
 // flushTopicVersions flushes all open files for the provided topic up to and
@@ -473,10 +464,10 @@ func (s *cloudStorageSink) EmitResolvedTimestamp(
 // schema 2 file, leading to a violation of our ordering guarantees (see comment
 // on cloudStorageSink)
 func (s *cloudStorageSink) flushTopicVersions(
-	ctx context.Context, topic string, maxVersionToFlush int64,
+	ctx context.Context, topic string, maxVersionToFlush descpb.DescriptorVersion,
 ) (err error) {
-	var toRemoveAlloc [2]int64    // generally avoid allocating
-	toRemove := toRemoveAlloc[:0] // schemaIDs of flushed files
+	var toRemoveAlloc [2]descpb.DescriptorVersion // generally avoid allocating
+	toRemove := toRemoveAlloc[:0]                 // schemaIDs of flushed files
 	gte := cloudStorageSinkKey{topic: topic}
 	lt := cloudStorageSinkKey{topic: topic, schemaID: maxVersionToFlush + 1}
 	s.files.AscendRange(gte, lt, func(i btree.Item) (wantMore bool) {
@@ -548,13 +539,13 @@ func (s *cloudStorageSink) flushFile(ctx context.Context, file *cloudStorageSink
 	// `%d.RESOLVED` files to lexicographically succeed data files that have the
 	// same timestamp. This works because ascii `-` < ascii '.'.
 	filename := fmt.Sprintf(`%s-%s-%d-%d-%08x-%s-%x%s`, s.dataFileTs,
-		s.jobSessionID, s.srcID, s.sinkID, fileID, file.topic, file.schemaID, s.ext)
+		s.jobSessionID, s.nodeID, s.sinkID, fileID, file.topic, file.schemaID, s.ext)
 	if s.prevFilename != "" && filename < s.prevFilename {
 		return errors.AssertionFailedf("error: detected a filename %s that lexically "+
 			"precedes a file emitted before: %s", filename, s.prevFilename)
 	}
 	s.prevFilename = filename
-	if err := cloud.WriteFile(ctx, s.es, filepath.Join(s.dataFilePartition, filename), bytes.NewReader(file.buf.Bytes())); err != nil {
+	if err := s.es.WriteFile(ctx, filepath.Join(s.dataFilePartition, filename), bytes.NewReader(file.buf.Bytes())); err != nil {
 		return err
 	}
 	return nil
@@ -567,14 +558,9 @@ func (s *cloudStorageSink) Close() error {
 	return s.es.Close()
 }
 
-// Dial implements the Sink interface.
-func (s *cloudStorageSink) Dial() error {
-	return nil
-}
-
 type cloudStorageSinkKey struct {
 	topic    string
-	schemaID int64
+	schemaID descpb.DescriptorVersion
 }
 
 func (k cloudStorageSinkKey) Less(other btree.Item) bool {

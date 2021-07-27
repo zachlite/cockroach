@@ -37,7 +37,6 @@ const (
 	ClientMsgTerminate   ClientMessageType = 'X'
 
 	ServerMsgAuth                 ServerMessageType = 'R'
-	ServerMsgBackendKeyData       ServerMessageType = 'K'
 	ServerMsgBindComplete         ServerMessageType = '2'
 	ServerMsgCommandComplete      ServerMessageType = 'C'
 	ServerMsgCloseComplete        ServerMessageType = '3'

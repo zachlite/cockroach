@@ -69,7 +69,7 @@ func TestGCQueueScoreString(t *testing.T) {
 			ExpMinGCByteAgeReduction: 256 * 1024,
 			GCByteAge:                512 * 1024,
 			GCBytes:                  1024 * 3,
-			LastGC:                   5 * time.Second,
+			LikelyLastGC:             5 * time.Second,
 		},
 			`queue=true with 4.31/fuzz(1.25)=3.45=valScaleScore(4.00)*deadFrac(0.25)+intentScore(0.45)
 likely last GC: 5s ago, 3.0 KiB non-live, curr. age 512 KiB*s, min exp. reduction: 256 KiB*s`},
@@ -109,9 +109,7 @@ func TestGCQueueMakeGCScoreInvariantQuick(t *testing.T) {
 			GCBytesAge:      gcByteAge,
 		}
 		now := initialNow.Add(timePassed.Nanoseconds(), 0)
-		r := makeGCQueueScoreImpl(
-			ctx, int64(seed), now, ms, zonepb.GCPolicy{TTLSeconds: ttlSec}, hlc.Timestamp{},
-			true /* canAdvanceGCThreshold */)
+		r := makeGCQueueScoreImpl(ctx, int64(seed), now, ms, zonepb.GCPolicy{TTLSeconds: ttlSec}, hlc.Timestamp{})
 		wouldHaveToDeleteSomething := gcBytes*int64(ttlSec) < ms.GCByteAge(now.WallTime)
 		result := !r.ShouldQueue || wouldHaveToDeleteSomething
 		if !result {
@@ -133,7 +131,7 @@ func TestGCQueueMakeGCScoreAnomalousStats(t *testing.T) {
 			LiveBytes:         int64(liveBytes),
 			ValBytes:          int64(valBytes),
 			KeyBytes:          int64(keyBytes),
-		}, zonepb.GCPolicy{TTLSeconds: 60}, hlc.Timestamp{}, true /* canAdvanceGCThreshold */)
+		}, zonepb.GCPolicy{TTLSeconds: 60}, hlc.Timestamp{})
 		return r.DeadFraction >= 0 && r.DeadFraction <= 1
 	}, &quick.Config{MaxCount: 1000}); err != nil {
 		t.Fatal(err)
@@ -149,6 +147,7 @@ func TestGCQueueMakeGCScoreLargeAbortSpan(t *testing.T) {
 	ms.SysBytes += largeAbortSpanBytesThreshold
 	ms.SysCount++
 
+	gcThresh := hlc.Timestamp{WallTime: 1}
 	expiration := kvserverbase.TxnCleanupThreshold.Nanoseconds() + 1
 
 	// GC triggered if abort span should all be gc'able and it's large.
@@ -157,7 +156,7 @@ func TestGCQueueMakeGCScoreLargeAbortSpan(t *testing.T) {
 			context.Background(), seed,
 			hlc.Timestamp{WallTime: expiration + 1},
 			ms, zonepb.GCPolicy{TTLSeconds: 10000},
-			hlc.Timestamp{}, true, /* canAdvanceGCThreshold */
+			gcThresh,
 		)
 		require.True(t, r.ShouldQueue)
 		require.NotZero(t, r.FinalScore)
@@ -172,60 +171,21 @@ func TestGCQueueMakeGCScoreLargeAbortSpan(t *testing.T) {
 			context.Background(), seed,
 			hlc.Timestamp{WallTime: expiration + 1},
 			ms, zonepb.GCPolicy{TTLSeconds: 10000},
-			hlc.Timestamp{}, true, /* canAdvanceGCThreshold */
+			gcThresh,
 		)
 		require.True(t, r.ShouldQueue)
 		require.NotZero(t, r.FinalScore)
 	}
 
-	// Heuristic doesn't fire if last GC within TxnCleanupThreshold.
+	// Heuristic doesn't fire if likely last GC within TxnCleanupThreshold.
 	{
 		r := makeGCQueueScoreImpl(context.Background(), seed,
 			hlc.Timestamp{WallTime: expiration},
 			ms, zonepb.GCPolicy{TTLSeconds: 10000},
-			hlc.Timestamp{WallTime: expiration - 100}, true, /* canAdvanceGCThreshold */
+			gcThresh,
 		)
 		require.False(t, r.ShouldQueue)
 		require.Zero(t, r.FinalScore)
-	}
-}
-
-func TestGCQueueMakeGCScoreIntentCooldown(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const seed = 1
-	ctx := context.Background()
-	now := hlc.Timestamp{WallTime: 1e6 * 1e9}
-	policy := zonepb.GCPolicy{TTLSeconds: 1}
-
-	testcases := map[string]struct {
-		lastGC   hlc.Timestamp
-		mvccGC   bool
-		expectGC bool
-	}{
-		"never GCed":               {lastGC: hlc.Timestamp{}, expectGC: true},
-		"just GCed":                {lastGC: now.Add(-1, 0), expectGC: false},
-		"future GC":                {lastGC: now.Add(1, 0), expectGC: false},
-		"MVCC GC ignores cooldown": {lastGC: now.Add(-1, 0), mvccGC: true, expectGC: true},
-		"before GC cooldown":       {lastGC: now.Add(-gcQueueIntentCooldownDuration.Nanoseconds()+1, 0), expectGC: false},
-		"at GC cooldown":           {lastGC: now.Add(-gcQueueIntentCooldownDuration.Nanoseconds(), 0), expectGC: true},
-		"after GC cooldown":        {lastGC: now.Add(-gcQueueIntentCooldownDuration.Nanoseconds()-1, 0), expectGC: true},
-	}
-	for name, tc := range testcases {
-		tc := tc
-		t.Run(name, func(t *testing.T) {
-			ms := enginepb.MVCCStats{
-				IntentCount: 1e9,
-			}
-			if tc.mvccGC {
-				ms.ValBytes = 1e9
-			}
-
-			r := makeGCQueueScoreImpl(
-				ctx, seed, now, ms, policy, tc.lastGC, true /* canAdvanceGCThreshold */)
-			require.Equal(t, tc.expectGC, r.ShouldQueue)
-		})
 	}
 }
 
@@ -276,7 +236,7 @@ func (cws *cachedWriteSimulator) value(size int) roachpb.Value {
 func (cws *cachedWriteSimulator) multiKey(
 	numOps int, size int, txn *roachpb.Transaction, ms *enginepb.MVCCStats,
 ) {
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 	t, ctx := cws.t, context.Background()
 
@@ -294,7 +254,7 @@ func (cws *cachedWriteSimulator) multiKey(
 func (cws *cachedWriteSimulator) singleKeySteady(
 	qps int, duration time.Duration, size int, ms *enginepb.MVCCStats,
 ) {
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 	t, ctx := cws.t, context.Background()
 	cacheKey := fmt.Sprintf("%d-%s-%s", qps, duration, humanizeutil.IBytes(int64(size)))
@@ -344,7 +304,7 @@ func (cws *cachedWriteSimulator) shouldQueue(
 	ts := hlc.Timestamp{}.Add(ms.LastUpdateNanos+after.Nanoseconds(), 0)
 	r := makeGCQueueScoreImpl(context.Background(), 0 /* seed */, ts, ms, zonepb.GCPolicy{
 		TTLSeconds: int32(ttl.Seconds()),
-	}, hlc.Timestamp{}, true /* canAdvanceGCThreshold */)
+	}, hlc.Timestamp{})
 	if fmt.Sprintf("%.2f", r.FinalScore) != fmt.Sprintf("%.2f", prio) || b != r.ShouldQueue {
 		cws.t.Errorf("expected queued=%t (is %t), prio=%.2f, got %.2f: after=%s, ttl=%s:\nms: %+v\nscore: %s",
 			b, r.ShouldQueue, prio, r.FinalScore, after, ttl, ms, r)
@@ -449,13 +409,15 @@ func TestGCQueueMakeGCScoreRealistic(t *testing.T) {
 
 		// Write 1000 distinct 1kb intents at the initial timestamp. This means that
 		// the average intent age is just the time elapsed from now, and this is roughly
-		// normalized by one hour at the time of writing. Note that the size of the writes
+		// normalized by one day at the time of writing. Note that the size of the writes
 		// doesn't matter. In reality, the value-based GC score will often strike first.
 		cws.multiKey(100, valSize, txn, &ms)
 
-		cws.shouldQueue(false, 0.12, 1*time.Hour, irrelevantTTL, ms)
-		cws.shouldQueue(false, 0.87, 7*time.Hour, irrelevantTTL, ms)
-		cws.shouldQueue(true, 1.12, 9*time.Hour, irrelevantTTL, ms)
+		cws.shouldQueue(false, 1.00, 24*time.Hour, irrelevantTTL, ms)
+		cws.shouldQueue(false, 1.99, 2*24*time.Hour, irrelevantTTL, ms)
+		cws.shouldQueue(false, 3.99, 4*24*time.Hour, irrelevantTTL, ms)
+		cws.shouldQueue(false, 6.98, 7*24*time.Hour, irrelevantTTL, ms)
+		cws.shouldQueue(true, 11.97, 12*24*time.Hour, irrelevantTTL, ms)
 	}
 }
 
@@ -609,7 +571,7 @@ func TestGCQueueProcess(t *testing.T) {
 
 		now := tc.Clock().Now()
 		newThreshold := gc.CalculateThreshold(now, *zone.GC)
-		return gc.Run(ctx, desc, snap, now, newThreshold, gc.RunOptions{IntentAgeThreshold: intentAgeThreshold}, *zone.GC,
+		return gc.Run(ctx, desc, snap, now, newThreshold, intentAgeThreshold, *zone.GC,
 			gc.NoopGCer{},
 			func(ctx context.Context, intents []roachpb.Intent) error {
 				return nil
@@ -933,9 +895,9 @@ func TestGCQueueTransactionTable(t *testing.T) {
 	outsideTxnPrefixEnd := keys.TransactionKey(outsideKey.Next(), uuid.UUID{})
 	var count int
 	if _, err := storage.MVCCIterate(ctx, tc.store.Engine(), outsideTxnPrefix, outsideTxnPrefixEnd, hlc.Timestamp{},
-		storage.MVCCScanOptions{}, func(roachpb.KeyValue) error {
+		storage.MVCCScanOptions{}, func(roachpb.KeyValue) (bool, error) {
 			count++
-			return nil
+			return false, nil
 		}); err != nil {
 		t.Fatal(err)
 	}
@@ -947,9 +909,9 @@ func TestGCQueueTransactionTable(t *testing.T) {
 	batch := tc.engine.NewSnapshot()
 	defer batch.Close()
 	tc.repl.raftMu.Lock()
-	tc.repl.mu.RLock()
-	tc.repl.assertStateRaftMuLockedReplicaMuRLocked(ctx, batch) // check that in-mem and on-disk state were updated
-	tc.repl.mu.RUnlock()
+	tc.repl.mu.Lock()
+	tc.repl.assertStateLocked(ctx, batch) // check that in-mem and on-disk state were updated
+	tc.repl.mu.Unlock()
 	tc.repl.raftMu.Unlock()
 }
 
@@ -1008,24 +970,23 @@ func TestGCQueueIntentResolution(t *testing.T) {
 	}
 	assert.True(t, processed, "queue not processed")
 
-	// MVCCIterate through all values to ensure intents have been fully resolved.
+	// Iterate through all values to ensure intents have been fully resolved.
 	// This must be done in a SucceedsSoon loop because intent resolution
 	// is initiated asynchronously from the GC queue.
 	testutils.SucceedsSoon(t, func() error {
 		meta := &enginepb.MVCCMetadata{}
-		// The range is specified using only global keys, since the implementation
-		// may use an intentInterleavingIter.
-		return tc.store.Engine().MVCCIterate(keys.LocalMax, roachpb.KeyMax, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
-			if !kv.Key.IsValue() {
-				if err := protoutil.Unmarshal(kv.Value, meta); err != nil {
-					return err
+		return tc.store.Engine().Iterate(roachpb.KeyMin, roachpb.KeyMax,
+			func(kv storage.MVCCKeyValue) (bool, error) {
+				if !kv.Key.IsValue() {
+					if err := protoutil.Unmarshal(kv.Value, meta); err != nil {
+						return false, err
+					}
+					if meta.Txn != nil {
+						return false, errors.Errorf("non-nil Txn after GC for key %s", kv.Key)
+					}
 				}
-				if meta.Txn != nil {
-					return errors.Errorf("non-nil Txn after GC for key %s", kv.Key)
-				}
-			}
-			return nil
-		})
+				return false, nil
+			})
 	})
 }
 

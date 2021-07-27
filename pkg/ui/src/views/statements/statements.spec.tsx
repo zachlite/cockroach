@@ -17,18 +17,9 @@ import { merge } from "lodash";
 
 import "src/protobufInit";
 import * as protos from "src/js/protos";
-import {
-  CollectedStatementStatistics,
-  ExecStats,
-  StatementStatistics,
-} from "src/util/appStats";
+import { CollectedStatementStatistics } from "src/util/appStats";
 import { appAttr, statementAttr } from "src/util/constants";
-import {
-  selectStatements,
-  selectApps,
-  selectTotalFingerprints,
-  selectLastReset,
-} from "./statementsPage";
+import { selectStatements, selectApps, selectTotalFingerprints, selectLastReset } from "./statementsPage";
 import { selectStatement } from "./statementDetails";
 import ISensitiveInfo = protos.cockroach.sql.ISensitiveInfo;
 import { AdminUIState, createAdminUIStore } from "src/redux/state";
@@ -56,16 +47,14 @@ describe("selectStatements", () => {
 
     assert.equal(result.length, 3);
 
-    const expectedFingerprints = [stmtA, stmtB, stmtC].map(
-      (stmt) => stmt.key.key_data.query,
-    );
+    const expectedFingerprints = [stmtA, stmtB, stmtC].map(stmt => stmt.key.key_data.query);
     expectedFingerprints.sort();
     const actualFingerprints = result.map((stmt: any) => stmt.label);
     actualFingerprints.sort();
     assert.deepEqual(actualFingerprints, expectedFingerprints);
   });
 
-  it("returns the statements with Internal for default ALL filter", () => {
+  it("returns the statements without Internal for default ALL filter", () => {
     const stmtA = makeFingerprint(1);
     const stmtB = makeFingerprint(2, INTERNAL_STATEMENT_PREFIX);
     const stmtC = makeFingerprint(3, INTERNAL_STATEMENT_PREFIX);
@@ -75,16 +64,14 @@ describe("selectStatements", () => {
 
     const result = selectStatements(state, props);
 
-    assert.equal(result.length, 3);
+    assert.equal(result.length, 2);
   });
 
   it("coalesces statements from different apps", () => {
     const stmtA = makeFingerprint(1);
     const stmtB = makeFingerprint(1, "foobar");
     const stmtC = makeFingerprint(1, "another");
-    const sumCount = stmtA.stats.count
-      .add(stmtB.stats.count.add(stmtC.stats.count))
-      .toNumber();
+    const sumCount = stmtA.stats.count.add(stmtB.stats.count.add(stmtC.stats.count)).toNumber();
     const state = makeStateWithStatements([stmtA, stmtB, stmtC]);
     const props = makeEmptyRouteProps();
 
@@ -135,7 +122,7 @@ describe("selectStatements", () => {
     assert.equal(result.length, 1);
   });
 
-  it('filters out statements with app set when app param is "(unset)"', () => {
+  it("filters out statements with app set when app param is \"(unset)\"", () => {
     const state = makeStateWithStatements([
       makeFingerprint(1, ""),
       makeFingerprint(2, "bar"),
@@ -148,7 +135,7 @@ describe("selectStatements", () => {
     assert.equal(result.length, 1);
   });
 
-  it('filters out statements with app set when app param is "(internal)"', () => {
+  it("filters out statements with app set when app param is \"(internal)\"", () => {
     const state = makeStateWithStatements([
       makeFingerprint(1, "$ internal_stmnt_app"),
       makeFingerprint(2, "bar"),
@@ -243,7 +230,7 @@ describe("selectTotalFingerprints", () => {
 });
 
 describe("selectLastReset", () => {
-  it('returns "unknown" if the statements data is invalid', () => {
+  it("returns \"unknown\" if the statements data is invalid", () => {
     const state = makeInvalidState();
 
     const result = selectLastReset(state);
@@ -294,9 +281,7 @@ describe("selectStatement", () => {
     const stmtA = makeFingerprint(1);
     const stmtB = makeFingerprint(1, "foobar");
     const stmtC = makeFingerprint(1, "another");
-    const sumCount = stmtA.stats.count
-      .add(stmtB.stats.count.add(stmtC.stats.count))
-      .toNumber();
+    const sumCount = stmtA.stats.count.add(stmtB.stats.count.add(stmtC.stats.count)).toNumber();
     const state = makeStateWithStatements([stmtA, stmtB, stmtC]);
     const props = makeRoutePropsWithStatement(stmtA.key.key_data.query);
 
@@ -304,11 +289,7 @@ describe("selectStatement", () => {
 
     assert.equal(result.statement, stmtA.key.key_data.query);
     assert.equal(result.stats.count.toNumber(), sumCount);
-    assert.deepEqual(result.app, [
-      stmtA.key.key_data.app,
-      stmtB.key.key_data.app,
-      stmtC.key.key_data.app,
-    ]);
+    assert.deepEqual(result.app, [stmtA.key.key_data.app, stmtB.key.key_data.app, stmtC.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.opt, { numerator: 0, denominator: 3 });
@@ -357,16 +338,7 @@ describe("selectStatement", () => {
       .add(stmtG.stats.count)
       .add(stmtH.stats.count)
       .toNumber();
-    const state = makeStateWithStatements([
-      stmtA,
-      stmtB,
-      stmtC,
-      stmtD,
-      stmtE,
-      stmtF,
-      stmtG,
-      stmtH,
-    ]);
+    const state = makeStateWithStatements([stmtA, stmtB, stmtC, stmtD, stmtE, stmtF, stmtG, stmtH]);
     const props = makeRoutePropsWithStatement(stmtA.key.key_data.query);
 
     const result = selectStatement(state, props);
@@ -388,10 +360,7 @@ describe("selectStatement", () => {
       makeFingerprint(2, "bar"),
       makeFingerprint(3, "baz"),
     ]);
-    const props = makeRoutePropsWithStatementAndApp(
-      stmtA.key.key_data.query,
-      "foo",
-    );
+    const props = makeRoutePropsWithStatementAndApp(stmtA.key.key_data.query, "foo");
 
     const result = selectStatement(state, props);
 
@@ -405,17 +374,14 @@ describe("selectStatement", () => {
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
 
-  it('filters out statements with app set when app param is "(unset)"', () => {
+  it("filters out statements with app set when app param is \"(unset)\"", () => {
     const stmtA = makeFingerprint(1, "");
     const state = makeStateWithStatements([
       stmtA,
       makeFingerprint(2, "bar"),
       makeFingerprint(3, "baz"),
     ]);
-    const props = makeRoutePropsWithStatementAndApp(
-      stmtA.key.key_data.query,
-      "(unset)",
-    );
+    const props = makeRoutePropsWithStatementAndApp(stmtA.key.key_data.query, "(unset)");
 
     const result = selectStatement(state, props);
 
@@ -429,17 +395,14 @@ describe("selectStatement", () => {
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
 
-  it('filters out statements with app set when app param is "(internal)"', () => {
+  it("filters out statements with app set when app param is \"(internal)\"", () => {
     const stmtA = makeFingerprint(1, "$ internal_stmnt_app");
     const state = makeStateWithStatements([
       stmtA,
       makeFingerprint(2, "bar"),
       makeFingerprint(3, "baz"),
     ]);
-    const props = makeRoutePropsWithStatementAndApp(
-      stmtA.key.key_data.query,
-      "(internal)",
-    );
+    const props = makeRoutePropsWithStatementAndApp(stmtA.key.key_data.query, "(internal)");
 
     const result = selectStatement(state, props);
 
@@ -454,15 +417,7 @@ describe("selectStatement", () => {
   });
 });
 
-function makeFingerprint(
-  id: number,
-  app: string = "",
-  nodeId: number = 1,
-  distSQL: boolean = false,
-  failed: boolean = false,
-  vec: boolean = false,
-  opt: boolean = false,
-) {
+function makeFingerprint(id: number, app: string = "", nodeId: number = 1, distSQL: boolean = false, failed: boolean = false, vec: boolean = false, opt: boolean = false) {
   return {
     key: {
       key_data: {
@@ -480,13 +435,11 @@ function makeFingerprint(
 }
 
 let makeStatsIndex = 1;
-function makeStats(): Required<StatementStatistics> {
+function makeStats() {
   return {
     count: Long.fromNumber(makeStatsIndex++),
     first_attempt_count: Long.fromNumber(1),
     max_retries: Long.fromNumber(0),
-    legacy_last_err: "",
-    legacy_last_err_redacted: "",
     num_rows: makeStat(),
     parse_lat: makeStat(),
     plan_lat: makeStat(),
@@ -496,24 +449,6 @@ function makeStats(): Required<StatementStatistics> {
     sensitive_info: makeEmptySensitiveInfo(),
     rows_read: makeStat(),
     bytes_read: makeStat(),
-    exec_stats: makeExecStats(),
-    sql_type: "DDL",
-    last_exec_timestamp: {
-      seconds: Long.fromInt(1599670292),
-      nanos: 111613000,
-    },
-    nodes: [Long.fromInt(1), Long.fromInt(2), Long.fromInt(3)],
-  };
-}
-
-function makeExecStats(): Required<ExecStats> {
-  return {
-    count: Long.fromNumber(10),
-    network_bytes: makeStat(),
-    max_mem_usage: makeStat(),
-    contention_time: makeStat(),
-    network_messages: makeStat(),
-    max_disk_usage: makeStat(),
   };
 }
 
@@ -547,10 +482,7 @@ function makeInvalidState(): AdminUIState {
   });
 }
 
-function makeStateWithStatementsAndLastReset(
-  statements: CollectedStatementStatistics[],
-  lastReset: number,
-) {
+function makeStateWithStatementsAndLastReset(statements: CollectedStatementStatistics[], lastReset: number) {
   const store = createAdminUIStore(H.createMemoryHistory());
   return merge(store.getState(), {
     cachedData: {

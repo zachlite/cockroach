@@ -34,16 +34,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -52,7 +51,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/flagutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -60,11 +58,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/tool"
-	"github.com/cockroachdb/pebble/vfs"
-	humanize "github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/kr/pretty"
 	"github.com/spf13/cobra"
@@ -158,17 +153,34 @@ func OpenEngine(dir string, stopper *stop.Stopper, opts OpenEngineOptions) (stor
 
 	var db storage.Engine
 
-	cfg := storage.PebbleConfig{
-		StorageConfig: storageConfig,
-		Opts:          storage.DefaultPebbleOptions(),
+	switch storage.DefaultStorageEngine {
+	case enginepb.EngineTypeDefault:
+		fallthrough
+	case enginepb.EngineTypePebble:
+		cfg := storage.PebbleConfig{
+			StorageConfig: storageConfig,
+			Opts:          storage.DefaultPebbleOptions(),
+		}
+		cfg.Opts.Cache = pebble.NewCache(server.DefaultCacheSize)
+		defer cfg.Opts.Cache.Unref()
+
+		cfg.Opts.MaxOpenFiles = int(maxOpenFiles)
+		cfg.Opts.ReadOnly = opts.ReadOnly
+
+		db, err = storage.NewPebble(context.Background(), cfg)
+
+	case enginepb.EngineTypeRocksDB:
+		cache := storage.NewRocksDBCache(server.DefaultCacheSize)
+		defer cache.Release()
+
+		cfg := storage.RocksDBConfig{
+			StorageConfig: storageConfig,
+			MaxOpenFiles:  maxOpenFiles,
+			ReadOnly:      opts.ReadOnly,
+		}
+
+		db, err = storage.NewRocksDB(cfg, cache)
 	}
-	cfg.Opts.Cache = pebble.NewCache(server.DefaultCacheSize)
-	defer cfg.Opts.Cache.Unref()
-
-	cfg.Opts.MaxOpenFiles = int(maxOpenFiles)
-	cfg.Opts.ReadOnly = opts.ReadOnly
-
-	db, err = storage.NewPebble(context.Background(), cfg)
 
 	if err != nil {
 		return nil, err
@@ -185,56 +197,6 @@ func printKey(kv storage.MVCCKeyValue) (bool, error) {
 	}
 	fmt.Printf("\n")
 	return false, nil
-}
-
-func transactionPredicate(kv storage.MVCCKeyValue) bool {
-	if kv.Key.IsValue() {
-		return false
-	}
-	_, suffix, _, err := keys.DecodeRangeKey(kv.Key.Key)
-	if err != nil {
-		return false
-	}
-	return keys.LocalTransactionSuffix.Equal(suffix)
-}
-
-func intentPredicate(kv storage.MVCCKeyValue) bool {
-	if kv.Key.IsValue() {
-		return false
-	}
-	var meta enginepb.MVCCMetadata
-	if err := protoutil.Unmarshal(kv.Value, &meta); err != nil {
-		return false
-	}
-	return meta.Txn != nil
-}
-
-var keyTypeParams = map[keyTypeFilter]struct {
-	predicate      func(kv storage.MVCCKeyValue) bool
-	minKey, maxKey storage.MVCCKey
-}{
-	showAll: {
-		predicate: func(kv storage.MVCCKeyValue) bool { return true },
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKeyMax,
-	},
-	showTxns: {
-		predicate: transactionPredicate,
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKey{Key: keys.LocalMax},
-	},
-	showValues: {
-		predicate: func(kv storage.MVCCKeyValue) bool {
-			return kv.Key.IsValue()
-		},
-		minKey: storage.NilKey,
-		maxKey: storage.MVCCKeyMax,
-	},
-	showIntents: {
-		predicate: intentPredicate,
-		minKey:    storage.NilKey,
-		maxKey:    storage.MVCCKeyMax,
-	},
 }
 
 func runDebugKeys(cmd *cobra.Command, args []string) error {
@@ -255,11 +217,7 @@ func runDebugKeys(cmd *cobra.Command, args []string) error {
 		if err := protoutil.Unmarshal(bytes, &desc); err != nil {
 			return err
 		}
-		b := catalogkv.NewBuilder(&desc)
-		if b == nil || b.DescriptorType() != catalog.Table {
-			return errors.Newf("expected a table descriptor")
-		}
-		table := b.BuildImmutable().(catalog.TableDescriptor)
+		table := tabledesc.NewImmutable(*descpb.TableFromDescriptor(&desc, hlc.Timestamp{}))
 
 		fn := func(kv storage.MVCCKeyValue) (string, error) {
 			var v roachpb.Value
@@ -284,69 +242,30 @@ func runDebugKeys(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	keyTypeOptions := keyTypeParams[debugCtx.keyTypes]
-	if debugCtx.startKey.Equal(storage.NilKey) {
-		debugCtx.startKey = keyTypeOptions.minKey
-	}
-	if debugCtx.endKey.Equal(storage.NilKey) {
-		debugCtx.endKey = keyTypeOptions.maxKey
-	}
-
 	results := 0
-	iterFunc := func(kv storage.MVCCKeyValue) error {
-		if !keyTypeOptions.predicate(kv) {
-			return nil
-		}
+	return db.Iterate(debugCtx.startKey.Key, debugCtx.endKey.Key, func(kv storage.MVCCKeyValue) (bool, error) {
 		done, err := printer(kv)
-		if err != nil {
-			return err
-		}
-		if done {
-			return iterutil.StopIteration()
+		if done || err != nil {
+			return done, err
 		}
 		results++
-		if results == debugCtx.maxResults {
-			return iterutil.StopIteration()
-		}
-		return nil
-	}
-	endKey := debugCtx.endKey.Key
-	splitScan := false
-	// If the startKey is local and the endKey is global, split into two parts
-	// to do the scan. This is because MVCCKeyAndIntentsIterKind cannot span
-	// across the two key kinds.
-	if (len(debugCtx.startKey.Key) == 0 || keys.IsLocal(debugCtx.startKey.Key)) && !(keys.IsLocal(endKey) || bytes.Equal(endKey, keys.LocalMax)) {
-		splitScan = true
-		endKey = keys.LocalMax
-	}
-	if err := db.MVCCIterate(
-		debugCtx.startKey.Key, endKey, storage.MVCCKeyAndIntentsIterKind, iterFunc); err != nil {
-		return err
-	}
-	if splitScan {
-		if err := db.MVCCIterate(keys.LocalMax, debugCtx.endKey.Key, storage.MVCCKeyAndIntentsIterKind,
-			iterFunc); err != nil {
-			return err
-		}
-	}
-	return nil
+		return results == debugCtx.maxResults, nil
+	})
 }
 
 func runDebugBallast(cmd *cobra.Command, args []string) error {
 	ballastFile := args[0] // we use cobra.ExactArgs(1)
 	dataDirectory := filepath.Dir(ballastFile)
 
-	du, err := vfs.Default.GetDiskUsage(dataDirectory)
+	fs, err := sysutil.StatFS(dataDirectory)
 	if err != nil {
 		return errors.Wrapf(err, "failed to stat filesystem %s", dataDirectory)
 	}
+	total := fs.TotalBlocks * fs.BlockSize
+	free := fs.AvailBlocks * fs.BlockSize
 
-	// Use a 'usedBytes' calculation that counts disk space reserved for the
-	// root user as used. The UsedBytes value returned by GetDiskUsage is
-	// the true count of currently allocated bytes.
-	usedBytes := du.TotalBytes - du.AvailBytes
-
-	var targetUsage uint64
+	used := total - free
+	var targetUsage int64
 	p := debugCtx.ballastSize.Percent
 	if math.Abs(p) > 100 {
 		return errors.Errorf("absolute percentage value %f greater than 100", p)
@@ -358,42 +277,32 @@ func runDebugBallast(cmd *cobra.Command, args []string) error {
 	switch {
 	case p > 0:
 		fillRatio := p / float64(100)
-		targetUsage = usedBytes + uint64((fillRatio)*float64(du.TotalBytes))
+		targetUsage = used + int64((fillRatio)*float64(total))
 	case p < 0:
 		// Negative means leave the absolute %age of disk space.
 		fillRatio := 1.0 + (p / float64(100))
-		targetUsage = uint64((fillRatio) * float64(du.TotalBytes))
+		targetUsage = int64((fillRatio) * float64(total))
 	case b > 0:
-		targetUsage = usedBytes + uint64(b)
+		targetUsage = used + b
 	case b < 0:
 		// Negative means leave that many bytes of disk space.
-		targetUsage = du.TotalBytes - uint64(-b)
+		targetUsage = total + b
 	default:
 		return errors.New("expected exactly one of percentage or bytes non-zero, found none")
 	}
-	if usedBytes > targetUsage {
+	if used > targetUsage {
 		return errors.Errorf(
 			"Used space %s already more than needed to be filled %s\n",
-			humanize.IBytes(usedBytes),
-			humanize.IBytes(targetUsage),
+			humanizeutil.IBytes(used),
+			humanizeutil.IBytes(targetUsage),
 		)
 	}
-	if usedBytes == targetUsage {
+	if used == targetUsage {
 		return nil
 	}
-	ballastSize := targetUsage - usedBytes
-
-	// Note: We intentionally fail if the target file already exists. This is
-	// a feature; we have seen users mistakenly applying the `ballast` command
-	// directly to block devices, thereby trashing their filesystem.
-	if _, err := os.Stat(ballastFile); err == nil {
-		return os.ErrExist
-	} else if !oserror.IsNotExist(err) {
-		return errors.Wrap(err, "stating ballast file")
-	}
-
-	if err := sysutil.ResizeLargeFile(ballastFile, int64(ballastSize)); err != nil {
-		return errors.Wrap(err, "error allocating ballast file")
+	ballastSize := targetUsage - used
+	if err := sysutil.CreateLargeFile(ballastFile, ballastSize); err != nil {
+		return errors.Wrap(err, "failed to fallocate to ballast file")
 	}
 	return nil
 }
@@ -429,7 +338,7 @@ func runDebugRangeData(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	iter := rditer.NewReplicaEngineDataIterator(&desc, db, debugCtx.replicated)
+	iter := rditer.NewReplicaDataIterator(&desc, db, debugCtx.replicated, false /* seekEnd */)
 	defer iter.Close()
 	results := 0
 	for ; ; iter.Next() {
@@ -438,7 +347,10 @@ func runDebugRangeData(cmd *cobra.Command, args []string) error {
 		} else if !ok {
 			break
 		}
-		kvserver.PrintEngineKeyValue(iter.UnsafeKey(), iter.UnsafeValue())
+		kvserver.PrintKeyValue(storage.MVCCKeyValue{
+			Key:   iter.Key(),
+			Value: iter.Value(),
+		})
 		results++
 		if results == debugCtx.maxResults {
 			break
@@ -461,28 +373,25 @@ func loadRangeDescriptor(
 	db storage.Engine, rangeID roachpb.RangeID,
 ) (roachpb.RangeDescriptor, error) {
 	var desc roachpb.RangeDescriptor
-	handleKV := func(kv storage.MVCCKeyValue) error {
-		if kv.Key.Timestamp.IsEmpty() {
+	handleKV := func(kv storage.MVCCKeyValue) (bool, error) {
+		if kv.Key.Timestamp == (hlc.Timestamp{}) {
 			// We only want values, not MVCCMetadata.
-			return nil
+			return false, nil
 		}
 		if err := kvserver.IsRangeDescriptorKey(kv.Key); err != nil {
 			// Range descriptor keys are interleaved with others, so if it
 			// doesn't parse as a range descriptor just skip it.
-			return nil //nolint:returnerrcheck
+			return false, nil //nolint:returnerrcheck
 		}
 		if len(kv.Value) == 0 {
 			// RangeDescriptor was deleted (range merged away).
-			return nil
+			return false, nil
 		}
 		if err := (roachpb.Value{RawBytes: kv.Value}).GetProto(&desc); err != nil {
 			log.Warningf(context.Background(), "ignoring range descriptor due to error %s: %+v", err, kv)
-			return nil
+			return false, nil
 		}
-		if desc.RangeID == rangeID {
-			return iterutil.StopIteration()
-		}
-		return nil
+		return desc.RangeID == rangeID, nil
 	}
 
 	// Range descriptors are stored by key, so we have to scan over the
@@ -490,8 +399,7 @@ func loadRangeDescriptor(
 	start := keys.LocalRangePrefix
 	end := keys.LocalRangeMax
 
-	// NB: Range descriptor keys can have intents.
-	if err := db.MVCCIterate(start, end, storage.MVCCKeyAndIntentsIterKind, handleKV); err != nil {
+	if err := db.Iterate(start, end, handleKV); err != nil {
 		return roachpb.RangeDescriptor{}, err
 	}
 	if desc.RangeID == rangeID {
@@ -512,13 +420,12 @@ func runDebugRangeDescriptors(cmd *cobra.Command, args []string) error {
 	start := keys.LocalRangePrefix
 	end := keys.LocalRangeMax
 
-	// NB: Range descriptor keys can have intents.
-	return db.MVCCIterate(start, end, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
+	return db.Iterate(start, end, func(kv storage.MVCCKeyValue) (bool, error) {
 		if kvserver.IsRangeDescriptorKey(kv.Key) != nil {
-			return nil
+			return false, nil
 		}
 		kvserver.PrintKeyValue(kv)
-		return nil
+		return false, nil
 	})
 }
 
@@ -571,14 +478,9 @@ Decode and print a hexadecimal-encoded key-value pair.
 		isTS := bytes.HasPrefix(bs[0], keys.TimeseriesPrefix)
 		k, err := storage.DecodeMVCCKey(bs[0])
 		if err != nil {
-			// - Could be an EngineKey.
-			// - Older versions of the consistency checker give you diffs with a raw_key that
-			//   is already a roachpb.Key, so make a half-assed attempt to support both.
+			// Older versions of the consistency checker give you diffs with a raw_key that
+			// is already a roachpb.Key, so make a half-assed attempt to support both.
 			if !isTS {
-				if k, ok := storage.DecodeEngineKey(bs[0]); ok {
-					kvserver.PrintEngineKeyValue(k, bs[1])
-					return nil
-				}
 				fmt.Printf("unable to decode key: %v, assuming it's a roachpb.Key with fake timestamp;\n"+
 					"if the result below looks like garbage, then it likely is:\n\n", err)
 			}
@@ -649,10 +551,9 @@ func runDebugRaftLog(cmd *cobra.Command, args []string) error {
 		string(storage.EncodeKey(storage.MakeMVCCMetadataKey(start))),
 		string(storage.EncodeKey(storage.MakeMVCCMetadataKey(end))))
 
-	// NB: raft log does not have intents.
-	return db.MVCCIterate(start, end, storage.MVCCKeyIterKind, func(kv storage.MVCCKeyValue) error {
+	return db.Iterate(start, end, func(kv storage.MVCCKeyValue) (bool, error) {
 		kvserver.PrintKeyValue(kv)
-		return nil
+		return false, nil
 	})
 }
 
@@ -680,7 +581,6 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	var rangeID roachpb.RangeID
 	gcTTLInSeconds := int64((24 * time.Hour).Seconds())
 	intentAgeThreshold := gc.IntentAgeThreshold.Default()
-	intentBatchSize := gc.MaxIntentsPerCleanupBatch.Default()
 
 	if len(args) > 3 {
 		var err error
@@ -712,25 +612,22 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	var descs []roachpb.RangeDescriptor
 
 	if _, err := storage.MVCCIterate(context.Background(), db, start, end, hlc.MaxTimestamp,
-		storage.MVCCScanOptions{Inconsistent: true}, func(kv roachpb.KeyValue) error {
+		storage.MVCCScanOptions{Inconsistent: true}, func(kv roachpb.KeyValue) (bool, error) {
 			var desc roachpb.RangeDescriptor
 			_, suffix, _, err := keys.DecodeRangeKey(kv.Key)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !bytes.Equal(suffix, keys.LocalRangeDescriptorSuffix) {
-				return nil
+				return false, nil
 			}
 			if err := kv.Value.GetProto(&desc); err != nil {
-				return err
+				return false, err
 			}
 			if desc.RangeID == rangeID || rangeID == 0 {
 				descs = append(descs, desc)
 			}
-			if desc.RangeID == rangeID {
-				return iterutil.StopIteration()
-			}
-			return nil
+			return desc.RangeID == rangeID, nil
 		}); err != nil {
 		return err
 	}
@@ -748,7 +645,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 		info, err := gc.Run(
 			context.Background(),
 			&desc, snap,
-			now, thresh, gc.RunOptions{IntentAgeThreshold: intentAgeThreshold, MaxIntentsPerIntentCleanupBatch: intentBatchSize}, policy,
+			now, thresh, intentAgeThreshold, policy,
 			gc.NoopGCer{},
 			func(_ context.Context, _ []roachpb.Intent) error { return nil },
 			func(_ context.Context, _ *roachpb.Transaction) error { return nil },
@@ -762,14 +659,44 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// DebugPebbleCmd is the root of all debug pebble commands.
-// Exported to allow modification by CCL code.
-var DebugPebbleCmd = &cobra.Command{
+var debugRocksDBCmd = &cobra.Command{
+	Use:   "rocksdb",
+	Short: "run the RocksDB 'ldb' tool",
+	Long: `
+Runs the RocksDB 'ldb' tool, which provides various subcommands for examining
+raw store data. 'cockroach debug rocksdb' accepts the same arguments and flags
+as 'ldb'.
+
+https://github.com/facebook/rocksdb/wiki/Administration-and-Data-Access-Tool#ldb-tool
+`,
+	// LDB does its own flag parsing.
+	// TODO(mberhault): support encrypted stores.
+	DisableFlagParsing: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		storage.RunLDB(args)
+	},
+}
+
+var debugPebbleCmd = &cobra.Command{
 	Use:   "pebble [command]",
 	Short: "run a Pebble introspection tool command",
 	Long: `
 Allows the use of pebble tools, such as to introspect manifests, SSTables, etc.
 `,
+}
+
+var debugSSTDumpCmd = &cobra.Command{
+	Use:   "sst_dump",
+	Short: "run the RocksDB 'sst_dump' tool",
+	Long: `
+Runs the RocksDB 'sst_dump' tool
+`,
+	// sst_dump does its own flag parsing.
+	// TODO(mberhault): support encrypted stores.
+	DisableFlagParsing: true,
+	Run: func(cmd *cobra.Command, args []string) {
+		storage.RunSSTDump(args)
+	},
 }
 
 var debugEnvCmd = &cobra.Command{
@@ -812,27 +739,9 @@ func runDebugCompact(cmd *cobra.Command, args []string) error {
 		fmt.Printf("approximate reported database size before compaction: %s\n", humanizeutil.IBytes(int64(approxBytesBefore)))
 	}
 
-	// Begin compacting the store in a separate goroutine.
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- errors.Wrap(db.Compact(), "while compacting")
-	}()
-
-	// Print the current LSM every minute.
-	ticker := time.NewTicker(time.Minute)
-	for done := false; !done; {
-		select {
-		case <-ticker.C:
-			fmt.Printf("%s\n", db.GetMetrics())
-		case err := <-errCh:
-			ticker.Stop()
-			if err != nil {
-				return err
-			}
-			done = true
-		}
+	if err := db.Compact(); err != nil {
+		return errors.Wrap(err, "while compacting")
 	}
-	fmt.Printf("%s\n", db.GetMetrics())
 
 	{
 		approxBytesAfter, err := db.ApproximateDiskBytes(roachpb.KeyMin, roachpb.KeyMax)
@@ -841,6 +750,47 @@ func runDebugCompact(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("approximate reported database size after compaction: %s\n", humanizeutil.IBytes(int64(approxBytesAfter)))
 	}
+	return nil
+}
+
+var debugSSTablesCmd = &cobra.Command{
+	Use:   "sstables <directory>",
+	Short: "list the sstables in a store",
+	Long: `
+
+List the sstables in a store. The output format is 1 or more lines of:
+
+  level [ total size #files ]: file sizes
+
+Only non-empty levels are shown. For levels greater than 0, the files span
+non-overlapping ranges of the key space. Level-0 is special in that sstables
+are created there by flushing the mem-table, thus every level-0 sstable must be
+consulted to see if it contains a particular key. Within a level, the file
+sizes are displayed in decreasing order and bucketed by the number of files of
+that size. The following example shows 3-level output. In Level-3, there are 19
+total files and 14 files that are 129 MiB in size.
+
+  1 [   8M  3 ]: 7M 1M 63K
+  2 [ 110M  7 ]: 31M 30M 13M[2] 10M 8M 5M
+  3 [   2G 19 ]: 129M[14] 122M 93M 24M 18M 9M
+
+The suffixes K, M, G and T are used for terseness to represent KiB, MiB, GiB
+and TiB.
+`,
+	Args: cobra.ExactArgs(1),
+	RunE: MaybeDecorateGRPCError(runDebugSSTables),
+}
+
+func runDebugSSTables(cmd *cobra.Command, args []string) error {
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.Background())
+
+	db, err := OpenExistingStore(args[0], stopper, true /* readOnly */)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%s", db.GetSSTables())
 	return nil
 }
 
@@ -936,7 +886,7 @@ func parseGossipValues(gossipInfo *gossip.InfoStatus) (string, error) {
 			}
 			output = append(output, fmt.Sprintf("%q: %+v", key, desc))
 		} else if strings.HasPrefix(key, gossip.KeyNodeLivenessPrefix) {
-			var liveness livenesspb.Liveness
+			var liveness kvserverpb.Liveness
 			if err := protoutil.Unmarshal(bytes, &liveness); err != nil {
 				return "", errors.Wrapf(err, "failed to parse value for key %q", key)
 			}
@@ -1003,8 +953,7 @@ var debugUnsafeRemoveDeadReplicasCmd = &cobra.Command{
 This command is UNSAFE and should only be used with the supervision of
 a Cockroach Labs engineer. It is a last-resort option to recover data
 after multiple node failures. The recovered data is not guaranteed to
-be consistent. If a suitable backup exists, restore it instead of
-using this tool.
+be consistent.
 
 The --dead-store-ids flag takes a comma-separated list of dead store
 IDs and scans this store for any ranges whose only live replica is on
@@ -1012,34 +961,11 @@ this store. These range descriptors will be edited to forcibly remove
 the dead stores, allowing the range to recover from this single
 replica.
 
-This command will prompt for confirmation before committing its changes.
-
-It is safest to run this command while all nodes are stopped. In some
-circumstances it may be possible to run it while some nodes are still
-running provided all nodes containing replicas of nodes that have lost
-quorum are stopped.
-
-It is recommended to take a filesystem-level backup or snapshot of the
-nodes to be affected before running this command (remember that it is
-not safe to take a filesystem-level backup of a running node, but it is
-possible while the node is stopped)
-
-WARNINGS
-
-This tool will cause previously committed data to be lost. It does not
-preserve atomicity of transactions, so further inconsistencies and
-undefined behavior may result. Before proceeding at the yes/no prompt,
-review the ranges that are affected to consider the possible impact
-of inconsistencies. Further remediation may be necessary after running
-this tool, including dropping and recreating affected indexes, or in the
-worst case creating a new backup or export of this cluster's data for
-restoration into a brand new cluster. Because of the latter possibilities,
-this tool is a slower means of disaster recovery than restoring from
-a backup.
-
 Must only be used when the dead stores are lost and unrecoverable. If
 the dead stores were to rejoin the cluster after this command was
 used, data may be corrupted.
+
+This command will prompt for confirmation before committing its changes.
 
 After this command is used, the node should not be restarted until at
 least 10 seconds have passed since it was stopped. Restarting it too
@@ -1115,10 +1041,10 @@ func removeDeadReplicas(
 
 	var newDescs []roachpb.RangeDescriptor
 
-	err = kvserver.IterateRangeDescriptors(ctx, db, func(desc roachpb.RangeDescriptor) error {
+	err = kvserver.IterateRangeDescriptors(ctx, db, func(desc roachpb.RangeDescriptor) (bool, error) {
 		hasSelf := false
 		numDeadPeers := 0
-		allReplicas := desc.Replicas().Descriptors()
+		allReplicas := desc.Replicas().All()
 		maxLivePeer := roachpb.StoreID(-1)
 		for _, rep := range allReplicas {
 			if rep.StoreID == storeIdent.StoreID {
@@ -1138,7 +1064,7 @@ func removeDeadReplicas(
 				return !ok
 			})
 			if canMakeProgress {
-				return nil
+				return false, nil
 			}
 
 			// Rewrite the range as having a single replica. The winning
@@ -1161,12 +1087,12 @@ func removeDeadReplicas(
 				StoreID:   storeIdent.StoreID,
 				ReplicaID: desc.NextReplicaID,
 			}}
-			newDesc.SetReplicas(roachpb.MakeReplicaSet(replicas))
+			newDesc.SetReplicas(roachpb.MakeReplicaDescriptors(replicas))
 			newDesc.NextReplicaID++
 			fmt.Printf("Replica %s -> %s\n", &desc, &newDesc)
 			newDescs = append(newDescs, newDesc)
 		}
-		return nil
+		return false, nil
 	})
 	if err != nil {
 		return nil, err
@@ -1267,18 +1193,18 @@ func removeDeadReplicas(
 	return batch, nil
 }
 
-var debugMergeLogsCmd = &cobra.Command{
+var debugMergeLogsCommand = &cobra.Command{
 	Use:   "merge-logs <log file globs>",
 	Short: "merge multiple log files from different machines into a single stream",
 	Long: `
 Takes a list of glob patterns (not left exclusively to the shell because of
-MAX_ARG_STRLEN, usually 128kB) which will be walked and whose contained log
-files and merged them into a single stream printed to stdout. Files not matching
-the log file name pattern are ignored. If log lines appear out of order within
-a file (which happens), the timestamp is ratcheted to the highest value seen so far.
-The command supports efficient time filtering as well as multiline regexp pattern
-matching via flags. If the filter regexp contains captures, such as
-'^abc(hello)def(world)', only the captured parts will be printed.
+MAX_ARG_STRLEN, usually 128kB) pointing to log files and merges them into a
+single stream printed to stdout. Files not matching the log file name pattern
+are ignored. If log lines appear out of order within a file (which happens), the
+timestamp is ratcheted to the highest value seen so far. The command supports
+efficient time filtering as well as multiline regexp pattern matching via flags.
+If the filter regexp contains captures, such as '^abc(hello)def(world)', only
+the captured parts will be printed.
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runDebugMergeLogs,
@@ -1295,9 +1221,8 @@ var debugMergeLogsOpts = struct {
 	prefix         string
 	keepRedactable bool
 	redactInput    bool
-	format         string
 }{
-	program:        nil, // match everything
+	program:        regexp.MustCompile("^cockroach.*$"),
 	file:           regexp.MustCompile(log.FilePattern),
 	keepRedactable: true,
 	redactInput:    false,
@@ -1309,7 +1234,7 @@ func runDebugMergeLogs(cmd *cobra.Command, args []string) error {
 	inputEditMode := log.SelectEditMode(o.redactInput, o.keepRedactable)
 
 	s, err := newMergedStreamFromPatterns(context.Background(),
-		args, o.file, o.program, o.from, o.to, inputEditMode, o.format)
+		args, o.file, o.program, o.from, o.to, inputEditMode)
 	if err != nil {
 		return err
 	}
@@ -1327,15 +1252,17 @@ var DebugCmdsForRocksDB = []*cobra.Command{
 	debugRaftLogCmd,
 	debugRangeDataCmd,
 	debugRangeDescriptorsCmd,
+	debugSSTablesCmd,
 }
 
 // All other debug commands go here.
 var debugCmds = append(DebugCmdsForRocksDB,
 	debugBallastCmd,
-	debugCheckLogConfigCmd,
 	debugDecodeKeyCmd,
 	debugDecodeValueCmd,
 	debugDecodeProtoCmd,
+	debugRocksDBCmd,
+	debugSSTDumpCmd,
 	debugGossipValuesCmd,
 	debugTimeSeriesDumpCmd,
 	debugSyncBenchCmd,
@@ -1343,9 +1270,7 @@ var debugCmds = append(DebugCmdsForRocksDB,
 	debugUnsafeRemoveDeadReplicasCmd,
 	debugEnvCmd,
 	debugZipCmd,
-	debugMergeLogsCmd,
-	debugListFilesCmd,
-	debugResetQuorumCmd,
+	debugMergeLogsCommand,
 )
 
 // DebugCmd is the root of all debug commands. Exported to allow modification by CCL code.
@@ -1360,7 +1285,7 @@ process that has failed and cannot restart.
 	RunE: usageAndErr,
 }
 
-// mvccValueFormatter is a fmt.Formatter for MVCC values.
+// mvccValueFormatter is an fmt.Formatter for MVCC values.
 type mvccValueFormatter struct {
 	kv  storage.MVCCKeyValue
 	err error
@@ -1375,59 +1300,29 @@ func (m mvccValueFormatter) Format(f fmt.State, c rune) {
 	fmt.Fprint(f, kvserver.SprintKeyValue(m.kv, false /* printKey */))
 }
 
-// lockValueFormatter is a fmt.Formatter for lock values.
-type lockValueFormatter struct {
-	value []byte
-}
-
-// Format implements the fmt.Formatter interface.
-func (m lockValueFormatter) Format(f fmt.State, c rune) {
-	fmt.Fprint(f, kvserver.SprintIntent(m.value))
-}
-
-// pebbleToolFS is the vfs.FS that the pebble tool should use.
-// It is necessary because an FS must be passed to tool.New before
-// the command line flags are parsed (i.e. before we can determine
-// if we have an encrypted FS).
-var pebbleToolFS = &swappableFS{vfs.Default}
-
 func init() {
 	DebugCmd.AddCommand(debugCmds...)
 
 	// Note: we hook up FormatValue here in order to avoid a circular dependency
 	// between kvserver and storage.
-	storage.EngineComparer.FormatValue = func(key, value []byte) fmt.Formatter {
-		decoded, ok := storage.DecodeEngineKey(key)
-		if !ok {
-			return mvccValueFormatter{err: errors.Errorf("invalid encoded engine key: %x", key)}
+	storage.MVCCComparer.FormatValue = func(key, value []byte) fmt.Formatter {
+		decoded, err := storage.DecodeMVCCKey(key)
+		if err != nil {
+			return mvccValueFormatter{err: err}
 		}
-		if decoded.IsMVCCKey() {
-			mvccKey, err := decoded.ToMVCCKey()
-			if err != nil {
-				return mvccValueFormatter{err: err}
-			}
-			return mvccValueFormatter{kv: storage.MVCCKeyValue{Key: mvccKey, Value: value}}
-		}
-		return lockValueFormatter{value: value}
+		return mvccValueFormatter{kv: storage.MVCCKeyValue{Key: decoded, Value: value}}
 	}
 
 	// To be able to read Cockroach-written RocksDB manifests/SSTables, comparator
 	// and merger functions must be specified to pebble that match the ones used
 	// to write those files.
 	pebbleTool := tool.New(tool.Mergers(storage.MVCCMerger),
-		tool.DefaultComparer(storage.EngineComparer),
-		tool.FS(&absoluteFS{pebbleToolFS}),
-	)
-	DebugPebbleCmd.AddCommand(pebbleTool.Commands...)
-	initPebbleCmds(DebugPebbleCmd)
-	DebugCmd.AddCommand(DebugPebbleCmd)
+		tool.DefaultComparer(storage.MVCCComparer))
+	debugPebbleCmd.AddCommand(pebbleTool.Commands...)
+	DebugCmd.AddCommand(debugPebbleCmd)
 
-	doctorExamineCmd.AddCommand(doctorExamineClusterCmd, doctorExamineZipDirCmd)
-	doctorRecreateCmd.AddCommand(doctorRecreateClusterCmd, doctorRecreateZipDirCmd)
-	debugDoctorCmd.AddCommand(doctorExamineCmd, doctorRecreateCmd, doctorExamineFallbackClusterCmd, doctorExamineFallbackZipDirCmd)
+	debugDoctorCmd.AddCommand(debugDoctorCmds...)
 	DebugCmd.AddCommand(debugDoctorCmd)
-
-	DebugCmd.AddCommand(debugJobTraceFromClusterCmd)
 
 	f := debugSyncBenchCmd.Flags()
 	f.IntVarP(&syncBenchOpts.Concurrency, "concurrency", "c", syncBenchOpts.Concurrency,
@@ -1441,7 +1336,7 @@ func init() {
 	f.IntSliceVar(&removeDeadReplicasOpts.deadStoreIDs, "dead-store-ids", nil,
 		"list of dead store IDs")
 
-	f = debugMergeLogsCmd.Flags()
+	f = debugMergeLogsCommand.Flags()
 	f.Var(flagutil.Time(&debugMergeLogsOpts.from), "from",
 		"time before which messages should be filtered")
 	// TODO(knz): the "to" should be named "until" - it's a time boundary, not a space boundary.
@@ -1460,60 +1355,10 @@ func init() {
 		"keep the output log file redactable")
 	f.BoolVar(&debugMergeLogsOpts.redactInput, "redact", debugMergeLogsOpts.redactInput,
 		"redact the input files to remove sensitive information")
-	f.StringVar(&debugMergeLogsOpts.format, "format", "",
-		"log format of the input files")
 
 	f = debugDecodeProtoCmd.Flags()
 	f.StringVar(&debugDecodeProtoName, "schema", "cockroach.sql.sqlbase.Descriptor",
 		"fully qualified name of the proto to decode")
 	f.BoolVar(&debugDecodeProtoEmitDefaults, "emit-defaults", true,
 		"encode default values for every field")
-
-	f = debugCheckLogConfigCmd.Flags()
-	f.Var(&debugLogChanSel, "only-channels", "selection of channels to include in the output diagram.")
-
-	f = debugTimeSeriesDumpCmd.Flags()
-	f.Var(&debugTimeSeriesDumpOpts.format, "format", "output format (text, csv, tsv, raw)")
-}
-
-func initPebbleCmds(cmd *cobra.Command) {
-	for _, c := range cmd.Commands() {
-		wrapped := c.PreRunE
-		c.PreRunE = func(cmd *cobra.Command, args []string) error {
-			if wrapped != nil {
-				if err := wrapped(cmd, args); err != nil {
-					return err
-				}
-			}
-			return pebbleCryptoInitializer()
-		}
-		initPebbleCmds(c)
-	}
-}
-
-func pebbleCryptoInitializer() error {
-	storageConfig := base.StorageConfig{
-		Settings: serverCfg.Settings,
-		Dir:      serverCfg.Stores.Specs[0].Path,
-	}
-
-	if PopulateRocksDBConfigHook != nil {
-		if err := PopulateRocksDBConfigHook(&storageConfig); err != nil {
-			return err
-		}
-	}
-
-	cfg := storage.PebbleConfig{
-		StorageConfig: storageConfig,
-		Opts:          storage.DefaultPebbleOptions(),
-	}
-
-	// This has the side effect of storing the encrypted FS into cfg.Opts.FS.
-	_, _, err := storage.ResolveEncryptedEnvOptions(&cfg)
-	if err != nil {
-		return err
-	}
-
-	pebbleToolFS.set(cfg.Opts.FS)
-	return nil
 }

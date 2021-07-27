@@ -20,11 +20,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
@@ -52,18 +50,13 @@ type Connector interface {
 	// Metadata keys directly. Instead, the RangeLookup requests are proxied
 	// through existing KV nodes while being subject to additional validation
 	// (e.g. is the Range being requested owned by the requesting tenant?).
-	rangecache.RangeDescriptorDB
+	kvcoord.RangeDescriptorDB
 
 	// Connector is capable of providing a filtered view of the SystemConfig
 	// containing only information applicable to secondary tenants. This
 	// obviates the need for SQL-only tenant processes to join the cluster-wide
 	// gossip network.
 	config.SystemConfigProvider
-
-	// Connector is capable of knowing every region in the cluster.
-	// This is necessary for region validation for zone configurations and
-	// multi-region primitives.
-	serverpb.RegionsServer
 }
 
 // ConnectorConfig encompasses the configuration required to create a Connector.

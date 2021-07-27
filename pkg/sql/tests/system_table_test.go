@@ -22,15 +22,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/datadriven"
+	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
@@ -65,7 +66,7 @@ func TestInitialKeys(t *testing.T) {
 			keys.SystemDatabaseID,
 			keys.MaxReservedDescID,
 			"CREATE TABLE system.x (val INTEGER PRIMARY KEY)",
-			descpb.NewDefaultPrivilegeDescriptor(security.NodeUserName()),
+			descpb.NewDefaultPrivilegeDescriptor(security.NodeUser),
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -161,7 +162,7 @@ func TestSystemTableLiterals(t *testing.T) {
 	type testcase struct {
 		id     descpb.ID
 		schema string
-		pkg    catalog.TableDescriptor
+		pkg    *tabledesc.Immutable
 	}
 
 	for _, test := range []testcase{
@@ -190,12 +191,8 @@ func TestSystemTableLiterals(t *testing.T) {
 		{keys.StatementDiagnosticsTableID, systemschema.StatementDiagnosticsTableSchema, systemschema.StatementDiagnosticsTable},
 		{keys.ScheduledJobsTableID, systemschema.ScheduledJobsTableSchema, systemschema.ScheduledJobsTable},
 		{keys.SqllivenessID, systemschema.SqllivenessTableSchema, systemschema.SqllivenessTable},
-		{keys.MigrationsID, systemschema.MigrationsTableSchema, systemschema.MigrationsTable},
-		{keys.JoinTokensTableID, systemschema.JoinTokensTableSchema, systemschema.JoinTokensTable},
-		{keys.StatementStatisticsTableID, systemschema.StatementStatisticsTableSchema, systemschema.StatementStatisticsTable},
-		{keys.TransactionStatisticsTableID, systemschema.TransactionStatisticsTableSchema, systemschema.TransactionStatisticsTable},
 	} {
-		privs := *test.pkg.GetPrivileges()
+		privs := *test.pkg.Privileges
 		gen, err := sql.CreateTestTableDescriptor(
 			context.Background(),
 			keys.SystemDatabaseID,
@@ -206,12 +203,12 @@ func TestSystemTableLiterals(t *testing.T) {
 		if err != nil {
 			t.Fatalf("test: %+v, err: %v", test, err)
 		}
-		require.NoError(t, catalog.ValidateSelf(gen))
+		require.NoError(t, gen.ValidateTable())
 
-		if !test.pkg.TableDesc().Equal(gen.TableDesc()) {
+		if !proto.Equal(test.pkg.TableDesc(), gen.TableDesc()) {
 			diff := strings.Join(pretty.Diff(test.pkg.TableDesc(), gen.TableDesc()), "\n")
 			t.Errorf("%s table descriptor generated from CREATE TABLE statement does not match "+
-				"hardcoded table descriptor:\n%s", test.pkg.GetName(), diff)
+				"hardcoded table descriptor:\n%s", test.pkg.Name, diff)
 		}
 	}
 }

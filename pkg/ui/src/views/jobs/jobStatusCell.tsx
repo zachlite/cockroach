@@ -9,10 +9,10 @@
 // licenses/APL.txt.
 
 import React from "react";
-import { cockroach } from "src/js/protos";
-import { HighwaterTimestamp } from "src/views/jobs/highwaterTimestamp";
-import { JobStatus } from "./jobStatus";
-import Job = cockroach.server.serverpb.IJobResponse;
+import {cockroach} from "src/js/protos";
+import {HighwaterTimestamp} from "src/views/jobs/highwaterTimestamp";
+import {JobStatus} from "./jobStatus";
+import Job = cockroach.server.serverpb.JobsResponse.IJob;
 
 export interface JobStatusCellProps {
   job: Job;
@@ -26,12 +26,7 @@ export const JobStatusCell: React.FC<JobStatusCellProps> = ({
   compact = false,
 }) => {
   if (job.highwater_timestamp) {
-    return (
-      <HighwaterTimestamp
-        highwater={job.highwater_timestamp}
-        tooltip={job.highwater_decimal}
-      />
-    );
+    return <HighwaterTimestamp highwater={job.highwater_timestamp} tooltip={job.highwater_decimal}/>;
   }
   return <JobStatus job={job} lineWidth={lineWidth} compact={compact} />;
 };

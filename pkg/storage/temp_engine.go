@@ -12,10 +12,12 @@ package storage
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/pebble"
@@ -25,9 +27,41 @@ import (
 // NewTempEngine creates a new engine for DistSQL processors to use when
 // the working set is larger than can be stored in memory.
 func NewTempEngine(
-	ctx context.Context, tempStorage base.TempStorageConfig, storeSpec base.StoreSpec,
+	ctx context.Context,
+	engine enginepb.EngineType,
+	tempStorage base.TempStorageConfig,
+	storeSpec base.StoreSpec,
 ) (diskmap.Factory, fs.FS, error) {
-	return NewPebbleTempEngine(ctx, tempStorage, storeSpec)
+	switch engine {
+	case enginepb.EngineTypeTeePebbleRocksDB:
+		fallthrough
+	case enginepb.EngineTypeDefault:
+		fallthrough
+	case enginepb.EngineTypePebble:
+		return NewPebbleTempEngine(ctx, tempStorage, storeSpec)
+	case enginepb.EngineTypeRocksDB:
+		return NewRocksDBTempEngine(tempStorage, storeSpec)
+	}
+	panic(fmt.Sprintf("unknown engine type: %d", engine))
+}
+
+type rocksDBTempEngine struct {
+	db *RocksDB
+}
+
+// Close implements the diskmap.Factory interface.
+func (r *rocksDBTempEngine) Close() {
+	r.db.Close()
+}
+
+// NewSortedDiskMap implements the diskmap.Factory interface.
+func (r *rocksDBTempEngine) NewSortedDiskMap() diskmap.SortedDiskMap {
+	return newRocksDBMap(r.db, false /* allowDuplications */)
+}
+
+// NewSortedDiskMultiMap implements the diskmap.Factory interface.
+func (r *rocksDBTempEngine) NewSortedDiskMultiMap() diskmap.SortedDiskMap {
+	return newRocksDBMap(r.db, true /* allowDuplicates */)
 }
 
 // storageConfigFromTempStorageConfigAndStoreSpec creates a base.StorageConfig
@@ -36,13 +70,39 @@ func storageConfigFromTempStorageConfigAndStoreSpec(
 	config base.TempStorageConfig, spec base.StoreSpec,
 ) base.StorageConfig {
 	return base.StorageConfig{
-		Attrs:             roachpb.Attributes{},
-		Dir:               config.Path,
-		MaxSize:           0, // doesn't matter for temp storage - it's not enforced in any way.
-		Settings:          config.Settings,
-		UseFileRegistry:   spec.UseFileRegistry,
-		EncryptionOptions: spec.EncryptionOptions,
+		Attrs: roachpb.Attributes{},
+		Dir:   config.Path,
+		// MaxSize doesn't matter for temp storage - it's not enforced in any way.
+		MaxSize:         0,
+		UseFileRegistry: spec.UseFileRegistry,
+		ExtraOptions:    spec.ExtraOptions,
 	}
+}
+
+// NewRocksDBTempEngine creates a new RocksDB engine for DistSQL processors to use when
+// the working set is larger than can be stored in memory.
+func NewRocksDBTempEngine(
+	tempStorage base.TempStorageConfig, storeSpec base.StoreSpec,
+) (diskmap.Factory, fs.FS, error) {
+	if tempStorage.InMemory {
+		// TODO(arjun): Limit the size of the store once #16750 is addressed.
+		// Technically we do not pass any attributes to temporary store.
+		db := newRocksDBInMem(roachpb.Attributes{} /* attrs */, 0 /* cacheSize */)
+		return &rocksDBTempEngine{db: db}, db, nil
+	}
+
+	cfg := RocksDBConfig{
+		StorageConfig: storageConfigFromTempStorageConfigAndStoreSpec(tempStorage, storeSpec),
+		MaxOpenFiles:  128, // TODO(arjun): Revisit this.
+	}
+	rocksDBCache := NewRocksDBCache(0)
+	defer rocksDBCache.Release()
+	db, err := NewRocksDB(cfg, rocksDBCache)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &rocksDBTempEngine{db: db}, db, nil
 }
 
 type pebbleTempEngine struct {
@@ -106,13 +166,9 @@ func newPebbleTempEngine(
 			Opts:          opts,
 		},
 	)
-
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Set store ID for the pebble engine.
-	p.SetStoreID(ctx, base.TempStoreID)
 
 	return &pebbleTempEngine{db: p.db}, p, nil
 }

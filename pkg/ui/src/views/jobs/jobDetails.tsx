@@ -11,41 +11,45 @@
 import { Col, Row } from "antd";
 import _ from "lodash";
 import { TimestampToMoment } from "src/util/convert";
-import Long from "long";
 import React from "react";
 import Helmet from "react-helmet";
 import { connect } from "react-redux";
 import { RouteComponentProps } from "react-router-dom";
 import { cockroach } from "src/js/protos";
-import { jobRequestKey, refreshJob } from "src/redux/apiReducers";
+import { CachedDataReducerState, jobsKey, refreshJobs } from "src/redux/apiReducers";
 import { AdminUIState } from "src/redux/state";
 import { getMatchParamByName } from "src/util/query";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import { showSetting, statusSetting, typeSetting } from ".";
+import Loading from "../shared/components/loading";
 import SqlBox from "../shared/components/sql/box";
 import { SummaryCard } from "../shared/components/summaryCard";
 
-import Job = cockroach.server.serverpb.JobResponse;
-import JobRequest = cockroach.server.serverpb.JobRequest;
+import Job = cockroach.server.serverpb.JobsResponse.IJob;
+import JobsRequest = cockroach.server.serverpb.JobsRequest;
+import JobsResponse = cockroach.server.serverpb.JobsResponse;
 import { Button } from "@cockroachlabs/cluster-ui";
 import { ArrowLeft } from "@cockroachlabs/icons";
 import { DATE_FORMAT } from "src/util/format";
 import { JobStatusCell } from "./jobStatusCell";
 import "src/views/shared/components/summaryCard/styles.styl";
-import * as protos from "src/js/protos";
 
 interface JobsTableProps extends RouteComponentProps {
-  refreshJob: typeof refreshJob;
+  status: string;
+  show: string;
+  type: number;
+  refreshJobs: typeof refreshJobs;
+  jobs: CachedDataReducerState<JobsResponse>;
   job: Job;
 }
 
 class JobDetails extends React.Component<JobsTableProps, {}> {
   refresh = (props = this.props) => {
-    props.refreshJob(
-      new JobRequest({
-        job_id: Long.fromString(getMatchParamByName(props.match, "id")),
-      }),
-    );
-  };
+    props.refreshJobs(new JobsRequest({
+      status: props.status,
+      type: props.type,
+      limit: parseInt(props.show, 10),
+    }));
+  }
 
   componentDidMount() {
     this.refresh();
@@ -58,7 +62,7 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
     return (
       <Row gutter={16}>
         <Col className="gutter-row" span={16}>
-          <SqlBox value={job.description} />
+          <SqlBox value={ job.description } />
           <SummaryCard>
             <h3 className="summary--card__status--title">Status</h3>
             <JobStatusCell job={job} lineWidth={1.5} />
@@ -69,19 +73,13 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
             <Row>
               <Col span={24}>
                 <div className="summary--card__counting">
-                  <h3 className="summary--card__counting--value">
-                    {TimestampToMoment(job.created).format(DATE_FORMAT)}
-                  </h3>
-                  <p className="summary--card__counting--label">
-                    Creation time
-                  </p>
+                  <h3 className="summary--card__counting--value">{TimestampToMoment(job.created).format(DATE_FORMAT)}</h3>
+                  <p className="summary--card__counting--label">Creation time</p>
                 </div>
               </Col>
               <Col span={24}>
                 <div className="summary--card__counting">
-                  <h3 className="summary--card__counting--value">
-                    {job.username}
-                  </h3>
+                  <h3 className="summary--card__counting--value">{job.username}</h3>
                   <p className="summary--card__counting--label">Users</p>
                 </div>
               </Col>
@@ -90,13 +88,13 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
         </Col>
       </Row>
     );
-  };
+  }
 
   render() {
     const { job, match } = this.props;
     return (
       <div className="job-details">
-        <Helmet title={"Details | Job"} />
+        <Helmet title={ "Details | Job" } />
         <div className="section page--header">
           <Button
             onClick={this.prevPage}
@@ -107,12 +105,13 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
           >
             Jobs
           </Button>
-          <h1 className="page--header__title">{`Job ID: ${String(
-            getMatchParamByName(match, "id"),
-          )}`}</h1>
+          <h1 className="page--header__title">{`Job ID: ${String(getMatchParamByName(match, "id"))}`}</h1>
         </div>
         <section className="section section--container">
-          <Loading loading={_.isNil(job)} render={this.renderContent} />
+          <Loading
+            loading={_.isNil(job)}
+            render={this.renderContent}
+          />
         </section>
       </div>
     );
@@ -120,20 +119,20 @@ class JobDetails extends React.Component<JobsTableProps, {}> {
 }
 
 const mapStateToProps = (state: AdminUIState, props: RouteComponentProps) => {
-  const jobRequest = new protos.cockroach.server.serverpb.JobRequest({
-    job_id: Long.fromString(getMatchParamByName(props.match, "id")),
-  });
-  const key = jobRequestKey(jobRequest);
-  const jobData = state.cachedData.job[key];
-  const job = jobData ? jobData.data : null;
-
+  const status = statusSetting.selector(state);
+  const show = showSetting.selector(state);
+  const type = typeSetting.selector(state);
+  const key = jobsKey(status, type, parseInt(show, 10));
+  const jobs = state.cachedData.jobs[key];
+  // tslint:disable-next-line: no-shadowed-variable
+  const job = _.filter(jobs ? jobs.data.jobs : [], job => String(job.id) === getMatchParamByName(props.match, "id"))[0];
   return {
-    job,
+    jobs, job, status, show, type,
   };
 };
 
 const mapDispatchToProps = {
-  refreshJob,
+  refreshJobs,
 };
 
 export default connect(mapStateToProps, mapDispatchToProps)(JobDetails);

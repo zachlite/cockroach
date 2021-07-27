@@ -21,14 +21,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catformat"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -45,15 +42,14 @@ func TestMysqldumpDataReader(t *testing.T) {
 	files := getMysqldumpTestdata(t)
 
 	ctx := context.Background()
-	table := descForTable(ctx, t, `CREATE TABLE simple (i INT PRIMARY KEY, s text, b bytea)`, 100, 200, NoFKs)
+	table := descForTable(t, `CREATE TABLE simple (i INT PRIMARY KEY, s text, b bytea)`, 10, 20, NoFKs)
 	tables := map[string]*execinfrapb.ReadImportDataSpec_ImportTable{"simple": {Desc: table.TableDesc()}}
-	opts := roachpb.MysqldumpOptions{}
 
-	kvCh := make(chan row.KVBatch, 50)
+	kvCh := make(chan row.KVBatch, 10)
 	// When creating a new dump reader, we need to pass in the walltime that will be used as
 	// a parameter used for generating unique rowid, random, and gen_random_uuid as default
 	// expressions. Here, the parameter doesn't matter so we pass in 0.
-	converter, err := newMysqldumpReader(ctx, kvCh, 0 /*walltime*/, tables, testEvalCtx, opts)
+	converter, err := newMysqldumpReader(ctx, kvCh, 0 /*walltime*/, tables, testEvalCtx)
 
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +97,7 @@ func TestMysqldumpDataReader(t *testing.T) {
 	}
 }
 
-const expectedParentID = 52
+const expectedParent = 52
 
 func readFile(t *testing.T, name string) string {
 	body, err := ioutil.ReadFile(filepath.Join("testdata", "mysqldump", name))
@@ -120,11 +116,8 @@ func readMysqlCreateFrom(
 		t.Fatal(err)
 	}
 	defer f.Close()
-	walltime := testEvalCtx.StmtTimestamp.UnixNano()
-	expectedParent := dbdesc.NewInitial(
-		expectedParentID, "test", security.RootUserName(),
-	)
-	tbl, err := readMysqlCreateTable(context.Background(), f, testEvalCtx, nil, id, expectedParent, name, fks, map[descpb.ID]int64{}, security.RootUserName(), walltime)
+
+	tbl, err := readMysqlCreateTable(context.Background(), f, testEvalCtx, nil, id, expectedParent, name, fks, map[descpb.ID]int64{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,17 +127,16 @@ func readMysqlCreateFrom(
 func TestMysqldumpSchemaReader(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 
 	files := getMysqldumpTestdata(t)
 
-	simpleTable := descForTable(ctx, t, readFile(t, `simple.cockroach-schema.sql`), expectedParentID, 52, NoFKs)
-	referencedSimple := descForTable(ctx, t, readFile(t, `simple.cockroach-schema.sql`), expectedParentID, 52, NoFKs)
+	simpleTable := descForTable(t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
+	referencedSimple := descForTable(t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
 	fks := fkHandler{
 		allowed: true,
-		resolver: fkResolver{
-			tableNameToDesc: map[string]*tabledesc.Mutable{referencedSimple.Name: referencedSimple},
-			format:          mysqlDumpFormat()},
+		resolver: fkResolver(map[string]*tabledesc.Mutable{
+			referencedSimple.Name: referencedSimple,
+		}),
 	}
 
 	t.Run("simple", func(t *testing.T) {
@@ -154,14 +146,14 @@ func TestMysqldumpSchemaReader(t *testing.T) {
 	})
 
 	t.Run("second", func(t *testing.T) {
-		secondTable := descForTable(ctx, t, readFile(t, `second.cockroach-schema.sql`), expectedParentID, 53, fks)
+		secondTable := descForTable(t, readFile(t, `second.cockroach-schema.sql`), expectedParent, 53, fks)
 		expected := secondTable
 		got := readMysqlCreateFrom(t, files.second, "", 53, fks)
 		compareTables(t, expected.TableDesc(), got)
 	})
 
 	t.Run("everything", func(t *testing.T) {
-		expected := descForTable(ctx, t, readFile(t, `everything.cockroach-schema.sql`), expectedParentID, 53, NoFKs)
+		expected := descForTable(t, readFile(t, `everything.cockroach-schema.sql`), expectedParent, 53, NoFKs)
 		got := readMysqlCreateFrom(t, files.everything, "", 53, NoFKs)
 		compareTables(t, expected.TableDesc(), got)
 	})
@@ -173,11 +165,8 @@ func TestMysqldumpSchemaReader(t *testing.T) {
 	})
 
 	t.Run("third-in-multi", func(t *testing.T) {
-		skip := fkHandler{allowed: true, skip: true, resolver: fkResolver{
-			tableNameToDesc: make(map[string]*tabledesc.Mutable),
-			format:          mysqlDumpFormat(),
-		}}
-		expected := descForTable(ctx, t, readFile(t, `third.cockroach-schema.sql`), expectedParentID, 52, skip)
+		skip := fkHandler{allowed: true, skip: true, resolver: make(fkResolver)}
+		expected := descForTable(t, readFile(t, `third.cockroach-schema.sql`), expectedParent, 52, skip)
 		got := readMysqlCreateFrom(t, files.wholeDB, "third", 51, skip)
 		compareTables(t, expected.TableDesc(), got)
 	})
@@ -225,16 +214,16 @@ func compareTables(t *testing.T, expected, got *descpb.TableDescriptor) {
 		ctx := context.Background()
 		semaCtx := tree.MakeSemaContext()
 		tableName := &descpb.AnonymousTable
-		expectedDesc := tabledesc.NewBuilder(expected).BuildImmutableTable()
-		gotDesc := tabledesc.NewBuilder(got).BuildImmutableTable()
-		e, err := catformat.IndexForDisplay(
-			ctx, expectedDesc, tableName, expectedDesc.PublicNonPrimaryIndexes()[i], "" /* partition */, "" /* interleave */, &semaCtx,
+		expectedDesc := tabledesc.NewImmutable(*expected)
+		gotDesc := tabledesc.NewImmutable(*got)
+		e, err := schemaexpr.FormatIndexForDisplay(
+			ctx, expectedDesc, tableName, &expected.Indexes[i], "" /* partition */, "" /* interleave */, &semaCtx,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
-		g, err := catformat.IndexForDisplay(
-			ctx, gotDesc, tableName, gotDesc.PublicNonPrimaryIndexes()[i], "" /* partition */, "" /* interleave */, &semaCtx,
+		g, err := schemaexpr.FormatIndexForDisplay(
+			ctx, gotDesc, tableName, &got.Indexes[i], "" /* partition */, "" /* interleave */, &semaCtx,
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
@@ -283,10 +272,10 @@ func TestMysqlValueToDatum(t *testing.T) {
 		typ  *types.T
 		want tree.Datum
 	}{
-		{raw: mysql.NewStrLiteral([]byte("0000-00-00")), typ: types.Date, want: tree.DNull},
-		{raw: mysql.NewStrLiteral([]byte("2010-01-01")), typ: types.Date, want: date("2010-01-01")},
-		{raw: mysql.NewStrLiteral([]byte("0000-00-00 00:00:00")), typ: types.Timestamp, want: tree.DNull},
-		{raw: mysql.NewStrLiteral([]byte("2010-01-01 00:00:00")), typ: types.Timestamp, want: ts("2010-01-01 00:00:00")},
+		{raw: mysql.NewStrVal([]byte("0000-00-00")), typ: types.Date, want: tree.DNull},
+		{raw: mysql.NewStrVal([]byte("2010-01-01")), typ: types.Date, want: date("2010-01-01")},
+		{raw: mysql.NewStrVal([]byte("0000-00-00 00:00:00")), typ: types.Timestamp, want: tree.DNull},
+		{raw: mysql.NewStrVal([]byte("2010-01-01 00:00:00")), typ: types.Timestamp, want: ts("2010-01-01 00:00:00")},
 	}
 	evalContext := tree.NewTestingEvalContext(nil)
 	for _, tc := range tests {

@@ -11,20 +11,20 @@
 package kvserver_test
 
 import (
+	"bytes"
 	"context"
-	"math"
 	"math/rand"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -34,7 +34,6 @@ import (
 type splitBurstTest struct {
 	*testcluster.TestCluster
 	baseKey                     roachpb.Key
-	magicStickyBit              hlc.Timestamp
 	numSplitsSeenOnSlowFollower *int32 // atomic
 	initialRaftSnaps            int
 }
@@ -47,7 +46,7 @@ func (sbt *splitBurstTest) SplitWithDelay(t *testing.T, location byte) {
 func (sbt *splitBurstTest) SplitWithDelayE(location byte) error {
 	k := append([]byte(nil), sbt.baseKey...)
 	splitKey := append(k, location)
-	_, _, err := sbt.SplitRangeWithExpiration(splitKey, sbt.magicStickyBit)
+	_, _, err := sbt.SplitRange(splitKey)
 	return err
 }
 
@@ -58,7 +57,7 @@ func (sbt *splitBurstTest) NumRaftSnaps(t *testing.T) int {
 		var c int // num Raft snapshots
 		if err := sbt.ServerConn(i).QueryRow(`
 SELECT count(*), sum(value) FROM crdb_internal.node_metrics WHERE
-	name = 'range.snapshots.applied-voter'
+	name = 'range.snapshots.normal-applied'
 `).Scan(&n, &c); err != nil {
 			t.Fatal(err)
 		}
@@ -69,8 +68,6 @@ SELECT count(*), sum(value) FROM crdb_internal.node_metrics WHERE
 }
 
 func setupSplitBurstTest(t *testing.T, delay time.Duration) *splitBurstTest {
-	var magicStickyBit = hlc.Timestamp{WallTime: math.MaxInt64 - 123, Logical: 987654321}
-
 	numSplitsSeenOnSlowFollower := new(int32) // atomic
 	var quiesceCh <-chan struct{}
 	knobs := base.TestingKnobs{Store: &kvserver.StoreTestingKnobs{
@@ -78,7 +75,8 @@ func setupSplitBurstTest(t *testing.T, delay time.Duration) *splitBurstTest {
 			if args.Split == nil || delay == 0 {
 				return 0, nil
 			}
-			if args.Split.RightDesc.GetStickyBit() != magicStickyBit {
+			if !bytes.HasPrefix(args.Split.LeftDesc.StartKey, keys.TableDataMax) {
+				// Unrelated split.
 				return 0, nil
 			}
 			select {
@@ -90,8 +88,6 @@ func setupSplitBurstTest(t *testing.T, delay time.Duration) *splitBurstTest {
 		},
 	}}
 
-	ctx := context.Background()
-
 	// n1 and n3 are fast, n2 is slow (to apply the splits). We need
 	// three nodes here; delaying the apply loop on n2 also delays
 	// how quickly commands can reach quorum and would backpressure
@@ -102,18 +98,17 @@ func setupSplitBurstTest(t *testing.T, delay time.Duration) *splitBurstTest {
 		},
 		ReplicationMode: base.ReplicationManual,
 	})
-	defer t.Cleanup(func() {
-		tc.Stopper().Stop(ctx)
-	})
 	quiesceCh = tc.Stopper().ShouldQuiesce()
 
 	k := tc.ScratchRange(t)
-	tc.AddVotersOrFatal(t, k, tc.Target(1), tc.Target(2))
+	if _, err := tc.AddReplicas(k, tc.Target(1), tc.Target(2)); err != nil {
+		tc.Stopper().Stop(context.Background())
+		t.Fatal(err)
+	}
 
 	sbc := &splitBurstTest{
 		TestCluster:                 tc,
 		baseKey:                     k,
-		magicStickyBit:              magicStickyBit,
 		numSplitsSeenOnSlowFollower: numSplitsSeenOnSlowFollower,
 	}
 	sbc.initialRaftSnaps = sbc.NumRaftSnaps(t)

@@ -38,11 +38,10 @@ func genValues(w io.Writer, firstRow, lastRow int, fn GenRowFn, shouldPrint bool
 		}
 		row := fn(rowIdx)
 		if shouldPrint {
-			var strs []string
 			for _, v := range row {
-				strs = append(strs, v.String())
+				fmt.Printf("%s\t\t", v)
 			}
-			fmt.Printf("(%v),\n", strings.Join(strs, ","))
+			fmt.Printf("\n")
 		}
 		fmt.Fprintf(w, "(%s", tree.Serialize(row[0]))
 		for _, v := range row[1:] {

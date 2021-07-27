@@ -171,7 +171,7 @@ var (
 		{name: "RangeLease", suffix: LocalRangeLeaseSuffix},
 		{name: "RangePriorReadSummary", suffix: LocalRangePriorReadSummarySuffix},
 		{name: "RangeStats", suffix: LocalRangeStatsLegacySuffix},
-		{name: "RangeGCThreshold", suffix: LocalRangeGCThresholdSuffix},
+		{name: "RangeLastGC", suffix: LocalRangeLastGCSuffix},
 		{name: "RangeVersion", suffix: LocalRangeVersionSuffix},
 	}
 

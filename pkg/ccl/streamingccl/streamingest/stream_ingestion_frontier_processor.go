@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -29,6 +30,7 @@ const streamIngestionFrontierProcName = `ingestfntr`
 
 type streamIngestionFrontier struct {
 	execinfra.ProcessorBase
+	execinfra.StreamingProcessor
 
 	flowCtx *execinfra.FlowCtx
 	spec    execinfrapb.StreamIngestionFrontierSpec
@@ -60,16 +62,12 @@ func newStreamIngestionFrontierProcessor(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
-	frontier, err := span.MakeFrontier(spec.TrackedSpans...)
-	if err != nil {
-		return nil, err
-	}
 	sf := &streamIngestionFrontier{
 		flowCtx:          flowCtx,
 		spec:             spec,
 		input:            input,
 		highWaterAtStart: spec.HighWaterAtStart,
-		frontier:         frontier,
+		frontier:         span.MakeFrontier(spec.TrackedSpans...),
 	}
 	if err := sf.Init(
 		sf,
@@ -86,11 +84,6 @@ func newStreamIngestionFrontierProcessor(
 		return nil, err
 	}
 	return sf, nil
-}
-
-// MustBeStreaming implements the execinfra.Processor interface.
-func (sf *streamIngestionFrontier) MustBeStreaming() bool {
-	return true
 }
 
 // Start is part of the RowSource interface.
@@ -167,12 +160,26 @@ func (sf *streamIngestionFrontier) noteResolvedTimestamps(d rowenc.EncDatum) (bo
 				redact.Safe(resolved.Timestamp), redact.Safe(sf.highWaterAtStart))
 		}
 
-		if changed, err := sf.frontier.Forward(resolved.Span, resolved.Timestamp); err == nil {
-			frontierChanged = frontierChanged || changed
-		} else {
-			return false, err
+		if sf.maybeMoveFrontier(resolved.Span, resolved.Timestamp) {
+			frontierChanged = true
 		}
 	}
 
 	return frontierChanged, nil
+}
+
+// maybeMoveFrontier updates the resolved ts for the provided span, and returns
+// true if the update causes the frontier to move to higher resolved ts.
+func (sf *streamIngestionFrontier) maybeMoveFrontier(
+	span roachpb.Span, resolved hlc.Timestamp,
+) bool {
+	prevResolved := sf.frontier.Frontier()
+	sf.frontier.Forward(span, resolved)
+	return prevResolved.Less(sf.frontier.Frontier())
+}
+
+// ConsumerClosed is part of the RowSource interface.
+func (sf *streamIngestionFrontier) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	sf.InternalClose()
 }

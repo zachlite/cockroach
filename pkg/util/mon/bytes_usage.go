@@ -46,7 +46,7 @@ import (
 
 // - different instances of BoundAccount are associated to different usage
 //   categories in components, in principle to track different object
-//   lifetimes. Each account tracks the total amount of bytes allocated in
+//   lifetimes.  Each account tracks the total amount of bytes allocated in
 //   that category and enables declaring all the bytes as released at once
 //   using Close().
 //
@@ -390,11 +390,6 @@ func (mm *BytesMonitor) EmergencyStop(ctx context.Context) {
 // Stop completes a monitoring region.
 func (mm *BytesMonitor) Stop(ctx context.Context) {
 	mm.doStop(ctx, true)
-}
-
-// Name returns the name of the monitor.
-func (mm *BytesMonitor) Name() string {
-	return mm.name
 }
 
 const bytesMaxUsageLoggingThreshold = 100 * 1024

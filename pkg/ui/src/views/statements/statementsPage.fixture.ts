@@ -168,14 +168,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
     hash: "",
     state: null,
   },
-  databases: ["defaultdb", "foo"],
-  nodeRegions: {
-    "1": "gcp-us-east1",
-    "2": "gcp-us-east1",
-    "3": "gcp-us-west1",
-    "4": "gcp-europe-west1",
-  },
-  columns: null,
   match: {
     path: "/statements",
     url: "/statements",
@@ -189,14 +181,12 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO vehicles VALUES ($1, $2, __more6__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -204,7 +194,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -212,21 +201,18 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO user_promo_codes VALUES ($1, $2, $3, now(), _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "SELECT city, id FROM vehicles WHERE city = $1",
       implicitTxn: true,
       fullScan: true,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -234,7 +220,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -242,7 +227,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -250,14 +234,12 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO users VALUES ($1, $2, __more3__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -265,21 +247,18 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: true,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO promo_codes VALUES ($1, $2, __more3__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE users SCATTER FROM (_, _) TO (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -287,14 +266,12 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "SHOW database",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -302,21 +279,18 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE users SPLIT AT VALUES (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE vehicles SCATTER FROM (_, _) TO (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -324,7 +298,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -332,28 +305,24 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO users VALUES ($1, $2, __more3__), (__more40__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE rides SCATTER FROM (_, _) TO (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: 'SET CLUSTER SETTING "cluster.organization" = $1',
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -361,7 +330,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -369,7 +337,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -377,28 +344,24 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO rides VALUES ($1, $2, __more8__), (__more400__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE vehicles SPLIT AT VALUES (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "SET sql_safe_updates = _",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -406,7 +369,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -414,21 +376,18 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "SELECT * FROM crdb_internal.node_build_info",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "CREATE DATABASE movr",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -436,14 +395,12 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: 'SET CLUSTER SETTING "enterprise.license" = $1',
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -451,7 +408,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -459,7 +415,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -467,21 +422,18 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "ALTER TABLE rides SPLIT AT VALUES (_, _)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "SELECT value FROM crdb_internal.node_build_info WHERE field = _",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label:
@@ -489,14 +441,12 @@ const statementsPagePropsFixture: StatementsPageProps = {
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
     {
       label: "INSERT INTO vehicles VALUES ($1, $2, __more6__), (__more10__)",
       implicitTxn: true,
       fullScan: false,
       stats: statementStats,
-      database: "defaultdb",
     },
   ],
   statementsError: null,

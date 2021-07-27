@@ -85,6 +85,7 @@ func newSampleAggregator(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	spec *execinfrapb.SampleAggregatorSpec,
+	minSampleSize int,
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
@@ -108,7 +109,7 @@ func newSampleAggregator(
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will disable histogram collection if this limit is not
 	// enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "sample-aggregator-mem")
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "sample-aggregator-mem")
 	rankCol := len(input.OutputTypes()) - 7
 	s := &sampleAggregator{
 		spec:         spec,
@@ -144,7 +145,7 @@ func newSampleAggregator(
 	}
 
 	s.sr.Init(
-		int(spec.SampleSize), int(spec.MinSampleSize), input.OutputTypes()[:rankCol], &s.memAcc,
+		int(spec.SampleSize), minSampleSize, input.OutputTypes()[:rankCol], &s.memAcc,
 		sampleCols,
 	)
 	for i := range spec.InvertedSketches {
@@ -153,7 +154,7 @@ func newSampleAggregator(
 		// sent as a single DBytes column.
 		var srCols util.FastIntSet
 		srCols.Add(0)
-		sr.Init(int(spec.SampleSize), int(spec.MinSampleSize), bytesRowType, &s.memAcc, srCols)
+		sr.Init(int(spec.SampleSize), minSampleSize, bytesRowType, &s.memAcc, srCols)
 		col := spec.InvertedSketches[i].Columns[0]
 		s.invSr[col] = &sr
 		s.invSketch[col] = &sketchInfo{
@@ -179,7 +180,7 @@ func newSampleAggregator(
 }
 
 func (s *sampleAggregator) pushTrailingMeta(ctx context.Context) {
-	execinfra.SendTraceData(ctx, s.Output)
+	execinfra.SendTraceData(ctx, s.Out.Output())
 }
 
 // Run is part of the Processor interface.
@@ -189,11 +190,11 @@ func (s *sampleAggregator) Run(ctx context.Context) {
 
 	earlyExit, err := s.mainLoop(ctx)
 	if err != nil {
-		execinfra.DrainAndClose(ctx, s.Output, err, s.pushTrailingMeta, s.input)
+		execinfra.DrainAndClose(ctx, s.Out.Output(), err, s.pushTrailingMeta, s.input)
 	} else if !earlyExit {
 		s.pushTrailingMeta(ctx)
 		s.input.ConsumerClosed()
-		s.Output.ProducerDone()
+		s.Out.Close()
 	}
 	s.MoveToDraining(nil /* err */)
 }
@@ -267,7 +268,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 						sr.Disable()
 					}
 				}
-			} else if !emitHelper(ctx, s.Output, &s.OutputHelper, nil /* row */, meta, s.pushTrailingMeta, s.input) {
+			} else if !emitHelper(ctx, &s.Out, nil /* row */, meta, s.pushTrailingMeta, s.input) {
 				// No cleanup required; emitHelper() took care of it.
 				return true, nil
 			}

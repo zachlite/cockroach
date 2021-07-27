@@ -72,10 +72,9 @@ func TestEvalFollowerReadOffset(t *testing.T) {
 func TestZeroDurationDisablesFollowerReadOffset(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer utilccl.TestingEnableEnterprise()()
-	ctx := context.Background()
 
 	st := cluster.MakeTestingClusterSettings()
-	closedts.TargetDuration.Override(ctx, &st.SV, 0)
+	closedts.TargetDuration.Override(&st.SV, 0)
 	if offset, err := evalFollowerReadOffset(uuid.MakeV4(), st); err != nil {
 		t.Fatal(err)
 	} else if offset != math.MinInt64 {
@@ -85,7 +84,6 @@ func TestZeroDurationDisablesFollowerReadOffset(t *testing.T) {
 
 func TestCanSendToFollower(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
 	clock := hlc.NewClock(hlc.UnixNano, base.DefaultMaxClockOffset)
 	stale := clock.Now().Add(2*expectedFollowerReadOffset.Nanoseconds(), 0)
 	current := clock.Now()
@@ -275,9 +273,9 @@ func TestCanSendToFollower(t *testing.T) {
 				defer utilccl.TestingEnableEnterprise()()
 			}
 			st := cluster.MakeTestingClusterSettings()
-			kvserver.FollowerReadsEnabled.Override(ctx, &st.SV, !c.disabledFollowerReads)
+			kvserver.FollowerReadsEnabled.Override(&st.SV, !c.disabledFollowerReads)
 			if c.zeroTargetDuration {
-				closedts.TargetDuration.Override(ctx, &st.SV, 0)
+				closedts.TargetDuration.Override(&st.SV, 0)
 			}
 
 			can := canSendToFollower(uuid.MakeV4(), st, clock, c.ctPolicy, c.ba)
@@ -288,14 +286,13 @@ func TestCanSendToFollower(t *testing.T) {
 
 func TestFollowerReadMultipleValidation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatalf("expected panic from setting followerReadMultiple to .1")
 		}
 	}()
 	st := cluster.MakeTestingClusterSettings()
-	followerReadMultiple.Override(ctx, &st.SV, .1)
+	followerReadMultiple.Override(&st.SV, .1)
 }
 
 // mockNodeStore implements the kvcoord.NodeDescStore interface.
@@ -473,7 +470,7 @@ func TestOracle(t *testing.T) {
 				defer utilccl.TestingEnableEnterprise()()
 			}
 			st := cluster.MakeTestingClusterSettings()
-			kvserver.FollowerReadsEnabled.Override(ctx, &st.SV, !c.disabledFollowerReads)
+			kvserver.FollowerReadsEnabled.Override(&st.SV, !c.disabledFollowerReads)
 
 			o := replicaoracle.NewOracle(followerReadOraclePolicy, replicaoracle.Config{
 				NodeDescs:  nodes,
@@ -564,7 +561,7 @@ func TestFollowerReadsWithStaleDescriptor(t *testing.T) {
 	n4.Exec(t, "SELECT * from test WHERE k=1")
 	// Check that the cache was indeed populated.
 	var tableID uint32
-	n1.QueryRow(t, `SELECT id from system.namespace WHERE name='test'`).Scan(&tableID)
+	n1.QueryRow(t, `SELECT id from system.namespace2 WHERE name='test'`).Scan(&tableID)
 	tablePrefix := keys.MustAddr(keys.SystemSQLCodec.TablePrefix(tableID))
 	n4Cache := tc.Server(3).DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache()
 	entry := n4Cache.GetCached(ctx, tablePrefix, false /* inverted */)

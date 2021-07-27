@@ -38,7 +38,16 @@ func initializeMultiRegionMetadata(
 	primaryRegion descpb.RegionName,
 	regions []tree.Name,
 ) (*multiregion.RegionConfig, error) {
-	if err := CheckClusterSupportsMultiRegion(evalCtx, execCfg); err != nil {
+	if err := checkClusterSupportsMultiRegion(evalCtx); err != nil {
+		return nil, err
+	}
+
+	if err := utilccl.CheckEnterpriseEnabled(
+		execCfg.Settings,
+		execCfg.ClusterID(),
+		execCfg.Organization(),
+		"multi-region features",
+	); err != nil {
 		return nil, err
 	}
 
@@ -106,22 +115,14 @@ func initializeMultiRegionMetadata(
 	return &regionConfig, nil
 }
 
-// CheckClusterSupportsMultiRegion returns whether the current cluster supports
-// multi-region features.
-func CheckClusterSupportsMultiRegion(evalCtx *tree.EvalContext, execCfg *sql.ExecutorConfig) error {
+func checkClusterSupportsMultiRegion(evalCtx *tree.EvalContext) error {
 	if !evalCtx.Settings.Version.IsActive(evalCtx.Context, clusterversion.MultiRegionFeatures) {
 		return pgerror.Newf(
 			pgcode.ObjectNotInPrerequisiteState,
 			`cannot add regions to a database until the cluster upgrade is finalized`,
 		)
 	}
-
-	return utilccl.CheckEnterpriseEnabled(
-		execCfg.Settings,
-		execCfg.ClusterID(),
-		execCfg.Organization(),
-		"multi-region features",
-	)
+	return nil
 }
 
 func getMultiRegionEnumAddValuePlacement(

@@ -198,7 +198,7 @@ func TestTupleCastVolatility(t *testing.T) {
 		from.InternalType.TupleContents = tc.from
 		to := *types.EmptyTuple
 		to.InternalType.TupleContents = tc.to
-		v, ok := LookupCastVolatility(&from, &to, nil /* sessionData */)
+		v, ok := LookupCastVolatility(&from, &to)
 		res := "error"
 		if ok {
 			res = v.String()

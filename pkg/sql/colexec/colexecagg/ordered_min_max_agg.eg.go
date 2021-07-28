@@ -24,8 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
-	"github.com/cockroachdb/errors"
 )
 
 // Workaround for bazel auto-generated code. goimports does not automatically
@@ -34,8 +32,6 @@ var (
 	_ tree.AggType
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
-	_ coldataext.Datum
 )
 
 // Remove unused warning.
@@ -47,67 +43,60 @@ func newMinOrderedAggAlloc(
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	case types.BoolFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minBoolOrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minBoolOrderedAggAlloc{aggAllocBase: allocBase}
 	case types.BytesFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minBytesOrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minBytesOrderedAggAlloc{aggAllocBase: allocBase}
 	case types.DecimalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minDecimalOrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minDecimalOrderedAggAlloc{aggAllocBase: allocBase}
 	case types.IntFamily:
 		switch t.Width() {
 		case 16:
 			return &minInt16OrderedAggAlloc{aggAllocBase: allocBase}
 		case 32:
 			return &minInt32OrderedAggAlloc{aggAllocBase: allocBase}
-		case -1:
 		default:
 			return &minInt64OrderedAggAlloc{aggAllocBase: allocBase}
 		}
 	case types.FloatFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minFloat64OrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minFloat64OrderedAggAlloc{aggAllocBase: allocBase}
 	case types.TimestampTZFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minTimestampOrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minTimestampOrderedAggAlloc{aggAllocBase: allocBase}
 	case types.IntervalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minIntervalOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minJSONOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case typeconv.DatumVecCanonicalTypeFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &minDatumOrderedAggAlloc{aggAllocBase: allocBase}
-		}
+		return &minIntervalOrderedAggAlloc{aggAllocBase: allocBase}
+	default:
+		return &minDatumOrderedAggAlloc{aggAllocBase: allocBase}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unexpectedly didn't find min overload for %s type family", t.Name()))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
+}
+
+func newMaxOrderedAggAlloc(
+	allocator *colmem.Allocator, t *types.T, allocSize int64,
+) aggregateFuncAlloc {
+	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
+	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+	case types.BoolFamily:
+		return &maxBoolOrderedAggAlloc{aggAllocBase: allocBase}
+	case types.BytesFamily:
+		return &maxBytesOrderedAggAlloc{aggAllocBase: allocBase}
+	case types.DecimalFamily:
+		return &maxDecimalOrderedAggAlloc{aggAllocBase: allocBase}
+	case types.IntFamily:
+		switch t.Width() {
+		case 16:
+			return &maxInt16OrderedAggAlloc{aggAllocBase: allocBase}
+		case 32:
+			return &maxInt32OrderedAggAlloc{aggAllocBase: allocBase}
+		default:
+			return &maxInt64OrderedAggAlloc{aggAllocBase: allocBase}
+		}
+	case types.FloatFamily:
+		return &maxFloat64OrderedAggAlloc{aggAllocBase: allocBase}
+	case types.TimestampTZFamily:
+		return &maxTimestampOrderedAggAlloc{aggAllocBase: allocBase}
+	case types.IntervalFamily:
+		return &maxIntervalOrderedAggAlloc{aggAllocBase: allocBase}
+	default:
+		return &maxDatumOrderedAggAlloc{aggAllocBase: allocBase}
+	}
 }
 
 type minBoolOrderedAgg struct {
@@ -131,7 +120,7 @@ func (a *minBoolOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minBoolOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -142,10 +131,10 @@ func (a *minBoolOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -155,7 +144,7 @@ func (a *minBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -195,7 +184,7 @@ func (a *minBoolOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -205,7 +194,7 @@ func (a *minBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -246,7 +235,7 @@ func (a *minBoolOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -257,7 +246,7 @@ func (a *minBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -306,7 +295,7 @@ func (a *minBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -366,7 +355,7 @@ func (a *minBoolOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -417,7 +406,7 @@ func (a *minBytesOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minBytesOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := len(a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -428,10 +417,10 @@ func (a *minBytesOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -473,7 +462,7 @@ func (a *minBytesOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -516,7 +505,7 @@ func (a *minBytesOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -622,9 +611,8 @@ func (a *minBytesOrderedAgg) Flush(outputIdx int) {
 	} else {
 		a.col.Set(outputIdx, a.curAgg)
 	}
-	oldCurAggSize := len(a.curAgg)
 	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	a.allocator.AdjustMemoryUsage(-int64(len(a.curAgg)))
 	a.curAgg = nil
 }
 
@@ -675,7 +663,7 @@ func (a *minDecimalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minDecimalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := tree.SizeOfDecimal(&a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -686,10 +674,10 @@ func (a *minDecimalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -699,7 +687,7 @@ func (a *minDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -731,7 +719,7 @@ func (a *minDecimalOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -741,7 +729,7 @@ func (a *minDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -774,7 +762,7 @@ func (a *minDecimalOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -785,7 +773,7 @@ func (a *minDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -826,7 +814,7 @@ func (a *minDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -878,7 +866,7 @@ func (a *minDecimalOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx].Set(&a.curAgg)
 	}
 }
 
@@ -929,7 +917,7 @@ func (a *minInt16OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minInt16OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -940,10 +928,10 @@ func (a *minInt16OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -953,7 +941,7 @@ func (a *minInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -996,7 +984,7 @@ func (a *minInt16OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1006,7 +994,7 @@ func (a *minInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1050,7 +1038,7 @@ func (a *minInt16OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1061,7 +1049,7 @@ func (a *minInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1113,7 +1101,7 @@ func (a *minInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1176,7 +1164,7 @@ func (a *minInt16OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -1227,7 +1215,7 @@ func (a *minInt32OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minInt32OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -1238,10 +1226,10 @@ func (a *minInt32OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1251,7 +1239,7 @@ func (a *minInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1294,7 +1282,7 @@ func (a *minInt32OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1304,7 +1292,7 @@ func (a *minInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1348,7 +1336,7 @@ func (a *minInt32OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1359,7 +1347,7 @@ func (a *minInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1411,7 +1399,7 @@ func (a *minInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1474,7 +1462,7 @@ func (a *minInt32OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -1525,7 +1513,7 @@ func (a *minInt64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minInt64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -1536,10 +1524,10 @@ func (a *minInt64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1549,7 +1537,7 @@ func (a *minInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1592,7 +1580,7 @@ func (a *minInt64OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1602,7 +1590,7 @@ func (a *minInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1646,7 +1634,7 @@ func (a *minInt64OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1657,7 +1645,7 @@ func (a *minInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1709,7 +1697,7 @@ func (a *minInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1772,7 +1760,7 @@ func (a *minInt64OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -1823,7 +1811,7 @@ func (a *minFloat64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minFloat64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -1834,10 +1822,10 @@ func (a *minFloat64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1847,7 +1835,7 @@ func (a *minFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1898,7 +1886,7 @@ func (a *minFloat64OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -1908,7 +1896,7 @@ func (a *minFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -1960,7 +1948,7 @@ func (a *minFloat64OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1971,7 +1959,7 @@ func (a *minFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2031,7 +2019,7 @@ func (a *minFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2102,7 +2090,7 @@ func (a *minFloat64OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -2153,7 +2141,7 @@ func (a *minTimestampOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minTimestampOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -2164,10 +2152,10 @@ func (a *minTimestampOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -2177,7 +2165,7 @@ func (a *minTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2216,7 +2204,7 @@ func (a *minTimestampOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -2226,7 +2214,7 @@ func (a *minTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2266,7 +2254,7 @@ func (a *minTimestampOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -2277,7 +2265,7 @@ func (a *minTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2325,7 +2313,7 @@ func (a *minTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2384,7 +2372,7 @@ func (a *minTimestampOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -2435,7 +2423,7 @@ func (a *minIntervalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minIntervalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -2446,10 +2434,10 @@ func (a *minIntervalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -2459,7 +2447,7 @@ func (a *minIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2491,7 +2479,7 @@ func (a *minIntervalOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -2501,7 +2489,7 @@ func (a *minIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2534,7 +2522,7 @@ func (a *minIntervalOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -2545,7 +2533,7 @@ func (a *minIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2586,7 +2574,7 @@ func (a *minIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -2638,7 +2626,7 @@ func (a *minIntervalOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -2668,385 +2656,6 @@ func (a *minIntervalOrderedAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-type minJSONOrderedAgg struct {
-	orderedAggregateFuncBase
-	// col points to the output vector we are updating.
-	col *coldata.JSONs
-	// curAgg holds the running min/max, so we can index into the slice once per
-	// group, instead of on each iteration.
-	// NOTE: if foundNonNullForCurrentGroup is false, curAgg is undefined.
-	curAgg json.JSON
-	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
-	// for the group that is currently being aggregated.
-	foundNonNullForCurrentGroup bool
-}
-
-var _ AggregateFunc = &minJSONOrderedAgg{}
-
-func (a *minJSONOrderedAgg) SetOutput(vec coldata.Vec) {
-	a.orderedAggregateFuncBase.SetOutput(vec)
-	a.col = vec.JSON()
-}
-
-func (a *minJSONOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
-) {
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.Size()
-	}
-	vec := vecs[inputIdxs[0]]
-	col, nulls := vec.JSON(), vec.Nulls()
-	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
-		// Capture groups and col to force bounds check to work. See
-		// https://github.com/golang/go/issues/39756
-		groups := a.groups
-		col := col
-		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
-			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
-
-					//gcassert:bce
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = nulls.NullAt(i)
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult < 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			} else {
-				for i := startIdx; i < endIdx; i++ {
-
-					//gcassert:bce
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = false
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult < 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			}
-		} else {
-			sel = sel[startIdx:endIdx]
-			if nulls.MaybeHasNulls() {
-				for _, i := range sel {
-
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = nulls.NullAt(i)
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult < 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			} else {
-				for _, i := range sel {
-
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = false
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult < 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			}
-		}
-	},
-	)
-	var newCurAggSize uintptr
-	if a.curAgg != nil {
-		newCurAggSize = a.curAgg.Size()
-	}
-	if newCurAggSize != oldCurAggSize {
-		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
-	}
-}
-
-func (a *minJSONOrderedAgg) Flush(outputIdx int) {
-	// The aggregation is finished. Flush the last value. If we haven't found
-	// any non-nulls for this group so far, the output for this group should
-	// be null.
-	// Go around "argument overwritten before first use" linter error.
-	_ = outputIdx
-	outputIdx = a.curIdx
-	a.curIdx++
-	if !a.foundNonNullForCurrentGroup {
-		a.nulls.SetNull(outputIdx)
-	} else {
-		a.col.Set(outputIdx, a.curAgg)
-	}
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.Size()
-	}
-	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
-	a.curAgg = nil
-}
-
-func (a *minJSONOrderedAgg) Reset() {
-	a.orderedAggregateFuncBase.Reset()
-	a.foundNonNullForCurrentGroup = false
-}
-
-type minJSONOrderedAggAlloc struct {
-	aggAllocBase
-	aggFuncs []minJSONOrderedAgg
-}
-
-var _ aggregateFuncAlloc = &minJSONOrderedAggAlloc{}
-
-const sizeOfminJSONOrderedAgg = int64(unsafe.Sizeof(minJSONOrderedAgg{}))
-const minJSONOrderedAggSliceOverhead = int64(unsafe.Sizeof([]minJSONOrderedAgg{}))
-
-func (a *minJSONOrderedAggAlloc) newAggFunc() AggregateFunc {
-	if len(a.aggFuncs) == 0 {
-		a.allocator.AdjustMemoryUsage(minJSONOrderedAggSliceOverhead + sizeOfminJSONOrderedAgg*a.allocSize)
-		a.aggFuncs = make([]minJSONOrderedAgg, a.allocSize)
-	}
-	f := &a.aggFuncs[0]
-	f.allocator = a.allocator
-	a.aggFuncs = a.aggFuncs[1:]
-	return f
-}
-
 type minDatumOrderedAgg struct {
 	orderedAggregateFuncBase
 	// col points to the output vector we are updating.
@@ -3068,7 +2677,7 @@ func (a *minDatumOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *minDatumOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 
 	var oldCurAggSize uintptr
@@ -3083,10 +2692,10 @@ func (a *minDatumOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3130,7 +2739,7 @@ func (a *minDatumOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3175,7 +2784,7 @@ func (a *minDatumOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -3289,13 +2898,10 @@ func (a *minDatumOrderedAgg) Flush(outputIdx int) {
 	} else {
 		a.col.Set(outputIdx, a.curAgg)
 	}
-
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.(*coldataext.Datum).Size()
-	}
 	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	if d, ok := a.curAgg.(*coldataext.Datum); ok {
+		a.allocator.AdjustMemoryUsage(-int64(d.Size()))
+	}
 	a.curAgg = nil
 }
 
@@ -3325,75 +2931,6 @@ func (a *minDatumOrderedAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-func newMaxOrderedAggAlloc(
-	allocator *colmem.Allocator, t *types.T, allocSize int64,
-) aggregateFuncAlloc {
-	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
-	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
-	case types.BoolFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxBoolOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.BytesFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxBytesOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.DecimalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxDecimalOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.IntFamily:
-		switch t.Width() {
-		case 16:
-			return &maxInt16OrderedAggAlloc{aggAllocBase: allocBase}
-		case 32:
-			return &maxInt32OrderedAggAlloc{aggAllocBase: allocBase}
-		case -1:
-		default:
-			return &maxInt64OrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.FloatFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxFloat64OrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.TimestampTZFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxTimestampOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.IntervalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxIntervalOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxJSONOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	case typeconv.DatumVecCanonicalTypeFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &maxDatumOrderedAggAlloc{aggAllocBase: allocBase}
-		}
-	}
-	colexecerror.InternalError(errors.AssertionFailedf("unexpectedly didn't find max overload for %s type family", t.Name()))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
-}
-
 type maxBoolOrderedAgg struct {
 	orderedAggregateFuncBase
 	// col points to the output vector we are updating.
@@ -3415,7 +2952,7 @@ func (a *maxBoolOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxBoolOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -3426,10 +2963,10 @@ func (a *maxBoolOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3439,7 +2976,7 @@ func (a *maxBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -3479,7 +3016,7 @@ func (a *maxBoolOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3489,7 +3026,7 @@ func (a *maxBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -3530,7 +3067,7 @@ func (a *maxBoolOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -3541,7 +3078,7 @@ func (a *maxBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -3590,7 +3127,7 @@ func (a *maxBoolOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -3650,7 +3187,7 @@ func (a *maxBoolOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -3701,7 +3238,7 @@ func (a *maxBytesOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxBytesOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := len(a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -3712,10 +3249,10 @@ func (a *maxBytesOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3757,7 +3294,7 @@ func (a *maxBytesOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3800,7 +3337,7 @@ func (a *maxBytesOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -3906,9 +3443,8 @@ func (a *maxBytesOrderedAgg) Flush(outputIdx int) {
 	} else {
 		a.col.Set(outputIdx, a.curAgg)
 	}
-	oldCurAggSize := len(a.curAgg)
 	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	a.allocator.AdjustMemoryUsage(-int64(len(a.curAgg)))
 	a.curAgg = nil
 }
 
@@ -3959,7 +3495,7 @@ func (a *maxDecimalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxDecimalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := tree.SizeOfDecimal(&a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -3970,10 +3506,10 @@ func (a *maxDecimalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -3983,7 +3519,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4015,7 +3551,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4025,7 +3561,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4058,7 +3594,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -4069,7 +3605,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4110,7 +3646,7 @@ func (a *maxDecimalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx].Set(&a.curAgg)
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4162,7 +3698,7 @@ func (a *maxDecimalOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx].Set(&a.curAgg)
 	}
 }
 
@@ -4213,7 +3749,7 @@ func (a *maxInt16OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxInt16OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -4224,10 +3760,10 @@ func (a *maxInt16OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4237,7 +3773,7 @@ func (a *maxInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4280,7 +3816,7 @@ func (a *maxInt16OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4290,7 +3826,7 @@ func (a *maxInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4334,7 +3870,7 @@ func (a *maxInt16OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -4345,7 +3881,7 @@ func (a *maxInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4397,7 +3933,7 @@ func (a *maxInt16OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4460,7 +3996,7 @@ func (a *maxInt16OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -4511,7 +4047,7 @@ func (a *maxInt32OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxInt32OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -4522,10 +4058,10 @@ func (a *maxInt32OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4535,7 +4071,7 @@ func (a *maxInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4578,7 +4114,7 @@ func (a *maxInt32OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4588,7 +4124,7 @@ func (a *maxInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4632,7 +4168,7 @@ func (a *maxInt32OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -4643,7 +4179,7 @@ func (a *maxInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4695,7 +4231,7 @@ func (a *maxInt32OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4758,7 +4294,7 @@ func (a *maxInt32OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -4809,7 +4345,7 @@ func (a *maxInt64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxInt64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -4820,10 +4356,10 @@ func (a *maxInt64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4833,7 +4369,7 @@ func (a *maxInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4876,7 +4412,7 @@ func (a *maxInt64OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -4886,7 +4422,7 @@ func (a *maxInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4930,7 +4466,7 @@ func (a *maxInt64OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -4941,7 +4477,7 @@ func (a *maxInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -4993,7 +4529,7 @@ func (a *maxInt64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5056,7 +4592,7 @@ func (a *maxInt64OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -5107,7 +4643,7 @@ func (a *maxFloat64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxFloat64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -5118,10 +4654,10 @@ func (a *maxFloat64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5131,7 +4667,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5182,7 +4718,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5192,7 +4728,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5244,7 +4780,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -5255,7 +4791,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5315,7 +4851,7 @@ func (a *maxFloat64OrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5386,7 +4922,7 @@ func (a *maxFloat64OrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -5437,7 +4973,7 @@ func (a *maxTimestampOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxTimestampOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -5448,10 +4984,10 @@ func (a *maxTimestampOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5461,7 +4997,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5500,7 +5036,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5510,7 +5046,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5550,7 +5086,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -5561,7 +5097,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5609,7 +5145,7 @@ func (a *maxTimestampOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5668,7 +5204,7 @@ func (a *maxTimestampOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -5719,7 +5255,7 @@ func (a *maxIntervalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxIntervalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -5730,10 +5266,10 @@ func (a *maxIntervalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5743,7 +5279,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5775,7 +5311,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -5785,7 +5321,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5818,7 +5354,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -5829,7 +5365,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5870,7 +5406,7 @@ func (a *maxIntervalOrderedAgg) Compute(
 							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
-								a.col.Set(a.curIdx, a.curAgg)
+								a.col[a.curIdx] = a.curAgg
 							}
 							a.curIdx++
 							a.foundNonNullForCurrentGroup = false
@@ -5922,7 +5458,7 @@ func (a *maxIntervalOrderedAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		a.col[outputIdx] = a.curAgg
 	}
 }
 
@@ -5952,385 +5488,6 @@ func (a *maxIntervalOrderedAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-type maxJSONOrderedAgg struct {
-	orderedAggregateFuncBase
-	// col points to the output vector we are updating.
-	col *coldata.JSONs
-	// curAgg holds the running min/max, so we can index into the slice once per
-	// group, instead of on each iteration.
-	// NOTE: if foundNonNullForCurrentGroup is false, curAgg is undefined.
-	curAgg json.JSON
-	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
-	// for the group that is currently being aggregated.
-	foundNonNullForCurrentGroup bool
-}
-
-var _ AggregateFunc = &maxJSONOrderedAgg{}
-
-func (a *maxJSONOrderedAgg) SetOutput(vec coldata.Vec) {
-	a.orderedAggregateFuncBase.SetOutput(vec)
-	a.col = vec.JSON()
-}
-
-func (a *maxJSONOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
-) {
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.Size()
-	}
-	vec := vecs[inputIdxs[0]]
-	col, nulls := vec.JSON(), vec.Nulls()
-	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
-		// Capture groups and col to force bounds check to work. See
-		// https://github.com/golang/go/issues/39756
-		groups := a.groups
-		col := col
-		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
-			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
-
-					//gcassert:bce
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = nulls.NullAt(i)
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult > 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			} else {
-				for i := startIdx; i < endIdx; i++ {
-
-					//gcassert:bce
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = false
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult > 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			}
-		} else {
-			sel = sel[startIdx:endIdx]
-			if nulls.MaybeHasNulls() {
-				for _, i := range sel {
-
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = nulls.NullAt(i)
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult > 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			} else {
-				for _, i := range sel {
-
-					if groups[i] {
-						if !a.isFirstGroup {
-							// If we encounter a new group, and we haven't found any non-nulls for the
-							// current group, the output for this group should be null.
-							if !a.foundNonNullForCurrentGroup {
-								a.nulls.SetNull(a.curIdx)
-							} else {
-								a.col.Set(a.curIdx, a.curAgg)
-							}
-							a.curIdx++
-							a.foundNonNullForCurrentGroup = false
-						}
-						a.isFirstGroup = false
-					}
-
-					var isNull bool
-					isNull = false
-					if !isNull {
-						if !a.foundNonNullForCurrentGroup {
-							val := col.Get(i)
-
-							var _err error
-							var _bytes []byte
-							_bytes, _err = json.EncodeJSON(nil, val)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-							a.curAgg, _err = json.FromEncoding(_bytes)
-							if _err != nil {
-								colexecerror.ExpectedError(_err)
-							}
-
-							a.foundNonNullForCurrentGroup = true
-						} else {
-							var cmp bool
-							candidate := col.Get(i)
-
-							{
-								var cmpResult int
-
-								var err error
-								cmpResult, err = candidate.Compare(a.curAgg)
-								if err != nil {
-									colexecerror.ExpectedError(err)
-								}
-
-								cmp = cmpResult > 0
-							}
-
-							if cmp {
-
-								var _err error
-								var _bytes []byte
-								_bytes, _err = json.EncodeJSON(nil, candidate)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-								a.curAgg, _err = json.FromEncoding(_bytes)
-								if _err != nil {
-									colexecerror.ExpectedError(_err)
-								}
-
-							}
-						}
-					}
-				}
-			}
-		}
-	},
-	)
-	var newCurAggSize uintptr
-	if a.curAgg != nil {
-		newCurAggSize = a.curAgg.Size()
-	}
-	if newCurAggSize != oldCurAggSize {
-		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
-	}
-}
-
-func (a *maxJSONOrderedAgg) Flush(outputIdx int) {
-	// The aggregation is finished. Flush the last value. If we haven't found
-	// any non-nulls for this group so far, the output for this group should
-	// be null.
-	// Go around "argument overwritten before first use" linter error.
-	_ = outputIdx
-	outputIdx = a.curIdx
-	a.curIdx++
-	if !a.foundNonNullForCurrentGroup {
-		a.nulls.SetNull(outputIdx)
-	} else {
-		a.col.Set(outputIdx, a.curAgg)
-	}
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.Size()
-	}
-	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
-	a.curAgg = nil
-}
-
-func (a *maxJSONOrderedAgg) Reset() {
-	a.orderedAggregateFuncBase.Reset()
-	a.foundNonNullForCurrentGroup = false
-}
-
-type maxJSONOrderedAggAlloc struct {
-	aggAllocBase
-	aggFuncs []maxJSONOrderedAgg
-}
-
-var _ aggregateFuncAlloc = &maxJSONOrderedAggAlloc{}
-
-const sizeOfmaxJSONOrderedAgg = int64(unsafe.Sizeof(maxJSONOrderedAgg{}))
-const maxJSONOrderedAggSliceOverhead = int64(unsafe.Sizeof([]maxJSONOrderedAgg{}))
-
-func (a *maxJSONOrderedAggAlloc) newAggFunc() AggregateFunc {
-	if len(a.aggFuncs) == 0 {
-		a.allocator.AdjustMemoryUsage(maxJSONOrderedAggSliceOverhead + sizeOfmaxJSONOrderedAgg*a.allocSize)
-		a.aggFuncs = make([]maxJSONOrderedAgg, a.allocSize)
-	}
-	f := &a.aggFuncs[0]
-	f.allocator = a.allocator
-	a.aggFuncs = a.aggFuncs[1:]
-	return f
-}
-
 type maxDatumOrderedAgg struct {
 	orderedAggregateFuncBase
 	// col points to the output vector we are updating.
@@ -6352,7 +5509,7 @@ func (a *maxDatumOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *maxDatumOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 
 	var oldCurAggSize uintptr
@@ -6367,10 +5524,10 @@ func (a *maxDatumOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -6414,7 +5571,7 @@ func (a *maxDatumOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -6459,7 +5616,7 @@ func (a *maxDatumOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -6573,13 +5730,10 @@ func (a *maxDatumOrderedAgg) Flush(outputIdx int) {
 	} else {
 		a.col.Set(outputIdx, a.curAgg)
 	}
-
-	var oldCurAggSize uintptr
-	if a.curAgg != nil {
-		oldCurAggSize = a.curAgg.(*coldataext.Datum).Size()
-	}
 	// Release the reference to curAgg eagerly.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	if d, ok := a.curAgg.(*coldataext.Datum); ok {
+		a.allocator.AdjustMemoryUsage(-int64(d.Size()))
+	}
 	a.curAgg = nil
 }
 

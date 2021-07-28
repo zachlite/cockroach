@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
@@ -41,7 +40,6 @@ func makeTestPlanner() *planner {
 	// Initialize an Executorconfig sufficiently for the purposes of creating a
 	// planner.
 	execCfg := ExecutorConfig{
-		Settings: cluster.MakeTestingClusterSettings(),
 		NodeInfo: NodeInfo{
 			NodeID: base.TestingIDContainer,
 			ClusterID: func() uuid.UUID {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/authentication"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
@@ -149,7 +148,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		opName,
 		params.p.txn,
 		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", authentication.UsersTableName),
+		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", userTableName),
 		normalizedUsername,
 	)
 	if err != nil {
@@ -208,12 +207,6 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		if err != nil {
 			return err
 		}
-		if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-			// Bump user table versions to force a refresh of AuthInfo cache.
-			if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-				return err
-			}
-		}
 	}
 
 	// Get a map of statements to execute for role options and their values.
@@ -256,13 +249,6 @@ func (n *alterRoleNode) startExec(params runParams) error {
 	optStrs := make([]string, len(n.roleOptions))
 	for i := range optStrs {
 		optStrs[i] = n.roleOptions[i].String()
-	}
-
-	if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		// Bump role_options table versions to force a refresh of AuthInfo cache.
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
 	}
 
 	return params.p.logEvent(params.ctx,

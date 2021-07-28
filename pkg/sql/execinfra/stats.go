@@ -38,7 +38,7 @@ func GetCumulativeContentionTime(ctx context.Context) time.Duration {
 	}
 	var ev roachpb.ContentionEvent
 	for i := range recording {
-		recording[i].Structured(func(any *pbtypes.Any, _ time.Time) {
+		recording[i].Structured(func(any *pbtypes.Any) {
 			if !pbtypes.Is(any, &ev) {
 				return
 			}

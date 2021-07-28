@@ -86,23 +86,8 @@ var lightstepToken = settings.RegisterStringSetting(
 // to send traces to, if any.
 var ZipkinCollector = settings.RegisterStringSetting(
 	"trace.zipkin.collector",
-	"if set, traces go to the given Zipkin instance (example: '127.0.0.1:9411'). "+
-		"Only one tracer can be configured at a time.",
+	"if set, traces go to the given Zipkin instance (example: '127.0.0.1:9411'); ignored if trace.lightstep.token is set",
 	envutil.EnvOrDefaultString("COCKROACH_TEST_ZIPKIN_COLLECTOR", ""),
-).WithPublic()
-
-var dataDogAgentAddr = settings.RegisterStringSetting(
-	"trace.datadog.agent",
-	"if set, traces will be sent to this DataDog agent; use <host>:<port> or \"default\" for localhost:8126. "+
-		"Only one tracer can be configured at a time.",
-	envutil.EnvOrDefaultString("COCKROACH_DATADOG_AGENT", ""),
-).WithPublic()
-
-var dataDogProjectName = settings.RegisterStringSetting(
-	"trace.datadog.project",
-	"the project under which traces will be reported to the DataDog agent if trace.datadog.agent is set. "+
-		"Only one tracer can be configured at a time.",
-	envutil.EnvOrDefaultString("COCKROACH_DATADOG_PROJECT", "CockroachDB"),
 ).WithPublic()
 
 // Tracer is our own custom implementation of opentracing.Tracer. It supports:
@@ -160,8 +145,7 @@ type Tracer struct {
 	// to a function that returns `true`.
 	TracingVerbosityIndependentSemanticsIsActive func() bool
 
-	testingMu               syncutil.Mutex // protects testingRecordAsyncSpans
-	testingRecordAsyncSpans bool           // see TestingRecordAsyncSpans
+	includeAsyncSpansInRecordings bool // see TestingIncludeAsyncSpansInRecordings
 
 	testing *testingKnob
 }
@@ -181,14 +165,12 @@ func NewTracer() *Tracer {
 
 // Configure sets up the Tracer according to the cluster settings (and keeps
 // it updated if they change).
-func (t *Tracer) Configure(ctx context.Context, sv *settings.Values) {
-	reconfigure := func(ctx context.Context) {
+func (t *Tracer) Configure(sv *settings.Values) {
+	reconfigure := func() {
 		if lsToken := lightstepToken.Get(sv); lsToken != "" {
 			t.setShadowTracer(createLightStepTracer(lsToken))
 		} else if zipkinAddr := ZipkinCollector.Get(sv); zipkinAddr != "" {
 			t.setShadowTracer(createZipkinTracer(zipkinAddr))
-		} else if ddAddr := dataDogAgentAddr.Get(sv); ddAddr != "" {
-			t.setShadowTracer(createDataDogTracer(ddAddr, dataDogProjectName.Get(sv)))
 		} else {
 			t.setShadowTracer(nil, nil)
 		}
@@ -199,13 +181,11 @@ func (t *Tracer) Configure(ctx context.Context, sv *settings.Values) {
 		atomic.StoreInt32(&t._useNetTrace, nt)
 	}
 
-	reconfigure(ctx)
+	reconfigure()
 
 	enableNetTrace.SetOnChange(sv, reconfigure)
 	lightstepToken.SetOnChange(sv, reconfigure)
 	ZipkinCollector.SetOnChange(sv, reconfigure)
-	dataDogAgentAddr.SetOnChange(sv, reconfigure)
-	dataDogProjectName.SetOnChange(sv, reconfigure)
 }
 
 // HasExternalSink returns whether the tracer is configured to report
@@ -284,19 +264,19 @@ func (t *Tracer) startSpanGeneric(
 	}
 
 	if opts.Parent != nil {
-		if !opts.RemoteParent.Empty() {
+		if opts.RemoteParent != nil {
 			panic("can't specify both Parent and RemoteParent")
 		}
+	}
+
+	if opts.LogTags == nil {
+		opts.LogTags = logtags.FromContext(ctx)
 	}
 
 	// Are we tracing everything, or have a parent, or want a real span? Then
 	// we create a real trace span. In all other cases, a noop span will do.
 	if !(t.AlwaysTrace() || opts.parentTraceID() != 0 || opts.ForceRealSpan) {
 		return maybeWrapCtx(ctx, nil /* octx */, t.noopSpan)
-	}
-
-	if opts.LogTags == nil {
-		opts.LogTags = logtags.FromContext(ctx)
 	}
 
 	if opts.LogTags == nil && opts.Parent != nil && !opts.Parent.i.isNoop() {
@@ -325,7 +305,11 @@ func (t *Tracer) startSpanGeneric(
 		// for the new span to avoid compat issues between the
 		// two underlying tracers.
 		if ok2 && (!ok1 || typ1 == typ2) {
-			ot = makeShadowSpan(shadowTr, opts.shadowContext(), opts.RefType, opName, startTime)
+			var shadowCtx opentracing.SpanContext
+			if opts.Parent != nil && opts.Parent.i.ot.shadowSpan != nil {
+				shadowCtx = opts.Parent.i.ot.shadowSpan.Context()
+			}
+			ot = makeShadowSpan(shadowTr, shadowCtx, opts.RefType, opName, startTime)
 			// If LogTags are given, pass them as tags to the shadow span.
 			// Regular tags are populated later, via the top-level Span.
 			if opts.LogTags != nil {
@@ -396,20 +380,6 @@ func (t *Tracer) startSpanGeneric(
 		netTr:  netTr,
 	}
 
-	// Copy over the parent span's root span reference, and if there isn't one
-	// (we're creating a new root span), set a reference to ourselves.
-	//
-	// TODO(irfansharif): Given we have a handle on the root span, we should
-	// reconsider the maxChildrenPerSpan limit, which only limits the branching
-	// factor. To bound the total memory usage for pkg/tracing, we could instead
-	// limit the number of spans per trace (no-oping all subsequent ones) and
-	// do the same for the total number of root spans.
-	if rootSpan := opts.deriveRootSpan(); rootSpan != nil {
-		helper.crdbSpan.rootSpan = rootSpan
-	} else {
-		helper.crdbSpan.rootSpan = &helper.crdbSpan
-	}
-
 	s := &helper.span
 
 	{
@@ -424,8 +394,8 @@ func (t *Tracer) startSpanGeneric(
 		s.i.crdb.enableRecording(p, opts.recordingType())
 	}
 
-	// Set initial tags (has to happen after instantiating the recording type).
-	// These will propagate to the crdbSpan, ot, and netTr as appropriate.
+	// Set initial tags. These will propagate to the crdbSpan, ot, and netTr
+	// as appropriate.
 	//
 	// NB: this could be optimized.
 	for k, v := range opts.Tags {
@@ -440,11 +410,10 @@ func (t *Tracer) startSpanGeneric(
 		if !opts.Parent.i.isNoop() {
 			opts.Parent.i.crdb.mu.Lock()
 			m := opts.Parent.i.crdb.mu.baggage
-			opts.Parent.i.crdb.mu.Unlock()
-
 			for k, v := range m {
 				s.SetBaggageItem(k, v)
 			}
+			opts.Parent.i.crdb.mu.Unlock()
 		}
 	} else {
 		// Local root span - put it into the registry of active local root
@@ -467,7 +436,7 @@ func (t *Tracer) startSpanGeneric(
 		t.activeSpans.m[spanID] = s
 		t.activeSpans.Unlock()
 
-		if !opts.RemoteParent.Empty() {
+		if opts.RemoteParent != nil {
 			for k, v := range opts.RemoteParent.Baggage {
 				s.SetBaggageItem(k, v)
 			}
@@ -551,8 +520,8 @@ func (fn textMapWriterFn) Set(key, val string) {
 // InjectMetaInto is used to serialize the given span metadata into the given
 // Carrier. This, alongside ExtractMetaFrom, can be used to carry span metadata
 // across process boundaries. See serializationFormat for more details.
-func (t *Tracer) InjectMetaInto(sm SpanMeta, carrier Carrier) error {
-	if sm.Empty() {
+func (t *Tracer) InjectMetaInto(sm *SpanMeta, carrier Carrier) error {
+	if sm == nil {
 		// Fast path when tracing is disabled. ExtractMetaFrom will accept an
 		// empty map as a noop context.
 		return nil
@@ -595,20 +564,32 @@ func (t *Tracer) InjectMetaInto(sm SpanMeta, carrier Carrier) error {
 	return nil
 }
 
-// var noopSpanMeta = (*SpanMeta)(nil)
-var noopSpanMeta = SpanMeta{}
+var noopSpanMeta = (*SpanMeta)(nil)
 
 // ExtractMetaFrom is used to deserialize a span metadata (if any) from the
 // given Carrier. This, alongside InjectMetaFrom, can be used to carry span
 // metadata across process boundaries. See serializationFormat for more details.
-func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
+func (t *Tracer) ExtractMetaFrom(carrier Carrier) (*SpanMeta, error) {
+	var format serializationFormat
+	switch carrier.(type) {
+	case MapCarrier:
+		format = mapFormat
+	case metadataCarrier:
+		format = metadataFormat
+	default:
+		return noopSpanMeta, errors.New("unsupported carrier")
+	}
+
 	var shadowType string
 	var shadowCarrier opentracing.TextMapCarrier
+
 	var traceID uint64
 	var spanID uint64
 	var baggage map[string]string
 
-	iterFn := func(k, v string) error {
+	// TODO(tbg): ForeachKey forces things on the heap. We can do better
+	// by using an explicit carrier.
+	err := carrier.ForEach(func(k, v string) error {
 		switch k = strings.ToLower(k); k {
 		case fieldNameTraceID:
 			var err error
@@ -639,23 +620,10 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 			}
 		}
 		return nil
+	})
+	if err != nil {
+		return noopSpanMeta, err
 	}
-
-	// Instead of iterating through the interface type, we prefer to do so with
-	// the explicit types to avoid heap allocations.
-	switch c := carrier.(type) {
-	case MapCarrier:
-		if err := c.ForEach(iterFn); err != nil {
-			return noopSpanMeta, err
-		}
-	case metadataCarrier:
-		if err := c.ForEach(iterFn); err != nil {
-			return noopSpanMeta, err
-		}
-	default:
-		return noopSpanMeta, errors.New("unsupported carrier")
-	}
-
 	if traceID == 0 && spanID == 0 {
 		return noopSpanMeta, nil
 	}
@@ -676,20 +644,10 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 			// consideration.
 			shadowType = ""
 		} else {
-			var format serializationFormat
-			switch carrier.(type) {
-			case MapCarrier:
-				format = mapFormat
-			case metadataCarrier:
-				format = metadataFormat
-			default:
-				return noopSpanMeta, errors.New("unsupported carrier")
-			}
 			// Shadow tracing is active on this node and the incoming information
 			// was created using the same type of tracer.
 			//
 			// Extract the shadow context using the un-encapsulated textmap.
-			var err error
 			shadowCtx, err = shadowTr.Extract(format, shadowCarrier)
 			if err != nil {
 				return noopSpanMeta, err
@@ -697,7 +655,7 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 		}
 	}
 
-	return SpanMeta{
+	return &SpanMeta{
 		traceID:          traceID,
 		spanID:           spanID,
 		shadowTracerType: shadowType,
@@ -707,7 +665,7 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 	}, nil
 }
 
-// GetActiveSpanFromID retrieves any active root span given its ID.
+// GetActiveSpanFromID retrieves any active span given its span ID.
 func (t *Tracer) GetActiveSpanFromID(spanID uint64) (*Span, bool) {
 	t.activeSpans.Lock()
 	span, found := t.activeSpans.m[spanID]
@@ -736,24 +694,11 @@ func (t *Tracer) VisitSpans(visitor func(*Span) error) error {
 	return nil
 }
 
-// TestingRecordAsyncSpans is a test-only helper that configures
+// TestingIncludeAsyncSpansInRecordings is a test-only helper that configures
 // the tracer to include recordings from forked/async child spans, when
 // retrieving the recording for a parent span.
-func (t *Tracer) TestingRecordAsyncSpans() {
-	t.testingMu.Lock()
-	defer t.testingMu.Unlock()
-
-	t.testingRecordAsyncSpans = true
-}
-
-// ShouldRecordAsyncSpans returns whether or not we should include recordings
-// from async child spans in the parent span. See TestingRecordAsyncSpans, this
-// mode is only used in tests.
-func (t *Tracer) ShouldRecordAsyncSpans() bool {
-	t.testingMu.Lock()
-	defer t.testingMu.Unlock()
-
-	return t.testingRecordAsyncSpans
+func (t *Tracer) TestingIncludeAsyncSpansInRecordings() {
+	t.includeAsyncSpansInRecordings = true
 }
 
 // ForkSpan forks the current span, if any[1]. Forked spans "follow from" the
@@ -770,14 +715,14 @@ func (t *Tracer) ShouldRecordAsyncSpans() bool {
 //
 // [1]: Looking towards the provided context to see if one exists.
 // [2]: Unless configured differently by tests, see
-//      TestingRecordAsyncSpans.
+//      TestingIncludeAsyncSpansInRecordings.
 func ForkSpan(ctx context.Context, opName string) (context.Context, *Span) {
 	sp := SpanFromContext(ctx)
 	if sp == nil {
 		return ctx, nil
 	}
 	collectionOpt := WithParentAndManualCollection(sp.Meta())
-	if sp.Tracer().ShouldRecordAsyncSpans() {
+	if sp.Tracer().includeAsyncSpansInRecordings {
 		// Using auto collection here ensures that recordings from async spans
 		// also show up at the parent.
 		collectionOpt = WithParentAndAutoCollection(sp)

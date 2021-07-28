@@ -267,10 +267,6 @@ var _ planNodeSpooled = &spoolNode{}
 type flowInfo struct {
 	typ     planComponentType
 	diagram execinfrapb.FlowDiagram
-	// explainVec and explainVecVerbose are only populated when collecting a
-	// statement bundle when the plan was vectorized.
-	explainVec        []string
-	explainVecVerbose []string
 	// flowsMetadata stores metadata from flows that will be used by
 	// execstats.TraceAnalyzer.
 	flowsMetadata *execstats.FlowsMetadata
@@ -299,6 +295,9 @@ type planTop struct {
 
 	// flags is populated during planning and execution.
 	flags planFlags
+
+	// execErr retains the last execution error, if any.
+	execErr error
 
 	// avoidBuffering, when set, causes the execution to avoid buffering
 	// results.

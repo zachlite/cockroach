@@ -576,12 +576,7 @@ func (bq *baseQueue) Async(
 		log.InfofDepth(ctx, 2, "%s", log.Safe(opName))
 	}
 	opName += " (" + bq.name + ")"
-	if err := bq.store.stopper.RunAsyncTaskEx(context.Background(),
-		stop.TaskOpts{
-			TaskName:   opName,
-			Sem:        bq.addOrMaybeAddSem,
-			WaitForSem: wait,
-		},
+	if err := bq.store.stopper.RunLimitedAsyncTask(context.Background(), opName, bq.addOrMaybeAddSem, wait,
 		func(ctx context.Context) {
 			fn(ctx, baseQueueHelper{bq})
 		}); err != nil && bq.addLogN.ShouldLog() {

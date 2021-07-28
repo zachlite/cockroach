@@ -119,11 +119,7 @@ func TestRandStep(t *testing.T) {
 					client.PutMissing++
 				}
 			case *ScanOperation:
-				if o.Reverse && o.ForUpdate {
-					client.ReverseScanForUpdate++
-				} else if o.Reverse {
-					client.ReverseScan++
-				} else if o.ForUpdate {
+				if o.ForUpdate {
 					client.ScanForUpdate++
 				} else {
 					client.Scan++
@@ -183,11 +179,6 @@ func TestRandStep(t *testing.T) {
 			}
 		case *TransferLeaseOperation:
 			counts.ChangeLease.TransferLease++
-		case *ChangeZoneOperation:
-			switch o.Type {
-			case ChangeZoneType_ToggleGlobalReads:
-				counts.ChangeZone.ToggleGlobalReads++
-			}
 		}
 		updateKeys(step.Op)
 

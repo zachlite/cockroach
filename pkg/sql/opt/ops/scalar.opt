@@ -95,8 +95,7 @@ define Variable {
 }
 
 # Const is a typed scalar constant value. The Value field is a tree.Datum value
-# having any datum type that's legal in the expression's context. Do NOT call
-# ConstructConst directly; use ConstructConstVal instead.
+# having any datum type that's legal in the expression's context.
 [Scalar, ConstValue]
 define Const {
     Value Datum
@@ -444,12 +443,6 @@ define IsNot {
 
 [Scalar, Bool, Comparison, CompositeInsensitive]
 define Contains {
-    Left ScalarExpr
-    Right ScalarExpr
-}
-
-[Scalar, Bool, Comparison, CompositeInsensitive]
-define ContainedBy {
     Left ScalarExpr
     Right ScalarExpr
 }

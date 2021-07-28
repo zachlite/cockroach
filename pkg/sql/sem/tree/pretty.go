@@ -417,7 +417,7 @@ func (p *PrettyCfg) peelBinaryOperand(e Expr, sameLevel bool, parenPrio int) Exp
 	stripped := StripParens(e)
 	switch te := stripped.(type) {
 	case *BinaryExpr:
-		childPrio := binaryOpPrio[te.Operator.Symbol]
+		childPrio := binaryOpPrio[te.Operator]
 		if childPrio < parenPrio || (sameLevel && childPrio == parenPrio) {
 			return stripped
 		}
@@ -434,16 +434,16 @@ func (p *PrettyCfg) peelBinaryOperand(e Expr, sameLevel bool, parenPrio int) Exp
 func (node *BinaryExpr) doc(p *PrettyCfg) pretty.Doc {
 	// All the binary operators are at least left-associative.
 	// So we can always simplify "(a OP b) OP c" to "a OP b OP c".
-	parenPrio := binaryOpPrio[node.Operator.Symbol]
+	parenPrio := binaryOpPrio[node.Operator]
 	leftOperand := p.peelBinaryOperand(node.Left, true /*sameLevel*/, parenPrio)
 	// If the binary operator is also fully associative,
 	// we can also simplify "a OP (b OP c)" to "a OP b OP c".
-	opFullyAssoc := binaryOpFullyAssoc[node.Operator.Symbol]
+	opFullyAssoc := binaryOpFullyAssoc[node.Operator]
 	rightOperand := p.peelBinaryOperand(node.Right, opFullyAssoc, parenPrio)
 
 	opDoc := pretty.Text(node.Operator.String())
 	var res pretty.Doc
-	if !node.Operator.Symbol.isPadded() {
+	if !node.Operator.isPadded() {
 		res = pretty.JoinDoc(opDoc, p.Doc(leftOperand), p.Doc(rightOperand))
 	} else {
 		pred := func(e Expr, recurse func(e Expr)) bool {

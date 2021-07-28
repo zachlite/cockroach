@@ -13,8 +13,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl/multiregionccltestutils"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -135,14 +135,14 @@ func TestConcurrentAddDropRegions(t *testing.T) {
 			}
 
 			_, sqlDB, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-				t, 5 /* numServers */, knobs,
+				t, 5 /* numServers */, knobs, nil, /* baseDir */
 			)
 			defer cleanup()
 
 			// Create a multi-region database with a REGIONAL BY ROW table inside of it
 			// which needs to be re-partitioned on add/drop operations.
 			_, err := sqlDB.Exec(`
-CREATE DATABASE db WITH PRIMARY REGION "us-east1" REGIONS "us-east2", "us-east3";
+CREATE DATABASE db WITH PRIMARY REGION "us-east1" REGIONS "us-east2", "us-east3"; 
 CREATE TABLE db.rbr () LOCALITY REGIONAL BY ROW`)
 			require.NoError(t, err)
 
@@ -173,7 +173,6 @@ CREATE TABLE db.rbr () LOCALITY REGIONAL BY ROW`)
 			for {
 				done := rows.Next()
 				if !done {
-					require.NoError(t, rows.Err())
 					break
 				}
 				var region string
@@ -216,6 +215,9 @@ func TestRegionAddDropEnclosingRegionalByRowOps(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	skip.UnderRace(t, "times out under race")
+
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	regionAlterCmds := []struct {
 		name          string
@@ -281,12 +283,10 @@ func TestRegionAddDropEnclosingRegionalByRowOps(t *testing.T) {
 							return nil
 						},
 					},
-					// Decrease the adopt loop interval so that retries happen quickly.
-					JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				}
 
 				_, sqlDB, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-					t, 4 /* numServers */, knobs,
+					t, 4 /* numServers */, knobs, nil, /* baseDir */
 				)
 				defer cleanup()
 
@@ -355,7 +355,7 @@ func TestSettingPrimaryRegionAmidstDrop(t *testing.T) {
 	}
 
 	_, sqlDB, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-		t, 2 /* numServers */, knobs,
+		t, 2 /* numServers */, knobs, nil, /* baseDir */
 	)
 	defer cleanup()
 
@@ -400,12 +400,7 @@ ALTER DATABASE db PRIMARY REGION "us-east2";
 
 		const expectedRegion = "us-east1"
 		var region string
-		if !rows.Next() {
-			if err := rows.Err(); err != nil {
-				return err
-			}
-			return errors.New("no rows returned")
-		}
+		rows.Next()
 		if err := rows.Scan(&region); err != nil {
 			return err
 		}
@@ -431,6 +426,9 @@ func TestDroppingPrimaryRegionAsyncJobFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	// Protects expectedCleanupRuns
 	var mu syncutil.Mutex
 	// We need to cleanup 2 times, once for the multi-region type descriptor and
@@ -452,18 +450,16 @@ func TestDroppingPrimaryRegionAsyncJobFailure(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 
 	_, sqlDB, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-		t, 1 /* numServers */, knobs,
+		t, 1 /* numServers */, knobs, nil, /* baseDir */
 	)
 	defer cleanup()
 
 	// Setup the test.
 	_, err := sqlDB.Exec(`
-CREATE DATABASE db WITH PRIMARY REGION "us-east1";
+CREATE DATABASE db WITH PRIMARY REGION "us-east1"; 
 CREATE TABLE db.t(k INT) LOCALITY REGIONAL BY TABLE IN PRIMARY REGION;
 `)
 	require.NoError(t, err)
@@ -502,19 +498,20 @@ func TestRollbackDuringAddDropRegionAsyncJobFailure(t *testing.T) {
 
 	skip.UnderRace(t, "times out under race")
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	knobs := base.TestingKnobs{
 		SQLTypeSchemaChanger: &sql.TypeSchemaChangerTestingKnobs{
 			RunBeforeMultiRegionUpdates: func() error {
 				return errors.New("boom")
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 
 	// Setup.
 	_, sqlDB, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-		t, 3 /* numServers */, knobs,
+		t, 3 /* numServers */, knobs, nil, /* baseDir */
 	)
 	defer cleanup()
 	_, err := sqlDB.Exec(`CREATE DATABASE db WITH PRIMARY REGION "us-east1" REGIONS "us-east2"`)
@@ -591,6 +588,9 @@ func TestRegionAddDropWithConcurrentBackupOps(t *testing.T) {
 
 	skip.UnderRace(t, "times out under race")
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	regionAlterCmds := []struct {
 		name               string
 		cmd                string
@@ -659,18 +659,13 @@ func TestRegionAddDropWithConcurrentBackupOps(t *testing.T) {
 							return nil
 						},
 					},
-					// Decrease the adopt loop interval so that retries happen quickly.
-					JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				}
 
 				tempExternalIODir, tempDirCleanup := testutils.TempDir(t)
 				defer tempDirCleanup()
 
 				_, sqlDBBackup, cleanupBackup := multiregionccltestutils.TestingCreateMultiRegionCluster(
-					t,
-					4, /* numServers */
-					backupKnobs,
-					multiregionccltestutils.WithBaseDirectory(tempExternalIODir),
+					t, 4 /* numServers */, backupKnobs, &tempExternalIODir,
 				)
 				defer cleanupBackup()
 
@@ -714,16 +709,11 @@ INSERT INTO db.rbr VALUES (1,1),(2,2),(3,3);
 							return nil
 						},
 					},
-					// Decrease the adopt loop interval so that retries happen quickly.
-					JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				}
 
 				// Start a new cluster (with new testing knobs) for restore.
 				_, sqlDBRestore, cleanupRestore := multiregionccltestutils.TestingCreateMultiRegionCluster(
-					t,
-					4, /* numServers */
-					restoreKnobs,
-					multiregionccltestutils.WithBaseDirectory(tempExternalIODir),
+					t, 4 /* numServers */, restoreKnobs, &tempExternalIODir,
 				)
 				defer cleanupRestore()
 

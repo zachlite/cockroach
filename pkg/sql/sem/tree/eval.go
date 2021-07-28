@@ -33,9 +33,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -108,9 +108,7 @@ func (*UnaryOp) preferred() bool {
 	return false
 }
 
-func unaryOpFixups(
-	ops map[UnaryOperatorSymbol]unaryOpOverload,
-) map[UnaryOperatorSymbol]unaryOpOverload {
+func unaryOpFixups(ops map[UnaryOperator]unaryOpOverload) map[UnaryOperator]unaryOpOverload {
 	for op, overload := range ops {
 		for i, impl := range overload {
 			casted := impl.(*UnaryOp)
@@ -126,7 +124,7 @@ func unaryOpFixups(
 type unaryOpOverload []overloadImpl
 
 // UnaryOps contains the unary operations indexed by operation type.
-var UnaryOps = unaryOpFixups(map[UnaryOperatorSymbol]unaryOpOverload{
+var UnaryOps = unaryOpFixups(map[UnaryOperator]unaryOpOverload{
 	UnaryMinus: {
 		&UnaryOp{
 			Typ:        types.Int,
@@ -501,22 +499,29 @@ func (o binOpOverload) lookupImpl(left, right *types.T) (*BinOp, bool) {
 	return nil, false
 }
 
-// GetJSONPath is used for the #> and #>> operators.
-func GetJSONPath(j json.JSON, ary DArray) (json.JSON, error) {
+// getJSONPath is used for the #> and #>> operators.
+func getJSONPath(j DJSON, ary DArray) (Datum, error) {
 	// TODO(justin): this is slightly annoying because we have to allocate
 	// a new array since the JSON package isn't aware of DArray.
 	path := make([]string, len(ary.Array))
 	for i, v := range ary.Array {
 		if v == DNull {
-			return nil, nil
+			return DNull, nil
 		}
 		path[i] = string(MustBeDString(v))
 	}
-	return json.FetchPath(j, path)
+	result, err := json.FetchPath(j.JSON, path)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return DNull, nil
+	}
+	return &DJSON{result}, nil
 }
 
 // BinOps contains the binary operations indexed by operation type.
-var BinOps = map[BinaryOperatorSymbol]binOpOverload{
+var BinOps = map[BinaryOperator]binOpOverload{
 	Bitand: {
 		&BinOp{
 			LeftType:   types.Int,
@@ -1881,14 +1886,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 			RightType:  types.MakeArray(types.String),
 			ReturnType: types.Jsonb,
 			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				path, err := GetJSONPath(left.(*DJSON).JSON, *MustBeDArray(right))
-				if err != nil {
-					return nil, err
-				}
-				if path == nil {
-					return DNull, nil
-				}
-				return &DJSON{path}, nil
+				return getJSONPath(*left.(*DJSON), *MustBeDArray(right))
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -1949,14 +1947,14 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 			RightType:  types.MakeArray(types.String),
 			ReturnType: types.String,
 			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				res, err := GetJSONPath(left.(*DJSON).JSON, *MustBeDArray(right))
+				res, err := getJSONPath(*left.(*DJSON), *MustBeDArray(right))
 				if err != nil {
 					return nil, err
 				}
-				if res == nil {
+				if res == DNull {
 					return DNull, nil
 				}
-				text, err := res.AsText()
+				text, err := res.(*DJSON).JSON.AsText()
 				if err != nil {
 					return nil, err
 				}
@@ -2170,10 +2168,10 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeLtFn(types.Bytes, types.Bytes, VolatilityLeakProof),
 		makeLtFn(types.Date, types.Date, VolatilityLeakProof),
 		makeLtFn(types.Decimal, types.Decimal, VolatilityImmutable),
+		makeLtFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		// Note: it is an error to compare two strings with different collations;
 		// the operator is leak proof under the assumption that these cases will be
 		// detected during type checking.
-		makeLtFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		makeLtFn(types.Float, types.Float, VolatilityLeakProof),
 		makeLtFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeLtFn(types.Geography, types.Geography, VolatilityLeakProof),
@@ -3048,9 +3046,9 @@ type EvalDatabase interface {
 	// It returns the ID of the resolved table, and an error if the table doesn't exist.
 	ResolveTableName(ctx context.Context, tn *TableName) (ID, error)
 
-	// SchemaExists looks up the schema with the given name and determines
-	// whether it exists.
-	SchemaExists(ctx context.Context, dbName, scName string) (found bool, err error)
+	// LookupSchema looks up the schema with the given name in the given
+	// database.
+	LookupSchema(ctx context.Context, dbName, scName string) (found bool, scMeta SchemaMeta, err error)
 
 	// IsTableVisible checks if the table with the given ID belongs to a schema
 	// on the given sessiondata.SearchPath.
@@ -3063,59 +3061,12 @@ type EvalDatabase interface {
 	IsTypeVisible(
 		ctx context.Context, curDB string, searchPath sessiondata.SearchPath, typeID oid.Oid,
 	) (isVisible bool, exists bool, err error)
-
-	// HasPrivilege returns whether the current user has privilege to access
-	// the given object.
-	HasPrivilege(
-		ctx context.Context,
-		specifier HasPrivilegeSpecifier,
-		user security.SQLUsername,
-		kind privilege.Kind,
-		withGrantOpt bool,
-	) (bool, error)
-}
-
-// HasPrivilegeSpecifier specifies an object to lookup privilege for.
-type HasPrivilegeSpecifier struct {
-	// Only one of these is filled.
-	TableName *string
-	TableOID  *oid.Oid
-
-	// Only one of these is filled.
-	// Only used if TableName or TableOID is specified.
-	ColumnName   *Name
-	ColumnAttNum *uint32
-}
-
-// TypeResolver is an interface for resolving types and type OIDs.
-type TypeResolver interface {
-	TypeReferenceResolver
-
-	// ResolveOIDFromString looks up the populated value of the OID with the
-	// desired resultType which matches the provided name.
-	//
-	// The return value is a fresh DOid of the input oid.Oid with name and OID
-	// set to the result of the query. If there was not exactly one result to the
-	// query, an error will be returned.
-	ResolveOIDFromString(
-		ctx context.Context, resultType *types.T, toResolve *DString,
-	) (*DOid, error)
-
-	// ResolveOIDFromOID looks up the populated value of the oid with the
-	// desired resultType which matches the provided oid.
-	//
-	// The return value is a fresh DOid of the input oid.Oid with name and OID
-	// set to the result of the query. If there was not exactly one result to the
-	// query, an error will be returned.
-	ResolveOIDFromOID(
-		ctx context.Context, resultType *types.T, toResolve *DOid,
-	) (*DOid, error)
 }
 
 // EvalPlanner is a limited planner that can be used from EvalContext.
 type EvalPlanner interface {
 	EvalDatabase
-	TypeResolver
+	TypeReferenceResolver
 
 	// GetImmutableTableInterfaceByID returns an interface{} with
 	// catalog.TableDescriptor to avoid a circular dependency.
@@ -3163,6 +3114,14 @@ type EvalPlanner interface {
 		force bool,
 	) error
 
+	// CompactEngineSpan is used to compact an engine key span at the given
+	// (nodeID, storeID). If we add more overloads to the compact_span builtin,
+	// this parameter list should be changed to a struct union to accommodate
+	// those overloads.
+	CompactEngineSpan(
+		ctx context.Context, nodeID int32, storeID int32, startKey []byte, endKey []byte,
+	) error
+
 	// MemberOfWithAdminOption is used to collect a list of roles (direct and
 	// indirect) that the member is part of. See the comment on the planner
 	// implementation in authorization.go
@@ -3171,14 +3130,6 @@ type EvalPlanner interface {
 		member security.SQLUsername,
 	) (map[security.SQLUsername]bool, error)
 }
-
-// CompactEngineSpanFunc is used to compact an engine key span at the given
-// (nodeID, storeID). If we add more overloads to the compact_span builtin,
-// this parameter list should be changed to a struct union to accommodate
-// those overloads.
-type CompactEngineSpanFunc func(
-	ctx context.Context, nodeID, storeID int32, startKey, endKey []byte,
-) error
 
 // EvalSessionAccessor is a limited interface to access session variables.
 type EvalSessionAccessor interface {
@@ -3311,16 +3262,6 @@ type TenantOperator interface {
 	GCTenant(ctx context.Context, tenantID uint64) error
 }
 
-// JoinTokenCreator is capable of creating and persisting join tokens, allowing
-// SQL builtin functions to create join tokens. The methods will return errors
-// when run on multi-tenant clusters or with this functionality unavailable.
-type JoinTokenCreator interface {
-	// CreateJoinToken creates a new ephemeral join token and persists it
-	// across the cluster. This join token can then be used to have new nodes
-	// join the cluster and exchange certificates securely.
-	CreateJoinToken(ctx context.Context) (string, error)
-}
-
 // EvalContextTestingKnobs contains test knobs.
 type EvalContextTestingKnobs struct {
 	// AssertFuncExprReturnTypes indicates whether FuncExpr evaluations
@@ -3449,8 +3390,6 @@ type EvalContext struct {
 
 	Tenant TenantOperator
 
-	JoinTokenCreator JoinTokenCreator
-
 	// The transaction in which the statement is executing.
 	Txn *kv.Txn
 	// A handle to the database.
@@ -3487,9 +3426,6 @@ type EvalContext struct {
 	SQLLivenessReader sqlliveness.Reader
 
 	SQLStatsResetter SQLStatsResetter
-
-	// CompactEngineSpan is used to force compaction of a span in a store.
-	CompactEngineSpan CompactEngineSpanFunc
 }
 
 // MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.
@@ -3511,11 +3447,13 @@ func MakeTestingEvalContext(st *cluster.Settings) EvalContext {
 // EvalContext so do not start or close the memory monitor.
 func MakeTestingEvalContextWithMon(st *cluster.Settings, monitor *mon.BytesMonitor) EvalContext {
 	ctx := EvalContext{
-		Codec:       keys.SystemSQLCodec,
-		Txn:         &kv.Txn{},
-		SessionData: &sessiondata.SessionData{},
-		Settings:    st,
-		NodeID:      base.TestingIDContainer,
+		Codec: keys.SystemSQLCodec,
+		Txn:   &kv.Txn{},
+		SessionData: &sessiondata.SessionData{SessionData: sessiondatapb.SessionData{
+			VectorizeMode: sessiondatapb.VectorizeOn,
+		}},
+		Settings: st,
+		NodeID:   base.TestingIDContainer,
 	}
 	monitor.Start(context.Background(), nil /* pool */, mon.MakeStandaloneBudget(math.MaxInt64))
 	ctx.Mon = monitor
@@ -3559,20 +3497,6 @@ func NewTestingEvalContext(st *cluster.Settings) *EvalContext {
 // Stop closes out the EvalContext and must be called once it is no longer in use.
 func (ctx *EvalContext) Stop(c context.Context) {
 	ctx.Mon.Stop(c)
-}
-
-// FmtCtx creates a FmtCtx with the given options as well as the EvalContext's session data.
-func (ctx *EvalContext) FmtCtx(f FmtFlags, opts ...FmtCtxOption) *FmtCtx {
-	if ctx.SessionData != nil {
-		opts = append(
-			[]FmtCtxOption{FmtDataConversionConfig(ctx.SessionData.DataConversionConfig)},
-			opts...,
-		)
-	}
-	return NewFmtCtx(
-		f,
-		opts...,
-	)
 }
 
 // GetStmtTimestamp retrieves the current statement timestamp as per
@@ -3845,6 +3769,75 @@ func (expr *CaseExpr) Eval(ctx *EvalContext) (Datum, error) {
 // name of the function into group 1.
 // e.g. function(a, b, c) or function( a )
 var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\."]+)\s*\((?:(?:\s*[\w"]+\s*,)*\s*[\w"]+)?\s*\)\s*$`)
+
+// regTypeInfo contains details on a pg_catalog table that has a reg* type.
+type regTypeInfo struct {
+	tableName string
+	// nameCol is the name of the column that contains the table's entity name.
+	nameCol string
+	// objName is a human-readable name describing the objects in the table.
+	objName string
+	// errType is the pg error code in case the object does not exist.
+	errType pgcode.Code
+}
+
+// regTypeInfos maps an oid.Oid to a regTypeInfo that describes the pg_catalog
+// table that contains the entities of the type of the key.
+var regTypeInfos = map[oid.Oid]regTypeInfo{
+	oid.T_regclass:     {"pg_class", "relname", "relation", pgcode.UndefinedTable},
+	oid.T_regtype:      {"pg_type", "typname", "type", pgcode.UndefinedObject},
+	oid.T_regproc:      {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
+	oid.T_regprocedure: {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
+	oid.T_regnamespace: {"pg_namespace", "nspname", "namespace", pgcode.UndefinedObject},
+}
+
+// queryOidWithJoin looks up the name or OID of an input OID or string in the
+// pg_catalog table that the input oid.Oid belongs to. If the input Datum
+// is a DOid, the relevant table will be queried by OID; if the input is a
+// DString, the table will be queried by its name column.
+//
+// The return value is a fresh DOid of the input oid.Oid with name and OID
+// set to the result of the query. If there was not exactly one result to the
+// query, an error will be returned.
+func queryOidWithJoin(
+	ctx *EvalContext, typ *types.T, d Datum, joinClause string, additionalWhere string,
+) (*DOid, error) {
+	ret := &DOid{semanticType: typ}
+	info := regTypeInfos[typ.Oid()]
+	var queryCol string
+	switch d.(type) {
+	case *DOid:
+		queryCol = "oid"
+	case *DString:
+		queryCol = info.nameCol
+	default:
+		return nil, errors.AssertionFailedf("invalid argument to OID cast: %s", d)
+	}
+	results, err := ctx.InternalExecutor.QueryRow(
+		ctx.Ctx(), "queryOidWithJoin",
+		ctx.Txn,
+		fmt.Sprintf(
+			"SELECT %s.oid, %s FROM pg_catalog.%s %s WHERE %s = $1 %s",
+			info.tableName, info.nameCol, info.tableName, joinClause, queryCol, additionalWhere),
+		d)
+	if err != nil {
+		if errors.HasType(err, (*MultipleResultsError)(nil)) {
+			return nil, pgerror.Newf(pgcode.AmbiguousAlias,
+				"more than one %s named %s", info.objName, d)
+		}
+		return nil, err
+	}
+	if results.Len() == 0 {
+		return nil, pgerror.Newf(info.errType, "%s %s does not exist", info.objName, d)
+	}
+	ret.DInt = results[0].(*DOid).DInt
+	ret.name = AsStringWithFlags(results[1], FmtBareStrings)
+	return ret, nil
+}
+
+func queryOid(ctx *EvalContext, typ *types.T, d Datum) (*DOid, error) {
+	return queryOidWithJoin(ctx, typ, d, "", "")
+}
 
 // Eval implements the TypedExpr interface.
 func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
@@ -5230,37 +5223,16 @@ func (k similarToKey) Pattern() (string, error) {
 // SimilarToEscape checks if 'unescaped' is SIMILAR TO 'pattern' using custom escape token 'escape'
 // which must be either empty (which disables the escape mechanism) or a single unicode character.
 func SimilarToEscape(ctx *EvalContext, unescaped, pattern, escape string) (Datum, error) {
-	key, err := makeSimilarToKey(pattern, escape)
-	if err != nil {
-		return DBoolFalse, err
-	}
-	return matchRegexpWithKey(ctx, NewDString(unescaped), key)
-}
-
-// SimilarPattern converts a SQL regexp 'pattern' to a POSIX regexp 'pattern' using custom escape token 'escape'
-// which must be either empty (which disables the escape mechanism) or a single unicode character.
-func SimilarPattern(pattern, escape string) (Datum, error) {
-	key, err := makeSimilarToKey(pattern, escape)
-	if err != nil {
-		return nil, err
-	}
-	pattern, err = key.Pattern()
-	if err != nil {
-		return nil, err
-	}
-	return NewDString(pattern), nil
-}
-
-// makeSimilarToKey makes a similarToKey using the given 'pattern' and 'escape'.
-func makeSimilarToKey(pattern, escape string) (similarToKey, error) {
 	var escapeRune rune
-	var width int
-	escapeRune, width = utf8.DecodeRuneInString(escape)
-	if len(escape) > width {
-		return similarToKey{}, pgerror.Newf(pgcode.InvalidEscapeSequence, "invalid escape string")
+	if len(escape) > 0 {
+		var width int
+		escapeRune, width = utf8.DecodeRuneInString(escape)
+		if len(escape) > width {
+			return DBoolFalse, pgerror.Newf(pgcode.InvalidEscapeSequence, "invalid escape string")
+		}
 	}
 	key := similarToKey{s: pattern, escape: escapeRune}
-	return key, nil
+	return matchRegexpWithKey(ctx, NewDString(unescaped), key)
 }
 
 type regexpKey struct {

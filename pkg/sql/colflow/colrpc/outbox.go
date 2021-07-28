@@ -13,7 +13,6 @@ package colrpc
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
@@ -45,16 +44,16 @@ type flowStreamClient interface {
 // given remote endpoint.
 type Outbox struct {
 	colexecop.OneInputNode
-	inputInitialized bool
 
 	typs []*types.T
 
+	allocator  *colmem.Allocator
 	converter  *colserde.ArrowBatchConverter
 	serializer *colserde.RecordBatchSerializer
 
 	// draining is an atomic that represents whether the Outbox is draining.
 	draining        uint32
-	metadataSources colexecop.MetadataSources
+	metadataSources execinfrapb.MetadataSources
 	// closers is a slice of Closers that need to be Closed on termination.
 	closers colexecop.Closers
 
@@ -83,7 +82,7 @@ func NewOutbox(
 	input colexecop.Operator,
 	typs []*types.T,
 	getStats func() []*execinfrapb.ComponentStats,
-	metadataSources []colexecop.MetadataSource,
+	metadataSources []execinfrapb.MetadataSource,
 	toClose []colexecop.Closer,
 ) (*Outbox, error) {
 	c, err := colserde.NewArrowBatchConverter(typs)
@@ -99,6 +98,7 @@ func NewOutbox(
 		// be).
 		OneInputNode:    colexecop.NewOneInputNode(colexecutils.NewDeselectorOp(allocator, input, typs)),
 		typs:            typs,
+		allocator:       allocator,
 		converter:       c,
 		serializer:      s,
 		getStats:        getStats,
@@ -111,6 +111,14 @@ func NewOutbox(
 }
 
 func (o *Outbox) close(ctx context.Context) {
+	o.scratch.buf = nil
+	o.scratch.msg = nil
+	// Unset the input (which is a deselector operator) so that its output batch
+	// could be garbage collected. This allows us to release all memory
+	// registered with the allocator (the allocator is shared by the outbox and
+	// the deselector).
+	o.Input = nil
+	o.allocator.ReleaseMemory(o.allocator.Used())
 	o.closers.CloseAndLogOnErr(ctx, "outbox")
 }
 
@@ -225,9 +233,9 @@ func handleStreamErr(
 	}
 }
 
-func (o *Outbox) moveToDraining(ctx context.Context, reason string) {
+func (o *Outbox) moveToDraining(ctx context.Context) {
 	if atomic.CompareAndSwapUint32(&o.draining, 0, 1) {
-		log.VEventf(ctx, 2, "Outbox moved to draining (%s)", reason)
+		log.VEvent(ctx, 2, "Outbox moved to draining")
 	}
 }
 
@@ -261,29 +269,40 @@ func (o *Outbox) sendBatches(
 		o.runnerCtx = ctx
 	}
 	errToSend = colexecerror.CatchVectorizedRuntimeError(func() {
-		o.Input.Init(o.runnerCtx)
-		o.inputInitialized = true
+		o.Input.Init()
 		for {
 			if atomic.LoadUint32(&o.draining) == 1 {
 				terminatedGracefully = true
 				return
 			}
 
-			batch := o.Input.Next()
+			batch := o.Input.Next(o.runnerCtx)
 			n := batch.Length()
 			if n == 0 {
 				terminatedGracefully = true
 				return
 			}
 
-			o.scratch.buf.Reset()
+			// Note that for certain types (like Decimals, Intervals,
+			// datum-backed types) BatchToArrow allocates some memory in order
+			// to perform the conversion, and we consciously choose to ignore it
+			// for the purposes of the memory accounting because the references
+			// to those slices are lost in Serialize call below.
 			d, err := o.converter.BatchToArrow(batch)
 			if err != nil {
 				colexecerror.InternalError(errors.Wrap(err, "Outbox BatchToArrow data serialization error"))
 			}
+
+			oldBufCap := o.scratch.buf.Cap()
+			o.scratch.buf.Reset()
 			if _, _, err := o.serializer.Serialize(o.scratch.buf, d, n); err != nil {
 				colexecerror.InternalError(errors.Wrap(err, "Outbox Serialize data error"))
 			}
+			// Account for the increase in the capacity of the scratch buffer.
+			// Note that because we never truncate the buffer, we are only
+			// adjusting the memory usage whenever the buffer's capacity
+			// increases (if it didn't increase, this call becomes a noop).
+			o.allocator.AdjustMemoryUsage(int64(o.scratch.buf.Cap() - oldBufCap))
 			o.scratch.msg.Data.RawBytes = o.scratch.buf.Bytes()
 
 			// o.scratch.msg can be reused as soon as Send returns since it returns as
@@ -304,21 +323,13 @@ func (o *Outbox) sendBatches(
 func (o *Outbox) sendMetadata(ctx context.Context, stream flowStreamClient, errToSend error) error {
 	msg := &execinfrapb.ProducerMessage{}
 	if errToSend != nil {
-		log.VEventf(ctx, 1, "Outbox sending an error as metadata: %v", errToSend)
 		msg.Data.Metadata = append(
 			msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, execinfrapb.ProducerMetadata{Err: errToSend}),
 		)
 	}
-	if o.inputInitialized {
-		// Retrieving stats and draining the metadata is only safe if the input
-		// to the outbox was properly initialized.
-		if o.span != nil && o.getStats != nil {
-			for _, s := range o.getStats() {
-				o.span.RecordStructured(s)
-			}
-		}
-		for _, meta := range o.metadataSources.DrainMeta() {
-			msg.Data.Metadata = append(msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, meta))
+	if o.span != nil && o.getStats != nil {
+		for _, s := range o.getStats() {
+			o.span.RecordStructured(s)
 		}
 	}
 	if trace := execinfra.GetTraceData(ctx); trace != nil {
@@ -329,6 +340,9 @@ func (o *Outbox) sendMetadata(ctx context.Context, stream flowStreamClient, errT
 				},
 			},
 		})
+	}
+	for _, meta := range o.metadataSources.DrainMeta(ctx) {
+		msg.Data.Metadata = append(msg.Data.Metadata, execinfrapb.LocalMetaToRemoteProducerMeta(ctx, meta))
 	}
 	if len(msg.Data.Metadata) == 0 {
 		return nil
@@ -376,7 +390,7 @@ func (o *Outbox) runWithStream(
 				log.VEventf(ctx, 2, "Outbox received handshake: %v", msg.Handshake)
 			case msg.DrainRequest != nil:
 				log.VEventf(ctx, 2, "Outbox received drain request")
-				o.moveToDraining(ctx, "consumer requested draining" /* reason */)
+				o.moveToDraining(ctx)
 			}
 		}
 		close(waitCh)
@@ -384,11 +398,7 @@ func (o *Outbox) runWithStream(
 
 	terminatedGracefully, errToSend := o.sendBatches(ctx, stream, flowCtxCancel, outboxCtxCancel)
 	if terminatedGracefully || errToSend != nil {
-		reason := "terminated gracefully"
-		if errToSend != nil {
-			reason = fmt.Sprintf("encountered error when sending batches: %v", errToSend)
-		}
-		o.moveToDraining(ctx, reason)
+		o.moveToDraining(ctx)
 		if err := o.sendMetadata(ctx, stream, errToSend); err != nil {
 			handleStreamErr(ctx, "Send (metadata)", err, flowCtxCancel, outboxCtxCancel)
 		} else {

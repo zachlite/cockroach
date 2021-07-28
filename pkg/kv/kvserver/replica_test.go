@@ -54,7 +54,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -81,8 +80,8 @@ import (
 
 // allSpans is a SpanSet that covers *everything* for use in tests that don't
 // care about properly declaring their spans.
-func allSpans() *spanset.SpanSet {
-	ss := spanset.New()
+var allSpans = func() spanset.SpanSet {
+	var ss spanset.SpanSet
 	ss.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{
 		Key:    roachpb.KeyMin,
 		EndKey: roachpb.KeyMax,
@@ -93,7 +92,7 @@ func allSpans() *spanset.SpanSet {
 		EndKey: append([]byte("\x01"), roachpb.KeyMax...),
 	})
 	return ss
-}
+}()
 
 // allSpansGuard returns a concurrency guard that indicates that it provides
 // isolation across all key spans for use in tests that don't care about
@@ -101,8 +100,7 @@ func allSpans() *spanset.SpanSet {
 func allSpansGuard() *concurrency.Guard {
 	return &concurrency.Guard{
 		Req: concurrency.Request{
-			LatchSpans: allSpans(),
-			LockSpans:  spanset.New(),
+			LatchSpans: &allSpans,
 		},
 	}
 }
@@ -1017,7 +1015,7 @@ func TestReplicaLease(t *testing.T) {
 	} {
 		if _, err := batcheval.RequestLease(ctx, tc.store.Engine(),
 			batcheval.CommandArgs{
-				EvalCtx: NewReplicaEvalContext(tc.repl, allSpans()),
+				EvalCtx: NewReplicaEvalContext(tc.repl, &allSpans),
 				Args: &roachpb.RequestLeaseRequest{
 					Lease: lease,
 				},
@@ -2877,123 +2875,6 @@ func TestReplicaLatchingSplitDeclaresWrites(t *testing.T) {
 			require.NotNil(t, err)
 			require.Regexp(t, "undeclared span", err)
 		}
-	}
-}
-
-// TestReplicaLatchingOptimisticEvaluation verifies that limited scans
-// evaluate optimistically without waiting for latches to be acquired. In some
-// cases, this allows them to avoid waiting on writes that their
-// over-estimated declared spans overlapped with.
-func TestReplicaLatchingOptimisticEvaluation(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	// Split into two back-to-back scans for better test coverage.
-	sArgs1 := scanArgs([]byte("a"), []byte("c"))
-	sArgs2 := scanArgs([]byte("c"), []byte("e"))
-	baScan := roachpb.BatchRequest{}
-	baScan.Add(sArgs1, sArgs2)
-	// The state that will block a write while holding latches.
-	var blockKey, blockWriter atomic.Value
-	blockKey.Store(roachpb.Key("a"))
-	blockWriter.Store(false)
-	blockCh := make(chan struct{}, 1)
-	blockedCh := make(chan struct{}, 1)
-	// Setup filter to block the write.
-	tc := testContext{}
-	tsc := TestStoreConfig(nil)
-	tsc.TestingKnobs.EvalKnobs.TestingEvalFilter =
-		func(filterArgs kvserverbase.FilterArgs) *roachpb.Error {
-			// Make sure the direct GC path doesn't interfere with this test.
-			if !filterArgs.Req.Header().Key.Equal(blockKey.Load().(roachpb.Key)) {
-				return nil
-			}
-			if filterArgs.Req.Method() == roachpb.Put && blockWriter.Load().(bool) {
-				blockedCh <- struct{}{}
-				<-blockCh
-			}
-			return nil
-		}
-	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-	tc.StartWithStoreConfig(t, stopper, tsc)
-	// Write initial keys.
-	for _, k := range []string{"a", "b", "c", "d"} {
-		pArgs := putArgs([]byte(k), []byte("value"))
-		if _, pErr := tc.SendWrapped(&pArgs); pErr != nil {
-			t.Fatal(pErr)
-		}
-	}
-	testCases := []struct {
-		writeKey   string
-		limit      int64
-		interferes bool
-	}{
-		// No limit, so pessimistic latching.
-		{"a", 0, true},
-		{"b", 0, true},
-		{"c", 0, true},
-		{"d", 0, true},
-		{"e", 0, false}, // Only scanning from [a,e)
-		// Limited, with optimistic latching.
-		{"a", 1, true},
-		{"b", 1, false},
-		{"b", 2, true},
-		{"c", 2, false},
-		{"c", 3, true},
-		{"d", 3, false},
-		// Limited, with pessimistic latching since limit count is equal to number
-		// of keys in range.
-		{"d", 4, true},
-		{"e", 4, false}, // Only scanning from [a,e)
-		{"e", 5, false}, // Only scanning from [a,e)
-	}
-	for _, test := range testCases {
-		t.Run(fmt.Sprintf("%+v", test), func(t *testing.T) {
-			errCh := make(chan *roachpb.Error, 2)
-			pArgs := putArgs([]byte(test.writeKey), []byte("value"))
-			blockKey.Store(roachpb.Key(test.writeKey))
-			blockWriter.Store(true)
-			go func() {
-				_, pErr := tc.SendWrapped(&pArgs)
-				errCh <- pErr
-			}()
-			<-blockedCh
-			// Write is now blocked while holding latches.
-			blockWriter.Store(false)
-			baScanCopy := baScan
-			baScanCopy.MaxSpanRequestKeys = test.limit
-			go func() {
-				_, pErr := tc.Sender().Send(context.Background(), baScanCopy)
-				errCh <- pErr
-			}()
-			if test.interferes {
-				// Neither request should complete until the write is unblocked.
-				select {
-				case <-time.After(10 * time.Millisecond):
-					// Expected.
-				case pErr := <-errCh:
-					t.Fatalf("expected interference: got error %s", pErr)
-				}
-				// Unblock the write.
-				blockCh <- struct{}{}
-				// Both read and write should complete with no errors.
-				for j := 0; j < 2; j++ {
-					if pErr := <-errCh; pErr != nil {
-						t.Errorf("error %d: unexpected error: %s", j, pErr)
-					}
-				}
-			} else {
-				// The read should complete first.
-				if pErr := <-errCh; pErr != nil {
-					t.Errorf("unexpected error: %s", pErr)
-				}
-				// The write should complete next, after it is unblocked.
-				blockCh <- struct{}{}
-				if pErr := <-errCh; pErr != nil {
-					t.Errorf("unexpected error: %s", pErr)
-				}
-			}
-		})
 	}
 }
 
@@ -5119,7 +5000,7 @@ func TestEndTxnDirectGC(t *testing.T) {
 				var gr roachpb.GetResponse
 				if _, err := batcheval.Get(
 					ctx, tc.engine, batcheval.CommandArgs{
-						EvalCtx: NewReplicaEvalContext(tc.repl, allSpans()),
+						EvalCtx: NewReplicaEvalContext(tc.repl, &allSpans),
 						Args: &roachpb.GetRequest{RequestHeader: roachpb.RequestHeader{
 							Key: keys.TransactionKey(txn.Key, txn.ID),
 						}},
@@ -5496,7 +5377,7 @@ func TestAbortSpanError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := &SpanSetReplicaEvalContext{tc.repl, *allSpans()}
+	rec := &SpanSetReplicaEvalContext{tc.repl, allSpans}
 	pErr := checkIfTxnAborted(context.Background(), rec, tc.engine, txn)
 	if _, ok := pErr.GetDetail().(*roachpb.TransactionAbortedError); ok {
 		expected := txn.Clone()
@@ -5606,7 +5487,6 @@ func TestPushTxnAlreadyCommittedOrAborted(t *testing.T) {
 // test cases, the priorities are set such that the push will succeed.
 func TestPushTxnUpgradeExistingTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, 64313, "flaky test")
 	defer log.Scope(t).Close(t)
 	tc := testContext{}
 	stopper := stop.NewStopper()
@@ -5716,7 +5596,6 @@ func TestPushTxnQueryPusheeHasNewerVersion(t *testing.T) {
 // heartbeat within its transaction liveness threshold can be pushed/aborted.
 func TestPushTxnHeartbeatTimeout(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.UnderBazelWithIssue(t, 62860, "flaky test")
 	defer log.Scope(t).Close(t)
 	tc := testContext{manualClock: hlc.NewManualClock(123)}
 	stopper := stop.NewStopper()
@@ -6376,7 +6255,7 @@ func TestRangeStatsComputation(t *testing.T) {
 	// there will be an initial nontrivial lease requested with the first write
 	// below. This lease acquisition will, in turn, create a prior read summary.
 	baseStats.Add(enginepb.MVCCStats{
-		SysBytes: 66,
+		SysBytes: 64,
 		SysCount: 1,
 	})
 
@@ -8234,7 +8113,7 @@ func TestReplicaRefreshPendingCommandsTicks(t *testing.T) {
 		ba.Timestamp = tc.Clock().Now()
 		ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: roachpb.Key(id)}})
 		st := r.CurrentLeaseStatus(ctx)
-		cmd, pErr := r.requestToProposal(ctx, kvserverbase.CmdIDKey(id), &ba, st, hlc.Timestamp{}, allSpans(), allSpans())
+		cmd, pErr := r.requestToProposal(ctx, kvserverbase.CmdIDKey(id), &ba, st, hlc.Timestamp{}, &allSpans, &allSpans)
 		if pErr != nil {
 			t.Fatal(pErr)
 		}
@@ -8356,7 +8235,7 @@ func TestReplicaRefreshMultiple(t *testing.T) {
 
 	incCmdID = makeIDKey()
 	atomic.StoreInt32(&filterActive, 1)
-	proposal, pErr := repl.requestToProposal(ctx, incCmdID, &ba, repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans(), allSpans())
+	proposal, pErr := repl.requestToProposal(ctx, incCmdID, &ba, repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, &allSpans, &allSpans)
 	if pErr != nil {
 		t.Fatal(pErr)
 	}
@@ -8612,7 +8491,7 @@ func TestFailureToProcessCommandClearsLocalResult(t *testing.T) {
 	r.mu.Unlock()
 
 	tr := tc.store.ClusterSettings().Tracer
-	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
+	tr.TestingIncludeAsyncSpansInRecordings() // we assert on async span traces in this test
 	opCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
 	defer cancel()
 
@@ -8806,7 +8685,7 @@ func TestReplicaEvaluationNotTxnMutation(t *testing.T) {
 	assignSeqNumsForReqs(txn, &txnPut, &txnPut2)
 	origTxn := txn.Clone()
 
-	batch, _, _, _, pErr := tc.repl.evaluateWriteBatch(ctx, makeIDKey(), &ba, hlc.Timestamp{}, allSpans(), allSpans())
+	batch, _, _, _, pErr := tc.repl.evaluateWriteBatch(ctx, makeIDKey(), &ba, hlc.Timestamp{}, &allSpans, &allSpans)
 	defer batch.Close()
 	if pErr != nil {
 		t.Fatal(pErr)
@@ -9370,7 +9249,6 @@ func TestCommandTooLarge(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
 	tc := testContext{}
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
@@ -9378,7 +9256,7 @@ func TestCommandTooLarge(t *testing.T) {
 
 	st := tc.store.cfg.Settings
 	st.Manual.Store(true)
-	MaxCommandSize.Override(ctx, &st.SV, 1024)
+	MaxCommandSize.Override(&st.SV, 1024)
 
 	args := putArgs(roachpb.Key("k"),
 		[]byte(strings.Repeat("a", int(MaxCommandSize.Get(&st.SV)))))
@@ -10813,7 +10691,7 @@ func TestReplicaNotifyLockTableOn1PC(t *testing.T) {
 	// Disable txn liveness pushes. See below for why.
 	st := tc.store.cfg.Settings
 	st.Manual.Store(true)
-	concurrency.LockTableLivenessPushDelay.Override(ctx, &st.SV, 24*time.Hour)
+	concurrency.LockTableLivenessPushDelay.Override(&st.SV, 24*time.Hour)
 
 	// Write a value to a key A.
 	key := roachpb.Key("a")
@@ -12690,7 +12568,7 @@ func TestProposalNotAcknowledgedOrReproposedAfterApplication(t *testing.T) {
 	cfg.RaftMaxCommittedSizePerReady = 1
 	// Set up tracing.
 	tracer := tracing.NewTracer()
-	tracer.Configure(ctx, &cfg.Settings.SV)
+	tracer.Configure(&cfg.Settings.SV)
 	cfg.AmbientCtx.Tracer = tracer
 
 	// Below we set txnID to the value of the transaction we're going to force to
@@ -12829,7 +12707,7 @@ func TestLaterReproposalsDoNotReuseContext(t *testing.T) {
 	cfg := TestStoreConfig(hlc.NewClock(hlc.UnixNano, time.Nanosecond))
 	// Set up tracing.
 	tracer := tracing.NewTracer()
-	tracer.Configure(ctx, &cfg.Settings.SV)
+	tracer.Configure(&cfg.Settings.SV)
 	tracer.AlwaysTrace()
 	cfg.AmbientCtx.Tracer = tracer
 	tc.StartWithStoreConfig(t, stopper, cfg)
@@ -13008,7 +12886,7 @@ func TestReplicateQueueProcessOne(t *testing.T) {
 	tc.repl.mu.destroyStatus.Set(errBoom, destroyReasonMergePending)
 	tc.repl.mu.Unlock()
 
-	requeue, err := tc.store.replicateQueue.processOneChange(ctx, tc.repl, func(ctx context.Context, repl *Replica) bool { return false }, true /* dryRun */)
+	requeue, err := tc.store.replicateQueue.processOneChange(ctx, tc.repl, func() bool { return false }, true /* dryRun */)
 	require.Equal(t, errBoom, err)
 	require.False(t, requeue)
 }
@@ -13026,7 +12904,7 @@ func TestContainsEstimatesClampProposal(t *testing.T) {
 		ba.Timestamp = tc.Clock().Now()
 		req := putArgs(roachpb.Key("some-key"), []byte("some-value"))
 		ba.Add(&req)
-		proposal, err := tc.repl.requestToProposal(ctx, cmdIDKey, &ba, tc.repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans(), allSpans())
+		proposal, err := tc.repl.requestToProposal(ctx, cmdIDKey, &ba, tc.repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, &allSpans, &allSpans)
 		if err != nil {
 			t.Error(err)
 		}

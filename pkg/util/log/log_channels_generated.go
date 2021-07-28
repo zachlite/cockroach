@@ -2085,7 +2085,8 @@ type loggerSessions struct{}
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2108,7 +2109,8 @@ var _ ChannelLogger = Sessions
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2131,7 +2133,8 @@ func (loggerSessions) Infof(ctx context.Context, format string, args ...interfac
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2154,7 +2157,8 @@ func (loggerSessions) VInfof(ctx context.Context, level Level, format string, ar
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2176,7 +2180,8 @@ func (loggerSessions) Info(ctx context.Context, msg string) {
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2197,7 +2202,8 @@ func (loggerSessions) InfofDepth(ctx context.Context, depth int, format string, 
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2220,7 +2226,8 @@ func (loggerSessions) Warningf(ctx context.Context, format string, args ...inter
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2243,7 +2250,8 @@ func (loggerSessions) VWarningf(ctx context.Context, level Level, format string,
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2265,7 +2273,8 @@ func (loggerSessions) Warning(ctx context.Context, msg string) {
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2286,7 +2295,8 @@ func (loggerSessions) WarningfDepth(ctx context.Context, depth int, format strin
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2310,7 +2320,8 @@ func (loggerSessions) Errorf(ctx context.Context, format string, args ...interfa
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2334,7 +2345,8 @@ func (loggerSessions) VErrorf(ctx context.Context, level Level, format string, a
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2357,7 +2369,8 @@ func (loggerSessions) Error(ctx context.Context, msg string) {
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2379,7 +2392,8 @@ func (loggerSessions) ErrorfDepth(ctx context.Context, depth int, format string,
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2403,7 +2417,8 @@ func (loggerSessions) Fatalf(ctx context.Context, format string, args ...interfa
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2427,7 +2442,8 @@ func (loggerSessions) VFatalf(ctx context.Context, level Level, format string, a
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2450,7 +2466,8 @@ func (loggerSessions) Fatal(ctx context.Context, msg string) {
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2471,7 +2488,8 @@ func (loggerSessions) FatalfDepth(ctx context.Context, depth int, format string,
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts
@@ -2489,7 +2507,8 @@ func (loggerSessions) Shout(ctx context.Context, sev Severity, msg string) {
 //
 // The `SESSIONS` channel is used to report client network activity when enabled via
 // the `server.auth_log.sql_connections.enabled` and/or
-// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+// `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+// [cluster settings](cluster-settings.html):
 //
 // - Connections opened/closed
 // - Authentication events: logins, failed attempts

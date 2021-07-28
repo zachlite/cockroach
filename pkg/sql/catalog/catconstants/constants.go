@@ -36,11 +36,7 @@ const (
 	CrdbInternalBackwardDependenciesTableID
 	CrdbInternalBuildInfoTableID
 	CrdbInternalBuiltinFunctionsTableID
-	CrdbInternalClusterContendedIndexesViewID
-	CrdbInternalClusterContendedKeysViewID
-	CrdbInternalClusterContendedTablesViewID
 	CrdbInternalClusterContentionEventsTableID
-	CrdbInternalClusterDistSQLFlowsTableID
 	CrdbInternalClusterQueriesTableID
 	CrdbInternalClusterTransactionsTableID
 	CrdbInternalClusterSessionsTableID
@@ -62,7 +58,6 @@ const (
 	CrdbInternalKVStoreStatusTableID
 	CrdbInternalLeasesTableID
 	CrdbInternalLocalContentionEventsTableID
-	CrdbInternalLocalDistSQLFlowsTableID
 	CrdbInternalLocalQueriesTableID
 	CrdbInternalLocalTransactionsTableID
 	CrdbInternalLocalSessionsTableID
@@ -85,76 +80,35 @@ const (
 	CrdbInternalZonesTableID
 	CrdbInternalInvalidDescriptorsTableID
 	CrdbInternalClusterDatabasePrivilegesTableID
-	CrdbInternalInterleaved
-	CrdbInternalCrossDbRefrences
 	CrdbInternalLostTableDescriptors
-	CrdbInternalClusterInflightTracesTable
 	InformationSchemaID
 	InformationSchemaAdministrableRoleAuthorizationsID
 	InformationSchemaApplicableRolesID
-	InformationSchemaAttributesTableID
 	InformationSchemaCharacterSets
-	InformationSchemaCheckConstraintRoutineUsageTableID
 	InformationSchemaCheckConstraints
 	InformationSchemaCollationCharacterSetApplicability
 	InformationSchemaCollations
-	InformationSchemaColumnColumnUsageTableID
-	InformationSchemaColumnDomainUsageTableID
-	InformationSchemaColumnOptionsTableID
 	InformationSchemaColumnPrivilegesID
-	InformationSchemaColumnUDTUsageID
 	InformationSchemaColumnsTableID
+	InformationSchemaColumnUDTUsageID
 	InformationSchemaConstraintColumnUsageTableID
-	InformationSchemaConstraintTableUsageTableID
-	InformationSchemaDataTypePrivilegesTableID
-	InformationSchemaDomainConstraintsTableID
-	InformationSchemaDomainUdtUsageTableID
-	InformationSchemaDomainsTableID
-	InformationSchemaElementTypesTableID
 	InformationSchemaEnabledRolesID
-	InformationSchemaForeignDataWrapperOptionsTableID
-	InformationSchemaForeignDataWrappersTableID
-	InformationSchemaForeignServerOptionsTableID
-	InformationSchemaForeignServersTableID
-	InformationSchemaForeignTableOptionsTableID
-	InformationSchemaForeignTablesTableID
-	InformationSchemaInformationSchemaCatalogNameTableID
 	InformationSchemaKeyColumnUsageTableID
 	InformationSchemaParametersTableID
 	InformationSchemaReferentialConstraintsTableID
-	InformationSchemaRoleColumnGrantsTableID
-	InformationSchemaRoleRoutineGrantsTableID
 	InformationSchemaRoleTableGrantsID
-	InformationSchemaRoleUdtGrantsTableID
-	InformationSchemaRoleUsageGrantsTableID
-	InformationSchemaRoutinePrivilegesTableID
 	InformationSchemaRoutineTableID
 	InformationSchemaSchemataTableID
 	InformationSchemaSchemataTablePrivilegesID
-	InformationSchemaSequencesID
 	InformationSchemaSessionVariables
-	InformationSchemaSQLFeaturesTableID
-	InformationSchemaSQLImplementationInfoTableID
-	InformationSchemaSQLPartsTableID
-	InformationSchemaSQLSizingTableID
+	InformationSchemaSequencesID
 	InformationSchemaStatisticsTableID
 	InformationSchemaTableConstraintTableID
 	InformationSchemaTablePrivilegesID
 	InformationSchemaTablesTableID
-	InformationSchemaTransformsTableID
-	InformationSchemaTriggeredUpdateColumnsTableID
-	InformationSchemaTriggersTableID
 	InformationSchemaTypePrivilegesID
-	InformationSchemaUdtPrivilegesTableID
-	InformationSchemaUsagePrivilegesTableID
-	InformationSchemaUserDefinedTypesTableID
-	InformationSchemaUserMappingOptionsTableID
-	InformationSchemaUserMappingsTableID
-	InformationSchemaUserPrivilegesID
-	InformationSchemaViewColumnUsageTableID
-	InformationSchemaViewRoutineUsageTableID
-	InformationSchemaViewTableUsageTableID
 	InformationSchemaViewsTableID
+	InformationSchemaUserPrivilegesID
 	PgCatalogID
 	PgCatalogAggregateTableID
 	PgCatalogAmTableID
@@ -190,9 +144,7 @@ const (
 	PgCatalogIndexTableID
 	PgCatalogIndexesTableID
 	PgCatalogInheritsTableID
-	PgCatalogInitPrivsTableID
 	PgCatalogLanguageTableID
-	PgCatalogLargeobjectMetadataTableID
 	PgCatalogLargeobjectTableID
 	PgCatalogLocksTableID
 	PgCatalogMatViewsTableID
@@ -200,9 +152,7 @@ const (
 	PgCatalogOpclassTableID
 	PgCatalogOperatorTableID
 	PgCatalogOpfamilyTableID
-	PgCatalogPartitionedTableTableID
 	PgCatalogPoliciesTableID
-	PgCatalogPolicyTableID
 	PgCatalogPreparedStatementsTableID
 	PgCatalogPreparedXactsTableID
 	PgCatalogProcTableID
@@ -210,15 +160,12 @@ const (
 	PgCatalogPublicationTableID
 	PgCatalogPublicationTablesTableID
 	PgCatalogRangeTableID
-	PgCatalogReplicationOriginStatusTableID
 	PgCatalogReplicationOriginTableID
-	PgCatalogReplicationSlotsTableID
 	PgCatalogRewriteTableID
 	PgCatalogRolesTableID
 	PgCatalogRulesTableID
 	PgCatalogSecLabelsTableID
 	PgCatalogSecurityLabelTableID
-	PgCatalogSequenceTableID
 	PgCatalogSequencesTableID
 	PgCatalogSettingsTableID
 	PgCatalogShadowTableID
@@ -228,7 +175,6 @@ const (
 	PgCatalogShmemAllocationsTableID
 	PgCatalogStatActivityTableID
 	PgCatalogStatisticExtTableID
-	PgCatalogSubscriptionRelTableID
 	PgCatalogSubscriptionTableID
 	PgCatalogTablesTableID
 	PgCatalogTablespaceTableID
@@ -252,3 +198,7 @@ const (
 	PgExtensionSpatialRefSysTableID
 	MinVirtualID = PgExtensionSpatialRefSysTableID
 )
+
+// ValidationTelemetryKeyPrefix is the prefix of telemetry keys pertaining to
+// descriptor validation failures.
+const ValidationTelemetryKeyPrefix = "sql.schema.validation_errors."

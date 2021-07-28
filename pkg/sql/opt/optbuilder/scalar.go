@@ -84,7 +84,7 @@ func (b *Builder) buildScalar(
 			// grouping on the entire PK of that table.
 			g := inScope.groupby
 			if !inScope.isOuterColumn(t.id) && !b.allowImplicitGroupingColumn(t.id, g) {
-				panic(newGroupingError(t.name.ReferenceName()))
+				panic(newGroupingError(&t.name))
 			}
 
 			// We add a new grouping column; these show up both in aggInScope and
@@ -93,7 +93,7 @@ func (b *Builder) buildScalar(
 			// Note that normalization rules will trim down the list of grouping
 			// columns based on FDs, so this is only for the purposes of building a
 			// valid operator.
-			aggInCol := g.aggInScope.addColumn(scopeColName(""), t)
+			aggInCol := g.aggInScope.addColumn("" /* alias */, t)
 			b.finishBuildScalarRef(t, inScope, g.aggInScope, aggInCol, nil)
 			g.groupStrs[symbolicExprStr(t)] = aggInCol
 
@@ -214,8 +214,7 @@ func (b *Builder) buildScalar(
 
 		left := tree.ReType(t.TypedLeft(), t.ResolvedBinOp().LeftType)
 		right := tree.ReType(t.TypedRight(), t.ResolvedBinOp().RightType)
-		out = b.constructBinary(
-			tree.MakeBinaryOperator(t.Operator.Symbol),
+		out = b.constructBinary(t.Operator,
 			b.buildScalar(left, inScope, nil, nil, colRefs),
 			b.buildScalar(right, inScope, nil, nil, colRefs),
 			t.ResolvedType(),
@@ -385,7 +384,7 @@ func (b *Builder) buildScalar(
 				// Non-grouping column was referenced. Note that a column that is part
 				// of a larger grouping expression would have been detected by the
 				// groupStrs checking code above.
-				panic(newGroupingError(t.cols[0].name.ReferenceName()))
+				panic(newGroupingError(&t.cols[0].name))
 			}
 			return b.finishBuildScalarRef(&t.cols[0], inScope, outScope, outCol, colRefs)
 		}
@@ -639,11 +638,10 @@ func (b *Builder) checkSubqueryOuterCols(
 			subqueryOuterCols.DifferenceWith(inScope.groupby.aggOutScope.colSet())
 			colID, _ := subqueryOuterCols.Next(0)
 			col := inScope.getColumn(colID)
-			name := col.name.ReferenceName()
 			panic(pgerror.Newf(
 				pgcode.Grouping,
 				"subquery uses ungrouped column \"%s\" from outer query",
-				tree.ErrString(&name)))
+				tree.ErrString(&col.name)))
 		}
 	}
 }
@@ -702,7 +700,8 @@ func (b *Builder) constructComparison(
 	case tree.Contains:
 		return b.factory.ConstructContains(left, right)
 	case tree.ContainedBy:
-		return b.factory.ConstructContainedBy(left, right)
+		// This is just syntatic sugar that reverses the operands.
+		return b.factory.ConstructContains(right, left)
 	case tree.JSONExists:
 		return b.factory.ConstructJsonExists(left, right)
 	case tree.JSONAllExists:
@@ -725,7 +724,7 @@ func (b *Builder) constructComparison(
 func (b *Builder) constructBinary(
 	bin tree.BinaryOperator, left, right opt.ScalarExpr, typ *types.T,
 ) opt.ScalarExpr {
-	switch bin.Symbol {
+	switch bin {
 	case tree.Bitand:
 		return b.factory.ConstructBitand(left, right)
 	case tree.Bitor:
@@ -767,7 +766,7 @@ func (b *Builder) constructBinary(
 func (b *Builder) constructUnary(
 	un tree.UnaryOperator, input opt.ScalarExpr, typ *types.T,
 ) opt.ScalarExpr {
-	switch un.Symbol {
+	switch un {
 	case tree.UnaryMinus:
 		return b.factory.ConstructUnaryMinus(input)
 	case tree.UnaryComplement:
@@ -813,7 +812,7 @@ func NewScalar(
 	for colID := opt.ColumnID(1); int(colID) <= md.NumColumns(); colID++ {
 		colMeta := md.ColumnMeta(colID)
 		sb.scope.cols = append(sb.scope.cols, scopeColumn{
-			name: scopeColName(tree.Name(colMeta.Alias)),
+			name: tree.Name(colMeta.Alias),
 			typ:  colMeta.Type,
 			id:   colID,
 		})

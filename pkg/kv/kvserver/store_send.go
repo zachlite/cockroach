@@ -304,6 +304,9 @@ func (s *Store) maybeThrottleBatch(
 		}
 		return res, nil
 
+	case *roachpb.ImportRequest:
+		return s.limiters.ConcurrentImportRequests.Begin(ctx)
+
 	default:
 		return nil, nil
 	}

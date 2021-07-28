@@ -172,12 +172,6 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 	}
 }
 
-func (b *logicalPropsBuilder) buildPlaceholderScanProps(
-	scan *PlaceholderScanExpr, rel *props.Relational,
-) {
-	panic(errors.AssertionFailedf("not implemented"))
-}
-
 func (b *logicalPropsBuilder) buildSequenceSelectProps(
 	seq *SequenceSelectExpr, rel *props.Relational,
 ) {
@@ -685,7 +679,6 @@ func (b *logicalPropsBuilder) buildLocalityOptimizedSearchProps(
 func (b *logicalPropsBuilder) buildSetProps(setNode RelExpr, rel *props.Relational) {
 	BuildSharedProps(setNode, &rel.Shared)
 
-	op := setNode.Op()
 	leftProps := setNode.Child(0).(RelExpr).Relational()
 	rightProps := setNode.Child(1).(RelExpr).Relational()
 	setPrivate := setNode.Private().(*SetPrivate)
@@ -721,7 +714,12 @@ func (b *logicalPropsBuilder) buildSetProps(setNode RelExpr, rel *props.Relation
 
 	// Functional Dependencies
 	// -----------------------
-	switch op {
+	switch setNode.Op() {
+	case opt.UnionOp, opt.IntersectOp, opt.ExceptOp:
+		// These operators eliminate duplicates, so a strict key exists.
+		rel.FuncDeps.AddStrictKey(rel.OutputCols, rel.OutputCols)
+	}
+	switch setNode.Op() {
 	case opt.UnionOp, opt.UnionAllOp, opt.LocalityOptimizedSearchOp:
 		// If columns at ordinals (i, j) are equivalent in both the left input
 		// and right input, then the output columns at ordinals at (i, j) are
@@ -734,34 +732,27 @@ func (b *logicalPropsBuilder) buildSetProps(setNode RelExpr, rel *props.Relation
 				}
 			}
 		}
-
 	case opt.IntersectOp, opt.IntersectAllOp, opt.ExceptOp, opt.ExceptAllOp:
-		// With these operators, the output is a subset of the left input, so all
-		// the left FDs still hold (similar to a Select).
-		rel.FuncDeps.RemapFrom(&leftProps.FuncDeps, setPrivate.LeftCols, setPrivate.OutCols)
-
-		if op == opt.IntersectOp || op == opt.IntersectAllOp {
-			// With Intersect operators, the output is also a subset of the right input,
-			// so all the right FDs apply as well.
-			var remapped props.FuncDepSet
-			remapped.RemapFrom(&rightProps.FuncDeps, setPrivate.RightCols, setPrivate.OutCols)
-			rel.FuncDeps.AddFrom(&remapped)
+		// Intersect, IntersectAll, Except and ExceptAll only output rows from
+		// the left input, so if columns at ordinals (i, j) are equivalent in
+		// the left input, then they are equivalent in the output.
+		// TODO(mgartner): The entire FD set on the left side can be used, but
+		// columns may need to be mapped. Intersections can combine FD
+		// information from both the left and the right.
+		for i := range setPrivate.OutCols {
+			for j := i + 1; j < len(setPrivate.OutCols); j++ {
+				if leftProps.FuncDeps.AreColsEquiv(setPrivate.LeftCols[i], setPrivate.LeftCols[j]) {
+					rel.FuncDeps.AddEquivalency(setPrivate.OutCols[i], setPrivate.OutCols[j])
+				}
+			}
 		}
-	}
-
-	// Add a strict key for variants that eliminate duplicates.
-	switch op {
-	case opt.UnionOp, opt.IntersectOp, opt.ExceptOp:
-		rel.FuncDeps.AddStrictKey(rel.OutputCols, rel.OutputCols)
 	}
 
 	// Cardinality
 	// -----------
 	// Calculate cardinality of the set operator.
-	rel.Cardinality = b.makeSetCardinality(op, leftProps.Cardinality, rightProps.Cardinality)
-	if rel.FuncDeps.HasMax1Row() {
-		rel.Cardinality = rel.Cardinality.Limit(1)
-	}
+	rel.Cardinality = b.makeSetCardinality(
+		setNode.Op(), leftProps.Cardinality, rightProps.Cardinality)
 
 	// Statistics
 	// ----------
@@ -1459,29 +1450,21 @@ func (b *logicalPropsBuilder) buildFiltersItemProps(item *FiltersItem, scalar *p
 
 	// Functional Dependencies
 	// -----------------------
-	var constCols opt.ColSet
+	// Add constant columns. No need to add not null columns, because they
+	// are only relevant if there are lax FDs that can be made strict.
 	if scalar.Constraints != nil {
-		constCols = scalar.Constraints.ExtractConstCols(b.evalCtx)
+		constCols := scalar.Constraints.ExtractConstCols(b.evalCtx)
+		scalar.FuncDeps.AddConstants(constCols)
 	}
 
+	// Check for filter conjunct of the form: x = y.
 	if eq, ok := item.Condition.(*EqExpr); ok {
 		if leftVar, ok := eq.Left.(*VariableExpr); ok {
-			switch rhs := eq.Right.(type) {
-			case *VariableExpr:
-				// Filter conjunct of the form: x = y.
-				scalar.FuncDeps.AddEquivalency(leftVar.Col, rhs.Col)
-
-			case *PlaceholderExpr:
-				// Filter conjunct of the form x = $1. This filter cannot generate
-				// constraints, but still tell us that the column is constant.
-				constCols.Add(leftVar.Col)
+			if rightVar, ok := eq.Right.(*VariableExpr); ok {
+				scalar.FuncDeps.AddEquivalency(leftVar.Col, rightVar.Col)
 			}
 		}
 	}
-
-	// Add constant columns. No need to add not null columns, because they
-	// are only relevant if there are lax FDs that can be made strict.
-	scalar.FuncDeps.AddConstants(constCols)
 }
 
 func (b *logicalPropsBuilder) buildProjectionsItemProps(
@@ -2341,31 +2324,16 @@ func (h *joinPropsHelper) setFuncDeps(rel *props.Relational) {
 
 func (h *joinPropsHelper) cardinality() props.Cardinality {
 	left := h.leftProps.Cardinality
-	right := h.rightProps.Cardinality
-	joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity)
 
 	switch h.joinType {
-	case opt.AntiJoinOp, opt.AntiJoinApplyOp:
-		// Anti join cardinality never exceeds left input cardinality, and
+	case opt.SemiJoinOp, opt.SemiJoinApplyOp, opt.AntiJoinOp, opt.AntiJoinApplyOp:
+		// Semi/Anti join cardinality never exceeds left input cardinality, and
 		// allows zero rows.
 		return left.AsLowAs(0)
-	case opt.SemiJoinOp, opt.SemiJoinApplyOp:
-		// Semi join cardinality never exceeds left input cardinality, and
-		// allows zero rows.
-		semiJoinCard := left.AsLowAs(0)
-		if isJoinWithMult {
-			multiplicity := joinWithMult.getMultiplicity()
-			if multiplicity.JoinFiltersDoNotDuplicateRightRows() {
-				// Each right row matches at most one left row on the join filters, so
-				// the Semi join output cardinality is at most the cardinality of the
-				// right input.
-				semiJoinCard = semiJoinCard.Limit(right.Max)
-			}
-		}
-		return semiJoinCard
 	}
 
 	// Other join types can return up to cross product of rows.
+	right := h.rightProps.Cardinality
 	innerJoinCard := left.Product(right)
 
 	// Apply filter to cardinality.
@@ -2378,6 +2346,7 @@ func (h *joinPropsHelper) cardinality() props.Cardinality {
 	}
 
 	// Adjust cardinality to account for outer joins as well as join multiplicity.
+	joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity)
 	switch h.joinType {
 	case opt.InnerJoinOp, opt.InnerJoinApplyOp:
 		if isJoinWithMult {
@@ -2445,11 +2414,6 @@ func (b *logicalPropsBuilder) buildFakeRelProps(fake *FakeRelExpr, rel *props.Re
 	*rel = *fake.Props
 }
 
-func (b *logicalPropsBuilder) buildNormCycleTestRelProps(
-	nc *NormCycleTestRelExpr, rel *props.Relational,
-) {
-}
-
 // WithUses returns the WithUsesMap for the given expression.
 func WithUses(r opt.Expr) props.WithUsesMap {
 	switch e := r.(type) {
@@ -2494,9 +2458,6 @@ func deriveWithUses(r opt.Expr) props.WithUsesMap {
 
 	case *WithExpr:
 		excludedID = e.ID
-
-	case *RecursiveCTEExpr:
-		excludedID = e.WithID
 
 	default:
 		if opt.IsMutationOp(e) {

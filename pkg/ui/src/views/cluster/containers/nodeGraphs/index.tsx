@@ -37,7 +37,6 @@ import {
   nodesSummarySelector,
   NodesSummary,
   LivenessStatus,
-  selectNodesSummaryValid,
 } from "src/redux/nodes";
 import Alerts from "src/views/shared/containers/alerts";
 import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
@@ -57,7 +56,6 @@ import queuesDashboard from "./dashboards/queues";
 import requestsDashboard from "./dashboards/requests";
 import hardwareDashboard from "./dashboards/hardware";
 import changefeedsDashboard from "./dashboards/changefeeds";
-import overloadDashboard from "./dashboards/overload";
 import { getMatchParamByName } from "src/util/query";
 import { PayloadAction } from "src/interfaces/action";
 import {
@@ -82,7 +80,6 @@ const dashboards: { [key: string]: GraphDashboard } = {
   queues: { label: "Queues", component: queuesDashboard },
   requests: { label: "Slow Requests", component: requestsDashboard },
   changefeeds: { label: "Changefeeds", component: changefeedsDashboard },
-  overload: { label: "Overload", component: overloadDashboard },
 };
 
 const defaultDashboard = "overview";
@@ -97,7 +94,6 @@ const dashboardDropdownOptions = _.map(dashboards, (dashboard, key) => {
 type MapStateToProps = {
   nodesSummary: NodesSummary;
   hoverState: HoverState;
-  nodesSummaryValid: boolean;
 };
 
 type MapDispatchToProps = {
@@ -292,7 +288,6 @@ export class NodeGraphs extends React.Component<NodeGraphsProps> {
               <ClusterSummaryBar
                 nodesSummary={this.props.nodesSummary}
                 nodeSources={nodeSources}
-                nodesSummaryValid={this.props.nodesSummaryValid}
               />
             </div>
           </div>
@@ -305,7 +300,6 @@ export class NodeGraphs extends React.Component<NodeGraphsProps> {
 const mapStateToProps = (state: AdminUIState): MapStateToProps => ({
   nodesSummary: nodesSummarySelector(state),
   hoverState: hoverStateSelector(state),
-  nodesSummaryValid: selectNodesSummaryValid(state),
 });
 
 const mapDispatchToProps: MapDispatchToProps = {

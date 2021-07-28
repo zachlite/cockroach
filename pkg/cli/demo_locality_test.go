@@ -18,8 +18,8 @@ import (
 )
 
 func Example_demo_locality() {
-	c := NewCLITest(TestCLIParams{NoServer: true})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{noServer: true})
+	defer c.cleanup()
 
 	defer func(b bool) { testingForceRandomizeDemoPorts = b }(testingForceRandomizeDemoPorts)
 	testingForceRandomizeDemoPorts = true

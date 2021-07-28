@@ -222,12 +222,6 @@ func Run(
 	log.Eventf(ctx, "GC'ed keys; stats %+v", info)
 
 	// Push transactions (if pending) and resolve intents.
-	//
-	// FIXME(erikgrinaker): We should have a timeout for suboperations here now
-	// that the overall GC timeout has been increased, to make sure we'll make
-	// progress even with range unavailability. That's probably best done once
-	// batching is implemented, so we'll wait for that:
-	// https://github.com/cockroachdb/cockroach/pull/65847
 	var intents []roachpb.Intent
 	for txnID, txn := range txnMap {
 		intents = append(intents, roachpb.AsIntents(&txn.TxnMeta, intentKeyMap[txnID])...)
@@ -368,7 +362,7 @@ func processReplicatedKeyRange(
 			}
 			batchGCKeys = nil
 			batchGCKeysBytes = 0
-			alloc = bufalloc.ByteAllocator{}
+			alloc = nil
 		}
 	}
 	if len(batchGCKeys) > 0 {

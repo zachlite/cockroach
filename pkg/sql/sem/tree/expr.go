@@ -103,8 +103,8 @@ type Operator interface {
 	operator()
 }
 
-var _ Operator = (*UnaryOperator)(nil)
-var _ Operator = (*BinaryOperator)(nil)
+var _ Operator = UnaryOperator(0)
+var _ Operator = BinaryOperator(0)
 var _ Operator = ComparisonOperator(0)
 
 // SubqueryExpr is an interface used to identify an expression as a subquery.
@@ -963,7 +963,7 @@ func (node *Array) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(FmtParsable) && node.typ != nil {
 		if node.typ.ArrayContents().Family() != types.UnknownFamily {
 			ctx.WriteString(":::")
-			ctx.FormatTypeReference(node.typ)
+			ctx.Buffer.WriteString(node.typ.SQLString())
 		}
 	}
 }
@@ -1099,33 +1099,14 @@ func (node *TypedDummy) Eval(*EvalContext) (Datum, error) {
 	return nil, errors.AssertionFailedf("should not eval typed dummy")
 }
 
-// BinaryOperator represents a unary operator used in a BinaryExpr.
-type BinaryOperator struct {
-	Symbol BinaryOperatorSymbol
-	// IsOperator is true if OPERATOR(symbol) is used.
-	IsOperator bool
-}
-
-// MakeBinaryOperator creates a BinaryOperator given a symbol.
-func MakeBinaryOperator(symbol BinaryOperatorSymbol) BinaryOperator {
-	return BinaryOperator{Symbol: symbol}
-}
-
-func (o BinaryOperator) String() string {
-	if o.IsOperator {
-		return fmt.Sprintf("OPERATOR(%s)", o.Symbol.String())
-	}
-	return o.Symbol.String()
-}
+// BinaryOperator represents a binary operator.
+type BinaryOperator int
 
 func (BinaryOperator) operator() {}
 
-// BinaryOperatorSymbol is a symbol for a binary operator.
-type BinaryOperatorSymbol uint8
-
 // BinaryExpr.Operator
 const (
-	Bitand BinaryOperatorSymbol = iota
+	Bitand BinaryOperator = iota
 	Bitor
 	Bitxor
 	Plus
@@ -1143,10 +1124,10 @@ const (
 	JSONFetchValPath
 	JSONFetchTextPath
 
-	NumBinaryOperatorSymbols
+	NumBinaryOperators
 )
 
-var _ = NumBinaryOperatorSymbols
+var _ = NumBinaryOperators
 
 var binaryOpName = [...]string{
 	Bitand:            "&",
@@ -1193,12 +1174,12 @@ var binaryOpFullyAssoc = [...]bool{
 	Concat: true, JSONFetchVal: false, JSONFetchText: false, JSONFetchValPath: false, JSONFetchTextPath: false,
 }
 
-func (i BinaryOperatorSymbol) isPadded() bool {
+func (i BinaryOperator) isPadded() bool {
 	return !(i == JSONFetchVal || i == JSONFetchText || i == JSONFetchValPath || i == JSONFetchTextPath)
 }
 
-func (i BinaryOperatorSymbol) String() string {
-	if i > BinaryOperatorSymbol(len(binaryOpName)-1) {
+func (i BinaryOperator) String() string {
+	if i < 0 || i > BinaryOperator(len(binaryOpName)-1) {
 		return fmt.Sprintf("BinaryOp(%d)", i)
 	}
 	return binaryOpName[i]
@@ -1241,7 +1222,7 @@ func (*BinaryExpr) operatorExpr() {}
 
 func (node *BinaryExpr) memoizeFn() {
 	leftRet, rightRet := node.Left.(TypedExpr).ResolvedType(), node.Right.(TypedExpr).ResolvedType()
-	fn, ok := BinOps[node.Operator.Symbol].lookupImpl(leftRet, rightRet)
+	fn, ok := BinOps[node.Operator].lookupImpl(leftRet, rightRet)
 	if !ok {
 		panic(errors.AssertionFailedf("lookup for BinaryExpr %s's BinOp failed",
 			AsStringWithFlags(node, FmtShowTypes)))
@@ -1254,7 +1235,7 @@ func (node *BinaryExpr) memoizeFn() {
 // BinaryOperator.
 func newBinExprIfValidOverload(op BinaryOperator, left TypedExpr, right TypedExpr) *BinaryExpr {
 	leftRet, rightRet := left.ResolvedType(), right.ResolvedType()
-	fn, ok := BinOps[op.Symbol].lookupImpl(leftRet, rightRet)
+	fn, ok := BinOps[op].lookupImpl(leftRet, rightRet)
 	if ok {
 		expr := &BinaryExpr{
 			Operator: op,
@@ -1270,44 +1251,25 @@ func newBinExprIfValidOverload(op BinaryOperator, left TypedExpr, right TypedExp
 
 // Format implements the NodeFormatter interface.
 func (node *BinaryExpr) Format(ctx *FmtCtx) {
-	binExprFmtWithParen(ctx, node.Left, node.Operator.String(), node.Right, node.Operator.Symbol.isPadded())
+	binExprFmtWithParen(ctx, node.Left, node.Operator.String(), node.Right, node.Operator.isPadded())
 }
 
-// UnaryOperator represents a unary operator used in a UnaryExpr.
-type UnaryOperator struct {
-	Symbol UnaryOperatorSymbol
-	// IsOperator is true if OPERATOR(symbol) is used.
-	IsOperator bool
-}
-
-// MakeUnaryOperator creates a UnaryOperator given a symbol.
-func MakeUnaryOperator(symbol UnaryOperatorSymbol) UnaryOperator {
-	return UnaryOperator{Symbol: symbol}
-}
-
-func (o UnaryOperator) String() string {
-	if o.IsOperator {
-		return fmt.Sprintf("OPERATOR(%s)", o.Symbol.String())
-	}
-	return o.Symbol.String()
-}
+// UnaryOperator represents a unary operator.
+type UnaryOperator int
 
 func (UnaryOperator) operator() {}
 
-// UnaryOperatorSymbol represents a unary operator.
-type UnaryOperatorSymbol uint8
-
-// UnaryExpr.Operator.Symbol
+// UnaryExpr.Operator
 const (
-	UnaryMinus UnaryOperatorSymbol = iota
+	UnaryMinus UnaryOperator = iota
 	UnaryComplement
 	UnarySqrt
 	UnaryCbrt
 
-	NumUnaryOperatorSymbols
+	NumUnaryOperators
 )
 
-var _ = NumUnaryOperatorSymbols
+var _ = NumUnaryOperators
 
 var unaryOpName = [...]string{
 	UnaryMinus:      "-",
@@ -1316,8 +1278,8 @@ var unaryOpName = [...]string{
 	UnaryCbrt:       "||/",
 }
 
-func (i UnaryOperatorSymbol) String() string {
-	if i > UnaryOperatorSymbol(len(unaryOpName)-1) {
+func (i UnaryOperator) String() string {
+	if i < 0 || i > UnaryOperator(len(unaryOpName)-1) {
 		return fmt.Sprintf("UnaryOp(%d)", i)
 	}
 	return unaryOpName[i]
@@ -1341,7 +1303,7 @@ func (node *UnaryExpr) Format(ctx *FmtCtx) {
 	_, isOp := e.(operatorExpr)
 	_, isDatum := e.(Datum)
 	_, isConstant := e.(Constant)
-	if isOp || (node.Operator.Symbol == UnaryMinus && (isDatum || isConstant)) {
+	if isOp || (node.Operator == UnaryMinus && (isDatum || isConstant)) {
 		ctx.WriteByte('(')
 		ctx.FormatNode(e)
 		ctx.WriteByte(')')
@@ -1360,14 +1322,14 @@ func NewTypedUnaryExpr(op UnaryOperator, expr TypedExpr, typ *types.T) *UnaryExp
 	node := &UnaryExpr{Operator: op, Expr: expr}
 	node.typ = typ
 	innerType := expr.ResolvedType()
-	for _, o := range UnaryOps[op.Symbol] {
+	for _, o := range UnaryOps[op] {
 		o := o.(*UnaryOp)
 		if innerType.Equivalent(o.Typ) && node.typ.Equivalent(o.ReturnType) {
 			node.fn = o
 			return node
 		}
 	}
-	panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op.Symbol, expr))
+	panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op, expr))
 }
 
 // FuncExpr represents a function call.

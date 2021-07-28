@@ -134,7 +134,7 @@ distribution: local
 vectorized: true
 ·
 • sort
-│ order: -column19,-started
+│ order: -column18,-started
 │
 └── • render
     │
@@ -208,12 +208,12 @@ vectorized: true
 └── • render
     │
     └── • hash join (left outer)
-        │ equality: (column80) = (table_id)
+        │ equality: (column79) = (table_id)
         │
         ├── • render
         │   │
         │   └── • hash join (left outer)
-        │       │ equality: (column62) = (table_id)
+        │       │ equality: (column61) = (table_id)
         │       │
         │       ├── • render
         │       │   │
@@ -257,12 +257,12 @@ vectorized: true
 └── • render
     │
     └── • hash join (left outer)
-        │ equality: (column85) = (table_id)
+        │ equality: (column84) = (table_id)
         │
         ├── • render
         │   │
         │   └── • hash join (left outer)
-        │       │ equality: (column67) = (table_id)
+        │       │ equality: (column66) = (table_id)
         │       │
         │       ├── • render
         │       │   │
@@ -454,7 +454,7 @@ vectorized: true
 │ order: +grantee,+privilege_type
 │
 └── • filter
-    │ filter: ((table_catalog = 'test') AND (table_schema = 'public')) AND (table_name = 'foo')
+    │ filter: (table_catalog, table_schema, table_name) IN (('test', 'public', 'foo'),)
     │
     └── • virtual table
           table: table_privileges@primary
@@ -1101,12 +1101,14 @@ sort
  ├── fd: ()-->(1)
  ├── ordering: +2 opt(1) [actual: +2]
  ├── prune: (2)
+ ├── interesting orderings: (+1)
  └── index-join tc
       ├── columns: a:1 b:2
       ├── stats: [rows=10, distinct(1)=1, null(1)=0]
       ├── cost: 86.52
       ├── fd: ()-->(1)
       ├── prune: (2)
+      ├── interesting orderings: (+1)
       └── scan tc@c
            ├── columns: a:1 rowid:3
            ├── constraint: /1/3: [/10 - /10]
@@ -1125,12 +1127,14 @@ sort
  ├── fd: ()-->(1)
  ├── ordering: +2 opt(1) [actual: +2]
  ├── prune: (2)
+ ├── interesting orderings: (+1)
  └── index-join tc
       ├── columns: a:1(int!null) b:2(int)
       ├── stats: [rows=10, distinct(1)=1, null(1)=0]
       ├── cost: 86.52
       ├── fd: ()-->(1)
       ├── prune: (2)
+      ├── interesting orderings: (+1)
       └── scan tc@c
            ├── columns: a:1(int!null) rowid:3(int!null)
            ├── constraint: /1/3: [/10 - /10]
@@ -1183,7 +1187,7 @@ inner-join (hash)
  ├── columns: a:1 b:2 k:6 v:7
  ├── multiplicity: left-rows(zero-or-one), right-rows(zero-or-more)
  ├── stats: [rows=990, distinct(1)=99, null(1)=0, distinct(6)=99, null(6)=0]
- ├── cost: 2271.67625
+ ├── cost: 2271.54
  ├── fd: (6)-->(7), (1)==(6), (6)==(1)
  ├── prune: (2,7)
  ├── scan tc
@@ -1224,7 +1228,7 @@ sort
  ├── columns: a:1 b:2  [hidden: column6:6]
  ├── immutable
  ├── stats: [rows=333.333333]
- ├── cost: 1215.26951
+ ├── cost: 1215.25548
  ├── fd: (1,2)-->(6)
  ├── ordering: +6
  ├── prune: (1,2,6)
@@ -1261,7 +1265,7 @@ sort
  ├── columns: a:1(int) b:2(int)  [hidden: column6:6(int)]
  ├── immutable
  ├── stats: [rows=333.333333]
- ├── cost: 1215.26951
+ ├── cost: 1215.25548
  ├── fd: (1,2)-->(6)
  ├── ordering: +6
  ├── prune: (1,2,6)
@@ -1563,29 +1567,3 @@ vectorized: true
 • insert fast path
   into: t2(x)
   auto commit
-
-statement ok
-PREPARE prep AS SELECT $1 + 1
-
-statement error EXPLAIN EXECUTE is not supported
-EXPLAIN EXECUTE prep(1)
-
-statement error EXPLAIN EXECUTE is not supported
-SELECT 1 FROM [ EXPLAIN EXECUTE prep(1) ]
-
-query T
-EXPLAIN ANALYZE EXECUTE prep(1)
-----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• values
-  nodes: <hidden>
-  regions: <hidden>
-  actual row count: 1
-  size: 1 column, 1 row

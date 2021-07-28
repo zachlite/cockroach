@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -437,6 +438,26 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				return tree.MakeDTimestampTZ(x.(time.Time), time.Microsecond)
 			},
 		)
+	case types.IntervalFamily:
+		setNullable(
+			// This would ideally be the avro Duration logical type
+			// However, the spec is not implemented in most tooling
+			// and is problematic--it requires 32-bit integers
+			// representing months, days, and milliseconds, meaning
+			// it can't encode everything we can with our int64 years.
+			// String encoding is still fairly terse and arguably the
+			// only semantically exact representation.
+			// Using ISO 8601 format (https://en.wikipedia.org/wiki/ISO_8601#Durations)
+			// because it's the tersest of the input formats we support
+			// and isn't golang-specific.
+			avroSchemaString,
+			func(d tree.Datum, _ interface{}) (interface{}, error) {
+				return d.(*tree.DInterval).ValueAsISO8601String(), nil
+			},
+			func(x interface{}) (tree.Datum, error) {
+				return tree.ParseDInterval(x.(string))
+			},
+		)
 	case types.DecimalFamily:
 		if typ.Precision() == 0 {
 			return nil, errors.Errorf(
@@ -632,7 +653,10 @@ func columnToAvroSchema(col catalog.Column) (*avroSchemaField, error) {
 // record schema. The fields are kept in the same order as columns in the index.
 // sqlName can be any string but should uniquely identify a schema.
 func indexToAvroSchema(
-	tableDesc catalog.TableDescriptor, index catalog.Index, sqlName string, namespace string,
+	tableDesc catalog.TableDescriptor,
+	indexDesc *descpb.IndexDescriptor,
+	sqlName string,
+	namespace string,
 ) (*avroDataRecord, error) {
 	schema := &avroDataRecord{
 		avroRecord: avroRecord{
@@ -645,8 +669,7 @@ func indexToAvroSchema(
 		fieldIdxByColIdx: make(map[int]int),
 	}
 	colIdxByID := catalog.ColumnIDToOrdinalMap(tableDesc.PublicColumns())
-	for i := 0; i < index.NumKeyColumns(); i++ {
-		colID := index.GetKeyColumnID(i)
+	for _, colID := range indexDesc.ColumnIDs {
 		colIdx, ok := colIdxByID.Get(colID)
 		if !ok {
 			return nil, errors.Errorf(`unknown column id: %d`, colID)

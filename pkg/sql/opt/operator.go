@@ -136,7 +136,6 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperator{
 	IsOp:             tree.IsNotDistinctFrom,
 	IsNotOp:          tree.IsDistinctFrom,
 	ContainsOp:       tree.Contains,
-	ContainedByOp:    tree.ContainedBy,
 	JsonExistsOp:     tree.JSONExists,
 	JsonSomeExistsOp: tree.JSONSomeExists,
 	JsonAllExistsOp:  tree.JSONAllExists,
@@ -147,7 +146,7 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperator{
 
 // BinaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // binary operator type.
-var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
+var BinaryOpReverseMap = map[Operator]tree.BinaryOperator{
 	BitandOp:        tree.Bitand,
 	BitorOp:         tree.Bitor,
 	BitxorOp:        tree.Bitxor,
@@ -169,7 +168,7 @@ var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
 
 // UnaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // unary operator type.
-var UnaryOpReverseMap = map[Operator]tree.UnaryOperatorSymbol{
+var UnaryOpReverseMap = map[Operator]tree.UnaryOperator{
 	UnaryMinusOp:      tree.UnaryMinus,
 	UnaryComplementOp: tree.UnaryComplement,
 	UnarySqrtOp:       tree.UnarySqrt,

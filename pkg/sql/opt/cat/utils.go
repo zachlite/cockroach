@@ -15,7 +15,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -28,25 +27,26 @@ import (
 // into a list of object names.
 func ExpandDataSourceGlob(
 	ctx context.Context, catalog Catalog, flags Flags, pattern tree.TablePattern,
-) ([]DataSourceName, descpb.IDs, error) {
+) ([]DataSourceName, error) {
+
 	switch p := pattern.(type) {
 	case *tree.TableName:
-		ds, name, err := catalog.ResolveDataSource(ctx, flags, p)
+		_, name, err := catalog.ResolveDataSource(ctx, flags, p)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return []DataSourceName{name}, descpb.IDs{descpb.ID(ds.ID())}, nil
+		return []DataSourceName{name}, nil
 
 	case *tree.AllTablesSelector:
 		schema, _, err := catalog.ResolveSchema(ctx, flags, &p.ObjectNamePrefix)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		return schema.GetDataSourceNames(ctx)
 
 	default:
-		return nil, nil, errors.Errorf("invalid TablePattern type %T", p)
+		return nil, errors.Errorf("invalid TablePattern type %T", p)
 	}
 }
 
@@ -84,7 +84,7 @@ func ResolveTableIndex(
 	if err != nil {
 		return nil, DataSourceName{}, err
 	}
-	dsNames, _, err := schema.GetDataSourceNames(ctx)
+	dsNames, err := schema.GetDataSourceNames(ctx)
 	if err != nil {
 		return nil, DataSourceName{}, err
 	}

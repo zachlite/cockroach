@@ -16,12 +16,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/errors"
 )
 
 // KVFetcher wraps kvBatchFetcher, providing a NextKV interface that returns the
@@ -172,105 +170,3 @@ func (f *SpanKVFetcher) nextBatch(
 }
 
 func (f *SpanKVFetcher) close(context.Context) {}
-
-// BackupSSTKVFetcher is a kvBatchFetcher that wraps storage.SimpleMVCCIterator
-// and returns a batch of kv from backupSST.
-type BackupSSTKVFetcher struct {
-	iter          storage.SimpleMVCCIterator
-	endKeyMVCC    storage.MVCCKey
-	startTime     hlc.Timestamp
-	endTime       hlc.Timestamp
-	withRevisions bool
-}
-
-// MakeBackupSSTKVFetcher creates a BackupSSTKVFetcher and
-// advances the iter to the first key >= startKeyMVCC
-func MakeBackupSSTKVFetcher(
-	startKeyMVCC, endKeyMVCC storage.MVCCKey,
-	iter storage.SimpleMVCCIterator,
-	startTime hlc.Timestamp,
-	endTime hlc.Timestamp,
-	withRev bool,
-) BackupSSTKVFetcher {
-	res := BackupSSTKVFetcher{
-		iter,
-		endKeyMVCC,
-		startTime,
-		endTime,
-		withRev,
-	}
-	res.iter.SeekGE(startKeyMVCC)
-	return res
-}
-
-func (f *BackupSSTKVFetcher) nextBatch(
-	_ context.Context,
-) (ok bool, kvs []roachpb.KeyValue, batchResponse []byte, span roachpb.Span, err error) {
-	res := make([]roachpb.KeyValue, 0)
-
-	copyKV := func(mvccKey storage.MVCCKey, value []byte) roachpb.KeyValue {
-		keyCopy := make([]byte, len(mvccKey.Key))
-		copy(keyCopy, mvccKey.Key)
-		valueCopy := make([]byte, len(value))
-		copy(valueCopy, value)
-		return roachpb.KeyValue{
-			Key:   keyCopy,
-			Value: roachpb.Value{RawBytes: valueCopy, Timestamp: mvccKey.Timestamp},
-		}
-	}
-
-	for {
-		valid, err := f.iter.Valid()
-		if err != nil {
-			err = errors.Wrapf(err, "iter key value of table data")
-			return false, nil, nil, roachpb.Span{}, err
-		}
-
-		if !valid || !f.iter.UnsafeKey().Less(f.endKeyMVCC) {
-			break
-		}
-
-		if !f.endTime.IsEmpty() {
-			if f.endTime.Less(f.iter.UnsafeKey().Timestamp) {
-				f.iter.Next()
-				continue
-			}
-		}
-
-		if f.withRevisions {
-			if f.iter.UnsafeKey().Timestamp.Less(f.startTime) {
-				f.iter.NextKey()
-				continue
-			}
-		} else {
-			if len(f.iter.UnsafeValue()) == 0 {
-				if f.endTime.IsEmpty() || f.iter.UnsafeKey().Timestamp.Less(f.endTime) {
-					// Value is deleted at endTime.
-					f.iter.NextKey()
-					continue
-				} else {
-					// Otherwise we call Next to trace back the correct revision.
-					f.iter.Next()
-					continue
-				}
-			}
-		}
-
-		res = append(res, copyKV(f.iter.UnsafeKey(), f.iter.UnsafeValue()))
-
-		if f.withRevisions {
-			f.iter.Next()
-		} else {
-			f.iter.NextKey()
-		}
-
-	}
-	if len(res) == 0 {
-		return false, nil, nil, roachpb.Span{}, err
-	}
-	return true, res, nil, roachpb.Span{}, nil
-}
-
-func (f *BackupSSTKVFetcher) close(context.Context) {
-	f.iter.Close()
-}

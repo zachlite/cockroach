@@ -15,7 +15,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -28,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
-	"github.com/cockroachdb/cockroach/pkg/storage/cloud/userfile"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
@@ -46,8 +45,7 @@ var userFileUploadCmd = &cobra.Command{
 	Use:   "upload <source> <destination>",
 	Short: "upload file from source to destination",
 	Long: `
-Uploads a single file, or, with the -r flag, all the files in the subtree rooted
-at a directory, to the user-scoped file storage using a SQL connection.
+Uploads a file to the user scoped file storage using a SQL connection.
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: maybeShoutError(runUserFileUpload),
@@ -138,52 +136,6 @@ func runUserFileList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func uploadUserFileRecursive(conn *sqlConn, srcDir, dstDir string) error {
-	srcHasTrailingSlash := strings.HasSuffix(srcDir, "/")
-	var err error
-	srcDir, err = filepath.Abs(srcDir)
-	if err != nil {
-		return err
-	}
-	dstDir = strings.TrimSuffix(dstDir, "/")
-	// We append the last element of the (absolute) source path, i.e. the source
-	// directory name, to the destination path in the following two cases:
-	//   1. The user has not specified a destination, i.e. it is empty.
-	//   2. The source has no trailing slash (à la rsync).
-	srcDirBase := filepath.Base(srcDir)
-	if dstDir == "" {
-		dstDir = srcDirBase
-	} else if !srcHasTrailingSlash {
-		dstDir = dstDir + "/" + srcDirBase
-	}
-
-	ctx := context.Background()
-
-	err = filepath.WalkDir(srcDir,
-		func(path string, info fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() {
-				relativePath := strings.TrimPrefix(path, srcDir+"/")
-				fmt.Printf("uploading: %s\n", relativePath)
-
-				uploadedFile, err := uploadUserFile(ctx, conn, path, dstDir+"/"+relativePath)
-				if err != nil {
-					return err
-				}
-				fmt.Printf("successfully uploaded to %s\n", uploadedFile)
-			}
-			return nil
-		})
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("successfully uploaded all files in the subtree rooted at %s\n", filepath.Base(srcDir))
-	return nil
-}
-
 func runUserFileUpload(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach userfile", useDefaultDb)
 	if err != nil {
@@ -198,20 +150,20 @@ func runUserFileUpload(cmd *cobra.Command, args []string) error {
 		destination = args[1]
 	}
 
-	if userfileCtx.recursive {
-		if err := uploadUserFileRecursive(conn, source, destination); err != nil {
-			return err
-		}
-	} else {
-		uploadedFile, err := uploadUserFile(context.Background(), conn, source,
-			destination)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("successfully uploaded to %s\n", uploadedFile)
+	reader, err := openUserFile(source)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	var uploadedFile string
+	if uploadedFile, err = uploadUserFile(context.Background(), conn, reader, source,
+		destination); err != nil {
+		return err
 	}
 
 	telemetry.Count("userfile.command.upload")
+	fmt.Printf("successfully uploaded to %s\n", uploadedFile)
 	return nil
 }
 
@@ -234,7 +186,7 @@ func runUserFileGet(cmd *cobra.Command, args []string) error {
 	}
 	glob := conf.Path
 	conf.Path = "/"
-	f, err := userfile.MakeSQLConnFileTableStorage(ctx, conf, conn.conn.(cloud.SQLConnI))
+	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, conf, conn.conn.(cloud.SQLConnI))
 	if err != nil {
 		return err
 	}
@@ -415,7 +367,7 @@ func getUserfileConf(
 		return roachpb.ExternalStorage_FileTable{}, err
 	}
 
-	userFileTableConf, err := cloud.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
+	userFileTableConf, err := cloudimpl.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
 	if err != nil {
 		return roachpb.ExternalStorage_FileTable{}, err
 	}
@@ -430,7 +382,7 @@ func listUserFile(ctx context.Context, conn *sqlConn, glob string) ([]string, er
 	}
 	prefix := conf.Path
 	conf.Path = ""
-	f, err := userfile.MakeSQLConnFileTableStorage(ctx, conf, conn.conn.(cloud.SQLConnI))
+	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, conf, conn.conn.(cloud.SQLConnI))
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +433,7 @@ func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) ([]string, 
 		return nil, err
 	}
 
-	userFileTableConf, err := cloud.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
+	userFileTableConf, err := cloudimpl.ExternalStorageConfFromURI(unescapedUserfileListURI, reqUsername)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +442,7 @@ func deleteUserFile(ctx context.Context, conn *sqlConn, glob string) ([]string, 
 	// ListFiles call below. Explicit glob patterns allows us to use the same
 	// ExternalStorage for both the ListFiles() and Delete() methods.
 	userFileTableConf.FileTableConfig.Path = ""
-	f, err := userfile.MakeSQLConnFileTableStorage(ctx, userFileTableConf.FileTableConfig,
+	f, err := cloudimpl.MakeSQLConnFileTableStorage(ctx, userFileTableConf.FileTableConfig,
 		conn.conn.(cloud.SQLConnI))
 	if err != nil {
 		return nil, err
@@ -562,14 +514,8 @@ func renameUserFile(
 // This method returns the complete userfile URI representation to which the
 // file is uploaded to.
 func uploadUserFile(
-	ctx context.Context, conn *sqlConn, source, destination string,
+	ctx context.Context, conn *sqlConn, reader io.Reader, source, destination string,
 ) (string, error) {
-	reader, err := openUserFile(source)
-	if err != nil {
-		return "", err
-	}
-	defer reader.Close()
-
 	if err := conn.ensureConn(); err != nil {
 		return "", err
 	}

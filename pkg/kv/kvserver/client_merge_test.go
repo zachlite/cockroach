@@ -411,22 +411,19 @@ func TestStoreRangeMergeTimestampCache(t *testing.T) {
 func mergeCheckingTimestampCaches(
 	t *testing.T, disjointLeaseholders, throughSnapshot, futureRead bool,
 ) {
-
-	var filterMu struct {
-		syncutil.Mutex
-		// mergeCommitFilter is used to issue a sequence of operations on the LHS of
-		// a range merge immediately before it.
-		mergeCommitFilter func()
-		// blockHBAndGCs is used to black hole Heartbeat and GC requests for the
-		// duration of the merge on the throughSnapshot path. Neither request type
-		// is needed and both can create issues by holding latches during the split
-		// leader-leaseholder state.
-		blockHBAndGCs chan struct{}
-	}
+	// mergeCommitFilter is used to issue a sequence of operations on the LHS of
+	// a range merge immediately before it.
+	var mergeCommitFilter func()
+	// blockHBAndGCs is used to black hole Heartbeat and GC requests for the
+	// duration of the merge on the throughSnapshot path. Neither request type
+	// is needed and both can create issues by holding latches during the split
+	// leader-leaseholder state.
+	var blockHBAndGCs chan struct{}
+	var filterMu syncutil.Mutex
 	testingRequestFilter := func(_ context.Context, ba roachpb.BatchRequest) *roachpb.Error {
 		filterMu.Lock()
-		mergeCommitFilterCopy := filterMu.mergeCommitFilter
-		blockHBAndGCsCopy := filterMu.blockHBAndGCs
+		mergeCommitFilterCopy := mergeCommitFilter
+		blockHBAndGCsCopy := blockHBAndGCs
 		filterMu.Unlock()
 		for _, req := range ba.Requests {
 			switch v := req.GetInner().(type) {
@@ -479,17 +476,6 @@ func mergeCheckingTimestampCaches(
 			},
 		})
 	defer tc.Stopper().Stop(ctx)
-	defer func() {
-		filterMu.Lock()
-		defer filterMu.Unlock()
-		if filterMu.blockHBAndGCs != nil {
-			// If test failed before closing the channel, do so now
-			// to (maybe) avoid hangs. Note that this must execute
-			// before the Stopper().Stop() call above.
-			close(filterMu.blockHBAndGCs)
-		}
-	}()
-
 	lhsStore := tc.GetFirstStoreFromServer(t, 0)
 	var rhsStore *kvserver.Store
 	if disjointLeaseholders {
@@ -656,7 +642,7 @@ func mergeCheckingTimestampCaches(
 		snapChan := make(chan kvserver.IncomingSnapshot, 1)
 
 		filterMu.Lock()
-		filterMu.mergeCommitFilter = func() {
+		mergeCommitFilter = func() {
 			// Install leader-leaseholder partition.
 			for i, s := range lhsStores {
 				var funcs unreliableRaftHandlerFuncs
@@ -734,7 +720,7 @@ func mergeCheckingTimestampCaches(
 		// Begin blocking txn heartbeats and GC requests. They cause issues
 		// because they can grab latches and then get stuck once in the split
 		// leader-leaseholder state.
-		filterMu.blockHBAndGCs = make(chan struct{})
+		blockHBAndGCs = make(chan struct{})
 
 		// Install a filter to capture the Raft snapshot.
 		snapshotFilter = func(inSnap kvserver.IncomingSnapshot) {
@@ -778,24 +764,15 @@ func mergeCheckingTimestampCaches(
 			}
 			tc.Servers[i].RaftTransport().Listen(s.StoreID(), h)
 		}
-		close(filterMu.blockHBAndGCs)
-		filterMu.Lock()
-		filterMu.blockHBAndGCs = nil
-		filterMu.Unlock()
+		close(blockHBAndGCs)
 
 		t.Logf("waiting for snapshot to LHS leaseholder")
-		var inSnap kvserver.IncomingSnapshot
-		select {
-		case inSnap = <-snapChan:
-		case <-time.After(45 * time.Second):
-			t.Fatal("timed out waiting for snapChan")
-		}
+		inSnap := <-snapChan
 		inSnapDesc := inSnap.State.Desc
 		require.Equal(t, lhsDesc.StartKey, inSnapDesc.StartKey)
 		require.Equal(t, rhsDesc.EndKey, inSnapDesc.EndKey)
 
 		// Wait for all async ops to complete.
-		after45s := time.After(45 * time.Second)
 		for _, asyncRes := range []struct {
 			name string
 			ch   chan *roachpb.Error
@@ -805,12 +782,7 @@ func mergeCheckingTimestampCaches(
 			{"merge", mergeChan},
 		} {
 			t.Logf("waiting for result of %s", asyncRes.name)
-			var err *roachpb.Error
-			select {
-			case err = <-asyncRes.ch:
-			case <-after45s:
-				t.Fatalf("timed out on %s", asyncRes.name)
-			}
+			err := <-asyncRes.ch
 			require.NotNil(t, err, "%s should fail", asyncRes.name)
 			require.Regexp(t, "result is ambiguous", err, "%s's result should be ambiguous", asyncRes.name)
 		}
@@ -4119,7 +4091,7 @@ func TestMergeQueue(t *testing.T) {
 	zoneConfig.RangeMinBytes = &rangeMinBytes
 	settings := cluster.MakeTestingClusterSettings()
 	sv := &settings.SV
-	kvserver.MergeQueueInterval.Override(ctx, sv, 0) // process greedily
+	kvserver.MergeQueueInterval.Override(sv, 0) // process greedily
 
 	tc := testcluster.StartTestCluster(t, 2,
 		base.TestClusterArgs{
@@ -4202,7 +4174,7 @@ func TestMergeQueue(t *testing.T) {
 		// Disable load-based splitting, so that the absence of sufficient QPS
 		// measurements do not prevent ranges from merging. Certain subtests
 		// re-enable the functionality.
-		kvserver.SplitByLoadEnabled.Override(ctx, sv, false)
+		kvserver.SplitByLoadEnabled.Override(sv, false)
 		store.MustForceMergeScanAndProcess() // drain any merges that might already be queued
 		split(t, rhsStartKey.AsRawKey(), hlc.Timestamp{} /* expirationTime */)
 	}
@@ -4290,13 +4262,13 @@ func TestMergeQueue(t *testing.T) {
 			// measurement from both sides to be sufficiently stable and reliable,
 			// meaning that it was a maximum measurement over some extended period of
 			// time.
-			kvserver.SplitByLoadEnabled.Override(ctx, sv, true)
-			kvserver.SplitByLoadQPSThreshold.Override(ctx, sv, splitByLoadQPS)
+			kvserver.SplitByLoadEnabled.Override(sv, true)
+			kvserver.SplitByLoadQPSThreshold.Override(sv, splitByLoadQPS)
 
 			// Drop the load-based splitting merge delay setting, which also dictates
 			// the duration that a leaseholder must measure QPS before considering its
 			// measurements to be reliable enough to base range merging decisions on.
-			kvserverbase.SplitByLoadMergeDelay.Override(ctx, sv, splitByLoadMergeDelay)
+			kvserver.SplitByLoadMergeDelay.Override(sv, splitByLoadMergeDelay)
 
 			// Reset both range's load-based splitters, so that QPS measurements do
 			// not leak over between subtests. Then, bump the manual clock so that
@@ -4378,7 +4350,6 @@ func TestMergeQueue(t *testing.T) {
 	})
 
 	t.Run("sticky-bit-expiration", func(t *testing.T) {
-		skip.WithIssue(t, 66942, "flakey test")
 		manualSplitTTL := time.Millisecond * 200
 		reset(t)
 		store.MustForceMergeScanAndProcess()
@@ -4890,7 +4861,6 @@ func sendWithTxn(
 func TestStoreBlockTransferLeaseRequestAfterSubsumption(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.UnderRaceWithIssue(t, 67346, "data race")
 
 	ctx := context.Background()
 	numNodes := 2

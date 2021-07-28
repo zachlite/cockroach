@@ -292,8 +292,8 @@ func (l *logConfigFlags) reset() {
 	l.sqlAuditLogDir = settableString{}
 	*l.fileMaxSizeVal = *humanizeutil.NewBytesValue(&l.fileMaxSize)
 	*l.maxGroupSizeVal = *humanizeutil.NewBytesValue(&l.maxGroupSize)
-	l.fileMaxSize = int64(*d.FileDefaults.MaxFileSize)
-	l.maxGroupSize = int64(*d.FileDefaults.MaxGroupSize)
+	l.fileMaxSize = int64(d.FileDefaults.MaxFileSize)
+	l.maxGroupSize = int64(d.FileDefaults.MaxGroupSize)
 	l.fileThreshold = severity.UNKNOWN
 	l.stderrThreshold = severity.UNKNOWN
 	l.stderrNoColor = settableBool{}
@@ -323,12 +323,10 @@ func (l *logConfigFlags) propagate(
 		c.FileDefaults.Dir = &l.logDir.s
 	}
 	if l.fileMaxSizeVal.IsSet() {
-		s := logconfig.ByteSize(l.fileMaxSize)
-		c.FileDefaults.MaxFileSize = &s
+		c.FileDefaults.MaxFileSize = logconfig.ByteSize(l.fileMaxSize)
 	}
 	if l.maxGroupSizeVal.IsSet() {
-		s := logconfig.ByteSize(l.maxGroupSize)
-		c.FileDefaults.MaxGroupSize = &s
+		c.FileDefaults.MaxGroupSize = logconfig.ByteSize(l.maxGroupSize)
 	}
 	if l.fileThreshold.IsSet() {
 		c.FileDefaults.Filter = l.fileThreshold
@@ -436,11 +434,9 @@ func addPredefinedLogFiles(c *logconfig.Config) {
 		}
 		m[prefix] = &logconfig.FileSinkConfig{
 			Channels: logconfig.ChannelList{Channels: []logpb.Channel{ch}},
-			FileDefaults: logconfig.FileDefaults{
-				Dir: dir,
-				CommonSinkConfig: logconfig.CommonSinkConfig{
-					Auditable: &b,
-				},
+			Dir:      dir,
+			CommonSinkConfig: logconfig.CommonSinkConfig{
+				Auditable: &b,
 			},
 		}
 	}

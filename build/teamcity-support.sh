@@ -6,7 +6,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/build/teamcity-common-support.sh"
 
 remove_files_on_exit() {
-  rm -f ~/.ssh/id_rsa{,.pub}
   common_support_remove_files_on_exit
 }
 trap remove_files_on_exit EXIT
@@ -290,10 +289,4 @@ tc_prepare() {
   run mkdir -p artifacts
   maybe_ccache
   tc_end_block "Prepare environment"
-}
-
-generate_ssh_key() {
-  if [[ ! -f ~/.ssh/id_rsa.pub ]]; then
-    ssh-keygen -q -N "" -f ~/.ssh/id_rsa
-  fi
 }

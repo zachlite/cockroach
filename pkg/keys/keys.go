@@ -284,10 +284,12 @@ func RangeStatsLegacyKey(rangeID roachpb.RangeID) roachpb.Key {
 	return MakeRangeIDPrefixBuf(rangeID).RangeStatsLegacyKey()
 }
 
-// RangeGCThresholdKey returns a system-local key for last used GC threshold on the
+// RangeLastGCKey returns a system-local key for last used GC threshold on the
 // user keyspace. Reads and writes <= this timestamp will not be served.
-func RangeGCThresholdKey(rangeID roachpb.RangeID) roachpb.Key {
-	return MakeRangeIDPrefixBuf(rangeID).RangeGCThresholdKey()
+//
+// TODO(tschottdorf): should be renamed to RangeGCThresholdKey.
+func RangeLastGCKey(rangeID roachpb.RangeID) roachpb.Key {
+	return MakeRangeIDPrefixBuf(rangeID).RangeLastGCKey()
 }
 
 // RangeVersionKey returns a system-local for the range version.
@@ -655,6 +657,11 @@ func UserKey(key roachpb.RKey) roachpb.RKey {
 	return buf
 }
 
+// InMeta1 returns true iff a key is in the meta1 range (which includes RKeyMin).
+func InMeta1(k roachpb.RKey) bool {
+	return k.Equal(roachpb.RKeyMin) || bytes.HasPrefix(k, MustAddr(Meta1Prefix))
+}
+
 // validateRangeMetaKey validates that the given key is a valid Range Metadata
 // key. This checks only the constraints common to forward and backwards scans:
 // correct prefix and not exceeding KeyMax.
@@ -969,9 +976,9 @@ func (b RangeIDPrefixBuf) RangeStatsLegacyKey() roachpb.Key {
 	return append(b.replicatedPrefix(), LocalRangeStatsLegacySuffix...)
 }
 
-// RangeGCThresholdKey returns a system-local key for the GC threshold.
-func (b RangeIDPrefixBuf) RangeGCThresholdKey() roachpb.Key {
-	return append(b.replicatedPrefix(), LocalRangeGCThresholdSuffix...)
+// RangeLastGCKey returns a system-local key for the last GC.
+func (b RangeIDPrefixBuf) RangeLastGCKey() roachpb.Key {
+	return append(b.replicatedPrefix(), LocalRangeLastGCSuffix...)
 }
 
 // RangeVersionKey returns a system-local key for the range version.

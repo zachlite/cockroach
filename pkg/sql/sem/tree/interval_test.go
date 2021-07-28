@@ -261,10 +261,9 @@ func TestPGIntervalSyntax(t *testing.T) {
 		error  string
 	}{
 		{``, types.IntervalTypeMetadata{}, ``, `interval: invalid input syntax: ""`},
-		{`-`, types.IntervalTypeMetadata{}, ``, `interval: strconv.ParseInt: parsing "-": invalid syntax`},
+		{`-`, types.IntervalTypeMetadata{}, ``, `interval: missing unit at position 1: "-"`},
 		{`123`, types.IntervalTypeMetadata{}, ``, `interval: missing unit at position 3: "123"`},
 		{`123blah`, types.IntervalTypeMetadata{}, ``, `interval: unknown unit "blah" in duration "123blah"`},
-		{`10000000000000000000000000000000000 year`, types.IntervalTypeMetadata{}, ``, `interval: strconv.ParseInt: parsing "10000000000000000000000000000000000": value out of range`},
 
 		{`500nanoseconds`, types.IntervalTypeMetadata{}, ``, `interval: unknown unit "nanoseconds" in duration "500nanoseconds"`},
 		{`500ns`, types.IntervalTypeMetadata{}, ``, `interval: unknown unit "ns" in duration "500ns"`},
@@ -564,6 +563,18 @@ func TestISO8601IntervalSyntax(t *testing.T) {
 			if s3 != test.output {
 				t.Fatalf(`%q: as datum, got "%s", expected "%s"`, test.input, s3, test.output)
 			}
+
+			// Test that ISO 8601 output format also round-trips
+			s4 := dur.ISO8601String()
+			di2, err := parseDInterval(s4, test.itm)
+			if err != nil {
+				t.Fatalf(`%q: ISO8601String "%s" unrecognized as datum: %v`, test.input, s4, err)
+			}
+			s5 := di2.Duration.String()
+			if s != s5 {
+				t.Fatalf(`%q: repr "%s" does not round-trip, got %s instead`, test.input, s4, s5)
+			}
+
 		})
 	}
 }

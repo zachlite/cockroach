@@ -26,10 +26,7 @@ import (
 // joinReaderSpanGenerator is used by the joinReader to generate spans for
 // looking up into the index.
 type joinReaderSpanGenerator interface {
-	// generateSpans generates spans for the given batch of input rows. The spans
-	// are returned in rows order, but there are no duplicates (i.e. if a 2nd row
-	// results in the same spans as a previous row, the results don't include them
-	// a second time).
+	// generateSpans generates spans for the given batch of input rows.
 	generateSpans(rows []rowenc.EncDatumRow) (roachpb.Spans, error)
 
 	// getMatchingRowIndices returns the indices of the input rows that desire
@@ -44,7 +41,6 @@ type joinReaderSpanGenerator interface {
 
 var _ joinReaderSpanGenerator = &defaultSpanGenerator{}
 var _ joinReaderSpanGenerator = &multiSpanGenerator{}
-var _ joinReaderSpanGenerator = &localityOptimizedSpanGenerator{}
 
 type defaultSpanGenerator struct {
 	spanBuilder *span.Builder
@@ -438,75 +434,4 @@ func (g *multiSpanGenerator) generateSpans(rows []rowenc.EncDatumRow) (roachpb.S
 // getMatchingRowIndices is part of the joinReaderSpanGenerator interface.
 func (g *multiSpanGenerator) getMatchingRowIndices(key roachpb.Key) []int {
 	return g.keyToInputRowIndices[string(key)]
-}
-
-// localityOptimizedSpanGenerator is the span generator for locality optimized
-// lookup joins. The localSpanGen is used to generate spans targeting local
-// nodes, and the remoteSpanGen is used to generate spans targeting remote
-// nodes.
-type localityOptimizedSpanGenerator struct {
-	localSpanGen  multiSpanGenerator
-	remoteSpanGen multiSpanGenerator
-}
-
-// init must be called before the localityOptimizedSpanGenerator can be used to
-// generate spans.
-func (g *localityOptimizedSpanGenerator) init(
-	spanBuilder *span.Builder,
-	numKeyCols int,
-	numInputCols int,
-	keyToInputRowIndices map[string][]int,
-	localExprHelper *execinfrapb.ExprHelper,
-	remoteExprHelper *execinfrapb.ExprHelper,
-	tableOrdToIndexOrd util.FastIntMap,
-) error {
-	if err := g.localSpanGen.init(
-		spanBuilder, numKeyCols, numInputCols, keyToInputRowIndices, localExprHelper, tableOrdToIndexOrd,
-	); err != nil {
-		return err
-	}
-	if err := g.remoteSpanGen.init(
-		spanBuilder, numKeyCols, numInputCols, keyToInputRowIndices, remoteExprHelper, tableOrdToIndexOrd,
-	); err != nil {
-		return err
-	}
-	// Check that the resulting span generators have the same lookup columns.
-	localLookupCols := g.localSpanGen.maxLookupCols()
-	remoteLookupCols := g.remoteSpanGen.maxLookupCols()
-	if localLookupCols != remoteLookupCols {
-		return errors.AssertionFailedf(
-			"local lookup cols (%d) != remote lookup cols (%d)", localLookupCols, remoteLookupCols,
-		)
-	}
-	return nil
-}
-
-// maxLookupCols is part of the joinReaderSpanGenerator interface.
-func (g *localityOptimizedSpanGenerator) maxLookupCols() int {
-	// We already asserted in init that maxLookupCols is the same for both the
-	// local and remote span generators.
-	return g.localSpanGen.maxLookupCols()
-}
-
-// generateSpans is part of the joinReaderSpanGenerator interface.
-func (g *localityOptimizedSpanGenerator) generateSpans(
-	rows []rowenc.EncDatumRow,
-) (roachpb.Spans, error) {
-	return g.localSpanGen.generateSpans(rows)
-}
-
-// generateRemoteSpans generates spans targeting remote nodes for the given
-// batch of input rows.
-func (g *localityOptimizedSpanGenerator) generateRemoteSpans(
-	rows []rowenc.EncDatumRow,
-) (roachpb.Spans, error) {
-	return g.remoteSpanGen.generateSpans(rows)
-}
-
-// getMatchingRowIndices is part of the joinReaderSpanGenerator interface.
-func (g *localityOptimizedSpanGenerator) getMatchingRowIndices(key roachpb.Key) []int {
-	if res := g.localSpanGen.getMatchingRowIndices(key); len(res) > 0 {
-		return res
-	}
-	return g.remoteSpanGen.getMatchingRowIndices(key)
 }

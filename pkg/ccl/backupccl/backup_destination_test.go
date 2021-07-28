@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
-	"github.com/cockroachdb/cockroach/pkg/storage/cloud/nodelocal"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -36,11 +36,11 @@ func newTestStorageFactory(t *testing.T) (cloud.ExternalStorageFromURIFactory, f
 	settings := cluster.MakeTestingClusterSettings()
 	settings.ExternalIODir = dir
 	clientFactory := blobs.TestBlobServiceClient(settings.ExternalIODir)
-	externalStorageFromURI := func(ctx context.Context, uri string, user security.SQLUsername) (cloud.ExternalStorage,
+	externalStorageFromURI := func(ctx context.Context, uri, user string) (cloud.ExternalStorage,
 		error) {
-		conf, err := cloud.ExternalStorageConfFromURI(uri, user)
+		conf, err := cloudimpl.ExternalStorageConfFromURI(uri, user)
 		require.NoError(t, err)
-		return nodelocal.TestingMakeLocalStorage(ctx, conf.LocalFile, settings, clientFactory, base.ExternalIODirConfig{})
+		return cloudimpl.TestingMakeLocalStorage(ctx, conf.LocalFile, settings, clientFactory, base.ExternalIODirConfig{})
 	}
 	return externalStorageFromURI, dirCleanupFn
 }
@@ -60,19 +60,19 @@ func TestBackupRestoreResolveDestination(t *testing.T) {
 
 	// writeManifest writes an empty backup manifest file to the given URI.
 	writeManifest := func(t *testing.T, uri string) {
-		storage, err := externalStorageFromURI(ctx, uri, security.RootUserName())
+		storage, err := externalStorageFromURI(ctx, uri, security.RootUser)
 		defer storage.Close()
 		require.NoError(t, err)
-		require.NoError(t, cloud.WriteFile(ctx, storage, backupManifestName, emptyReader))
+		require.NoError(t, storage.WriteFile(ctx, backupManifestName, emptyReader))
 	}
 
 	// writeLatest writes latestBackupSuffix to the LATEST file in the given
 	// collection.
 	writeLatest := func(t *testing.T, collectionURI, latestBackupSuffix string) {
-		storage, err := externalStorageFromURI(ctx, collectionURI, security.RootUserName())
+		storage, err := externalStorageFromURI(ctx, collectionURI, security.RootUser)
 		defer storage.Close()
 		require.NoError(t, err)
-		require.NoError(t, cloud.WriteFile(ctx, storage, latestFileName, bytes.NewReader([]byte(latestBackupSuffix))))
+		require.NoError(t, storage.WriteFile(ctx, latestFileName, bytes.NewReader([]byte(latestBackupSuffix))))
 	}
 
 	// localizeURI returns a slice of just the base URI if localities is nil.
@@ -136,7 +136,7 @@ func TestBackupRestoreResolveDestination(t *testing.T) {
 					require.NoError(t, err)
 
 					collectionURI, defaultURI, chosenSuffix, urisByLocalityKV, prevBackupURIs, err := resolveDest(
-						ctx, security.RootUserName(),
+						ctx, security.RootUser,
 						false /* nested */, false, /* appendToLatest */
 						defaultDest, localitiesDest,
 						externalStorageFromURI, endTime,
@@ -205,7 +205,7 @@ func TestBackupRestoreResolveDestination(t *testing.T) {
 					dest, localitiesDest, err := getURIsByLocalityKV(to, "")
 					require.NoError(t, err)
 					collectionURI, defaultURI, chosenSuffix, urisByLocalityKV, prevBackupURIs, err := resolveDest(
-						ctx, security.RootUserName(),
+						ctx, security.RootUser,
 						false /* nested */, false, /* appendToLatest */
 						dest, localitiesDest,
 						externalStorageFromURI, endTime,
@@ -308,7 +308,7 @@ func TestBackupRestoreResolveDestination(t *testing.T) {
 					defaultCollection, localityCollections, err := getURIsByLocalityKV(collectionTo, "")
 					require.NoError(t, err)
 					collectionURI, defaultURI, chosenSuffix, urisByLocalityKV, prevBackupURIs, err := resolveDest(
-						ctx, security.RootUserName(),
+						ctx, security.RootUser,
 						true /* nested */, appendToLatest,
 						defaultCollection, localityCollections,
 						externalStorageFromURI, endTime,

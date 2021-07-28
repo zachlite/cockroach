@@ -86,7 +86,25 @@ func RunTest(t *testing.T, path, addr, user string) {
 				return d.Expected
 			}
 			for _, line := range strings.Split(d.Input, "\n") {
-				if err := p.SendOneLine(line); err != nil {
+				sp := strings.SplitN(line, " ", 2)
+				msg := toMessage(sp[0])
+				if len(sp) == 2 {
+					msgBytes := []byte(sp[1])
+					switch msg := msg.(type) {
+					case *pgproto3.CopyData:
+						var data struct{ Data string }
+						if err := json.Unmarshal(msgBytes, &data); err != nil {
+							t.Fatal(err)
+						}
+						msg.Data = []byte(data.Data)
+					default:
+						if err := json.Unmarshal(msgBytes, msg); err != nil {
+							t.Log(sp[1])
+							t.Fatal(err)
+						}
+					}
+				}
+				if err := p.Send(msg.(pgproto3.FrontendMessage)); err != nil {
 					t.Fatalf("%s: send %s: %v", d.Pos, line, err)
 				}
 			}
@@ -167,14 +185,6 @@ func MsgsToJSONWithIgnore(msgs []pgproto3.BackendMessage, args *datadriven.TestD
 				if m, ok := msg.(*pgproto3.RowDescription); ok {
 					for i := range m.Fields {
 						m.Fields[i].DataTypeOID = 0
-					}
-				}
-			}
-		case "ignore_data_type_sizes":
-			for _, msg := range msgs {
-				if m, ok := msg.(*pgproto3.RowDescription); ok {
-					for i := range m.Fields {
-						m.Fields[i].DataTypeSize = 0
 					}
 				}
 			}

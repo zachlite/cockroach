@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-source "$(dirname "${0}")/teamcity-support.sh"
-
 # Entry point for the nightly roachtests. These are run from CI and require
 # appropriate secrets for the ${CLOUD} parameter (along with other things,
 # apologies, you're going to have to dig around for them below or even better
@@ -45,20 +43,12 @@ stats_dir="$(date +"%Y%m%d")-${TC_BUILD_ID}"
 
 # Set up a function we'll invoke at the end.
 function upload_stats {
- if tc_release_branch; then
+ if [[ "${TC_BUILD_BRANCH}" == "master" ]]; then
       bucket="cockroach-nightly-${CLOUD}"
       if [[ "${CLOUD}" == "gce" ]]; then
-          # GCE, having been there first, gets an exemption.
+	  # GCE, having been there first, gets an exemption.
           bucket="cockroach-nightly"
       fi
-
-      remote_artifacts_dir="artifacts-${TC_BUILD_BRANCH}"
-      if [[ "${TC_BUILD_BRANCH}" == "master" ]]; then
-        # The master branch is special, as roachperf hard-codes
-        # the location.
-        remote_artifacts_dir="artifacts"
-      fi
-
       # The stats.json files need some path translation:
       #     ${artifacts}/path/to/test/stats.json
       # to
@@ -70,7 +60,7 @@ function upload_stats {
       (cd "${artifacts}" && \
         while IFS= read -r f; do
           if [[ -n "${f}" ]]; then
-            gsutil cp "${f}" "gs://${bucket}/${remote_artifacts_dir}/${stats_dir}/${f}"
+            gsutil cp "${f}" "gs://${bucket}/artifacts/${stats_dir}/${f}"
           fi
         done <<< "$(find . -name stats.json | sed 's/^\.\///')")
   fi
@@ -97,9 +87,7 @@ case "${CLOUD}" in
     PARALLELISM=3
     CPUQUOTA=384
     if [ -z "${TESTS}" ]; then
-      # NB: anchor ycsb to beginning of line to avoid matching `zfs/ycsb/*` which
-      # isn't supported on AWS at time of writing.
-      TESTS="kv(0|95)|^ycsb|tpcc/(headroom/n4cpu16)|tpccbench/(nodes=3/cpu=16)|scbench/randomload/(nodes=3/ops=2000/conc=1)|backup/(KMS/n3cpu4)"
+      TESTS="kv(0|95)|ycsb|tpcc/(headroom/n4cpu16)|tpccbench/(nodes=3/cpu=16)|scbench/randomload/(nodes=3/ops=2000/conc=1)|backup/(KMS/n3cpu4)"
     fi
     ;;
   *)

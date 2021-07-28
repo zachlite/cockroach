@@ -15,9 +15,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -84,7 +82,7 @@ func (b *Builder) buildScalar(
 			// grouping on the entire PK of that table.
 			g := inScope.groupby
 			if !inScope.isOuterColumn(t.id) && !b.allowImplicitGroupingColumn(t.id, g) {
-				panic(newGroupingError(t.name.ReferenceName()))
+				panic(newGroupingError(&t.name))
 			}
 
 			// We add a new grouping column; these show up both in aggInScope and
@@ -93,7 +91,7 @@ func (b *Builder) buildScalar(
 			// Note that normalization rules will trim down the list of grouping
 			// columns based on FDs, so this is only for the purposes of building a
 			// valid operator.
-			aggInCol := g.aggInScope.addColumn(scopeColName(""), t)
+			aggInCol := b.addColumn(g.aggInScope, "" /* alias */, t)
 			b.finishBuildScalarRef(t, inScope, g.aggInScope, aggInCol, nil)
 			g.groupStrs[symbolicExprStr(t)] = aggInCol
 
@@ -134,7 +132,7 @@ func (b *Builder) buildScalar(
 
 	case *tree.CollateExpr:
 		in := b.buildScalar(t.Expr.(tree.TypedExpr), inScope, nil, nil, colRefs)
-		out = b.factory.ConstructCollate(in, lex.NormalizeLocaleName(t.Locale))
+		out = b.factory.ConstructCollate(in, t.Locale)
 
 	case *tree.ArrayFlatten:
 		s := t.Subquery.(*subquery)
@@ -214,8 +212,7 @@ func (b *Builder) buildScalar(
 
 		left := tree.ReType(t.TypedLeft(), t.ResolvedBinOp().LeftType)
 		right := tree.ReType(t.TypedRight(), t.ResolvedBinOp().RightType)
-		out = b.constructBinary(
-			tree.MakeBinaryOperator(t.Operator.Symbol),
+		out = b.constructBinary(t.Operator,
 			b.buildScalar(left, inScope, nil, nil, colRefs),
 			b.buildScalar(right, inScope, nil, nil, colRefs),
 			t.ResolvedType(),
@@ -385,7 +382,7 @@ func (b *Builder) buildScalar(
 				// Non-grouping column was referenced. Note that a column that is part
 				// of a larger grouping expression would have been detected by the
 				// groupStrs checking code above.
-				panic(newGroupingError(t.cols[0].name.ReferenceName()))
+				panic(newGroupingError(&t.cols[0].name))
 			}
 			return b.finishBuildScalarRef(&t.cols[0], inScope, outScope, outCol, colRefs)
 		}
@@ -445,7 +442,7 @@ func (b *Builder) buildScalar(
 }
 
 func (b *Builder) hasSubOperator(t *tree.ComparisonExpr) bool {
-	return t.Operator.Symbol == tree.Any || t.Operator.Symbol == tree.All || t.Operator.Symbol == tree.Some
+	return t.Operator == tree.Any || t.Operator == tree.All || t.Operator == tree.Some
 }
 
 func (b *Builder) buildAnyScalar(
@@ -454,14 +451,14 @@ func (b *Builder) buildAnyScalar(
 	left := b.buildScalar(t.TypedLeft(), inScope, nil, nil, colRefs)
 	right := b.buildScalar(t.TypedRight(), inScope, nil, nil, colRefs)
 
-	subop := opt.ComparisonOpMap[t.SubOperator.Symbol]
+	subop := opt.ComparisonOpMap[t.SubOperator]
 
-	if t.Operator.Symbol == tree.All {
+	if t.Operator == tree.All {
 		subop = opt.NegateOpMap[subop]
 	}
 
 	out := b.factory.ConstructAnyScalar(left, right, subop)
-	if t.Operator.Symbol == tree.All {
+	if t.Operator == tree.All {
 		out = b.factory.ConstructNot(out)
 	}
 	return out
@@ -519,24 +516,14 @@ func (b *Builder) buildFunction(
 
 	// Add a dependency on sequences that are used as a string argument.
 	if b.trackViewDeps {
-		seqIdentifier, err := sequence.GetSequenceFromFunc(f)
+		name, err := sequence.GetSequenceFromFunc(f)
 		if err != nil {
 			panic(err)
 		}
-		if seqIdentifier != nil {
-			var ds cat.DataSource
-			if seqIdentifier.IsByID() {
-				flags := cat.Flags{
-					AvoidDescriptorCaches: b.insideViewDef,
-				}
-				ds, _, err = b.catalog.ResolveDataSourceByID(b.ctx, flags, cat.StableID(seqIdentifier.SeqID))
-				if err != nil {
-					panic(err)
-				}
-			} else {
-				tn := tree.MakeUnqualifiedTableName(tree.Name(seqIdentifier.SeqName))
-				ds, _, _ = b.resolveDataSource(&tn, privilege.SELECT)
-			}
+		if name != nil {
+			tn := tree.MakeUnqualifiedTableName(tree.Name(*name))
+			ds, _, _ := b.resolveDataSource(&tn, privilege.SELECT)
+
 			b.viewDeps = append(b.viewDeps, opt.ViewDep{
 				DataSource: ds,
 			})
@@ -639,11 +626,10 @@ func (b *Builder) checkSubqueryOuterCols(
 			subqueryOuterCols.DifferenceWith(inScope.groupby.aggOutScope.colSet())
 			colID, _ := subqueryOuterCols.Next(0)
 			col := inScope.getColumn(colID)
-			name := col.name.ReferenceName()
 			panic(pgerror.Newf(
 				pgcode.Grouping,
 				"subquery uses ungrouped column \"%s\" from outer query",
-				tree.ErrString(&name)))
+				tree.ErrString(&col.name)))
 		}
 	}
 }
@@ -651,7 +637,7 @@ func (b *Builder) checkSubqueryOuterCols(
 func (b *Builder) constructComparison(
 	cmp *tree.ComparisonExpr, left, right opt.ScalarExpr,
 ) opt.ScalarExpr {
-	switch cmp.Operator.Symbol {
+	switch cmp.Operator {
 	case tree.EQ:
 		return b.factory.ConstructEq(left, right)
 	case tree.LT:
@@ -702,7 +688,8 @@ func (b *Builder) constructComparison(
 	case tree.Contains:
 		return b.factory.ConstructContains(left, right)
 	case tree.ContainedBy:
-		return b.factory.ConstructContainedBy(left, right)
+		// This is just syntatic sugar that reverses the operands.
+		return b.factory.ConstructContains(right, left)
 	case tree.JSONExists:
 		return b.factory.ConstructJsonExists(left, right)
 	case tree.JSONAllExists:
@@ -725,7 +712,7 @@ func (b *Builder) constructComparison(
 func (b *Builder) constructBinary(
 	bin tree.BinaryOperator, left, right opt.ScalarExpr, typ *types.T,
 ) opt.ScalarExpr {
-	switch bin.Symbol {
+	switch bin {
 	case tree.Bitand:
 		return b.factory.ConstructBitand(left, right)
 	case tree.Bitor:
@@ -767,7 +754,7 @@ func (b *Builder) constructBinary(
 func (b *Builder) constructUnary(
 	un tree.UnaryOperator, input opt.ScalarExpr, typ *types.T,
 ) opt.ScalarExpr {
-	switch un.Symbol {
+	switch un {
 	case tree.UnaryMinus:
 		return b.factory.ConstructUnaryMinus(input)
 	case tree.UnaryComplement:
@@ -813,7 +800,7 @@ func NewScalar(
 	for colID := opt.ColumnID(1); int(colID) <= md.NumColumns(); colID++ {
 		colMeta := md.ColumnMeta(colID)
 		sb.scope.cols = append(sb.scope.cols, scopeColumn{
-			name: scopeColName(tree.Name(colMeta.Alias)),
+			name: tree.Name(colMeta.Alias),
 			typ:  colMeta.Type,
 			id:   colID,
 		})

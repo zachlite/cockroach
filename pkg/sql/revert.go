@@ -15,9 +15,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -29,29 +28,18 @@ import (
 // TODO(dt): tune this via experimentation.
 const RevertTableDefaultBatchSize = 500000
 
-// useTBIForRevertRange is a cluster setting that controls if the time-bound
-// iterator optimization is used when processing a revert range request.
-var useTBIForRevertRange = settings.RegisterBoolSetting(
-	"kv.bulk_io_write.revert_range_time_bound_iterator.enabled",
-	"use the time-bound iterator optimization when processing a revert range request",
-	true,
-)
-
-// RevertTables reverts the passed table to the target time, which much be above
-// the GC threshold for every range (unless the flag ignoreGCThreshold is passed
-// which should be done with care -- see RevertRangeRequest.IgnoreGCThreshold).
+// RevertTables reverts the passed table to the target time.
 func RevertTables(
 	ctx context.Context,
 	db *kv.DB,
 	execCfg *ExecutorConfig,
-	tables []catalog.TableDescriptor,
+	tables []*tabledesc.Immutable,
 	targetTime hlc.Timestamp,
-	ignoreGCThreshold bool,
 	batchSize int64,
 ) error {
 	reverting := make(map[descpb.ID]bool, len(tables))
 	for i := range tables {
-		reverting[tables[i].GetID()] = true
+		reverting[tables[i].ID] = true
 	}
 
 	spans := make([]roachpb.Span, 0, len(tables))
@@ -59,22 +47,20 @@ func RevertTables(
 	// Check that all the tables are revertable -- i.e. offline and that their
 	// full interleave hierarchy is being reverted.
 	for i := range tables {
-		if tables[i].GetState() != descpb.DescriptorState_OFFLINE {
+		if tables[i].State != descpb.DescriptorState_OFFLINE {
 			return errors.New("only offline tables can be reverted")
 		}
 
 		if !tables[i].IsPhysicalTable() {
-			return errors.Errorf("cannot revert virtual table %s", tables[i].GetName())
+			return errors.Errorf("cannot revert virtual table %s", tables[i].Name)
 		}
-		for _, idx := range tables[i].NonDropIndexes() {
-			for j := 0; j < idx.NumInterleaveAncestors(); j++ {
-				parent := idx.GetInterleaveAncestor(j)
+		for _, idx := range tables[i].AllNonDropIndexes() {
+			for _, parent := range idx.Interleave.Ancestors {
 				if !reverting[parent.TableID] {
 					return errors.New("cannot revert table without reverting all interleaved tables and indexes")
 				}
 			}
-			for j := 0; j < idx.NumInterleavedBy(); j++ {
-				child := idx.GetInterleavedBy(j)
+			for _, child := range idx.InterleavedBy {
 				if !reverting[child.Table] {
 					return errors.New("cannot revert table without reverting all interleaved tables and indexes")
 				}
@@ -86,7 +72,7 @@ func RevertTables(
 	for i := range tables {
 		// This is a) rare and b) probably relevant if we are looking at logs so it
 		// probably makes sense to log it without a verbosity filter.
-		log.Infof(ctx, "reverting table %s (%d) to time %v", tables[i].GetName(), tables[i].GetID(), targetTime)
+		log.Infof(ctx, "reverting table %s (%d) to time %v", tables[i].Name, tables[i].ID, targetTime)
 	}
 
 	// TODO(dt): pre-split requests up using a rangedesc cache and run batches in
@@ -100,9 +86,7 @@ func RevertTables(
 					Key:    span.Key,
 					EndKey: span.EndKey,
 				},
-				TargetTime:                          targetTime,
-				IgnoreGcThreshold:                   ignoreGCThreshold,
-				EnableTimeBoundIteratorOptimization: useTBIForRevertRange.Get(&execCfg.Settings.SV),
+				TargetTime: targetTime,
 			})
 		}
 		b.Header.MaxSpanRequestKeys = batchSize

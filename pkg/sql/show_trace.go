@@ -164,6 +164,8 @@ var kvMsgRegexp = regexp.MustCompile(
 		"^Del ",
 		"^Get ",
 		"^Scan ",
+		"^FKScan ",
+		"^CascadeScan ",
 		"^querying next range at ",
 		"^output row: ",
 		"^rows affected: ",

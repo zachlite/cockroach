@@ -11,7 +11,7 @@ mkdir -p "$TMPDIR"
 
 
 tc_start_block "Run Random Syntax tests"
-run_json_test build/builder.sh stdbuf -oL -eL make test \
+USE_BUILDER_IMAGE=20210205-000935 run_json_test build/builder.sh stdbuf -oL -eL make test \
   PKG=./pkg/sql/tests \
   TESTS=TestRandomSyntax \
   GOTESTFLAGS=-json \

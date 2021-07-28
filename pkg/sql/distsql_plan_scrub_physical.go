@@ -11,9 +11,11 @@
 package sql
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // createScrubPhysicalCheck generates a plan for running a physical
@@ -22,16 +24,20 @@ import (
 // TableReaders will only emit errors encountered during scanning
 // instead of row data. The plan is finalized.
 func (dsp *DistSQLPlanner) createScrubPhysicalCheck(
-	planCtx *PlanningCtx, n *scanNode,
-) (*PhysicalPlan, error) {
-	spec, _, err := initTableReaderSpec(n)
+	planCtx *PlanningCtx,
+	n *scanNode,
+	desc descpb.TableDescriptor,
+	indexDesc descpb.IndexDescriptor,
+	readAsOf hlc.Timestamp,
+) (PhysicalPlan, error) {
+	spec, _, err := initTableReaderSpec(n, planCtx, nil /* indexVarMap */)
 	if err != nil {
-		return nil, err
+		return PhysicalPlan{}, err
 	}
 
 	spanPartitions, err := dsp.PartitionSpans(planCtx, n.spans)
 	if err != nil {
-		return nil, err
+		return PhysicalPlan{}, err
 	}
 
 	corePlacement := make([]physicalplan.ProcessorCorePlacement, len(spanPartitions))
@@ -47,10 +53,10 @@ func (dsp *DistSQLPlanner) createScrubPhysicalCheck(
 		corePlacement[i].Core.TableReader = tr
 	}
 
-	p := planCtx.NewPhysicalPlan()
+	p := MakePhysicalPlan(dsp.gatewayNodeID)
 	p.AddNoInputStage(corePlacement, execinfrapb.PostProcessSpec{}, rowexec.ScrubTypes, execinfrapb.Ordering{})
 	p.PlanToStreamColMap = identityMapInPlace(make([]int, len(rowexec.ScrubTypes)))
 
-	dsp.FinalizePlan(planCtx, p)
+	dsp.FinalizePlan(planCtx, &p)
 	return p, nil
 }

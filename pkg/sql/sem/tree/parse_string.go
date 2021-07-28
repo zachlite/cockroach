@@ -16,7 +16,7 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// ParseAndRequireString parses s as type t for simple types. Collated
+// ParseAndRequireString parses s as type t for simple types. Arrays and collated
 // strings are not handled.
 //
 // The dependsOnContext return value indicates if we had to consult the
@@ -28,11 +28,7 @@ func ParseAndRequireString(
 	case types.ArrayFamily:
 		d, dependsOnContext, err = ParseDArrayFromString(ctx, s, t.ArrayContents())
 	case types.BitFamily:
-		r, err := ParseDBitArray(s)
-		if err != nil {
-			return nil, false, err
-		}
-		d = formatBitArrayToType(r, t)
+		d, err = ParseDBitArray(s)
 	case types.BoolFamily:
 		d, err = ParseDBool(s)
 	case types.BytesFamily:
@@ -52,7 +48,7 @@ func ParseAndRequireString(
 		if typErr != nil {
 			return nil, false, typErr
 		}
-		d, err = ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), s, itm)
+		d, err = ParseDIntervalWithTypeMetadata(s, itm)
 	case types.Box2DFamily:
 		d, err = ParseDBox2D(s)
 	case types.GeographyFamily:
@@ -90,9 +86,5 @@ func ParseAndRequireString(
 	default:
 		return nil, false, errors.AssertionFailedf("unknown type %s (%T)", t, t)
 	}
-	if err != nil {
-		return d, dependsOnContext, err
-	}
-	d, err = AdjustValueToType(t, d)
 	return d, dependsOnContext, err
 }

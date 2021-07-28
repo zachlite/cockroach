@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -28,7 +27,7 @@ import (
 )
 
 type dropCascadeState struct {
-	schemasToDelete []schemaWithDbDesc
+	schemasToDelete []*catalog.ResolvedSchema
 
 	objectNamesToDelete []tree.ObjectName
 
@@ -38,11 +37,6 @@ type dropCascadeState struct {
 	typesToDelete           []*typedesc.Mutable
 
 	droppedNames []string
-}
-
-type schemaWithDbDesc struct {
-	schema catalog.SchemaDescriptor
-	dbDesc *dbdesc.Mutable
 }
 
 func newDropCascadeState() *dropCascadeState {
@@ -55,33 +49,28 @@ func newDropCascadeState() *dropCascadeState {
 }
 
 func (d *dropCascadeState) collectObjectsInSchema(
-	ctx context.Context, p *planner, db *dbdesc.Mutable, schema catalog.SchemaDescriptor,
+	ctx context.Context, p *planner, db catalog.DatabaseDescriptor, schema *catalog.ResolvedSchema,
 ) error {
-	names, _, err := resolver.GetObjectNamesAndIDs(
-		ctx, p.txn, p, p.ExecCfg().Codec, db, schema.GetName(), true, /* explicitPrefix */
-	)
+	names, err := resolver.GetObjectNames(ctx, p.txn, p, p.ExecCfg().Codec, db, schema.Name, true /* explicitPrefix */)
 	if err != nil {
 		return err
 	}
 	for i := range names {
 		d.objectNamesToDelete = append(d.objectNamesToDelete, &names[i])
 	}
-	d.schemasToDelete = append(d.schemasToDelete, schemaWithDbDesc{schema: schema, dbDesc: db})
+	d.schemasToDelete = append(d.schemasToDelete, schema)
 	return nil
 }
 
-// This resolves objects for DROP SCHEMA and DROP DATABASE ops.
-// db is used to generate a useful error message in the case
-// of DROP DATABASE; otherwise, db is nil.
 func (d *dropCascadeState) resolveCollectedObjects(
-	ctx context.Context, p *planner, db *dbdesc.Mutable,
+	ctx context.Context, p *planner, db catalog.DatabaseDescriptor,
 ) error {
 	d.td = make([]toDelete, 0, len(d.objectNamesToDelete))
 	// Resolve each of the collected names.
 	for i := range d.objectNamesToDelete {
 		objName := d.objectNamesToDelete[i]
 		// First try looking up objName as a table.
-		found, _, desc, err := p.LookupObject(
+		found, desc, err := p.LookupObject(
 			ctx,
 			tree.ObjectLookupFlags{
 				// Note we set required to be false here in order to not error out
@@ -108,14 +97,12 @@ func (d *dropCascadeState) resolveCollectedObjects(
 					objName.Object(),
 				)
 			}
-			if db != nil {
-				if tbDesc.State == descpb.DescriptorState_OFFLINE {
-					dbName := db.GetName()
-					return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-						"cannot drop a database with OFFLINE tables, ensure %s is"+
-							" dropped or made public before dropping database %s",
-						objName.FQString(), tree.AsString((*tree.Name)(&dbName)))
-				}
+			if tbDesc.State == descpb.DescriptorState_OFFLINE {
+				dbName := db.GetName()
+				return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+					"cannot drop a database with OFFLINE tables, ensure %s is"+
+						" dropped or made public before dropping database %s",
+					objName.FQString(), tree.AsString((*tree.Name)(&dbName)))
 			}
 			checkOwnership := true
 			// If the object we are trying to drop as part of this DROP DATABASE
@@ -139,7 +126,7 @@ func (d *dropCascadeState) resolveCollectedObjects(
 			d.td = append(d.td, toDelete{objName, tbDesc})
 		} else {
 			// If we couldn't resolve objName as a table, try a type.
-			found, _, desc, err := p.LookupObject(
+			found, desc, err := p.LookupObject(
 				ctx,
 				tree.ObjectLookupFlags{
 					CommonLookupFlags: tree.CommonLookupFlags{
@@ -194,11 +181,13 @@ func (d *dropCascadeState) dropAllCollectedObjects(ctx context.Context, p *plann
 		var cascadedObjects []string
 		var err error
 		if desc.IsView() {
+			// TODO(knz): The names of dependent dropped views should be qualified here.
 			cascadedObjects, err = p.dropViewImpl(ctx, desc, false /* queueJob */, "", tree.DropCascade)
 		} else if desc.IsSequence() {
 			err = p.dropSequenceImpl(ctx, desc, false /* queueJob */, "", tree.DropCascade)
 		} else {
-			cascadedObjects, err = p.dropTableImpl(ctx, desc, true /* droppingParent */, "", tree.DropCascade)
+			// TODO(knz): The names of dependent dropped tables should be qualified here.
+			cascadedObjects, err = p.dropTableImpl(ctx, desc, true /* droppingParent */, "")
 		}
 		if err != nil {
 			return err

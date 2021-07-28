@@ -16,12 +16,14 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/text/language"
@@ -47,21 +49,14 @@ type SemaContext struct {
 	// TypeResolver manages resolving type names into *types.T's.
 	TypeResolver TypeReferenceResolver
 
-	// AsOfSystemTime denotes the explicit AS OF SYSTEM TIME timestamp for the
+	// AsOfTimestamp denotes the explicit AS OF SYSTEM TIME timestamp for the
 	// query, if any. If the query is not an AS OF SYSTEM TIME query,
-	// AsOfSystemTime is nil.
+	// AsOfTimestamp is nil.
 	// TODO(knz): we may want to support table readers at arbitrary
 	// timestamps, so that each FROM clause can have its own
 	// timestamp. In that case, the timestamp would not be set
 	// globally for the entire txn and this field would not be needed.
-	AsOfSystemTime *AsOfSystemTime
-
-	// TableNameResolver is used to resolve the fully qualified
-	// name of a table given its ID.
-	TableNameResolver QualifiedNameResolver
-
-	// IntervalStyleEnabled determines whether IntervalStyle is enabled.
-	IntervalStyleEnabled bool
+	AsOfTimestamp *hlc.Timestamp
 
 	Properties SemaProperties
 }
@@ -213,12 +208,9 @@ func (sc *SemaContext) GetTypeResolver() TypeReferenceResolver {
 }
 
 func placeholderTypeAmbiguityError(idx PlaceholderIdx) error {
-	return errors.WithHint(
-		pgerror.WithCandidateCode(
-			&placeholderTypeAmbiguityErr{idx},
-			pgcode.IndeterminateDatatype),
-		"consider adding explicit type casts to the placeholder arguments",
-	)
+	return pgerror.WithCandidateCode(
+		&placeholderTypeAmbiguityErr{idx},
+		pgcode.InvalidParameterValue)
 }
 
 type placeholderTypeAmbiguityErr struct {
@@ -301,7 +293,7 @@ func (expr *AndExpr) TypeCheck(
 func (expr *BinaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := BinOps[expr.Operator.Symbol]
+	ops := BinOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, true, expr.Left, expr.Right)
 	if err != nil {
@@ -421,20 +413,12 @@ func (expr *CaseExpr) TypeCheck(
 // is false, it also checks that the cast has VolatilityImmutable.
 //
 // On success, any relevant telemetry counters are incremented.
-func resolveCast(
-	context string, castFrom, castTo *types.T, allowStable bool, intervalStyleEnabled bool,
-) error {
+func resolveCast(context string, castFrom, castTo *types.T, allowStable bool) error {
 	toFamily := castTo.Family()
 	fromFamily := castFrom.Family()
 	switch {
 	case toFamily == types.ArrayFamily && fromFamily == types.ArrayFamily:
-		err := resolveCast(
-			context,
-			castFrom.ArrayContents(),
-			castTo.ArrayContents(),
-			allowStable,
-			intervalStyleEnabled,
-		)
+		err := resolveCast(context, castFrom.ArrayContents(), castTo.ArrayContents(), allowStable)
 		if err != nil {
 			return err
 		}
@@ -451,7 +435,7 @@ func resolveCast(
 		return nil
 
 	default:
-		cast := lookupCast(fromFamily, toFamily, intervalStyleEnabled)
+		cast := lookupCast(fromFamily, toFamily)
 		if cast == nil {
 			return pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, castTo)
 		}
@@ -494,16 +478,15 @@ func (expr *CastExpr) TypeCheck(
 			// is in its resolvable type set), we desire the cast's type for the
 			// Constant. In many cases, the CastExpr will then become a no-op and will
 			// be elided below. In other cases, the types may be equivalent but not
-			// Identical (e.g. string::char(2) or oid::regclass) and the CastExpr is
-			// still needed.
+			// Identical (e.g. string vs char(2)) and the CastExpr is still needed.
 			desired = exprType
 		}
 	case semaCtx.isUnresolvedPlaceholder(expr.Expr):
-		// If the placeholder has not yet been resolved, then we can make its
-		// expected type be the cast type. If it already has been resolved, but the
-		// type we gave it before is not compatible with the usage here, then
-		// type-checking will fail as desired.
-		desired = exprType
+		// This case will be triggered if ProcessPlaceholderAnnotations found
+		// the same placeholder in another location where it was either not
+		// the child of a cast, or was the child of a cast to a different type.
+		// In this case, we default to inferring a STRING for the placeholder.
+		desired = types.String
 	case isEmptyArray(expr.Expr):
 		// An empty array can't be type-checked with a desired parameter of
 		// types.Any. If we're going to cast to another array type, which is a
@@ -531,7 +514,7 @@ func (expr *CastExpr) TypeCheck(
 		allowStable = false
 		context = semaCtx.Properties.required.context
 	}
-	err = resolveCast(context, castFrom, exprType, allowStable, semaCtx != nil && semaCtx.IntervalStyleEnabled)
+	err = resolveCast(context, castFrom, exprType, allowStable)
 	if err != nil {
 		return nil, err
 	}
@@ -605,15 +588,6 @@ func (expr *AnnotateTypeExpr) TypeCheck(
 func (expr *CollateExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	if strings.ToLower(expr.Locale) == DefaultCollationTag {
-		return nil, errors.WithHint(
-			unimplemented.NewWithIssuef(
-				57255,
-				"DEFAULT collations are not supported",
-			),
-			`omit the 'COLLATE "default"' clause in your statement`,
-		)
-	}
 	_, err := language.Parse(expr.Locale)
 	if err != nil {
 		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue,
@@ -624,11 +598,7 @@ func (expr *CollateExpr) TypeCheck(
 		return nil, err
 	}
 	t := subExpr.ResolvedType()
-	if types.IsStringType(t) {
-		expr.Expr = subExpr
-		expr.typ = types.MakeCollatedString(t, expr.Locale)
-		return expr, nil
-	} else if t.Family() == types.UnknownFamily {
+	if types.IsStringType(t) || t.Family() == types.UnknownFamily {
 		expr.Expr = subExpr
 		expr.typ = types.MakeCollatedString(types.String, expr.Locale)
 		return expr, nil
@@ -699,7 +669,7 @@ func (expr *ColumnAccessExpr) TypeCheck(
 		// Go through all of the labels to find a match.
 		expr.ColIndex = -1
 		for i, label := range resolvedType.TupleLabels() {
-			if label == string(expr.ColName) {
+			if label == expr.ColName {
 				if expr.ColIndex != -1 {
 					// Found a duplicate label.
 					return nil, pgerror.Newf(pgcode.AmbiguousColumn, "column reference %q is ambiguous", label)
@@ -710,7 +680,7 @@ func (expr *ColumnAccessExpr) TypeCheck(
 		if expr.ColIndex < 0 {
 			return nil, pgerror.Newf(pgcode.DatatypeMismatch,
 				"could not identify column %q in %s",
-				ErrString(&expr.ColName), resolvedType,
+				ErrNameStringP(&expr.ColName), resolvedType,
 			)
 		}
 	}
@@ -751,7 +721,7 @@ func (expr *ComparisonExpr) TypeCheck(
 	var cmpOp *CmpOp
 	var alwaysNull bool
 	var err error
-	if expr.Operator.Symbol.HasSubOperator() {
+	if expr.Operator.HasSubOperator() {
 		leftTyped, rightTyped, cmpOp, alwaysNull, err = typeCheckComparisonOpWithSubOperator(
 			ctx,
 			semaCtx,
@@ -1321,16 +1291,16 @@ func (expr *AllColumnsSelector) TypeCheck(
 func (expr *RangeCond) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	leftFromTyped, fromTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(GT), expr.Left, expr.From)
+	leftFromTyped, fromTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, GT, expr.Left, expr.From)
 	if err != nil {
 		return nil, err
 	}
-	leftToTyped, toTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(LT), expr.Left, expr.To)
+	leftToTyped, toTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, LT, expr.Left, expr.To)
 	if err != nil {
 		return nil, err
 	}
 	// Ensure that the boundaries of the comparison are well typed.
-	_, _, _, _, err = typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(LT), expr.From, expr.To)
+	_, _, _, _, err = typeCheckComparisonOp(ctx, semaCtx, LT, expr.From, expr.To)
 	if err != nil {
 		return nil, err
 	}
@@ -1354,7 +1324,7 @@ func (expr *Subquery) TypeCheck(_ context.Context, sc *SemaContext, _ *types.T) 
 func (expr *UnaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := UnaryOps[expr.Operator.Symbol]
+	ops := UnaryOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, false, expr.Expr)
 	if err != nil {
@@ -1469,7 +1439,9 @@ func (expr *Tuple) TypeCheck(
 	// Copy the labels if there are any.
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
-		copy(labels, expr.Labels)
+		for i := range expr.Labels {
+			labels[i] = lex.NormalizeName(expr.Labels[i])
+		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)
 	return expr, nil
@@ -1761,25 +1733,6 @@ func typeCheckAndRequireTupleElems(
 		tuple.Exprs[i] = rightTyped
 		tuple.typ.TupleContents()[i] = rightTyped.ResolvedType()
 	}
-	if len(tuple.typ.TupleContents()) > 0 && tuple.typ.TupleContents()[0].Family() == types.CollatedStringFamily {
-		// Make sure that all elements of the tuple have the correct locale set
-		// for collated strings. Note that if the locales were different, an
-		// error would have been already emitted, so here we are only upgrading
-		// an empty locale (which might be set for NULLs) to a non-empty (if
-		// such is found).
-		var typWithLocale *types.T
-		for _, typ := range tuple.typ.TupleContents() {
-			if typ.Locale() != "" {
-				typWithLocale = typ
-				break
-			}
-		}
-		if typWithLocale != nil {
-			for i := range tuple.typ.TupleContents() {
-				tuple.typ.TupleContents()[i] = typWithLocale
-			}
-		}
-	}
 	return tuple, nil
 }
 
@@ -1828,7 +1781,7 @@ func typeCheckComparisonOpWithSubOperator(
 	// Determine the set of comparisons are possible for the sub-operation,
 	// which will be memoized.
 	foldedOp, _, _, _, _ := FoldComparisonExpr(subOp, nil, nil)
-	ops := CmpOps[foldedOp.Symbol]
+	ops := CmpOps[foldedOp]
 
 	var cmpTypeLeft, cmpTypeRight *types.T
 	var leftTyped, rightTyped TypedExpr
@@ -1974,14 +1927,14 @@ func typeCheckComparisonOp(
 	ctx context.Context, semaCtx *SemaContext, op ComparisonOperator, left, right Expr,
 ) (_ TypedExpr, _ TypedExpr, _ *CmpOp, alwaysNull bool, _ error) {
 	foldedOp, foldedLeft, foldedRight, switched, _ := FoldComparisonExpr(op, left, right)
-	ops := CmpOps[foldedOp.Symbol]
+	ops := CmpOps[foldedOp]
 
 	_, leftIsTuple := foldedLeft.(*Tuple)
 	rightTuple, rightIsTuple := foldedRight.(*Tuple)
 
 	_, rightIsSubquery := foldedRight.(SubqueryExpr)
 	switch {
-	case foldedOp.Symbol == In && rightIsTuple:
+	case foldedOp == In && rightIsTuple:
 		sameTypeExprs := make([]Expr, len(rightTuple.Exprs)+1)
 		sameTypeExprs[0] = foldedLeft
 		copy(sameTypeExprs[1:], rightTuple.Exprs)
@@ -2013,7 +1966,7 @@ func typeCheckComparisonOp(
 		}
 		return typedLeft, rightTuple, fn, false, nil
 
-	case foldedOp.Symbol == In && rightIsSubquery:
+	case foldedOp == In && rightIsSubquery:
 		typedLeft, err := foldedLeft.TypeCheck(ctx, semaCtx, types.Any)
 		if err != nil {
 			sigWithErr := fmt.Sprintf(compExprsFmt, left, op, right, err)

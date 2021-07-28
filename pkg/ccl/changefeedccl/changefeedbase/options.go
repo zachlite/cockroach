@@ -33,17 +33,13 @@ const (
 	OptFormat                   = `format`
 	OptFullTableName            = `full_table_name`
 	OptKeyInValue               = `key_in_value`
-	OptTopicInValue             = `topic_in_value`
 	OptResolvedTimestamps       = `resolved`
 	OptUpdatedTimestamps        = `updated`
-	OptMVCCTimestamps           = `mvcc_timestamp`
 	OptDiff                     = `diff`
 	OptCompression              = `compression`
 	OptSchemaChangeEvents       = `schema_change_events`
 	OptSchemaChangePolicy       = `schema_change_policy`
 	OptProtectDataFromGCOnPause = `protect_data_from_gc_on_pause`
-	OptWebhookAuthHeader        = `webhook_auth_header`
-	OptWebhookClientTimeout     = `webhook_client_timeout`
 
 	// OptSchemaChangeEventClassColumnChange corresponds to all schema change
 	// events which add or remove any column.
@@ -63,9 +59,6 @@ const (
 	// exit with an error indicating the HLC timestamp of the change from which
 	// the user could continue.
 	OptSchemaChangePolicyStop SchemaChangePolicy = `stop`
-	// OptSchemaChangePolicyIgnore indicates that all schema change events should
-	// be ignored.
-	OptSchemaChangePolicyIgnore SchemaChangePolicy = `ignore`
 
 	// OptInitialScan enables an initial scan. This is the default when no
 	// cursor is specified, leading to an initial scan at the statement time of
@@ -76,51 +69,33 @@ const (
 	// cursor is specified. This option is useful to create a changefeed which
 	// subscribes only to new messages.
 	OptNoInitialScan = `no_initial_scan`
-	// Sentinel value to indicate that all resolved timestamp events should be emitted.
-	OptEmitAllResolvedTimestamps = ``
 
 	OptEnvelopeKeyOnly       EnvelopeType = `key_only`
 	OptEnvelopeRow           EnvelopeType = `row`
 	OptEnvelopeDeprecatedRow EnvelopeType = `deprecated_row`
 	OptEnvelopeWrapped       EnvelopeType = `wrapped`
 
-	OptFormatJSON   FormatType = `json`
-	OptFormatAvro   FormatType = `experimental_avro`
-	OptFormatNative FormatType = `native`
+	OptFormatJSON FormatType = `json`
+	OptFormatAvro FormatType = `experimental_avro`
 
 	// OptKafkaSinkConfig is a JSON configuration for kafka sink (kafkaSinkConfig).
 	OptKafkaSinkConfig = `kafka_sink_config`
 
-	SinkParamCACert                 = `ca_cert`
-	SinkParamClientCert             = `client_cert`
-	SinkParamClientKey              = `client_key`
-	SinkParamFileSize               = `file_size`
-	SinkParamSchemaTopic            = `schema_topic`
-	SinkParamTLSEnabled             = `tls_enabled`
-	SinkParamSkipTLSVerify          = `insecure_tls_skip_verify`
-	SinkParamTopicPrefix            = `topic_prefix`
-	SinkParamTopicName              = `topic_name`
-	SinkSchemeBuffer                = ``
-	SinkSchemeCloudStorageAzure     = `experimental-azure`
-	SinkSchemeCloudStorageGCS       = `experimental-gs`
-	SinkSchemeCloudStorageHTTP      = `experimental-http`
-	SinkSchemeCloudStorageHTTPS     = `experimental-https`
-	SinkSchemeCloudStorageNodelocal = `experimental-nodelocal`
-	SinkSchemeCloudStorageS3        = `experimental-s3`
-	SinkSchemeExperimentalSQL       = `experimental-sql`
-	SinkSchemeHTTP                  = `http`
-	SinkSchemeHTTPS                 = `https`
-	SinkSchemeKafka                 = `kafka`
-	SinkSchemeNull                  = `null`
-	SinkSchemeWebhookHTTP           = `webhook-http`
-	SinkSchemeWebhookHTTPS          = `webhook-https`
-	SinkParamSASLEnabled            = `sasl_enabled`
-	SinkParamSASLHandshake          = `sasl_handshake`
-	SinkParamSASLUser               = `sasl_user`
-	SinkParamSASLPassword           = `sasl_password`
-	SinkParamSASLMechanism          = `sasl_mechanism`
-
-	RegistryParamCACert = `ca_cert`
+	SinkParamCACert           = `ca_cert`
+	SinkParamClientCert       = `client_cert`
+	SinkParamClientKey        = `client_key`
+	SinkParamFileSize         = `file_size`
+	SinkParamSchemaTopic      = `schema_topic`
+	SinkParamTLSEnabled       = `tls_enabled`
+	SinkParamSkipTLSVerify    = `insecure_tls_skip_verify`
+	SinkParamTopicPrefix      = `topic_prefix`
+	SinkSchemeBuffer          = ``
+	SinkSchemeExperimentalSQL = `experimental-sql`
+	SinkSchemeKafka           = `kafka`
+	SinkParamSASLEnabled      = `sasl_enabled`
+	SinkParamSASLHandshake    = `sasl_handshake`
+	SinkParamSASLUser         = `sasl_user`
+	SinkParamSASLPassword     = `sasl_password`
 )
 
 // ChangefeedOptionExpectValues is used to parse changefeed options using
@@ -133,10 +108,8 @@ var ChangefeedOptionExpectValues = map[string]sql.KVStringOptValidate{
 	OptFormat:                   sql.KVStringOptRequireValue,
 	OptFullTableName:            sql.KVStringOptRequireNoValue,
 	OptKeyInValue:               sql.KVStringOptRequireNoValue,
-	OptTopicInValue:             sql.KVStringOptRequireNoValue,
 	OptResolvedTimestamps:       sql.KVStringOptAny,
 	OptUpdatedTimestamps:        sql.KVStringOptRequireNoValue,
-	OptMVCCTimestamps:           sql.KVStringOptRequireNoValue,
 	OptDiff:                     sql.KVStringOptRequireNoValue,
 	OptCompression:              sql.KVStringOptRequireValue,
 	OptSchemaChangeEvents:       sql.KVStringOptRequireValue,
@@ -145,6 +118,4 @@ var ChangefeedOptionExpectValues = map[string]sql.KVStringOptValidate{
 	OptNoInitialScan:            sql.KVStringOptRequireNoValue,
 	OptProtectDataFromGCOnPause: sql.KVStringOptRequireNoValue,
 	OptKafkaSinkConfig:          sql.KVStringOptRequireValue,
-	OptWebhookAuthHeader:        sql.KVStringOptRequireValue,
-	OptWebhookClientTimeout:     sql.KVStringOptRequireValue,
 }

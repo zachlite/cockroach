@@ -12,22 +12,30 @@ import React from "react";
 import classnames from "classnames/bind";
 import styles from "./anchor.module.styl";
 
-type AnchorProps = React.DetailedHTMLProps<
-  React.AnchorHTMLAttributes<HTMLAnchorElement>,
-  HTMLAnchorElement
->;
+interface AnchorProps {
+  onClick?: () => void;
+  href?: string;
+  target?: "_blank" | "_parent" | "_self";
+  className?: string;
+}
 
 const cx = classnames.bind(styles);
 
-export function Anchor({
-  target = "_blank",
-  className,
-  children,
-  ...props
-}: AnchorProps) {
+export function Anchor(props: React.PropsWithChildren<AnchorProps>) {
+  const { href, target, children, onClick, className } = props;
   return (
-    <a {...props} className={cx("crl-anchor", className)} target={target}>
+    <a
+      className={cx("crl-anchor", className)}
+      href={href}
+      target={target}
+      onClick={onClick}
+    >
       {children}
     </a>
   );
 }
+
+Anchor.defaultProps = {
+  target: "_blank",
+  className: "",
+};

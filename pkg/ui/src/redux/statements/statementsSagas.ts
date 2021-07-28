@@ -20,15 +20,12 @@ import {
 } from "./statementsActions";
 import { cockroach } from "src/js/protos";
 import CreateStatementDiagnosticsReportRequest = cockroach.server.serverpb.CreateStatementDiagnosticsReportRequest;
+import { invalidateStatementDiagnosticsRequests, refreshStatementDiagnosticsRequests } from "src/redux/apiReducers";
 import {
-  invalidateStatementDiagnosticsRequests,
-  refreshStatementDiagnosticsRequests,
-} from "src/redux/apiReducers";
-import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
+  createStatementDiagnosticsAlertLocalSetting,
+} from "src/redux/alerts";
 
-export function* createDiagnosticsReportSaga(
-  action: PayloadAction<DiagnosticsReportPayload>,
-) {
+export function* createDiagnosticsReportSaga(action: PayloadAction<DiagnosticsReportPayload>) {
   const { statementFingerprint } = action.payload;
   const diagnosticsReportRequest = new CreateStatementDiagnosticsReportRequest({
     statement_fingerprint: statementFingerprint,
@@ -39,20 +36,10 @@ export function* createDiagnosticsReportSaga(
     yield put(invalidateStatementDiagnosticsRequests());
     // PUT expects action with `type` field which isn't defined in `refresh` ThunkAction interface
     yield put(refreshStatementDiagnosticsRequests() as any);
-    yield put(
-      createStatementDiagnosticsAlertLocalSetting.set({
-        show: true,
-        status: "SUCCESS",
-      }),
-    );
+    yield put(createStatementDiagnosticsAlertLocalSetting.set({ show: true, status: "SUCCESS"}));
   } catch (e) {
     yield put(createStatementDiagnosticsReportFailedAction());
-    yield put(
-      createStatementDiagnosticsAlertLocalSetting.set({
-        show: true,
-        status: "FAILED",
-      }),
-    );
+    yield put(createStatementDiagnosticsAlertLocalSetting.set({ show: true, status: "FAILED"}));
   }
 }
 

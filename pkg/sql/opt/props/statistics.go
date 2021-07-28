@@ -63,21 +63,18 @@ type Statistics struct {
 	// Selectivity is a value between 0 and 1 representing the estimated
 	// reduction in number of rows for the top-level operator in this
 	// expression.
-	Selectivity Selectivity
+	Selectivity float64
 }
 
 // Init initializes the data members of Statistics.
 func (s *Statistics) Init(relProps *Relational) (zeroCardinality bool) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Reusing fields must be done explicitly.
-	*s = Statistics{}
 	if relProps.Cardinality.IsZero() {
 		s.RowCount = 0
-		s.Selectivity = ZeroSelectivity
+		s.Selectivity = 0
 		s.Available = true
 		return true
 	}
-	s.Selectivity = OneSelectivity
+	s.Selectivity = 1
 	return false
 }
 
@@ -94,33 +91,9 @@ func (s *Statistics) CopyFrom(other *Statistics) {
 // Histograms are not updated.
 // See ColumnStatistic.ApplySelectivity for updating distinct counts, null
 // counts, and histograms.
-func (s *Statistics) ApplySelectivity(selectivity Selectivity) {
-	s.RowCount *= selectivity.AsFloat()
-	s.Selectivity.Multiply(selectivity)
-}
-
-// UnapplySelectivity divides the statistics by the given selectivity.
-// RowCount and Selectivity are updated. Note that DistinctCounts, NullCounts,
-// and Histograms are not updated.
-func (s *Statistics) UnapplySelectivity(selectivity Selectivity) {
-	// Make sure that we don't increase the row count to something larger than it
-	// was at the beginning. Selectivity will never exceed 1, so use that fact to
-	// update the RowCount.
-	adjustedSelectivity := s.Selectivity
-	s.Selectivity.Divide(selectivity)
-	adjustedSelectivity.Divide(s.Selectivity)
-	s.RowCount /= adjustedSelectivity.AsFloat()
-}
-
-// LimitSelectivity limits the Selectivity to the given max selectivity.
-// RowCount and Selectivity are updated. Note that DistinctCounts, NullCounts,
-// and Histograms are not updated.
-func (s *Statistics) LimitSelectivity(maxSelectivity Selectivity) {
-	if s.Selectivity.selectivity > maxSelectivity.selectivity {
-		adjustedSelectivity := maxSelectivity
-		adjustedSelectivity.Divide(s.Selectivity)
-		s.ApplySelectivity(adjustedSelectivity)
-	}
+func (s *Statistics) ApplySelectivity(selectivity float64) {
+	s.RowCount *= selectivity
+	s.Selectivity *= selectivity
 }
 
 // UnionWith unions this Statistics object with another Statistics object. It
@@ -130,7 +103,7 @@ func (s *Statistics) LimitSelectivity(maxSelectivity Selectivity) {
 func (s *Statistics) UnionWith(other *Statistics) {
 	s.Available = s.Available && other.Available
 	s.RowCount += other.RowCount
-	s.Selectivity.Add(other.Selectivity)
+	s.Selectivity += other.Selectivity
 }
 
 func (s *Statistics) String() string {
@@ -171,7 +144,7 @@ func (s *Statistics) String() string {
 // maintaining statistics on a few columns and column sets that are frequently
 // used in predicates, group by columns, etc.
 //
-// ColumnStatistics can be copied by value.
+// ColumnStatistiscs can be copied by value.
 type ColumnStatistic struct {
 	// Cols is the set of columns whose data are summarized by this
 	// ColumnStatistic struct. The ColSet is never modified in-place.
@@ -194,19 +167,19 @@ type ColumnStatistic struct {
 
 // ApplySelectivity updates the distinct count, null count, and histogram
 // according to a given selectivity.
-func (c *ColumnStatistic) ApplySelectivity(selectivity Selectivity, inputRows float64) {
+func (c *ColumnStatistic) ApplySelectivity(selectivity, inputRows float64) {
 	// Since the null count is a simple count of all null rows, we can
 	// just multiply the selectivity with it.
-	c.NullCount *= selectivity.AsFloat()
+	c.NullCount *= selectivity
 
 	if c.Histogram != nil {
 		c.Histogram = c.Histogram.ApplySelectivity(selectivity)
 	}
 
-	if selectivity == OneSelectivity || c.DistinctCount == 0 {
+	if selectivity == 1 || c.DistinctCount == 0 {
 		return
 	}
-	if selectivity == ZeroSelectivity {
+	if selectivity == 0 {
 		c.DistinctCount = 0
 		return
 	}
@@ -221,7 +194,7 @@ func (c *ColumnStatistic) ApplySelectivity(selectivity Selectivity, inputRows fl
 	//
 	// This formula returns d * selectivity when d=n but is closer to d
 	// when d << n.
-	c.DistinctCount = d - d*math.Pow(1-selectivity.AsFloat(), n/d)
+	c.DistinctCount = d - d*math.Pow(1-selectivity, n/d)
 	const epsilon = 1e-10
 	if c.DistinctCount < epsilon {
 		// Avoid setting the distinct count to 0 (since the row count is
@@ -245,14 +218,14 @@ func (c ColumnStatistics) Less(i, j int) bool {
 
 	prev := opt.ColumnID(0)
 	for {
-		nextI, ok := c[i].Cols.Next(prev + 1)
+		nextI, ok := c[i].Cols.Next(prev)
 		if !ok {
 			return false
 		}
 
 		// No need to check if ok since both ColSets are the same length and
 		// so far have had the same elements.
-		nextJ, _ := c[j].Cols.Next(prev + 1)
+		nextJ, _ := c[j].Cols.Next(prev)
 
 		if nextI != nextJ {
 			return nextI < nextJ

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -13,12 +13,9 @@ import { storiesOf, DecoratorFn } from "@storybook/react";
 
 import {
   countBarChart,
-  rowsReadBarChart,
-  bytesReadBarChart,
   latencyBarChart,
-  maxMemUsageBarChart,
-  networkBytesBarChart,
   retryBarChart,
+  rowsBarChart,
 } from "./barCharts";
 import statementsPagePropsFixture from "src/statementsPage/statementsPage.fixture";
 import Long from "long";
@@ -54,28 +51,16 @@ storiesOf("BarCharts", module)
     const chartFactory = countBarChart(statements);
     return chartFactory(statements[0]);
   })
-  .add("rowsReadBarChart", () => {
-    const chartFactory = rowsReadBarChart(statements);
-    return chartFactory(statements[0]);
-  })
-  .add("bytesReadBarChart", () => {
-    const chartFactory = bytesReadBarChart(statements);
-    return chartFactory(statements[0]);
-  })
   .add("latencyBarChart", () => {
     const chartFactory = latencyBarChart(statements);
     return chartFactory(statements[0]);
   })
-  .add("maxMemUsageBarChart", () => {
-    const chartFactory = maxMemUsageBarChart(statements);
-    return chartFactory(statements[0]);
-  })
-  .add("networkBytesBarChart", () => {
-    const chartFactory = networkBytesBarChart(statements);
-    return chartFactory(statements[0]);
-  })
   .add("retryBarChart", () => {
     const chartFactory = retryBarChart(statements);
+    return chartFactory(statements[0]);
+  })
+  .add("rowsBarChart", () => {
+    const chartFactory = rowsBarChart(statements);
     return chartFactory(statements[0]);
   });
 
@@ -85,20 +70,8 @@ storiesOf("BarCharts/within column (150px)", module)
     const chartFactory = countBarChart(statements);
     return chartFactory(statements[0]);
   })
-  .add("rowsReadBarChart", () => {
-    const chartFactory = rowsReadBarChart(statements);
-    return chartFactory(statements[0]);
-  })
-  .add("bytesReadBarChart", () => {
-    const chartFactory = bytesReadBarChart(statements);
-    return chartFactory(statements[0]);
-  })
   .add("latencyBarChart", () => {
     const chartFactory = latencyBarChart(statements);
-    return chartFactory(statements[0]);
-  })
-  .add("maxMemUsageBarChart", () => {
-    const chartFactory = maxMemUsageBarChart(statements);
     return chartFactory(statements[0]);
   })
   .add("retryBarChart", () => {
@@ -117,4 +90,8 @@ storiesOf("BarCharts/within column (150px)", module)
     }));
     const chartFactory = retryBarChart(withoutRetries);
     return chartFactory(withoutRetries[0]);
+  })
+  .add("rowsBarChart", () => {
+    const chartFactory = rowsBarChart(statements);
+    return chartFactory(statements[0]);
   });

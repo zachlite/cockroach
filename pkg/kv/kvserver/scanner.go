@@ -34,7 +34,7 @@ type replicaQueue interface {
 	// MaybeAdd adds the replica to the queue if the replica meets
 	// the queue's inclusion criteria and the queue is not already
 	// too full, etc.
-	MaybeAddAsync(context.Context, replicaInQueue, hlc.ClockTimestamp)
+	MaybeAddAsync(context.Context, replicaInQueue, hlc.Timestamp)
 	// MaybeRemove removes the replica from the queue if it is present.
 	MaybeRemove(roachpb.RangeID)
 	// Name returns the name of the queue.
@@ -179,7 +179,7 @@ func (rs *replicaScanner) avgScan() time.Duration {
 func (rs *replicaScanner) RemoveReplica(repl *Replica) {
 	select {
 	case rs.removed <- repl:
-	case <-rs.stopper.ShouldQuiesce():
+	case <-rs.stopper.ShouldStop():
 	}
 }
 
@@ -230,14 +230,14 @@ func (rs *replicaScanner) waitAndProcess(ctx context.Context, start time.Time, r
 				log.Infof(ctx, "replica scanner processing %s", repl)
 			}
 			for _, q := range rs.queues {
-				q.MaybeAddAsync(ctx, repl, rs.clock.NowAsClockTimestamp())
+				q.MaybeAddAsync(ctx, repl, rs.clock.Now())
 			}
 			return false
 
 		case repl := <-rs.removed:
 			rs.removeReplica(repl)
 
-		case <-rs.stopper.ShouldQuiesce():
+		case <-rs.stopper.ShouldStop():
 			return true
 		}
 	}
@@ -261,7 +261,7 @@ func (rs *replicaScanner) removeReplica(repl *Replica) {
 // is paced to complete a full scan in approximately the scan interval.
 func (rs *replicaScanner) scanLoop() {
 	ctx := rs.AnnotateCtx(context.Background())
-	_ = rs.stopper.RunAsyncTask(ctx, "scan-loop", func(ctx context.Context) {
+	rs.stopper.RunWorker(ctx, func(ctx context.Context) {
 		start := timeutil.Now()
 
 		// waitTimer is reset in each call to waitAndProcess.
@@ -326,7 +326,7 @@ func (rs *replicaScanner) waitEnabled() bool {
 		case repl := <-rs.removed:
 			rs.removeReplica(repl)
 
-		case <-rs.stopper.ShouldQuiesce():
+		case <-rs.stopper.ShouldStop():
 			return true
 		}
 	}

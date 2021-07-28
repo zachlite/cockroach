@@ -40,16 +40,14 @@ message ClosureTxnOperation {
 
 message GetOperation {
   bytes key = 1;
-  bool for_update = 2;
-  Result result = 3 [(gogoproto.nullable) = false];
+  Result result = 2 [(gogoproto.nullable) = false];
 }
 
 message ScanOperation {
   bytes key = 1;
   bytes end_key = 2;
   bool for_update = 3;
-  bool reverse = 4;
-  Result result = 5 [(gogoproto.nullable) = false];
+  Result result = 4 [(gogoproto.nullable) = false];
 }
 
 message PutOperation {
@@ -74,21 +72,6 @@ message ChangeReplicasOperation {
   Result result = 3 [(gogoproto.nullable) = false];
 }
 
-message TransferLeaseOperation {
-  bytes key = 1;
-  int32 target = 2 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID"];
-  Result result = 3 [(gogoproto.nullable) = false];
-}
-
-enum ChangeZoneType {
-  ToggleGlobalReads = 0;
-}
-
-message ChangeZoneOperation {
-  ChangeZoneType type = 1;
-  Result result = 2 [(gogoproto.nullable) = false];
-}
-
 message Operation {
   option (gogoproto.goproto_stringer) = false;
   option (gogoproto.onlyone) = true;
@@ -107,8 +90,6 @@ message Operation {
   SplitOperation split = 10;
   MergeOperation merge = 11;
   ChangeReplicasOperation change_replicas = 12;
-  TransferLeaseOperation transfer_lease = 13;
-  ChangeZoneOperation change_zone = 14;
 }
 
 enum ResultType {

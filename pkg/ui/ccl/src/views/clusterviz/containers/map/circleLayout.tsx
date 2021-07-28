@@ -16,7 +16,7 @@ import { NodeView } from "./nodeView";
 import { LivenessStatus } from "src/redux/nodes";
 import { cockroach } from "src/js/protos";
 
-type Liveness = cockroach.kv.kvserver.liveness.livenesspb.ILiveness;
+type Liveness = cockroach.kv.kvserver.storagepb.ILiveness;
 
 const MIN_RADIUS = 150;
 const PADDING = 150;
@@ -39,7 +39,7 @@ export class CircleLayout extends React.Component<CircleLayoutProps> {
       return [leftOrRight, 0];
     }
 
-    const angle = (2 * Math.PI * index) / total - Math.PI / 2;
+    const angle = 2 * Math.PI * index / total - Math.PI / 2;
     return [radius * Math.cos(angle), radius * Math.sin(angle)];
   }
 
@@ -54,31 +54,29 @@ export class CircleLayout extends React.Component<CircleLayoutProps> {
 
     return (
       <g transform={`translate(${viewportSize[0] / 2},${viewportSize[1] / 2})`}>
-        {childLocalities.map((locality, i) => (
-          <g transform={`translate(${this.coordsFor(i, total, radius)})`}>
-            <LocalityView
-              localityTree={locality}
-              livenessStatuses={this.props.livenessStatuses}
-            />
-          </g>
-        ))}
-        {localityTree.nodes.map((node, i) => {
-          return (
-            <g
-              transform={`translate(${this.coordsFor(
-                i + childLocalities.length,
-                total,
-                radius,
-              )})`}
-            >
-              <NodeView
-                node={node}
-                livenessStatus={this.props.livenessStatuses[node.desc.node_id]}
-                liveness={this.props.livenesses[node.desc.node_id]}
+        {
+          childLocalities.map((locality, i) => (
+            <g transform={`translate(${this.coordsFor(i, total, radius)})`}>
+              <LocalityView
+                localityTree={locality}
+                livenessStatuses={this.props.livenessStatuses}
               />
             </g>
-          );
-        })}
+          ))
+        }
+        {
+          localityTree.nodes.map((node, i) => {
+            return (
+              <g transform={`translate(${this.coordsFor(i + childLocalities.length, total, radius)})`}>
+                <NodeView
+                  node={node}
+                  livenessStatus={this.props.livenessStatuses[node.desc.node_id]}
+                  liveness={this.props.livenesses[node.desc.node_id]}
+                />
+              </g>
+            );
+          })
+        }
       </g>
     );
   }

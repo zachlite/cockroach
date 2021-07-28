@@ -25,60 +25,12 @@ SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::
 3
 6
 
+# The InvertedFilterer stats show "rows read: 6" since all the above shapes overflow
+# the default index bounds.
 query T
-EXPLAIN ANALYZE (DISTSQL) SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k
+SELECT url FROM [EXPLAIN ANALYZE SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k]
 ----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-rows read from KV: 6 (48 B)
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• sort
-│ nodes: <hidden>
-│ regions: <hidden>
-│ actual row count: 2
-│ order: +k
-│
-└── • filter
-    │ nodes: <hidden>
-    │ regions: <hidden>
-    │ actual row count: 2
-    │ filter: st_intersects('010100002026690000000000000C6A18410000008081844E41', geom)
-    │
-    └── • index join
-        │ nodes: <hidden>
-        │ regions: <hidden>
-        │ actual row count: 2
-        │ KV time: 0µs
-        │ KV contention time: 0µs
-        │ KV rows read: 2
-        │ KV bytes read: 16 B
-        │ table: geo_table@primary
-        │
-        └── • inverted filter
-            │ nodes: <hidden>
-            │ regions: <hidden>
-            │ actual row count: 2
-            │ inverted column: geom_inverted_key
-            │ num spans: 31
-            │
-            └── • scan
-                  nodes: <hidden>
-                  regions: <hidden>
-                  actual row count: 4
-                  KV time: 0µs
-                  KV contention time: 0µs
-                  KV rows read: 4
-                  KV bytes read: 32 B
-                  missing stats
-                  table: geo_table@geom_index
-                  spans: 31 spans
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMleFO40YQx7_3KUbzBVBdZdc2adiqUgqYNm0hyIlaoTpCiz0NFrbX7G5aI5THuhe4JzvZJhwhirnc3YfLh41mxv_1zG9m149o7jMUOAn-DE6mcAdn4fgc5qSurbzJCP7-LQgDMPY6LSxpQ7E1-3uTcHT6s9s_4oOfLseji-m-zxhjHjR_zDvYE-LXYHweTMMrp94rP4BxeBqEcHwFd-hgoRK6kDkZFP8gx5mDpVYxGaN07XpsHhglFQrmYFqUC1u7Zw7GShOKR7SpzQgFTuscQ5IJ6R5DBxOyMs2abZ9LGNYJXKdFQhU6OCllYQT0IjyOourfJIoqzqKoYm8t-MOuGh4hyCIBj4Gyt6QNOvjHX2DTnASw9--e7FgVlgqbqmIjpNX_BjTJRIDfem4eLK1cngvH6OCNtPEtGVALWy6sgJpDI1w5fJwtHWytJ47Gyjmh4Evn01mPiv9IW0rO0sySJt3j68BX8aAqNagChlyAqWmDsVJb0dDzfjyMIuayKGLsrQWBimRXWQ19g_q4xjCs820KbLi2SFvbWJll6_Sponix2ZRcVpBTrvQDyCxTsbSUCGBNI-qYuc_AUl5Ckpo7WBg5p1X4zT65W_vk7tKn31VaPB0Jd9uRKHWaS_3wEY0zdF_RcbvofPYYu5tjzPsNni3Av4Catwu156n21pm1fvH6BmSc8fquc5nb7x-xl7-T_i984PPWGLABH_h-4PM98fJSHLoHW-eyk_zXx-TvgmmitCXd89chDfn339qROdylqpBMqQpDa1Vt25ktZw5SMqf2U2XUQsd0qVXcvKY1x42ucSRkbBvlrTEq2lCd4Esx7xS73WK3U-x1i71Osd8t9jvFh6_Es-V3HwIAAP___4y3QA==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJykVGFv0zAQ_c6vON2XrcKodhJKZ4TUbssg0LUjrQRjqaasOUa0JC62C5mm_neUZGNbUbtV9IMr3713ufd89g2anxlKHPsD_2ACC53BUTg6hjP_68mgHwyhP-wPTr_5sHsYjCfjz4MW3EKvGuAlqXMbX2QEXz74oQ_GnqeFJW1oZs3uzjgMDt85nT3RfXsyCoaTXY9zzl2o_7jb2pHyvT869ifhKatq5S0YhYd-CPuncDVFhoVKaBjnZFCeocApw7lWMzJG6Sp0UwOCpETJGabFfGGr8JThTGlCeYM2tRmhxEnVZEhxQrrNkWFCNk6zuuxfDb2qg_O0SKhEhuN5XBgJ7Qj3o6j8nkRRKXgUlfypBV9tyxERQlwk4HJQ9gdpgwy1-m1AU5xI8JChsXGWgU1zksCr_MW1pTuA43VhH6dLhmph7z0wNr4klGLJnu9TUPwibSk5SjNLmnRbPDbrLu-Xcw2qgJ6QYCqnwNhYW1krd9-8jiLu8Cji_KkFgYpkW1pl2D-OjRZWQk88w7s8LiGnXOlrWBiqDOTwKV3voLONgx9VWtwOmrNu0OY6zWN9fd806znP6LseTVhBNcEV7Dol7jZKxkpb0m33sYqeeIkMm_mQqxeeCy6qq-1wp9PZ4w9_B52-6Hqi2XR5V3Q9z_fEjnz4BvSc1v-dpNh8kt42-kMyc1UYeqR_XWW-nDKk5JKad8mohZ7RiVaz-jPNdlTz6kBCxjZZ0WyCoklVDT4ki41kZzPZ2Uh2N5PdjWRvhTxdvvgTAAD__xxU91Y=
 
 statement ok
 DROP TABLE geo_table
@@ -112,59 +64,9 @@ SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::
 # The InvertedFilterer stats show "rows read: 2" since all the above shapes are within the index
 # bounds.
 query T
-EXPLAIN ANALYZE (DISTSQL) SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k
+SELECT url FROM [EXPLAIN ANALYZE SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k]
 ----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-rows read from KV: 4 (32 B)
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• sort
-│ nodes: <hidden>
-│ regions: <hidden>
-│ actual row count: 2
-│ order: +k
-│
-└── • filter
-    │ nodes: <hidden>
-    │ regions: <hidden>
-    │ actual row count: 2
-    │ filter: st_intersects('010100002026690000000000000C6A18410000008081844E41', geom)
-    │
-    └── • index join
-        │ nodes: <hidden>
-        │ regions: <hidden>
-        │ actual row count: 2
-        │ KV time: 0µs
-        │ KV contention time: 0µs
-        │ KV rows read: 2
-        │ KV bytes read: 16 B
-        │ table: geo_table@primary
-        │
-        └── • inverted filter
-            │ nodes: <hidden>
-            │ regions: <hidden>
-            │ actual row count: 2
-            │ inverted column: geom_inverted_key
-            │ num spans: 31
-            │
-            └── • scan
-                  nodes: <hidden>
-                  regions: <hidden>
-                  actual row count: 2
-                  KV time: 0µs
-                  KV contention time: 0µs
-                  KV rows read: 2
-                  KV bytes read: 16 B
-                  missing stats
-                  table: geo_table@geom_index
-                  spans: 31 spans
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMleFO40YQx7_3KUbzBVBdZdc2adiqUgqYNm0hyIlaoTpCiz0NFrbX7G7aIJTHuhe4JzutTTgCwncRd9Llw0bzH__XO7_ZXd-juS1Q4CT6Mzqawg2cxONTmJO6tPKqIPj7tyiOwNjLvLKkDaXW7O5M4tHxz37_gA9-Oh-Pzqa7IWOMBdD8sWBvR4hfo_FpNI0vPDdXuQfj-DiK4fACbtDDSmV0JksyKP5BjjMPa61SMkZpJ903D4yyJQrmYV7VC-vkmYep0oTiHm1uC0KBU7fGmGRGusfQw4yszItm2scShm4Bl3mV0RI9nNSyMgJ6CR4myfLfLEmWLHAD-8SAP2zr4QmCrDIIGCh7Tdqgh3_8BTYvSQB7_-4hTlVlqbK5ql6ktPrfgCaZCfBb5erO0lrifThED6-kTa_JgFrYemEFOA6NcS34OFt52EYPHI2Vc0LBV97nsx5V_5G2lJ3khSVNusc3ga_z0bLWoCoYcgHG0QZjpbaioRf8uJ8kzNFjDlLngEBVtq3NQX9BfewwDN16mwIbri3SNjZWFsUmfVpSunjZlFIuoaRS6TuQRaFSaSkTwJpGuJy5LcBSWUOWmxtYGDmndfoNffK36dPvKq8ejoT_2pGodV5KffcRjTf0t6HzFbbxK8DfQC3Yhtrjrg42mbW6eH4DMs64u-t85vf7B-zp76j_Cx-EvA0GbMAHYRiFfEc8vRSH_t4X3ZdvwBRug2mitCXdCzchDfn339qR2d-mqphMrSpDG1W9NjNbzTykbE7tp8qohU7pXKu0eU0bjhtfI2RkbJvlbTCq2pRb4FMz7zT73Wa_0xx0m4NOc9htDjvN-8_Ms9V3HwIAAP__EHC3Qg==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJykVGFP2zoU_f5-xdX9AtXzU-0kr6_4aVILhK1baVlaaWOkQqG5YxFJ3NnuVoT63ycnMKBTM6r1gyvfe87NPcfXvkPzNUeJk3AYHk1hqXM4icancBF-PBv2ByPoj_rD808h7B8PJtPJ-2EL7qE3NfCa1KVNrnKCD2_CKARjL7PSkjY0t2Z_bxINjl95nQPR_f9sPBhN9wPOOfeh-uN-a0_K1-H4NJxG58zVKlowjo7DCA7P4WaGDEuV0igpyKC8QIEzhgut5mSM0i50VwEG6QolZ5iVi6V14RnDudKE8g5tZnNCiVPXZERJSrrNkWFKNsnyquxPDT3XwWVWprRChpNFUhoJ7RgP43j1OY3jFffdwn-z4D-7ckSMkJQp-ByU_ULaIEOtvhvQlKQSPGRobJLnYLOCJHCXv7q19AAQXgCHOFszVEv76IGxyTWhFGv2cp8G5TfSltKTLLekSbfFc7Me8uFqoUGV0BMSjHMKjE20lZVy_79_45g75dwJbFwQqEx3pTnDfnFsvLQSeuIF3hXJCgoqlL6FpSGH4vAu2-6gt4uDb1VW3g-at23QFjorEn372DTreS_ouxpN2EDVwQ3sNiX-LkomSlvSbf-5ip74GxnW8yE3LzwXXLir7XGv0zngT39Hnb7oBqLedHlXdIMgDMSefPoG9LzWn52kaD7JYBf9EZmFKg0907-tMl_PGFJ6TfW7ZNRSz-lMq3n1mXo7rnhVICVj66yoN4OyTrkGn5JFI9lrJnuNZL-Z7DeSgw3ybP3XjwAAAP__-mH3Sw==
 
 # Also works when creating an index.
 statement ok
@@ -174,56 +76,6 @@ statement ok
 CREATE INVERTED INDEX geom_index ON geo_table(geom)
 
 query T
-EXPLAIN ANALYZE (DISTSQL) SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k
+SELECT url FROM [EXPLAIN ANALYZE SELECT k FROM geo_table WHERE ST_Intersects('SRID=26918;POINT(400003 4000003)'::geometry, geom) ORDER BY k]
 ----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-rows read from KV: 4 (32 B)
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• sort
-│ nodes: <hidden>
-│ regions: <hidden>
-│ actual row count: 2
-│ order: +k
-│
-└── • filter
-    │ nodes: <hidden>
-    │ regions: <hidden>
-    │ actual row count: 2
-    │ filter: st_intersects('010100002026690000000000000C6A18410000008081844E41', geom)
-    │
-    └── • index join
-        │ nodes: <hidden>
-        │ regions: <hidden>
-        │ actual row count: 2
-        │ KV time: 0µs
-        │ KV contention time: 0µs
-        │ KV rows read: 2
-        │ KV bytes read: 16 B
-        │ table: geo_table@primary
-        │
-        └── • inverted filter
-            │ nodes: <hidden>
-            │ regions: <hidden>
-            │ actual row count: 2
-            │ inverted column: geom_inverted_key
-            │ num spans: 31
-            │
-            └── • scan
-                  nodes: <hidden>
-                  regions: <hidden>
-                  actual row count: 2
-                  KV time: 0µs
-                  KV contention time: 0µs
-                  KV rows read: 2
-                  KV bytes read: 16 B
-                  missing stats
-                  table: geo_table@geom_index
-                  spans: 31 spans
-·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMleFO40YQx7_3KUbzBVBdZdc2adiqUgqYNm0hyIlaoTpCiz0NFrbX7G7aIJTHuhe4JzutTTgCwncRd9Llw0bzH__XO7_ZXd-juS1Q4CT6Mzqawg2cxONTmJO6tPKqIPj7tyiOwNjLvLKkDaXW7O5M4tHxz37_gA9-Oh-Pzqa7IWOMBdD8sWBvR4hfo_FpNI0vPDdXuQfj-DiK4fACbtDDSmV0JksyKP5BjjMPa61SMkZpJ903D4yyJQrmYV7VC-vkmYep0oTiHm1uC0KBU7fGmGRGusfQw4yszItm2scShm4Bl3mV0RI9nNSyMgJ6CR4myfLfLEmWLHAD-8SAP2zr4QmCrDIIGCh7Tdqgh3_8BTYvSQB7_-4hTlVlqbK5ql6ktPrfgCaZCfBb5erO0lrifThED6-kTa_JgFrYemEFOA6NcS34OFt52EYPHI2Vc0LBV97nsx5V_5G2lJ3khSVNusc3ga_z0bLWoCoYcgHG0QZjpbaioRf8uJ8kzNFjDlLngEBVtq3NQX9BfewwDN16mwIbri3SNjZWFsUmfVpSunjZlFIuoaRS6TuQRaFSaSkTwJpGuJy5LcBSWUOWmxtYGDmndfoNffK36dPvKq8ejoT_2pGodV5KffcRjTf0t6HzFbbxK8DfQC3Yhtrjrg42mbW6eH4DMs64u-t85vf7B-zp76j_Cx-EvA0GbMAHYRiFfEc8vRSH_t4X3ZdvwBRug2mitCXdCzchDfn339qR2d-mqphMrSpDG1W9NjNbzTykbE7tp8qohU7pXKu0eU0bjhtfI2RkbJvlbTCq2pRb4FMz7zT73Wa_0xx0m4NOc9htDjvN-8_Ms9V3HwIAAP__EHC3Qg==
+https://cockroachdb.github.io/distsqlplan/decode.html#eJykVGFP2zoU_f5-xdX9AtXzU-0kr6_4aVILhK1baVlaaWOkQqG5YxFJ3NnuVoT63ycnMKBTM6r1gyvfe87NPcfXvkPzNUeJk3AYHk1hqXM4icancBF-PBv2ByPoj_rD808h7B8PJtPJ-2EL7qE3NfCa1KVNrnKCD2_CKARjL7PSkjY0t2Z_bxINjl95nQPR_f9sPBhN9wPOOfeh-uN-a0_K1-H4NJxG58zVKlowjo7DCA7P4WaGDEuV0igpyKC8QIEzhgut5mSM0i50VwEG6QolZ5iVi6V14RnDudKE8g5tZnNCiVPXZERJSrrNkWFKNsnyquxPDT3XwWVWprRChpNFUhoJ7RgP43j1OY3jFffdwn-z4D-7ckSMkJQp-ByU_ULaIEOtvhvQlKQSPGRobJLnYLOCJHCXv7q19AAQXgCHOFszVEv76IGxyTWhFGv2cp8G5TfSltKTLLekSbfFc7Me8uFqoUGV0BMSjHMKjE20lZVy_79_45g75dwJbFwQqEx3pTnDfnFsvLQSeuIF3hXJCgoqlL6FpSGH4vAu2-6gt4uDb1VW3g-at23QFjorEn372DTreS_ouxpN2EDVwQ3sNiX-LkomSlvSbf-5ip74GxnW8yE3LzwXXLir7XGv0zngT39Hnb7oBqLedHlXdIMgDMSefPoG9LzWn52kaD7JYBf9EZmFKg0907-tMl_PGFJ6TfW7ZNRSz-lMq3n1mXo7rnhVICVj66yoN4OyTrkGn5JFI9lrJnuNZL-Z7DeSgw3ybP3XjwAAAP__-mH3Sw==

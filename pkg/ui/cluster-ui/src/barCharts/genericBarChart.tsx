@@ -13,9 +13,10 @@ import classNames from "classnames/bind";
 import { scaleLinear } from "d3-scale";
 import { format as d3Format } from "d3-format";
 
-import { stdDevLong, longToInt, NumericStat } from "src/util";
+import { stdDevLong } from "src/util";
 import { Tooltip } from "@cockroachlabs/ui-components";
-import { clamp, normalizeClosedDomain } from "./utils";
+import { NumericStat } from "../util";
+import { clamp, longToInt, normalizeClosedDomain } from "./utils";
 import styles from "./barCharts.module.scss";
 
 const cx = classNames.bind(styles);

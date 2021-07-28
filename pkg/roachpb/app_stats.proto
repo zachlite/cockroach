@@ -91,15 +91,6 @@ message StatementStatistics {
   // are sampled.
   optional ExecStats exec_stats = 21 [(gogoproto.nullable) = false];
 
-  // SQLType is the type of the sql (DDL, DML, DCL or TCL)
-  optional string sql_type = 22 [(gogoproto.nullable) = false, (gogoproto.customname) = "SQLType"];
-
-  // LastExecTimestamp is the last timestamp the statement was executed.
-  optional google.protobuf.Timestamp last_exec_timestamp = 23 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-
-  // Nodes is the ordered list of nodes ids on which the statement was executed.
-  repeated int64 nodes = 24;
-
   // Note: be sure to update `sql/app_stats.go` when adding/removing fields here!
 
   reserved 13, 14, 17, 18, 19, 20;
@@ -178,7 +169,6 @@ message StatementStatisticsKey {
   optional bool implicit_txn = 6 [(gogoproto.nullable) = false];
   optional bool vec = 7 [(gogoproto.nullable) = false];
   optional bool full_scan = 8 [(gogoproto.nullable) = false];
-  optional string database = 9 [(gogoproto.nullable) = false];
 }
 
 // CollectedStatementStatistics wraps collected timings and metadata for some
@@ -187,7 +177,7 @@ message CollectedStatementStatistics {
   // ID is a hash of the statement key (query fingerprint, failure status,
   // implicit txn or not) which can be used to identify the statement
   // for instance in transaction statistics.
-  optional uint64 id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID", (gogoproto.casttype) = "StmtFingerprintID"];
+  optional uint64 id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID", (gogoproto.casttype) = "StmtID"];
   optional StatementStatisticsKey key = 1 [(gogoproto.nullable) = false];
   optional StatementStatistics stats = 2 [(gogoproto.nullable) = false];
 }
@@ -196,9 +186,9 @@ message CollectedStatementStatistics {
 // CollectedTransactionStatistics wraps collected timings and metadata for some
 // transaction executions.
 message CollectedTransactionStatistics {
-  // StatementFingerprintIDs is the fingerprint IDs of the statements which this
-  // transaction comprises, in order.
-  repeated uint64 statement_fingerprint_ids = 1 [(gogoproto.customname) = "StatementFingerprintIDs", (gogoproto.casttype) = "StmtFingerprintID"] ;
+  // StatementIDs is the IDs of the statements which this transaction comprises,
+  // in order.
+  repeated uint64 statement_ids = 1 [(gogoproto.customname) = "StatementIDs", (gogoproto.casttype) = "StmtID"] ;
   // App is the name of the app which executed the transaction.
   optional string app = 2 [(gogoproto.nullable) = false];
   optional TransactionStatistics stats = 3 [(gogoproto.nullable) = false];

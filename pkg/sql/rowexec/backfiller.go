@@ -73,18 +73,13 @@ type backfiller struct {
 	processorID int32
 }
 
-// OutputTypes is part of the execinfra.Processor interface.
+// OutputTypes is part of the processor interface.
 func (*backfiller) OutputTypes() []*types.T {
 	// No output types.
 	return nil
 }
 
-// MustBeStreaming is part of the execinfra.Processor interface.
-func (*backfiller) MustBeStreaming() bool {
-	return false
-}
-
-// Run is part of the execinfra.Processor interface.
+// Run is part of the Processor interface.
 func (b *backfiller) Run(ctx context.Context) {
 	opName := fmt.Sprintf("%sBackfiller", b.name)
 	ctx = logtags.AddTag(ctx, opName, int(b.spec.Table.ID))
@@ -92,14 +87,14 @@ func (b *backfiller) Run(ctx context.Context) {
 	defer span.Finish()
 	meta := b.doRun(ctx)
 	execinfra.SendTraceData(ctx, b.output)
-	if emitHelper(ctx, b.output, &b.out, nil /* row */, meta, func(ctx context.Context) {}) {
+	if emitHelper(ctx, &b.out, nil /* row */, meta, func(ctx context.Context) {}) {
 		b.output.ProducerDone()
 	}
 }
 
 func (b *backfiller) doRun(ctx context.Context) *execinfrapb.ProducerMetadata {
 	semaCtx := tree.MakeSemaContext()
-	if err := b.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, b.flowCtx.NewEvalCtx()); err != nil {
+	if err := b.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, b.flowCtx.NewEvalCtx(), b.output); err != nil {
 		return &execinfrapb.ProducerMetadata{Err: err}
 	}
 	finishedSpans, err := b.mainLoop(ctx)

@@ -76,9 +76,6 @@ func TryDelegate(
 	case *tree.ShowJobs:
 		return d.delegateShowJobs(t)
 
-	case *tree.ShowChangefeedJobs:
-		return d.delegateShowChangefeedJobs(t)
-
 	case *tree.ShowQueries:
 		return d.delegateShowQueries(t)
 

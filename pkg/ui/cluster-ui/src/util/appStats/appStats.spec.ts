@@ -209,12 +209,6 @@ function randomStats(
     legacy_last_err: "",
     legacy_last_err_redacted: "",
     exec_stats: randomExecStats(count),
-    sql_type: "DDL",
-    last_exec_timestamp: {
-      seconds: Long.fromInt(1599670292),
-      nanos: 111613000,
-    },
-    nodes: [Long.fromInt(1), Long.fromInt(3), Long.fromInt(4)],
   };
 }
 

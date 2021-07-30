@@ -16,7 +16,6 @@ import (
 	"io"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -32,7 +31,7 @@ import (
 type singleRangeInfo struct {
 	rs    roachpb.RSpan
 	ts    hlc.Timestamp
-	token rangecache.EvictionToken
+	token EvictionToken
 }
 
 // RangeFeed divides a RangeFeed request on range boundaries and establishes a
@@ -136,10 +135,10 @@ func (ds *DistSender) partialRangeFeed(
 		// If we've cleared the descriptor on a send failure, re-lookup.
 		if !rangeInfo.token.Valid() {
 			var err error
-			ri, err := ds.getRoutingInfo(ctx, rangeInfo.rs.Key, rangecache.EvictionToken{}, false)
+			ri, err := ds.getRoutingInfo(ctx, rangeInfo.rs.Key, EvictionToken{}, false)
 			if err != nil {
 				log.VErrEventf(ctx, 1, "range descriptor re-lookup failed: %s", err)
-				if !rangecache.IsRangeLookupErrorRetryable(err) {
+				if !isRangeLookupErrorRetryable(err) {
 					return err
 				}
 				continue
@@ -164,10 +163,10 @@ func (ds *DistSender) partialRangeFeed(
 				// These errors are likely to be unique to the replica that
 				// reported them, so no action is required before the next
 				// retry.
-			case IsSendError(err), errors.HasType(err, (*roachpb.RangeNotFoundError)(nil)):
+			case errors.HasType(err, sendError{}), errors.HasType(err, (*roachpb.RangeNotFoundError)(nil)):
 				// Evict the descriptor from the cache and reload on next attempt.
 				rangeInfo.token.Evict(ctx)
-				rangeInfo.token = rangecache.EvictionToken{}
+				rangeInfo.token = EvictionToken{}
 				continue
 			case errors.HasType(err, (*roachpb.RangeKeyMismatchError)(nil)):
 				// Evict the descriptor from the cache.
@@ -229,7 +228,7 @@ func (ds *DistSender) singleRangeFeed(
 	if ds.rpcContext != nil {
 		latencyFn = ds.rpcContext.RemoteClocks.Latency
 	}
-	replicas, err := NewReplicaSlice(ctx, ds.nodeDescs, desc, nil, AllExtantReplicas)
+	replicas, err := NewReplicaSlice(ctx, ds.nodeDescs, desc, nil /* leaseholder */)
 	if err != nil {
 		return args.Timestamp, err
 	}
@@ -237,11 +236,10 @@ func (ds *DistSender) singleRangeFeed(
 	// The RangeFeed is not used for system critical traffic so use a DefaultClass
 	// connection regardless of the range.
 	opts := SendOptions{class: rpc.DefaultClass}
-	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas)
+	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas.Descriptors())
 	if err != nil {
 		return args.Timestamp, err
 	}
-	defer transport.Release()
 
 	for {
 		if transport.IsExhausted() {
@@ -255,12 +253,12 @@ func (ds *DistSender) singleRangeFeed(
 			log.VErrEventf(ctx, 2, "RPC error: %s", err)
 			continue
 		}
-		log.VEventf(ctx, 3, "attempting to create a RangeFeed over replica %s", args.Replica)
+
 		stream, err := client.RangeFeed(clientCtx, &args)
 		if err != nil {
 			log.VErrEventf(ctx, 2, "RPC error: %s", err)
-			if grpcutil.IsAuthError(err) {
-				// Authentication or authorization error. Propagate.
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
 				return args.Timestamp, err
 			}
 			continue

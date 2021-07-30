@@ -12,19 +12,17 @@ package colexec
 
 import (
 	"context"
-	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecagg"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stringarena"
 	"github.com/cockroachdb/errors"
 )
@@ -52,14 +50,17 @@ type aggregatorHelper interface {
 // DISTINCT or FILTER aggregation, then the defaultAggregatorHelper
 // is returned which has negligible performance overhead.
 func newAggregatorHelper(
-	args *colexecagg.NewAggregatorArgs,
+	allocator *colmem.Allocator,
+	memAccount *mon.BoundAccount,
+	inputTypes []*types.T,
+	spec *execinfrapb.AggregatorSpec,
 	datumAlloc *rowenc.DatumAlloc,
 	isHashAgg bool,
 	maxBatchSize int,
 ) aggregatorHelper {
 	hasDistinct, hasFilterAgg := false, false
-	aggFilter := make([]int, len(args.Spec.Aggregations))
-	for i, aggFn := range args.Spec.Aggregations {
+	aggFilter := make([]int, len(spec.Aggregations))
+	for i, aggFn := range spec.Aggregations {
 		if aggFn.Distinct {
 			hasDistinct = true
 		}
@@ -71,7 +72,7 @@ func newAggregatorHelper(
 		}
 	}
 	if !hasDistinct && !hasFilterAgg {
-		return newDefaultAggregatorHelper(args.Spec)
+		return newDefaultAggregatorHelper(spec)
 	}
 	if !isHashAgg {
 		if hasFilterAgg {
@@ -79,16 +80,16 @@ func newAggregatorHelper(
 				"filtering ordered aggregation is not supported",
 			))
 		}
-		return newDistinctOrderedAggregatorHelper(args, datumAlloc, maxBatchSize)
+		return newDistinctOrderedAggregatorHelper(memAccount, inputTypes, spec, datumAlloc, maxBatchSize)
 	}
-	filters := make([]*filteringSingleFunctionHashHelper, len(args.Spec.Aggregations))
+	filters := make([]*filteringSingleFunctionHashHelper, len(spec.Aggregations))
 	for i, filterIdx := range aggFilter {
-		filters[i] = newFilteringHashAggHelper(args, filterIdx, maxBatchSize)
+		filters[i] = newFilteringHashAggHelper(allocator, inputTypes, filterIdx, maxBatchSize)
 	}
 	if !hasDistinct {
-		return newFilteringHashAggregatorHelper(args.Spec, filters, maxBatchSize)
+		return newFilteringHashAggregatorHelper(spec, filters, maxBatchSize)
 	}
-	return newFilteringDistinctHashAggregatorHelper(args, filters, datumAlloc, maxBatchSize)
+	return newFilteringDistinctHashAggregatorHelper(memAccount, inputTypes, spec, filters, datumAlloc, maxBatchSize)
 }
 
 // defaultAggregatorHelper is the default aggregatorHelper for the case
@@ -111,7 +112,7 @@ func (h *defaultAggregatorHelper) performAggregation(
 	_ context.Context, vecs []coldata.Vec, inputLen int, sel []int, bucket *aggBucket, _ []bool,
 ) {
 	for fnIdx, fn := range bucket.fns {
-		fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, 0 /* startIdx */, inputLen, sel)
+		fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, inputLen, sel)
 	}
 }
 
@@ -156,7 +157,7 @@ func (b *aggregatorHelperBase) restoreState() ([]coldata.Vec, int, []int) {
 // handling of a FILTER clause of a single aggregate function for the hash
 // aggregation.
 type filteringSingleFunctionHashHelper struct {
-	filter      colexecop.Operator
+	filter      colexecbase.Operator
 	filterInput *singleBatchOperator
 }
 
@@ -166,14 +167,14 @@ var noFilterHashAggHelper = &filteringSingleFunctionHashHelper{}
 // tree.NoColumnIdx index can be used to indicate that there is no FILTER
 // clause for the aggregate function.
 func newFilteringHashAggHelper(
-	args *colexecagg.NewAggregatorArgs, filterIdx int, maxBatchSize int,
+	allocator *colmem.Allocator, typs []*types.T, filterIdx int, maxBatchSize int,
 ) *filteringSingleFunctionHashHelper {
 	if filterIdx == tree.NoColumnIdx {
 		return noFilterHashAggHelper
 	}
-	filterInput := newSingleBatchOperator(args.Allocator, args.InputTypes, maxBatchSize)
+	filterInput := newSingleBatchOperator(allocator, typs, maxBatchSize)
 	h := &filteringSingleFunctionHashHelper{
-		filter:      colexecutils.NewBoolVecToSelOp(filterInput, filterIdx),
+		filter:      newBoolVecToSelOp(filterInput, filterIdx),
 		filterInput: filterInput,
 	}
 	return h
@@ -189,10 +190,7 @@ func (h *filteringSingleFunctionHashHelper) applyFilter(
 		return vecs, inputLen, sel, false
 	}
 	h.filterInput.reset(vecs, inputLen, sel)
-	// Note that it is ok that we call Init on every iteration - it is a noop
-	// every time except for the first one.
-	h.filter.Init(ctx)
-	newBatch := h.filter.Next()
+	newBatch := h.filter.Next(ctx)
 	return newBatch.ColVecs(), newBatch.Length(), newBatch.Selection(), true
 }
 
@@ -231,7 +229,7 @@ func (h *filteringHashAggregatorHelper) performAggregation(
 		if inputLen > 0 {
 			// It is possible that all tuples to aggregate have been filtered
 			// out, so we need to check the length.
-			fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, 0 /* startIdx */, inputLen, sel)
+			fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			// Restore the state so that the next iteration sees the input with
@@ -272,16 +270,20 @@ type distinctAggregatorHelperBase struct {
 }
 
 func newDistinctAggregatorHelperBase(
-	args *colexecagg.NewAggregatorArgs, datumAlloc *rowenc.DatumAlloc, maxBatchSize int,
+	memAccount *mon.BoundAccount,
+	inputTypes []*types.T,
+	spec *execinfrapb.AggregatorSpec,
+	datumAlloc *rowenc.DatumAlloc,
+	maxBatchSize int,
 ) *distinctAggregatorHelperBase {
 	b := &distinctAggregatorHelperBase{
-		aggregatorHelperBase: newAggregatorHelperBase(args.Spec, maxBatchSize),
-		inputTypes:           args.InputTypes,
-		arena:                stringarena.Make(args.MemAccount),
+		aggregatorHelperBase: newAggregatorHelperBase(spec, maxBatchSize),
+		inputTypes:           inputTypes,
+		arena:                stringarena.Make(memAccount),
 		datumAlloc:           datumAlloc,
 	}
 	var vecIdxsToConvert []int
-	for _, aggFn := range args.Spec.Aggregations {
+	for _, aggFn := range spec.Aggregations {
 		if aggFn.Distinct {
 			for _, aggCol := range aggFn.ColIdx {
 				found := false
@@ -297,7 +299,7 @@ func newDistinctAggregatorHelperBase(
 			}
 		}
 	}
-	b.aggColsConverter = colconv.NewVecToDatumConverter(len(args.InputTypes), vecIdxsToConvert, false /* willRelease */)
+	b.aggColsConverter = colconv.NewVecToDatumConverter(len(inputTypes), vecIdxsToConvert)
 	b.scratch.converted = []tree.Datum{nil}
 	b.scratch.sel = make([]int, maxBatchSize)
 	return b
@@ -394,14 +396,18 @@ type filteringDistinctHashAggregatorHelper struct {
 var _ aggregatorHelper = &filteringDistinctHashAggregatorHelper{}
 
 func newFilteringDistinctHashAggregatorHelper(
-	args *colexecagg.NewAggregatorArgs,
+	memAccount *mon.BoundAccount,
+	inputTypes []*types.T,
+	spec *execinfrapb.AggregatorSpec,
 	filters []*filteringSingleFunctionHashHelper,
 	datumAlloc *rowenc.DatumAlloc,
 	maxBatchSize int,
 ) aggregatorHelper {
 	return &filteringDistinctHashAggregatorHelper{
 		distinctAggregatorHelperBase: newDistinctAggregatorHelperBase(
-			args,
+			memAccount,
+			inputTypes,
+			spec,
 			datumAlloc,
 			maxBatchSize,
 		),
@@ -439,7 +445,7 @@ func (h *filteringDistinctHashAggregatorHelper) performAggregation(
 			maybeModified = true
 		}
 		if inputLen > 0 {
-			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, 0 /* startIdx */, inputLen, sel)
+			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			vecs, inputLen, sel = h.restoreState()
@@ -454,11 +460,17 @@ type distinctOrderedAggregatorHelper struct {
 var _ aggregatorHelper = &distinctOrderedAggregatorHelper{}
 
 func newDistinctOrderedAggregatorHelper(
-	args *colexecagg.NewAggregatorArgs, datumAlloc *rowenc.DatumAlloc, maxBatchSize int,
+	memAccount *mon.BoundAccount,
+	inputTypes []*types.T,
+	spec *execinfrapb.AggregatorSpec,
+	datumAlloc *rowenc.DatumAlloc,
+	maxBatchSize int,
 ) aggregatorHelper {
 	return &distinctOrderedAggregatorHelper{
 		distinctAggregatorHelperBase: newDistinctAggregatorHelperBase(
-			args,
+			memAccount,
+			inputTypes,
+			spec,
 			datumAlloc,
 			maxBatchSize,
 		),
@@ -487,7 +499,7 @@ func (h *distinctOrderedAggregatorHelper) performAggregation(
 			maybeModified = true
 		}
 		if inputLen > 0 {
-			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, 0 /* startIdx */, inputLen, sel)
+			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			vecs, inputLen, sel = h.restoreState()
@@ -495,19 +507,19 @@ func (h *distinctOrderedAggregatorHelper) performAggregation(
 	}
 }
 
-// singleBatchOperator is a helper colexecop.Operator that returns the
+// singleBatchOperator is a helper colexecbase.Operator that returns the
 // provided vectors as a batch on the first call to Next() and zero batch on
 // all consequent calls (until it is reset). It must be reset before it can be
 // used for the first time.
 type singleBatchOperator struct {
-	colexecop.ZeroInputNode
-	colexecop.NonExplainable
+	colexecbase.ZeroInputNode
+	NonExplainable
 
 	nexted bool
 	batch  coldata.Batch
 }
 
-var _ colexecop.Operator = &singleBatchOperator{}
+var _ colexecbase.Operator = &singleBatchOperator{}
 
 func newSingleBatchOperator(
 	allocator *colmem.Allocator, typs []*types.T, maxBatchSize int,
@@ -517,9 +529,9 @@ func newSingleBatchOperator(
 	}
 }
 
-func (o *singleBatchOperator) Init(context.Context) {}
+func (o *singleBatchOperator) Init() {}
 
-func (o *singleBatchOperator) Next() coldata.Batch {
+func (o *singleBatchOperator) Next(context.Context) coldata.Batch {
 	if o.nexted {
 		return coldata.ZeroBatch
 	}
@@ -532,56 +544,9 @@ func (o *singleBatchOperator) reset(vecs []coldata.Vec, inputLen int, sel []int)
 	for i, vec := range vecs {
 		o.batch.ReplaceCol(vec, i)
 	}
-	colexecutils.UpdateBatchState(o.batch, inputLen, sel != nil, sel)
-}
-
-// aggBucket stores the aggregation functions for the corresponding aggregation
-// group as well as other utility information.
-type aggBucket struct {
-	fns []colexecagg.AggregateFunc
-	// seen is a slice of maps used to handle distinct aggregation. A
-	// corresponding entry in the slice is nil if the function doesn't have a
-	// DISTINCT clause. The slice itself will be nil whenever no aggregate
-	// function has a DISTINCT clause.
-	seen []map[string]struct{}
-}
-
-func (b *aggBucket) init(
-	fns []colexecagg.AggregateFunc, seen []map[string]struct{}, groups []bool,
-) {
-	b.fns = fns
-	for _, fn := range b.fns {
-		fn.Init(groups)
+	o.batch.SetSelection(sel != nil)
+	if sel != nil {
+		copy(o.batch.Selection(), sel[:inputLen])
 	}
-	b.seen = seen
-}
-
-func (b *aggBucket) reset() {
-	for _, fn := range b.fns {
-		fn.Reset()
-	}
-	for _, seen := range b.seen {
-		for k := range seen {
-			delete(seen, k)
-		}
-	}
-}
-
-const sizeOfAggBucket = int64(unsafe.Sizeof(aggBucket{}))
-const aggBucketSliceOverhead = int64(unsafe.Sizeof([]aggBucket{}))
-
-// aggBucketAlloc is a utility struct that batches allocations of aggBuckets.
-type aggBucketAlloc struct {
-	allocator *colmem.Allocator
-	buf       []aggBucket
-}
-
-func (a *aggBucketAlloc) newAggBucket() *aggBucket {
-	if len(a.buf) == 0 {
-		a.allocator.AdjustMemoryUsage(aggBucketSliceOverhead + hashAggregatorAllocSize*sizeOfAggBucket)
-		a.buf = make([]aggBucket, hashAggregatorAllocSize)
-	}
-	ret := &a.buf[0]
-	a.buf = a.buf[1:]
-	return ret
+	o.batch.SetLength(inputLen)
 }

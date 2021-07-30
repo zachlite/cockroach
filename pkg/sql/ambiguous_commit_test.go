@@ -13,7 +13,6 @@ package sql_test
 import (
 	"bytes"
 	"context"
-	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -24,11 +23,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -63,14 +60,6 @@ func (t *interceptingTransport) SendNext(
 func TestAmbiguousCommit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	if mutations.MaxBatchSize(false /* forceProductionMaxBatchSize */) == 1 {
-		// This test relies on the fact that the mutation batch consisting of a
-		// single row also contains an EndTxn which is the case only when the
-		// max batch size is at least 2, so we'll skip it.
-		skip.UnderMetamorphic(t)
-	}
 
 	testutils.RunTrueAndFalse(t, "ambiguousSuccess", func(t *testing.T, ambiguousSuccess bool) {
 		var params base.TestServerArgs
@@ -95,7 +84,7 @@ func TestAmbiguousCommit(t *testing.T) {
 
 		params.Knobs.KVClient = &kvcoord.ClientTestingKnobs{
 			TransportFactory: func(
-				opts kvcoord.SendOptions, nodeDialer *nodedialer.Dialer, replicas kvcoord.ReplicaSlice,
+				opts kvcoord.SendOptions, nodeDialer *nodedialer.Dialer, replicas []roachpb.ReplicaDescriptor,
 			) (kvcoord.Transport, error) {
 				transport, err := kvcoord.GRPCTransportFactory(opts, nodeDialer, replicas)
 				return &interceptingTransport{
@@ -109,7 +98,7 @@ func TestAmbiguousCommit(t *testing.T) {
 							//
 							// For the rest, compare and perhaps inject an
 							// RPC error ourselves.
-							if err == nil && reflect.DeepEqual(br.Error, translateToRPCError) {
+							if err == nil && br.Error.Equal(translateToRPCError) {
 								// Translate the injected error into an RPC
 								// error to simulate an ambiguous result.
 								return nil, br.Error.GoError()
@@ -158,7 +147,7 @@ func TestAmbiguousCommit(t *testing.T) {
 		for _, server := range tc.Servers {
 			st := server.ClusterSettings()
 			st.Manual.Store(true)
-			sql.DistSQLClusterExecMode.Override(ctx, &st.SV, int64(sessiondata.DistSQLOff))
+			sql.DistSQLClusterExecMode.Override(&st.SV, int64(sessiondata.DistSQLOff))
 		}
 
 		sqlDB := tc.Conns[0]

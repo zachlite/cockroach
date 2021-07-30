@@ -116,47 +116,6 @@ type zoneConfig struct {
 	strategy partitionStrategy
 }
 
-type survivalGoal int
-
-const (
-	survivalGoalZone survivalGoal = iota
-	survivalGoalRegion
-)
-
-// Part of pflag's Value interface.
-func (s survivalGoal) String() string {
-	switch s {
-	case survivalGoalZone:
-		return "zone"
-	case survivalGoalRegion:
-		return "region"
-	}
-	panic("unexpected")
-}
-
-// Part of pflag's Value interface.
-func (s *survivalGoal) Set(value string) error {
-	switch value {
-	case "zone":
-		*s = survivalGoalZone
-	case "region":
-		*s = survivalGoalRegion
-	default:
-		return errors.Errorf("unknown survival goal %q", value)
-	}
-	return nil
-}
-
-// Part of pflag's Value interface.
-func (s survivalGoal) Type() string {
-	return "survival_goal"
-}
-
-type multiRegionConfig struct {
-	regions      []string
-	survivalGoal survivalGoal
-}
-
 // partitioner encapsulates all logic related to partitioning discrete numbers
 // of warehouses into disjoint sets of roughly equal sizes. Partitions are then
 // evenly assigned "active" warehouses, which allows for an even split of live
@@ -402,53 +361,11 @@ func partitionHistory(db *gosql.DB, cfg zoneConfig, wPart *partitioner) error {
 	return partitionTable(db, cfg, wPart, "history", "h_w_id", 0)
 }
 
-// replicateColumns creates covering replicated indexes for a given table
-// for each of the zones provided.
-//
-// It is recommended to do this for columns that are immutable as it allows
-// lookups on those columns to be local within the provided zone. If there are
-// no zones, it assumes that each partition corresponds to a rack.
-func replicateColumns(
-	db *gosql.DB,
-	cfg zoneConfig,
-	wPart *partitioner,
-	name string,
-	pkColumns []string,
-	storedColumns []string,
-) error {
-	constraints := synthesizeConstraints(cfg, wPart)
-	for i, constraint := range constraints {
-		if _, err := db.Exec(
-			fmt.Sprintf(`CREATE UNIQUE INDEX %[1]s_idx_%[2]d ON %[1]s (%[3]s) STORING (%[4]s)`,
-				name, i, strings.Join(pkColumns, ","), strings.Join(storedColumns, ",")),
-		); err != nil {
-			return err
-		}
-		if _, err := db.Exec(fmt.Sprintf(
-			`ALTER INDEX %[1]s@%[1]s_idx_%[2]d
-CONFIGURE ZONE USING num_replicas = COPY FROM PARENT, constraints='{"%[3]s": 1}', lease_preferences='[[%[3]s]]'`,
-			name, i, constraint)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func replicateWarehouse(db *gosql.DB, cfg zoneConfig, wPart *partitioner) error {
-	return replicateColumns(db, cfg, wPart, "warehouse", []string{"w_id"}, []string{"w_tax"})
-}
-
-func replicateDistrict(db *gosql.DB, cfg zoneConfig, wPart *partitioner) error {
-	return replicateColumns(db, cfg, wPart, "district", []string{"d_w_id", "d_id"},
-		[]string{"d_name", "d_street_1", "d_street_2", "d_city", "d_state", "d_zip"})
-}
-
+// replicateItem creates a covering "replicated index" for the item table for
+// each of the zones provided. The item table is immutable, so this comes at a
+// negligible cost and allows all lookups into it to be local. If there are no
+// zone it assumes that each partition corresponds to a rack.
 func replicateItem(db *gosql.DB, cfg zoneConfig, wPart *partitioner) error {
-	return replicateColumns(db, cfg, wPart, "item", []string{"i_id"},
-		[]string{"i_im_id", "i_name", "i_price", "i_data"})
-}
-
-func synthesizeConstraints(cfg zoneConfig, wPart *partitioner) []string {
 	var constraints []string
 	if len(cfg.zones) > 0 {
 		for _, zone := range cfg.zones {
@@ -460,12 +377,30 @@ func synthesizeConstraints(cfg zoneConfig, wPart *partitioner) []string {
 			constraints = append(constraints, fmt.Sprintf("+rack=%d", i))
 		}
 	}
-	return constraints
+	for i, constraint := range constraints {
+		idxName := fmt.Sprintf("replicated_idx_%d", i)
+
+		create := fmt.Sprintf(`
+			CREATE UNIQUE INDEX %s
+			ON item (i_id)
+			STORING (i_im_id, i_name, i_price, i_data)`,
+			idxName)
+		if _, err := db.Exec(create); err != nil {
+			return errors.Wrapf(err, "Couldn't exec %q", create)
+		}
+
+		configure := fmt.Sprintf(`
+			ALTER INDEX item@%s
+			CONFIGURE ZONE USING num_replicas = COPY FROM PARENT, constraints = '{"%s":1}', lease_preferences = '[[%s]]'`,
+			idxName, constraint, constraint)
+		if _, err := db.Exec(configure); err != nil {
+			return errors.Wrapf(err, "Couldn't exec %q", configure)
+		}
+	}
+	return nil
 }
 
-func partitionTables(
-	db *gosql.DB, cfg zoneConfig, wPart *partitioner, replicateStaticColumns bool,
-) error {
+func partitionTables(db *gosql.DB, cfg zoneConfig, wPart *partitioner) error {
 	if err := partitionWarehouse(db, cfg, wPart); err != nil {
 		return err
 	}
@@ -489,14 +424,6 @@ func partitionTables(
 	}
 	if err := partitionHistory(db, cfg, wPart); err != nil {
 		return err
-	}
-	if replicateStaticColumns {
-		if err := replicateDistrict(db, cfg, wPart); err != nil {
-			return err
-		}
-		if err := replicateWarehouse(db, cfg, wPart); err != nil {
-			return err
-		}
 	}
 	return replicateItem(db, cfg, wPart)
 }

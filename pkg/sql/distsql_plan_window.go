@@ -96,7 +96,7 @@ func (s *windowPlanState) createWindowFnSpec(
 	funcInProgress *windowFuncHolder,
 ) (execinfrapb.WindowerSpec_WindowFn, *types.T, error) {
 	for _, argIdx := range funcInProgress.argsIdxs {
-		if argIdx >= uint32(len(s.plan.GetResultTypes())) {
+		if argIdx >= uint32(len(s.plan.ResultTypes)) {
 			return execinfrapb.WindowerSpec_WindowFn{}, nil, errors.Errorf("ColIdx out of range (%d)", argIdx)
 		}
 	}
@@ -107,7 +107,7 @@ func (s *windowPlanState) createWindowFnSpec(
 	}
 	argTypes := make([]*types.T, len(funcInProgress.argsIdxs))
 	for i, argIdx := range funcInProgress.argsIdxs {
-		argTypes[i] = s.plan.GetResultTypes()[argIdx]
+		argTypes[i] = s.plan.ResultTypes[argIdx]
 	}
 	_, outputType, err := execinfrapb.GetWindowFunctionInfo(funcSpec, argTypes...)
 	if err != nil {
@@ -142,9 +142,6 @@ func (s *windowPlanState) createWindowFnSpec(
 	return funcInProgressSpec, outputType, nil
 }
 
-// windowers currently cannot maintain the ordering (see #36310).
-var windowerMergeOrdering = execinfrapb.Ordering{}
-
 // addRenderingOrProjection checks whether any of the window functions' outputs
 // are used in another expression and, if they are, adds rendering to the plan.
 // If no rendering is required, it adds a projection to remove all columns that
@@ -178,7 +175,7 @@ func (s *windowPlanState) addRenderingOrProjection() error {
 				columns[i] = uint32(holder.outputColIdx)
 			}
 		}
-		s.plan.AddProjection(columns, windowerMergeOrdering)
+		s.plan.AddProjection(columns)
 		return nil
 	}
 
@@ -204,13 +201,13 @@ func (s *windowPlanState) addRenderingOrProjection() error {
 			renderExprs[i] = visitor.replace(render)
 		} else {
 			// render is nil meaning that a column is being passed through.
-			renderExprs[i] = tree.NewTypedOrdinalReference(passedThruColIdx, s.plan.GetResultTypes()[passedThruColIdx])
+			renderExprs[i] = tree.NewTypedOrdinalReference(passedThruColIdx, s.plan.ResultTypes[passedThruColIdx])
 			passedThruColIdx++
 		}
 		outputType := renderExprs[i].ResolvedType()
 		renderTypes = append(renderTypes, outputType)
 	}
-	return s.plan.AddRendering(renderExprs, s.planCtx, s.plan.PlanToStreamColMap, renderTypes, windowerMergeOrdering)
+	return s.plan.AddRendering(renderExprs, s.planCtx, s.plan.PlanToStreamColMap, renderTypes)
 }
 
 // replaceWindowFuncsVisitor is used to populate render expressions containing

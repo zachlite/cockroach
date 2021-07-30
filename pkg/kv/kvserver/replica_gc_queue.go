@@ -27,16 +27,23 @@ import (
 
 const (
 	// replicaGCQueueTimerDuration is the duration between GCs of queued replicas.
-	replicaGCQueueTimerDuration = 100 * time.Millisecond
+	replicaGCQueueTimerDuration = 50 * time.Millisecond
 
-	// ReplicaGCQueueCheckInterval is the inactivity duration after which
+	// ReplicaGCQueueInactivityThreshold is the inactivity duration after which
 	// a range will be considered for garbage collection. Exported for testing.
-	ReplicaGCQueueCheckInterval = 12 * time.Hour
-	// ReplicaGCQueueSuspectCheckInterval is the duration after which a Replica
-	// which is suspected to be removed should be considered for garbage
-	// collection. See replicaIsSuspect() for details on what makes a replica
-	// suspect.
-	ReplicaGCQueueSuspectCheckInterval = 3 * time.Second
+	ReplicaGCQueueInactivityThreshold = 10 * 24 * time.Hour // 10 days
+	// ReplicaGCQueueSuspectTimeout is the duration after which a Replica which
+	// is suspected to be removed should be processed by the queue.
+	// A Replica is suspected to have been removed if either it is in the
+	// candidate Raft state (which is a typical sign of having been removed
+	// from the group) or it is not in the VOTER_FULL state. Replicas which are
+	// in the LEARNER state will never become candidates. It seems possible that
+	// a range will quiesce and never tell a VOTER_OUTGOING that is was removed.
+	// Cases where a replica gets stuck in VOTER_INCOMING seem farfetched and
+	// would require the replica to be removed from the range before it ever
+	// learned about its promotion but that state shouldn't last long so we
+	// also treat idle replicas in that state as suspect.
+	ReplicaGCQueueSuspectTimeout = 1 * time.Second
 )
 
 // Priorities for the replica GC queue.
@@ -116,101 +123,85 @@ func newReplicaGCQueue(store *Store, db *kv.DB, gossip *gossip.Gossip) *replicaG
 // check must have occurred more than ReplicaGCQueueInactivityThreshold
 // in the past.
 func (rgcq *replicaGCQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ *config.SystemConfig,
+	ctx context.Context, now hlc.Timestamp, repl *Replica, _ *config.SystemConfig,
 ) (shouldQ bool, prio float64) {
-	if _, currentMember := repl.Desc().GetReplicaDescriptor(repl.store.StoreID()); !currentMember {
-		return true, replicaGCPriorityRemoved
-	}
+
 	lastCheck, err := repl.GetLastReplicaGCTimestamp(ctx)
 	if err != nil {
 		log.Errorf(ctx, "could not read last replica GC timestamp: %+v", err)
 		return false, 0
 	}
-	isSuspect := replicaIsSuspect(repl)
+	replDesc, currentMember := repl.Desc().GetReplicaDescriptor(repl.store.StoreID())
+	if !currentMember {
+		return true, replicaGCPriorityRemoved
+	}
 
-	return replicaGCShouldQueueImpl(now.ToTimestamp(), lastCheck, isSuspect)
-}
+	lastActivity := hlc.Timestamp{
+		WallTime: repl.store.startedAt,
+	}
 
-func replicaIsSuspect(repl *Replica) bool {
+	if lease, _ := repl.GetLease(); lease.ProposedTS != nil {
+		lastActivity.Forward(*lease.ProposedTS)
+	}
+
 	// It is critical to think of the replica as suspect if it is a learner as
 	// it both shouldn't be a learner for long but will never become a candidate.
 	// It is less critical to consider joint configuration members as suspect
 	// but in cases where a replica is removed but only ever hears about the
 	// command which sets it to VOTER_OUTGOING we would conservatively wait
-	// 12 hours before removing the node. Finally we consider replicas which are
+	// 10 days before removing the node. Finally we consider replicas which are
 	// VOTER_INCOMING as suspect because no replica should stay in that state for
 	// too long and being conservative here doesn't seem worthwhile.
-	replDesc, ok := repl.Desc().GetReplicaDescriptor(repl.store.StoreID())
-	if !ok {
-		return true
-	}
-	if t := replDesc.GetType(); t != roachpb.VOTER_FULL && t != roachpb.NON_VOTER {
-		return true
-	}
-
-	// NodeLiveness can be nil in tests/benchmarks.
-	if repl.store.cfg.NodeLiveness == nil {
-		return false
-	}
-
-	// If a replica doesn't have an active raft group, we should check whether
-	// or not the node is active. If not, we should consider the replica suspect
-	// because it has probably already been removed from its raft group but
-	// doesn't know it. Without this, node decommissioning can stall on such
-	// dormant ranges.
-	raftStatus := repl.RaftStatus()
-	if raftStatus == nil {
-		liveness, ok := repl.store.cfg.NodeLiveness.Self()
-		return ok && !liveness.Membership.Active()
-	}
-
-	livenessMap := repl.store.cfg.NodeLiveness.GetIsLiveMap()
-	switch raftStatus.SoftState.RaftState {
-	// If a replica is a candidate, then by definition it has lost contact with
-	// its leader and possibly the rest of the Raft group, so consider it suspect.
-	case raft.StateCandidate, raft.StatePreCandidate:
-		return true
-
-	// If the replica is a follower, check that the leader is in our range
-	// descriptor and that we're still in touch with it. This handles e.g. a
-	// non-voting replica which has lost its leader. It also attempts to handle
-	// a quiesced follower which was partitioned away from the Raft group during
-	// its own removal from the range -- this case is vulnerable to race
-	// conditions, but if it fails it will be GCed within 12 hours anyway.
-	case raft.StateFollower:
-		leadDesc, ok := repl.Desc().GetReplicaDescriptorByID(roachpb.ReplicaID(raftStatus.Lead))
-		if !ok || !livenessMap[leadDesc.NodeID].IsLive {
-			return true
-		}
-
-	// If the replica is a leader, check that it has a quorum. This handles e.g.
-	// a stuck leader with a lost quorum being replaced via Node.ResetQuorum,
-	// which must cause the stale leader to relinquish its lease and GC itself.
-	case raft.StateLeader:
-		if !repl.Desc().Replicas().CanMakeProgress(func(d roachpb.ReplicaDescriptor) bool {
-			return livenessMap[d.NodeID].IsLive
-		}) {
-			return true
+	isSuspect := replDesc.GetType() != roachpb.VOTER_FULL
+	if raftStatus := repl.RaftStatus(); raftStatus != nil {
+		isSuspect = isSuspect ||
+			(raftStatus.SoftState.RaftState == raft.StateCandidate ||
+				raftStatus.SoftState.RaftState == raft.StatePreCandidate)
+	} else {
+		// If a replica doesn't have an active raft group, we should check
+		// whether or not it is active. If not, we should process the replica
+		// because it has probably already been removed from its raft group but
+		// doesn't know it. Without this, node decommissioning can stall on such
+		// dormant ranges. Make sure NodeLiveness isn't nil because it can be in
+		// tests/benchmarks.
+		if repl.store.cfg.NodeLiveness != nil {
+			if liveness, err := repl.store.cfg.NodeLiveness.Self(); err == nil &&
+				!liveness.Membership.Active() {
+				return true, replicaGCPriorityDefault
+			}
 		}
 	}
-
-	return false
+	return replicaGCShouldQueueImpl(now, lastCheck, lastActivity, isSuspect)
 }
 
-func replicaGCShouldQueueImpl(now, lastCheck hlc.Timestamp, isSuspect bool) (bool, float64) {
-	timeout := ReplicaGCQueueCheckInterval
+func replicaGCShouldQueueImpl(
+	now, lastCheck, lastActivity hlc.Timestamp, isSuspect bool,
+) (bool, float64) {
+	timeout := ReplicaGCQueueInactivityThreshold
 	priority := replicaGCPriorityDefault
 
 	if isSuspect {
-		timeout = ReplicaGCQueueSuspectCheckInterval
+		// If the range is suspect (which happens if its former replica set
+		// ignores it), let it expire much earlier.
+		timeout = ReplicaGCQueueSuspectTimeout
 		priority = replicaGCPrioritySuspect
-	}
-
-	// Only queue for GC if the timeout interval has passed since the last check.
-	if !lastCheck.Add(timeout.Nanoseconds(), 0).Less(now) {
+	} else if now.Less(lastCheck.Add(ReplicaGCQueueInactivityThreshold.Nanoseconds(), 0)) {
+		// Return false immediately if the previous check was less than the
+		// check interval in the past. Note that we don't do this if the
+		// replica is in candidate state, in which case we want to be more
+		// aggressive - a failed rebalance attempt could have checked this
+		// range, and candidate state suggests that a retry succeeded. See
+		// #7489.
 		return false, 0
 	}
-	return true, priority
+
+	shouldQ := lastActivity.Add(timeout.Nanoseconds(), 0).Less(now)
+
+	if !shouldQ {
+		return false, 0
+	}
+
+	return shouldQ, priority
 }
 
 // process performs a consistent lookup on the range descriptor to see if we are

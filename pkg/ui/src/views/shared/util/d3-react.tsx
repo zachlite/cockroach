@@ -17,10 +17,7 @@ type Chart<T> = (sel: d3.Selection<T>) => void;
  * createChartComponent wraps a D3 reusable chart in a React component.
  * See https://bost.ocks.org/mike/chart/
  */
-export default function createChartComponent<T>(
-  containerTy: string,
-  chart: Chart<T>,
-) {
+export default function createChartComponent<T>(containerTy: string, chart: Chart<T>) {
   return class WrappedChart extends React.Component<T> {
     containerEl: React.RefObject<Element> = React.createRef();
 
@@ -40,12 +37,14 @@ export default function createChartComponent<T>(
     }
 
     redraw(props: T = this.props) {
-      d3.select(this.containerEl.current).datum(props).call(chart);
+      d3.select(this.containerEl.current)
+        .datum(props)
+        .call(chart);
     }
 
     handleResize = () => {
       this.redraw();
-    };
+    }
 
     addResizeHandler() {
       window.addEventListener("resize", this.handleResize);
@@ -56,7 +55,10 @@ export default function createChartComponent<T>(
     }
 
     render() {
-      return React.createElement(containerTy, { ref: this.containerEl });
+      return React.createElement(
+        containerTy,
+        { ref: this.containerEl },
+      );
     }
   };
 }

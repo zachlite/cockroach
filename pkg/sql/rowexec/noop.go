@@ -54,18 +54,13 @@ func newNoopProcessor(
 	); err != nil {
 		return nil, err
 	}
-	ctx := flowCtx.EvalCtx.Ctx()
-	if execinfra.ShouldCollectStats(ctx, flowCtx) {
-		n.input = newInputStatCollector(n.input)
-		n.ExecStatsForTrace = n.execStatsForTrace
-	}
 	return n, nil
 }
 
 // Start is part of the RowSource interface.
-func (n *noopProcessor) Start(ctx context.Context) {
-	ctx = n.StartInternal(ctx, noopProcName)
+func (n *noopProcessor) Start(ctx context.Context) context.Context {
 	n.input.Start(ctx)
+	return n.StartInternal(ctx, noopProcName)
 }
 
 // Next is part of the RowSource interface.
@@ -91,16 +86,10 @@ func (n *noopProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadat
 	return nil, n.DrainHelper()
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (n *noopProcessor) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getInputStats(n.input)
-	if !ok {
-		return nil
-	}
-	return &execinfrapb.ComponentStats{
-		Inputs: []execinfrapb.InputStats{is},
-		Output: n.OutputHelper.Stats(),
-	}
+// ConsumerClosed is part of the RowSource interface.
+func (n *noopProcessor) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	n.InternalClose()
 }
 
 // ChildCount is part of the execinfra.OpNode interface.

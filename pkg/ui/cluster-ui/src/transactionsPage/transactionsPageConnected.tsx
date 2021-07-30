@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -14,7 +14,6 @@ import { Dispatch } from "redux";
 
 import { AppState } from "src/store";
 import { actions as transactionsActions } from "src/store/transactions";
-import { actions as resetSQLStatsActions } from "src/store/sqlStats";
 import { TransactionsPage } from "./transactionsPage";
 import {
   TransactionsPageStateProps,
@@ -24,7 +23,6 @@ import {
   selectTransactionsData,
   selectTransactionsLastError,
 } from "./transactionsPage.selectors";
-import { nodeRegionsByIDSelector } from "../store/nodes";
 
 export const TransactionsPageConnected = withRouter(
   connect<
@@ -34,12 +32,10 @@ export const TransactionsPageConnected = withRouter(
   >(
     (state: AppState) => ({
       data: selectTransactionsData(state),
-      nodeRegions: nodeRegionsByIDSelector(state),
       error: selectTransactionsLastError(state),
     }),
     (dispatch: Dispatch) => ({
       refreshData: () => dispatch(transactionsActions.refresh()),
-      resetSQLStats: () => dispatch(resetSQLStatsActions.request()),
     }),
   )(TransactionsPage),
 );

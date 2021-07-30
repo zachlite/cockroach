@@ -12,7 +12,7 @@ import _ from "lodash";
 import * as React from "react";
 import Select from "react-select";
 
-import * as protos from "src/js/protos";
+import * as protos from  "src/js/protos";
 import { AxisUnits } from "src/views/shared/components/metricQuery";
 import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
 
@@ -25,27 +25,21 @@ const axisUnitsOptions: DropdownOption[] = [
   AxisUnits.Count,
   AxisUnits.Bytes,
   AxisUnits.Duration,
-].map((au) => ({ label: AxisUnits[au], value: au.toString() }));
+].map(au => ({ label: AxisUnits[au], value: au.toString() }));
 
 const downsamplerOptions: DropdownOption[] = [
   TimeSeriesQueryAggregator.AVG,
   TimeSeriesQueryAggregator.MAX,
   TimeSeriesQueryAggregator.MIN,
   TimeSeriesQueryAggregator.SUM,
-].map((agg) => ({
-  label: TimeSeriesQueryAggregator[agg],
-  value: agg.toString(),
-}));
+].map(agg => ({ label: TimeSeriesQueryAggregator[agg], value: agg.toString() }));
 
 const aggregatorOptions = downsamplerOptions;
 
 const derivativeOptions: DropdownOption[] = [
   { label: "Normal", value: TimeSeriesQueryDerivative.NONE.toString() },
   { label: "Rate", value: TimeSeriesQueryDerivative.DERIVATIVE.toString() },
-  {
-    label: "Non-negative Rate",
-    value: TimeSeriesQueryDerivative.NON_NEGATIVE_DERIVATIVE.toString(),
-  },
+  { label: "Non-negative Rate", value: TimeSeriesQueryDerivative.NON_NEGATIVE_DERIVATIVE.toString() },
 ];
 
 export class CustomMetricState {
@@ -77,64 +71,54 @@ interface CustomMetricRowProps {
 
 export class CustomMetricRow extends React.Component<CustomMetricRowProps> {
   changeState(newState: Partial<CustomMetricState>) {
-    this.props.onChange(
-      this.props.index,
-      _.assign(this.props.rowState, newState),
-    );
+    this.props.onChange(this.props.index, _.assign(this.props.rowState, newState));
   }
 
   changeMetric = (selectedOption: DropdownOption) => {
     this.changeState({
       metric: selectedOption.value,
     });
-  };
+  }
 
   changeDownsampler = (selectedOption: DropdownOption) => {
     this.changeState({
       downsampler: +selectedOption.value,
     });
-  };
+  }
 
   changeAggregator = (selectedOption: DropdownOption) => {
     this.changeState({
       aggregator: +selectedOption.value,
     });
-  };
+  }
 
   changeDerivative = (selectedOption: DropdownOption) => {
     this.changeState({
       derivative: +selectedOption.value,
     });
-  };
+  }
 
   changeSource = (selectedOption: DropdownOption) => {
     this.changeState({
       source: selectedOption.value,
     });
-  };
+  }
 
   changePerNode = (selection: React.FormEvent<HTMLInputElement>) => {
     this.changeState({
       perNode: selection.currentTarget.checked,
     });
-  };
+  }
 
   deleteOption = () => {
     this.props.onDelete(this.props.index);
-  };
+  }
 
   render() {
     const {
       metricOptions,
       nodeOptions,
-      rowState: {
-        metric,
-        downsampler,
-        aggregator,
-        derivative,
-        source,
-        perNode,
-      },
+      rowState: { metric, downsampler, aggregator, derivative, source, perNode },
     } = this.props;
 
     return (
@@ -203,19 +187,10 @@ export class CustomMetricRow extends React.Component<CustomMetricRowProps> {
           </div>
         </td>
         <td className="metric-table__cell">
-          <input
-            type="checkbox"
-            checked={perNode}
-            onChange={this.changePerNode}
-          />
+          <input type="checkbox" checked={perNode} onChange={this.changePerNode} />
         </td>
         <td className="metric-table__cell">
-          <button
-            className="edit-button metric-edit-button"
-            onClick={this.deleteOption}
-          >
-            Remove Metric
-          </button>
+          <button className="edit-button metric-edit-button" onClick={this.deleteOption}>Remove Metric</button>
         </td>
       </tr>
     );
@@ -241,7 +216,7 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
       metrics: [...this.currentMetrics(), new CustomMetricState()],
       axisUnits: this.currentAxisUnits(),
     });
-  };
+  }
 
   updateMetricRow = (index: number, newState: CustomMetricState) => {
     const metrics = this.currentMetrics().slice();
@@ -250,7 +225,7 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
       metrics,
       axisUnits: this.currentAxisUnits(),
     });
-  };
+  }
 
   removeMetric = (index: number) => {
     const metrics = this.currentMetrics();
@@ -258,7 +233,7 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
       metrics: metrics.slice(0, index).concat(metrics.slice(index + 1)),
       axisUnits: this.currentAxisUnits(),
     });
-  };
+  }
 
   currentAxisUnits(): AxisUnits {
     return this.props.chartState.axisUnits;
@@ -269,11 +244,11 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
       metrics: this.currentMetrics(),
       axisUnits: +selected.value,
     });
-  };
+  }
 
   removeChart = () => {
     this.props.onDelete(this.props.index);
-  };
+  }
 
   render() {
     const metrics = this.currentMetrics();
@@ -296,7 +271,7 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
             </tr>
           </thead>
           <tbody>
-            {metrics.map((row, i) => (
+            { metrics.map((row, i) =>
               <CustomMetricRow
                 key={i}
                 metricOptions={this.props.metricOptions}
@@ -305,8 +280,8 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
                 rowState={row}
                 onChange={this.updateMetricRow}
                 onDelete={this.removeMetric}
-              />
-            ))}
+              />,
+            )}
           </tbody>
         </table>
       );
@@ -321,20 +296,10 @@ export class CustomChartTable extends React.Component<CustomChartTableProps> {
             options={axisUnitsOptions}
             onChange={this.changeAxisUnits}
           />
-          <button
-            className="edit-button chart-edit-button chart-edit-button--remove"
-            onClick={this.removeChart}
-          >
-            Remove Chart
-          </button>
+          <button className="edit-button chart-edit-button chart-edit-button--remove" onClick={this.removeChart}>Remove Chart</button>
         </div>
-        {table}
-        <button
-          className="edit-button metric-edit-button metric-edit-button--add"
-          onClick={this.addMetric}
-        >
-          Add Metric
-        </button>
+        { table }
+        <button className="edit-button metric-edit-button metric-edit-button--add" onClick={this.addMetric}>Add Metric</button>
       </div>
     );
   }

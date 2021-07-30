@@ -11,7 +11,7 @@
 package execgen
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/errors"
 )
 
@@ -20,15 +20,37 @@ const nonTemplatePanic = "do not call from non-template code"
 // Remove unused warnings.
 var (
 	_ = COPYVAL
+	_ = SET
+	_ = SLICE
+	_ = COPYSLICE
 	_ = APPENDSLICE
 	_ = APPENDVAL
-	_ = SETVARIABLESIZE
+	_ = LEN
+	_ = ZERO
+	_ = WINDOW
 )
 
 // COPYVAL is a template function that can be used to set a scalar to the value
 // of another scalar in such a way that the destination won't be modified if the
-// source is.
+// source is. You must use this on the result of UNSAFEGET if you wish to store
+// that result past the lifetime of the batch you UNSAFEGET'd from.
 func COPYVAL(dest, src interface{}) {
+	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
+}
+
+// SET is a template function.
+func SET(target, i, new interface{}) {
+	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
+}
+
+// SLICE is a template function.
+func SLICE(target, start, end interface{}) interface{} {
+	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
+	return nil
+}
+
+// COPYSLICE is a template function.
+func COPYSLICE(target, src, destIdx, srcStartIdx, srcEndIdx interface{}) {
 	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
 }
 
@@ -42,8 +64,19 @@ func APPENDVAL(target, v interface{}) {
 	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
 }
 
-// SETVARIABLESIZE is a template function.
-func SETVARIABLESIZE(target, value interface{}) interface{} {
+// LEN is a template function.
+func LEN(target interface{}) interface{} {
+	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
+	return nil
+}
+
+// ZERO is a template function.
+func ZERO(target interface{}) {
+	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
+}
+
+// WINDOW is a template function.
+func WINDOW(target, start, end interface{}) interface{} {
 	colexecerror.InternalError(errors.AssertionFailedf(nonTemplatePanic))
 	return nil
 }

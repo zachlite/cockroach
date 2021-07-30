@@ -16,24 +16,20 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -55,14 +51,6 @@ type toDelete struct {
 //   Notes: postgres allows only the table owner to DROP a table.
 //          mysql requires the DROP privilege on the table.
 func (p *planner) DropTable(ctx context.Context, n *tree.DropTable) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"DROP TABLE",
-	); err != nil {
-		return nil, err
-	}
-
 	td := make(map[descpb.ID]toDelete, len(n.Names))
 	for i := range n.Names {
 		tn := &n.Names[i]
@@ -87,9 +75,8 @@ func (p *planner) DropTable(ctx context.Context, n *tree.DropTable) (planNode, e
 				}
 			}
 		}
-		for _, idx := range droppedDesc.NonDropIndexes() {
-			for i := 0; i < idx.NumInterleavedBy(); i++ {
-				ref := idx.GetInterleavedBy(i)
+		for _, idx := range droppedDesc.AllNonDropIndexes() {
+			for _, ref := range idx.InterleavedBy {
 				if _, ok := td[ref.Table]; !ok {
 					if err := p.canRemoveInterleave(ctx, droppedDesc.Name, ref, n.DropBehavior); err != nil {
 						return nil, err
@@ -136,7 +123,6 @@ func (n *dropTableNode) startExec(params runParams) error {
 			droppedDesc,
 			false, /* droppingDatabase */
 			tree.AsStringWithFQNames(n.n, params.Ann()),
-			n.n.DropBehavior,
 		)
 		if err != nil {
 			return err
@@ -144,12 +130,20 @@ func (n *dropTableNode) startExec(params runParams) error {
 		// Log a Drop Table event for this table. This is an auditable log event
 		// and is recorded in the same transaction as the table descriptor
 		// update.
-		if err := params.p.logEvent(params.ctx,
-			droppedDesc.ID,
-			&eventpb.DropTable{
-				TableName:           toDel.tn.FQString(),
-				CascadeDroppedViews: droppedViews,
-			}); err != nil {
+		if err := MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+			ctx,
+			params.p.txn,
+			EventLogDropTable,
+			int32(droppedDesc.ID),
+			int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+			struct {
+				TableName           string
+				Statement           string
+				User                string
+				CascadeDroppedViews []string
+			}{toDel.tn.FQString(), n.n.String(),
+				params.SessionData().User, droppedViews},
+		); err != nil {
 			return err
 		}
 	}
@@ -175,7 +169,7 @@ func (*dropTableNode) Close(context.Context)        {}
 func (p *planner) prepareDrop(
 	ctx context.Context, name *tree.TableName, required bool, requiredType tree.RequiredTableKind,
 ) (*tabledesc.Mutable, error) {
-	_, tableDesc, err := p.ResolveMutableTableDescriptor(ctx, name, required, requiredType)
+	tableDesc, err := p.ResolveMutableTableDescriptor(ctx, name, required, requiredType)
 	if err != nil {
 		return nil, err
 	}
@@ -260,11 +254,11 @@ func (p *planner) removeInterleave(ctx context.Context, ref descpb.ForeignKeyRef
 		// The referenced table is being dropped. No need to modify it further.
 		return nil
 	}
-	idx, err := table.FindIndexWithID(ref.Index)
+	idx, err := table.FindIndexByID(ref.Index)
 	if err != nil {
 		return err
 	}
-	idx.IndexDesc().Interleave.Ancestors = nil
+	idx.Interleave.Ancestors = nil
 	// No job description, since this is presumably part of some larger schema change.
 	return p.writeSchemaChange(ctx, table, descpb.InvalidMutationID, "")
 }
@@ -274,19 +268,13 @@ func (p *planner) removeInterleave(ctx context.Context, ref descpb.ForeignKeyRef
 // dropped due to `cascade` behavior. droppingParent indicates whether this
 // table's parent (either database or schema) is being dropped
 func (p *planner) dropTableImpl(
-	ctx context.Context,
-	tableDesc *tabledesc.Mutable,
-	droppingParent bool,
-	jobDesc string,
-	behavior tree.DropBehavior,
+	ctx context.Context, tableDesc *tabledesc.Mutable, droppingParent bool, jobDesc string,
 ) ([]string, error) {
 	var droppedViews []string
 
 	// Remove foreign key back references from tables that this table has foreign
 	// keys to.
-	// Copy out the set of outbound fks as it may be overwritten in the loop.
-	outboundFKs := append([]descpb.ForeignKeyConstraint(nil), tableDesc.OutboundFKs...)
-	for i := range outboundFKs {
+	for i := range tableDesc.OutboundFKs {
 		ref := &tableDesc.OutboundFKs[i]
 		if err := p.removeFKBackReference(ctx, tableDesc, ref); err != nil {
 			return droppedViews, err
@@ -296,9 +284,7 @@ func (p *planner) dropTableImpl(
 
 	// Remove foreign key forward references from tables that have foreign keys
 	// to this table.
-	// Copy out the set of inbound fks as it may be overwritten in the loop.
-	inboundFKs := append([]descpb.ForeignKeyConstraint(nil), tableDesc.InboundFKs...)
-	for i := range inboundFKs {
+	for i := range tableDesc.InboundFKs {
 		ref := &tableDesc.InboundFKs[i]
 		if err := p.removeFKForBackReference(ctx, tableDesc, ref); err != nil {
 			return droppedViews, err
@@ -307,14 +293,13 @@ func (p *planner) dropTableImpl(
 	tableDesc.InboundFKs = nil
 
 	// Remove interleave relationships.
-	for _, idx := range tableDesc.NonDropIndexes() {
-		if idx.NumInterleaveAncestors() > 0 {
+	for _, idx := range tableDesc.AllNonDropIndexes() {
+		if len(idx.Interleave.Ancestors) > 0 {
 			if err := p.removeInterleaveBackReference(ctx, tableDesc, idx); err != nil {
 				return droppedViews, err
 			}
 		}
-		for i := 0; i < idx.NumInterleavedBy(); i++ {
-			ref := idx.GetInterleavedBy(i)
+		for _, ref := range idx.InterleavedBy {
 			if err := p.removeInterleave(ctx, ref); err != nil {
 				return droppedViews, err
 			}
@@ -322,26 +307,24 @@ func (p *planner) dropTableImpl(
 	}
 
 	// Remove sequence dependencies.
-	for _, col := range tableDesc.PublicColumns() {
-		if err := p.removeSequenceDependencies(ctx, tableDesc, col); err != nil {
+	for i := range tableDesc.Columns {
+		if err := p.removeSequenceDependencies(ctx, tableDesc, &tableDesc.Columns[i]); err != nil {
 			return droppedViews, err
 		}
 	}
 
 	// Drop sequences that the columns of the table own.
-	for _, col := range tableDesc.PublicColumns() {
-		if err := p.dropSequencesOwnedByCol(ctx, col, !droppingParent, behavior); err != nil {
+	for _, col := range tableDesc.Columns {
+		if err := p.dropSequencesOwnedByCol(ctx, &col, !droppingParent); err != nil {
 			return droppedViews, err
 		}
 	}
 
 	// Drop all views that depend on this table, assuming that we wouldn't have
 	// made it to this point if `cascade` wasn't enabled.
-	// Copy out the set of dependencies as it may be overwritten in the loop.
-	dependedOnBy := append([]descpb.TableDescriptor_Reference(nil), tableDesc.DependedOnBy...)
-	for _, ref := range dependedOnBy {
+	for _, ref := range tableDesc.DependedOnBy {
 		viewDesc, err := p.getViewDescForCascade(
-			ctx, string(tableDesc.DescriptorType()), tableDesc.Name, tableDesc.ParentID, ref.ID, tree.DropCascade,
+			ctx, tableDesc.TypeName(), tableDesc.Name, tableDesc.ParentID, ref.ID, tree.DropCascade,
 		)
 		if err != nil {
 			return droppedViews, err
@@ -354,14 +337,8 @@ func (p *planner) dropTableImpl(
 		if err != nil {
 			return droppedViews, err
 		}
-
-		qualifiedView, err := p.getQualifiedTableName(ctx, viewDesc)
-		if err != nil {
-			return droppedViews, err
-		}
-
 		droppedViews = append(droppedViews, cascadedViews...)
-		droppedViews = append(droppedViews, qualifiedView.FQString())
+		droppedViews = append(droppedViews, viewDesc.Name)
 	}
 
 	err := p.removeTableComments(ctx, tableDesc)
@@ -395,7 +372,7 @@ func (p *planner) unsplitRangesForTable(ctx context.Context, tableDesc *tabledes
 	// allowed to scan the meta ranges directly.
 	if p.ExecCfg().Codec.ForSystemTenant() {
 		span := tableDesc.TableSpan(p.ExecCfg().Codec)
-		ranges, err := kvclient.ScanMetaKVs(ctx, p.execCfg.DB.NewTxn(ctx, "unsplit-ranges-for-table"), span)
+		ranges, err := ScanMetaKVs(ctx, p.execCfg.DB.NewTxn(ctx, "unsplit-ranges-for-table"), span)
 		if err != nil {
 			return err
 		}
@@ -404,7 +381,7 @@ func (p *planner) unsplitRangesForTable(ctx context.Context, tableDesc *tabledes
 			if err := r.ValueProto(&desc); err != nil {
 				return err
 			}
-			if !desc.GetStickyBit().IsEmpty() {
+			if (desc.GetStickyBit() != hlc.Timestamp{}) {
 				// Swallow "key is not the start of a range" errors because it would mean
 				// that the sticky bit was removed and merged concurrently. DROP TABLE
 				// should not fail because of this.
@@ -427,16 +404,6 @@ func (p *planner) initiateDropTable(
 ) error {
 	if tableDesc.Dropped() {
 		return errors.Errorf("table %q is already being dropped", tableDesc.Name)
-	}
-
-	// Exit early with an error if the table is undergoing a new-style schema
-	// change, before we try to get job IDs and update job statuses later. See
-	// createOrUpdateSchemaChangeJob.
-	if tableDesc.NewSchemaChangeJobID != 0 {
-		return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-			"cannot perform a schema change on table %q while it is undergoing a new-style schema change",
-			tableDesc.GetName(),
-		)
 	}
 
 	// If the table is not interleaved , use the delayed GC mechanism to
@@ -505,7 +472,7 @@ func (p *planner) markTableMutationJobsSuccessful(
 	ctx context.Context, tableDesc *tabledesc.Mutable,
 ) error {
 	for _, mj := range tableDesc.MutationJobs {
-		jobID := jobspb.JobID(mj.JobID)
+		jobID := mj.JobID
 		mutationJob, err := p.execCfg.JobRegistry.LoadJobWithTxn(ctx, jobID, p.txn)
 		if err != nil {
 			if jobs.HasJobNotFoundError(err) {
@@ -514,11 +481,11 @@ func (p *planner) markTableMutationJobsSuccessful(
 			}
 			return err
 		}
-		if err := mutationJob.Update(
-			ctx, p.txn, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+		if err := mutationJob.WithTxn(p.txn).Update(
+			ctx, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
 				status := md.Status
 				switch status {
-				case jobs.StatusSucceeded, jobs.StatusCanceled, jobs.StatusFailed, jobs.StatusRevertFailed:
+				case jobs.StatusSucceeded, jobs.StatusCanceled, jobs.StatusFailed:
 					log.Warningf(ctx, "mutation job %d in unexpected state %s", jobID, status)
 					return nil
 				case jobs.StatusRunning, jobs.StatusPending:
@@ -549,7 +516,7 @@ func (p *planner) removeFKForBackReference(
 	} else {
 		lookup, err := p.Descriptors().GetMutableTableVersionByID(ctx, ref.OriginTableID, p.txn)
 		if err != nil {
-			return errors.Wrapf(err, "error resolving origin table ID %d", ref.OriginTableID)
+			return errors.Errorf("error resolving origin table ID %d: %v", ref.OriginTableID, err)
 		}
 		originTableDesc = lookup
 	}
@@ -607,7 +574,7 @@ func (p *planner) removeFKBackReference(
 	} else {
 		lookup, err := p.Descriptors().GetMutableTableVersionByID(ctx, ref.ReferencedTableID, p.txn)
 		if err != nil {
-			return errors.Wrapf(err, "error resolving referenced table ID %d", ref.ReferencedTableID)
+			return errors.Errorf("error resolving referenced table ID %d: %v", ref.ReferencedTableID, err)
 		}
 		referencedTableDesc = lookup
 	}
@@ -645,25 +612,24 @@ func removeFKBackReferenceFromTable(
 			"for constraint %q on table %q", fkName, originTableDesc.GetName())
 	}
 	// Delete our match.
-	referencedTableDesc.InboundFKs = append(referencedTableDesc.InboundFKs[:matchIdx],
-		referencedTableDesc.InboundFKs[matchIdx+1:]...)
+	referencedTableDesc.InboundFKs = append(referencedTableDesc.InboundFKs[:matchIdx], referencedTableDesc.InboundFKs[matchIdx+1:]...)
 	return nil
 }
 
 func (p *planner) removeInterleaveBackReference(
-	ctx context.Context, tableDesc *tabledesc.Mutable, idx catalog.Index,
+	ctx context.Context, tableDesc *tabledesc.Mutable, idx *descpb.IndexDescriptor,
 ) error {
-	if idx.NumInterleaveAncestors() == 0 {
+	if len(idx.Interleave.Ancestors) == 0 {
 		return nil
 	}
-	ancestor := idx.GetInterleaveAncestor(idx.NumInterleaveAncestors() - 1)
+	ancestor := idx.Interleave.Ancestors[len(idx.Interleave.Ancestors)-1]
 	var t *tabledesc.Mutable
 	if ancestor.TableID == tableDesc.ID {
 		t = tableDesc
 	} else {
 		lookup, err := p.Descriptors().GetMutableTableVersionByID(ctx, ancestor.TableID, p.txn)
 		if err != nil {
-			return errors.Wrapf(err, "error resolving referenced table ID %d", ancestor.TableID)
+			return errors.Errorf("error resolving referenced table ID %d: %v", ancestor.TableID, err)
 		}
 		t = lookup
 	}
@@ -671,17 +637,16 @@ func (p *planner) removeInterleaveBackReference(
 		// The referenced table is being dropped. No need to modify it further.
 		return nil
 	}
-	targetIdxI, err := t.FindIndexWithID(ancestor.IndexID)
+	targetIdx, err := t.FindIndexByID(ancestor.IndexID)
 	if err != nil {
 		return err
 	}
-	targetIdx := targetIdxI.IndexDesc()
 	foundAncestor := false
 	for k, ref := range targetIdx.InterleavedBy {
-		if ref.Table == tableDesc.ID && ref.Index == idx.GetID() {
+		if ref.Table == tableDesc.ID && ref.Index == idx.ID {
 			if foundAncestor {
 				return errors.AssertionFailedf(
-					"ancestor entry in %s for %s@%s found more than once", t.Name, tableDesc.Name, idx.GetName())
+					"ancestor entry in %s for %s@%s found more than once", t.Name, tableDesc.Name, idx.Name)
 			}
 			targetIdx.InterleavedBy = append(targetIdx.InterleavedBy[:k], targetIdx.InterleavedBy[k+1:]...)
 			foundAncestor = true
@@ -717,7 +682,7 @@ func (p *planner) removeTableComments(ctx context.Context, tableDesc *tabledesc.
 		ctx,
 		"delete-table-comments",
 		p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"DELETE FROM system.comments WHERE object_id=$1",
 		tableDesc.ID)
 	if err != nil {

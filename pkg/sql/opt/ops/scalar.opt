@@ -89,14 +89,13 @@ define Exists {
 
 # Variable is the typed scalar value of a column in the query. The Col field is
 # a metadata ColumnID value that references the column by index.
-[Scalar, CompositeInsensitive]
+[Scalar]
 define Variable {
     Col ColumnID
 }
 
 # Const is a typed scalar constant value. The Value field is a tree.Datum value
-# having any datum type that's legal in the expression's context. Do NOT call
-# ConstructConst directly; use ConstructConstVal instead.
+# having any datum type that's legal in the expression's context.
 [Scalar, ConstValue]
 define Const {
     Value Datum
@@ -168,7 +167,7 @@ define Projections {
 # then repeatedly reused.
 #
 # The Element scalar expression cannot contain a simple VariableOp with the same
-# ColumnID as the one stored in the Col field, since that would make it a
+# ColumnID as the one stored in the ColPrivate field, since that would make it a
 # pass-through column. Pass-through columns are always stored on the containing
 # Project operator instead. However, the Element field can contain a VariableOp
 # when a new ColumnID is being assigned, such as in the case of an outer column
@@ -317,49 +316,49 @@ define IsTupleNotNull {
     Input ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Eq {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Lt {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Gt {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Le {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Ge {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Ne {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define In {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define NotIn {
     Left ScalarExpr
     Right ScalarExpr
@@ -427,7 +426,7 @@ define NotRegIMatch {
 
 # Is maps to the IS NOT DISTINCT FROM operator which is equivalent to IS for
 # non-tuples. See IsTupleNull for the tuple-specific IS NULL operator.
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Is {
     Left ScalarExpr
     Right ScalarExpr
@@ -436,20 +435,14 @@ define Is {
 # IsNot is the inverse of Is. It maps to the IS DISTINCT FROM operator which is
 # equivalent to IS NOT for non-tuples. See IsTupleNotNull for the
 # tuple-specific IS NOT NULL operator.
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define IsNot {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
+[Scalar, Bool, Comparison]
 define Contains {
-    Left ScalarExpr
-    Right ScalarExpr
-}
-
-[Scalar, Bool, Comparison, CompositeInsensitive]
-define ContainedBy {
     Left ScalarExpr
     Right ScalarExpr
 }
@@ -521,43 +514,43 @@ define Bitxor {
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Plus {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Minus {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Mult {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Div {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define FloorDiv {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Mod {
     Left ScalarExpr
     Right ScalarExpr
 }
 
-[Scalar, Binary, CompositeInsensitive]
+[Scalar, Binary]
 define Pow {
     Left ScalarExpr
     Right ScalarExpr
@@ -605,7 +598,7 @@ define FetchTextPath {
     Path ScalarExpr
 }
 
-[Scalar, Unary, CompositeInsensitive]
+[Scalar, Unary]
 define UnaryMinus {
     Input ScalarExpr
 }
@@ -615,12 +608,12 @@ define UnaryComplement {
     Input ScalarExpr
 }
 
-[Scalar, Unary, CompositeInsensitive]
+[Scalar, Unary]
 define UnarySqrt {
     Input ScalarExpr
 }
 
-[Scalar, Unary, CompositeInsensitive]
+[Scalar, Unary]
 define UnaryCbrt {
     Input ScalarExpr
 }
@@ -823,72 +816,6 @@ define Count {
 
 [Scalar, Int, Aggregate]
 define CountRows {
-}
-
-[Scalar, Aggregate]
-define CovarPop {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define CovarSamp {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionAvgX {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionAvgY {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionIntercept {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionR2 {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionSlope {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionSXX {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionSXY {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionSYY {
-    Y ScalarExpr
-    X ScalarExpr
-}
-
-[Scalar, Aggregate]
-define RegressionCount {
-    Y ScalarExpr
-    X ScalarExpr
 }
 
 [Scalar, Aggregate]

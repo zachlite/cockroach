@@ -12,9 +12,7 @@ package kvnemesis
 
 import (
 	"context"
-	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -22,12 +20,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
-	"google.golang.org/protobuf/proto"
 )
 
 // Applier executes Steps.
 type Applier struct {
-	env *Env
 	dbs []*kv.DB
 	mu  struct {
 		dbIdx int
@@ -36,10 +32,9 @@ type Applier struct {
 	}
 }
 
-// MakeApplier constructs an Applier that executes against the given DBs.
-func MakeApplier(env *Env, dbs ...*kv.DB) *Applier {
+// MakeApplier constructs an Applier that executes against the given DB.
+func MakeApplier(dbs ...*kv.DB) *Applier {
 	a := &Applier{
-		env: env,
 		dbs: dbs,
 	}
 	a.mu.txns = make(map[string]*kv.Txn)
@@ -60,7 +55,7 @@ func (a *Applier) Apply(ctx context.Context, step *Step) (retErr error) {
 			retErr = errors.Errorf(`panic applying step %s: %v`, step, p)
 		}
 	}()
-	applyOp(ctx, a.env, db, &step.Op)
+	applyOp(ctx, db, &step.Op)
 	return nil
 }
 
@@ -72,7 +67,7 @@ func (a *Applier) getNextDBRoundRobin() (*kv.DB, int32) {
 	return a.dbs[dbIdx], int32(dbIdx)
 }
 
-func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
+func applyOp(ctx context.Context, db *kv.DB, op *Operation) {
 	switch o := op.GetValue().(type) {
 	case *GetOperation, *PutOperation, *ScanOperation, *BatchOperation:
 		applyClientOp(ctx, db, op)
@@ -87,26 +82,9 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 		_, err := db.AdminChangeReplicas(ctx, o.Key, desc, o.Changes)
 		// TODO(dan): Save returned desc?
 		o.Result = resultError(ctx, err)
-	case *TransferLeaseOperation:
-		err := db.AdminTransferLease(ctx, o.Key, o.Target)
-		o.Result = resultError(ctx, err)
-	case *ChangeZoneOperation:
-		err := updateZoneConfigInEnv(ctx, env, o.Type)
-		o.Result = resultError(ctx, err)
 	case *ClosureTxnOperation:
-		// Use a backoff loop to avoid thrashing on txn aborts. Don't wait between
-		// epochs of the same transaction to avoid waiting while holding locks.
-		retryOnAbort := retry.StartWithCtx(ctx, retry.Options{
-			InitialBackoff: 1 * time.Millisecond,
-			MaxBackoff:     250 * time.Millisecond,
-		})
 		var savedTxn *kv.Txn
 		txnErr := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			if savedTxn != nil && txn.TestingCloneTxn().Epoch == 0 {
-				// If the txn's current epoch is 0 and we've run at least one prior
-				// iteration, we were just aborted.
-				retryOnAbort.Next()
-			}
 			savedTxn = txn
 			for i := range o.Ops {
 				op := &o.Ops[i]
@@ -135,7 +113,7 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 		})
 		o.Result = resultError(ctx, txnErr)
 		if txnErr == nil {
-			o.Txn = savedTxn.TestingCloneTxn()
+			o.Txn = savedTxn.Sender().TestingCloneTxn()
 		}
 	default:
 		panic(errors.AssertionFailedf(`unknown operation type: %T %v`, o, o))
@@ -144,23 +122,16 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 
 type clientI interface {
 	Get(context.Context, interface{}) (kv.KeyValue, error)
-	GetForUpdate(context.Context, interface{}) (kv.KeyValue, error)
 	Put(context.Context, interface{}, interface{}) error
 	Scan(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
 	ScanForUpdate(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
-	ReverseScan(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
-	ReverseScanForUpdate(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
 	Run(context.Context, *kv.Batch) error
 }
 
 func applyClientOp(ctx context.Context, db clientI, op *Operation) {
 	switch o := op.GetValue().(type) {
 	case *GetOperation:
-		fn := db.Get
-		if o.ForUpdate {
-			fn = db.GetForUpdate
-		}
-		kv, err := fn(ctx, o.Key)
+		kv, err := db.Get(ctx, o.Key)
 		if err != nil {
 			o.Result = resultError(ctx, err)
 		} else {
@@ -174,11 +145,7 @@ func applyClientOp(ctx context.Context, db clientI, op *Operation) {
 		o.Result = resultError(ctx, err)
 	case *ScanOperation:
 		fn := db.Scan
-		if o.Reverse && o.ForUpdate {
-			fn = db.ReverseScanForUpdate
-		} else if o.Reverse {
-			fn = db.ReverseScan
-		} else if o.ForUpdate {
+		if o.ForUpdate {
 			fn = db.ScanForUpdate
 		}
 		kvs, err := fn(ctx, o.Key, o.EndKey, 0 /* maxRows */)
@@ -208,19 +175,11 @@ func applyBatchOp(
 	for i := range o.Ops {
 		switch subO := o.Ops[i].GetValue().(type) {
 		case *GetOperation:
-			if subO.ForUpdate {
-				b.GetForUpdate(subO.Key)
-			} else {
-				b.Get(subO.Key)
-			}
+			b.Get(subO.Key)
 		case *PutOperation:
 			b.Put(subO.Key, subO.Value)
 		case *ScanOperation:
-			if subO.Reverse && subO.ForUpdate {
-				b.ReverseScanForUpdate(subO.Key, subO.EndKey)
-			} else if subO.Reverse {
-				b.ReverseScan(subO.Key, subO.EndKey)
-			} else if subO.ForUpdate {
+			if subO.ForUpdate {
 				b.ScanForUpdate(subO.Key, subO.EndKey)
 			} else {
 				b.Scan(subO.Key, subO.EndKey)
@@ -300,7 +259,7 @@ func newGetReplicasFn(dbs ...*kv.DB) GetReplicasFn {
 	ctx := context.Background()
 	return func(key roachpb.Key) []roachpb.ReplicationTarget {
 		desc := getRangeDesc(ctx, key, dbs...)
-		replicas := desc.Replicas().Descriptors()
+		replicas := desc.Replicas().All()
 		targets := make([]roachpb.ReplicationTarget, len(replicas))
 		for i, replica := range replicas {
 			targets[i] = roachpb.ReplicationTarget{
@@ -310,20 +269,4 @@ func newGetReplicasFn(dbs ...*kv.DB) GetReplicasFn {
 		}
 		return targets
 	}
-}
-
-func updateZoneConfig(zone *zonepb.ZoneConfig, change ChangeZoneType) {
-	switch change {
-	case ChangeZoneType_ToggleGlobalReads:
-		cur := zone.GlobalReads != nil && *zone.GlobalReads
-		zone.GlobalReads = proto.Bool(!cur)
-	default:
-		panic(errors.AssertionFailedf(`unknown ChangeZoneType: %v`, change))
-	}
-}
-
-func updateZoneConfigInEnv(ctx context.Context, env *Env, change ChangeZoneType) error {
-	return env.UpdateZoneConfig(ctx, GeneratorDataTableID, func(zone *zonepb.ZoneConfig) {
-		updateZoneConfig(zone, change)
-	})
 }

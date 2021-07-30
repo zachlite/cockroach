@@ -12,7 +12,6 @@ package gcjob
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -21,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -45,7 +45,7 @@ func SetSmallMaxGCIntervalForTest() func() {
 }
 
 type schemaChangeGCResumer struct {
-	jobID jobspb.JobID
+	jobID int64
 }
 
 // performGC GCs any schema elements that are in the DELETING state and returns
@@ -55,38 +55,41 @@ func performGC(
 	execCfg *sql.ExecutorConfig,
 	details *jobspb.SchemaChangeGCDetails,
 	progress *jobspb.SchemaChangeGCProgress,
-) error {
-	if details.Tenant != nil {
-		return errors.Wrapf(
-			gcTenant(ctx, execCfg, details.Tenant.ID, progress),
-			"attempting to GC tenant %+v", details.Tenant,
-		)
-	}
+) (bool, error) {
+	didGC := false
 	if details.Indexes != nil {
-		return errors.Wrap(gcIndexes(ctx, execCfg, details.ParentID, progress), "attempting to GC indexes")
+		if didGCIndex, err := gcIndexes(ctx, execCfg, details.ParentID, progress); err != nil {
+			return false, errors.Wrap(err, "attempting to GC indexes")
+		} else if didGCIndex {
+			didGC = true
+		}
 	} else if details.Tables != nil {
-		if err := gcTables(ctx, execCfg, progress); err != nil {
-			return errors.Wrap(err, "attempting to GC tables")
+		if didGCTable, err := gcTables(ctx, execCfg, progress); err != nil {
+			return false, errors.Wrap(err, "attempting to GC tables")
+		} else if didGCTable {
+			didGC = true
 		}
 
 		// Drop database zone config when all the tables have been GCed.
 		if details.ParentID != descpb.InvalidID && isDoneGC(progress) {
 			if err := deleteDatabaseZoneConfig(ctx, execCfg.DB, execCfg.Codec, details.ParentID); err != nil {
-				return errors.Wrap(err, "deleting database zone config")
+				return false, errors.Wrap(err, "deleting database zone config")
 			}
 		}
 	}
-	return nil
+	return didGC, nil
 }
 
 // Resume is part of the jobs.Resumer interface.
-func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) (err error) {
+func (r schemaChangeGCResumer) Resume(
+	ctx context.Context, phs interface{}, _ chan<- tree.Datums,
+) (err error) {
 	defer func() {
 		if err != nil && !r.isPermanentGCError(err) {
 			err = errors.Mark(err, jobs.NewRetryJobError("gc"))
 		}
 	}()
-	p := execCtx.(sql.JobExecContext)
+	p := phs.(sql.PlanHookState)
 	// TODO(pbardea): Wait for no versions.
 	execCfg := p.ExecCfg()
 	if fn := execCfg.GCJobTestingKnobs.RunBeforeResume; fn != nil {
@@ -107,81 +110,88 @@ func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) 
 		if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, details.InterleavedTable.ID); err != nil {
 			return err
 		}
-		interleavedIndexIDs := make([]descpb.IndexID, len(details.InterleavedIndexes))
-		for i := range details.InterleavedIndexes {
-			interleavedIndexIDs[i] = details.InterleavedIndexes[i].ID
-		}
 		if err := sql.TruncateInterleavedIndexes(
 			ctx,
 			execCfg,
-			tabledesc.NewBuilder(details.InterleavedTable).BuildImmutableTable(),
-			interleavedIndexIDs,
+			tabledesc.NewImmutable(*details.InterleavedTable),
+			details.InterleavedIndexes,
 		); err != nil {
 			return err
 		}
 	}
 
-	tableDropTimes, indexDropTimes := getDropTimes(details)
-
-	timer := timeutil.NewTimer()
-	defer timer.Stop()
-	timer.Reset(0)
 	gossipUpdateC, cleanup := execCfg.GCJobNotifier.AddNotifyee(ctx)
 	defer cleanup()
+	tableDropTimes, indexDropTimes := getDropTimes(details)
+
+	allTables := getAllTablesWaitingForGC(details, progress)
+	if len(allTables) == 0 {
+		return nil
+	}
+	expired, earliestDeadline := refreshTables(ctx, execCfg, allTables, tableDropTimes, indexDropTimes, r.jobID, progress)
+	timerDuration := timeutil.Until(earliestDeadline)
+	if expired {
+		timerDuration = 0
+	} else if timerDuration > MaxSQLGCInterval {
+		timerDuration = MaxSQLGCInterval
+	}
+	timer := timeutil.NewTimer()
+	defer timer.Stop()
+	timer.Reset(timerDuration)
+
 	for {
 		select {
 		case <-gossipUpdateC:
+			// Upon notification of a gossip update, update the status of the relevant schema elements.
 			if log.V(2) {
 				log.Info(ctx, "received a new system config")
 			}
+			remainingTables := getAllTablesWaitingForGC(details, progress)
+			if len(remainingTables) == 0 {
+				return nil
+			}
+			expired, earliestDeadline = refreshTables(ctx, execCfg, remainingTables, tableDropTimes, indexDropTimes, r.jobID, progress)
+
+			if isDoneGC(progress) {
+				return nil
+			}
+
+			timerDuration := time.Until(earliestDeadline)
+			if expired {
+				timerDuration = 0
+			} else if timerDuration > MaxSQLGCInterval {
+				timerDuration = MaxSQLGCInterval
+			}
+
+			timer.Reset(timerDuration)
 		case <-timer.C:
 			timer.Read = true
 			if log.V(2) {
 				log.Info(ctx, "SchemaChangeGC timer triggered")
 			}
+			// Refresh the status of all tables in case any GC TTLs have changed.
+			remainingTables := getAllTablesWaitingForGC(details, progress)
+			_, earliestDeadline = refreshTables(ctx, execCfg, remainingTables, tableDropTimes, indexDropTimes, r.jobID, progress)
+
+			if didWork, err := performGC(ctx, execCfg, details, progress); err != nil {
+				return err
+			} else if didWork {
+				persistProgress(ctx, execCfg, r.jobID, progress)
+			}
+
+			if isDoneGC(progress) {
+				return nil
+			}
+
+			// Schedule the next check for GC.
+			timerDuration := time.Until(earliestDeadline)
+			if timerDuration > MaxSQLGCInterval {
+				timerDuration = MaxSQLGCInterval
+			}
+			timer.Reset(timerDuration)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-
-		// Refresh the status of all elements in case any GC TTLs have changed.
-		var expired bool
-		earliestDeadline := timeutil.Unix(0, math.MaxInt64)
-		if details.Tenant == nil {
-			remainingTables := getAllTablesWaitingForGC(details, progress)
-			expired, earliestDeadline = refreshTables(
-				ctx, execCfg, remainingTables, tableDropTimes, indexDropTimes, r.jobID, progress,
-			)
-		} else {
-			expired, earliestDeadline = refreshTenant(ctx, execCfg, details.Tenant.DropTime, details, progress)
-		}
-		timerDuration := time.Until(earliestDeadline)
-
-		if expired {
-			// Some elements have been marked as DELETING so save the progress.
-			persistProgress(ctx, execCfg, r.jobID, progress, runningStatusGC(progress))
-			if fn := execCfg.GCJobTestingKnobs.RunBeforePerformGC; fn != nil {
-				if err := fn(r.jobID); err != nil {
-					return err
-				}
-			}
-			if err := performGC(ctx, execCfg, details, progress); err != nil {
-				return err
-			}
-			persistProgress(ctx, execCfg, r.jobID, progress, sql.RunningStatusWaitingGC)
-
-			// Trigger immediate re-run in case of more expired elements.
-			timerDuration = 0
-		}
-
-		if isDoneGC(progress) {
-			return nil
-		}
-
-		// Schedule the next check for GC.
-		if timerDuration > MaxSQLGCInterval {
-			timerDuration = MaxSQLGCInterval
-		}
-		timer.Reset(timerDuration)
 	}
 }
 
@@ -202,7 +212,7 @@ func (r *schemaChangeGCResumer) isPermanentGCError(err error) bool {
 func init() {
 	createResumerFn := func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
 		return &schemaChangeGCResumer{
-			jobID: job.ID(),
+			jobID: *job.ID(),
 		}
 	}
 	jobs.RegisterConstructor(jobspb.TypeSchemaChangeGC, createResumerFn)

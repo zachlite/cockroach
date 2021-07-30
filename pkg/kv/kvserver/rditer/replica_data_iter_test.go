@@ -61,14 +61,11 @@ func uuidFromString(input string) uuid.UUID {
 }
 
 // createRangeData creates sample range data in all possible areas of
-// the key space. Returns a pair of slices:
-// - the encoded keys of all created data.
-// - the subset of the encoded keys that are replicated keys.
-//
-// TODO(sumeer): add lock table and corrsponding MVCC keys.
+// the key space. Returns a slice of the encoded keys of all created
+// data.
 func createRangeData(
 	t *testing.T, eng storage.Engine, desc roachpb.RangeDescriptor,
-) ([]storage.MVCCKey, []storage.MVCCKey) {
+) []storage.MVCCKey {
 	testTxnID := uuidFromString("0ce61c17-5eb4-4587-8c36-dcf4062ada4c")
 	testTxnID2 := uuidFromString("9855a1ef-8eb9-4c06-a106-cab1dda78a2b")
 
@@ -80,7 +77,7 @@ func createRangeData(
 	}{
 		{keys.AbortSpanKey(desc.RangeID, testTxnID), ts0},
 		{keys.AbortSpanKey(desc.RangeID, testTxnID2), ts0},
-		{keys.RangeGCThresholdKey(desc.RangeID), ts0},
+		{keys.RangeLastGCKey(desc.RangeID), ts0},
 		{keys.RangeAppliedStateKey(desc.RangeID), ts0},
 		{keys.RaftAppliedIndexLegacyKey(desc.RangeID), ts0},
 		{keys.RaftTruncatedStateLegacyKey(desc.RangeID), ts0},
@@ -106,32 +103,25 @@ func createRangeData(
 		{fakePrevKey(desc.EndKey), ts},
 	}
 
-	allKeys := []storage.MVCCKey{}
+	keys := []storage.MVCCKey{}
 	for _, keyTS := range keyTSs {
 		if err := storage.MVCCPut(context.Background(), eng, nil, keyTS.key, keyTS.ts, roachpb.MakeValueFromString("value"), nil); err != nil {
 			t.Fatal(err)
 		}
-		allKeys = append(allKeys, storage.MVCCKey{Key: keyTS.key, Timestamp: keyTS.ts})
+		keys = append(keys, storage.MVCCKey{Key: keyTS.key, Timestamp: keyTS.ts})
 	}
-	unreplicatedPrefix := keys.MakeRangeIDUnreplicatedPrefix(desc.RangeID)
-	var replicatedKeys []storage.MVCCKey
-	for i := range allKeys {
-		if bytes.HasPrefix(allKeys[i].Key, unreplicatedPrefix) {
-			continue
-		}
-		replicatedKeys = append(replicatedKeys, allKeys[i])
-	}
-
-	return allKeys, replicatedKeys
+	return keys
 }
 
-func verifyRDReplicatedOnlyMVCCIter(
-	t *testing.T, desc *roachpb.RangeDescriptor, eng storage.Engine, expectedKeys []storage.MVCCKey,
+func verifyRDIter(
+	t *testing.T,
+	desc *roachpb.RangeDescriptor,
+	readWriter storage.ReadWriter,
+	replicatedOnly bool,
+	expectedKeys []storage.MVCCKey,
 ) {
 	t.Helper()
 	verify := func(t *testing.T, useSpanSet, reverse bool) {
-		readWriter := eng.NewReadOnly()
-		defer readWriter.Close()
 		if useSpanSet {
 			var spans spanset.SpanSet
 			spans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{
@@ -148,7 +138,7 @@ func verifyRDReplicatedOnlyMVCCIter(
 			}, hlc.Timestamp{WallTime: 42})
 			readWriter = spanset.NewReadWriterAt(readWriter, &spans, hlc.Timestamp{WallTime: 42})
 		}
-		iter := NewReplicaMVCCDataIterator(desc, readWriter, reverse /* seekEnd */)
+		iter := NewReplicaDataIterator(desc, readWriter, replicatedOnly, reverse /* seekEnd */)
 		defer iter.Close()
 		i := 0
 		if reverse {
@@ -169,7 +159,7 @@ func verifyRDReplicatedOnlyMVCCIter(
 			if key := iter.Key(); !key.Equal(expectedKeys[i]) {
 				k1, ts1 := key.Key, key.Timestamp
 				k2, ts2 := expectedKeys[i].Key, expectedKeys[i].Timestamp
-				t.Errorf("%d: expected %q(%s); got %q(%s)", i, k2, ts2, k1, ts1)
+				t.Errorf("%d: expected %q(%d); got %q(%d)", i, k2, ts2, k1, ts1)
 			}
 			if reverse {
 				i--
@@ -190,50 +180,12 @@ func verifyRDReplicatedOnlyMVCCIter(
 	})
 }
 
-func verifyRDEngineIter(
-	t *testing.T, desc *roachpb.RangeDescriptor, eng storage.Engine, expectedKeys []storage.MVCCKey,
-) {
-	readWriter := eng.NewReadOnly()
-	defer readWriter.Close()
-	iter := NewReplicaEngineDataIterator(desc, readWriter, false)
-	defer iter.Close()
-	i := 0
-	for {
-		if ok, err := iter.Valid(); err != nil {
-			t.Fatal(err)
-		} else if !ok {
-			break
-		}
-		if i >= len(expectedKeys) {
-			t.Fatal("there are more keys in the iteration than expected")
-		}
-		key := iter.UnsafeKey()
-		if !key.IsMVCCKey() {
-			t.Errorf("%d: expected mvcc key: %s", i, key)
-		}
-		k, err := key.ToMVCCKey()
-		if err != nil {
-			t.Errorf("%d: %s", i, err.Error())
-		}
-		if !k.Equal(expectedKeys[i]) {
-			k1, ts1 := k.Key, k.Timestamp
-			k2, ts2 := expectedKeys[i].Key, expectedKeys[i].Timestamp
-			t.Errorf("%d: expected %q(%s); got %q(%s)", i, k2, ts2, k1, ts1)
-		}
-		i++
-		iter.Next()
-	}
-	if i != len(expectedKeys) {
-		t.Fatal("there are fewer keys in the iteration than expected")
-	}
-}
-
 // TestReplicaDataIterator verifies correct operation of iterator if
 // a range contains no data and never has.
 func TestReplicaDataIteratorEmptyRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 
 	desc := &roachpb.RangeDescriptor{
@@ -242,8 +194,7 @@ func TestReplicaDataIteratorEmptyRange(t *testing.T) {
 		EndKey:   roachpb.RKey("z"),
 	}
 
-	verifyRDReplicatedOnlyMVCCIter(t, desc, eng, []storage.MVCCKey{})
-	verifyRDEngineIter(t, desc, eng, []storage.MVCCKey{})
+	verifyRDIter(t, desc, eng, false /* replicatedOnly */, []storage.MVCCKey{})
 }
 
 // TestReplicaDataIterator creates three ranges {"a"-"b" (pre), "b"-"c"
@@ -255,7 +206,7 @@ func TestReplicaDataIteratorEmptyRange(t *testing.T) {
 func TestReplicaDataIterator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 
 	descPre := roachpb.RangeDescriptor{
@@ -275,33 +226,32 @@ func TestReplicaDataIterator(t *testing.T) {
 	}
 
 	// Create range data for all three ranges.
-	preKeys, preReplicatedKeys := createRangeData(t, eng, descPre)
-	curKeys, curReplicatedKeys := createRangeData(t, eng, desc)
-	postKeys, postReplicatedKeys := createRangeData(t, eng, descPost)
+	preKeys := createRangeData(t, eng, descPre)
+	curKeys := createRangeData(t, eng, desc)
+	postKeys := createRangeData(t, eng, descPost)
 
-	// Verify the replicated contents of the "b"-"c" range.
-	t.Run("cur-replicated", func(t *testing.T) {
-		verifyRDReplicatedOnlyMVCCIter(t, &desc, eng, curReplicatedKeys)
-	})
-	// Verify the complete contents of the "b"-"c" range.
+	// Verify the contents of the "b"-"c" range.
 	t.Run("cur", func(t *testing.T) {
-		verifyRDEngineIter(t, &desc, eng, curKeys)
+		verifyRDIter(t, &desc, eng, false /* replicatedOnly */, curKeys)
 	})
 
-	// Verify the replicated keys in pre & post ranges.
-	for _, test := range []struct {
-		name string
-		desc *roachpb.RangeDescriptor
-		keys []storage.MVCCKey
-	}{
-		{"pre-replicated", &descPre, preReplicatedKeys},
-		{"post-replicated", &descPost, postReplicatedKeys},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			verifyRDReplicatedOnlyMVCCIter(t, test.desc, eng, test.keys)
-		})
+	// Verify that the replicated-only iterator ignores unreplicated keys.
+	unreplicatedPrefix := keys.MakeRangeIDUnreplicatedPrefix(desc.RangeID)
+	iter := NewReplicaDataIterator(&desc, eng,
+		true /* replicatedOnly */, false /* seekEnd */)
+	defer iter.Close()
+	for ; ; iter.Next() {
+		if ok, err := iter.Valid(); err != nil {
+			t.Fatal(err)
+		} else if !ok {
+			break
+		}
+		if bytes.HasPrefix(iter.Key().Key, unreplicatedPrefix) {
+			t.Fatalf("unexpected unreplicated key: %s", iter.Key().Key)
+		}
 	}
-	// Verify the complete keys in pre & post ranges.
+
+	// Verify the keys in pre & post ranges.
 	for _, test := range []struct {
 		name string
 		desc *roachpb.RangeDescriptor
@@ -311,30 +261,7 @@ func TestReplicaDataIterator(t *testing.T) {
 		{"post", &descPost, postKeys},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			verifyRDEngineIter(t, test.desc, eng, test.keys)
+			verifyRDIter(t, test.desc, eng, false /* replicatedOnly */, test.keys)
 		})
 	}
-}
-
-func checkOrdering(t *testing.T, ranges []KeyRange) {
-	for i := 1; i < len(ranges); i++ {
-		if ranges[i].Start.Less(ranges[i-1].End) {
-			t.Fatalf("ranges need to be ordered and non-overlapping, but %s > %s",
-				ranges[i-1].End, ranges[i].Start)
-		}
-	}
-}
-
-func TestReplicaKeyRanges(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	desc := roachpb.RangeDescriptor{
-		RangeID:  1,
-		StartKey: roachpb.RKeyMin,
-		EndKey:   roachpb.RKeyMax,
-	}
-	checkOrdering(t, MakeAllKeyRanges(&desc))
-	checkOrdering(t, MakeReplicatedKeyRanges(&desc))
-	checkOrdering(t, MakeReplicatedKeyRangesExceptLockTable(&desc))
-	checkOrdering(t, MakeReplicatedKeyRangesExceptRangeID(&desc))
 }

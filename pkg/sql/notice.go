@@ -21,24 +21,24 @@ import (
 
 // NoticesEnabled is the cluster setting that allows users
 // to enable notices.
-var NoticesEnabled = settings.RegisterBoolSetting(
+var NoticesEnabled = settings.RegisterPublicBoolSetting(
 	"sql.notices.enabled",
 	"enable notices in the server/client protocol being sent",
 	true,
-).WithPublic()
+)
 
 // noticeSender is a subset of RestrictedCommandResult which allows
 // sending notices.
 type noticeSender interface {
-	BufferNotice(pgnotice.Notice)
+	AppendNotice(error)
 }
 
-// BufferClientNotice implements the tree.ClientNoticeSender interface.
-func (p *planner) BufferClientNotice(ctx context.Context, notice pgnotice.Notice) {
+// SendClientNotice implements the tree.ClientNoticeSender interface.
+func (p *planner) SendClientNotice(ctx context.Context, err error) {
 	if log.V(2) {
-		log.Infof(ctx, "buffered notice: %+v", notice)
+		log.Infof(ctx, "out-of-band notice: %+v", err)
 	}
-	noticeSeverity, ok := pgnotice.ParseDisplaySeverity(pgerror.GetSeverity(notice))
+	noticeSeverity, ok := pgnotice.ParseDisplaySeverity(pgerror.GetSeverity(err))
 	if !ok {
 		noticeSeverity = pgnotice.DisplaySeverityNotice
 	}
@@ -51,5 +51,5 @@ func (p *planner) BufferClientNotice(ctx context.Context, notice pgnotice.Notice
 		// * the notice protocol was disabled
 		return
 	}
-	p.noticeSender.BufferNotice(notice)
+	p.noticeSender.AppendNotice(err)
 }

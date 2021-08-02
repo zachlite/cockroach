@@ -10,11 +10,7 @@
 
 package syncutil
 
-import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
-)
+import "testing"
 
 const magic64 = 0xdeddeadbeefbeef
 
@@ -44,12 +40,4 @@ func TestAtomicFloat64(t *testing.T) {
 	if x.before != magic64 || x.after != magic64 {
 		t.Fatalf("wrong magic: %#x _ %#x != %#x _ %#x", x.before, x.after, uint64(magic64), uint64(magic64))
 	}
-}
-
-func TestAtomicBool(t *testing.T) {
-	var x AtomicBool
-	x.Set(true)
-	require.Equal(t, x.Get(), true)
-	require.Equal(t, x.Swap(false), true)
-	require.Equal(t, x.Get(), false)
 }

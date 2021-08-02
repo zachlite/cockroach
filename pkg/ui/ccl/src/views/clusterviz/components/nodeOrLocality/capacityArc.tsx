@@ -33,11 +33,12 @@ interface CapacityArcProps {
 }
 
 export class CapacityArc extends React.Component<CapacityArcProps> {
+
   render() {
     // Compute used percentage.
     const usedCapacity = this.props.usedCapacity;
     const capacity = this.props.usableCapacity;
-    const capacityUsedPct = capacity ? (usedCapacity / capacity) * 100 : 0;
+    const capacityUsedPct = capacity ? (usedCapacity / capacity * 100) : 0;
 
     return (
       <g>
@@ -109,4 +110,5 @@ export class CapacityArc extends React.Component<CapacityArcProps> {
       </g>
     );
   }
+
 }

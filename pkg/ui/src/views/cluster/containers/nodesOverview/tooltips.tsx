@@ -123,7 +123,7 @@ export const NodeCountTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -137,7 +137,7 @@ export const UptimeTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -151,7 +151,7 @@ export const ReplicasTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -173,7 +173,7 @@ export const NodelistCapacityUsageTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -190,7 +190,7 @@ export const MemoryUseTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -204,7 +204,7 @@ export const CPUsTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -218,7 +218,7 @@ export const VersionTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -235,7 +235,7 @@ export const StatusTooltip: PlainTooltip = (props) => (
       </div>
     }
   >
-    <span className={"column-title"}>{props.children}</span>
+    {props.children}
   </Tooltip>
 );
 
@@ -250,6 +250,7 @@ export const plainNodeTooltips: PlainTooltip[] = [
   StatusTooltip,
 ];
 
+// tslint:disable-next-line:variable-name
 export const NodeLocalityColumn: React.FC<{
   record: NodeStatusRow;
   visible?: boolean;

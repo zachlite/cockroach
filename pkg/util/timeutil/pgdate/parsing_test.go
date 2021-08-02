@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	_ "github.com/lib/pq"
 )
@@ -820,7 +819,7 @@ func BenchmarkParseTimestampComparison(b *testing.B) {
 }
 
 // bench compares our ParseTimestamp to ParseInLocation, optionally
-// chained with a timeutil.LoadLocation() for resolving named zones.
+// chained with a time.LoadLocation() for resolving named zones.
 // The layout parameter is only used for time.ParseInLocation().
 // When a named timezone is used, it must be passed via locationName
 // so that it may be resolved to a time.Location. It will be
@@ -851,7 +850,7 @@ func bench(b *testing.B, layout string, s string, locationName string) {
 					loc := time.UTC
 					if locationName != "" {
 						var err error
-						loc, err = timeutil.LoadLocation(locationName)
+						loc, err = time.LoadLocation(locationName)
 						if err != nil {
 							b.Fatal(err)
 						}

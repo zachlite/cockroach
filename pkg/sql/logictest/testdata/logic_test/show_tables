@@ -3,19 +3,19 @@
 statement ok
 CREATE TABLE show_this_table()
 
-query TTTTIT
+query TTTTI
 SHOW TABLES
 ----
-public  show_this_table  table  root  0  NULL
+public  show_this_table  table  root  0
 
 statement ok
 CREATE DATABASE other;
 SET DATABASE = 'other'
 
-query TTTTIT
+query TTTTI
 SHOW TABLES FROM test
 ----
-public  show_this_table  table  root  0  NULL
+public  show_this_table  table  root  0
 
 statement ok
 SET DATABASE = 'test'
@@ -23,12 +23,12 @@ SET DATABASE = 'test'
 statement ok
 SET CLUSTER SETTING sql.show_tables.estimated_row_count.enabled = false
 
-query TTTTT
+query TTTT
 SHOW TABLES
 ----
-public  show_this_table  table  root  NULL
+public  show_this_table  table  root
 
-query TTTTTT
+query TTTTT
 SHOW TABLES WITH COMMENT
 ----
-public  show_this_table  table  root  NULL  ·
+public  show_this_table  table  root  ·

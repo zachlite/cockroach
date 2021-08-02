@@ -18,16 +18,37 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
-const minMaxAggTmpl = "pkg/sql/colexec/colexecagg/min_max_agg_tmpl.go"
+type minMaxTmplInfo struct {
+	// Note that we embed the corresponding comparison overload (either LT or
+	// GT) into this struct (so that we could have access to methods like Set,
+	// Range, etc.) but also customize the result variables.
+	*lastArgWidthOverload
+	Agg string
+	// The following three fields have "Agg" prefix in order to not collide
+	// with the fields in lastArgWidthOverload, just to be safe.
+	AggRetGoTypeSlice string
+	AggRetGoType      string
+	AggRetVecMethod   string
+}
+
+// AggNameTitle returns the aggregation name in title case, e.g. "Min".
+func (a minMaxTmplInfo) AggNameTitle() string {
+	return strings.Title(a.Agg)
+}
+
+// Avoid unused warning for functions which are only used in templates.
+var _ = minMaxTmplInfo{}.AggNameTitle()
+
+const minMaxAggTmpl = "pkg/sql/colexec/min_max_agg_tmpl.go"
 
 func genMinMaxAgg(inputFileContents string, wr io.Writer) error {
+	// TODO(yuzefovich): clean up this file as per comments in #54080.
 	r := strings.NewReplacer(
-		"_CANONICAL_TYPE_FAMILY", "{{.CanonicalTypeFamilyStr}}",
-		"_TYPE_WIDTH", typeWidthReplacement,
-		"_AGG_TITLE", "{{.AggTitle}}",
-		"_AGG", "{{$agg}}",
-		"_GOTYPESLICE", "{{.GoTypeSliceName}}",
-		"_GOTYPE", "{{.GoType}}",
+		"_AGG_TITLE", "{{.AggNameTitle}}",
+		"_AGG", "{{.Agg}}",
+		"_RET_GOTYPESLICE", "{{.AggRetGoTypeSlice}}",
+		"_RET_GOTYPE", "{{.AggRetGoType}}",
+		"_RET_TYPE", "{{.AggRetVecMethod}}",
 		"_TYPE", "{{.VecMethod}}",
 		"TemplateType", "{{.VecMethod}}",
 	)
@@ -36,8 +57,8 @@ func genMinMaxAgg(inputFileContents string, wr io.Writer) error {
 	assignCmpRe := makeFunctionRegex("_ASSIGN_CMP", 6)
 	s = assignCmpRe.ReplaceAllString(s, makeTemplateFunctionCall("Assign", 6))
 
-	accumulateMinMax := makeFunctionRegex("_ACCUMULATE_MINMAX", 5)
-	s = accumulateMinMax.ReplaceAllString(s, `{{template "accumulateMinMax" buildDict "Global" . "HasNulls" $4 "HasSel" $5}}`)
+	accumulateMinMax := makeFunctionRegex("_ACCUMULATE_MINMAX", 4)
+	s = accumulateMinMax.ReplaceAllString(s, `{{template "accumulateMinMax" buildDict "Global" . "HasNulls" $4}}`)
 
 	s = replaceManipulationFuncs(s)
 
@@ -45,25 +66,32 @@ func genMinMaxAgg(inputFileContents string, wr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return tmpl.Execute(wr, []struct {
-		Agg       string
-		AggTitle  string
-		Overloads []*oneArgOverload
-	}{
-		{
-			Agg:       "min",
-			AggTitle:  "Min",
-			Overloads: sameTypeComparisonOpToOverloads[tree.LT],
-		},
-		{
-			Agg:       "max",
-			AggTitle:  "Max",
-			Overloads: sameTypeComparisonOpToOverloads[tree.GT],
-		},
-	})
+
+	var tmplInfos []minMaxTmplInfo
+	for _, agg := range []string{"min", "max"} {
+		cmpOp := tree.LT
+		if agg == "max" {
+			cmpOp = tree.GT
+		}
+		for _, ov := range sameTypeComparisonOpToOverloads[cmpOp] {
+			for i := range ov.WidthOverloads {
+				widthOv := ov.WidthOverloads[i]
+				retGoTypeSlice := widthOv.GoTypeSliceName()
+				retGoType := widthOv.GoType
+				retVecMethod := widthOv.VecMethod
+				tmplInfos = append(tmplInfos, minMaxTmplInfo{
+					lastArgWidthOverload: widthOv,
+					Agg:                  agg,
+					AggRetGoTypeSlice:    retGoTypeSlice,
+					AggRetGoType:         retGoType,
+					AggRetVecMethod:      retVecMethod,
+				})
+			}
+		}
+	}
+	return tmpl.Execute(wr, tmplInfos)
 }
 
 func init() {
-	registerAggGenerator(
-		genMinMaxAgg, "min_max_agg.eg.go", minMaxAggTmpl, true /* genWindowVariant */)
+	registerAggGenerator(genMinMaxAgg, "min_max_agg.eg.go", minMaxAggTmpl)
 }

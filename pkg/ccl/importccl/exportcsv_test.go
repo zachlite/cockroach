@@ -12,11 +12,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	gosql "database/sql"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,9 +85,11 @@ func TestExportImportBank(t *testing.T) {
 	chunkSize := 13
 	baseExportDir := "userfile:///t/"
 	for _, null := range []string{"", "NULL"} {
-		nullAs := fmt.Sprintf(", nullas = '%s'", null)
-		nullIf := fmt.Sprintf(", nullif = '%s'", null)
-
+		nullAs, nullIf := "", ", nullif = ''"
+		if null != "" {
+			nullAs = fmt.Sprintf(", nullas = '%s'", null)
+			nullIf = fmt.Sprintf(", nullif = '%s'", null)
+		}
 		t.Run("null="+null, func(t *testing.T) {
 			exportDir := filepath.Join(baseExportDir, t.Name())
 
@@ -115,48 +115,6 @@ func TestExportImportBank(t *testing.T) {
 			db.Exec(t, "DROP TABLE bank2")
 		})
 	}
-}
-
-// Tests if user does not specify nullas option and imports null data, an error is raised.
-func TestExportNullWithEmptyNullAs(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	dir, cleanup := testutils.TempDir(t)
-	defer cleanup()
-
-	tc := testcluster.StartTestCluster(
-		t, 1, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: dir}})
-	defer tc.Stopper().Stop(ctx)
-
-	conn := tc.Conns[0]
-	db := sqlutils.MakeSQLRunner(conn)
-
-	// Set up dummy accounts table with NULL value
-	db.Exec(t, `
-		CREATE TABLE accounts (id INT PRIMARY KEY, balance INT);
-		INSERT INTO accounts VALUES (1, NULL), (2, 8);
-	`)
-
-	// Case when `nullas` option is unspecified: expect error
-	const stmtWithoutNullas = "EXPORT INTO CSV 'nodelocal://0/t' FROM SELECT * FROM accounts"
-	db.ExpectErr(t, "NULL value encountered during EXPORT, "+
-		"use `WITH nullas` to specify the string representation of NULL", stmtWithoutNullas)
-
-	// Case when `nullas` option is specified: operation is successful and NULLs are encoded to "None"
-	const stmtWithNullas = `EXPORT INTO CSV 'nodelocal://0/t' WITH nullas="None" FROM SELECT * FROM accounts`
-	db.Exec(t, stmtWithNullas)
-	contents := readFileByGlob(t, filepath.Join(dir, "t", "export*-n1.0.csv"))
-	require.Equal(t, "1,None\n2,8\n", string(contents))
-
-	// Verify successful IMPORT statement `WITH nullif="None"` to complete round trip
-	const importStmt = `IMPORT TABLE accounts2(id INT PRIMARY KEY, balance INT) CSV DATA ('nodelocal://0/t/export*-n1.0.csv') WITH nullif="None"`
-	db.Exec(t, importStmt)
-	db.CheckQueryResults(t,
-		"SELECT * FROM accounts2", db.QueryStr(t, "SELECT * FROM accounts"),
-	)
-
 }
 
 func TestMultiNodeExportStmt(t *testing.T) {
@@ -192,11 +150,8 @@ func TestMultiNodeExportStmt(t *testing.T) {
 			totalBytes += bytes
 			nodesSeen[strings.SplitN(filename, ".", 2)[0]] = true
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatalf("unexpected error during export: %s", err.Error())
-		}
 		if totalRows != exportRows {
-			t.Fatalf("expected %d rows, got %d", exportRows, totalRows)
+			t.Fatalf("Expected %d rows, got %d", exportRows, totalRows)
 		}
 		if expected := exportRows / chunkSize; files < expected {
 			t.Fatalf("expected at least %d files, got %d", expected, files)
@@ -383,7 +338,7 @@ func TestExportShow(t *testing.T) {
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
 
-	sqlDB.Exec(t, `EXPORT INTO CSV 'nodelocal://0/show' FROM SELECT database_name, owner FROM [SHOW DATABASES] ORDER BY database_name`)
+	sqlDB.Exec(t, `EXPORT INTO CSV 'nodelocal://0/show' FROM SELECT * FROM [SHOW DATABASES] ORDER BY database_name`)
 	content := readFileByGlob(t, filepath.Join(dir, "show", "export*-n1.0.csv"))
 
 	if expected, got := "defaultdb,"+security.RootUser+"\npostgres,"+security.RootUser+"\nsystem,"+
@@ -405,106 +360,6 @@ func TestExportVectorized(t *testing.T) {
 	sqlDB := sqlutils.MakeSQLRunner(db)
 
 	sqlDB.Exec(t, `CREATE TABLE t(a INT PRIMARY KEY)`)
+	sqlDB.Exec(t, `SET vectorize_row_count_threshold=0`)
 	sqlDB.Exec(t, `EXPORT INTO CSV 'http://0.1:37957/exp_1' FROM TABLE t`)
-}
-
-// TestExportFeatureFlag tests the feature flag logic that allows the EXPORT
-// command to be toggled off via cluster settings.
-func TestExportFeatureFlag(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	dir, cleanupDir := testutils.TempDir(t)
-	defer cleanupDir()
-
-	srv, db, _ := serverutils.StartServer(t, base.TestServerArgs{ExternalIODir: dir})
-	defer srv.Stopper().Stop(context.Background())
-	sqlDB := sqlutils.MakeSQLRunner(db)
-
-	// Feature flag is off — test that EXPORT surfaces error.
-	sqlDB.Exec(t, `SET CLUSTER SETTING feature.export.enabled = FALSE`)
-	sqlDB.Exec(t, `CREATE TABLE feature_flags (a INT PRIMARY KEY)`)
-	sqlDB.ExpectErr(t, `feature EXPORT was disabled by the database administrator`,
-		`EXPORT INTO CSV 'nodelocal://0/%s/' FROM TABLE feature_flags`)
-
-	// Feature flag is on — test that EXPORT does not error.
-	sqlDB.Exec(t, `SET CLUSTER SETTING feature.export.enabled = TRUE`)
-	sqlDB.Exec(t, `EXPORT INTO CSV 'nodelocal://0/%s/' FROM TABLE feature_flags`)
-}
-
-func TestExportPrivileges(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	dir, cleanupDir := testutils.TempDir(t)
-	defer cleanupDir()
-
-	srv, db, _ := serverutils.StartServer(t, base.TestServerArgs{ExternalIODir: dir})
-	defer srv.Stopper().Stop(context.Background())
-	sqlDB := sqlutils.MakeSQLRunner(db)
-	sqlDB.Exec(t, `CREATE USER testuser`)
-	sqlDB.Exec(t, `CREATE TABLE privs (a INT)`)
-
-	pgURL, cleanup := sqlutils.PGUrl(t, srv.ServingSQLAddr(),
-		"TestExportPrivileges-testuser", url.User("testuser"))
-	defer cleanup()
-	startTestUser := func() *gosql.DB {
-		testuser, err := gosql.Open("postgres", pgURL.String())
-		require.NoError(t, err)
-		return testuser
-	}
-	testuser := startTestUser()
-	_, err := testuser.Exec(`EXPORT INTO CSV 'nodelocal://0/privs' FROM TABLE privs`)
-	require.True(t, testutils.IsError(err, "testuser does not have SELECT privilege"))
-
-	dest := "nodelocal://0/privs_placeholder"
-	_, err = testuser.Exec(`EXPORT INTO CSV $1 FROM TABLE privs`, dest)
-	require.True(t, testutils.IsError(err, "testuser does not have SELECT privilege"))
-	testuser.Close()
-
-	// Grant SELECT privilege.
-	sqlDB.Exec(t, `GRANT SELECT ON TABLE privs TO testuser`)
-
-	// The above SELECT GRANT hangs if we leave the user conn open. Thus, we need
-	// to reinitialize it here.
-	testuser = startTestUser()
-	defer testuser.Close()
-
-	_, err = testuser.Exec(`EXPORT INTO CSV 'nodelocal://0/privs' FROM TABLE privs`)
-	require.True(t, testutils.IsError(err,
-		"only users with the admin role are allowed to EXPORT to the specified URI"))
-	_, err = testuser.Exec(`EXPORT INTO CSV $1 FROM TABLE privs`, dest)
-	require.True(t, testutils.IsError(err,
-		"only users with the admin role are allowed to EXPORT to the specified URI"))
-
-	sqlDB.Exec(t, `GRANT ADMIN TO testuser`)
-
-	_, err = testuser.Exec(`EXPORT INTO CSV 'nodelocal://0/privs' FROM TABLE privs`)
-	require.NoError(t, err)
-	_, err = testuser.Exec(`EXPORT INTO CSV $1 FROM TABLE privs`, dest)
-	require.NoError(t, err)
-}
-
-func TestExportTargetFileSizeSetting(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	dir, cleanup := testutils.TempDir(t)
-	defer cleanup()
-
-	tc := testcluster.StartTestCluster(
-		t, 1, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: dir}})
-	defer tc.Stopper().Stop(ctx)
-
-	conn := tc.Conns[0]
-	sqlDB := sqlutils.MakeSQLRunner(conn)
-
-	sqlDB.Exec(t, `EXPORT INTO CSV 'nodelocal://0/foo' WITH chunk_size='10KB' FROM select i, gen_random_uuid() from generate_series(1, 4000) as i;`)
-	files, err := ioutil.ReadDir(filepath.Join(dir, "foo"))
-	require.NoError(t, err)
-	require.Equal(t, 14, len(files))
-
-	sqlDB.Exec(t, `EXPORT INTO CSV 'nodelocal://0/foo-compressed' WITH chunk_size='10KB',compression='gzip' FROM select i, gen_random_uuid() from generate_series(1, 4000) as i;`)
-	zipFiles, err := ioutil.ReadDir(filepath.Join(dir, "foo-compressed"))
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(zipFiles), 6)
 }

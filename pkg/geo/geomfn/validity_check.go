@@ -13,8 +13,6 @@ package geomfn
 import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geos"
-	"github.com/cockroachdb/errors"
-	"github.com/twpayne/go-geom"
 )
 
 // ValidDetail contains information about the validity of a geometry.
@@ -66,30 +64,6 @@ func IsValidDetail(g geo.Geometry, flags int) (ValidDetail, error) {
 	}, nil
 }
 
-// IsValidTrajectory returns whether a geometry encodes a valid trajectory
-func IsValidTrajectory(line geo.Geometry) (bool, error) {
-	t, err := line.AsGeomT()
-	if err != nil {
-		return false, err
-	}
-	lineString, ok := t.(*geom.LineString)
-	if !ok {
-		return false, errors.Newf("expected LineString, got %s", line.ShapeType().String())
-	}
-	mIndex := t.Layout().MIndex()
-	if mIndex < 0 {
-		return false, errors.New("LineString does not have M coordinates")
-	}
-
-	coords := lineString.Coords()
-	for i := 1; i < len(coords); i++ {
-		if coords[i][mIndex] <= coords[i-1][mIndex] {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
 // MakeValid returns a valid form of the given Geometry.
 func MakeValid(g geo.Geometry) (geo.Geometry, error) {
 	validEWKB, err := geos.MakeValid(g.EWKB())
@@ -97,13 +71,4 @@ func MakeValid(g geo.Geometry) (geo.Geometry, error) {
 		return geo.Geometry{}, err
 	}
 	return geo.ParseGeometryFromEWKB(validEWKB)
-}
-
-// EqualsExact validates if two geometry objects are exact equal under some epsilon
-func EqualsExact(lhs, rhs geo.Geometry, epsilon float64) bool {
-	equalsExact, err := geos.EqualsExact(lhs.EWKB(), rhs.EWKB(), epsilon)
-	if err != nil {
-		return false
-	}
-	return equalsExact
 }

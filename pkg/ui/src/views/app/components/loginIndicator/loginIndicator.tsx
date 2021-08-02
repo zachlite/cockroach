@@ -30,10 +30,7 @@ interface LoginIndicatorState {
   isOpenMenu: boolean;
 }
 
-class LoginIndicator extends React.Component<
-  LoginIndicatorProps,
-  LoginIndicatorState
-> {
+class LoginIndicator extends React.Component<LoginIndicatorProps, LoginIndicatorState> {
   constructor(props: LoginIndicatorProps) {
     super(props);
     this.state = {
@@ -45,7 +42,7 @@ class LoginIndicator extends React.Component<
     this.setState({
       isOpenMenu: nextState,
     });
-  };
+  }
 
   render() {
     const { loginState, handleLogout } = this.props;
@@ -80,7 +77,9 @@ class LoginIndicator extends React.Component<
           visible={isOpenMenu}
           onVisibleChange={this.onUserMenuToggle}
         >
-          <UserMenu userName={user} onLogoutClick={handleLogout} />
+          <UserMenu
+            userName={user}
+            onLogoutClick={handleLogout}/>
         </Popover>
       </div>
     );

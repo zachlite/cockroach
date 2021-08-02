@@ -20,9 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/optional"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // sorter sorts the input rows according to the specified ordering.
@@ -53,14 +55,14 @@ func (s *sorterBase) init(
 	opts execinfra.ProcStateOpts,
 ) error {
 	ctx := flowCtx.EvalCtx.Ctx()
-	if execinfra.ShouldCollectStats(ctx, flowCtx) {
+	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		input = newInputStatCollector(input)
-		s.ExecStatsForTrace = s.execStatsForTrace
+		s.FinishTrace = s.outputStatsToTrace
 	}
 
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will overflow to disk if this limit is not enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, fmt.Sprintf("%s-limited", processorName))
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, fmt.Sprintf("%s-limited", processorName))
 	if err := s.ProcessorBase.Init(
 		self, post, input.OutputTypes(), flowCtx, processorID, output, memMonitor, opts,
 	); err != nil {
@@ -68,7 +70,7 @@ func (s *sorterBase) init(
 		return err
 	}
 
-	s.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, fmt.Sprintf("%s-disk", processorName))
+	s.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.Cfg.DiskMonitor, fmt.Sprintf("%s-disk", processorName))
 	rc := rowcontainer.DiskBackedRowContainer{}
 	rc.Init(
 		ordering,
@@ -116,27 +118,60 @@ func (s *sorterBase) close() {
 		if s.i != nil {
 			s.i.Close()
 		}
-		s.rows.Close(s.Ctx)
-		s.MemMonitor.Stop(s.Ctx)
+		ctx := s.Ctx
+		s.rows.Close(ctx)
+		s.MemMonitor.Stop(ctx)
 		if s.diskMonitor != nil {
-			s.diskMonitor.Stop(s.Ctx)
+			s.diskMonitor.Stop(ctx)
 		}
 	}
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (s *sorterBase) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getInputStats(s.input)
-	if !ok {
-		return nil
+var _ execinfrapb.DistSQLSpanStats = &SorterStats{}
+
+const sorterTagPrefix = "sorter."
+
+// Stats implements the SpanStats interface.
+func (ss *SorterStats) Stats() map[string]string {
+	statsMap := ss.InputStats.Stats(sorterTagPrefix)
+	statsMap[sorterTagPrefix+MaxMemoryTagSuffix] = humanizeutil.IBytes(ss.MaxAllocatedMem)
+	statsMap[sorterTagPrefix+MaxDiskTagSuffix] = humanizeutil.IBytes(ss.MaxAllocatedDisk)
+	return statsMap
+}
+
+// StatsForQueryPlan implements the DistSQLSpanStats interface.
+func (ss *SorterStats) StatsForQueryPlan() []string {
+	stats := ss.InputStats.StatsForQueryPlan("" /* prefix */)
+
+	if ss.MaxAllocatedMem != 0 {
+		stats = append(stats,
+			fmt.Sprintf("%s: %s", MaxMemoryQueryPlanSuffix, humanizeutil.IBytes(ss.MaxAllocatedMem)))
 	}
-	return &execinfrapb.ComponentStats{
-		Inputs: []execinfrapb.InputStats{is},
-		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem:  optional.MakeUint(uint64(s.MemMonitor.MaximumBytes())),
-			MaxAllocatedDisk: optional.MakeUint(uint64(s.diskMonitor.MaximumBytes())),
-		},
-		Output: s.OutputHelper.Stats(),
+
+	if ss.MaxAllocatedDisk != 0 {
+		stats = append(stats,
+			fmt.Sprintf("%s: %s", MaxDiskQueryPlanSuffix, humanizeutil.IBytes(ss.MaxAllocatedDisk)))
+	}
+
+	return stats
+}
+
+// outputStatsToTrace outputs the collected sorter stats to the trace. Will fail
+// silently if stats are not being collected.
+func (s *sorterBase) outputStatsToTrace() {
+	is, ok := getInputStats(s.FlowCtx, s.input)
+	if !ok {
+		return
+	}
+	if sp := opentracing.SpanFromContext(s.Ctx); sp != nil {
+		tracing.SetSpanStats(
+			sp,
+			&SorterStats{
+				InputStats:       is,
+				MaxAllocatedMem:  s.MemMonitor.MaximumBytes(),
+				MaxAllocatedDisk: s.diskMonitor.MaximumBytes(),
+			},
+		)
 	}
 }
 
@@ -150,12 +185,17 @@ func newSorter(
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
 	count := uint64(0)
-	if post.Limit != 0 {
+	if post.Limit != 0 && post.Filter.Empty() {
 		// The sorter needs to produce Offset + Limit rows. The ProcOutputHelper
 		// will discard the first Offset ones.
-		if post.Limit <= math.MaxUint64-post.Offset {
-			count = post.Limit + post.Offset
+		// LIMIT and OFFSET should each never be greater than math.MaxInt64, the
+		// parser ensures this.
+		if post.Limit > math.MaxInt64 || post.Offset > math.MaxInt64 {
+			return nil, errors.AssertionFailedf(
+				"error creating sorter: limit %d offset %d too large",
+				errors.Safe(post.Limit), errors.Safe(post.Offset))
 		}
+		count = post.Limit + post.Offset
 	}
 
 	// Choose the optimal processor.
@@ -213,7 +253,7 @@ func newSortAllProcessor(
 		spec.OrderingMatchLen,
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				proc.close()
 				return nil
 			},
@@ -225,14 +265,15 @@ func newSortAllProcessor(
 }
 
 // Start is part of the RowSource interface.
-func (s *sortAllProcessor) Start(ctx context.Context) {
-	ctx = s.StartInternal(ctx, sortAllProcName)
+func (s *sortAllProcessor) Start(ctx context.Context) context.Context {
 	s.input.Start(ctx)
+	ctx = s.StartInternal(ctx, sortAllProcName)
 
 	valid, err := s.fill()
 	if !valid || err != nil {
 		s.MoveToDraining(err)
 	}
+	return ctx
 }
 
 // fill fills s.rows with the input's rows.
@@ -268,6 +309,11 @@ func (s *sortAllProcessor) fill() (ok bool, _ error) {
 	s.i = s.rows.NewFinalIterator(ctx)
 	s.i.Rewind()
 	return true, nil
+}
+
+// ConsumerDone is part of the RowSource interface.
+func (s *sortAllProcessor) ConsumerDone() {
+	s.input.ConsumerDone()
 }
 
 // ConsumerClosed is part of the RowSource interface.
@@ -325,7 +371,7 @@ func newSortTopKProcessor(
 		ordering, spec.OrderingMatchLen,
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				proc.close()
 				return nil
 			},
@@ -337,9 +383,9 @@ func newSortTopKProcessor(
 }
 
 // Start is part of the RowSource interface.
-func (s *sortTopKProcessor) Start(ctx context.Context) {
-	ctx = s.StartInternal(ctx, sortTopKProcName)
+func (s *sortTopKProcessor) Start(ctx context.Context) context.Context {
 	s.input.Start(ctx)
+	ctx = s.StartInternal(ctx, sortTopKProcName)
 
 	// The execution loop for the SortTopK processor is similar to that of the
 	// SortAll processor; the difference is that we push rows into a max-heap
@@ -382,6 +428,12 @@ func (s *sortTopKProcessor) Start(ctx context.Context) {
 	s.rows.Sort(ctx)
 	s.i = s.rows.NewFinalIterator(ctx)
 	s.i.Rewind()
+	return ctx
+}
+
+// ConsumerDone is part of the RowSource interface.
+func (s *sortTopKProcessor) ConsumerDone() {
+	s.input.ConsumerDone()
 }
 
 // ConsumerClosed is part of the RowSource interface.
@@ -422,7 +474,7 @@ func newSortChunksProcessor(
 		proc, flowCtx, processorID, sortChunksProcName, input, post, out, ordering, spec.OrderingMatchLen,
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				proc.close()
 				return nil
 			},
@@ -520,9 +572,9 @@ func (s *sortChunksProcessor) fill() (bool, error) {
 }
 
 // Start is part of the RowSource interface.
-func (s *sortChunksProcessor) Start(ctx context.Context) {
-	ctx = s.StartInternal(ctx, sortChunksProcName)
+func (s *sortChunksProcessor) Start(ctx context.Context) context.Context {
 	s.input.Start(ctx)
+	return s.StartInternal(ctx, sortChunksProcName)
 }
 
 // Next is part of the RowSource interface.

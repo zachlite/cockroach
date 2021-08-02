@@ -26,14 +26,10 @@ describe("statementsSagas", () => {
   describe("requestDiagnostics generator", () => {
     it("calls api#createStatementDiagnosticsReport with statement fingerprint as payload", () => {
       const statementFingerprint = "some-id";
-      const action = createStatementDiagnosticsReportAction(
-        statementFingerprint,
-      );
-      const diagnosticsReportRequest = new CreateStatementDiagnosticsReportRequest(
-        {
-          statement_fingerprint: statementFingerprint,
-        },
-      );
+      const action = createStatementDiagnosticsReportAction(statementFingerprint);
+      const diagnosticsReportRequest = new CreateStatementDiagnosticsReportRequest({
+        statement_fingerprint: statementFingerprint,
+      });
 
       return expectSaga(createDiagnosticsReportSaga, action)
         .provide([
@@ -49,11 +45,9 @@ describe("statementsSagas", () => {
   it("calls dispatched failed action if api#createStatementDiagnosticsReport request failed ", () => {
     const statementFingerprint = "some-id";
     const action = createStatementDiagnosticsReportAction(statementFingerprint);
-    const diagnosticsReportRequest = new CreateStatementDiagnosticsReportRequest(
-      {
-        statement_fingerprint: statementFingerprint,
-      },
-    );
+    const diagnosticsReportRequest = new CreateStatementDiagnosticsReportRequest({
+      statement_fingerprint: statementFingerprint,
+    });
 
     return expectSaga(createDiagnosticsReportSaga, action)
       .provide([

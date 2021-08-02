@@ -11,6 +11,7 @@
 package norm
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -19,30 +20,15 @@ import (
 
 // CanMapOnSetOp determines whether the filter can be mapped to either
 // side of a set operator.
-func (c *CustomFuncs) CanMapOnSetOp(filter *memo.FiltersItem) bool {
-	if memo.CanBeCompositeSensitive(c.mem.Metadata(), filter) {
-		// In general, it is not safe to remap a composite-sensitive filter.
-		// For example:
-		//  - the set operation is Except
-		//  - the left side has the decimal 1.0
-		//  - the right side has the decimal 1.00
-		//  - the filter is d::string != '1.00'
-		//
-		// If we push the filter to the right side, we will incorrectly remove 1.00,
-		// causing the overall Except operation to return a result.
-		//
-		// TODO(radu): we can do better on a case-by-case basis. For example, it is
-		// OK to push the filter for Union, and it is OK to push it to the left side
-		// of an Except.
-		return false
+func (c *CustomFuncs) CanMapOnSetOp(src *memo.FiltersItem) bool {
+	filterProps := src.ScalarProps()
+	for i, ok := filterProps.OuterCols.Next(0); ok; i, ok = filterProps.OuterCols.Next(i + 1) {
+		colType := c.f.Metadata().ColumnMeta(i).Type
+		if colinfo.HasCompositeKeyEncoding(colType) {
+			return false
+		}
 	}
-
-	if filter.ScalarProps().HasCorrelatedSubquery {
-		// If the filter has a correlated subquery, we want to try to hoist it up as
-		// much as possible to decorrelate it.
-		return false
-	}
-	return true
+	return !filterProps.HasCorrelatedSubquery
 }
 
 // MapSetOpFilterLeft maps the filter onto the left expression by replacing
@@ -319,18 +305,6 @@ func (c *CustomFuncs) IsUnsimplifiableOr(item *memo.FiltersItem) bool {
 	return or.Left.Op() != opt.NullOp && or.Right.Op() != opt.NullOp
 }
 
-// IsUnsimplifiableIs returns true if this is an IS where the right side is not
-// True or False. SimplifyFilters simplifies an IS expression with True or False
-// as the right input to its left input. This function serves a similar purpose
-// to IsUnsimplifiableOr.
-func (c *CustomFuncs) IsUnsimplifiableIs(item *memo.FiltersItem) bool {
-	is, ok := item.Condition.(*memo.IsExpr)
-	if !ok {
-		return false
-	}
-	return is.Right.Op() != opt.TrueOp && is.Right.Op() != opt.FalseOp
-}
-
 // addConjuncts recursively walks a scalar expression as long as it continues to
 // find nested And operators. It adds any conjuncts (ignoring True operators) to
 // the given FiltersExpr and returns true. If it finds a False or Null operator,
@@ -361,24 +335,6 @@ func (c *CustomFuncs) addConjuncts(
 		} else if t.Right.Op() == opt.NullOp {
 			filters = append(filters, c.f.ConstructFiltersItem(t.Left))
 		} else {
-			filters = append(filters, c.f.ConstructFiltersItem(t))
-		}
-
-	case *memo.IsExpr:
-		// Attempt to replace <expr> IS (True | False) with the left input. Note
-		// that this replacement may cause Null to be returned where the original
-		// expression returned False, because IS (True | False) returns False on a
-		// Null input. However, in this case the replacement is valid because Select
-		// and Join operators treat False and Null filter conditions the same way
-		// (no rows returned).
-		if t.Right.Op() == opt.TrueOp {
-			// <expr> IS True => <expr>
-			filters = append(filters, c.f.ConstructFiltersItem(t.Left))
-		} else if t.Right.Op() == opt.FalseOp {
-			// <expr> IS False => NOT <expr>
-			filters = append(filters, c.f.ConstructFiltersItem(c.f.ConstructNot(t.Left)))
-		} else {
-			// No replacement possible.
 			filters = append(filters, c.f.ConstructFiltersItem(t))
 		}
 

@@ -10,7 +10,7 @@
 
 // reduce reduces SQL passed over stdin using cockroach demo. The input is
 // simplified such that the contains argument is present as an error during SQL
-// execution. Run `make bin/reduce` to compile the reduce program.
+// execution.
 package main
 
 import (
@@ -43,81 +43,61 @@ var (
 		// 4-6: 2
 		// 7-9: 3
 		// etc.
-		n := (runtime.GOMAXPROCS(0) + 2) / 3
+		n := (runtime.NumCPU() + 2) / 3
 		if n < 1 {
 			n = 1
 		}
 		return n
 	}()
 	flags    = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	binary   = flags.String("binary", "./cockroach", "path to cockroach binary")
-	file     = flags.String("file", "", "the path to a file containing a SQL query to reduce")
-	verbose  = flags.Bool("v", false, "print progress to standard output")
+	path     = flags.String("path", "./cockroach", "path to cockroach binary")
+	verbose  = flags.Bool("v", false, "log progress")
 	contains = flags.String("contains", "", "error regex to search for")
 	unknown  = flags.Bool("unknown", false, "print unknown types during walk")
 	workers  = flags.Int("goroutines", goroutines, "number of worker goroutines (defaults to NumCPU/3")
 )
 
-const description = `
-The reduce utility attempts to simplify SQL that produces an error in
-CockroachDB. The problematic SQL, passed via standard input, is
-repeatedly reduced as long as it produces an error in the CockroachDB
-demo that matches the provided -contains regex.
-
-The following options are available:
-
-`
-
 func usage() {
 	fmt.Fprintf(flags.Output(), "Usage of %s:\n", os.Args[0])
-	fmt.Fprint(flags.Output(), description)
 	flags.PrintDefaults()
 	os.Exit(1)
 }
 
 func main() {
-	flags.Usage = usage
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		usage()
 	}
 	if *contains == "" {
-		fmt.Printf("%s: -contains must be provided\n\n", os.Args[0])
+		fmt.Print("missing contains\n\n")
 		usage()
 	}
 	reducesql.LogUnknown = *unknown
-	out, err := reduceSQL(*binary, *contains, file, *workers, *verbose)
+	out, err := reduceSQL(*path, *contains, *workers, *verbose)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(out)
 }
 
-func reduceSQL(binary, contains string, file *string, workers int, verbose bool) (string, error) {
+func reduceSQL(path, contains string, workers int, verbose bool) (string, error) {
 	containsRE, err := regexp.Compile(contains)
 	if err != nil {
 		return "", err
 	}
 	var input []byte
 	{
-		if file == nil {
-			done := make(chan struct{}, 1)
-			go func() {
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					log.Fatal("timeout waiting for input on stdin")
-				}
-			}()
-			input, err = ioutil.ReadAll(os.Stdin)
-			done <- struct{}{}
-			if err != nil {
-				return "", err
+		done := make(chan struct{}, 1)
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Fatal("timeout waiting for input on stdin")
 			}
-		} else {
-			input, err = ioutil.ReadFile(*file)
-			if err != nil {
-				return "", err
-			}
+		}()
+		input, err = ioutil.ReadAll(os.Stdin)
+		done <- struct{}{}
+		if err != nil {
+			return "", err
 		}
 	}
 
@@ -135,7 +115,7 @@ func reduceSQL(binary, contains string, file *string, workers int, verbose bool)
 
 	interesting := func(ctx context.Context, f reduce.File) bool {
 		// Disable telemetry and license generation.
-		cmd := exec.CommandContext(ctx, binary,
+		cmd := exec.CommandContext(ctx, path,
 			"demo",
 			"--empty",
 			"--disable-demo-license",

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -14,6 +14,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -22,9 +23,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/diagnostics"
-	"github.com/cockroachdb/cockroach/pkg/server/diagnostics/diagnosticspb"
+	"github.com/cockroachdb/cockroach/pkg/server/diagnosticspb"
+	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -32,11 +35,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/diagutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/cloudinfo"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/system"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -47,14 +48,14 @@ var _ = kvtenantccl.Connector{}
 const elemName = "somestring"
 
 func TestTenantReport(t *testing.T) {
-	defer leaktest.AfterTest(t)()
+	defer leaktest.AfterTest(t)
 	defer log.Scope(t).Close(t)
 
 	rt := startReporterTest(t)
 	defer rt.Close()
 
 	tenantArgs := base.TestTenantArgs{
-		TenantID:                    serverutils.TestTenantID(),
+		TenantID:                    roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
 		AllowSettingClusterSettings: true,
 		TestingKnobs:                rt.testingKnobs,
 	}
@@ -99,7 +100,7 @@ func TestTenantReport(t *testing.T) {
 // TestServerReport checks nodes, stores, localities, and zone configs.
 // Telemetry metrics are checked in datadriven tests (see sql.TestTelemetry).
 func TestServerReport(t *testing.T) {
-	defer leaktest.AfterTest(t)()
+	defer leaktest.AfterTest(t)
 	defer log.Scope(t).Close(t)
 
 	rt := startReporterTest(t)
@@ -135,10 +136,10 @@ func TestServerReport(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		expectedUsageReports++
 
-		node := rt.server.MetricsRecorder().GenerateNodeStatus(ctx)
+		node := rt.server.MetricsRecorder().(*status.MetricsRecorder).GenerateNodeStatus(ctx)
 		// Clear the SQL stat pool before getting diagnostics.
 		rt.server.SQLServer().(*sql.Server).ResetSQLStats(ctx)
-		rt.server.DiagnosticsReporter().(*diagnostics.Reporter).ReportDiagnostics(ctx)
+		rt.server.ReportDiagnostics(ctx)
 
 		keyCounts := make(map[roachpb.StoreID]int64)
 		rangeCounts := make(map[roachpb.StoreID]int64)
@@ -160,6 +161,40 @@ func TestServerReport(t *testing.T) {
 		require.Equal(t, expectedUsageReports, rt.diagServer.NumRequests())
 
 		last := rt.diagServer.LastRequestData()
+		if expected, actual := rt.server.ClusterID().String(), last.UUID; expected != actual {
+			return errors.Errorf("expected cluster id %v got %v", expected, actual)
+		}
+		if expected, actual := "system", last.TenantID; expected != actual {
+			return errors.Errorf("expected tenant id %v got %v", expected, actual)
+		}
+		if expected, actual := rt.server.NodeID().String(), last.NodeID; expected != actual {
+			return errors.Errorf("expected node id %v got %v", expected, actual)
+		}
+		if expected, actual := rt.server.NodeID().String(), last.SQLInstanceID; expected != actual {
+			return errors.Errorf("expected sql instance id %v got %v", expected, actual)
+		}
+		if expected, actual := rt.server.NodeID(), last.Node.NodeID; expected != actual {
+			return errors.Errorf("expected node id %v got %v", expected, actual)
+		}
+
+		if last.Node.Hardware.Mem.Total == 0 {
+			return errors.Errorf("expected non-zero total mem")
+		}
+		if last.Node.Hardware.Mem.Available == 0 {
+			return errors.Errorf("expected non-zero available mem")
+		}
+		if actual, expected := last.Node.Hardware.Cpu.Numcpu, runtime.NumCPU(); int(actual) != expected {
+			return errors.Errorf("expected %d num cpu, got %d", expected, actual)
+		}
+		if last.Node.Hardware.Cpu.Sockets == 0 {
+			return errors.Errorf("expected non-zero sockets")
+		}
+		if last.Node.Hardware.Cpu.Mhz == 0.0 {
+			return errors.Errorf("expected non-zero speed")
+		}
+		if last.Node.Os.Platform == "" {
+			return errors.Errorf("expected non-empty OS")
+		}
 
 		if minExpected, actual := totalKeys, last.Node.KeyCount; minExpected > actual {
 			return errors.Errorf("expected node keys at least %v got %v", minExpected, actual)
@@ -169,6 +204,22 @@ func TestServerReport(t *testing.T) {
 		}
 		if minExpected, actual := len(rt.serverArgs.StoreSpecs), len(last.Stores); minExpected > actual {
 			return errors.Errorf("expected at least %v stores got %v", minExpected, actual)
+		}
+		if expected, actual := "true", last.Internal; expected != actual {
+			return errors.Errorf("expected internal to be %v, got %v", expected, actual)
+		}
+		if expected, actual := len(rt.serverArgs.Locality.Tiers), len(last.Node.Locality.Tiers); expected != actual {
+			return errors.Errorf("expected locality to have %d tier, got %d", expected, actual)
+		}
+		for i := range rt.serverArgs.Locality.Tiers {
+			if expected, actual := sql.HashForReporting(clusterSecret, rt.serverArgs.Locality.Tiers[i].Key),
+				last.Node.Locality.Tiers[i].Key; expected != actual {
+				return errors.Errorf("expected locality tier %d key to be %s, got %s", i, expected, actual)
+			}
+			if expected, actual := sql.HashForReporting(clusterSecret, rt.serverArgs.Locality.Tiers[i].Value),
+				last.Node.Locality.Tiers[i].Value; expected != actual {
+				return errors.Errorf("expected locality tier %d value to be %s, got %s", i, expected, actual)
+			}
 		}
 
 		for _, store := range last.Stores {
@@ -183,15 +234,6 @@ func TestServerReport(t *testing.T) {
 	})
 
 	last := rt.diagServer.LastRequestData()
-	require.Equal(t, rt.server.ClusterID().String(), last.UUID)
-	require.Equal(t, "system", last.TenantID)
-	require.Equal(t, rt.server.NodeID().String(), last.NodeID)
-	require.Equal(t, rt.server.NodeID().String(), last.SQLInstanceID)
-	require.Equal(t, "true", last.Internal)
-
-	// Verify environment.
-	verifyEnvironment(t, clusterSecret, rt.serverArgs.Locality, &last.Env)
-
 	// This check isn't clean, since the body is a raw proto binary and thus could
 	// easily contain some encoded form of elemName, but *if* it ever does fail,
 	// that is probably very interesting.
@@ -277,101 +319,6 @@ func TestServerReport(t *testing.T) {
 	}
 }
 
-func TestUsageQuantization(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	defer cloudinfo.Disable()()
-
-	skip.UnderRace(t, "takes >1min under race")
-	r := diagutils.NewServer()
-	defer r.Close()
-
-	st := cluster.MakeTestingClusterSettings()
-	ctx := context.Background()
-
-	url := r.URL()
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Settings: st,
-		Knobs: base.TestingKnobs{
-			Server: &server.TestingKnobs{
-				DiagnosticsTestingKnobs: diagnostics.TestingKnobs{
-					OverrideReportingURL: &url,
-				},
-			},
-		},
-	})
-	defer s.Stopper().Stop(ctx)
-	ts := s.(*server.TestServer)
-
-	// Disable periodic reporting so it doesn't interfere with the test.
-	if _, err := db.Exec(`SET CLUSTER SETTING diagnostics.reporting.enabled = false`); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := db.Exec(`SET application_name = 'test'`); err != nil {
-		t.Fatal(err)
-	}
-
-	// Issue some queries against the test app name.
-	for i := 0; i < 8; i++ {
-		_, err := db.Exec(`SELECT 1`)
-		require.NoError(t, err)
-	}
-	// Between 10 and 100 queries is quantized to 10.
-	for i := 0; i < 30; i++ {
-		_, err := db.Exec(`SELECT 1,2`)
-		require.NoError(t, err)
-	}
-	// Between 100 and 10000 gets quantized to 100.
-	for i := 0; i < 200; i++ {
-		_, err := db.Exec(`SELECT 1,2,3`)
-		require.NoError(t, err)
-	}
-	// Above 10000 gets quantized to 10000.
-	for i := 0; i < 10010; i++ {
-		_, err := db.Exec(`SHOW application_name`)
-		require.NoError(t, err)
-	}
-
-	// Flush the SQL stat pool.
-	ts.SQLServer().(*sql.Server).ResetSQLStats(ctx)
-
-	// Collect a round of statistics.
-	ts.DiagnosticsReporter().(*diagnostics.Reporter).ReportDiagnostics(ctx)
-
-	// The stats "hide" the application name by hashing it. To find the
-	// test app name, we need to hash the ref string too prior to the
-	// comparison.
-	clusterSecret := sql.ClusterSecret.Get(&st.SV)
-	hashedAppName := sql.HashForReporting(clusterSecret, "test")
-	require.NotEqual(t, sql.FailedHashedValue, hashedAppName, "expected hashedAppName to not be 'unknown'")
-
-	testData := []struct {
-		query         string
-		expectedCount int64
-	}{
-		{`SELECT _`, 8},
-		{`SELECT _, _`, 10},
-		{`SELECT _, _, _`, 100},
-		{`SHOW application_name`, 10000},
-	}
-
-	last := r.LastRequestData()
-	for _, test := range testData {
-		found := false
-		for _, s := range last.SqlStats {
-			if s.Key.App == hashedAppName && s.Key.Query == test.query {
-				require.Equal(t, test.expectedCount, s.Stats.Count, "quantization incorrect for query %q", test.query)
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("query %q missing from stats", test.query)
-		}
-	}
-}
-
 type reporterTest struct {
 	cloudEnable  func()
 	settings     *cluster.Settings
@@ -405,7 +352,7 @@ func startReporterTest(t *testing.T) *reporterTest {
 			DisableDeleteOrphanedLeases: true,
 		},
 		Server: &server.TestingKnobs{
-			DiagnosticsTestingKnobs: diagnostics.TestingKnobs{
+			DiagnosticsTestingKnobs: diagnosticspb.TestingKnobs{
 				OverrideReportingURL: &url,
 			},
 		},
@@ -441,10 +388,6 @@ func setupCluster(t *testing.T, db *gosql.DB) {
 	_, err := db.Exec(`SET CLUSTER SETTING server.time_until_store_dead = '90s'`)
 	require.NoError(t, err)
 
-	// Enable diagnostics reporting to test PeriodicallyReportDiagnostics.
-	_, err = db.Exec(`SET CLUSTER SETTING diagnostics.reporting.enabled = true`)
-	require.NoError(t, err)
-
 	_, err = db.Exec(`SET CLUSTER SETTING diagnostics.reporting.send_crash_reports = false`)
 	require.NoError(t, err)
 
@@ -462,7 +405,7 @@ func verifyEnvironment(
 ) {
 	require.NotEqual(t, 0, env.Hardware.Mem.Total)
 	require.NotEqual(t, 0, env.Hardware.Mem.Available)
-	require.Equal(t, int32(system.NumCPU()), env.Hardware.Cpu.Numcpu)
+	require.Equal(t, int32(runtime.NumCPU()), env.Hardware.Cpu.Numcpu)
 	require.NotEqual(t, 0, env.Hardware.Cpu.Sockets)
 	require.NotEqual(t, 0.0, env.Hardware.Cpu.Mhz)
 	require.NotEqual(t, 0.0, env.Os.Platform)

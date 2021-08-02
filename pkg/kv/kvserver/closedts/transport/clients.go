@@ -14,7 +14,6 @@ import (
 	"context"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -67,11 +66,6 @@ type client struct {
 // done so, the information should soon thereafter be available to the Sink and
 // from there, further follower read attempts. Does not block.
 func (pr *Clients) Request(nodeID roachpb.NodeID, rangeID roachpb.RangeID) {
-	// If the new closed timestamps is enabled, this old one is disabled.
-	if pr.cfg.Settings.Version.IsActive(context.TODO(), clusterversion.ClosedTimestampsRaftTransport) {
-		return
-	}
-
 	if nodeID == pr.cfg.NodeID {
 		return
 	}
@@ -121,7 +115,7 @@ func (pr *Clients) getOrCreateClient(nodeID roachpb.NodeID) *client {
 	// If our client made it into the map, start it. The point in inserting
 	// before starting is to be able to collect RangeIDs immediately while never
 	// blocking callers.
-	if err := pr.cfg.Stopper.RunAsyncTask(ctx, "ct-client", func(ctx context.Context) {
+	pr.cfg.Stopper.RunWorker(ctx, func(ctx context.Context) {
 		defer pr.clients.Delete(int64(nodeID))
 
 		c, err := pr.cfg.Dialer.Dial(ctx, nodeID)
@@ -171,9 +165,7 @@ func (pr *Clients) getOrCreateClient(nodeID roachpb.NodeID) *client {
 				Requested: slice,
 			}
 		}
-	}); err != nil {
-		pr.clients.Delete(int64(nodeID))
-	}
+	})
 
 	return cl
 }

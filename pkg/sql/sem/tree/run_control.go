@@ -10,6 +10,8 @@
 
 package tree
 
+import "fmt"
+
 // ControlJobs represents a PAUSE/RESUME/CANCEL JOBS statement.
 type ControlJobs struct {
 	Jobs    *Select
@@ -101,11 +103,10 @@ type ControlSchedules struct {
 
 var _ Statement = &ControlSchedules{}
 
-// Format implements the NodeFormatter interface.
+// Format implements NodeFormatter interface
 func (n *ControlSchedules) Format(ctx *FmtCtx) {
-	ctx.WriteString(n.Command.String())
-	ctx.WriteString(" SCHEDULES ")
-	ctx.FormatNode(n.Schedules)
+	fmt.Fprintf(ctx, "%s SCHEDULES ", n.Command)
+	n.Schedules.Format(ctx)
 }
 
 // ControlJobsForSchedules represents PAUSE/RESUME/CANCEL clause
@@ -115,11 +116,10 @@ type ControlJobsForSchedules struct {
 	Command   JobCommand
 }
 
-// Format implements NodeFormatter interface.
+// Format implements NodeFormatter interface
 func (n *ControlJobsForSchedules) Format(ctx *FmtCtx) {
-	ctx.WriteString(JobCommandToStatement[n.Command])
-	ctx.WriteString(" JOBS FOR SCHEDULES ")
-	ctx.FormatNode(n.Schedules)
+	fmt.Fprintf(ctx, "%s JOBS FOR SCHEDULES %s",
+		JobCommandToStatement[n.Command], AsString(n.Schedules))
 }
 
 var _ Statement = &ControlJobsForSchedules{}

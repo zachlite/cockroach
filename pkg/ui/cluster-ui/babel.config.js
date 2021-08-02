@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -27,7 +27,6 @@ const presets = [
 const plugins = [
   "@babel/proposal-class-properties",
   "@babel/proposal-object-rest-spread",
-  // @babel/plugin-transform-runtime is required to support dynamic loading of cluster-ui package
   "@babel/plugin-transform-runtime",
   ["import", { "libraryName": "antd", "style": true }],
 ];

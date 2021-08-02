@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -228,13 +229,11 @@ func restoreMidSchemaChange(
 ) func(t *testing.T) {
 	return func(t *testing.T) {
 		ctx := context.Background()
+		defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 		dir, dirCleanupFn := testutils.TempDir(t)
 		params := base.TestClusterArgs{
-			ServerArgs: base.TestServerArgs{
-				ExternalIODir: dir,
-				Knobs:         base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
-			},
+			ServerArgs: base.TestServerArgs{ExternalIODir: dir},
 		}
 		tc := testcluster.StartTestCluster(t, singleNode, params)
 		defer func() {

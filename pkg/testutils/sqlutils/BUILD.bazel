@@ -4,6 +4,7 @@ go_library(
     name = "sqlutils",
     srcs = [
         "inject.go",
+        "name_resolution_testutils.go",
         "pg_url.go",
         "pretty.go",
         "scrub.go",
@@ -20,7 +21,7 @@ go_library(
         "//pkg/security",
         "//pkg/security/securitytest",
         "//pkg/sql/catalog/descpb",
-        "//pkg/sql/lexbase",
+        "//pkg/sql/lex",
         "//pkg/sql/parser",
         "//pkg/sql/sem/tree",
         "//pkg/testutils",

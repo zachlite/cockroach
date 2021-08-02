@@ -20,26 +20,21 @@ import (
 
 const (
 	// aggKindTmplVar specifies the template "variable" that describes the kind
-	// of aggregator using an aggregate function. It is replaced with "Hash",
-	// "Ordered", or "Window" before executing the template.
+	// of aggregator using an aggregate function. It is replaced with either
+	// "Hash" or "Ordered" before executing the template.
 	aggKindTmplVar = "_AGGKIND"
 	hashAggKind    = "Hash"
 	orderedAggKind = "Ordered"
-	windowAggKind  = "Window"
 )
 
-func registerAggGenerator(aggGen generator, filenameSuffix, dep string, genWindowVariant bool) {
+func registerAggGenerator(aggGen generator, filenameSuffix, dep string) {
 	aggGeneratorAdapter := func(aggKind string) generator {
 		return func(inputFileContents string, wr io.Writer) error {
 			inputFileContents = strings.ReplaceAll(inputFileContents, aggKindTmplVar, aggKind)
 			return aggGen(inputFileContents, wr)
 		}
 	}
-	aggKinds := []string{hashAggKind, orderedAggKind}
-	if genWindowVariant {
-		aggKinds = append(aggKinds, windowAggKind)
-	}
-	for _, aggKind := range aggKinds {
+	for _, aggKind := range []string{hashAggKind, orderedAggKind} {
 		registerGenerator(
 			aggGeneratorAdapter(aggKind),
 			fmt.Sprintf("%s_%s", strings.ToLower(aggKind), filenameSuffix),

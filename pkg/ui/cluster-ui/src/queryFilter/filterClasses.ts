@@ -10,6 +10,8 @@
 
 import classNames from "classnames/bind";
 import styles from "./filter.module.scss";
+import "react-select/dist/react-select.css";
+import "./select.scss";
 
 const cx = classNames.bind(styles);
 
@@ -18,6 +20,7 @@ export const dropdownContentWrapper = cx("dropdown-content-wrapper");
 export const dropdown = cx("dropdown-area");
 export const hidden = cx("hide");
 export const caretDown = cx("caret-down");
+export const dropdownSelect = cx("dropdown-select");
 
 export const timePair = {
   wrapper: cx("time-pair-wrapper"),

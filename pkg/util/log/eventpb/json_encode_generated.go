@@ -634,7 +634,7 @@ func (m *ClientAuthenticationFailed) AppendJSONFields(printComma bool, b redact.
 		}
 		printComma = true
 		b = append(b, "\"Method\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Method)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Method))
 		b = append(b, '"')
 	}
 
@@ -656,7 +656,7 @@ func (m *ClientAuthenticationInfo) AppendJSONFields(printComma bool, b redact.Re
 		}
 		printComma = true
 		b = append(b, "\"Method\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Method)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Method))
 		b = append(b, '"')
 	}
 
@@ -690,7 +690,7 @@ func (m *ClientAuthenticationOk) AppendJSONFields(printComma bool, b redact.Reda
 		}
 		printComma = true
 		b = append(b, "\"Method\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Method)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Method))
 		b = append(b, '"')
 	}
 
@@ -957,7 +957,7 @@ func (m *CommonConnectionDetails) AppendJSONFields(printComma bool, b redact.Red
 		}
 		printComma = true
 		b = append(b, "\"Network\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Network)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Network))
 		b = append(b, '"')
 	}
 
@@ -994,7 +994,7 @@ func (m *CommonEventDetails) AppendJSONFields(printComma bool, b redact.Redactab
 		}
 		printComma = true
 		b = append(b, "\"EventType\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.EventType)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.EventType))
 		b = append(b, '"')
 	}
 
@@ -1019,7 +1019,7 @@ func (m *CommonJobEventDetails) AppendJSONFields(printComma bool, b redact.Redac
 		}
 		printComma = true
 		b = append(b, "\"JobType\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.JobType)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.JobType))
 		b = append(b, '"')
 	}
 
@@ -1068,7 +1068,7 @@ func (m *CommonJobEventDetails) AppendJSONFields(printComma bool, b redact.Redac
 		}
 		printComma = true
 		b = append(b, "\"Status\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Status)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Status))
 		b = append(b, '"')
 	}
 
@@ -1141,7 +1141,9 @@ func (m *CommonSQLEventDetails) AppendJSONFields(printComma bool, b redact.Redac
 		}
 		printComma = true
 		b = append(b, "\"Statement\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Statement)))
+		b = append(b, redact.StartMarker()...)
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.Statement)))))
+		b = append(b, redact.EndMarker()...)
 		b = append(b, '"')
 	}
 
@@ -1151,7 +1153,7 @@ func (m *CommonSQLEventDetails) AppendJSONFields(printComma bool, b redact.Redac
 		}
 		printComma = true
 		b = append(b, "\"Tag\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Tag)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Tag))
 		b = append(b, '"')
 	}
 
@@ -1229,7 +1231,7 @@ func (m *CommonSQLExecDetails) AppendJSONFields(printComma bool, b redact.Redact
 		}
 		printComma = true
 		b = append(b, "\"ExecMode\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.ExecMode)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.ExecMode))
 		b = append(b, '"')
 	}
 
@@ -1248,7 +1250,7 @@ func (m *CommonSQLExecDetails) AppendJSONFields(printComma bool, b redact.Redact
 		}
 		printComma = true
 		b = append(b, "\"SQLSTATE\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.SQLSTATE)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.SQLSTATE))
 		b = append(b, '"')
 	}
 
@@ -1404,7 +1406,7 @@ func (m *CommonSessionDetails) AppendJSONFields(printComma bool, b redact.Redact
 		}
 		printComma = true
 		b = append(b, "\"Transport\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.Transport)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.Transport))
 		b = append(b, '"')
 	}
 
@@ -2364,178 +2366,8 @@ func (m *ReverseSchemaChange) AppendJSONFields(printComma bool, b redact.Redacta
 		}
 		printComma = true
 		b = append(b, "\"SQLSTATE\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.SQLSTATE)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.SQLSTATE))
 		b = append(b, '"')
-	}
-
-	return printComma, b
-}
-
-// AppendJSONFields implements the EventPayload interface.
-func (m *RuntimeStats) AppendJSONFields(printComma bool, b redact.RedactableBytes) (bool, redact.RedactableBytes) {
-
-	printComma, b = m.CommonEventDetails.AppendJSONFields(printComma, b)
-
-	if m.MemRSSBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"MemRSSBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.MemRSSBytes), 10)
-	}
-
-	if m.GoroutineCount != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GoroutineCount\":"...)
-		b = strconv.AppendUint(b, uint64(m.GoroutineCount), 10)
-	}
-
-	if m.MemStackSysBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"MemStackSysBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.MemStackSysBytes), 10)
-	}
-
-	if m.GoAllocBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GoAllocBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.GoAllocBytes), 10)
-	}
-
-	if m.GoTotalBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GoTotalBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.GoTotalBytes), 10)
-	}
-
-	if m.GoStatsStaleness != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GoStatsStaleness\":"...)
-		b = strconv.AppendFloat(b, float64(m.GoStatsStaleness), 'f', -1, 32)
-	}
-
-	if m.HeapFragmentBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"HeapFragmentBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.HeapFragmentBytes), 10)
-	}
-
-	if m.HeapReservedBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"HeapReservedBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.HeapReservedBytes), 10)
-	}
-
-	if m.HeapReleasedBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"HeapReleasedBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.HeapReleasedBytes), 10)
-	}
-
-	if m.CGoAllocBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"CGoAllocBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.CGoAllocBytes), 10)
-	}
-
-	if m.CGoTotalBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"CGoTotalBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.CGoTotalBytes), 10)
-	}
-
-	if m.CGoCallRate != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"CGoCallRate\":"...)
-		b = strconv.AppendFloat(b, float64(m.CGoCallRate), 'f', -1, 32)
-	}
-
-	if m.CPUUserPercent != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"CPUUserPercent\":"...)
-		b = strconv.AppendFloat(b, float64(m.CPUUserPercent), 'f', -1, 32)
-	}
-
-	if m.CPUSysPercent != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"CPUSysPercent\":"...)
-		b = strconv.AppendFloat(b, float64(m.CPUSysPercent), 'f', -1, 32)
-	}
-
-	if m.GCPausePercent != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GCPausePercent\":"...)
-		b = strconv.AppendFloat(b, float64(m.GCPausePercent), 'f', -1, 32)
-	}
-
-	if m.GCRunCount != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"GCRunCount\":"...)
-		b = strconv.AppendUint(b, uint64(m.GCRunCount), 10)
-	}
-
-	if m.NetHostRecvBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"NetHostRecvBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.NetHostRecvBytes), 10)
-	}
-
-	if m.NetHostSendBytes != 0 {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"NetHostSendBytes\":"...)
-		b = strconv.AppendUint(b, uint64(m.NetHostSendBytes), 10)
 	}
 
 	return printComma, b
@@ -2568,7 +2400,7 @@ func (m *SensitiveTableAccess) AppendJSONFields(printComma bool, b redact.Redact
 		}
 		printComma = true
 		b = append(b, "\"AccessMode\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.AccessMode)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.AccessMode))
 		b = append(b, '"')
 	}
 
@@ -2588,7 +2420,7 @@ func (m *SetClusterSetting) AppendJSONFields(printComma bool, b redact.Redactabl
 		}
 		printComma = true
 		b = append(b, "\"SettingName\":\""...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.SettingName)))
+		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.SettingName))
 		b = append(b, '"')
 	}
 

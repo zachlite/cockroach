@@ -32,6 +32,3 @@ type ValidateCheckConstraint struct {
 	TableID descpb.ID
 	Name    string
 }
-
-// Make sure baseOp is used for linter.
-var _ = validationOp{baseOp: baseOp{}}

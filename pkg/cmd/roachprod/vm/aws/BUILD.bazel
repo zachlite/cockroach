@@ -31,7 +31,7 @@ genrule(
     cmd = """
       $(location //pkg/cmd/roachprod/vm/aws/terraformgen) -o $@
     """,
-    exec_tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
+    tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
 )
 
 bindata(

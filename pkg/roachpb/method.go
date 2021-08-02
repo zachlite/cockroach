@@ -134,6 +134,8 @@ const (
 	WriteBatch
 	// Export dumps a keyrange into files.
 	Export
+	// Import bulk loads key/value entries.
+	Import
 	// AdminScatter moves replicas and leaseholders for a selection of ranges.
 	// Best-effort.
 	AdminScatter
@@ -156,12 +158,9 @@ const (
 	Subsume
 	// RangeStats returns the MVCC statistics for a range.
 	RangeStats
-	// AdminVerifyProtectedTimestamp determines whether the specified protection
-	// record will be respected by this Range.
+	// VerifyProtectedTimestamp determines whether the specified protection record
+	// will be respected by this Range.
 	AdminVerifyProtectedTimestamp
-	// QueryResolvedTimestamp requests the resolved timestamp of the key span it
-	// is issued over.
-	QueryResolvedTimestamp
 	// NumMethods represents the total number of API methods.
 	NumMethods
 )

@@ -36,7 +36,7 @@ import (
 // Workaround for bazel auto-generated code. goimports does not automatically
 // pick up the right packages when run within the bazel sandbox.
 var (
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ tree.AggType
 )
 
@@ -137,19 +137,18 @@ type sort_TYPE_DIR_HANDLES_NULLSOp struct {
 	cancelChecker colexecutils.CancelChecker
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(ctx context.Context, col coldata.Vec, order []int) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.TemplateType()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort() {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -163,7 +162,7 @@ func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 

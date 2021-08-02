@@ -76,7 +76,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		s, db, cleanup := setup(t)
 		defer cleanup()
 
-		descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, false)
+		descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, false)
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
 			if _, err := tx.Exec(
 				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'));",
@@ -87,7 +87,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 				parentID, schemaID, tableName, descID)
 			return err
 		}))
-		descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, true)
+		descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, true)
 
 		// Ideally we should be able to query `crdb_internal.invalid_object` but it
 		// does not do enough validation. Instead we'll just observe the issue that
@@ -127,7 +127,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		s, db, cleanup := setup(t)
 		defer cleanup()
 
-		descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, false)
+		descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, false)
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
 			if _, err := tx.Exec(
 				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'));",
@@ -138,7 +138,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 				parentID, schemaID, tableName, descID)
 			return err
 		}))
-		descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, true)
+		descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, true)
 
 		// Ideally we should be able to query `crdb_internal.invalid_objects` but it
 		// does not do enough validation. Instead we'll just observe the issue that
@@ -208,8 +208,7 @@ SELECT crdb_internal.unsafe_upsert_descriptor(
                 ARRAY['table', 'columns', '0', 'usesSequenceIds'],
                 '[]'
             )
-        ),
-        true
+        )
        )
   FROM system.descriptor
  WHERE id = $1;`,
@@ -436,11 +435,11 @@ SELECT crdb_internal.unsafe_delete_namespace_entry("parentID", 0, 'foo', id)
 			now := s.Clock().Now().GoTime()
 			defer cleanup()
 			tdb := sqlutils.MakeSQLRunner(db)
-			descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, false)
+			descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, false)
 			for _, op := range tc.before {
 				tdb.Exec(t, op)
 			}
-			descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, true)
+			descs.ValidateOnWriteEnabled.Override(&s.ClusterSettings().SV, true)
 			_, err := db.Exec(tc.op)
 			if tc.expErrRE == "" {
 				require.NoError(t, err)
@@ -510,23 +509,23 @@ const (
     "nextMutationId": 2,
     "parentId": 50,
     "primaryIndex": {
-      "keyColumnDirections": [
+      "columnDirections": [
         "ASC"
       ],
-      "keyColumnIds": [
+      "columnIds": [
         1
       ],
-      "keyColumnNames": [
+      "columnNames": [
         "i"
       ],
       "compositeColumnIds": [],
       "createdExplicitly": false,
-      "encodingType": 1,
+      "encodingType": 0,
       "id": 1,
       "name": "primary",
       "type": "FORWARD",
       "unique": true,
-      "version": 4
+      "version": 2
     },
     "privileges": {
       "ownerProto": "root",
@@ -623,15 +622,14 @@ SELECT crdb_internal.unsafe_upsert_descriptor(59, crdb_internal.json_to_pb('cock
     "nextMutationId": 1,
     "parentId": 52,
     "primaryIndex": {
-      "encodingType": 1,
-      "keyColumnDirections": [ "ASC" ],
-      "keyColumnIds": [ 1 ],
-      "keyColumnNames": [ "i" ],
+      "columnDirections": [ "ASC" ],
+      "columnIds": [ 1 ],
+      "columnNames": [ "i" ],
       "id": 1,
       "name": "primary",
       "type": "FORWARD",
       "unique": true,
-      "version": 4
+      "version": 1
     },
     "privileges": {
       "owner_proto": "root",
@@ -677,15 +675,14 @@ SELECT crdb_internal.unsafe_upsert_descriptor(59, crdb_internal.json_to_pb('cock
     "nextMutationId": 1,
     "parentId": 52,
     "primaryIndex": {
-      "encodingType": 1,
-      "keyColumnDirections": [ "ASC" ],
-      "keyColumnIds": [ 1 ],
-      "keyColumnNames": [ "i" ],
+      "columnDirections": [ "ASC" ],
+      "columnIds": [ 1 ],
+      "columnNames": [ "i" ],
       "id": 1,
       "name": "primary",
       "type": "FORWARD",
       "unique": true,
-      "version": 4
+      "version": 1
     },
     "privileges": {
       "owner_proto": "admin",

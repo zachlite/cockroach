@@ -17,12 +17,11 @@ import (
 	"os"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/cloud/nodelocal"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -38,6 +37,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -188,6 +190,9 @@ func (r *errorReportingRowReceiver) Push(
 }
 
 func (r *errorReportingRowReceiver) ProducerDone() {}
+func (r *errorReportingRowReceiver) Types() []*types.T {
+	return nil
+}
 
 // A do nothing bulk adder implementation.
 type doNothingKeyAdder struct {
@@ -640,11 +645,12 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -670,6 +676,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 		jobspb.TypeImport: func(raw jobs.Resumer) jobs.Resumer {
 
 			resumer := raw.(*importResumer)
+			resumer.testingKnobs.ignoreProtectedTimestamps = true
 			resumer.testingKnobs.alwaysFlushJobProgress = true
 			resumer.testingKnobs.afterImport = func(summary backupccl.RowCount) error {
 				importSummary = summary
@@ -745,11 +752,12 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -776,6 +784,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 		jobspb.TypeImport: func(raw jobs.Resumer) jobs.Resumer {
 			resumer := raw.(*importResumer)
 			resumer.testingKnobs.alwaysFlushJobProgress = true
+			resumer.testingKnobs.ignoreProtectedTimestamps = true
 			resumer.testingKnobs.afterImport = func(summary backupccl.RowCount) error {
 				importSummary = summary
 				return nil
@@ -845,6 +854,7 @@ func TestImportWithPartialIndexesErrs(t *testing.T) {
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -885,7 +895,7 @@ func externalStorageFactory(
 	if err != nil {
 		return nil, err
 	}
-	return cloud.MakeExternalStorage(ctx, dest, base.ExternalIODirConfig{},
+	return cloudimpl.MakeExternalStorage(ctx, dest, base.ExternalIODirConfig{},
 		nil, blobs.TestBlobServiceClient(workdir), nil, nil)
 }
 
@@ -936,7 +946,7 @@ func newTestSpec(
 	}
 
 	for id, path := range inputs {
-		spec.inputs[int32(id)] = nodelocal.MakeLocalStorageURI(path)
+		spec.inputs[int32(id)] = cloudimpl.MakeLocalStorageURI(path)
 	}
 
 	return spec

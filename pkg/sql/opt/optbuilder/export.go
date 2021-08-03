@@ -19,6 +19,9 @@ import (
 
 // buildExport builds an EXPORT statement.
 func (b *Builder) buildExport(export *tree.Export, inScope *scope) (outScope *scope) {
+	if err := b.catalog.RequireAdminRole(b.ctx, "EXPORT"); err != nil {
+		panic(err)
+	}
 	// We don't allow the input statement to reference outer columns, so we
 	// pass a "blank" scope rather than inScope.
 	emptyScope := b.allocScope()
@@ -28,7 +31,6 @@ func (b *Builder) buildExport(export *tree.Export, inScope *scope) (outScope *sc
 	fileName := b.buildScalar(
 		texpr, emptyScope, nil /* outScope */, nil /* outCol */, nil, /* colRefs */
 	)
-
 	options := b.buildKVOptions(export.Options, emptyScope)
 
 	outScope = inScope.push()

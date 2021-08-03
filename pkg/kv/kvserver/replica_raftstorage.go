@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -23,13 +24,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/readsummary"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -131,10 +130,10 @@ func entries(
 	// sideloaded proposal, but the caller didn't give us a sideloaded storage.
 	canCache := true
 
-	scanFunc := func(ent raftpb.Entry) error {
+	scanFunc := func(ent raftpb.Entry) (bool, error) {
 		// Exit early if we have any gaps or it has been compacted.
 		if ent.Index != expectedIndex {
-			return iterutil.StopIteration()
+			return true, nil
 		}
 		expectedIndex++
 
@@ -145,7 +144,7 @@ func entries(
 					ctx, rangeID, ent, sideloaded, eCache,
 				)
 				if err != nil {
-					return err
+					return true, err
 				}
 				if newEnt != nil {
 					ent = *newEnt
@@ -158,17 +157,11 @@ func entries(
 		if size > maxBytes {
 			exceededMaxBytes = true
 			if len(ents) > 0 {
-				if exceededMaxBytes {
-					return iterutil.StopIteration()
-				}
-				return nil
+				return exceededMaxBytes, nil
 			}
 		}
 		ents = append(ents, ent)
-		if exceededMaxBytes {
-			return iterutil.StopIteration()
-		}
-		return nil
+		return exceededMaxBytes, nil
 	}
 
 	if err := iterateEntries(ctx, reader, rangeID, expectedIndex, hi, scanFunc); err != nil {
@@ -234,11 +227,11 @@ func iterateEntries(
 	reader storage.Reader,
 	rangeID roachpb.RangeID,
 	lo, hi uint64,
-	f func(raftpb.Entry) error,
+	f func(raftpb.Entry) (bool, error),
 ) error {
 	key := keys.RaftLogKey(rangeID, lo)
 	endKey := keys.RaftLogKey(rangeID, hi)
-	iter := reader.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
+	iter := reader.NewIterator(storage.IterOptions{
 		UpperBound: endKey,
 	})
 	defer iter.Close()
@@ -258,10 +251,7 @@ func iterateEntries(
 		if err := storage.MakeValue(meta).GetProto(&ent); err != nil {
 			return errors.Wrap(err, "unable to unmarshal raft Entry")
 		}
-		if err := f(ent); err != nil {
-			if iterutil.Done(err) {
-				return nil
-			}
+		if done, err := f(ent); err != nil || done {
 			return err
 		}
 	}
@@ -487,10 +477,10 @@ type OutgoingSnapshot struct {
 	// The RocksDB snapshot that will be streamed from.
 	EngineSnap storage.Reader
 	// The complete range iterator for the snapshot to stream.
-	Iter *rditer.ReplicaEngineDataIterator
+	Iter *rditer.ReplicaDataIterator
 	// The replica state within the snapshot.
 	State kvserverpb.ReplicaState
-	// Allows access the original Replica's sideloaded storage. Note that
+	// Allows access the the original Replica's sideloaded storage. Note that
 	// this isn't a snapshot of the sideloaded storage congruent with EngineSnap
 	// or RaftSnap -- a log truncation could have removed files from the
 	// sideloaded storage in the meantime.
@@ -537,7 +527,6 @@ type IncomingSnapshot struct {
 	// See the comment on VersionUnreplicatedRaftTruncatedState for details.
 	UsesUnreplicatedTruncatedState bool
 	snapType                       SnapshotRequest_Type
-	placeholder                    *ReplicaPlaceholder
 }
 
 func (s *IncomingSnapshot) String() string {
@@ -572,7 +561,7 @@ func snapshot(
 		return OutgoingSnapshot{}, errors.Errorf("failed to get desc: %s", err)
 	}
 	if !ok {
-		return OutgoingSnapshot{}, errors.Mark(errors.Errorf("couldn't find range descriptor"), errMarkSnapshotError)
+		return OutgoingSnapshot{}, errors.Errorf("couldn't find range descriptor")
 	}
 
 	// Read the range metadata from the snapshot instead of the members
@@ -594,7 +583,8 @@ func snapshot(
 
 	// Intentionally let this iterator and the snapshot escape so that the
 	// streamer can send chunks from it bit by bit.
-	iter := rditer.NewReplicaEngineDataIterator(&desc, snap, true /* replicatedOnly */)
+	iter := rditer.NewReplicaDataIterator(&desc, snap,
+		true /* replicatedOnly */, false /* seekEnd */)
 
 	return OutgoingSnapshot{
 		RaftEntryCache: eCache,
@@ -746,7 +736,7 @@ func clearRangeData(
 	var clearRangeFn func(storage.Reader, storage.Writer, roachpb.Key, roachpb.Key) error
 	if mustClearRange {
 		clearRangeFn = func(reader storage.Reader, writer storage.Writer, start, end roachpb.Key) error {
-			return writer.ClearRawRange(start, end)
+			return writer.ClearRange(storage.MakeMVCCMetadataKey(start), storage.MakeMVCCMetadataKey(end))
 		}
 	} else {
 		clearRangeFn = storage.ClearRangeWithHeuristic
@@ -760,11 +750,11 @@ func clearRangeData(
 	return nil
 }
 
-// applySnapshot updates the replica and its store based on the given
-// (non-empty) snapshot and associated HardState. All snapshots must pass
-// through Raft for correctness, i.e. the parameters to this method must be
-// taken from a raft.Ready. Any replicas specified in subsumedRepls will be
-// destroyed atomically with the application of the snapshot.
+// applySnapshot updates the replica and its store based on the given snapshot
+// and associated HardState. All snapshots must pass through Raft for
+// correctness, i.e. the parameters to this method must be taken from a
+// raft.Ready. Any replicas specified in subsumedRepls will be destroyed
+// atomically with the application of the snapshot.
 //
 // If there is a placeholder associated with r, applySnapshot will remove that
 // placeholder from the store if and only if it does not return an error.
@@ -778,7 +768,7 @@ func clearRangeData(
 func (r *Replica) applySnapshot(
 	ctx context.Context,
 	inSnap IncomingSnapshot,
-	nonemptySnap raftpb.Snapshot,
+	snap raftpb.Snapshot,
 	hs raftpb.HardState,
 	subsumedRepls []*Replica,
 ) (err error) {
@@ -787,39 +777,37 @@ func (r *Replica) applySnapshot(
 		log.Fatalf(ctx, "unexpected range ID %d", s.Desc.RangeID)
 	}
 
-	isInitialSnap := !r.IsInitialized()
+	snapType := inSnap.snapType
 	defer func() {
 		if err == nil {
-			desc, err := r.GetReplicaDescriptor()
-			if err != nil {
-				log.Fatalf(ctx, "could not fetch replica descriptor for range after applying snapshot: %v", err)
-			}
-			if isInitialSnap {
-				r.store.metrics.RangeSnapshotsAppliedForInitialUpreplication.Inc(1)
-			} else {
-				switch typ := desc.GetType(); typ {
-				// NB: A replica of type LEARNER can receive a non-initial snapshot (via
-				// the snapshot queue) if we end up truncating the raft log before it
-				// gets promoted to a voter. We count such snapshot applications as
-				// "applied by voters" here, since the LEARNER will soon be promoted to
-				// a voting replica.
-				case roachpb.VOTER_FULL, roachpb.VOTER_INCOMING, roachpb.VOTER_DEMOTING_LEARNER,
-					roachpb.VOTER_OUTGOING, roachpb.LEARNER, roachpb.VOTER_DEMOTING_NON_VOTER:
-					r.store.metrics.RangeSnapshotsAppliedByVoters.Inc(1)
-				case roachpb.NON_VOTER:
-					r.store.metrics.RangeSnapshotsAppliedByNonVoters.Inc(1)
-				default:
-					log.Fatalf(ctx, "unexpected replica type %s while applying snapshot", typ)
-				}
+			switch snapType {
+			case SnapshotRequest_RAFT:
+				r.store.metrics.RangeSnapshotsNormalApplied.Inc(1)
+			case SnapshotRequest_LEARNER:
+				r.store.metrics.RangeSnapshotsLearnerApplied.Inc(1)
 			}
 		}
 	}()
 
+	if raft.IsEmptySnap(snap) {
+		// Raft discarded the snapshot, indicating that our local state is
+		// already ahead of what the snapshot provides. But we count it for
+		// stats (see the defer above).
+		//
+		// Since we're not returning an error, we're responsible for removing any
+		// placeholder that might exist.
+		r.store.mu.Lock()
+		if r.store.removePlaceholderLocked(ctx, r.RangeID) {
+			atomic.AddInt32(&r.store.counts.filledPlaceholders, 1)
+		}
+		r.store.mu.Unlock()
+		return nil
+	}
 	if raft.IsEmptyHardState(hs) {
 		// Raft will never provide an empty HardState if it is providing a
 		// nonempty snapshot because we discard snapshots that do not increase
 		// the commit index.
-		log.Fatalf(ctx, "found empty HardState for non-empty Snapshot %+v", nonemptySnap)
+		log.Fatalf(ctx, "found empty HardState for non-empty Snapshot %+v", snap)
 	}
 
 	var stats struct {
@@ -828,8 +816,8 @@ func (r *Replica) applySnapshot(
 		// Time to ingest SSTs.
 		ingestion time.Time
 	}
-	log.Infof(ctx, "applying snapshot of type %s [id=%s index=%d]", inSnap.snapType,
-		inSnap.SnapUUID.Short(), nonemptySnap.Metadata.Index)
+	log.Infof(ctx, "applying %s snapshot [id=%s index=%d]",
+		snapType, inSnap.SnapUUID.Short(), snap.Metadata.Index)
 	defer func(start time.Time) {
 		now := timeutil.Now()
 		totalLog := fmt.Sprintf(
@@ -849,10 +837,9 @@ func (r *Replica) applySnapshot(
 			len(inSnap.SSTStorageScratch.SSTs()),
 			stats.ingestion.Sub(stats.subsumedReplicas).Seconds()*1000,
 		)
-		log.Infof(
-			ctx, "applied snapshot of type %s [%s%s%sid=%s index=%d]", inSnap.snapType, totalLog,
-			subsumedReplicasLog, ingestionLog, inSnap.SnapUUID.Short(), nonemptySnap.Metadata.Index,
-		)
+		log.Infof(ctx, "applied %s snapshot [%s%s%sid=%s index=%d]",
+			snapType, totalLog, subsumedReplicasLog, ingestionLog,
+			inSnap.SnapUUID.Short(), snap.Metadata.Index)
 	}(timeutil.Now())
 
 	unreplicatedSSTFile := &storage.MemFile{}
@@ -861,9 +848,9 @@ func (r *Replica) applySnapshot(
 
 	// Clearing the unreplicated state.
 	unreplicatedPrefixKey := keys.MakeRangeIDUnreplicatedPrefix(r.RangeID)
-	unreplicatedStart := unreplicatedPrefixKey
-	unreplicatedEnd := unreplicatedPrefixKey.PrefixEnd()
-	if err = unreplicatedSST.ClearRawRange(unreplicatedStart, unreplicatedEnd); err != nil {
+	unreplicatedStart := storage.MakeMVCCMetadataKey(unreplicatedPrefixKey)
+	unreplicatedEnd := storage.MakeMVCCMetadataKey(unreplicatedPrefixKey.PrefixEnd())
+	if err = unreplicatedSST.ClearRange(unreplicatedStart, unreplicatedEnd); err != nil {
 		return errors.Wrapf(err, "error clearing range of unreplicated SST writer")
 	}
 
@@ -918,9 +905,9 @@ func (r *Replica) applySnapshot(
 		}
 	}
 
-	if s.RaftAppliedIndex != nonemptySnap.Metadata.Index {
+	if s.RaftAppliedIndex != snap.Metadata.Index {
 		log.Fatalf(ctx, "snapshot RaftAppliedIndex %d doesn't match its metadata index %d",
-			s.RaftAppliedIndex, nonemptySnap.Metadata.Index)
+			s.RaftAppliedIndex, snap.Metadata.Index)
 	}
 
 	if expLen := s.RaftAppliedIndex - s.TruncatedState.Index; expLen != uint64(len(inSnap.LogEntries)) {
@@ -957,7 +944,7 @@ func (r *Replica) applySnapshot(
 
 	// Ingest all SSTs atomically.
 	if fn := r.store.cfg.TestingKnobs.BeforeSnapshotSSTIngestion; fn != nil {
-		if err := fn(inSnap, inSnap.snapType, inSnap.SSTStorageScratch.SSTs()); err != nil {
+		if err := fn(inSnap, snapType, inSnap.SSTStorageScratch.SSTs()); err != nil {
 			return err
 		}
 	}
@@ -974,37 +961,28 @@ func (r *Replica) applySnapshot(
 		log.Fatalf(ctx, "failed to clear in-memory data of subsumed replicas while applying snapshot: %+v", err)
 	}
 
-	// Read the prior read summary for this range, which was included in the
-	// snapshot. We may need to use it to bump our timestamp cache if we
-	// discover that we are the leaseholder as of the snapshot's log index.
-	prioReadSum, err := readsummary.Load(ctx, r.store.engine, r.RangeID)
-	if err != nil {
-		log.Fatalf(ctx, "failed to read prior read summary after applying snapshot: %+v", err)
-	}
-
 	// Atomically swap the placeholder, if any, for the replica, and update the
-	// replica's state. Note that this is intentionally in one critical section.
-	// to avoid exposing an inconsistent in-memory state. We did however already
-	// consume the SSTs above, meaning that at this point the in-memory state lags
-	// the on-disk state.
-
+	// replica's descriptor.
 	r.store.mu.Lock()
-	r.mu.Lock()
-	if inSnap.placeholder != nil {
-		_, err := r.store.removePlaceholderLocked(ctx, inSnap.placeholder, removePlaceholderFilled)
-		if err != nil {
-			log.Fatalf(ctx, "unable to remove placeholder: %s", err)
-		}
+	if r.store.removePlaceholderLocked(ctx, r.RangeID) {
+		atomic.AddInt32(&r.store.counts.filledPlaceholders, 1)
 	}
-	r.setDescLockedRaftMuLocked(ctx, s.Desc)
-	if err := r.store.maybeMarkReplicaInitializedLockedReplLocked(ctx, r); err != nil {
+	r.setDescRaftMuLocked(ctx, s.Desc)
+	if err := r.store.maybeMarkReplicaInitializedLocked(ctx, r); err != nil {
 		log.Fatalf(ctx, "unable to mark replica initialized while applying snapshot: %+v", err)
 	}
-	// NOTE: even though we acquired the store mutex first (according to the
-	// lock ordering rules described on Store.mu), it is safe to drop it first
-	// without risking a lock-ordering deadlock.
 	r.store.mu.Unlock()
 
+	// Invoke the leasePostApply method to ensure we properly initialize the
+	// replica according to whether it holds the lease. We allow jumps in the
+	// lease sequence because there may be multiple lease changes accounted for
+	// in the snapshot.
+	r.leasePostApply(ctx, *s.Lease, true /* permitJump */)
+
+	// Inform the concurrency manager that this replica just applied a snapshot.
+	r.concMgr.OnReplicaSnapshotApplied()
+
+	r.mu.Lock()
 	// We set the persisted last index to the last applied index. This is
 	// not a correctness issue, but means that we may have just transferred
 	// some entries we're about to re-request from the leader and overwrite.
@@ -1018,7 +996,6 @@ func (r *Replica) applySnapshot(
 	// Update the store stats for the data in the snapshot.
 	r.store.metrics.subtractMVCCStats(ctx, r.mu.tenantID, *r.mu.state.Stats)
 	r.store.metrics.addMVCCStats(ctx, r.mu.tenantID, *s.Stats)
-	lastKnownLease := r.mu.state.Lease
 	// Update the rest of the Raft state. Changes to r.mu.state.Desc must be
 	// managed by r.setDescRaftMuLocked and changes to r.mu.state.Lease must be handled
 	// by r.leasePostApply, but we called those above, so now it's safe to
@@ -1027,33 +1004,8 @@ func (r *Replica) applySnapshot(
 	// Snapshots typically have fewer log entries than the leaseholder. The next
 	// time we hold the lease, recompute the log size before making decisions.
 	r.mu.raftLogSizeTrusted = false
-
-	// Invoke the leasePostApply method to ensure we properly initialize the
-	// replica according to whether it holds the lease. We allow jumps in the
-	// lease sequence because there may be multiple lease changes accounted for
-	// in the snapshot.
-	r.leasePostApplyLocked(ctx, lastKnownLease, s.Lease /* newLease */, prioReadSum, allowLeaseJump)
-
-	// Similarly, if we subsumed any replicas through the snapshot (meaning that
-	// we missed the application of a merge) and we are the new leaseholder, we
-	// make sure to update the timestamp cache using the prior read summary to
-	// account for any reads that were served on the right-hand side range(s).
-	if len(subsumedRepls) > 0 && s.Lease.Replica.ReplicaID == r.mu.replicaID && prioReadSum != nil {
-		applyReadSummaryToTimestampCache(r.store.tsCache, r.descRLocked(), *prioReadSum)
-	}
-
-	// Inform the concurrency manager that this replica just applied a snapshot.
-	r.concMgr.OnReplicaSnapshotApplied()
-
+	r.assertStateLocked(ctx, r.store.Engine())
 	r.mu.Unlock()
-
-	// Assert that the in-memory and on-disk states of the Replica are congruent
-	// after the application of the snapshot. Do so under a read lock, as this
-	// operation can be expensive. This is safe, as we hold the Replica.raftMu
-	// across both Replica.mu critical sections.
-	r.mu.RLock()
-	r.assertStateRaftMuLockedReplicaMuRLocked(ctx, r.store.Engine())
-	r.mu.RUnlock()
 
 	// The rangefeed processor is listening for the logical ops attached to
 	// each raft command. These will be lost during a snapshot, so disconnect
@@ -1084,11 +1036,14 @@ func (r *Replica) clearSubsumedReplicaDiskData(
 	subsumedRepls []*Replica,
 	subsumedNextReplicaID roachpb.ReplicaID,
 ) error {
-	// NB: we don't clear RangeID local key ranges here. That happens
-	// via the call to preDestroyRaftMuLocked.
-	getKeyRanges := rditer.MakeReplicatedKeyRangesExceptRangeID
+	getKeyRanges := func(desc *roachpb.RangeDescriptor) [2]rditer.KeyRange {
+		return [...]rditer.KeyRange{
+			rditer.MakeRangeLocalKeyRange(desc),
+			rditer.MakeUserKeyRange(desc),
+		}
+	}
 	keyRanges := getKeyRanges(desc)
-	totalKeyRanges := append([]rditer.KeyRange(nil), keyRanges...)
+	totalKeyRanges := append([]rditer.KeyRange(nil), keyRanges[:]...)
 	for _, sr := range subsumedRepls {
 		// We mark the replica as destroyed so that new commands are not
 		// accepted. This destroy status will be detected after the batch
@@ -1143,10 +1098,10 @@ func (r *Replica) clearSubsumedReplicaDiskData(
 		}
 	}
 
-	// We might have to create SSTs for the range local keys, lock table keys,
-	// and user keys depending on if the subsumed replicas are not fully
-	// contained by the replica in our snapshot. The following is an example to
-	// this case happening.
+	// We might have to create SSTs for the range local keys and user keys
+	// depending on if the subsumed replicas are not fully contained by the
+	// replica in our snapshot. The following is an example to this case
+	// happening.
 	//
 	// a       b       c       d
 	// |---1---|-------2-------|  S1

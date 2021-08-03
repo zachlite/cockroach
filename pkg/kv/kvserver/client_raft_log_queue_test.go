@@ -13,21 +13,15 @@ package kvserver_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/proto"
-	"github.com/stretchr/testify/require"
 )
 
 // TestRaftLogQueue verifies that the raft log queue correctly truncates the
@@ -36,78 +30,69 @@ func TestRaftLogQueue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	mtc := &multiTestContext{}
+
 	// Set maxBytes to something small so we can trigger the raft log truncation
 	// without adding 64MB of logs.
 	const maxBytes = 1 << 16
 
-	zoneConfig := zonepb.DefaultZoneConfig()
-	zoneConfig.RangeMaxBytes = proto.Int64(maxBytes)
+	// Turn off raft elections so the raft leader won't change out from under
+	// us in this test.
+	sc := kvserver.TestStoreConfig(nil)
+	sc.DefaultZoneConfig.RangeMaxBytes = proto.Int64(maxBytes)
+	sc.RaftTickInterval = math.MaxInt32
+	sc.RaftElectionTimeoutTicks = 1000000
+	mtc.storeConfig = &sc
 
-	ctx := context.Background()
-	tc := testcluster.StartTestCluster(t, 3,
-		base.TestClusterArgs{
-			ReplicationMode: base.ReplicationManual,
-			ServerArgs: base.TestServerArgs{
-				Knobs: base.TestingKnobs{
-					Server: &server.TestingKnobs{
-						DefaultZoneConfigOverride: &zoneConfig,
-					},
-				},
-				RaftConfig: base.RaftConfig{
-					// Turn off raft elections so the raft leader won't change out from under
-					// us in this test.
-					RaftTickInterval:         math.MaxInt32,
-					RaftElectionTimeoutTicks: 1000000,
-				},
-			},
-		})
-	defer tc.Stopper().Stop(ctx)
-	store := tc.GetFirstStoreFromServer(t, 0)
+	defer mtc.Stop()
+	mtc.Start(t, 3)
 
-	key := tc.ScratchRange(t)
-	tc.AddVotersOrFatal(t, key, tc.Targets(1, 2)...)
 	// Write a single value to ensure we have a leader.
-	pArgs := putArgs(key, []byte("value"))
-	if _, err := kv.SendWrapped(ctx, store.TestSender(), pArgs); err != nil {
+	pArgs := putArgs([]byte("key"), []byte("value"))
+	if _, err := kv.SendWrapped(context.Background(), mtc.stores[0].TestSender(), pArgs); err != nil {
 		t.Fatal(err)
 	}
 
 	// Get the raft leader (and ensure one exists).
-	raftLeaderRepl := tc.GetRaftLeader(t, roachpb.RKey(key))
-	require.NotNil(t, raftLeaderRepl)
+	rangeID := mtc.stores[0].LookupReplica([]byte("a")).RangeID
+	raftLeaderRepl := mtc.getRaftLeader(rangeID)
+	if raftLeaderRepl == nil {
+		t.Fatalf("could not find raft leader replica for range %d", rangeID)
+	}
 	originalIndex, err := raftLeaderRepl.GetFirstIndex()
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Disable splits since we're increasing the raft log with puts.
+	for _, store := range mtc.stores {
+		store.SetSplitQueueActive(false)
+	}
+
 	// Write a collection of values to increase the raft log.
-	value := bytes.Repeat(key, 1000) // 1KB
+	value := bytes.Repeat([]byte("a"), 1000) // 1KB
 	for size := int64(0); size < 2*maxBytes; size += int64(len(value)) {
-		key = key.Next()
-		pArgs = putArgs(key, value)
-		if _, err := kv.SendWrapped(ctx, store.TestSender(), pArgs); err != nil {
+		pArgs = putArgs([]byte(fmt.Sprintf("key-%d", size)), value)
+		if _, err := kv.SendWrapped(context.Background(), mtc.stores[0].TestSender(), pArgs); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	var afterTruncationIndex uint64
-	testutils.SucceedsSoon(t, func() error {
-		// Force a truncation check.
-		for i := range tc.Servers {
-			tc.GetFirstStoreFromServer(t, i).MustForceRaftLogScanAndProcess()
-		}
-		// Ensure that firstIndex has increased indicating that the log
-		// truncation has occurred.
-		afterTruncationIndex, err = raftLeaderRepl.GetFirstIndex()
-		if err != nil {
-			return err
-		}
-		if afterTruncationIndex <= originalIndex {
-			return errors.Errorf("raft log has not been truncated yet, afterTruncationIndex:%d originalIndex:%d",
-				afterTruncationIndex, originalIndex)
-		}
-		return nil
-	})
+	// Force a truncation check.
+	for _, store := range mtc.stores {
+		store.MustForceRaftLogScanAndProcess()
+	}
+
+	// Ensure that firstIndex has increased indicating that the log
+	// truncation has occurred.
+	afterTruncationIndex, err := raftLeaderRepl.GetFirstIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterTruncationIndex <= originalIndex {
+		t.Fatalf("raft log has not been truncated yet, afterTruncationIndex:%d originalIndex:%d",
+			afterTruncationIndex, originalIndex)
+	}
 
 	// Force a truncation check again to ensure that attempting to truncate an
 	// already truncated log has no effect. This check, unlike in the last
@@ -116,8 +101,8 @@ func TestRaftLogQueue(t *testing.T) {
 	// GetFirstIndex, giving a false negative. Fixing this requires additional
 	// instrumentation of the queues, which was deemed to require too much work
 	// at the time of this writing.
-	for i := range tc.Servers {
-		tc.GetFirstStoreFromServer(t, i).MustForceRaftLogScanAndProcess()
+	for _, store := range mtc.stores {
+		store.MustForceRaftLogScanAndProcess()
 	}
 
 	after2ndTruncationIndex, err := raftLeaderRepl.GetFirstIndex()

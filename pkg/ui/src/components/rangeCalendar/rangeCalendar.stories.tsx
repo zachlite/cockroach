@@ -15,5 +15,7 @@ import { RangeCalendar } from "./index";
 import { styledWrapper } from "src/util/decorators";
 
 storiesOf("Range Calendar", module)
-  .addDecorator(styledWrapper({ padding: "24px" }))
-  .add("default", () => <RangeCalendar />);
+  .addDecorator(styledWrapper({padding: "24px"}))
+  .add("default", () => (
+    <RangeCalendar />
+  ));

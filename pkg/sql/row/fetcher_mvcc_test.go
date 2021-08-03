@@ -19,9 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -44,7 +44,7 @@ func slurpUserDataKVs(t testing.TB, e storage.Engine) []roachpb.KeyValue {
 	var kvs []roachpb.KeyValue
 	testutils.SucceedsSoon(t, func() error {
 		kvs = nil
-		it := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
+		it := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer it.Close()
 		for it.SeekGE(storage.MVCCKey{Key: keys.UserTableDataMin}); ; it.NextKey() {
 			ok, err := it.Valid()
@@ -89,20 +89,21 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 	parentDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `parent`)
 	childDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `child`)
 	var args []row.FetcherTableArgs
-	for _, desc := range []catalog.TableDescriptor{parentDesc, childDesc} {
-		var colIdxMap catalog.TableColMap
+	for _, desc := range []*tabledesc.Immutable{parentDesc, childDesc} {
+		colIdxMap := make(map[descpb.ColumnID]int)
 		var valNeededForCol util.FastIntSet
-		for i, col := range desc.PublicColumns() {
-			colIdxMap.Set(col.GetID(), i)
-			valNeededForCol.Add(i)
+		for colIdx := range desc.Columns {
+			id := desc.Columns[colIdx].ID
+			colIdxMap[id] = colIdx
+			valNeededForCol.Add(colIdx)
 		}
 		args = append(args, row.FetcherTableArgs{
 			Spans:            desc.AllIndexSpans(keys.SystemSQLCodec),
 			Desc:             desc,
-			Index:            desc.GetPrimaryIndex(),
+			Index:            &desc.PrimaryIndex,
 			ColIdxMap:        colIdxMap,
 			IsSecondaryIndex: false,
-			Cols:             desc.PublicColumns(),
+			Cols:             desc.Columns,
 			ValNeededForCol:  valNeededForCol,
 		})
 	}

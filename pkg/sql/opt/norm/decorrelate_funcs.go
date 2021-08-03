@@ -86,13 +86,13 @@ func (c *CustomFuncs) deriveHasHoistableSubquery(scalar opt.ScalarExpr) bool {
 			case *memo.CaseExpr:
 				// Determine whether this is the Else child.
 				if child == t.OrElse {
-					memo.BuildSharedProps(child, &sharedProps, c.f.evalCtx)
+					memo.BuildSharedProps(child, &sharedProps)
 					hasHoistableSubquery = sharedProps.VolatilitySet.IsLeakProof()
 				}
 
 			case *memo.WhenExpr:
 				if child == t.Value {
-					memo.BuildSharedProps(child, &sharedProps, c.f.evalCtx)
+					memo.BuildSharedProps(child, &sharedProps)
 					hasHoistableSubquery = sharedProps.VolatilitySet.IsLeakProof()
 				}
 
@@ -101,7 +101,7 @@ func (c *CustomFuncs) deriveHasHoistableSubquery(scalar opt.ScalarExpr) bool {
 				// other branches do is tricky because it's a list, but we know that
 				// it's at position 1.
 				if i == 1 {
-					memo.BuildSharedProps(child, &sharedProps, c.f.evalCtx)
+					memo.BuildSharedProps(child, &sharedProps)
 					hasHoistableSubquery = sharedProps.VolatilitySet.IsLeakProof()
 				}
 			}
@@ -735,14 +735,10 @@ type subqueryHoister struct {
 }
 
 func (r *subqueryHoister) init(c *CustomFuncs, input memo.RelExpr) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*r = subqueryHoister{
-		c:       c,
-		f:       c.f,
-		mem:     c.mem,
-		hoisted: input,
-	}
+	r.c = c
+	r.f = c.f
+	r.mem = c.mem
+	r.hoisted = input
 }
 
 // input returns a single expression tree that contains the input expression

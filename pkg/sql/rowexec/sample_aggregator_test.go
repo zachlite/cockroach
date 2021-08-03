@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
@@ -118,17 +117,17 @@ func runSampleAggregator(
 
 	outputs := make([]*distsqlutils.RowBuffer, numSamplers)
 	for i := 0; i < numSamplers; i++ {
-		rows := randgen.GenEncDatumRowsInt(rowPartitions[i])
-		in := distsqlutils.NewRowBuffer(types.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
+		rows := rowenc.GenEncDatumRowsInt(rowPartitions[i])
+		in := distsqlutils.NewRowBuffer(rowenc.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
 		outputs[i] = distsqlutils.NewRowBuffer(samplerOutTypes, nil /* rows */, distsqlutils.RowBufferArgs{})
 
 		spec := &execinfrapb.SamplerSpec{
-			SampleSize:    childNumSamples,
-			MinSampleSize: childMinNumSamples,
-			Sketches:      sketchSpecs,
+			SampleSize: childNumSamples,
+			Sketches:   sketchSpecs,
 		}
 		p, err := newSamplerProcessor(
-			&flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{}, outputs[i],
+			&flowCtx, 0 /* processorID */, spec, int(childMinNumSamples), in,
+			&execinfrapb.PostProcessSpec{}, outputs[i],
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -155,14 +154,14 @@ func runSampleAggregator(
 	finalOut := distsqlutils.NewRowBuffer([]*types.T{}, nil /* rows*/, distsqlutils.RowBufferArgs{})
 	spec := &execinfrapb.SampleAggregatorSpec{
 		SampleSize:       aggNumSamples,
-		MinSampleSize:    aggMinNumSamples,
 		Sketches:         sketchSpecs,
 		SampledColumnIDs: []descpb.ColumnID{100, 101},
 		TableID:          13,
 	}
 
 	agg, err := newSampleAggregator(
-		&flowCtx, 0 /* processorID */, spec, samplerResults, &execinfrapb.PostProcessSpec{}, finalOut,
+		&flowCtx, 0 /* processorID */, spec, int(aggMinNumSamples), samplerResults,
+		&execinfrapb.PostProcessSpec{}, finalOut,
 	)
 	if err != nil {
 		t.Fatal(err)

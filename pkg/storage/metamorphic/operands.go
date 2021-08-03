@@ -379,7 +379,7 @@ func (w *readWriterGenerator) closeAll() {
 type iteratorID string
 type iteratorInfo struct {
 	id          iteratorID
-	iter        storage.MVCCIterator
+	iter        storage.Iterator
 	lowerBound  roachpb.Key
 	isBatchIter bool
 }

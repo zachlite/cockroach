@@ -16,8 +16,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -26,9 +26,9 @@ import (
 // Deleter abstracts the key/value operations for deleting table rows.
 type Deleter struct {
 	Helper    rowHelper
-	FetchCols []catalog.Column
+	FetchCols []descpb.ColumnDescriptor
 	// FetchColIDtoRowIndex must be kept in sync with FetchCols.
-	FetchColIDtoRowIndex catalog.TableColMap
+	FetchColIDtoRowIndex map[descpb.ColumnID]int
 	// For allocation avoidance.
 	key roachpb.Key
 }
@@ -41,43 +41,41 @@ type Deleter struct {
 // FetchCols; otherwise, all columns that are part of the key of any index
 // (either primary or secondary) are included in FetchCols.
 func MakeDeleter(
-	codec keys.SQLCodec, tableDesc catalog.TableDescriptor, requestedCols []catalog.Column,
+	codec keys.SQLCodec, tableDesc *tabledesc.Immutable, requestedCols []descpb.ColumnDescriptor,
 ) Deleter {
-	indexes := tableDesc.DeletableNonPrimaryIndexes()
+	indexes := tableDesc.DeletableIndexes()
 
-	var fetchCols []catalog.Column
-	var fetchColIDtoRowIndex catalog.TableColMap
+	var fetchCols []descpb.ColumnDescriptor
+	var fetchColIDtoRowIndex map[descpb.ColumnID]int
 	if requestedCols != nil {
 		fetchCols = requestedCols[:len(requestedCols):len(requestedCols)]
 		fetchColIDtoRowIndex = ColIDtoRowIndexFromCols(fetchCols)
 	} else {
+		fetchColIDtoRowIndex = make(map[descpb.ColumnID]int)
 		maybeAddCol := func(colID descpb.ColumnID) error {
-			if _, ok := fetchColIDtoRowIndex.Get(colID); !ok {
-				col, err := tableDesc.FindColumnWithID(colID)
+			if _, ok := fetchColIDtoRowIndex[colID]; !ok {
+				col, err := tableDesc.FindColumnByID(colID)
 				if err != nil {
 					return err
 				}
-				fetchColIDtoRowIndex.Set(col.GetID(), len(fetchCols))
-				fetchCols = append(fetchCols, col)
+				fetchColIDtoRowIndex[col.ID] = len(fetchCols)
+				fetchCols = append(fetchCols, *col)
 			}
 			return nil
 		}
-		for j := 0; j < tableDesc.GetPrimaryIndex().NumKeyColumns(); j++ {
-			colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(j)
+		for _, colID := range tableDesc.PrimaryIndex.ColumnIDs {
 			if err := maybeAddCol(colID); err != nil {
 				return Deleter{}
 			}
 		}
 		for _, index := range indexes {
-			for j := 0; j < index.NumKeyColumns(); j++ {
-				colID := index.GetKeyColumnID(j)
+			for _, colID := range index.ColumnIDs {
 				if err := maybeAddCol(colID); err != nil {
 					return Deleter{}
 				}
 			}
 			// The extra columns are needed to fix #14601.
-			for j := 0; j < index.NumKeySuffixColumns(); j++ {
-				colID := index.GetKeySuffixColumnID(j)
+			for _, colID := range index.ExtraColumnIDs {
 				if err := maybeAddCol(colID); err != nil {
 					return Deleter{}
 				}
@@ -106,7 +104,7 @@ func (rd *Deleter) DeleteRow(
 	for i := range rd.Helper.Indexes {
 		// If the index ID exists in the set of indexes to ignore, do not
 		// attempt to delete from the index.
-		if pm.IgnoreForDel.Contains(int(rd.Helper.Indexes[i].GetID())) {
+		if pm.IgnoreForDel.Contains(int(rd.Helper.Indexes[i].ID)) {
 			continue
 		}
 
@@ -114,7 +112,7 @@ func (rd *Deleter) DeleteRow(
 		entries, err := rowenc.EncodeSecondaryIndex(
 			rd.Helper.Codec,
 			rd.Helper.TableDesc,
-			rd.Helper.Indexes[i],
+			&rd.Helper.Indexes[i],
 			rd.FetchColIDtoRowIndex,
 			values,
 			true, /* includeEmpty */
@@ -160,7 +158,7 @@ func (rd *Deleter) DeleteRow(
 // DeleteIndexRow adds to the batch the kv operations necessary to delete a
 // table row from the given index.
 func (rd *Deleter) DeleteIndexRow(
-	ctx context.Context, b *kv.Batch, idx catalog.Index, values []tree.Datum, traceKV bool,
+	ctx context.Context, b *kv.Batch, idx *descpb.IndexDescriptor, values []tree.Datum, traceKV bool,
 ) error {
 	// We want to include empty k/v pairs because we want
 	// to delete all k/v's for this row. By setting includeEmpty

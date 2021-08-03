@@ -134,7 +134,7 @@ type ColumnItem struct {
 // If this is updated, then dummyColumnItem.Format should be updated as well.
 func (c *ColumnItem) Format(ctx *FmtCtx) {
 	if c.TableName != nil {
-		ctx.FormatNode(c.TableName)
+		c.TableName.Format(ctx)
 		ctx.WriteByte('.')
 	}
 	ctx.FormatNode(&c.ColumnName)

@@ -28,22 +28,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/errors"
 )
 
 var (
 	// DefaultTTL specifies the time to expiration when a session is created.
-	DefaultTTL = settings.RegisterDurationSetting(
+	DefaultTTL = settings.RegisterNonNegativeDurationSetting(
 		"server.sqlliveness.ttl",
 		"default sqlliveness session ttl",
 		40*time.Second,
-		settings.NonNegativeDuration,
 	)
 	// DefaultHeartBeat specifies the period between attempts to extend a session.
-	DefaultHeartBeat = settings.RegisterDurationSetting(
+	DefaultHeartBeat = settings.RegisterNonNegativeDurationSetting(
 		"server.sqlliveness.heartbeat",
 		"duration heart beats to push session expiration further out in time",
 		5*time.Second,
-		settings.NonNegativeDuration,
 	)
 )
 
@@ -184,6 +183,7 @@ func (l *Instance) heartbeatLoop(ctx context.Context) {
 	}()
 	ctx, cancel := l.stopper.WithCancelOnQuiesce(ctx)
 	defer cancel()
+	sqlliveness.WaitForActive(ctx, l.settings)
 	t := timeutil.NewTimer()
 	t.Reset(0)
 	for {
@@ -261,7 +261,7 @@ func (l *Instance) Session(ctx context.Context) (sqlliveness.Session, error) {
 	l.mu.Lock()
 	if !l.mu.started {
 		l.mu.Unlock()
-		return nil, sqlliveness.NotStartedError
+		return nil, errors.New("the Instance has not been started yet")
 	}
 	l.mu.Unlock()
 

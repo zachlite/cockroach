@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -28,7 +28,6 @@ export const getNodeStatus = () => {
         major_val: 20,
         minor_val: 2,
         patch: 0,
-        internal: 16,
       },
       build_tag: "v21.1.0-alpha.1-1124-ga51f2e212a",
       started_at: Long.fromString("1611220033263119000"),
@@ -462,7 +461,6 @@ export const getNodeStatus = () => {
       "sql.misc.started.count": 0,
       "sql.misc.started.count.internal": 2,
       "sql.new_conns": 0,
-      "sql.conn.latency": 0,
       "sql.optimizer.fallback.count": 0,
       "sql.optimizer.fallback.count.internal": 0,
       "sql.optimizer.plan_cache.hits": 0,
@@ -650,7 +648,6 @@ export const getNodeStatus = () => {
               major_val: 20,
               minor_val: 2,
               patch: 0,
-              internal: 16,
             },
             build_tag: "v21.1.0-alpha.1-1124-ga51f2e212a",
             started_at: Long.fromString("1611220033263119000"),
@@ -895,8 +892,6 @@ export const getNodeStatus = () => {
           "rocksdb.memtable.total-size": 67108864,
           "rocksdb.num-sstables": 4,
           "rocksdb.read-amplification": 1,
-          "storage.l0-sublevels": 1,
-          "storage.l0-num-files": 1,
           "rocksdb.table-readers-mem-estimate": 1848,
           "storage.disk-slow": 0,
           "storage.disk-stalled": 0,

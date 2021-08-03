@@ -29,9 +29,7 @@ const analyticsOpts = {
   host: COCKROACHLABS_ADDR + "/api/segment",
 };
 
-export function getAnalyticsClientFor(
-  target: AnalyticsClientTarget,
-): Analytics {
+export function getAnalyticsClientFor(target: AnalyticsClientTarget): Analytics {
   switch (target) {
     case "email_sign_up":
       return new Analytics(EMAIL_SIGN_UP_CLIENT_KEY, analyticsOpts);
@@ -40,9 +38,7 @@ export function getAnalyticsClientFor(
   }
 }
 
-export function* signUpEmailSubscription(
-  action: PayloadAction<EmailSubscriptionSignUpPayload>,
-) {
+export function* signUpEmailSubscription(action: PayloadAction<EmailSubscriptionSignUpPayload>) {
   const client = getAnalyticsClientFor("email_sign_up");
   const { clusterId, email } = action.payload;
   yield call([client, client.identify], {

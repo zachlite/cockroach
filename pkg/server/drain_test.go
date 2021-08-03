@@ -13,34 +13,49 @@ package server_test
 import (
 	"context"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"google.golang.org/grpc"
 )
 
 // TestDrain tests the Drain RPC.
 func TestDrain(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	doTestDrain(t)
+	doTestDrain(t, true /* newInterface */)
+}
+
+// TestDrainLegacy tests the Drain RPC using the pre-20.1 probe signaling.
+// TODO(knz): Remove this test when compatibility with pre-20.1 nodes
+// is dropped.
+func TestDrainLegacy(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	doTestDrain(t, false /* newInterface */)
 }
 
 // doTestDrain runs the drain test.
-func doTestDrain(tt *testing.T) {
+// The parameter newInterface indicates whether to use the pre-20.1
+// protocol based on "drain modes" or the post-20.1 protocol
+// using discrete fields on the request object.
+func doTestDrain(tt *testing.T, newInterface bool) {
 	var drainSleepCallCount = 0
-	t := newTestDrainContext(tt, &drainSleepCallCount)
+	t := newTestDrainContext(tt, newInterface, &drainSleepCallCount)
 	defer t.Close()
 
 	// Issue a probe. We're not draining yet, so the probe should
@@ -93,14 +108,18 @@ func doTestDrain(tt *testing.T) {
 
 type testDrainContext struct {
 	*testing.T
-	tc         *testcluster.TestCluster
-	c          serverpb.AdminClient
-	connCloser func()
+	tc           *testcluster.TestCluster
+	newInterface bool
+	c            serverpb.AdminClient
+	connCloser   func()
 }
 
-func newTestDrainContext(t *testing.T, drainSleepCallCount *int) *testDrainContext {
+func newTestDrainContext(
+	t *testing.T, newInterface bool, drainSleepCallCount *int,
+) *testDrainContext {
 	tc := &testDrainContext{
-		T: t,
+		T:            t,
+		newInterface: newInterface,
 		tc: testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
 			// We need to start the cluster insecure in order to not
 			// care about TLS settings for the RPC client connection.
@@ -119,7 +138,8 @@ func newTestDrainContext(t *testing.T, drainSleepCallCount *int) *testDrainConte
 
 	// We'll have the RPC talk to the first node.
 	var err error
-	tc.c, tc.connCloser, err = getAdminClientForServer(tc.tc.Server(0))
+	tc.c, tc.connCloser, err = getAdminClientForServer(context.Background(),
+		tc.tc, 0 /* serverIdx */)
 	if err != nil {
 		tc.Close()
 		t.Fatal(err)
@@ -148,7 +168,11 @@ func (t *testDrainContext) drainRequest(drain, shutdown bool) *serverpb.DrainRes
 	req := &serverpb.DrainRequest{Shutdown: shutdown}
 
 	if drain {
-		req.DoDrain = true
+		if t.newInterface {
+			req.DoDrain = true
+		} else {
+			req.DeprecatedProbeIndicator = server.DeprecatedDrainParameter
+		}
 	}
 
 	drainStream, err := t.c.Drain(context.Background(), req)
@@ -173,7 +197,7 @@ func (t *testDrainContext) sendShutdown() *serverpb.DrainResponse {
 		// It's possible we're getting "connection reset by peer" or some
 		// gRPC initialization failure because the server is shutting
 		// down. Tolerate that.
-		log.Infof(context.Background(), "RPC error: %v", err)
+		t.Logf("RPC error: %v", err)
 	}
 	return resp
 }
@@ -181,6 +205,18 @@ func (t *testDrainContext) sendShutdown() *serverpb.DrainResponse {
 func (t *testDrainContext) assertDraining(resp *serverpb.DrainResponse, drain bool) {
 	if resp.IsDraining != drain {
 		t.Fatalf("expected draining %v, got %v", drain, resp.IsDraining)
+	}
+	// Check that the deprecated status field is compatible with expectation.
+	// TODO(knz): Remove this test when compatibility with pre-20.1 nodes
+	// is dropped.
+	if drain {
+		if !reflect.DeepEqual(resp.DeprecatedDrainStatus, server.DeprecatedDrainParameter) {
+			t.Fatalf("expected compat drain status, got %# v", pretty.Formatter(resp))
+		}
+	} else {
+		if len(resp.DeprecatedDrainStatus) > 0 {
+			t.Fatalf("expected no compat drain status, got %# v", pretty.Formatter(resp))
+		}
 	}
 }
 
@@ -218,14 +254,23 @@ func (t *testDrainContext) getDrainResponse(
 }
 
 func getAdminClientForServer(
-	s serverutils.TestServerInterface,
+	ctx context.Context, tc *testcluster.TestCluster, serverIdx int,
 ) (c serverpb.AdminClient, closer func(), err error) {
-	conn, err := grpc.Dial(s.ServingRPCAddr(), grpc.WithInsecure())
+	stopper := stop.NewStopper() // stopper for the client.
+	// Retrieve some parameters to initialize the client RPC context.
+	cfg := tc.Server(0).RPCContext().Config
+	execCfg := tc.Server(0).ExecutorConfig().(sql.ExecutorConfig)
+	rpcContext := rpc.NewContext(rpc.ContextOptions{
+		TenantID:   roachpb.SystemTenantID,
+		AmbientCtx: log.AmbientContext{Tracer: execCfg.Settings.Tracer},
+		Config:     cfg,
+		Clock:      execCfg.Clock,
+		Stopper:    stopper,
+		Settings:   execCfg.Settings,
+	})
+	conn, err := rpcContext.GRPCUnvalidatedDial(tc.Server(serverIdx).ServingRPCAddr()).Connect(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	client := serverpb.NewAdminClient(conn)
-	return client, func() {
-		_ = conn.Close() // nolint:grpcconnclose
-	}, nil
+	return serverpb.NewAdminClient(conn), func() { stopper.Stop(ctx) }, nil
 }

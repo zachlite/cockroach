@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 )
 
 func init() {
@@ -27,16 +28,16 @@ func init() {
 }
 
 func declareKeysRevertRange(
-	rs ImmutableRangeState,
+	desc *roachpb.RangeDescriptor,
 	header roachpb.Header,
 	req roachpb.Request,
 	latchSpans, lockSpans *spanset.SpanSet,
 ) {
-	DefaultDeclareIsolatedKeys(rs, header, req, latchSpans, lockSpans)
+	DefaultDeclareIsolatedKeys(desc, header, req, latchSpans, lockSpans)
 	// We look up the range descriptor key to check whether the span
 	// is equal to the entire range for fast stats updating.
-	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeDescriptorKey(rs.GetStartKey())})
-	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeGCThresholdKey(rs.GetRangeID())})
+	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeDescriptorKey(desc.StartKey)})
+	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeLastGCKey(desc.RangeID)})
 }
 
 // isEmptyKeyTimeRange checks if the span has no writes in (since,until].
@@ -47,7 +48,7 @@ func isEmptyKeyTimeRange(
 	// may not be in the time range but the fact the TBI found any key indicates
 	// that there is *a* key in the SST that is in the time range. Thus we should
 	// proceed to iteration that actually checks timestamps on each key.
-	iter := readWriter.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
+	iter := readWriter.NewIterator(storage.IterOptions{
 		LowerBound: from, UpperBound: to,
 		MinTimestampHint: since.Next() /* make exclusive */, MaxTimestampHint: until,
 	})
@@ -56,8 +57,6 @@ func isEmptyKeyTimeRange(
 	ok, err := iter.Valid()
 	return !ok, err
 }
-
-const maxRevertRangeBatchBytes = 32 << 20
 
 // RevertRange wipes all MVCC versions more recent than TargetTime (up to the
 // command timestamp) of the keys covered by the specified span, adjusting the
@@ -69,7 +68,7 @@ func RevertRange(
 	ctx context.Context, readWriter storage.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
 ) (result.Result, error) {
 	if cArgs.Header.Txn != nil {
-		return result.Result{}, ErrTransactionUnsupported
+		return result.Result{}, errors.New("cannot execute RevertRange within a transaction")
 	}
 	log.VEventf(ctx, 2, "RevertRange %+v", cArgs.Args)
 
@@ -89,9 +88,7 @@ func RevertRange(
 	log.VEventf(ctx, 2, "clearing keys with timestamp (%v, %v]", args.TargetTime, cArgs.Header.Timestamp)
 
 	resume, err := storage.MVCCClearTimeRange(ctx, readWriter, cArgs.Stats, args.Key, args.EndKey,
-		args.TargetTime, cArgs.Header.Timestamp, cArgs.Header.MaxSpanRequestKeys,
-		maxRevertRangeBatchBytes,
-		args.EnableTimeBoundIteratorOptimization)
+		args.TargetTime, cArgs.Header.Timestamp, cArgs.Header.MaxSpanRequestKeys)
 	if err != nil {
 		return result.Result{}, err
 	}

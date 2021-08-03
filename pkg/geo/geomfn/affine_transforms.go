@@ -11,11 +11,9 @@
 package geomfn
 
 import (
-	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/geo"
-	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/errors"
 	"github.com/twpayne/go-geom"
 )
@@ -243,98 +241,4 @@ func Rotate(g geo.Geometry, rotRadians float64) (geo.Geometry, error) {
 			{0, 0, 0, 1},
 		}),
 	)
-}
-
-// ErrPointOriginEmpty is an error to compare point origin is empty.
-var ErrPointOriginEmpty = fmt.Errorf("origin is an empty point")
-
-// RotateWithPointOrigin returns a modified Geometry whose coordinates are rotated
-// around the pointOrigin by a rotRadians.
-func RotateWithPointOrigin(
-	g geo.Geometry, rotRadians float64, pointOrigin geo.Geometry,
-) (geo.Geometry, error) {
-	if pointOrigin.ShapeType() != geopb.ShapeType_Point {
-		return g, errors.New("origin is not a POINT")
-	}
-	t, err := pointOrigin.AsGeomT()
-	if err != nil {
-		return g, err
-	}
-	if t.Empty() {
-		return g, ErrPointOriginEmpty
-	}
-
-	return RotateWithXY(g, rotRadians, t.FlatCoords()[0], t.FlatCoords()[1])
-}
-
-// RotateWithXY returns a modified Geometry whose coordinates are rotated
-// around the X and Y by a rotRadians.
-func RotateWithXY(g geo.Geometry, rotRadians, x, y float64) (geo.Geometry, error) {
-	cos, sin := math.Cos(rotRadians), math.Sin(rotRadians)
-	return Affine(
-		g,
-		AffineMatrix{
-			{cos, -sin, 0, x - x*cos + y*sin},
-			{sin, cos, 0, y - x*sin - y*cos},
-			{0, 0, 1, 0},
-			{0, 0, 0, 1},
-		},
-	)
-}
-
-// RotateX returns a modified Geometry whose coordinates are rotated about
-// the X axis by rotRadians
-func RotateX(g geo.Geometry, rotRadians float64) (geo.Geometry, error) {
-	cos, sin := math.Cos(rotRadians), math.Sin(rotRadians)
-	return Affine(
-		g,
-		AffineMatrix{
-			{1, 0, 0, 0},
-			{0, cos, -sin, 0},
-			{0, sin, cos, 0},
-			{0, 0, 0, 1},
-		},
-	)
-}
-
-// RotateY returns a modified Geometry whose coordinates are rotated about
-// the Y axis by rotRadians
-func RotateY(g geo.Geometry, rotRadians float64) (geo.Geometry, error) {
-	cos, sin := math.Cos(rotRadians), math.Sin(rotRadians)
-	return Affine(
-		g,
-		AffineMatrix{
-			{cos, 0, sin, 0},
-			{0, 1, 0, 0},
-			{-sin, 0, cos, 0},
-			{0, 0, 0, 1},
-		},
-	)
-}
-
-// RotateZ returns a modified Geometry whose coordinates are rotated about
-// the Z axis by rotRadians
-func RotateZ(g geo.Geometry, rotRadians float64) (geo.Geometry, error) {
-	cos, sin := math.Cos(rotRadians), math.Sin(rotRadians)
-	return Affine(
-		g,
-		AffineMatrix{
-			{cos, -sin, 0, 0},
-			{sin, cos, 0, 0},
-			{0, 0, 1, 0},
-			{0, 0, 0, 1},
-		},
-	)
-}
-
-// TransScale returns a modified Geometry whose coordinates are
-// translate by deltaX and deltaY and scale by xFactor and yFactor
-func TransScale(g geo.Geometry, deltaX, deltaY, xFactor, yFactor float64) (geo.Geometry, error) {
-	return Affine(g,
-		AffineMatrix([][]float64{
-			{xFactor, 0, 0, xFactor * deltaX},
-			{0, yFactor, 0, yFactor * deltaY},
-			{0, 0, 1, 0},
-			{0, 0, 0, 1},
-		}))
 }

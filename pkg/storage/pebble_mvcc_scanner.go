@@ -16,7 +16,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/observedts"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -45,33 +44,29 @@ func (p *pebbleResults) clear() {
 // The repr that MVCCScan / MVCCGet expects to provide as output goes:
 // <valueLen:Uint32><keyLen:Uint32><Key><Value>
 // This function adds to repr in that format.
-func (p *pebbleResults) put(key []byte, value []byte) {
+func (p *pebbleResults) put(key MVCCKey, value []byte) {
 	// Key value lengths take up 8 bytes (2 x Uint32).
 	const kvLenSize = 8
 	const minSize = 16
-	const maxSize = 128 << 20 // 128 MB
+	// This used to be 128MB, but the enforcement of key+value size limit is
+	// currently done based on the cluster setting kv.raft.command.max_size,
+	// which defaults to 64MB but can be increased. Until we add proper
+	// enforcement, we are increasing this to 512MB, under the assumption that
+	// no one will increase kv.raft.command.max_size to > 512MB.
+	const maxSize = 512 << 20 // 512 MB
 
 	// We maintain a list of buffers, always encoding into the last one (a.k.a.
 	// pebbleResults.repr). The size of the buffers is exponentially increasing,
-	// capped at maxSize. The exponential increase allows us to amortize the
-	// cost of the allocation over multiple put calls. If this (key, value) pair
-	// needs capacity greater than maxSize, we allocate exactly the size needed.
-	lenKey := len(key)
+	// capped at maxSize.
+	lenKey := key.Len()
 	lenToAdd := kvLenSize + lenKey + len(value)
 	if len(p.repr)+lenToAdd > cap(p.repr) {
 		newSize := 2 * cap(p.repr)
-		if newSize == 0 || newSize > maxSize {
-			// If the previous buffer exceeded maxSize, we don't double its capacity
-			// for next allocation, and instead reset the exponential increase, in
-			// case we had a stray huge key-value.
+		if newSize == 0 {
 			newSize = minSize
 		}
-		if lenToAdd >= maxSize {
-			newSize = lenToAdd
-		} else {
-			for newSize < lenToAdd && newSize < maxSize {
-				newSize *= 2
-			}
+		for newSize < lenToAdd && newSize < maxSize {
+			newSize *= 2
 		}
 		if len(p.repr) > 0 {
 			p.bufs = append(p.bufs, p.repr)
@@ -83,7 +78,7 @@ func (p *pebbleResults) put(key []byte, value []byte) {
 	p.repr = p.repr[:startIdx+lenToAdd]
 	binary.LittleEndian.PutUint32(p.repr[startIdx:], uint32(len(value)))
 	binary.LittleEndian.PutUint32(p.repr[startIdx+4:], uint32(lenKey))
-	copy(p.repr[startIdx+kvLenSize:], key)
+	encodeKeyToBuf(p.repr[startIdx+kvLenSize:startIdx+kvLenSize+lenKey], key, lenKey)
 	copy(p.repr[startIdx+kvLenSize+lenKey:], value)
 	p.count++
 	p.bytes += int64(lenToAdd)
@@ -100,7 +95,7 @@ func (p *pebbleResults) finish() [][]byte {
 // Go port of mvccScanner in libroach/mvcc.h. Stores all variables relating to
 // one MVCCGet / MVCCScan call.
 type pebbleMVCCScanner struct {
-	parent  MVCCIterator
+	parent  Iterator
 	reverse bool
 	peeked  bool
 	// Iteration bounds. Does not contain MVCC timestamp.
@@ -114,42 +109,31 @@ type pebbleMVCCScanner struct {
 	// Stop adding keys once p.result.bytes matches or exceeds this threshold,
 	// if nonzero.
 	targetBytes int64
-	// Stop adding intents and abort scan once maxIntents threshold is reached.
-	// This limit is only applicable to consistent scans since they return
-	// intents as an error.
-	// Not used in inconsistent scans.
-	// Ignored if zero.
-	maxIntents int64
 	// Transaction epoch and sequence number.
 	txn               *roachpb.Transaction
 	txnEpoch          enginepb.TxnEpoch
 	txnSequence       enginepb.TxnSeq
 	txnIgnoredSeqNums []enginepb.IgnoredSeqNumRange
-	// Uncertainty related fields.
-	localUncertaintyLimit  hlc.Timestamp
-	globalUncertaintyLimit hlc.Timestamp
-	checkUncertainty       bool
 	// Metadata object for unmarshalling intents.
 	meta enginepb.MVCCMetadata
 	// Bools copied over from MVCC{Scan,Get}Options. See the comment on the
 	// package level MVCCScan for what these mean.
 	inconsistent, tombstones bool
 	failOnMoreRecent         bool
+	checkUncertainty         bool
 	isGet                    bool
 	keyBuf                   []byte
 	savedBuf                 []byte
 	// cur* variables store the "current" record we're pointing to. Updated in
 	// updateCurrent. Note that the timestamp can be clobbered in the case of
 	// adding an intent from the intent history but is otherwise meaningful.
-	curUnsafeKey MVCCKey
-	curRawKey    []byte
-	curValue     []byte
-	results      pebbleResults
-	intents      pebble.Batch
-	// mostRecentTS stores the largest timestamp observed that is equal to or
-	// above the scan timestamp. Only applicable if failOnMoreRecent is true. If
-	// set and no other error is hit, a WriteToOld error will be returned from
-	// the scan.
+	curKey   MVCCKey
+	curValue []byte
+	results  pebbleResults
+	intents  pebble.Batch
+	// mostRecentTS stores the largest timestamp observed that is above the scan
+	// timestamp. Only applicable if failOnMoreRecent is true. If set and no
+	// other error is hit, a WriteToOld error will be returned from the scan.
 	mostRecentTS hlc.Timestamp
 	// Stores any error returned. If non-nil, iteration short circuits.
 	err error
@@ -175,7 +159,7 @@ func (p *pebbleMVCCScanner) release() {
 
 // init sets bounds on the underlying pebble iterator, and initializes other
 // fields not set by the calling method.
-func (p *pebbleMVCCScanner) init(txn *roachpb.Transaction, localUncertaintyLimit hlc.Timestamp) {
+func (p *pebbleMVCCScanner) init(txn *roachpb.Transaction) {
 	p.itersBeforeSeek = maxItersBeforeSeek / 2
 
 	if txn != nil {
@@ -183,13 +167,7 @@ func (p *pebbleMVCCScanner) init(txn *roachpb.Transaction, localUncertaintyLimit
 		p.txnEpoch = txn.Epoch
 		p.txnSequence = txn.Sequence
 		p.txnIgnoredSeqNums = txn.IgnoredSeqNums
-
-		p.localUncertaintyLimit = localUncertaintyLimit
-		p.globalUncertaintyLimit = txn.GlobalUncertaintyLimit
-		// We must check uncertainty even if p.ts.Less(localUncertaintyLimit)
-		// because the local uncertainty limit cannot be applied to values with
-		// synthetic timestamps.
-		p.checkUncertainty = p.ts.Less(p.globalUncertaintyLimit)
+		p.checkUncertainty = p.ts.Less(txn.MaxTimestamp)
 	}
 }
 
@@ -231,7 +209,7 @@ func (p *pebbleMVCCScanner) scan() (*roachpb.Span, error) {
 			// NB: this is equivalent to:
 			//  append(roachpb.Key(nil), p.curKey.Key...).Next()
 			// but with half the allocations.
-			curKey := p.curUnsafeKey.Key
+			curKey := p.curKey.Key
 			curKeyCopy := make(roachpb.Key, len(curKey), len(curKey)+1)
 			copy(curKeyCopy, curKey)
 			resume = &roachpb.Span{
@@ -240,7 +218,7 @@ func (p *pebbleMVCCScanner) scan() (*roachpb.Span, error) {
 			}
 		} else {
 			resume = &roachpb.Span{
-				Key:    append(roachpb.Key(nil), p.curUnsafeKey.Key...),
+				Key:    append(roachpb.Key(nil), p.curKey.Key...),
 				EndKey: p.end,
 			}
 		}
@@ -307,18 +285,9 @@ func (p *pebbleMVCCScanner) maybeFailOnMoreRecent() {
 	p.intents.Reset()
 }
 
-// Returns whether a value with the specified timestamp is within the
-// transaction's uncertainty interval and is considered uncertain.
-//
-// REQUIRES: p.uncertaintyCheck == true
-// REQUIRES: p.ts < ts
-func (p *pebbleMVCCScanner) isUncertainValue(ts hlc.Timestamp) bool {
-	return observedts.IsUncertain(p.localUncertaintyLimit, p.globalUncertaintyLimit, ts)
-}
-
 // Returns an uncertainty error with the specified timestamp and p.txn.
 func (p *pebbleMVCCScanner) uncertaintyError(ts hlc.Timestamp) bool {
-	p.err = roachpb.NewReadWithinUncertaintyIntervalError(p.ts, ts, p.localUncertaintyLimit, p.txn)
+	p.err = roachpb.NewReadWithinUncertaintyIntervalError(p.ts, ts, p.txn)
 	p.results.clear()
 	p.intents.Reset()
 	return false
@@ -327,59 +296,36 @@ func (p *pebbleMVCCScanner) uncertaintyError(ts hlc.Timestamp) bool {
 // Emit a tuple and return true if we have reason to believe iteration can
 // continue.
 func (p *pebbleMVCCScanner) getAndAdvance() bool {
-	if !p.curUnsafeKey.Timestamp.IsEmpty() {
-		// ts < read_ts
-		if p.curUnsafeKey.Timestamp.Less(p.ts) {
-			// 1. Fast path: there is no intent and our read timestamp is newer
-			// than the most recent version's timestamp.
-			return p.addAndAdvance(p.curRawKey, p.curValue)
+	if p.curKey.Timestamp != (hlc.Timestamp{}) {
+		if p.curKey.Timestamp.LessEq(p.ts) {
+			// 1. Fast path: there is no intent and our read timestamp is newer than
+			// the most recent version's timestamp.
+			return p.addAndAdvance(p.curValue)
 		}
 
-		// ts == read_ts
-		if p.curUnsafeKey.Timestamp.EqOrdering(p.ts) {
-			if p.failOnMoreRecent {
-				// 2. Our txn's read timestamp is equal to the most recent
-				// version's timestamp and the scanner has been configured to
-				// throw a write too old error on equal or more recent versions.
-				// Merge the current timestamp with the maximum timestamp we've
-				// seen so we know to return an error, but then keep scanning so
-				// that we can return the largest possible time.
-				p.mostRecentTS.Forward(p.curUnsafeKey.Timestamp)
-				return p.advanceKey()
-			}
-
-			// 3. There is no intent and our read timestamp is equal to the most
-			// recent version's timestamp.
-			return p.addAndAdvance(p.curRawKey, p.curValue)
-		}
-
-		// ts > read_ts
 		if p.failOnMoreRecent {
-			// 4. Our txn's read timestamp is less than the most recent
-			// version's timestamp and the scanner has been configured to
-			// throw a write too old error on equal or more recent versions.
-			// Merge the current timestamp with the maximum timestamp we've
-			// seen so we know to return an error, but then keep scanning so
-			// that we can return the largest possible time.
-			p.mostRecentTS.Forward(p.curUnsafeKey.Timestamp)
+			// 2. Our txn's read timestamp is less than the most recent
+			// version's timestamp and the scanner has been configured
+			// to throw a write too old error on more recent versions.
+			// Merge the current timestamp with the maximum timestamp
+			// we've seen so we know to return an error, but then keep
+			// scanning so that we can return the largest possible time.
+			p.mostRecentTS.Forward(p.curKey.Timestamp)
 			return p.advanceKey()
 		}
 
 		if p.checkUncertainty {
-			// 5. Our txn's read timestamp is less than the max timestamp
+			// 3. Our txn's read timestamp is less than the max timestamp
 			// seen by the txn. We need to check for clock uncertainty
 			// errors.
-			if p.isUncertainValue(p.curUnsafeKey.Timestamp) {
-				return p.uncertaintyError(p.curUnsafeKey.Timestamp)
+			if p.curKey.Timestamp.LessEq(p.txn.MaxTimestamp) {
+				return p.uncertaintyError(p.curKey.Timestamp)
 			}
 
-			// This value is not within the reader's uncertainty window, but
-			// there could be other uncertain committed values, so seek and
-			// check uncertainty using globalUncertaintyLimit.
-			return p.seekVersion(p.globalUncertaintyLimit, true)
+			return p.seekVersion(p.txn.MaxTimestamp, true)
 		}
 
-		// 6. Our txn's read timestamp is greater than or equal to the
+		// 4. Our txn's read timestamp is greater than or equal to the
 		// max timestamp seen by the txn so clock uncertainty checks are
 		// unnecessary. We need to seek to the desired version of the
 		// value (i.e. one with a timestamp earlier than our read
@@ -397,15 +343,15 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 		return false
 	}
 	if len(p.meta.RawBytes) != 0 {
-		// 7. Emit immediately if the value is inline.
-		return p.addAndAdvance(p.curRawKey, p.meta.RawBytes)
+		// 5. Emit immediately if the value is inline.
+		return p.addAndAdvance(p.meta.RawBytes)
 	}
 
 	if p.meta.Txn == nil {
 		p.err = errors.Errorf("intent without transaction")
 		return false
 	}
-	metaTS := p.meta.Timestamp.ToTimestamp()
+	metaTS := hlc.Timestamp(p.meta.Timestamp)
 
 	// metaTS is the timestamp of an intent value, which we may or may
 	// not end up ignoring, depending on factors codified below. If we do ignore
@@ -419,47 +365,37 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 	}
 
 	ownIntent := p.txn != nil && p.meta.Txn.ID.Equal(p.txn.ID)
-	conflictingIntent := metaTS.LessEq(p.ts) || p.failOnMoreRecent
+	maxVisibleTS := p.ts
+	if p.checkUncertainty {
+		maxVisibleTS = p.txn.MaxTimestamp
+	}
+	otherIntentVisible := metaTS.LessEq(maxVisibleTS) || p.failOnMoreRecent
 
-	if !ownIntent && !conflictingIntent {
-		// 8. The key contains an intent, but we're reading below the intent.
-		// Seek to the desired version, checking for uncertainty if necessary.
-		//
-		// Note that if we own the intent (i.e. we're reading transactionally)
-		// we want to read the intent regardless of our read timestamp and fall
-		// into case 11 below.
-		if p.checkUncertainty {
-			if p.isUncertainValue(metaTS) {
-				return p.uncertaintyError(metaTS)
-			}
-			// The intent is not within the uncertainty window, but there could
-			// be an uncertain committed value, so seek and check uncertainty
-			// using globalUncertaintyLimit.
-			return p.seekVersion(p.globalUncertaintyLimit, true)
-		}
+	if !ownIntent && !otherIntentVisible {
+		// 6. The key contains an intent, but we're reading before the
+		// intent. Seek to the desired version. Note that if we own the
+		// intent (i.e. we're reading transactionally) we want to read
+		// the intent regardless of our read timestamp and fall into
+		// case 8 below.
 		return p.seekVersion(p.ts, false)
 	}
 
 	if p.inconsistent {
-		// 9. The key contains an intent and we're doing an inconsistent
+		// 7. The key contains an intent and we're doing an inconsistent
 		// read at a timestamp newer than the intent. We ignore the
 		// intent by insisting that the timestamp we're reading at is a
 		// historical timestamp < the intent timestamp. However, we
 		// return the intent separately; the caller may want to resolve
 		// it.
 		if p.maxKeys > 0 && p.results.count == p.maxKeys {
-			// TODO(oleg): This check seems broken and it should never
-			// reach this point with results count reaching max. We
-			// always get out of getAndAdvance either by addAndAdvance or
-			// by seekVersion which is also calling addAndAdvance.
-			//
 			// We've already retrieved the desired number of keys and now
 			// we're adding the resume key. We don't want to add the
 			// intent here as the intents should only correspond to KVs
 			// that lie before the resume key.
 			return false
 		}
-		p.err = p.intents.Set(p.curRawKey, p.curValue, nil)
+		p.keyBuf = EncodeKeyToBuf(p.keyBuf[:0], p.curKey)
+		p.err = p.intents.Set(p.keyBuf, p.curValue, nil)
 		if p.err != nil {
 			return false
 		}
@@ -468,7 +404,7 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 	}
 
 	if !ownIntent {
-		// 10. The key contains an intent which was not written by our
+		// 8. The key contains an intent which was not written by our
 		// transaction and either:
 		// - our read timestamp is equal to or newer than that of the
 		//   intent
@@ -479,12 +415,9 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 		// Note that this will trigger an error higher up the stack. We
 		// continue scanning so that we can return all of the intents
 		// in the scan range.
-		p.err = p.intents.Set(p.curRawKey, p.curValue, nil)
+		p.keyBuf = EncodeKeyToBuf(p.keyBuf[:0], p.curKey)
+		p.err = p.intents.Set(p.keyBuf, p.curValue, nil)
 		if p.err != nil {
-			return false
-		}
-		// Limit number of intents returned in write intent error.
-		if p.maxIntents > 0 && int64(p.intents.Count()) >= p.maxIntents {
 			return false
 		}
 		return p.advanceKey()
@@ -492,14 +425,14 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 
 	if p.txnEpoch == p.meta.Txn.Epoch {
 		if p.txnSequence >= p.meta.Txn.Sequence && !enginepb.TxnSeqIsIgnored(p.meta.Txn.Sequence, p.txnIgnoredSeqNums) {
-			// 11. We're reading our own txn's intent at an equal or higher sequence.
+			// 9. We're reading our own txn's intent at an equal or higher sequence.
 			// Note that we read at the intent timestamp, not at our read timestamp
 			// as the intent timestamp may have been pushed forward by another
 			// transaction. Txn's always need to read their own writes.
 			return p.seekVersion(metaTS, false)
 		}
 
-		// 12. We're reading our own txn's intent at a lower sequence than is
+		// 10. We're reading our own txn's intent at a lower sequence than is
 		// currently present in the intent. This means the intent we're seeing
 		// was written at a higher sequence than the read and that there may or
 		// may not be earlier versions of the intent (with lower sequence
@@ -516,11 +449,10 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 			// Note: this assumes that it is safe to corrupt curKey here because we're
 			// about to advance. If this proves to be a problem later, we can extend
 			// addAndAdvance to take an MVCCKey explicitly.
-			p.curUnsafeKey.Timestamp = metaTS
-			p.keyBuf = EncodeKeyToBuf(p.keyBuf[:0], p.curUnsafeKey)
-			return p.addAndAdvance(p.keyBuf, value)
+			p.curKey.Timestamp = metaTS
+			return p.addAndAdvance(value)
 		}
-		// 13. If no value in the intent history has a sequence number equal to
+		// 11. If no value in the intent history has a sequence number equal to
 		// or less than the read, we must ignore the intents laid down by the
 		// transaction all together. We ignore the intent by insisting that the
 		// timestamp we're reading at is a historical timestamp < the intent
@@ -529,7 +461,7 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 	}
 
 	if p.txnEpoch < p.meta.Txn.Epoch {
-		// 14. We're reading our own txn's intent but the current txn has
+		// 12. We're reading our own txn's intent but the current txn has
 		// an earlier epoch than the intent. Return an error so that the
 		// earlier incarnation of our transaction aborts (presumably
 		// this is some operation that was retried).
@@ -538,7 +470,7 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 		return false
 	}
 
-	// 15. We're reading our own txn's intent but the current txn has a
+	// 13. We're reading our own txn's intent but the current txn has a
 	// later epoch than the intent. This can happen if the txn was
 	// restarted and an earlier iteration wrote the value we're now
 	// reading. In this case, we ignore the intent and read the
@@ -548,13 +480,13 @@ func (p *pebbleMVCCScanner) getAndAdvance() bool {
 
 // nextKey advances to the next user key.
 func (p *pebbleMVCCScanner) nextKey() bool {
-	p.keyBuf = append(p.keyBuf[:0], p.curUnsafeKey.Key...)
+	p.keyBuf = append(p.keyBuf[:0], p.curKey.Key...)
 
 	for i := 0; i < p.itersBeforeSeek; i++ {
 		if !p.iterNext() {
 			return false
 		}
-		if !bytes.Equal(p.curUnsafeKey.Key, p.keyBuf) {
+		if !bytes.Equal(p.curKey.Key, p.keyBuf) {
 			p.incrementItersBeforeSeek()
 			return true
 		}
@@ -563,10 +495,6 @@ func (p *pebbleMVCCScanner) nextKey() bool {
 	p.decrementItersBeforeSeek()
 	// We're pointed at a different version of the same key. Fall back to
 	// seeking to the next key. We append a NUL to account for the "next-key".
-	// Note that we cannot rely on curUnsafeKey.Key being unchanged even though
-	// we are at a different version of the same key -- the underlying
-	// MVCCIterator is free to mutate the backing for p.curUnsafeKey.Key
-	// arbitrarily. Therefore we use p.keyBuf here which we have handy.
 	p.keyBuf = append(p.keyBuf, 0)
 	return p.iterSeek(MVCCKey{Key: p.keyBuf})
 }
@@ -594,11 +522,6 @@ func (p *pebbleMVCCScanner) backwardLatestVersion(key []byte, i int) bool {
 		}
 	}
 
-	// We're still not pointed to the latest version of the key. Fall back to
-	// seeking to the latest version. Note that we cannot rely on key being
-	// unchanged even though we are at a different version of the same key --
-	// the underlying MVCCIterator is free to mutate the backing for key
-	// arbitrarily. Therefore we use p.keyBuf here which we have handy.
 	p.decrementItersBeforeSeek()
 	return p.iterSeek(MVCCKey{Key: p.keyBuf})
 }
@@ -632,7 +555,7 @@ func (p *pebbleMVCCScanner) advanceKey() bool {
 		return false
 	}
 	if p.reverse {
-		return p.prevKey(p.curUnsafeKey.Key)
+		return p.prevKey(p.curKey.Key)
 	}
 	return p.nextKey()
 }
@@ -666,14 +589,14 @@ func (p *pebbleMVCCScanner) advanceKeyAtNewKey(key []byte) bool {
 	return true
 }
 
-// Adds the specified key and value to the result set, excluding tombstones unless
+// Adds the specified value to the result set, excluding tombstones unless
 // p.tombstones is true. Advances to the next key unless we've reached the max
 // results limit.
-func (p *pebbleMVCCScanner) addAndAdvance(rawKey []byte, val []byte) bool {
+func (p *pebbleMVCCScanner) addAndAdvance(val []byte) bool {
 	// Don't include deleted versions len(val) == 0, unless we've been instructed
 	// to include tombstones in the results.
 	if len(val) > 0 || p.tombstones {
-		p.results.put(rawKey, val)
+		p.results.put(p.curKey, val)
 		if p.targetBytes > 0 && p.results.bytes >= p.targetBytes {
 			// When the target bytes are met or exceeded, stop producing more
 			// keys. We implement this by reducing maxKeys to the current
@@ -692,64 +615,42 @@ func (p *pebbleMVCCScanner) addAndAdvance(rawKey []byte, val []byte) bool {
 // Seeks to the latest revision of the current key that's still less than or
 // equal to the specified timestamp, adds it to the result set, then moves onto
 // the next user key.
-func (p *pebbleMVCCScanner) seekVersion(seekTS hlc.Timestamp, uncertaintyCheck bool) bool {
-	seekKey := MVCCKey{Key: p.curUnsafeKey.Key, Timestamp: seekTS}
-	p.keyBuf = EncodeKeyToBuf(p.keyBuf[:0], seekKey)
-	origKey := p.keyBuf[:len(p.curUnsafeKey.Key)]
-	// We will need seekKey below, if the next's don't suffice. Even though the
-	// MVCCIterator will be at a different version of the same key, it is free
-	// to mutate the backing for p.curUnsafeKey.Key in an arbitrary manner. So
-	// assign to this copy, to make it stable.
-	seekKey.Key = origKey
+func (p *pebbleMVCCScanner) seekVersion(ts hlc.Timestamp, uncertaintyCheck bool) bool {
+	key := MVCCKey{Key: p.curKey.Key, Timestamp: ts}
+	p.keyBuf = EncodeKeyToBuf(p.keyBuf[:0], key)
+	origKey := p.keyBuf[:len(p.curKey.Key)]
 
 	for i := 0; i < p.itersBeforeSeek; i++ {
 		if !p.iterNext() {
 			return p.advanceKeyAtEnd()
 		}
-		if !bytes.Equal(p.curUnsafeKey.Key, origKey) {
+		if !bytes.Equal(p.curKey.Key, origKey) {
 			p.incrementItersBeforeSeek()
 			return p.advanceKeyAtNewKey(origKey)
 		}
-		if p.curUnsafeKey.Timestamp.LessEq(seekTS) {
+		if p.curKey.Timestamp.LessEq(ts) {
 			p.incrementItersBeforeSeek()
-			if !uncertaintyCheck || p.curUnsafeKey.Timestamp.LessEq(p.ts) {
-				return p.addAndAdvance(p.curRawKey, p.curValue)
+			if uncertaintyCheck && p.ts.Less(p.curKey.Timestamp) {
+				return p.uncertaintyError(p.curKey.Timestamp)
 			}
-			// Iterate through uncertainty interval. Though we found a value in
-			// the interval, it may not be uncertainty. This is because seekTS
-			// is set to the transaction's global uncertainty limit, so we are
-			// seeking based on the worst-case uncertainty, but values with a
-			// time in the range (localUncertaintyLimit, globalUncertaintyLimit]
-			// are only uncertain if their timestamps are synthetic. Meanwhile,
-			// any value with a time in the range (ts, localUncertaintyLimit]
-			// is uncertain.
-			if p.isUncertainValue(p.curUnsafeKey.Timestamp) {
-				return p.uncertaintyError(p.curUnsafeKey.Timestamp)
-			}
+			return p.addAndAdvance(p.curValue)
 		}
 	}
 
 	p.decrementItersBeforeSeek()
-	if !p.iterSeek(seekKey) {
+	if !p.iterSeek(key) {
 		return p.advanceKeyAtEnd()
 	}
-	for {
-		if !bytes.Equal(p.curUnsafeKey.Key, origKey) {
-			return p.advanceKeyAtNewKey(origKey)
-		}
-		if !uncertaintyCheck || p.curUnsafeKey.Timestamp.LessEq(p.ts) {
-			return p.addAndAdvance(p.curRawKey, p.curValue)
-		}
-		// Iterate through uncertainty interval. See the comment above about why
-		// a value in this interval is not necessarily cause for an uncertainty
-		// error.
-		if p.isUncertainValue(p.curUnsafeKey.Timestamp) {
-			return p.uncertaintyError(p.curUnsafeKey.Timestamp)
-		}
-		if !p.iterNext() {
-			return p.advanceKeyAtEnd()
-		}
+	if !bytes.Equal(p.curKey.Key, origKey) {
+		return p.advanceKeyAtNewKey(origKey)
 	}
+	if p.curKey.Timestamp.LessEq(ts) {
+		if uncertaintyCheck && p.ts.Less(p.curKey.Timestamp) {
+			return p.uncertaintyError(p.curKey.Timestamp)
+		}
+		return p.addAndAdvance(p.curValue)
+	}
+	return p.advanceKey()
 }
 
 // Updates cur{RawKey, Key, TS} to match record the iterator is pointing to.
@@ -758,24 +659,14 @@ func (p *pebbleMVCCScanner) updateCurrent() bool {
 		return false
 	}
 
-	p.curRawKey = p.parent.UnsafeRawMVCCKey()
-
-	var err error
-	p.curUnsafeKey, err = DecodeMVCCKey(p.curRawKey)
-	if err != nil {
-		panic(err)
-	}
+	p.curKey = p.parent.UnsafeKey()
 	p.curValue = p.parent.UnsafeValue()
 	return true
 }
 
 func (p *pebbleMVCCScanner) iterValid() bool {
 	if valid, err := p.parent.Valid(); !valid {
-		// Defensive: unclear if p.err can already be non-nil here, but
-		// regardless, don't overwrite unless we have a non-nil err.
-		if err != nil {
-			p.err = err
-		}
+		p.err = err
 		return false
 	}
 	return true
@@ -797,13 +688,13 @@ func (p *pebbleMVCCScanner) iterSeekReverse(key MVCCKey) bool {
 		return false
 	}
 
-	if p.curUnsafeKey.Timestamp.IsEmpty() {
+	if p.curKey.Timestamp == (hlc.Timestamp{}) {
 		// We landed on an intent or inline value.
 		return true
 	}
 	// We landed on a versioned value, we need to back up to find the
 	// latest version.
-	return p.backwardLatestVersion(p.curUnsafeKey.Key, 0)
+	return p.backwardLatestVersion(p.curKey.Key, 0)
 }
 
 // iterNext advances to the next MVCC key.
@@ -850,13 +741,10 @@ func (p *pebbleMVCCScanner) iterPeekPrev() ([]byte, bool) {
 		// We need to save a copy of the current iterator key and value and adjust
 		// curRawKey, curKey and curValue to point to this saved data. We use a
 		// single buffer for this purpose: savedBuf.
-		p.savedBuf = append(p.savedBuf[:0], p.curRawKey...)
+		p.savedBuf = append(p.savedBuf[:0], p.curKey.Key...)
 		p.savedBuf = append(p.savedBuf, p.curValue...)
-		p.curRawKey = p.savedBuf[:len(p.curRawKey)]
-		p.curValue = p.savedBuf[len(p.curRawKey):]
-		// The raw key is always a prefix of the encoded MVCC key. Take advantage of this to
-		// sub-slice the raw key directly, instead of calling SplitMVCCKey.
-		p.curUnsafeKey.Key = p.curRawKey[:len(p.curUnsafeKey.Key)]
+		p.curKey.Key = p.savedBuf[:len(p.curKey.Key)]
+		p.curValue = p.savedBuf[len(p.curKey.Key):]
 
 		// With the current iterator state saved we can move the iterator to the
 		// previous entry.

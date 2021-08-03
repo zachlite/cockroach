@@ -13,7 +13,6 @@ package rowflow
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -29,13 +28,6 @@ type rowBasedFlow struct {
 	*flowinfra.FlowBase
 
 	localStreams map[execinfrapb.StreamID]execinfra.RowReceiver
-
-	// numOutboxes is an atomic that counts how many outboxes have been created.
-	// At the last outbox we can accurately retrieve stats for the whole flow from
-	// parent monitors.
-	// Note that due to the row exec engine infrastructure, it is too complicated to attach
-	// flow-level stats to a flow-level span, so they are added to the last outbox's span.
-	numOutboxes int32
 }
 
 var _ flowinfra.Flow = &rowBasedFlow{}
@@ -56,20 +48,20 @@ func NewRowBasedFlow(base *flowinfra.FlowBase) flowinfra.Flow {
 // Setup if part of the flowinfra.Flow interface.
 func (f *rowBasedFlow) Setup(
 	ctx context.Context, spec *execinfrapb.FlowSpec, opt flowinfra.FuseOpt,
-) (context.Context, execinfra.OpChains, error) {
+) (context.Context, error) {
 	var err error
-	ctx, _, err = f.FlowBase.Setup(ctx, spec, opt)
+	ctx, err = f.FlowBase.Setup(ctx, spec, opt)
 	if err != nil {
-		return ctx, nil, err
+		return ctx, err
 	}
 	// First step: setup the input synchronizers for all processors.
 	inputSyncs, err := f.setupInputSyncs(ctx, spec, opt)
 	if err != nil {
-		return ctx, nil, err
+		return ctx, err
 	}
 
 	// Then, populate processors.
-	return ctx, nil, f.setupProcessors(ctx, spec, inputSyncs)
+	return ctx, f.setupProcessors(ctx, spec, inputSyncs)
 }
 
 // setupProcessors creates processors for each spec in f.spec, fusing processors
@@ -131,18 +123,15 @@ func (f *rowBasedFlow) setupProcessors(
 					}
 					// ps has an input with multiple streams. This can be either a
 					// multiplexed RowChannel (in case of some unordered synchronizers)
-					// or a serialSynchronizer (for other unordered synchronizers or
+					// or an orderedSynchronizer (for other unordered synchronizers or
 					// ordered synchronizers). If it's a multiplexed RowChannel,
 					// then its inputs run in parallel, so there's no fusing with them.
-					// If it's a serial synchronizer, then we look inside it to see if
+					// If it's an orderedSynchronizer, then we look inside it to see if
 					// the processor we're trying to fuse feeds into it.
-
-					sync, ok := inputSyncs[pIdx][inIdx].(serialSynchronizer)
-
+					orderedSync, ok := inputSyncs[pIdx][inIdx].(*orderedSynchronizer)
 					if !ok {
 						continue
 					}
-
 					// See if we can find a stream attached to the processor we're
 					// trying to fuse.
 					for sIdx, sspec := range in.Streams {
@@ -153,8 +142,8 @@ func (f *rowBasedFlow) setupProcessors(
 						if input.ProcessorID != pspec.ProcessorID {
 							continue
 						}
-						// Fuse the processor with this synchronizer.
-						sync.getSources()[sIdx].src = source
+						// Fuse the processor with this orderedSynchronizer.
+						orderedSync.sources[sIdx].src = source
 						return true
 					}
 				}
@@ -274,9 +263,8 @@ func (f *rowBasedFlow) setupInputSyncs(
 				return nil, errors.Errorf("input sync with no streams")
 			}
 			var sync execinfra.RowSource
-			if is.Type != execinfrapb.InputSyncSpec_PARALLEL_UNORDERED &&
-				is.Type != execinfrapb.InputSyncSpec_ORDERED &&
-				is.Type != execinfrapb.InputSyncSpec_SERIAL_UNORDERED {
+			if is.Type != execinfrapb.InputSyncSpec_UNORDERED &&
+				is.Type != execinfrapb.InputSyncSpec_ORDERED {
 				return nil, errors.Errorf("unsupported input sync type %s", is.Type)
 			}
 
@@ -290,10 +278,10 @@ func (f *rowBasedFlow) setupInputSyncs(
 				return nil, err
 			}
 
-			if is.Type == execinfrapb.InputSyncSpec_PARALLEL_UNORDERED {
+			if is.Type == execinfrapb.InputSyncSpec_UNORDERED {
 				if opt == flowinfra.FuseNormally || len(is.Streams) == 1 {
-					// Parallel unordered synchronizer: create a RowChannel for
-					// each input.
+					// Unordered synchronizer: create a RowChannel for each input.
+
 					mrc := &execinfra.RowChannel{}
 					mrc.InitWithNumSenders(is.ColumnTypes, len(is.Streams))
 					for _, s := range is.Streams {
@@ -305,13 +293,11 @@ func (f *rowBasedFlow) setupInputSyncs(
 				}
 			}
 			if sync == nil {
-				// We have a serial synchronizer (either ordered or unordered)
-				// or a parallel unordered sync that we really want to fuse
-				// because of the FuseAggressively option.
-				//
-				// We'll create a RowChannel for each input for now, but the
-				// inputs might be fused with the synchronizer later (in which
-				// case the RowChannels will be dropped).
+				// We have an ordered synchronizer or an unordered one that we really
+				// want to fuse because of the FuseAggressively option. We'll create a
+				// RowChannel for each input for now, but the inputs might be fused with
+				// the orderedSynchronizer later (in which case the RowChannels will be
+				// dropped).
 				streams := make([]execinfra.RowSource, len(is.Streams))
 				for i, s := range is.Streams {
 					rowChan := &execinfra.RowChannel{}
@@ -326,7 +312,7 @@ func (f *rowBasedFlow) setupInputSyncs(
 				if is.Type == execinfrapb.InputSyncSpec_ORDERED {
 					ordering = execinfrapb.ConvertToColumnOrdering(is.Ordering)
 				}
-				sync, err = makeSerialSync(ordering, f.EvalCtx, streams)
+				sync, err = makeOrderedSync(ordering, f.EvalCtx, streams)
 				if err != nil {
 					return nil, err
 				}
@@ -384,11 +370,10 @@ func (f *rowBasedFlow) setupOutboundStream(
 	sid := spec.StreamID
 	switch spec.Type {
 	case execinfrapb.StreamEndpointSpec_SYNC_RESPONSE:
-		return f.GetRowSyncFlowConsumer(), nil
+		return f.GetSyncFlowConsumer(), nil
 
 	case execinfrapb.StreamEndpointSpec_REMOTE:
-		atomic.AddInt32(&f.numOutboxes, 1)
-		outbox := flowinfra.NewOutbox(&f.FlowCtx, spec.TargetNodeID, sid, &f.numOutboxes, f.FlowCtx.Gateway)
+		outbox := flowinfra.NewOutbox(&f.FlowCtx, spec.TargetNodeID, f.ID, sid)
 		f.AddStartable(outbox)
 		return outbox, nil
 

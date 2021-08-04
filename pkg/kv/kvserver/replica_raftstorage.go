@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -537,7 +538,6 @@ type IncomingSnapshot struct {
 	// See the comment on VersionUnreplicatedRaftTruncatedState for details.
 	UsesUnreplicatedTruncatedState bool
 	snapType                       SnapshotRequest_Type
-	placeholder                    *ReplicaPlaceholder
 }
 
 func (s *IncomingSnapshot) String() string {
@@ -760,11 +760,11 @@ func clearRangeData(
 	return nil
 }
 
-// applySnapshot updates the replica and its store based on the given
-// (non-empty) snapshot and associated HardState. All snapshots must pass
-// through Raft for correctness, i.e. the parameters to this method must be
-// taken from a raft.Ready. Any replicas specified in subsumedRepls will be
-// destroyed atomically with the application of the snapshot.
+// applySnapshot updates the replica and its store based on the given snapshot
+// and associated HardState. All snapshots must pass through Raft for
+// correctness, i.e. the parameters to this method must be taken from a
+// raft.Ready. Any replicas specified in subsumedRepls will be destroyed
+// atomically with the application of the snapshot.
 //
 // If there is a placeholder associated with r, applySnapshot will remove that
 // placeholder from the store if and only if it does not return an error.
@@ -778,7 +778,7 @@ func clearRangeData(
 func (r *Replica) applySnapshot(
 	ctx context.Context,
 	inSnap IncomingSnapshot,
-	nonemptySnap raftpb.Snapshot,
+	snap raftpb.Snapshot,
 	hs raftpb.HardState,
 	subsumedRepls []*Replica,
 ) (err error) {
@@ -815,11 +815,25 @@ func (r *Replica) applySnapshot(
 		}
 	}()
 
+	if raft.IsEmptySnap(snap) {
+		// Raft discarded the snapshot, indicating that our local state is
+		// already ahead of what the snapshot provides. But we count it for
+		// stats (see the defer above).
+		//
+		// Since we're not returning an error, we're responsible for removing any
+		// placeholder that might exist.
+		r.store.mu.Lock()
+		if r.store.removePlaceholderLocked(ctx, r.RangeID) {
+			atomic.AddInt32(&r.store.counts.filledPlaceholders, 1)
+		}
+		r.store.mu.Unlock()
+		return nil
+	}
 	if raft.IsEmptyHardState(hs) {
 		// Raft will never provide an empty HardState if it is providing a
 		// nonempty snapshot because we discard snapshots that do not increase
 		// the commit index.
-		log.Fatalf(ctx, "found empty HardState for non-empty Snapshot %+v", nonemptySnap)
+		log.Fatalf(ctx, "found empty HardState for non-empty Snapshot %+v", snap)
 	}
 
 	var stats struct {
@@ -829,7 +843,7 @@ func (r *Replica) applySnapshot(
 		ingestion time.Time
 	}
 	log.Infof(ctx, "applying snapshot of type %s [id=%s index=%d]", inSnap.snapType,
-		inSnap.SnapUUID.Short(), nonemptySnap.Metadata.Index)
+		inSnap.SnapUUID.Short(), snap.Metadata.Index)
 	defer func(start time.Time) {
 		now := timeutil.Now()
 		totalLog := fmt.Sprintf(
@@ -851,7 +865,7 @@ func (r *Replica) applySnapshot(
 		)
 		log.Infof(
 			ctx, "applied snapshot of type %s [%s%s%sid=%s index=%d]", inSnap.snapType, totalLog,
-			subsumedReplicasLog, ingestionLog, inSnap.SnapUUID.Short(), nonemptySnap.Metadata.Index,
+			subsumedReplicasLog, ingestionLog, inSnap.SnapUUID.Short(), snap.Metadata.Index,
 		)
 	}(timeutil.Now())
 
@@ -918,9 +932,9 @@ func (r *Replica) applySnapshot(
 		}
 	}
 
-	if s.RaftAppliedIndex != nonemptySnap.Metadata.Index {
+	if s.RaftAppliedIndex != snap.Metadata.Index {
 		log.Fatalf(ctx, "snapshot RaftAppliedIndex %d doesn't match its metadata index %d",
-			s.RaftAppliedIndex, nonemptySnap.Metadata.Index)
+			s.RaftAppliedIndex, snap.Metadata.Index)
 	}
 
 	if expLen := s.RaftAppliedIndex - s.TruncatedState.Index; expLen != uint64(len(inSnap.LogEntries)) {
@@ -990,11 +1004,8 @@ func (r *Replica) applySnapshot(
 
 	r.store.mu.Lock()
 	r.mu.Lock()
-	if inSnap.placeholder != nil {
-		_, err := r.store.removePlaceholderLocked(ctx, inSnap.placeholder, removePlaceholderFilled)
-		if err != nil {
-			log.Fatalf(ctx, "unable to remove placeholder: %s", err)
-		}
+	if r.store.removePlaceholderLocked(ctx, r.RangeID) {
+		atomic.AddInt32(&r.store.counts.filledPlaceholders, 1)
 	}
 	r.setDescLockedRaftMuLocked(ctx, s.Desc)
 	if err := r.store.maybeMarkReplicaInitializedLockedReplLocked(ctx, r); err != nil {

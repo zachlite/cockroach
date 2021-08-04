@@ -29,13 +29,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -100,8 +100,8 @@ func TestReplicaRangefeed(t *testing.T) {
 		// Disable closed timestamps as this test was designed assuming no closed
 		// timestamps would get propagated.
 		settings := cluster.MakeTestingClusterSettings()
-		closedts.TargetDuration.Override(ctx, &settings.SV, 24*time.Hour)
-		kvserver.RangefeedEnabled.Override(ctx, &settings.SV, true)
+		closedts.TargetDuration.Override(&settings.SV, 24*time.Hour)
+		kvserver.RangefeedEnabled.Override(&settings.SV, true)
 		args.ServerArgsPerNode[i] = base.TestServerArgs{Settings: settings}
 	}
 	tc := testcluster.StartTestCluster(t, numNodes, args)
@@ -343,30 +343,24 @@ func TestReplicaRangefeedExpiringLeaseError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	s := serv.(*server.TestServer)
-	defer s.Stopper().Stop(ctx)
-	store, err := s.Stores().GetStore(s.GetFirstStoreID())
-	require.NoError(t, err)
-
-	_, rdesc, err := s.ScratchRangeWithExpirationLeaseEx()
-	require.NoError(t, err)
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.Background())
+	store, _ := createTestStore(t, stopper)
 
 	// Establish a rangefeed on the replica we plan to remove.
 	stream := newTestStream()
 	req := roachpb.RangeFeedRequest{
 		Header: roachpb.Header{
-			RangeID: store.LookupReplica(rdesc.StartKey).RangeID,
+			RangeID: store.LookupReplica(roachpb.RKey("a")).RangeID,
 		},
-		Span: roachpb.Span{Key: rdesc.StartKey.AsRawKey(), EndKey: rdesc.EndKey.AsRawKey()},
+		Span: roachpb.Span{Key: roachpb.Key("a"), EndKey: roachpb.Key("z")},
 	}
 
 	// Cancel the stream's context so that RangeFeed would return
 	// immediately even if it didn't return the correct error.
 	stream.Cancel()
 
-	kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, true)
+	kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, true)
 	pErr := store.RangeFeed(&req, stream)
 	const exp = "expiration-based leases are incompatible with rangefeeds"
 	if !testutils.IsPError(pErr, exp) {
@@ -751,7 +745,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 				},
 				Span: rangefeedSpan,
 			}
-			kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, true)
+			kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, true)
 			pErr := store.RangeFeed(&req, stream)
 			streamErrC <- pErr
 		}()
@@ -761,7 +755,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 
 		// Disable rangefeeds, which stops logical op logs from being provided
 		// with Raft commands.
-		kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, false)
+		kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, false)
 
 		// Perform a write on the range.
 		writeKey := encoding.EncodeStringAscending(keys.SystemSQLCodec.TablePrefix(55), "c")
@@ -1014,7 +1008,7 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 	var scratchRangeID int64 // accessed atomically
 	// nudgeSeen will be set if a request filter sees the signature of the
 	// rangefeed nudger, as proof that the expected mechanism kicked in.
-	var nudgeSeen int64 // accessed atomically
+	var nudgeSeen bool
 	// At some point, the test will require full control over the requests
 	// evaluating on the scratch range.
 	var rejectExtraneousRequests int64 // accessed atomically
@@ -1045,11 +1039,10 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 						return nil
 					}
 					if ba.IsSingleLeaseInfoRequest() {
-						atomic.StoreInt64(&nudgeSeen, 1)
+						nudgeSeen = true
 						return nil
 					}
-					nudged := atomic.LoadInt64(&nudgeSeen)
-					if ba.IsLeaseRequest() && (nudged == 1) {
+					if ba.IsLeaseRequest() && nudgeSeen {
 						return nil
 					}
 					log.Infof(ctx, "test rejecting request: %s", ba)
@@ -1058,7 +1051,8 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 			},
 		},
 	}
-	tci := serverutils.StartNewTestCluster(t, 2, cargs)
+	tci, _, _ := setupClusterForClosedTSTesting(ctx, t, testingTargetDuration,
+		testingCloseFraction, cargs, "cttest", "kv")
 	tc := tci.(*testcluster.TestCluster)
 	defer tc.Stopper().Stop(ctx)
 
@@ -1069,8 +1063,9 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 
 	sqlDB := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.rangefeed.enabled = true`)
-	// Drop the target closedts duration in order to speed up the rangefeed
-	// "nudging" once the range loses its lease.
+	// Drop the target closedts duration. This was set to testingTargetDuration
+	// above, but this is higher then it needs to be now that cluster and schema
+	// setup is complete.
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.target_duration = '10ms'`)
 
 	n1 := tc.Server(0)
@@ -1141,8 +1136,7 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 	log.Infof(ctx, "test waiting for another checkpoint")
 	ts2 := n1.Clock().Now()
 	waitForCheckpoint(ts2)
-	nudged := atomic.LoadInt64(&nudgeSeen)
-	require.Equal(t, int64(1), nudged)
+	require.True(t, nudgeSeen)
 
 	// Check that n2 renewed its lease, like the test intended.
 	li, _, err := tc.FindRangeLeaseEx(ctx, desc, &n2Target)

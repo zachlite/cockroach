@@ -74,11 +74,12 @@ var retiredSettings = map[string]struct{}{
 	"sql.parallel_scans.enabled":                                       {},
 	"backup.table_statistics.enabled":                                  {},
 	// removed as of 21.1.
-	"sql.distsql.interleaved_joins.enabled": {},
-	"sql.testing.vectorize.batch_size":      {},
-	"sql.testing.mutations.max_batch_size":  {},
-	"sql.testing.mock_contention.enabled":   {},
-	"kv.atomic_replication_changes.enabled": {},
+	"sql.distsql.interleaved_joins.enabled":    {},
+	"sql.testing.vectorize.batch_size":         {},
+	"sql.testing.mutations.max_batch_size":     {},
+	"sql.testing.mock_contention.enabled":      {},
+	"kv.atomic_replication_changes.enabled":    {},
+	"storage.sst_export.max_intents_per_error": {},
 	// removed as of 21.1.2.
 	"kv.tenant_rate_limiter.read_requests.rate_limit":   {},
 	"kv.tenant_rate_limiter.read_requests.burst_limit":  {},
@@ -88,18 +89,6 @@ var retiredSettings = map[string]struct{}{
 	"kv.tenant_rate_limiter.read_bytes.burst_limit":     {},
 	"kv.tenant_rate_limiter.write_bytes.rate_limit":     {},
 	"kv.tenant_rate_limiter.write_bytes.burst_limit":    {},
-
-	// removed as of 21.2.
-	"sql.defaults.vectorize_row_count_threshold":                 {},
-	"cloudstorage.gs.default.key":                                {},
-	"storage.sst_export.max_intents_per_error":                   {},
-	"jobs.registry.leniency":                                     {},
-	"sql.defaults.experimental_expression_based_indexes.enabled": {},
-	"kv.tenant_rate_limiter.read_request_cost":                   {},
-	"kv.tenant_rate_limiter.read_cost_per_megabyte":              {},
-	"kv.tenant_rate_limiter.write_request_cost":                  {},
-	"kv.tenant_rate_limiter.write_cost_per_megabyte":             {},
-	"kv.transaction.write_pipelining_max_outstanding_size":       {},
 }
 
 // register adds a setting to the registry.
@@ -114,19 +103,7 @@ func register(key, desc string, s extendedSetting) {
 		panic(fmt.Sprintf("setting missing description: %s", key))
 	}
 	if r, _ := utf8.DecodeRuneInString(desc); unicode.IsUpper(r) {
-		panic(fmt.Sprintf(
-			"setting descriptions should start with a lowercase letter: %q, %q", key, desc,
-		))
-	}
-	for _, c := range desc {
-		if c == unicode.ReplacementChar {
-			panic(fmt.Sprintf("setting descriptions must be valid UTF-8: %q, %q", key, desc))
-		}
-		if unicode.IsControl(c) {
-			panic(fmt.Sprintf(
-				"setting descriptions cannot contain control character %q: %q, %q", c, key, desc,
-			))
-		}
+		panic(fmt.Sprintf("setting descriptions should start with a lowercase letter: %q", desc))
 	}
 	s.setDescription(desc)
 	registry[key] = s

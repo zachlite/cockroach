@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
@@ -237,6 +238,7 @@ func TestCacheBasic(t *testing.T) {
 	sc := NewTableStatisticsCache(
 		ctx,
 		2, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		db,
 		ex,
 		keys.SystemSQLCodec,
@@ -284,8 +286,9 @@ func TestCacheBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Table ID 2 should be available immediately in the cache for querying, and
-	// eventually should contain the updated stat.
+	// After refreshing, Table ID 2 should be available immediately in the cache
+	// for querying, and eventually should contain the updated stat.
+	sc.RefreshTableStats(ctx, tab2)
 	if _, ok := lookupTableStats(ctx, sc, tab2); !ok {
 		t.Fatalf("expected lookup of refreshed key %d to succeed", tab2)
 	}
@@ -313,6 +316,7 @@ func TestCacheBasic(t *testing.T) {
 	checkStatsForTable(ctx, t, sc, expectedStats[tab0], tab0)
 	checkStatsForTable(ctx, t, sc, expectedStats[tab1], tab1)
 
+	sc.RefreshTableStats(ctx, tab0)
 	// Sleep a bit to give the async refresh process a chance to do something.
 	// Note that this is not flaky - the check below passes even if the refresh is
 	// delayed.
@@ -347,6 +351,7 @@ CREATE STATISTICS s FROM tt;
 	sc := NewTableStatisticsCache(
 		ctx,
 		1,
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		s.InternalExecutor().(sqlutil.InternalExecutor),
 		keys.SystemSQLCodec,
@@ -408,6 +413,7 @@ func TestCacheWait(t *testing.T) {
 	sc := NewTableStatisticsCache(
 		ctx,
 		len(tableIDs), /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		db,
 		ex,
 		keys.SystemSQLCodec,
@@ -452,7 +458,7 @@ func TestCacheWait(t *testing.T) {
 }
 
 // TestCacheAutoRefresh verifies that the cache gets refreshed automatically
-// when new statistics are added.
+// when new statistics are added (when using the range cache).
 func TestCacheAutoRefresh(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -465,6 +471,7 @@ func TestCacheAutoRefresh(t *testing.T) {
 	sc := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(nil),
 		s.DB(),
 		s.InternalExecutor().(sqlutil.InternalExecutor),
 		keys.SystemSQLCodec,

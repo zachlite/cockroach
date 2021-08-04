@@ -127,17 +127,6 @@ func (w column) IsHidden() bool {
 	return w.desc.Hidden
 }
 
-// IsInaccessible returns true iff the column is inaccessible.
-func (w column) IsInaccessible() bool {
-	return w.desc.Inaccessible
-}
-
-// IsExpressionIndexColumn returns true iff the column is an an inaccessible
-// virtual computed column that represents an expression in an expression index.
-func (w column) IsExpressionIndexColumn() bool {
-	return w.IsInaccessible() && w.IsVirtual()
-}
-
 // NumUsesSequences returns the number of sequences used by this column.
 func (w column) NumUsesSequences() int {
 	return len(w.desc.UsesSequenceIds)
@@ -189,16 +178,15 @@ func (w column) IsSystemColumn() bool {
 
 // columnCache contains precomputed slices of catalog.Column interfaces.
 type columnCache struct {
-	all        []catalog.Column
-	public     []catalog.Column
-	writable   []catalog.Column
-	deletable  []catalog.Column
-	nonDrop    []catalog.Column
-	visible    []catalog.Column
-	accessible []catalog.Column
-	readable   []catalog.Column
-	withUDTs   []catalog.Column
-	system     []catalog.Column
+	all       []catalog.Column
+	public    []catalog.Column
+	writable  []catalog.Column
+	deletable []catalog.Column
+	nonDrop   []catalog.Column
+	visible   []catalog.Column
+	readable  []catalog.Column
+	withUDTs  []catalog.Column
+	system    []catalog.Column
 }
 
 // newColumnCache returns a fresh fully-populated columnCache struct for the
@@ -262,11 +250,8 @@ func newColumnCache(desc *descpb.TableDescriptor, mutations *mutationCache) *col
 		}
 	}
 	for _, col := range c.deletable {
-		if col.Public() && !col.IsHidden() && !col.IsInaccessible() {
+		if col.Public() && !col.IsHidden() {
 			lazyAllocAppendColumn(&c.visible, col, numPublic)
-		}
-		if col.Public() && !col.IsInaccessible() {
-			lazyAllocAppendColumn(&c.accessible, col, numPublic)
 		}
 		if col.HasType() && col.GetType().UserDefined() {
 			lazyAllocAppendColumn(&c.withUDTs, col, numDeletable)

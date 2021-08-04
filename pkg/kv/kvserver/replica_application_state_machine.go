@@ -73,7 +73,7 @@ type nonDeterministicFailure struct {
 
 // The provided format string should be safe for reporting.
 func makeNonDeterministicFailure(format string, args ...interface{}) error {
-	err := errors.AssertionFailedWithDepthf(1, format, args...)
+	err := errors.Newf(format, args...)
 	return &nonDeterministicFailure{
 		wrapped:  err,
 		safeExpl: err.Error(),
@@ -1206,7 +1206,7 @@ func (sm *replicaStateMachine) ApplySideEffects(
 	if cmd.IsLocal() {
 		// Handle the LocalResult.
 		if cmd.localResult != nil {
-			sm.r.handleReadWriteLocalEvalResult(ctx, *cmd.localResult, true /* raftMuHeld */)
+			sm.r.handleReadWriteLocalEvalResult(ctx, *cmd.localResult)
 		}
 
 		rejected := cmd.Rejected()

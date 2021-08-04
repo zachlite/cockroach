@@ -16,7 +16,6 @@ go_library(
         "file_sync_buffer.go",
         "flags.go",
         "fluent_client.go",
-        "format_crdb.go",
         "format_crdb_v1.go",
         "format_crdb_v2.go",
         "format_json.go",
@@ -26,7 +25,6 @@ go_library(
         "log.go",
         "log_bridge.go",
         "log_buffer.go",
-        "log_decoder.go",
         "log_entry.go",
         "log_flush.go",
         "redact.go",
@@ -100,6 +98,9 @@ go_library(
         "@io_bazel_rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
         ],
+        "@io_bazel_rules_go//go/platform:nacl": [
+            "@org_golang_x_sys//unix",
+        ],
         "@io_bazel_rules_go//go/platform:netbsd": [
             "@org_golang_x_sys//unix",
         ],
@@ -142,6 +143,7 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":log"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/cli/exit",
         "//pkg/settings/cluster",
@@ -173,13 +175,11 @@ genrule(
     name = "gen-log-channels",
     srcs = [
         "//pkg/util/log/logpb:log.proto",
+        "//pkg/util/log/gen",
     ],
     outs = ["log_channels_generated.go"],
     cmd = """
         $(location //pkg/util/log/gen) $(location //pkg/util/log/logpb:log.proto) \
           log_channels.go $(location log_channels_generated.go)
        """,
-    exec_tools = [
-        "//pkg/util/log/gen",
-    ],
 )

@@ -200,7 +200,7 @@ var requireConstFmt = map[string]bool{
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate.inputErrorf": true,
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/sqlproxyccl.newErrorf": true,
+	"github.com/cockroachdb/cockroach/pkg/ccl/sqlproxyccl.NewErrorf": true,
 }
 
 func init() {

@@ -497,12 +497,6 @@ function makeStats(): Required<StatementStatistics> {
     rows_read: makeStat(),
     bytes_read: makeStat(),
     exec_stats: makeExecStats(),
-    sql_type: "DDL",
-    last_exec_timestamp: {
-      seconds: Long.fromInt(1599670292),
-      nanos: 111613000,
-    },
-    nodes: [Long.fromInt(1), Long.fromInt(2), Long.fromInt(3)],
   };
 }
 

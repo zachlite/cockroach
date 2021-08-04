@@ -10,6 +10,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -41,16 +42,16 @@ func newSumIntHashAggAlloc(
 			return &sumIntInt16HashAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &sumIntInt32HashAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &sumIntInt64HashAggAlloc{aggAllocBase: allocBase}, nil
 		}
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower("Int"), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 type sumIntInt16HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg int64
@@ -64,19 +65,19 @@ type sumIntInt16HashAgg struct {
 var _ AggregateFunc = &sumIntInt16HashAgg{}
 
 func (a *sumIntInt16HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Int64()
 }
 
 func (a *sumIntInt16HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Int16(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -163,7 +164,7 @@ func (a *sumIntInt16HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumIntInt32HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg int64
@@ -177,19 +178,19 @@ type sumIntInt32HashAgg struct {
 var _ AggregateFunc = &sumIntInt32HashAgg{}
 
 func (a *sumIntInt32HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Int64()
 }
 
 func (a *sumIntInt32HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Int32(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -276,7 +277,7 @@ func (a *sumIntInt32HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumIntInt64HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg int64
@@ -290,19 +291,19 @@ type sumIntInt64HashAgg struct {
 var _ AggregateFunc = &sumIntInt64HashAgg{}
 
 func (a *sumIntInt64HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Int64()
 }
 
 func (a *sumIntInt64HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Int64(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 

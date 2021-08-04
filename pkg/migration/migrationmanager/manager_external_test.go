@@ -159,20 +159,6 @@ RETURNING id;`).Scan(&secondID))
 	}()
 
 	testutils.SucceedsSoon(t, func() error {
-		// TODO(yuzefovich): this check is quite unfortunate since it relies on
-		// the assumption that all recordings from the child spans are imported
-		// into the tracer. However, this is not the case for the DistSQL
-		// processors where child spans are created with
-		// WithParentAndManualCollection option which requires explicitly
-		// importing the recordings from the children. This only happens when
-		// the execution flow is drained which cannot happen until we close
-		// the 'unblock' channel, and this we cannot do until we see the
-		// expected message in the trace.
-		//
-		// At the moment it works in a very fragile manner (by making sure that
-		// no processors actually create their own spans). Instead, a different
-		// way to observe the status of the migration manager should be
-		// introduced and should be used here.
 		if tracing.FindMsgInRecording(getRecording(), "found existing migration job") > 0 {
 			return nil
 		}
@@ -382,6 +368,10 @@ func TestPauseMigration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer jobs.TestingSetAdoptAndCancelIntervals(
+		10*time.Millisecond, 10*time.Millisecond,
+	)()
+
 	// We're going to be migrating from startCV to endCV.
 	startCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 41}}
 	endCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 42}}
@@ -397,7 +387,6 @@ func TestPauseMigration(t *testing.T) {
 		ServerArgs: base.TestServerArgs{
 			Settings: cluster.MakeTestingClusterSettingsWithVersions(endCV.Version, startCV.Version, false),
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				Server: &server.TestingKnobs{
 					BinaryVersionOverride:          startCV.Version,
 					DisableAutomaticVersionUpgrade: 1,

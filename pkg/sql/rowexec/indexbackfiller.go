@@ -104,10 +104,6 @@ func (ib *indexBackfiller) OutputTypes() []*types.T {
 	return nil
 }
 
-func (ib *indexBackfiller) MustBeStreaming() bool {
-	return false
-}
-
 // indexEntryBatch represents a "batch" of index entries which are constructed
 // and sent for ingestion. Breaking up the index entries into these batches
 // serves for better progress reporting as explained in the ingestIndexEntries
@@ -358,7 +354,8 @@ func (ib *indexBackfiller) Run(ctx context.Context) {
 	progCh := make(chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress)
 
 	semaCtx := tree.MakeSemaContext()
-	if err := ib.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, ib.flowCtx.NewEvalCtx()); err != nil {
+	if err := ib.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, ib.flowCtx.NewEvalCtx(),
+		ib.output); err != nil {
 		ib.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}

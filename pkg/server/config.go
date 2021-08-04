@@ -37,7 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
+	"github.com/elastic/gosigar"
 )
 
 // Context defaults.
@@ -307,6 +307,9 @@ type SQLConfig struct {
 	// The tenant that the SQL server runs on the behalf of.
 	TenantID roachpb.TenantID
 
+	// LeaseManagerConfig holds configuration values specific to the LeaseManager.
+	LeaseManagerConfig *base.LeaseManagerConfig
+
 	// SocketFile, if non-empty, sets up a TLS-free local listener using
 	// a unix datagram socket at the specified path.
 	SocketFile string
@@ -344,6 +347,7 @@ func MakeSQLConfig(tenID roachpb.TenantID, tempStorageCfg base.TempStorageConfig
 		TableStatCacheSize: defaultSQLTableStatCacheSize,
 		QueryCacheSize:     defaultSQLQueryCacheSize,
 		TempStorageConfig:  tempStorageCfg,
+		LeaseManagerConfig: base.NewLeaseManagerConfig(),
 	}
 	return sqlCfg
 }
@@ -515,11 +519,11 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			}
 		} else {
 			if spec.Size.Percent > 0 {
-				du, err := vfs.Default.GetDiskUsage(spec.Path)
-				if err != nil {
+				fileSystemUsage := gosigar.FileSystemUsage{}
+				if err := fileSystemUsage.Get(spec.Path); err != nil {
 					return Engines{}, err
 				}
-				sizeInBytes = int64(float64(du.TotalBytes) * spec.Size.Percent / 100)
+				sizeInBytes = int64(float64(fileSystemUsage.Total) * spec.Size.Percent / 100)
 			}
 			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
 				return Engines{}, errors.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
@@ -530,12 +534,12 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				i, humanizeutil.IBytes(sizeInBytes), openFileLimitPerStore))
 
 			storageConfig := base.StorageConfig{
-				Attrs:             spec.Attributes,
-				Dir:               spec.Path,
-				MaxSize:           sizeInBytes,
-				Settings:          cfg.Settings,
-				UseFileRegistry:   spec.UseFileRegistry,
-				EncryptionOptions: spec.EncryptionOptions,
+				Attrs:           spec.Attributes,
+				Dir:             spec.Path,
+				MaxSize:         sizeInBytes,
+				Settings:        cfg.Settings,
+				UseFileRegistry: spec.UseFileRegistry,
+				ExtraOptions:    spec.ExtraOptions,
 			}
 			pebbleConfig := storage.PebbleConfig{
 				StorageConfig: storageConfig,

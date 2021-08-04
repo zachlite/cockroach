@@ -28,20 +28,20 @@ type Kind uint32
 
 // List of privileges. ALL is specifically encoded so that it will automatically
 // pick up new privileges.
-// Do not change values of privileges. These correspond to the position
-// of the privilege in a bit field and are expected to stay constant.
+// New privileges must be added to the end since this is a bitfield.
 const (
-	ALL        Kind = 1
-	CREATE     Kind = 2
-	DROP       Kind = 3
-	GRANT      Kind = 4
-	SELECT     Kind = 5
-	INSERT     Kind = 6
-	DELETE     Kind = 7
-	UPDATE     Kind = 8
-	USAGE      Kind = 9
-	ZONECONFIG Kind = 10
-	CONNECT    Kind = 11
+	_ Kind = iota
+	ALL
+	CREATE
+	DROP
+	GRANT
+	SELECT
+	INSERT
+	DELETE
+	UPDATE
+	USAGE
+	ZONECONFIG
+	CONNECT
 )
 
 // ObjectType represents objects that can have privileges.
@@ -113,7 +113,7 @@ func (pl List) Less(i, j int) bool {
 }
 
 // names returns a list of privilege names in the same
-// order as "pl".
+// order as 'pl'.
 func (pl List) names() []string {
 	ret := make([]string, len(pl))
 	for i, p := range pl {
@@ -206,6 +206,7 @@ func ListFromStrings(strs []string) (List, error) {
 
 // ValidatePrivileges returns an error if any privilege in
 // privileges cannot be granted on the given objectType.
+// Currently db/schema/table can all be granted the same privileges.
 func ValidatePrivileges(privileges List, objectType ObjectType) error {
 	validPrivs := GetValidPrivilegesForObject(objectType)
 	for _, priv := range privileges {
@@ -235,37 +236,4 @@ func GetValidPrivilegesForObject(objectType ObjectType) List {
 	default:
 		panic(errors.AssertionFailedf("unknown object type %s", objectType))
 	}
-}
-
-// ListToACL converts a list of privileges to a list of Postgres
-// ACL items.
-// See: https://www.postgresql.org/docs/13/ddl-priv.html#PRIVILEGE-ABBREVS-TABLE
-//     for privileges and their ACL abbreviations.
-func (pl List) ListToACL(objectType ObjectType) string {
-	privileges := pl
-	// If ALL is present, explode ALL into the underlying privileges.
-	if pl.Contains(ALL) {
-		privileges = GetValidPrivilegesForObject(objectType)
-	}
-	chars := make([]string, len(privileges))
-	for _, privilege := range privileges {
-		switch privilege {
-		case CREATE:
-			chars = append(chars, "C")
-		case SELECT:
-			chars = append(chars, "r")
-		case INSERT:
-			chars = append(chars, "a")
-		case DELETE:
-			chars = append(chars, "d")
-		case UPDATE:
-			chars = append(chars, "w")
-		case USAGE:
-			chars = append(chars, "U")
-		case CONNECT:
-			chars = append(chars, "c")
-		}
-	}
-	sort.Strings(chars)
-	return strings.Join(chars, "")
 }

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -16,11 +16,9 @@ module.exports = {
     "\\.(css|scss|less)$": "identity-obj-proxy",
     "\\.(gif|png|svg)$": "<rootDir>/.jest/fileMock.js",
   },
-  moduleDirectories: [
+  "moduleDirectories": [
+    ".",
     "node_modules"
-  ],
-  modulePaths: [
-    "<rootDir>/"
   ],
   roots: ["<rootDir>/src"],
   testEnvironment: "enzyme",

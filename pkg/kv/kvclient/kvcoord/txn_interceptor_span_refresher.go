@@ -34,11 +34,11 @@ const (
 // MaxTxnRefreshSpansBytes is a threshold in bytes for refresh spans stored
 // on the coordinator during the lifetime of a transaction. Refresh spans
 // are used for SERIALIZABLE transactions to avoid client restarts.
-var MaxTxnRefreshSpansBytes = settings.RegisterIntSetting(
+var MaxTxnRefreshSpansBytes = settings.RegisterPublicIntSetting(
 	"kv.transaction.max_refresh_spans_bytes",
 	"maximum number of bytes used to track refresh spans in serializable transactions",
 	256*1000,
-).WithPublic()
+)
 
 // txnSpanRefresher is a txnInterceptor that collects the read spans of a
 // serializable transaction in the event it gets a serializable retry error. It
@@ -164,9 +164,36 @@ func (sr *txnSpanRefresher) SendLocked(
 
 	// Set the batch's CanForwardReadTimestamp flag.
 	ba.CanForwardReadTimestamp = sr.canForwardReadTimestampWithoutRefresh(ba.Txn)
+	if rArgs, hasET := ba.GetArg(roachpb.EndTxn); hasET {
+		et := rArgs.(*roachpb.EndTxnRequest)
+		// Assign the EndTxn's DeprecatedCanCommitAtHigherTimestamp flag if it
+		// isn't already set correctly. We don't write blindly because we could
+		// be dealing with a re-issued batch from splitEndTxnAndRetrySend after
+		// a refresh and we don't want to mutate previously issued requests or
+		// we risk a data race (checked by raceTransport). In these cases, we
+		// need to clone the EndTxn request first before mutating.
+		//
+		// We know this is a re-issued batch if the flag is already set and we
+		// need to unset it. We aren't able to detect the case where the flag is
+		// not set and we now need to set it to true, but such cases don't
+		// happen in practice (i.e. we'll never begin setting the flag after a
+		// refresh).
+		//
+		// TODO(nvanbenschoten): this is ugly. If we weren't about to delete
+		// this field, we'd want to do something better. Just delete this ASAP.
+		if et.DeprecatedCanCommitAtHigherTimestamp != ba.CanForwardReadTimestamp {
+			isReissue := et.DeprecatedCanCommitAtHigherTimestamp
+			if isReissue {
+				etCpy := *et
+				ba.Requests[len(ba.Requests)-1].SetInner(&etCpy)
+				et = &etCpy
+			}
+			et.DeprecatedCanCommitAtHigherTimestamp = ba.CanForwardReadTimestamp
+		}
+	}
 
 	// Attempt a refresh before sending the batch.
-	ba, pErr := sr.maybeRefreshPreemptivelyLocked(ctx, ba, false)
+	ba, pErr := sr.maybeRefreshPreemptively(ctx, ba)
 	if pErr != nil {
 		return nil, pErr
 	}
@@ -379,15 +406,13 @@ func (sr *txnSpanRefresher) splitEndTxnAndRetrySend(
 	return br, nil
 }
 
-// maybeRefreshPreemptivelyLocked attempts to refresh a transaction's read timestamp
+// maybeRefreshPreemptively attempts to refresh a transaction's read timestamp
 // eagerly. Doing so can take advantage of opportunities where the refresh is
 // free or can avoid wasting work issuing a batch containing an EndTxn that will
 // necessarily throw a serializable error. The method returns a batch with an
 // updated transaction if the refresh is successful, or a retry error if not.
-// If the force flag is true, the refresh will be attempted even if a refresh
-// is not inevitable.
-func (sr *txnSpanRefresher) maybeRefreshPreemptivelyLocked(
-	ctx context.Context, ba roachpb.BatchRequest, force bool,
+func (sr *txnSpanRefresher) maybeRefreshPreemptively(
+	ctx context.Context, ba roachpb.BatchRequest,
 ) (roachpb.BatchRequest, *roachpb.Error) {
 	// If we know that the transaction will need a refresh at some point because
 	// its write timestamp has diverged from its read timestamp, consider doing
@@ -441,7 +466,7 @@ func (sr *txnSpanRefresher) maybeRefreshPreemptivelyLocked(
 	refreshInevitable := hasET && args.(*roachpb.EndTxnRequest).Commit
 
 	// If neither condition is true, defer the refresh.
-	if !refreshFree && !refreshInevitable && !force {
+	if !refreshFree && !refreshInevitable {
 		return ba, nil
 	}
 
@@ -652,14 +677,14 @@ func (sr *txnSpanRefresher) epochBumpedLocked() {
 	sr.refreshedTimestamp.Reset()
 }
 
-// createSavepointLocked is part of the txnInterceptor interface.
+// createSavepointLocked is part of the txnReqInterceptor interface.
 func (sr *txnSpanRefresher) createSavepointLocked(ctx context.Context, s *savepoint) {
 	s.refreshSpans = make([]roachpb.Span, len(sr.refreshFootprint.asSlice()))
 	copy(s.refreshSpans, sr.refreshFootprint.asSlice())
 	s.refreshInvalid = sr.refreshInvalid
 }
 
-// rollbackToSavepointLocked is part of the txnInterceptor interface.
+// rollbackToSavepointLocked is part of the txnReqInterceptor interface.
 func (sr *txnSpanRefresher) rollbackToSavepointLocked(ctx context.Context, s savepoint) {
 	sr.refreshFootprint.clear()
 	sr.refreshFootprint.insert(s.refreshSpans...)

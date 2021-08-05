@@ -16,10 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
@@ -28,29 +26,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
 // RangefeedEnabled is a cluster setting that enables rangefeed requests.
-var RangefeedEnabled = settings.RegisterBoolSetting(
+var RangefeedEnabled = settings.RegisterPublicBoolSetting(
 	"kv.rangefeed.enabled",
 	"if set, rangefeed registration is enabled",
 	false,
-).WithPublic()
-
-// RangeFeedRefreshInterval controls the frequency with which we deliver closed
-// timestamp updates to rangefeeds.
-var RangeFeedRefreshInterval = settings.RegisterDurationSetting(
-	"kv.rangefeed.closed_timestamp_refresh_interval",
-	"the interval at which closed-timestamp updates"+
-		"are delivered to rangefeeds; set to 0 to use kv.closed_timestamp.side_transport_interval",
-	0,
-	settings.NonNegativeDuration,
 )
 
 // lockedRangefeedStream is an implementation of rangefeed.Stream which provides
@@ -124,12 +112,12 @@ func (tp *rangefeedTxnPusher) ResolveIntents(
 }
 
 type iteratorWithCloser struct {
-	storage.SimpleMVCCIterator
+	storage.SimpleIterator
 	close func()
 }
 
 func (i iteratorWithCloser) Close() {
-	i.SimpleMVCCIterator.Close()
+	i.SimpleIterator.Close()
 	i.close()
 }
 
@@ -152,12 +140,7 @@ func (r *Replica) RangeFeed(
 	}
 
 	if err := r.ensureClosedTimestampStarted(ctx); err != nil {
-		if err := stream.Send(&roachpb.RangeFeedEvent{Error: &roachpb.RangeFeedError{
-			Error: *err,
-		}}); err != nil {
-			return roachpb.NewError(err)
-		}
-		return nil
+		return err
 	}
 
 	// If the RangeFeed is performing a catch-up scan then it will observe all
@@ -216,9 +199,9 @@ func (r *Replica) RangeFeed(
 	// Register the stream with a catch-up iterator.
 	var catchUpIterFunc rangefeed.IteratorConstructor
 	if usingCatchupIter {
-		catchUpIterFunc = func() storage.SimpleMVCCIterator {
+		catchUpIterFunc = func() storage.SimpleIterator {
 
-			innerIter := r.Engine().NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
+			innerIter := r.Engine().NewIterator(storage.IterOptions{
 				UpperBound: args.Span.EndKey,
 				// RangeFeed originally intended to use the time-bound iterator
 				// performance optimization. However, they've had correctness issues in
@@ -230,8 +213,8 @@ func (r *Replica) RangeFeed(
 				// MinTimestampHint: args.Timestamp,
 			})
 			catchUpIter := iteratorWithCloser{
-				SimpleMVCCIterator: innerIter,
-				close:              iterSemRelease,
+				SimpleIterator: innerIter,
+				close:          iterSemRelease,
 			}
 			return catchUpIter
 		}
@@ -363,8 +346,8 @@ func (r *Replica) registerWithRangefeedRaftMuLocked(
 	p = rangefeed.NewProcessor(cfg)
 
 	// Start it with an iterator to initialize the resolved timestamp.
-	rtsIter := func() storage.SimpleMVCCIterator {
-		return r.Engine().NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
+	rtsIter := func() storage.SimpleIterator {
+		return r.Engine().NewIterator(storage.IterOptions{
 			UpperBound: desc.EndKey.AsRawKey(),
 			// TODO(nvanbenschoten): To facilitate fast restarts of rangefeed
 			// we should periodically persist the resolved timestamp so that we
@@ -612,20 +595,19 @@ func (r *Replica) handleClosedTimestampUpdateRaftMuLocked(ctx context.Context) {
 	}
 
 	// Determine what the maximum closed timestamp is for this replica.
-	closedTS, _ := r.maxClosed(ctx)
+	closedTS, _ := r.maxClosed()
 
 	// If the closed timestamp is sufficiently stale, signal that we want an
 	// update to the leaseholder so that it will eventually begin to progress
 	// again.
-	behind := r.Clock().PhysicalTime().Sub(closedTS.GoTime())
 	slowClosedTSThresh := 5 * closedts.TargetDuration.Get(&r.store.cfg.Settings.SV)
-	if behind > slowClosedTSThresh {
+	if d := timeutil.Since(closedTS.GoTime()); d > slowClosedTSThresh {
 		m := r.store.metrics.RangeFeedMetrics
 		if m.RangeFeedSlowClosedTimestampLogN.ShouldLog() {
 			if closedTS.IsEmpty() {
 				log.Infof(ctx, "RangeFeed closed timestamp is empty")
 			} else {
-				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, behind)
+				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, d)
 			}
 		}
 
@@ -668,56 +650,33 @@ func (r *Replica) handleClosedTimestampUpdateRaftMuLocked(ctx context.Context) {
 }
 
 // ensureClosedTimestampStarted does its best to make sure that this node is
-// receiving closed timestamp updates for this replica's range. Note that this
+// receiving closed timestamp updated for this replica's range. Note that this
 // forces a valid lease to exist on the range and so can be reasonably expensive
 // if there is not already a valid lease.
 func (r *Replica) ensureClosedTimestampStarted(ctx context.Context) *roachpb.Error {
-	// Make sure there's a valid lease. If there's no lease, nobody's sending
+	// Make sure there's a leaseholder. If there's no leaseholder, there's no
 	// closed timestamp updates.
-	lease := r.CurrentLeaseStatus(ctx)
-
-	if !lease.IsValid() {
-		// Send a cheap request that needs a leaseholder, in order to ensure a
-		// lease. We don't care about the request's result, only its routing. We're
-		// employing higher-level machinery here (the DistSender); there's no better
-		// way to ensure that someone (potentially another replica) takes a lease.
-		// In particular, r.redirectOnOrAcquireLease() doesn't work because, if the
-		// current lease is invalid and the current replica is not a leader, the
-		// current replica will not take a lease.
-		log.VEventf(ctx, 2, "ensuring lease for rangefeed range. current lease invalid: %s", lease.Lease)
-		err := contextutil.RunWithTimeout(ctx, "read forcing lease acquisition", 5*time.Second,
-			func(ctx context.Context) error {
-				var b kv.Batch
-				liReq := &roachpb.LeaseInfoRequest{}
-				liReq.Key = r.Desc().StartKey.AsRawKey()
-				b.AddRawRequest(liReq)
-				return r.store.DB().Run(ctx, &b)
-			})
-		if err != nil {
-			if errors.HasType(err, (*contextutil.TimeoutError)(nil)) {
-				err = &roachpb.RangeFeedRetryError{
-					Reason: roachpb.RangeFeedRetryError_REASON_NO_LEASEHOLDER,
-				}
-			}
-			return roachpb.NewError(err)
-		}
-	}
-
-	if r.store.cfg.Settings.Version.IsActive(ctx, clusterversion.ClosedTimestampsRaftTransport) {
-		// In the "new closed timestamps subsystem", there's nothing more to do.
-		// Once there's a leaseholder, that node will connect to us and inform us of
-		// updates.
-		return nil
-	}
-
-	lease = r.CurrentLeaseStatus(ctx)
-	if lease.OwnedBy(r.StoreID()) {
+	var leaseholderNodeID roachpb.NodeID
+	_, err := r.redirectOnOrAcquireLease(ctx)
+	if err == nil {
 		// We have the lease. Request is essentially a wrapper for calling EmitMLAI
 		// on a remote node, so cut out the middleman.
 		r.EmitMLAI()
 		return nil
+	} else if lErr, ok := err.GetDetail().(*roachpb.NotLeaseHolderError); ok {
+		if lErr.LeaseHolder == nil {
+			// It's possible for redirectOnOrAcquireLease to return
+			// NotLeaseHolderErrors with LeaseHolder unset, but these should be
+			// transient conditions. If this method is being called by RangeFeed to
+			// nudge a stuck closedts, then essentially all we can do here is nothing
+			// and assume that redirectOnOrAcquireLease will do something different
+			// the next time it's called.
+			return nil
+		}
+		leaseholderNodeID = lErr.LeaseHolder.NodeID
+	} else {
+		return err
 	}
-	leaseholderNodeID := lease.Lease.Replica.NodeID
 	// Request fixes any issues where we've missed a closed timestamp update or
 	// where we're not connected to receive them from this node in the first
 	// place.

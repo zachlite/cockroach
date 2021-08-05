@@ -15,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/logtags"
+	opentracing "github.com/opentracing/opentracing-go"
 	"golang.org/x/net/trace"
 )
 
@@ -52,22 +53,22 @@ import (
 //   ...
 type AmbientContext struct {
 	// Tracer is used to open spans (see AnnotateCtxWithSpan).
-	Tracer *tracing.Tracer
+	Tracer opentracing.Tracer
 
 	// eventLog will be embedded into contexts that don't already have an event
 	// log or an open span (if not nil).
 	eventLog *ctxEventLog
 
-	// The buffer.
-	//
-	// NB: this should not be returned to the caller, to avoid other mutations
-	// leaking in. If we return this to the caller, it should be in immutable
-	// form.
 	tags *logtags.Buffer
 
 	// Cached annotated version of context.{TODO,Background}, to avoid annotating
 	// these contexts repeatedly.
 	backgroundCtx context.Context
+}
+
+// LogTags returns the tags in the ambient context.
+func (ac *AmbientContext) LogTags() *logtags.Buffer {
+	return ac.tags
 }
 
 // AddLogTag adds a tag to the ambient context.
@@ -130,7 +131,7 @@ func (ac *AmbientContext) ResetAndAnnotateCtx(ctx context.Context) context.Conte
 		}
 		return ctx
 	default:
-		if ac.eventLog != nil && tracing.SpanFromContext(ctx) == nil && eventLogFromCtx(ctx) == nil {
+		if ac.eventLog != nil && opentracing.SpanFromContext(ctx) == nil && eventLogFromCtx(ctx) == nil {
 			ctx = embedCtxEventLog(ctx, ac.eventLog)
 		}
 		if ac.tags != nil {
@@ -141,7 +142,7 @@ func (ac *AmbientContext) ResetAndAnnotateCtx(ctx context.Context) context.Conte
 }
 
 func (ac *AmbientContext) annotateCtxInternal(ctx context.Context) context.Context {
-	if ac.eventLog != nil && tracing.SpanFromContext(ctx) == nil && eventLogFromCtx(ctx) == nil {
+	if ac.eventLog != nil && opentracing.SpanFromContext(ctx) == nil && eventLogFromCtx(ctx) == nil {
 		ctx = embedCtxEventLog(ctx, ac.eventLog)
 	}
 	if ac.tags != nil {
@@ -159,7 +160,7 @@ func (ac *AmbientContext) annotateCtxInternal(ctx context.Context) context.Conte
 // The caller is responsible for closing the span (via Span.Finish).
 func (ac *AmbientContext) AnnotateCtxWithSpan(
 	ctx context.Context, opName string,
-) (context.Context, *tracing.Span) {
+) (context.Context, opentracing.Span) {
 	switch ctx {
 	case context.TODO(), context.Background():
 		// NB: context.TODO and context.Background are identical except for their

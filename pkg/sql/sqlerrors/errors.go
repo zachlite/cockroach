@@ -56,9 +56,15 @@ func NewInvalidSchemaDefinitionError(err error) error {
 }
 
 // NewUndefinedSchemaError creates an error for an undefined schema.
-// TODO (lucy): Have this take a database name.
 func NewUndefinedSchemaError(name string) error {
 	return pgerror.Newf(pgcode.InvalidSchemaName, "unknown schema %q", name)
+}
+
+// NewUnsupportedSchemaUsageError creates an error for an invalid
+// schema use, e.g. mydb.someschema.tbl.
+func NewUnsupportedSchemaUsageError(name string) error {
+	return pgerror.Newf(pgcode.InvalidSchemaName,
+		"unsupported schema specification: %q", name)
 }
 
 // NewCCLRequiredError creates an error for when a CCL feature is used in an OSS
@@ -125,11 +131,6 @@ func NewDatabaseAlreadyExistsError(name string) error {
 	return pgerror.Newf(pgcode.DuplicateDatabase, "database %q already exists", name)
 }
 
-// NewSchemaAlreadyExistsError creates an error for a preexisting schema.
-func NewSchemaAlreadyExistsError(name string) error {
-	return pgerror.Newf(pgcode.DuplicateSchema, "schema %q already exists", name)
-}
-
 // WrapErrorWhileConstructingObjectAlreadyExistsErr is used to wrap an error
 // when an error occurs while trying to get the colliding object for an
 // ObjectAlreadyExistsErr.
@@ -148,7 +149,8 @@ func MakeObjectAlreadyExistsError(collidingObject *descpb.Descriptor, name strin
 	case *descpb.Descriptor_Database:
 		return NewDatabaseAlreadyExistsError(name)
 	case *descpb.Descriptor_Schema:
-		return NewSchemaAlreadyExistsError(name)
+		// TODO(ajwerner): Add a case for an existing schema object.
+		return errors.AssertionFailedf("schema exists with name %v", name)
 	default:
 		return errors.AssertionFailedf("unknown type %T exists with name %v", collidingObject.Union, name)
 	}

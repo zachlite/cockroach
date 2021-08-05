@@ -105,7 +105,7 @@ func newTestIterator(kvs []storage.MVCCKeyValue) *testIterator {
 				}
 				expNextKey := storage.MVCCKey{
 					Key:       kv.Key.Key,
-					Timestamp: meta.Timestamp.ToTimestamp(),
+					Timestamp: hlc.Timestamp(meta.Timestamp),
 				}
 				if !kvs[i].Key.Equal(expNextKey) {
 					panic(missingErr)

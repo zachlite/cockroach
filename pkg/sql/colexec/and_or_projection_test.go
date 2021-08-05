@@ -17,9 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -30,8 +28,8 @@ import (
 )
 
 type andOrTestCase struct {
-	tuples                []colexectestutils.Tuple
-	expected              []colexectestutils.Tuple
+	tuples                []tuple
+	expected              []tuple
 	skipAllNullsInjection bool
 }
 
@@ -44,54 +42,54 @@ func init() {
 	andTestCases = []andOrTestCase{
 		// All variations of pairs separately first.
 		{
-			tuples:   colexectestutils.Tuples{{false, true}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{false, true}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{false, nil}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{false, nil}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{false, false}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{false, false}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, true}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{true, true}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, false}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{true, false}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, nil}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{true, nil}},
+			expected: tuples{{nil}},
 			// The case of {nil, nil} is explicitly tested below.
 			skipAllNullsInjection: true,
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, true}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{nil, true}},
+			expected: tuples{{nil}},
 			// The case of {nil, nil} is explicitly tested below.
 			skipAllNullsInjection: true,
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, false}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{nil, false}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, nil}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{nil, nil}},
+			expected: tuples{{nil}},
 		},
 		// Now all variations of pairs combined together to make sure that nothing
 		// funky going on with multiple tuples.
 		{
-			tuples: colexectestutils.Tuples{
+			tuples: tuples{
 				{false, true}, {false, nil}, {false, false},
 				{true, true}, {true, false}, {true, nil},
 				{nil, true}, {nil, false}, {nil, nil},
 			},
-			expected: colexectestutils.Tuples{
+			expected: tuples{
 				{false}, {false}, {false},
 				{true}, {false}, {nil},
 				{nil}, {false}, {nil},
@@ -102,54 +100,54 @@ func init() {
 	orTestCases = []andOrTestCase{
 		// All variations of pairs separately first.
 		{
-			tuples:   colexectestutils.Tuples{{false, true}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{false, true}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{false, nil}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{false, nil}},
+			expected: tuples{{nil}},
 			// The case of {nil, nil} is explicitly tested below.
 			skipAllNullsInjection: true,
 		},
 		{
-			tuples:   colexectestutils.Tuples{{false, false}},
-			expected: colexectestutils.Tuples{{false}},
+			tuples:   tuples{{false, false}},
+			expected: tuples{{false}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, true}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{true, true}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, false}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{true, false}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true, nil}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{true, nil}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, true}},
-			expected: colexectestutils.Tuples{{true}},
+			tuples:   tuples{{nil, true}},
+			expected: tuples{{true}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, false}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{nil, false}},
+			expected: tuples{{nil}},
 			// The case of {nil, nil} is explicitly tested below.
 			skipAllNullsInjection: true,
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, nil}},
-			expected: colexectestutils.Tuples{{nil}},
+			tuples:   tuples{{nil, nil}},
+			expected: tuples{{nil}},
 		},
 		// Now all variations of pairs combined together to make sure that nothing
 		// funky going on with multiple tuples.
 		{
-			tuples: colexectestutils.Tuples{
+			tuples: tuples{
 				{false, true}, {false, nil}, {false, false},
 				{true, true}, {true, false}, {true, nil},
 				{nil, true}, {nil, false}, {nil, nil},
 			},
-			expected: colexectestutils.Tuples{
+			expected: tuples{
 				{true}, {nil}, {false},
 				{true}, {true}, {true},
 				{true}, {nil}, {nil},
@@ -187,32 +185,31 @@ func TestAndOrOps(t *testing.T) {
 	} {
 		t.Run(test.operation, func(t *testing.T) {
 			for _, tc := range test.cases {
-				var runner colexectestutils.TestRunner
+				var runner testRunner
 				if tc.skipAllNullsInjection {
 					// We're omitting all nulls injection test. See comments for each such
 					// test case.
-					runner = colexectestutils.RunTestsWithoutAllNullsInjection
+					runner = runTestsWithoutAllNullsInjection
 				} else {
-					runner = colexectestutils.RunTestsWithTyps
+					runner = runTestsWithTyps
 				}
 				runner(
 					t,
-					testAllocator,
-					[]colexectestutils.Tuples{tc.tuples},
+					[]tuples{tc.tuples},
 					[][]*types.T{{types.Bool, types.Bool}},
 					tc.expected,
-					colexectestutils.OrderedVerifier,
-					func(input []colexecop.Operator) (colexecop.Operator, error) {
-						projOp, err := colexectestutils.CreateTestProjectingOperator(
+					orderedVerifier,
+					func(input []colexecbase.Operator) (colexecbase.Operator, error) {
+						projOp, err := createTestProjectingOperator(
 							ctx, flowCtx, input[0], []*types.T{types.Bool, types.Bool},
-							fmt.Sprintf("@1 %s @2", test.operation), false /* canFallbackToRowexec */, testMemAcc,
+							fmt.Sprintf("@1 %s @2", test.operation), false, /* canFallbackToRowexec */
 						)
 						if err != nil {
 							return nil, err
 						}
 						// We will project out the first two columns in order
 						// to have test cases be less verbose.
-						return colexecbase.NewSimpleProjectOp(projOp, 3 /* numInputCols */, []uint32{2}), nil
+						return NewSimpleProjectOp(projOp, 3 /* numInputCols */, []uint32{2}), nil
 					})
 			}
 		})
@@ -222,7 +219,6 @@ func TestAndOrOps(t *testing.T) {
 func benchmarkLogicalProjOp(
 	b *testing.B, operation string, useSelectionVector bool, hasNulls bool,
 ) {
-	defer log.Scope(b).Close(b)
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
@@ -263,17 +259,17 @@ func benchmarkLogicalProjOp(
 		}
 	}
 	typs := []*types.T{types.Bool, types.Bool}
-	input := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
-	logicalProjOp, err := colexectestutils.CreateTestProjectingOperator(
+	input := colexecbase.NewRepeatableBatchSource(testAllocator, batch, typs)
+	logicalProjOp, err := createTestProjectingOperator(
 		ctx, flowCtx, input, typs,
-		fmt.Sprintf("@1 %s @2", operation), false /* canFallbackToRowexec */, testMemAcc,
+		fmt.Sprintf("@1 %s @2", operation), false, /* canFallbackToRowexec */
 	)
 	require.NoError(b, err)
-	logicalProjOp.Init(ctx)
+	logicalProjOp.Init()
 
 	b.SetBytes(int64(8 * coldata.BatchSize()))
 	for i := 0; i < b.N; i++ {
-		logicalProjOp.Next()
+		logicalProjOp.Next(ctx)
 	}
 }
 

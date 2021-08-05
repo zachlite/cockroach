@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -13,8 +13,7 @@ import { NoConnection } from "./noConnection";
 
 type INodeStatus = cockroach.server.status.statuspb.INodeStatus;
 
-const LivenessStatus =
-  cockroach.kv.kvserver.liveness.livenesspb.NodeLivenessStatus;
+const LivenessStatus = cockroach.kv.kvserver.storagepb.NodeLivenessStatus;
 
 function isNoConnection(
   node: INodeStatus | NoConnection,

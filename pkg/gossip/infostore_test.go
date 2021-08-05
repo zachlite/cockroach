@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/gogo/protobuf/proto"
 )
 
 var emptyAddr = util.MakeUnresolvedAddr("test", "<test-addr>")
@@ -167,7 +168,7 @@ func TestAddInfoSameKeyDifferentHops(t *testing.T) {
 	}
 
 	i := is.getInfo("a")
-	if i.Hops != info1.Hops || !reflect.DeepEqual(i, info1) {
+	if i.Hops != info1.Hops || !proto.Equal(i, info1) {
 		t.Error("failed to properly combine hops and value", i)
 	}
 
@@ -177,7 +178,7 @@ func TestAddInfoSameKeyDifferentHops(t *testing.T) {
 		t.Error(err)
 	}
 	i = is.getInfo("a")
-	if i.Hops != info3.Hops || !reflect.DeepEqual(i, info3) {
+	if i.Hops != info3.Hops || !proto.Equal(i, info3) {
 		t.Error("failed to properly combine hops and value", i)
 	}
 }

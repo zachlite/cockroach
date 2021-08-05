@@ -103,7 +103,7 @@ func BuildChildPhysicalProps(
 		childProps.LimitHint = parentProps.LimitHint
 
 	case opt.ExceptOp, opt.ExceptAllOp, opt.IntersectOp, opt.IntersectAllOp,
-		opt.UnionOp, opt.UnionAllOp, opt.LocalityOptimizedSearchOp:
+		opt.UnionOp, opt.UnionAllOp:
 		// TODO(celine): Set operation limits need further thought; for example,
 		// the right child of an ExceptOp should not be limited.
 		childProps.LimitHint = parentProps.LimitHint

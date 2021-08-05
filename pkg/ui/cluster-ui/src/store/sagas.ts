@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -19,7 +19,6 @@ import { sessionsSaga } from "./sessions";
 import { transactionsSaga } from "./transactions";
 import { terminateSaga } from "./terminateQuery";
 import { notifificationsSaga } from "./notifications";
-import { sqlStatsSaga } from "./sqlStats";
 
 export function* sagas(cacheInvalidationPeriod?: number) {
   yield all([
@@ -29,9 +28,8 @@ export function* sagas(cacheInvalidationPeriod?: number) {
     fork(nodesSaga, cacheInvalidationPeriod),
     fork(livenessSaga, cacheInvalidationPeriod),
     fork(sessionsSaga),
-    fork(terminateSaga),
     fork(transactionsSaga),
+    fork(terminateSaga),
     fork(notifificationsSaga),
-    fork(sqlStatsSaga),
   ]);
 }

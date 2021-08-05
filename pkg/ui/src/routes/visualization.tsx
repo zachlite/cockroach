@@ -17,14 +17,12 @@ import ClusterOverview from "src/views/cluster/containers/clusterOverview";
 class NodesWrapper extends React.Component<{}, {}> {
   render() {
     return (
-      <div
-        style={{
-          paddingTop: 12,
-          width: "100%",
-          height: "100%",
-          overflow: "auto",
-        }}
-      >
+      <div style={{
+        paddingTop: 12,
+        width: "100%",
+        height: "100%",
+        overflow: "auto",
+      }}>
         <NodesOverview />
       </div>
     );
@@ -37,7 +35,7 @@ export default function createClusterOverviewRoutes(): JSX.Element {
       <ClusterOverview>
         <Switch>
           <Redirect exact from="/overview" to="/overview/list" />
-          <Route path="/overview/list" component={NodesWrapper} />
+          <Route path="/overview/list" component={ NodesWrapper } />
         </Switch>
       </ClusterOverview>
     </Route>

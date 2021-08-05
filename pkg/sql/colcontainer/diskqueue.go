@@ -19,11 +19,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/colserde"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/golang/snappy"
@@ -193,14 +191,6 @@ type diskQueue struct {
 	scratchDecompressedReadBytes []byte
 
 	diskAcc *mon.BoundAccount
-
-	// diskSpillingMetricsHelper keeps track of various disk spilling metrics.
-	diskSpillingMetricsHelper struct {
-		mu struct {
-			syncutil.Mutex
-			querySpilled bool
-		}
-	}
 }
 
 var _ RewindableQueue = &diskQueue{}
@@ -280,39 +270,13 @@ const (
 	DiskQueueCacheModeClearAndReuseCache
 )
 
-// GetPather is an object that has a temporary directory.
-type GetPather interface {
-	// GetPath returns where this object's temporary directory is.
-	// Note that the directory is created lazily on the first call to GetPath.
-	GetPath(context.Context) string
-}
-
-type getPatherFunc struct {
-	f func(ctx context.Context) string
-}
-
-func (f getPatherFunc) GetPath(ctx context.Context) string {
-	return f.f(ctx)
-}
-
-// GetPatherFunc returns a GetPather initialized from a closure.
-func GetPatherFunc(f func(ctx context.Context) string) GetPather {
-	return getPatherFunc{
-		f: f,
-	}
-}
-
 // DiskQueueCfg is a struct holding the configuration options for a DiskQueue.
 type DiskQueueCfg struct {
 	// FS is the filesystem interface to use.
 	FS fs.FS
-	// DistSQLMetrics contains metrics for monitoring DistSQL processing. This
-	// can be nil if these metrics are not needed.
-	DistSQLMetrics *execinfra.DistSQLMetrics
-	// GetPather returns where the temporary directory that will contain this
-	// DiskQueue's files has been created. The directory name will be a UUID.
-	// Note that the directory is created lazily on the first call to GetPath.
-	GetPather GetPather
+	// Path is where the temporary directory that will contain this DiskQueue's
+	// files should be created. The directory name will be a UUID.
+	Path string
 	// CacheMode defines the way a DiskQueue should use its cache. Refer to the
 	// comment of DiskQueueCacheModes for more information.
 	CacheMode DiskQueueCacheMode
@@ -322,6 +286,10 @@ type DiskQueueCfg struct {
 	// MaxFileSizeBytes is the maximum size an on-disk file should reach before
 	// rolling over to a new one.
 	MaxFileSizeBytes int
+
+	// OnNewDiskQueueCb is an optional callback function that will be called when
+	// NewDiskQueue is called.
+	OnNewDiskQueueCb func()
 
 	// TestingKnobs are used to test the queue implementation.
 	TestingKnobs struct {
@@ -376,20 +344,14 @@ func NewRewindableDiskQueue(
 	return d, nil
 }
 
-func (d *diskQueue) querySpilled() {
-	d.diskSpillingMetricsHelper.mu.Lock()
-	defer d.diskSpillingMetricsHelper.mu.Unlock()
-	if d.cfg.DistSQLMetrics != nil && !d.diskSpillingMetricsHelper.mu.querySpilled {
-		d.diskSpillingMetricsHelper.mu.querySpilled = true
-		d.cfg.DistSQLMetrics.QueriesSpilled.Inc(1)
-	}
-}
-
 func newDiskQueue(
 	ctx context.Context, typs []*types.T, cfg DiskQueueCfg, diskAcc *mon.BoundAccount,
 ) (*diskQueue, error) {
 	if err := cfg.EnsureDefaults(); err != nil {
 		return nil, err
+	}
+	if cfg.OnNewDiskQueueCb != nil {
+		cfg.OnNewDiskQueueCb()
 	}
 	d := &diskQueue{
 		dirName:          uuid.FastMakeV4().String(),
@@ -404,10 +366,9 @@ func newDiskQueue(
 	if d.cfg.CacheMode != DiskQueueCacheModeDefault {
 		d.writeBufferLimit = d.cfg.BufferSizeBytes / 2
 	}
-	if err := cfg.FS.MkdirAll(filepath.Join(cfg.GetPather.GetPath(ctx), d.dirName)); err != nil {
+	if err := cfg.FS.MkdirAll(filepath.Join(cfg.Path, d.dirName)); err != nil {
 		return nil, err
 	}
-	d.querySpilled()
 	// rotateFile will create a new file to write to.
 	return d, d.rotateFile(ctx)
 }
@@ -459,7 +420,7 @@ func (d *diskQueue) Close(ctx context.Context) error {
 	if err := d.CloseRead(); err != nil {
 		return err
 	}
-	if err := d.cfg.FS.RemoveAll(filepath.Join(d.cfg.GetPather.GetPath(ctx), d.dirName)); err != nil {
+	if err := d.cfg.FS.RemoveAll(filepath.Join(d.cfg.Path, d.dirName)); err != nil {
 		return err
 	}
 	totalSize := int64(0)
@@ -484,7 +445,7 @@ func (d *diskQueue) Close(ctx context.Context) error {
 // any file (i.e. during initialization). This will simply create the first file
 // to write to.
 func (d *diskQueue) rotateFile(ctx context.Context) error {
-	fName := filepath.Join(d.cfg.GetPather.GetPath(ctx), d.dirName, strconv.Itoa(d.seqNo))
+	fName := filepath.Join(d.cfg.Path, d.dirName, strconv.Itoa(d.seqNo))
 	f, err := d.cfg.FS.CreateWithSync(fName, bytesPerSync)
 	if err != nil {
 		return err
@@ -543,9 +504,6 @@ func (d *diskQueue) writeFooterAndFlush(ctx context.Context) (err error) {
 	}
 	d.numBufferedBatches = 0
 	d.files[d.writeFileIdx].totalSize += written
-	if d.cfg.DistSQLMetrics != nil {
-		d.cfg.DistSQLMetrics.SpilledBytesWritten.Inc(int64(written))
-	}
 	if err := d.diskAcc.Grow(ctx, int64(written)); err != nil {
 		return err
 	}
@@ -672,9 +630,6 @@ func (d *diskQueue) maybeInitDeserializer(ctx context.Context) (bool, error) {
 	if err != nil && err != io.EOF {
 		return false, err
 	}
-	if d.cfg.DistSQLMetrics != nil {
-		d.cfg.DistSQLMetrics.SpilledBytesRead.Inc(int64(n))
-	}
 	if n != len(d.writer.scratch.compressedBuf) {
 		return false, errors.Errorf("expected to read %d bytes but read %d", len(d.writer.scratch.compressedBuf), n)
 	}
@@ -763,6 +718,24 @@ func (d *diskQueue) Dequeue(ctx context.Context, b coldata.Batch) (bool, error) 
 		// No data will be added.
 		b.SetLength(0)
 	} else {
+		if d.deserializerState.curBatch == 0 {
+			// It is possible that the caller has appended more columns to the
+			// batch than it provided types during diskQueue's creation. We
+			// will only be touching the prefix of the batch that we have been
+			// told about.
+			vecs := b.ColVecs()[:len(d.typs)]
+			for i := range vecs {
+				// When we deserialize a new memory region, we allocate a new null
+				// bitmap for the batch which deserializer will write to. If we naively
+				// allow the arrow batch converter to directly overwrite null bitmap of
+				// each column, it could lead to memory corruption. Doing this avoids
+				// reallocating a new scratchDecompressedReadBytes every time we perform
+				// a read from the file and constrains the downside to allocating a new
+				// null bitmap every couple of batches.
+				nulls := coldata.NewNulls(coldata.BatchSize())
+				vecs[i].SetNulls(&nulls)
+			}
+		}
 		if err := d.deserializerState.GetBatch(d.deserializerState.curBatch, b); err != nil {
 			return false, err
 		}

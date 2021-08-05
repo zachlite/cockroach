@@ -20,16 +20,18 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 type isNullProjBase struct {
-	colexecop.OneInputHelper
+	OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -43,18 +45,18 @@ type isNullProjBase struct {
 // (we either have IS NULL or IS NOT NULL with tuple type as the input vector).
 func NewIsNullProjOp(
 	allocator *colmem.Allocator,
-	input colexecop.Operator,
+	input colexecbase.Operator,
 	colIdx, outputIdx int,
 	negate bool,
 	isTupleNull bool,
-) colexecop.Operator {
-	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputIdx)
+) colexecbase.Operator {
+	input = newVectorTypeEnforcer(allocator, input, types.Bool, outputIdx)
 	base := isNullProjBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		colIdx:         colIdx,
-		outputIdx:      outputIdx,
-		negate:         negate,
+		OneInputNode: NewOneInputNode(input),
+		allocator:    allocator,
+		colIdx:       colIdx,
+		outputIdx:    outputIdx,
+		negate:       negate,
 	}
 	if isTupleNull {
 		return &isTupleNullProjOp{isNullProjBase: base}
@@ -73,10 +75,14 @@ type is_KINDNullProjOp struct {
 	isNullProjBase
 }
 
-var _ colexecop.Operator = &is_KINDNullProjOp{}
+var _ colexecbase.Operator = &is_KINDNullProjOp{}
 
-func (o *is_KINDNullProjOp) Next() coldata.Batch {
-	batch := o.Input.Next()
+func (o *is_KINDNullProjOp) Init() {
+	o.input.Init()
+}
+
+func (o *is_KINDNullProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := o.input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -136,7 +142,7 @@ func _COMPUTE_IS_NULL(
 	if nulls.NullAt(i) {
 		projCol[i] = !o.negate
 	} else {
-		projCol[i] = isTupleNull(datums.Get(i).(tree.Datum), o.negate)
+		projCol[i] = isTupleNull(datums.Get(i).(*coldataext.Datum).Datum, o.negate)
 	}
 	// {{else}}
 	// {{if .HasNulls}}
@@ -152,7 +158,7 @@ func _COMPUTE_IS_NULL(
 } // */}}
 
 type isNullSelBase struct {
-	colexecop.OneInputHelper
+	OneInputNode
 	colIdx int
 	negate bool
 }
@@ -163,12 +169,12 @@ type isNullSelBase struct {
 // - isTupleNull indicates whether special "is tuple null" version is needed
 // (we either have IS NULL or IS NOT NULL with tuple type as the input vector).
 func NewIsNullSelOp(
-	input colexecop.Operator, colIdx int, negate bool, isTupleNull bool,
-) colexecop.Operator {
+	input colexecbase.Operator, colIdx int, negate bool, isTupleNull bool,
+) colexecbase.Operator {
 	base := isNullSelBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		colIdx:         colIdx,
-		negate:         negate,
+		OneInputNode: NewOneInputNode(input),
+		colIdx:       colIdx,
+		negate:       negate,
 	}
 	if isTupleNull {
 		return &isTupleNullSelOp{isNullSelBase: base}
@@ -185,11 +191,15 @@ type is_KINDNullSelOp struct {
 	isNullSelBase
 }
 
-var _ colexecop.Operator = &is_KINDNullSelOp{}
+var _ colexecbase.Operator = &is_KINDNullSelOp{}
 
-func (o *is_KINDNullSelOp) Next() coldata.Batch {
+func (o *is_KINDNullSelOp) Init() {
+	o.input.Init()
+}
+
+func (o *is_KINDNullSelOp) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := o.Input.Next()
+		batch := o.input.Next(ctx)
 		n := batch.Length()
 		if n == 0 {
 			return batch
@@ -249,7 +259,7 @@ func _MAYBE_SELECT(
 	// {{if .IsTuple}}
 	selectTuple := nulls.NullAt(i) != o.negate
 	if !selectTuple {
-		selectTuple = isTupleNull(datums.Get(i).(tree.Datum), o.negate)
+		selectTuple = isTupleNull(datums.Get(i).(*coldataext.Datum).Datum, o.negate)
 	}
 	if selectTuple {
 		sel[idx] = i

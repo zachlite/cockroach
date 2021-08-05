@@ -18,6 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/opentracing/opentracing-go"
 )
 
 // ordinalityProcessor is the processor of the WITH ORDINALITY operator, which
@@ -58,23 +60,26 @@ func newOrdinalityProcessor(
 		nil, /* memMonitor */
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{o.input},
-		},
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
+				o.ConsumerClosed()
+				return nil
+			}},
 	); err != nil {
 		return nil, err
 	}
 
-	if execinfra.ShouldCollectStats(ctx, flowCtx) {
+	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		o.input = newInputStatCollector(o.input)
-		o.ExecStatsForTrace = o.execStatsForTrace
+		o.FinishTrace = o.outputStatsToTrace
 	}
 
 	return o, nil
 }
 
 // Start is part of the RowSource interface.
-func (o *ordinalityProcessor) Start(ctx context.Context) {
-	ctx = o.StartInternal(ctx, ordinalityProcName)
+func (o *ordinalityProcessor) Start(ctx context.Context) context.Context {
 	o.input.Start(ctx)
+	return o.StartInternal(ctx, ordinalityProcName)
 }
 
 // Next is part of the RowSource interface.
@@ -104,14 +109,34 @@ func (o *ordinalityProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerM
 
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (o *ordinalityProcessor) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getInputStats(o.input)
+// ConsumerClosed is part of the RowSource interface.
+func (o *ordinalityProcessor) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	o.InternalClose()
+}
+
+const ordinalityTagPrefix = "ordinality."
+
+// Stats implements the SpanStats interface.
+func (os *OrdinalityStats) Stats() map[string]string {
+	return os.InputStats.Stats(ordinalityTagPrefix)
+}
+
+// StatsForQueryPlan implements the DistSQLSpanStats interface.
+func (os *OrdinalityStats) StatsForQueryPlan() []string {
+	return os.InputStats.StatsForQueryPlan("")
+}
+
+// outputStatsToTrace outputs the collected distinct stats to the trace. Will
+// fail silently if the Distinct processor is not collecting stats.
+func (o *ordinalityProcessor) outputStatsToTrace() {
+	is, ok := getInputStats(o.FlowCtx, o.input)
 	if !ok {
-		return nil
+		return
 	}
-	return &execinfrapb.ComponentStats{
-		Inputs: []execinfrapb.InputStats{is},
-		Output: o.OutputHelper.Stats(),
+	if sp := opentracing.SpanFromContext(o.Ctx); sp != nil {
+		tracing.SetSpanStats(
+			sp, &OrdinalityStats{InputStats: is},
+		)
 	}
 }

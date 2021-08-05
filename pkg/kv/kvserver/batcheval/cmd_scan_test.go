@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -59,7 +58,7 @@ func testScanReverseScanInner(
 	k1, k2 := roachpb.Key("a"), roachpb.Key("b")
 	ts := hlc.Timestamp{WallTime: 1}
 
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 
 	// Write to k1 and k2.
@@ -85,7 +84,6 @@ func testScanReverseScanInner(
 			Timestamp:   ts,
 			TargetBytes: tb,
 		},
-		EvalCtx: (&MockEvalCtx{ClusterSettings: cluster.MakeClusterSettings()}).EvalContext(),
 	}
 
 	if !reverse {

@@ -41,7 +41,7 @@ var vn = (*ReplicaType)(nil) // should be treated like VoterFull
 var v = ReplicaTypeVoterFull()
 var vi = ReplicaTypeVoterIncoming()
 var vo = ReplicaTypeVoterOutgoing()
-var vd = ReplicaTypeVoterDemotingLearner()
+var vd = ReplicaTypeVoterDemoting()
 var l = ReplicaTypeLearner()
 
 func TestVotersLearnersAll(t *testing.T) {
@@ -61,9 +61,9 @@ func TestVotersLearnersAll(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run("", func(t *testing.T) {
-			r := MakeReplicaSet(test)
+			r := MakeReplicaDescriptors(test)
 			seen := map[ReplicaDescriptor]struct{}{}
-			for _, voter := range r.VoterDescriptors() {
+			for _, voter := range r.Voters() {
 				typ := voter.GetType()
 				switch typ {
 				case VOTER_FULL, VOTER_INCOMING:
@@ -72,14 +72,14 @@ func TestVotersLearnersAll(t *testing.T) {
 					assert.FailNow(t, "unexpectedly got a %s as Voter()", typ)
 				}
 			}
-			for _, learner := range r.LearnerDescriptors() {
+			for _, learner := range r.Learners() {
 				seen[learner] = struct{}{}
 				assert.Equal(t, LEARNER, learner.GetType())
 			}
 
-			all := r.Descriptors()
+			all := r.All()
 			// Make sure that VOTER_OUTGOING is the only type that is skipped both
-			// by LearnerDescriptors() and VoterDescriptors()
+			// by Learners() and Voters()
 			for _, rd := range all {
 				typ := rd.GetType()
 				if _, seen := seen[rd]; !seen {
@@ -126,21 +126,21 @@ func TestReplicaDescriptorsRemove(t *testing.T) {
 		},
 	}
 	for i, test := range tests {
-		r := MakeReplicaSet(test.replicas)
-		lenBefore := len(r.Descriptors())
+		r := MakeReplicaDescriptors(test.replicas)
+		lenBefore := len(r.All())
 		removedDesc, ok := r.RemoveReplica(test.remove.NodeID, test.remove.StoreID)
 		assert.Equal(t, test.expected, ok, "testcase %d", i)
 		if ok {
 			assert.Equal(t, test.remove.NodeID, removedDesc.NodeID, "testcase %d", i)
 			assert.Equal(t, test.remove.StoreID, removedDesc.StoreID, "testcase %d", i)
-			assert.Equal(t, lenBefore-1, len(r.Descriptors()), "testcase %d", i)
+			assert.Equal(t, lenBefore-1, len(r.All()), "testcase %d", i)
 		} else {
-			assert.Equal(t, lenBefore, len(r.Descriptors()), "testcase %d", i)
+			assert.Equal(t, lenBefore, len(r.All()), "testcase %d", i)
 		}
-		for _, voter := range r.VoterDescriptors() {
+		for _, voter := range r.Voters() {
 			assert.Equal(t, VOTER_FULL, voter.GetType(), "testcase %d", i)
 		}
-		for _, learner := range r.LearnerDescriptors() {
+		for _, learner := range r.Learners() {
 			assert.Equal(t, LEARNER, learner.GetType(), "testcase %d", i)
 		}
 	}
@@ -202,7 +202,7 @@ func TestReplicaDescriptorsConfState(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run("", func(t *testing.T) {
-			r := MakeReplicaSet(test.in)
+			r := MakeReplicaDescriptors(test.in)
 			cs := r.ConfState()
 			require.Equal(t, test.out, raft.DescribeConfState(cs))
 		})
@@ -308,7 +308,7 @@ func TestReplicaDescriptorsCanMakeProgress(t *testing.T) {
 				rds = append(rds, rDesc.ReplicaDescriptor)
 			}
 
-			act := MakeReplicaSet(rds).CanMakeProgress(func(rd ReplicaDescriptor) bool {
+			act := MakeReplicaDescriptors(rds).CanMakeProgress(func(rd ReplicaDescriptor) bool {
 				for _, rdi := range test.rds {
 					if rdi.ReplicaID == rd.ReplicaID {
 						return rdi.live
@@ -346,7 +346,7 @@ func TestReplicaDescriptorsCanMakeProgressRandom(t *testing.T) {
 			liveness[i] = (livenessBits >> i & 1) == 0
 		}
 
-		rng := MakeReplicaSet(rds)
+		rng := MakeReplicaDescriptors(rds)
 
 		crdbCanMakeProgress := rng.CanMakeProgress(func(rd ReplicaDescriptor) bool {
 			return liveness[rd.ReplicaID-1]

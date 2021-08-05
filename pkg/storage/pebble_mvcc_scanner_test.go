@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -118,6 +119,7 @@ func TestMVCCScanWithManyVersionsAndSeparatedIntents(t *testing.T) {
 
 func TestMVCCScanWithLargeKeyValue(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.UnderRace(t, "takes >1min under race")
 
 	eng := createTestPebbleEngine()
 	defer eng.Close()

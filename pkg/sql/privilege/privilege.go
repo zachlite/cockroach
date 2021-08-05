@@ -28,20 +28,20 @@ type Kind uint32
 
 // List of privileges. ALL is specifically encoded so that it will automatically
 // pick up new privileges.
-// Do not change values of privileges. These correspond to the position
-// of the privilege in a bit field and are expected to stay constant.
+// New privileges must be added to the end since this is a bitfield.
 const (
-	ALL        Kind = 1
-	CREATE     Kind = 2
-	DROP       Kind = 3
-	GRANT      Kind = 4
-	SELECT     Kind = 5
-	INSERT     Kind = 6
-	DELETE     Kind = 7
-	UPDATE     Kind = 8
-	USAGE      Kind = 9
-	ZONECONFIG Kind = 10
-	CONNECT    Kind = 11
+	_ Kind = iota
+	ALL
+	CREATE
+	DROP
+	GRANT
+	SELECT
+	INSERT
+	DELETE
+	UPDATE
+	USAGE
+	ZONECONFIG
+	CONNECT
 )
 
 // ObjectType represents objects that can have privileges.
@@ -206,6 +206,7 @@ func ListFromStrings(strs []string) (List, error) {
 
 // ValidatePrivileges returns an error if any privilege in
 // privileges cannot be granted on the given objectType.
+// Currently db/schema/table can all be granted the same privileges.
 func ValidatePrivileges(privileges List, objectType ObjectType) error {
 	validPrivs := GetValidPrivilegesForObject(objectType)
 	for _, priv := range privileges {

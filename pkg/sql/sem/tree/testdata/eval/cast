@@ -1204,17 +1204,6 @@ eval
 ----
 invalid cast: jsonb -> float
 
-# "char" is supposed to truncate long values
-eval
-'abc'::"char"
-----
-'a'
-
-eval
-'abc'::string::"char"
-----
-'a'
-
 eval
 'null'::jsonb::geography
 ----

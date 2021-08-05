@@ -97,24 +97,9 @@ func TestSegmentize(t *testing.T) {
 			expectedWKT:      "MULTIPOINT((0 0), (1 1))",
 		},
 		{
-			wkt:              "LINESTRING(0 0 25, 0 1 0, 2 5 100)",
-			maxSegmentLength: 150000.0,
-			expectedWKT:      "LINESTRING Z (0 0 25,0 1 0,0.49878052093921765 2.0003038990352664 25,0.9981696941692514 3.0004561476391296 50,1.4984735304805308 4.000380457593079 75,2 5 100)",
-		},
-		{
 			wkt:              "LINESTRING(0 0, 1 1)",
 			maxSegmentLength: math.NaN(),
 			expectedWKT:      "LINESTRING(0 0, 1 1)",
-		},
-		{
-			wkt:              "LINESTRING M (0 0 0, 1 1 1)",
-			maxSegmentLength: math.Sqrt(-1),
-			expectedWKT:      "LINESTRING M (0 0 0, 1 1 1)",
-		},
-		{
-			wkt:              "LINESTRING ZM (0 0 0 0, 1 1 1 1)",
-			maxSegmentLength: -math.NaN(),
-			expectedWKT:      "LINESTRING(0 0 0 0, 1 1 1 1)",
 		},
 		{
 			wkt:              "LINESTRING(0 0, 1 1)",
@@ -148,15 +133,6 @@ func TestSegmentize(t *testing.T) {
 			t,
 			err,
 			fmt.Sprintf("attempting to segmentize into too many coordinates; need 34359738370 points between [0 0] and [100 80], max %d", geo.MaxAllowedSplitPoints),
-		)
-	})
-	t.Run("overflowing number of coordinates to segmentize", func(t *testing.T) {
-		g := geo.MustParseGeography("LINESTRING Z (-169.79088499002907 8.884172679558333 -4827356730.650944,50.66238188467506 -42.736039899804595 -8796356262.766115,81.80150918285182 -53.84161280004709 -8387269145.754486,30.179109503087716 67.82372267760985 3004789468.230095,20.563302070933446 62.59700266527605 -4314324960.005148)")
-		_, err := Segmentize(g, 1.401298464324817e-45)
-		require.EqualError(
-			t,
-			err,
-			fmt.Sprintf("attempting to segmentize into too many coordinates; need 35917864239044270000000000000000000000000000000000000 points between [-169.79088499002907 8.884172679558333 -4.827356730650944e+09] and [50.66238188467506 -42.736039899804595 -8.796356262766115e+09], max %d", geo.MaxAllowedSplitPoints),
 		)
 	})
 }
@@ -204,13 +180,6 @@ func TestSegmentizeCoords(t *testing.T) {
 			segmentMaxAngle:      1.563200444168918,
 			resultantCoordinates: []float64{85, 85},
 		},
-		{
-			desc:                 `Coordinate(0, 16, 23, 10) to Coordinate(1, 0, -5, 0), 0.07848050723825097`,
-			a:                    geom.Coord{0, 16, 23, 10},
-			b:                    geom.Coord{1, 0, -5, 0},
-			segmentMaxAngle:      0.07848050723825097,
-			resultantCoordinates: []float64{0, 16, 23, 10, 0.2587272349066411, 12.000265604969918, 16, 7.5, 0.5098761137159087, 8.00030056571944, 9, 5, 0.7561364483510505, 4.000186752673144, 2, 2.5},
-		},
 	}
 	for _, test := range testCases {
 		t.Run(test.desc, func(t *testing.T) {
@@ -233,13 +202,6 @@ func TestSegmentizeCoords(t *testing.T) {
 			b:               geom.Coord{1, 1},
 			segmentMaxAngle: 2e-8,
 			expectedErr:     fmt.Sprintf("attempting to segmentize into too many coordinates; need 268435458 points between [0 100] and [1 1], max %d", geo.MaxAllowedSplitPoints),
-		},
-		{
-			desc:            "input coords have different dimensions",
-			a:               geom.Coord{1, 1},
-			b:               geom.Coord{1, 2, 3},
-			segmentMaxAngle: 1,
-			expectedErr:     "cannot segmentize two coordinates of different dimensions",
 		},
 		{
 			desc:            "negative max segment angle",

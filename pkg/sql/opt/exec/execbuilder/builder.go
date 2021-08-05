@@ -15,9 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -33,7 +31,6 @@ const ParallelScanResultThreshold = 10000
 // expression tree (opt.Expr).
 type Builder struct {
 	factory          exec.Factory
-	optimizer        *xform.Optimizer
 	mem              *memo.Memo
 	catalog          cat.Catalog
 	e                opt.Expr
@@ -75,6 +72,8 @@ type Builder struct {
 
 	allowInsertFastPath bool
 
+	allowInterleavedJoins bool
+
 	// forceForUpdateLocking is conditionally passed through to factory methods
 	// for scan operators that serve as the input for mutation operators. When
 	// set to true, it ensures that a FOR UPDATE row-level locking mode is used
@@ -93,10 +92,6 @@ type Builder struct {
 	// containsFullIndexScan is set to true if the statement contains a secondary
 	// index scan.
 	ContainsFullIndexScan bool
-
-	// containsBoundedStalenessScan is true if the query uses bounded
-	// staleness and contains a scan.
-	containsBoundedStalenessScan bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -111,7 +106,6 @@ type Builder struct {
 // transaction.
 func New(
 	factory exec.Factory,
-	optimizer *xform.Optimizer,
 	mem *memo.Memo,
 	catalog cat.Catalog,
 	e opt.Expr,
@@ -120,7 +114,6 @@ func New(
 ) *Builder {
 	b := &Builder{
 		factory:                factory,
-		optimizer:              optimizer,
 		mem:                    mem,
 		catalog:                catalog,
 		e:                      e,
@@ -133,6 +126,7 @@ func New(
 			b.nameGen = memo.NewExprNameGenerator(evalCtx.SessionData.SaveTablesPrefix)
 		}
 		b.allowInsertFastPath = evalCtx.SessionData.InsertFastPath
+		b.allowInterleavedJoins = evalCtx.SessionData.InterleavedJoins
 	}
 	return b
 }
@@ -181,16 +175,15 @@ func (b *Builder) build(e opt.Expr) (_ execPlan, err error) {
 	return b.buildRelational(rel)
 }
 
-// BuildScalar converts a scalar expression to a TypedExpr.
-func (b *Builder) BuildScalar() (tree.TypedExpr, error) {
+// BuildScalar converts a scalar expression to a TypedExpr. Variables are mapped
+// according to the IndexedVarHelper.
+func (b *Builder) BuildScalar(ivh *tree.IndexedVarHelper) (tree.TypedExpr, error) {
 	scalar, ok := b.e.(opt.ScalarExpr)
 	if !ok {
 		return nil, errors.AssertionFailedf("BuildScalar cannot be called for non-scalar operator %s", log.Safe(b.e.Op()))
 	}
-	var ctx buildScalarCtx
-	md := b.mem.Metadata()
-	ctx.ivh = tree.MakeIndexedVarHelper(&mdVarContainer{md: md}, md.NumColumns())
-	for i := 0; i < md.NumColumns(); i++ {
+	ctx := buildScalarCtx{ivh: *ivh}
+	for i := 0; i < ivh.NumVars(); i++ {
 		ctx.ivarMap.Set(i+1, i)
 	}
 	return b.buildScalar(&ctx, scalar)
@@ -224,34 +217,5 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 			return &b.withExprs[i]
 		}
 	}
-	return nil
-}
-
-// boundedStaleness returns true if this query uses bounded staleness.
-func (b *Builder) boundedStaleness() bool {
-	return b.evalCtx != nil && b.evalCtx.AsOfSystemTime != nil &&
-		b.evalCtx.AsOfSystemTime.BoundedStaleness
-}
-
-// mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -
-// it maps indexed vars to columns in the metadata.
-type mdVarContainer struct {
-	md *opt.Metadata
-}
-
-var _ tree.IndexedVarContainer = &mdVarContainer{}
-
-// IndexedVarEval is part of the IndexedVarContainer interface.
-func (c *mdVarContainer) IndexedVarEval(idx int, ctx *tree.EvalContext) (tree.Datum, error) {
-	return nil, errors.AssertionFailedf("no eval allowed in mdVarContainer")
-}
-
-// IndexedVarResolvedType is part of the IndexedVarContainer interface.
-func (c *mdVarContainer) IndexedVarResolvedType(idx int) *types.T {
-	return c.md.ColumnMeta(opt.ColumnID(idx + 1)).Type
-}
-
-// IndexedVarNodeFormatter is part of the IndexedVarContainer interface.
-func (c *mdVarContainer) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
 	return nil
 }

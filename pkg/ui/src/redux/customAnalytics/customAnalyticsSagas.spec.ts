@@ -13,7 +13,9 @@ import sinon from "sinon";
 import Analytics from "analytics-node";
 
 import { signUpEmailSubscription } from "./customAnalyticsSagas";
-import { signUpForEmailSubscription } from "./customAnanlyticsActions";
+import {
+  signUpForEmailSubscription,
+} from "./customAnanlyticsActions";
 
 const sandbox = sinon.createSandbox();
 

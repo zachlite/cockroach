@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -180,8 +180,10 @@ Creation fails if the CA expiration time is before the desired certificate expir
 // TODO(marc): there is currently no way to specify which CA cert to use if more
 // than one if present.
 func runCreateClientCert(cmd *cobra.Command, args []string) error {
-	username, err := security.MakeSQLUsernameFromUserInput(args[0], security.UsernameCreation)
-	if err != nil {
+	var err error
+	var username string
+	// We intentionally allow the `node` user to have a cert.
+	if username, err = sql.NormalizeAndValidateUsernameNoBlocklist(args[0]); err != nil {
 		return errors.Wrap(err, "failed to generate client certificate and key")
 	}
 
@@ -300,7 +302,7 @@ func runListCerts(cmd *cobra.Command, args []string) error {
 		addRow(cert, fmt.Sprintf("user: %s", user))
 	}
 
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, certTableHeaders, clisqlexec.NewRowSliceIter(rows, alignment))
+	return printQueryOutput(os.Stdout, certTableHeaders, newRowSliceIter(rows, alignment))
 }
 
 var certCmds = []*cobra.Command{

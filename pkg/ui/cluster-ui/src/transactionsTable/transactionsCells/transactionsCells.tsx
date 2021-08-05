@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-import * as protos from "@cockroachlabs/crdb-protobuf-client";
 import React from "react";
 import { getHighlightedText } from "src/highlightedText";
 import { Anchor } from "src/anchor";
@@ -29,23 +28,16 @@ const descriptionClassName = statementsCx("cl-table-link__description");
 const textWrapper = ownCellStyles("text-wrapper");
 const hoverAreaClassName = ownCellStyles("hover-area");
 
-type TransactionStats = protos.cockroach.sql.ITransactionStatistics;
-
 interface TextCellProps {
   transactionText: string;
-  transactionFingerprintIds: Long[];
-  transactionStats: TransactionStats;
-  handleDetails: (
-    transactionFingerprintIds: Long[],
-    transactionStats: TransactionStats,
-  ) => void;
+  transactionIds: Long[];
+  handleDetails: (transactionIds: Long[]) => void;
   search: string;
 }
 
 export const textCell = ({
   transactionText,
-  transactionFingerprintIds,
-  transactionStats,
+  transactionIds,
   handleDetails,
   search,
 }: TextCellProps) => {
@@ -62,9 +54,7 @@ export const textCell = ({
       >
         <div className={textWrapper}>
           <div
-            onClick={() =>
-              handleDetails(transactionFingerprintIds, transactionStats)
-            }
+            onClick={() => handleDetails(transactionIds)}
             className={hoverAreaClassName}
           >
             {getHighlightedText(

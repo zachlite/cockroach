@@ -27,9 +27,7 @@ export function PrintReplicaID(
   replicaID?: Long,
 ) {
   if (!_.isNil(rep)) {
-    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${
-      rep.replica_id
-    }`;
+    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${rep.replica_id}`;
   }
   // Fall back to the passed in node, store and replica IDs. If those are nil,
   // use a question mark instead.
@@ -44,17 +42,14 @@ export function PrintTime(time: moment.Moment) {
 }
 
 export function PrintTimestamp(
-  timestamp:
-    | protos.cockroach.util.hlc.ITimestamp
-    | protos.google.protobuf.ITimestamp,
+  timestamp: protos.cockroach.util.hlc.ITimestamp |
+    protos.google.protobuf.ITimestamp,
 ) {
   let time: moment.Moment = null;
   if (_.has(timestamp, "wall_time")) {
-    time = LongToMoment(
-      (timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time,
-    );
+    time = LongToMoment((timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time);
   } else if (_.has(timestamp, "seconds") || _.has(timestamp, "nanos")) {
-    time = TimestampToMoment(timestamp as protos.google.protobuf.ITimestamp);
+    time = TimestampToMoment((timestamp as protos.google.protobuf.ITimestamp));
   } else {
     return "";
   }
@@ -98,30 +93,10 @@ export function PrintTimestampDelta(
   return PrintDuration(diff);
 }
 
-// PrintTimestampDeltaFromNow is like PrintTimestampDelta, except it works both
-// when `timestamp` is below or above `now`, and at appends "ago" or "in the
-// future" to the result.
-export function PrintTimestampDeltaFromNow(
-  timestamp: protos.cockroach.util.hlc.ITimestamp,
-  now: moment.Moment,
-): string {
-  if (_.isNil(timestamp)) {
-    return "";
-  }
-  const time: moment.Moment = LongToMoment(timestamp.wall_time);
-  if (now.isAfter(time)) {
-    const diff = moment.duration(now.diff(time));
-    return `${PrintDuration(diff)} ago`;
-  }
-  const diff = moment.duration(time.diff(now));
-  return `${PrintDuration(diff)} in the future`;
-}
-
 export default {
   Duration: PrintDuration,
   ReplicaID: PrintReplicaID,
   Time: PrintTime,
   Timestamp: PrintTimestamp,
   TimestampDelta: PrintTimestampDelta,
-  TimestampDeltaFromNow: PrintTimestampDeltaFromNow,
 };

@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -9,7 +9,6 @@
 // licenses/APL.txt.
 
 export * from "./appStats";
-export * from "./arrays";
 export * from "./constants";
 export * from "./convert";
 export * from "./dataFromServer";
@@ -25,4 +24,3 @@ export * from "./pick";
 export * from "./find";
 export * from "./proto";
 export * from "./formatNumber";
-export * from "./totalWorkload";

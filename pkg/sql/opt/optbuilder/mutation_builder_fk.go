@@ -11,8 +11,6 @@
 package optbuilder
 
 import (
-	"context"
-
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -23,7 +21,7 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// This file contains methods that populate mutationBuilder.fkChecks and cascades.
+// This file contains methods that populate mutationBuilder.checks and cascades.
 //
 // -- Checks --
 //
@@ -75,12 +73,13 @@ func (mb *mutationBuilder) buildFKChecksForInsert() {
 	// need to buffer it. This could be a normalization rule, but it's probably
 	// more efficient if we did it in here (or we'd end up building the entire FK
 	// subtrees twice).
-	mb.ensureWithID()
+	mb.withID = mb.b.factory.Memo().NextWithID()
+	mb.md.AddWithBinding(mb.withID, mb.outScope.expr)
 
 	h := &mb.fkCheckHelper
 	for i, n := 0, mb.tab.OutboundForeignKeyCount(); i < n; i++ {
 		if h.initWithOutboundFK(mb, i) {
-			mb.fkChecks = append(mb.fkChecks, h.buildInsertionCheck())
+			mb.checks = append(mb.checks, h.buildInsertionCheck())
 		}
 	}
 	telemetry.Inc(sqltelemetry.ForeignKeyChecksUseCounter)
@@ -116,14 +115,16 @@ func (mb *mutationBuilder) buildFKChecksForInsert() {
 //
 // -- Cascades --
 //
-// See onDeleteCascadeBuilder, onDeleteFastCascadeBuilder, onDeleteSetBuilder
-// for details.
+// See onDeleteCascadeBuilder, onDeleteSetBuilder for details.
 //
 func (mb *mutationBuilder) buildFKChecksAndCascadesForDelete() {
 	if mb.tab.InboundForeignKeyCount() == 0 {
 		// No relevant FKs.
 		return
 	}
+
+	mb.withID = mb.b.factory.Memo().NextWithID()
+	mb.md.AddWithBinding(mb.withID, mb.outScope.expr)
 
 	for i, n := 0, mb.tab.InboundForeignKeyCount(); i < n; i++ {
 		h := &mb.fkCheckHelper
@@ -140,17 +141,8 @@ func (mb *mutationBuilder) buildFKChecksAndCascadesForDelete() {
 			var builder memo.CascadeBuilder
 			switch a {
 			case tree.Cascade:
-				// Try the fast builder first; if it cannot be used, use the regular builder.
-				var ok bool
-				builder, ok = tryNewOnDeleteFastCascadeBuilder(
-					mb.b.ctx, mb.md, mb.b.catalog, h.fk, i, mb.tab, h.otherTab, mb.outScope,
-				)
-				if !ok {
-					mb.ensureWithID()
-					builder = newOnDeleteCascadeBuilder(mb.tab, i, h.otherTab)
-				}
+				builder = newOnDeleteCascadeBuilder(mb.tab, i, h.otherTab)
 			case tree.SetNull, tree.SetDefault:
-				mb.ensureWithID()
 				builder = newOnDeleteSetBuilder(mb.tab, i, h.otherTab, a)
 			default:
 				panic(errors.AssertionFailedf("unhandled action type %s", a))
@@ -170,9 +162,8 @@ func (mb *mutationBuilder) buildFKChecksAndCascadesForDelete() {
 			continue
 		}
 
-		mb.ensureWithID()
-		withScanScope, _ := mb.buildCheckInputScan(checkInputScanFetchedVals, h.tabOrdinals)
-		mb.fkChecks = append(mb.fkChecks, h.buildDeletionCheck(withScanScope.expr, withScanScope.colList()))
+		fkInput, withScanCols, _ := h.makeFKInputScan(fkInputScanFetchedVals)
+		mb.checks = append(mb.checks, h.buildDeletionCheck(fkInput, withScanCols))
 	}
 	telemetry.Inc(sqltelemetry.ForeignKeyChecksUseCounter)
 }
@@ -239,7 +230,8 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 		return
 	}
 
-	mb.ensureWithID()
+	mb.withID = mb.b.factory.Memo().NextWithID()
+	mb.md.AddWithBinding(mb.withID, mb.outScope.expr)
 
 	// An Update can be thought of an insertion paired with a deletion, so for an
 	// Update we can emit both semi-joins and anti-joins.
@@ -269,7 +261,7 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 		// Verify that at least one FK column is actually updated.
 		if mb.outboundFKColsUpdated(i) {
 			if h.initWithOutboundFK(mb, i) {
-				mb.fkChecks = append(mb.fkChecks, h.buildInsertionCheck())
+				mb.checks = append(mb.checks, h.buildInsertionCheck())
 			}
 		}
 	}
@@ -336,17 +328,15 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 		// performance either: we would be incurring extra cost (more complicated
 		// expressions, scanning the input buffer twice) for a rare case.
 
-		oldRowsScope, _ := mb.buildCheckInputScan(checkInputScanFetchedVals, h.tabOrdinals)
-		newRowsScope, _ := mb.buildCheckInputScan(checkInputScanNewVals, h.tabOrdinals)
-		colsForOldRow := oldRowsScope.colList()
-		colsForNewRow := newRowsScope.colList()
+		oldRows, colsForOldRow, _ := h.makeFKInputScan(fkInputScanFetchedVals)
+		newRows, colsForNewRow, _ := h.makeFKInputScan(fkInputScanNewVals)
 
 		// The rows that no longer exist are the ones that were "deleted" by virtue
 		// of being updated _from_, minus the ones that were "added" by virtue of
 		// being updated _to_.
 		deletedRows := mb.b.factory.ConstructExcept(
-			oldRowsScope.expr,
-			newRowsScope.expr,
+			oldRows,
+			newRows,
 			&memo.SetPrivate{
 				LeftCols:  colsForOldRow,
 				RightCols: colsForNewRow,
@@ -354,7 +344,7 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 			},
 		)
 
-		mb.fkChecks = append(mb.fkChecks, h.buildDeletionCheck(deletedRows, colsForOldRow))
+		mb.checks = append(mb.checks, h.buildDeletionCheck(deletedRows, colsForOldRow))
 	}
 	telemetry.Inc(sqltelemetry.ForeignKeyChecksUseCounter)
 }
@@ -384,12 +374,13 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 		return
 	}
 
-	mb.ensureWithID()
+	mb.withID = mb.b.factory.Memo().NextWithID()
+	mb.md.AddWithBinding(mb.withID, mb.outScope.expr)
 
 	h := &mb.fkCheckHelper
 	for i := 0; i < numOutbound; i++ {
 		if h.initWithOutboundFK(mb, i) {
-			mb.fkChecks = append(mb.fkChecks, h.buildInsertionCheck())
+			mb.checks = append(mb.checks, h.buildInsertionCheck())
 		}
 	}
 
@@ -441,24 +432,22 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 		// insertions (using a "canaryCol IS NOT NULL" condition). But the rows we
 		// would filter out have all-null fetched values anyway and will never match
 		// in the semi join.
-		oldRowsScope, _ := mb.buildCheckInputScan(checkInputScanFetchedVals, h.tabOrdinals)
-		newRowsScope, _ := mb.buildCheckInputScan(checkInputScanNewVals, h.tabOrdinals)
-		colsForOldRow := oldRowsScope.colList()
-		colsForNewRow := newRowsScope.colList()
+		oldRows, colsForOldRow, _ := h.makeFKInputScan(fkInputScanFetchedVals)
+		newRows, colsForNewRow, _ := h.makeFKInputScan(fkInputScanNewVals)
 
 		// The rows that no longer exist are the ones that were "deleted" by virtue
 		// of being updated _from_, minus the ones that were "added" by virtue of
 		// being updated _to_.
 		deletedRows := mb.b.factory.ConstructExcept(
-			oldRowsScope.expr,
-			newRowsScope.expr,
+			oldRows,
+			newRows,
 			&memo.SetPrivate{
 				LeftCols:  colsForOldRow,
 				RightCols: colsForNewRow,
 				OutCols:   colsForOldRow,
 			},
 		)
-		mb.fkChecks = append(mb.fkChecks, h.buildDeletionCheck(deletedRows, oldRowsScope.colList()))
+		mb.checks = append(mb.checks, h.buildDeletionCheck(deletedRows, colsForOldRow))
 	}
 	telemetry.Inc(sqltelemetry.ForeignKeyChecksUseCounter)
 }
@@ -487,19 +476,6 @@ func (mb *mutationBuilder) inboundFKColsUpdated(fkOrdinal int) bool {
 	return false
 }
 
-// ensureWithID makes sure that withID is initialized (and thus that the input
-// to the mutation will be buffered).
-//
-// Assumes that outScope.expr is the input to the mutation.
-func (mb *mutationBuilder) ensureWithID() {
-	if mb.withID != 0 {
-		return
-	}
-
-	mb.withID = mb.b.factory.Memo().NextWithID()
-	mb.md.AddWithBinding(mb.withID, mb.outScope.expr)
-}
-
 // fkCheckHelper is a type associated with a single FK constraint and is used to
 // build the "leaves" of a FK check expression, namely the WithScan of the
 // mutation input and the Scan of the other table.
@@ -526,8 +502,6 @@ type fkCheckHelper struct {
 // Returns false if the FK relation should be ignored (e.g. because the new
 // values for the FK columns are known to be always NULL).
 func (h *fkCheckHelper) initWithOutboundFK(mb *mutationBuilder, fkOrdinal int) bool {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
 	*h = fkCheckHelper{
 		mb:         mb,
 		fk:         mb.tab.OutboundForeignKey(fkOrdinal),
@@ -536,13 +510,17 @@ func (h *fkCheckHelper) initWithOutboundFK(mb *mutationBuilder, fkOrdinal int) b
 	}
 
 	refID := h.fk.ReferencedTableID()
-	h.otherTab = resolveTable(mb.b.ctx, mb.b.catalog, refID)
-	if h.otherTab == nil {
-		// The other table is in the process of being added; ignore the FK relation.
-		return false
+	ref, isAdding, err := mb.b.catalog.ResolveDataSourceByID(mb.b.ctx, cat.Flags{}, refID)
+	if err != nil {
+		if isAdding {
+			// The other table is in the process of being added; ignore the FK relation.
+			return false
+		}
+		panic(err)
 	}
 	// We need SELECT privileges on the referenced table.
-	mb.b.checkPrivilege(opt.DepByID(refID), h.otherTab, privilege.SELECT)
+	mb.b.checkPrivilege(opt.DepByID(refID), ref, privilege.SELECT)
+	h.otherTab = ref.(cat.Table)
 
 	numCols := h.fk.ColumnCount()
 	h.allocOrdinals(numCols)
@@ -578,8 +556,6 @@ func (h *fkCheckHelper) initWithOutboundFK(mb *mutationBuilder, fkOrdinal int) b
 // Returns false if the FK relation should be ignored (because the other table
 // is in the process of being created).
 func (h *fkCheckHelper) initWithInboundFK(mb *mutationBuilder, fkOrdinal int) (ok bool) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
 	*h = fkCheckHelper{
 		mb:         mb,
 		fk:         mb.tab.InboundForeignKey(fkOrdinal),
@@ -588,12 +564,17 @@ func (h *fkCheckHelper) initWithInboundFK(mb *mutationBuilder, fkOrdinal int) (o
 	}
 
 	originID := h.fk.OriginTableID()
-	h.otherTab = resolveTable(mb.b.ctx, mb.b.catalog, originID)
-	if h.otherTab == nil {
-		return false
+	ref, isAdding, err := mb.b.catalog.ResolveDataSourceByID(mb.b.ctx, cat.Flags{}, originID)
+	if err != nil {
+		if isAdding {
+			// The other table is in the process of being added; ignore the FK relation.
+			return false
+		}
+		panic(err)
 	}
 	// We need SELECT privileges on the origin table.
-	mb.b.checkPrivilege(opt.DepByID(originID), h.otherTab, privilege.SELECT)
+	mb.b.checkPrivilege(opt.DepByID(originID), ref, privilege.SELECT)
+	h.otherTab = ref.(cat.Table)
 
 	numCols := h.fk.ColumnCount()
 	h.allocOrdinals(numCols)
@@ -605,19 +586,63 @@ func (h *fkCheckHelper) initWithInboundFK(mb *mutationBuilder, fkOrdinal int) (o
 	return true
 }
 
-// resolveTable resolves a table StableID. Returns nil if the table is in the
-// process of being added, in which case it is safe to ignore any FK
-// relation with the table.
-func resolveTable(ctx context.Context, catalog cat.Catalog, id cat.StableID) cat.Table {
-	ref, isAdding, err := catalog.ResolveDataSourceByID(ctx, cat.Flags{}, id)
-	if err != nil {
-		if isAdding {
-			// The table is in the process of being added.
-			return nil
+type fkInputScanType uint8
+
+const (
+	fkInputScanNewVals fkInputScanType = iota
+	fkInputScanFetchedVals
+)
+
+// makeFKInputScan constructs a WithScan that iterates over the input to the
+// mutation operator. Used in expressions that generate rows for checking for FK
+// violations.
+//
+// The WithScan expression will scan either the new values or the fetched values
+// for the given table ordinals (which correspond to FK columns).
+//
+// Returns the output columns from the WithScan, which map 1-to-1 to
+// h.tabOrdinals. Also returns the subset of these columns that can be assumed
+// to be not null (either because they are not null in the mutation input or
+// because they are non-nullable table columns).
+//
+func (h *fkCheckHelper) makeFKInputScan(
+	typ fkInputScanType,
+) (scan memo.RelExpr, outCols opt.ColList, notNullOutCols opt.ColSet) {
+	mb := h.mb
+	// inputCols are the column IDs from the mutation input that we are scanning.
+	inputCols := make(opt.ColList, len(h.tabOrdinals))
+	// outCols will store the newly synthesized output columns for WithScan.
+	outCols = make(opt.ColList, len(inputCols))
+	for i, tabOrd := range h.tabOrdinals {
+		if typ == fkInputScanNewVals {
+			inputCols[i] = mb.mapToReturnColID(tabOrd)
+		} else {
+			inputCols[i] = mb.fetchColIDs[tabOrd]
 		}
-		panic(err)
+		if inputCols[i] == 0 {
+			panic(errors.AssertionFailedf("no value for FK column (tabOrd=%d)", tabOrd))
+		}
+
+		// Synthesize new column.
+		c := mb.b.factory.Metadata().ColumnMeta(inputCols[i])
+		outCols[i] = mb.md.AddColumn(c.Alias, c.Type)
+
+		// If a table column is not nullable, NULLs cannot be inserted (the
+		// mutation will fail). So for the purposes of FK checks, we can treat
+		// these columns as not null.
+		if mb.outScope.expr.Relational().NotNullCols.Contains(inputCols[i]) ||
+			!mb.tab.Column(tabOrd).IsNullable() {
+			notNullOutCols.Add(outCols[i])
+		}
 	}
-	return ref.(cat.Table)
+
+	scan = mb.b.factory.ConstructWithScan(&memo.WithScanPrivate{
+		With:    mb.withID,
+		InCols:  inputCols,
+		OutCols: outCols,
+		ID:      mb.b.factory.Metadata().NextUniqueID(),
+	})
+	return scan, outCols, notNullOutCols
 }
 
 // buildOtherTableScan builds a Scan of the "other" table.
@@ -642,11 +667,9 @@ func (h *fkCheckHelper) allocOrdinals(numCols int) {
 // The input to the insertion check will be produced from the input to the
 // mutation operator.
 func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
-	withScanScope, notNullWithScanCols := h.mb.buildCheckInputScan(
-		checkInputScanNewVals, h.tabOrdinals,
-	)
+	fkInput, withScanCols, notNullWithScanCols := h.makeFKInputScan(fkInputScanNewVals)
 
-	numCols := len(withScanScope.cols)
+	numCols := len(withScanCols)
 	f := h.mb.b.factory
 	if notNullWithScanCols.Len() < numCols {
 		// The columns we are inserting might have NULLs. These require special
@@ -671,17 +694,17 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 			// Filter out any rows which have a NULL; build filters of the form
 			//   (a IS NOT NULL) AND (b IS NOT NULL) ...
 			filters := make(memo.FiltersExpr, 0, numCols-notNullWithScanCols.Len())
-			for _, col := range withScanScope.cols {
-				if !notNullWithScanCols.Contains(col.id) {
+			for _, col := range withScanCols {
+				if !notNullWithScanCols.Contains(col) {
 					filters = append(filters, f.ConstructFiltersItem(
 						f.ConstructIsNot(
-							f.ConstructVariable(col.id),
+							f.ConstructVariable(col),
 							memo.NullSingleton,
 						),
 					))
 				}
 			}
-			withScanScope.expr = f.ConstructSelect(withScanScope.expr, filters)
+			fkInput = f.ConstructSelect(fkInput, filters)
 
 		case tree.MatchFull:
 			// Filter out any rows which have NULLs on all referencing columns.
@@ -694,9 +717,9 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 			// Build a filter of the form
 			//   (a IS NOT NULL) OR (b IS NOT NULL) ...
 			var condition opt.ScalarExpr
-			for _, col := range withScanScope.cols {
+			for _, col := range withScanCols {
 				is := f.ConstructIsNot(
-					f.ConstructVariable(col.id),
+					f.ConstructVariable(col),
 					memo.NullSingleton,
 				)
 				if condition == nil {
@@ -705,8 +728,8 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 					condition = f.ConstructOr(condition, is)
 				}
 			}
-			withScanScope.expr = f.ConstructSelect(
-				withScanScope.expr,
+			fkInput = f.ConstructSelect(
+				fkInput,
 				memo.FiltersExpr{f.ConstructFiltersItem(condition)},
 			)
 
@@ -726,7 +749,7 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 	for j := 0; j < numCols; j++ {
 		antiJoinFilters[j] = f.ConstructFiltersItem(
 			f.ConstructEq(
-				f.ConstructVariable(withScanScope.cols[j].id),
+				f.ConstructVariable(withScanCols[j]),
 				f.ConstructVariable(scanScope.cols[j].id),
 			),
 		)
@@ -735,14 +758,14 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 	if h.mb.b.evalCtx.SessionData.PreferLookupJoinsForFKs {
 		p.Flags = memo.PreferLookupJoinIntoRight
 	}
-	antiJoin := f.ConstructAntiJoin(withScanScope.expr, scanScope.expr, antiJoinFilters, &p)
+	antiJoin := f.ConstructAntiJoin(fkInput, scanScope.expr, antiJoinFilters, &p)
 
 	return f.ConstructFKChecksItem(antiJoin, &memo.FKChecksItemPrivate{
 		OriginTable:     h.mb.tabID,
 		ReferencedTable: refTabMeta.MetaID,
 		FKOutbound:      true,
 		FKOrdinal:       h.fkOrdinal,
-		KeyCols:         withScanScope.colList(),
+		KeyCols:         withScanCols,
 		OpName:          h.mb.opName,
 	})
 }

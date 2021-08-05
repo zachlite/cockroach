@@ -30,7 +30,7 @@ import (
 
 // TestRandomOracle defeats TestUnused for RandomChoice.
 func TestRandomOracle(t *testing.T) {
-	_ = NewOracle(RandomChoice, Config{})
+	_ = NewOracleFactory(RandomChoice, Config{})
 }
 
 func TestClosest(t *testing.T) {
@@ -40,19 +40,19 @@ func TestClosest(t *testing.T) {
 	defer stopper.Stop(ctx)
 	g, _ := makeGossip(t, stopper)
 	nd, _ := g.GetNodeDescriptor(1)
-	o := NewOracle(ClosestChoice, Config{
+	of := NewOracleFactory(ClosestChoice, Config{
 		NodeDescs: g,
 		NodeDesc:  *nd,
 	})
-	o.(*closestOracle).latencyFunc = func(s string) (time.Duration, bool) {
+	of.(*closestOracle).latencyFunc = func(s string) (time.Duration, bool) {
 		if strings.HasSuffix(s, "2") {
 			return time.Nanosecond, true
 		}
 		return time.Millisecond, true
 	}
+	o := of.Oracle(nil)
 	info, err := o.ChoosePreferredReplica(
 		ctx,
-		nil, /* txn */
 		&roachpb.RangeDescriptor{
 			InternalReplicas: []roachpb.ReplicaDescriptor{
 				{NodeID: 4, StoreID: 4},
@@ -60,10 +60,7 @@ func TestClosest(t *testing.T) {
 				{NodeID: 3, StoreID: 3},
 			},
 		},
-		nil, /* leaseHolder */
-		roachpb.LAG_BY_CLUSTER_SETTING,
-		QueryState{},
-	)
+		nil /* leaseHolder */, QueryState{})
 	if err != nil {
 		t.Fatalf("Failed to choose closest replica: %v", err)
 	}

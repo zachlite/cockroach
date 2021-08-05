@@ -29,41 +29,41 @@ func TestFormatSafeDescriptorProperties(t *testing.T) {
 		exp  string
 	}{
 		{
-			desc: tabledesc.NewBuilder(&descpb.TableDescriptor{
+			desc: tabledesc.NewImmutable(descpb.TableDescriptor{
 				ID:       27,
 				Version:  2,
 				ParentID: 12,
 				State:    descpb.DescriptorState_ADD,
-			}).BuildImmutable(),
+			}),
 			exp: "ID: 27, Version: 2, ModificationTime: \"0,0\", ParentID: 12, ParentSchemaID: 29, State: ADD",
 		},
 		{
-			desc: schemadesc.NewBuilder(&descpb.SchemaDescriptor{
+			desc: schemadesc.NewImmutable(descpb.SchemaDescriptor{
 				ID:            12,
 				Version:       1,
 				ParentID:      2,
 				State:         descpb.DescriptorState_OFFLINE,
 				OfflineReason: "foo",
-			}).BuildImmutable(),
+			}),
 			exp: "ID: 12, Version: 1, ModificationTime: \"0,0\", ParentID: 2, State: OFFLINE, OfflineReason: \"foo\"",
 		},
 		{
-			desc: dbdesc.NewBuilder(&descpb.DatabaseDescriptor{
+			desc: dbdesc.NewCreatedMutable(descpb.DatabaseDescriptor{
 				ID:      12,
 				Version: 1,
 				State:   descpb.DescriptorState_PUBLIC,
-			}).BuildCreatedMutable(),
+			}),
 			exp: "ID: 12, Version: 1, IsUncommitted: true, ModificationTime: \"0,0\", State: PUBLIC",
 		},
 		{
 			desc: func() catalog.Descriptor {
-				desc := tabledesc.NewBuilder(&descpb.TableDescriptor{
+				desc := tabledesc.NewExistingMutable(descpb.TableDescriptor{
 					ID:                      27,
 					Version:                 2,
 					ParentID:                12,
 					UnexposedParentSchemaID: 51,
 					State:                   descpb.DescriptorState_PUBLIC,
-				}).BuildExistingMutableTable()
+				})
 				desc.MaybeIncrementVersion()
 				desc.AddDrainingName(descpb.NameInfo{
 					ParentID:       12,

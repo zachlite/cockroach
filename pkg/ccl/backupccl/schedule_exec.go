@@ -95,9 +95,6 @@ func (e *scheduledBackupExecutor) executeBackup(
 		}
 	}
 
-	log.Infof(ctx, "Starting scheduled backup %d: %s",
-		sj.ScheduleID(), tree.AsString(backupStmt))
-
 	// Invoke backup plan hook.
 	hook, cleanup := cfg.PlanHookMaker("exec-backup", txn, sj.Owner())
 	defer cleanup()
@@ -148,7 +145,7 @@ func planBackup(
 // NotifyJobTermination implements jobs.ScheduledJobExecutor interface.
 func (e *scheduledBackupExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus jobs.Status,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
@@ -169,69 +166,6 @@ func (e *scheduledBackupExecutor) NotifyJobTermination(
 	log.Errorf(ctx, "backup error: %v	", err)
 	jobs.DefaultHandleFailedRun(schedule, "backup job %d failed with err=%v", jobID, err)
 	return nil
-}
-
-func (e *scheduledBackupExecutor) GetCreateScheduleStatement(
-	sj *jobs.ScheduledJob,
-) (string, error) {
-	backupNode, err := extractBackupStatement(sj)
-	if err != nil {
-		return "", err
-	}
-
-	args := &ScheduledBackupExecutionArgs{}
-	if err := pbtypes.UnmarshalAny(sj.ExecutionArgs().Args, args); err != nil {
-		return "", errors.Wrap(err, "un-marshaling args")
-	}
-
-	recurrence := sj.ScheduleExpr()
-	fullBackup := &tree.FullBackupClause{AlwaysFull: true}
-	// If there exists any dependent schedules (full, incremental) for this
-	// scheduled job, we need to include the crontab of the dependent schedule.
-	// For incremental BACKUPs, the full BACKUP's crontab needs to be included
-	// in the full backup clause. Otherwise, update the recurrence
-	// to be the incremental BACKUP's crontab.
-	if args.DependentScheduleCrontab != "" {
-		fullBackup.AlwaysFull = false
-		if backupNode.AppendToLatest {
-			fullBackup.Recurrence = tree.NewDString(args.DependentScheduleCrontab)
-		} else {
-			fullBackup.Recurrence = tree.NewDString(recurrence)
-			recurrence = args.DependentScheduleCrontab
-		}
-	}
-
-	firstRun, err := tree.MakeDTimestampTZ(sj.ScheduledRunTime(), time.Microsecond)
-	if err != nil {
-		return "", err
-	}
-
-	scheduleOptions := tree.KVOptions{
-		tree.KVOption{
-			Key:   optFirstRun,
-			Value: firstRun,
-		},
-		tree.KVOption{
-			Key:   optOnExecFailure,
-			Value: tree.NewDString(sj.ScheduleDetails().OnError.String()),
-		},
-		tree.KVOption{
-			Key:   optOnPreviousRunning,
-			Value: tree.NewDString(sj.ScheduleDetails().Wait.String()),
-		},
-	}
-
-	node := &tree.ScheduledBackup{
-		ScheduleLabel:   tree.NewDString(sj.ScheduleLabel()),
-		Recurrence:      tree.NewDString(recurrence),
-		FullBackup:      fullBackup,
-		Targets:         backupNode.Targets,
-		To:              backupNode.To,
-		BackupOptions:   backupNode.Options,
-		ScheduleOptions: scheduleOptions,
-	}
-
-	return tree.AsString(node), nil
 }
 
 func (e *scheduledBackupExecutor) backupSucceeded(

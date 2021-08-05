@@ -28,22 +28,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/errors"
 )
 
 var (
 	// DefaultTTL specifies the time to expiration when a session is created.
-	DefaultTTL = settings.RegisterDurationSetting(
+	DefaultTTL = settings.RegisterNonNegativeDurationSetting(
 		"server.sqlliveness.ttl",
 		"default sqlliveness session ttl",
 		40*time.Second,
-		settings.NonNegativeDuration,
 	)
 	// DefaultHeartBeat specifies the period between attempts to extend a session.
-	DefaultHeartBeat = settings.RegisterDurationSetting(
+	DefaultHeartBeat = settings.RegisterNonNegativeDurationSetting(
 		"server.sqlliveness.heartbeat",
 		"duration heart beats to push session expiration further out in time",
 		5*time.Second,
-		settings.NonNegativeDuration,
 	)
 )
 
@@ -60,10 +59,6 @@ type Writer interface {
 type session struct {
 	id  sqlliveness.SessionID
 	exp hlc.Timestamp
-	mu  struct {
-		syncutil.RWMutex
-		sessionExpiryCallbacks []func(ctx context.Context)
-	}
 }
 
 // ID implements the Session interface method ID.
@@ -72,25 +67,10 @@ func (s *session) ID() sqlliveness.SessionID { return s.id }
 // Expiration implements the Session interface method Expiration.
 func (s *session) Expiration() hlc.Timestamp { return s.exp }
 
-func (s *session) RegisterCallbackForSessionExpiry(sExp func(context.Context)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mu.sessionExpiryCallbacks = append(s.mu.sessionExpiryCallbacks, sExp)
-}
-
-func (s *session) invokeSessionExpiryCallbacks(ctx context.Context) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, callback := range s.mu.sessionExpiryCallbacks {
-		callback(ctx)
-	}
-}
-
 // Instance implements the sqlliveness.Instance interface by storing the
 // liveness sessions in table system.sqlliveness and relying on a heart beat
 // loop to extend the existing sessions' expirations or creating a new session
 // to replace a session that has expired and deleted from the table.
-// TODO(rima): Rename Instance to avoid confusion with sqlinstance.SQLInstance.
 type Instance struct {
 	clock    *hlc.Clock
 	settings *cluster.Settings
@@ -123,14 +103,9 @@ func (l *Instance) setSession(s *session) {
 	l.mu.Unlock()
 }
 
-func (l *Instance) clearSession(ctx context.Context) {
+func (l *Instance) clearSession() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if expiration := l.mu.s.Expiration(); expiration.Less(l.clock.Now()) {
-		// If the session has expired, invoke the session expiry callbacks
-		// associated with the session.
-		l.mu.s.invokeSessionExpiryCallbacks(ctx)
-	}
 	l.mu.s = nil
 	l.mu.blockCh = make(chan struct{})
 }
@@ -208,6 +183,7 @@ func (l *Instance) heartbeatLoop(ctx context.Context) {
 	}()
 	ctx, cancel := l.stopper.WithCancelOnQuiesce(ctx)
 	defer cancel()
+	sqlliveness.WaitForActive(ctx, l.settings)
 	t := timeutil.NewTimer()
 	t.Reset(0)
 	for {
@@ -228,11 +204,11 @@ func (l *Instance) heartbeatLoop(ctx context.Context) {
 			}
 			found, err := l.extendSession(ctx, s)
 			if err != nil {
-				l.clearSession(ctx)
+				l.clearSession()
 				return
 			}
 			if !found {
-				l.clearSession(ctx)
+				l.clearSession()
 				// Start next loop iteration immediately to insert a new session.
 				t.Reset(0)
 				continue
@@ -285,7 +261,7 @@ func (l *Instance) Session(ctx context.Context) (sqlliveness.Session, error) {
 	l.mu.Lock()
 	if !l.mu.started {
 		l.mu.Unlock()
-		return nil, sqlliveness.NotStartedError
+		return nil, errors.New("the Instance has not been started yet")
 	}
 	l.mu.Unlock()
 

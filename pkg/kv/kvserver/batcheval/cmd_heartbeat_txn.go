@@ -27,12 +27,12 @@ func init() {
 }
 
 func declareKeysHeartbeatTransaction(
-	rs ImmutableRangeState,
+	desc *roachpb.RangeDescriptor,
 	header roachpb.Header,
 	req roachpb.Request,
 	latchSpans, _ *spanset.SpanSet,
 ) {
-	declareKeysWriteTransaction(rs, header, req, latchSpans)
+	declareKeysWriteTransaction(desc, header, req, latchSpans)
 }
 
 // HeartbeatTxn updates the transaction status and heartbeat

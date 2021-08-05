@@ -39,7 +39,7 @@ func (n *Scrub) Format(ctx *FmtCtx) {
 	switch n.Typ {
 	case ScrubTable:
 		ctx.WriteString("TABLE ")
-		ctx.FormatNode(n.Table)
+		n.Table.Format(ctx)
 	case ScrubDatabase:
 		ctx.WriteString("DATABASE ")
 		ctx.FormatNode(&n.Database)

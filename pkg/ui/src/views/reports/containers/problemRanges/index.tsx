@@ -15,16 +15,13 @@ import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
 import { Link, RouteComponentProps, withRouter } from "react-router-dom";
 import * as protos from "src/js/protos";
-import {
-  problemRangesRequestKey,
-  refreshProblemRanges,
-} from "src/redux/apiReducers";
+import { problemRangesRequestKey, refreshProblemRanges } from "src/redux/apiReducers";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { AdminUIState } from "src/redux/state";
 import { nodeIDAttr } from "src/util/constants";
 import { FixLong } from "src/util/fixLong";
 import ConnectionsTable from "src/views/reports/containers/problemRanges/connectionsTable";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import Loading from "src/views/shared/components/loading";
 import { getMatchParamByName } from "src/util/query";
 
 type NodeProblems$Properties = protos.cockroach.server.serverpb.ProblemRangesResponse.INodeProblems;
@@ -41,16 +38,16 @@ function isLoading(state: CachedDataReducerState<any>) {
 }
 
 function ProblemRangeList(props: {
-  name: string;
-  problems: NodeProblems$Properties[];
-  extract: (p: NodeProblems$Properties) => Long[];
+  name: string,
+  problems: NodeProblems$Properties[],
+  extract: (p: NodeProblems$Properties) => Long[],
 }) {
   const ids = _.chain(props.problems)
-    .filter((problem) => _.isEmpty(problem.error_message))
-    .flatMap((problem) => props.extract(problem))
-    .map((id) => FixLong(id))
+    .filter(problem => _.isEmpty(problem.error_message))
+    .flatMap(problem => props.extract(problem))
+    .map(id => FixLong(id))
     .sort((a, b) => a.compare(b))
-    .map((id) => id.toString())
+    .map(id => id.toString())
     .sortedUniq()
     .value();
   if (_.isEmpty(ids)) {
@@ -60,17 +57,15 @@ function ProblemRangeList(props: {
     <div>
       <h2 className="base-heading">{props.name}</h2>
       <div className="problems-list">
-        {_.map(ids, (id) => {
-          return (
-            <Link
-              key={id}
-              className="problems-link"
-              to={`/reports/range/${id}`}
-            >
-              {id}
-            </Link>
-          );
-        })}
+        {
+          _.map(ids, id => {
+            return (
+              <Link key={id} className="problems-link" to={`/reports/range/${id}`}>
+                {id}
+              </Link>
+            );
+          })
+        }
       </div>
     </div>
   );
@@ -117,18 +112,14 @@ export class ProblemRanges extends React.Component<ProblemRangesProps, {}> {
       if (nodeId === null) {
         return (
           <div>
-            <h2 className="base-heading">
-              Error loading Problem Ranges for the Cluster
-            </h2>
+            <h2 className="base-heading">Error loading Problem Ranges for the Cluster</h2>
             {problemRanges.lastError.toString()}
           </div>
         );
       } else {
         return (
           <div>
-            <h2 className="base-heading">
-              Error loading Problem Ranges for node n{nodeId}
-            </h2>
+            <h2 className="base-heading">Error loading Problem Ranges for node n{nodeId}</h2>
             {problemRanges.lastError.toString()}
           </div>
         );
@@ -137,20 +128,14 @@ export class ProblemRanges extends React.Component<ProblemRangesProps, {}> {
 
     const { data } = problemRanges;
 
-    const validIDs = _.keys(
-      _.pickBy(data.problems_by_node_id, (d) => {
-        return _.isEmpty(d.error_message);
-      }),
-    );
+    const validIDs = _.keys(_.pickBy(data.problems_by_node_id, d => {
+      return _.isEmpty(d.error_message);
+    }));
     if (validIDs.length === 0) {
       if (nodeId === null) {
         return <h2 className="base-heading">No nodes returned any results</h2>;
       } else {
-        return (
-          <h2 className="base-heading">
-            No results reported for node n{nodeId}
-          </h2>
-        );
+        return <h2 className="base-heading">No results reported for node n{nodeId}</h2>;
       }
     }
 
@@ -165,7 +150,9 @@ export class ProblemRanges extends React.Component<ProblemRangesProps, {}> {
     const problems = _.values(data.problems_by_node_id);
     return (
       <div>
-        <h2 className="base-heading">{titleText}</h2>
+        <h2 className="base-heading">
+          {titleText}
+        </h2>
         <ProblemRangeList
           name="Unavailable"
           problems={problems}
@@ -226,9 +213,7 @@ export class ProblemRanges extends React.Component<ProblemRangesProps, {}> {
 }
 
 const mapStateToProps = (state: AdminUIState, props: ProblemRangesProps) => {
-  const nodeIDKey = problemRangesRequestKey(
-    problemRangeRequestFromProps(props),
-  );
+  const nodeIDKey = problemRangesRequestKey(problemRangeRequestFromProps(props));
   return {
     problemRanges: state.cachedData.problemRanges[nodeIDKey],
   };
@@ -239,6 +224,7 @@ const mapDispatchToProps = {
   refreshProblemRanges,
 };
 
-export default withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(ProblemRanges),
-);
+export default withRouter(connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(ProblemRanges));

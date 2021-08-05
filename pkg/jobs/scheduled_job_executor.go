@@ -39,7 +39,7 @@ type ScheduledJobExecutor interface {
 	// Modifications to the ScheduledJob object will be persisted.
 	NotifyJobTermination(
 		ctx context.Context,
-		jobID jobspb.JobID,
+		jobID int64,
 		jobStatus Status,
 		details jobspb.Details,
 		env scheduledjobs.JobSchedulerEnv,
@@ -50,10 +50,6 @@ type ScheduledJobExecutor interface {
 
 	// Metrics returns optional metric.Struct object for this executor.
 	Metrics() metric.Struct
-
-	// GetCreateScheduleStatement returns the statement used to create schedule
-	// for the scheduled job executed by this executor
-	GetCreateScheduleStatement(schedule *ScheduledJob) (string, error)
 }
 
 // ScheduledJobExecutorFactory is a callback to create a ScheduledJobExecutor.
@@ -90,43 +86,21 @@ func newScheduledJobExecutorLocked(name string) (ScheduledJobExecutor, error) {
 
 // GetScheduledJobExecutor returns a singleton instance of
 // ScheduledJobExecutor and a flag indicating if that instance was just created.
-func GetScheduledJobExecutor(name string) (ScheduledJobExecutor, error) {
+func GetScheduledJobExecutor(name string) (ScheduledJobExecutor, bool, error) {
 	executorRegistry.Lock()
 	defer executorRegistry.Unlock()
-	return getScheduledJobExecutorLocked(name)
-}
-
-func getScheduledJobExecutorLocked(name string) (ScheduledJobExecutor, error) {
 	if executorRegistry.executors == nil {
 		executorRegistry.executors = make(map[string]ScheduledJobExecutor)
 	}
 	if ex, ok := executorRegistry.executors[name]; ok {
-		return ex, nil
+		return ex, false, nil
 	}
 	ex, err := newScheduledJobExecutorLocked(name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	executorRegistry.executors[name] = ex
-	return ex, nil
-}
-
-// RegisterExecutorsMetrics registered the metrics updated by each executor.
-func RegisterExecutorsMetrics(registry *metric.Registry) error {
-	executorRegistry.Lock()
-	defer executorRegistry.Unlock()
-
-	for executorType := range executorRegistry.factories {
-		ex, err := getScheduledJobExecutorLocked(executorType)
-		if err != nil {
-			return err
-		}
-		if m := ex.Metrics(); m != nil {
-			registry.AddMetricStruct(m)
-		}
-	}
-
-	return nil
+	return ex, true, nil
 }
 
 // DefaultHandleFailedRun is a default implementation for handling failed run
@@ -154,7 +128,7 @@ func DefaultHandleFailedRun(schedule *ScheduledJob, fmtOrMsg string, args ...int
 func NotifyJobTermination(
 	ctx context.Context,
 	env scheduledjobs.JobSchedulerEnv,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus Status,
 	jobDetails jobspb.Details,
 	scheduleID int64,
@@ -169,7 +143,7 @@ func NotifyJobTermination(
 	if err != nil {
 		return err
 	}
-	executor, err := GetScheduledJobExecutor(schedule.ExecutorType())
+	executor, _, err := GetScheduledJobExecutor(schedule.ExecutorType())
 	if err != nil {
 		return err
 	}

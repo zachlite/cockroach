@@ -25,7 +25,6 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
@@ -55,6 +54,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -121,6 +121,14 @@ var bulkIOWriteLimit = settings.RegisterByteSizeSetting(
 	"the rate limit (bytes/sec) to use for writes to disk on behalf of bulk io ops",
 	1<<40,
 ).WithPublic()
+
+// importRequestsLimit limits concurrent import requests.
+var importRequestsLimit = settings.RegisterIntSetting(
+	"kv.bulk_io_write.concurrent_import_requests",
+	"number of import requests a store will handle concurrently before queuing",
+	1,
+	settings.PositiveInt,
+)
 
 // addSSTableRequestLimit limits concurrent AddSSTable requests.
 var addSSTableRequestLimit = settings.RegisterIntSetting(
@@ -450,7 +458,7 @@ type Store struct {
 	// renew. An object is sent on the signal whenever a new entry is added to
 	// the map.
 	renewableLeases       syncutil.IntMap // map[roachpb.RangeID]*Replica
-	renewableLeasesSignal chan struct{}   // 1-buffered
+	renewableLeasesSignal chan struct{}
 
 	// draining holds a bool which indicates whether this store is draining. See
 	// SetDraining() for a more detailed explanation of behavior changes.
@@ -604,16 +612,12 @@ type Store struct {
 	}
 
 	counts struct {
-		// Number of placeholders removed due to error. Not a good fit for meaningful
-		// metrics, as snapshots to initialized ranges don't get a placeholder.
-		failedPlaceholders int32
-		// Number of placeholders successfully filled by a snapshot. Not a good fit
-		// for meaningful metrics, as snapshots to initialized ranges don't get a
-		// placeholder.
+		// Number of placeholders removed due to error.
+		removedPlaceholders int32
+		// Number of placeholders successfully filled by a snapshot.
 		filledPlaceholders int32
 		// Number of placeholders removed due to a snapshot that was dropped by
-		// raft. Not a good fit for meaningful metrics, as snapshots to initialized
-		// ranges don't get a placeholder.
+		// raft.
 		droppedPlaceholders int32
 	}
 
@@ -845,15 +849,17 @@ func NewStore(
 	s.metrics.registry.AddMetricStruct(s.txnWaitMetrics)
 	s.snapshotApplySem = make(chan struct{}, cfg.concurrentSnapshotApplyLimit)
 
-	if ch := s.cfg.TestingKnobs.LeaseRenewalSignalChan; ch != nil {
-		s.renewableLeasesSignal = ch
-	} else {
-		s.renewableLeasesSignal = make(chan struct{}, 1)
-	}
+	s.renewableLeasesSignal = make(chan struct{})
 
 	s.limiters.BulkIOWriteRate = rate.NewLimiter(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)), bulkIOWriteBurst)
-	bulkIOWriteLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	bulkIOWriteLimit.SetOnChange(&cfg.Settings.SV, func() {
 		s.limiters.BulkIOWriteRate.SetLimit(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)))
+	})
+	s.limiters.ConcurrentImportRequests = limit.MakeConcurrentRequestLimiter(
+		"importRequestLimiter", int(importRequestsLimit.Get(&cfg.Settings.SV)),
+	)
+	importRequestsLimit.SetOnChange(&cfg.Settings.SV, func() {
+		s.limiters.ConcurrentImportRequests.SetLimit(int(importRequestsLimit.Get(&cfg.Settings.SV)))
 	})
 	s.limiters.ConcurrentExportRequests = limit.MakeConcurrentRequestLimiter(
 		"exportRequestLimiter", int(ExportRequestsLimit.Get(&cfg.Settings.SV)),
@@ -875,7 +881,7 @@ func NewStore(
 	if exportCores < 1 {
 		exportCores = 1
 	}
-	ExportRequestsLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	ExportRequestsLimit.SetOnChange(&cfg.Settings.SV, func() {
 		limit := int(ExportRequestsLimit.Get(&cfg.Settings.SV))
 		if limit > exportCores {
 			limit = exportCores
@@ -885,25 +891,25 @@ func NewStore(
 	s.limiters.ConcurrentAddSSTableRequests = limit.MakeConcurrentRequestLimiter(
 		"addSSTableRequestLimiter", int(addSSTableRequestLimit.Get(&cfg.Settings.SV)),
 	)
-	addSSTableRequestLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	addSSTableRequestLimit.SetOnChange(&cfg.Settings.SV, func() {
 		s.limiters.ConcurrentAddSSTableRequests.SetLimit(int(addSSTableRequestLimit.Get(&cfg.Settings.SV)))
 	})
 	s.limiters.ConcurrentRangefeedIters = limit.MakeConcurrentRequestLimiter(
 		"rangefeedIterLimiter", int(concurrentRangefeedItersLimit.Get(&cfg.Settings.SV)),
 	)
-	concurrentRangefeedItersLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	concurrentRangefeedItersLimit.SetOnChange(&cfg.Settings.SV, func() {
 		s.limiters.ConcurrentRangefeedIters.SetLimit(
 			int(concurrentRangefeedItersLimit.Get(&cfg.Settings.SV)))
 	})
 
-	s.tenantRateLimiters = tenantrate.NewLimiterFactory(&cfg.Settings.SV, &cfg.TestingKnobs.TenantRateKnobs)
+	s.tenantRateLimiters = tenantrate.NewLimiterFactory(cfg.Settings, &cfg.TestingKnobs.TenantRateKnobs)
 	s.metrics.registry.AddMetricStruct(s.tenantRateLimiters.Metrics())
 
 	s.systemConfigUpdateQueueRateLimiter = quotapool.NewRateLimiter(
 		"SystemConfigUpdateQueue",
 		quotapool.Limit(queueAdditionOnSystemConfigUpdateRate.Get(&cfg.Settings.SV)),
 		queueAdditionOnSystemConfigUpdateBurst.Get(&cfg.Settings.SV))
-	updateSystemConfigUpdateQueueLimits := func(ctx context.Context) {
+	updateSystemConfigUpdateQueueLimits := func() {
 		s.systemConfigUpdateQueueRateLimiter.UpdateLimit(
 			quotapool.Limit(queueAdditionOnSystemConfigUpdateRate.Get(&cfg.Settings.SV)),
 			queueAdditionOnSystemConfigUpdateBurst.Get(&cfg.Settings.SV))
@@ -933,13 +939,10 @@ func NewStore(
 		s.scanner.AddQueues(
 			s.gcQueue, s.mergeQueue, s.splitQueue, s.replicateQueue, s.replicaGCQueue,
 			s.raftLogQueue, s.raftSnapshotQueue, s.consistencyQueue)
-		tsDS := s.cfg.TimeSeriesDataStore
-		if s.cfg.TestingKnobs.TimeSeriesDataStore != nil {
-			tsDS = s.cfg.TestingKnobs.TimeSeriesDataStore
-		}
-		if tsDS != nil {
+
+		if s.cfg.TimeSeriesDataStore != nil {
 			s.tsMaintenanceQueue = newTimeSeriesMaintenanceQueue(
-				s, s.db, s.cfg.Gossip, tsDS,
+				s, s.db, s.cfg.Gossip, s.cfg.TimeSeriesDataStore,
 			)
 			s.scanner.AddQueues(s.tsMaintenanceQueue)
 		}
@@ -1051,7 +1054,7 @@ func (s *Store) SetDraining(drain bool, reporter func(int, redact.SafeString)) {
 		newStoreReplicaVisitor(s).Visit(func(r *Replica) bool {
 			//
 			// We need to be careful about the case where the ctx has been canceled
-			// prior to the call to (*Stopper).RunAsyncTaskEx(). In that case,
+			// prior to the call to (*Stopper).RunLimitedAsyncTask(). In that case,
 			// the goroutine is not even spawned. However, we don't want to
 			// mis-count the missing goroutine as the lack of transfer attempted.
 			// So what we do here is immediately increase numTransfersAttempted
@@ -1060,13 +1063,8 @@ func (s *Store) SetDraining(drain bool, reporter func(int, redact.SafeString)) {
 			// not raft leader).
 			atomic.AddInt32(&numTransfersAttempted, 1)
 			wg.Add(1)
-			if err := s.stopper.RunAsyncTaskEx(
-				r.AnnotateCtx(ctx),
-				stop.TaskOpts{
-					TaskName:   "storage.Store: draining replica",
-					Sem:        sem,
-					WaitForSem: true,
-				},
+			if err := s.stopper.RunLimitedAsyncTask(
+				r.AnnotateCtx(ctx), "storage.Store: draining replica", sem, true, /* wait */
 				func(ctx context.Context) {
 					defer wg.Done()
 
@@ -1604,7 +1602,7 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 		consistencyCheckRate.Get(&s.ClusterSettings().SV)*consistencyCheckRateBurstFactor,
 		quotapool.WithMinimumWait(consistencyCheckRateMinWait))
 
-	consistencyCheckRate.SetOnChange(&s.ClusterSettings().SV, func(ctx context.Context) {
+	consistencyCheckRate.SetOnChange(&s.ClusterSettings().SV, func() {
 		rate := consistencyCheckRate.Get(&s.ClusterSettings().SV)
 		s.consistencyLimiter.UpdateLimit(quotapool.Limit(rate), rate*consistencyCheckRateBurstFactor)
 	})
@@ -1681,9 +1679,6 @@ func (s *Store) startGossip() {
 		},
 	}
 
-	cannotGossipEvery := log.Every(time.Minute)
-	cannotGossipEvery.ShouldLog() // only log next time after waiting out the delay
-
 	// Periodic updates run in a goroutine and signal a WaitGroup upon completion
 	// of their first iteration.
 	s.initComplete.Add(len(gossipFns))
@@ -1703,9 +1698,7 @@ func (s *Store) startGossip() {
 					if repl := s.LookupReplica(roachpb.RKey(gossipFn.key)); repl != nil {
 						annotatedCtx := repl.AnnotateCtx(ctx)
 						if err := gossipFn.fn(annotatedCtx, repl); err != nil {
-							if cannotGossipEvery.ShouldLog() {
-								log.Infof(annotatedCtx, "could not gossip %s: %v", gossipFn.description, err)
-							}
+							log.Warningf(annotatedCtx, "could not gossip %s: %+v", gossipFn.description, err)
 							if !errors.Is(err, errPeriodicGossipsDisabled) {
 								continue
 							}
@@ -1740,6 +1733,7 @@ func (s *Store) startLeaseRenewer(ctx context.Context) {
 	// Start a goroutine that watches and proactively renews certain
 	// expiration-based leases.
 	_ = s.stopper.RunAsyncTask(ctx, "lease-renewer", func(ctx context.Context) {
+		repls := make(map[*Replica]struct{})
 		timer := timeutil.NewTimer()
 		defer timer.Stop()
 
@@ -1751,13 +1745,8 @@ func (s *Store) startLeaseRenewer(ctx context.Context) {
 		// attempting to accurately determine exactly when each iteration of a
 		// lease expires and when we should attempt to renew it as a result.
 		renewalDuration := s.cfg.RangeLeaseActiveDuration() / 5
-		if d := s.cfg.TestingKnobs.LeaseRenewalDurationOverride; d > 0 {
-			renewalDuration = d
-		}
 		for {
-			var numRenewableLeases int
 			s.renewableLeases.Range(func(k int64, v unsafe.Pointer) bool {
-				numRenewableLeases++
 				repl := (*Replica)(v)
 				annotatedCtx := repl.AnnotateCtx(ctx)
 				if _, pErr := repl.redirectOnOrAcquireLease(annotatedCtx); pErr != nil {
@@ -1769,11 +1758,8 @@ func (s *Store) startLeaseRenewer(ctx context.Context) {
 				return true
 			})
 
-			if numRenewableLeases > 0 {
+			if len(repls) > 0 {
 				timer.Reset(renewalDuration)
-			}
-			if fn := s.cfg.TestingKnobs.LeaseRenewalOnPostCycle; fn != nil {
-				fn()
 			}
 			select {
 			case <-s.renewableLeasesSignal:
@@ -1858,7 +1844,7 @@ func (s *Store) startRangefeedUpdater(ctx context.Context) {
 		st := s.cfg.Settings
 
 		confCh := make(chan struct{}, 1)
-		confChanged := func(ctx context.Context) {
+		confChanged := func() {
 			select {
 			case confCh <- struct{}{}:
 			default:
@@ -2552,13 +2538,6 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		underreplicatedRangeCount int64
 		overreplicatedRangeCount  int64
 		behindCount               int64
-
-		locks                          int64
-		locksWithWaitQueues            int64
-		lockWaitQueueWaiters           int64
-		maxLockWaitQueueWaitersForLock int64
-
-		minMaxClosedTS hlc.Timestamp
 	)
 
 	now := s.cfg.Clock.NowAsClockTimestamp()
@@ -2568,6 +2547,7 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	}
 	clusterNodes := s.ClusterNodeCount()
 
+	var minMaxClosedTS hlc.Timestamp
 	newStoreReplicaVisitor(s).Visit(func(rep *Replica) bool {
 		metrics := rep.Metrics(ctx, now, livenessMap, clusterNodes)
 		if metrics.Leader {
@@ -2608,12 +2588,6 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 		if wps, dur := rep.writeStats.avgQPS(); dur >= MinStatsDuration {
 			averageWritesPerSecond += wps
 		}
-		locks += metrics.LockTableMetrics.Locks
-		locksWithWaitQueues += metrics.LockTableMetrics.LocksWithWaitQueues
-		lockWaitQueueWaiters += metrics.LockTableMetrics.Waiters
-		if w := metrics.LockTableMetrics.TopKLocksByWaiters[0].Waiters; w > maxLockWaitQueueWaitersForLock {
-			maxLockWaitQueueWaitersForLock = w
-		}
 		mc, ok := rep.maxClosed(ctx)
 		if ok && (minMaxClosedTS.IsEmpty() || mc.Less(minMaxClosedTS)) {
 			minMaxClosedTS = mc
@@ -2637,11 +2611,6 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	s.metrics.OverReplicatedRangeCount.Update(overreplicatedRangeCount)
 	s.metrics.RaftLogFollowerBehindCount.Update(behindCount)
 
-	s.metrics.Locks.Update(locks)
-	s.metrics.LocksWithWaitQueues.Update(locksWithWaitQueues)
-	s.metrics.LockWaitQueueWaiters.Update(lockWaitQueueWaiters)
-	s.metrics.MaxLockWaitQueueWaitersForLock.Update(maxLockWaitQueueWaitersForLock)
-
 	if !minMaxClosedTS.IsEmpty() {
 		nanos := timeutil.Since(minMaxClosedTS.GoTime()).Nanoseconds()
 		s.metrics.ClosedTimestampMaxBehindNanos.Update(nanos)
@@ -2649,8 +2618,6 @@ func (s *Store) updateReplicationGauges(ctx context.Context) error {
 	s.metrics.ClosedTimestampFailuresToClose.Update(
 		s.cfg.ClosedTimestamp.Tracker.FailedCloseAttempts(),
 	)
-
-	s.metrics.RaftEnqueuedPending.Update(s.cfg.Transport.queuedMessageCount())
 
 	return nil
 }
@@ -2686,8 +2653,11 @@ func (s *Store) ComputeMetrics(ctx context.Context, tick int) error {
 	}
 
 	// Get the latest engine metrics.
-	m := s.engine.GetMetrics()
-	s.metrics.updateEngineMetrics(m)
+	m, err := s.engine.GetMetrics()
+	if err != nil {
+		return err
+	}
+	s.metrics.updateEngineMetrics(*m)
 
 	// Get engine Env stats.
 	envStats, err := s.engine.GetEnvStats()
@@ -2701,9 +2671,7 @@ func (s *Store) ComputeMetrics(ctx context.Context, tick int) error {
 	// non-periodic callers of this method don't trigger expensive
 	// stats.
 	if tick%logSSTInfoTicks == 1 /* every 10m */ {
-		// NB: The initial blank line ensures that compaction stats display
-		// will not contain the log prefix.
-		log.Infof(ctx, "\n%s", m.Metrics)
+		log.Infof(ctx, "%s", redact.Safe(s.engine.GetCompactionStats()))
 	}
 	return nil
 }
@@ -2772,7 +2740,7 @@ func (s *Store) ComputeStatsForKeySpan(startKey, endKey roachpb.RKey) (StoreKeyS
 func (s *Store) AllocatorDryRun(ctx context.Context, repl *Replica) (tracing.Recording, error) {
 	ctx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, s.ClusterSettings().Tracer, "allocator dry run")
 	defer cancel()
-	canTransferLease := func(ctx context.Context, repl *Replica) bool { return true }
+	canTransferLease := func() bool { return true }
 	_, err := s.replicateQueue.processOneChange(
 		ctx, repl, canTransferLease, true /* dryRun */)
 	if err != nil {

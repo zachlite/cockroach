@@ -14,7 +14,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
@@ -23,6 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/limit"
@@ -33,6 +35,7 @@ import (
 // Limiters is the collection of per-store limits used during cmd evaluation.
 type Limiters struct {
 	BulkIOWriteRate              *rate.Limiter
+	ConcurrentImportRequests     limit.ConcurrentRequestLimiter
 	ConcurrentExportRequests     limit.ConcurrentRequestLimiter
 	ConcurrentAddSSTableRequests limit.ConcurrentRequestLimiter
 	// concurrentRangefeedIters is a semaphore used to limit the number of
@@ -49,7 +52,9 @@ type EvalContext interface {
 	ClusterSettings() *cluster.Settings
 	EvalKnobs() kvserverbase.BatchEvalTestingKnobs
 
+	Engine() storage.Engine
 	Clock() *hlc.Clock
+	DB() *kv.DB
 	AbortSpan() *abortspan.AbortSpan
 	GetConcurrencyManager() concurrency.Manager
 
@@ -106,13 +111,14 @@ type EvalContext interface {
 	// across all keys in the range (see declareAllKeys), because it will only
 	// return a meaningful summary if the caller has serialized with all other
 	// requests on the range.
-	GetCurrentReadSummary(ctx context.Context) rspb.ReadSummary
-
-	// GetClosedTimestampV2 returns the current closed timestamp on the range.
-	// It is expected that a caller will have performed some action (either
-	// calling RevokeLease or WatchForMerge) to freeze further progression of
-	// the closed timestamp before calling this method.
-	GetClosedTimestampV2(ctx context.Context) hlc.Timestamp
+	//
+	// The method also returns the current closed timestamp on the range. This
+	// closed timestamp is already incorporated into the read summary, but some
+	// callers also need is separated out. It is expected that a caller will
+	// have performed some action (either calling RevokeLease or WatchForMerge)
+	// to freeze further progression of the closed timestamp before calling this
+	// method.
+	GetCurrentReadSummary(ctx context.Context) (rspb.ReadSummary, hlc.Timestamp)
 
 	GetExternalStorage(ctx context.Context, dest roachpb.ExternalStorage) (cloud.ExternalStorage, error)
 	GetExternalStorageFromURI(ctx context.Context, uri string, user security.SQLUsername) (cloud.ExternalStorage,
@@ -143,7 +149,6 @@ type MockEvalCtx struct {
 	CanCreateTxn       func() (bool, hlc.Timestamp, roachpb.TransactionAbortedReason)
 	Lease              roachpb.Lease
 	CurrentReadSummary rspb.ReadSummary
-	ClosedTimestamp    hlc.Timestamp
 	RevokedLeaseSeq    roachpb.LeaseSequence
 }
 
@@ -168,8 +173,14 @@ func (m *mockEvalCtxImpl) ClusterSettings() *cluster.Settings {
 func (m *mockEvalCtxImpl) EvalKnobs() kvserverbase.BatchEvalTestingKnobs {
 	return kvserverbase.BatchEvalTestingKnobs{}
 }
+func (m *mockEvalCtxImpl) Engine() storage.Engine {
+	panic("unimplemented")
+}
 func (m *mockEvalCtxImpl) Clock() *hlc.Clock {
 	return m.MockEvalCtx.Clock
+}
+func (m *mockEvalCtxImpl) DB() *kv.DB {
+	panic("unimplemented")
 }
 func (m *mockEvalCtxImpl) AbortSpan() *abortspan.AbortSpan {
 	return m.MockEvalCtx.AbortSpan
@@ -236,11 +247,10 @@ func (m *mockEvalCtxImpl) GetLease() (roachpb.Lease, roachpb.Lease) {
 func (m *mockEvalCtxImpl) GetRangeInfo(ctx context.Context) roachpb.RangeInfo {
 	return roachpb.RangeInfo{Desc: *m.Desc(), Lease: m.Lease}
 }
-func (m *mockEvalCtxImpl) GetCurrentReadSummary(ctx context.Context) rspb.ReadSummary {
-	return m.CurrentReadSummary
-}
-func (m *mockEvalCtxImpl) GetClosedTimestampV2(ctx context.Context) hlc.Timestamp {
-	return m.ClosedTimestamp
+func (m *mockEvalCtxImpl) GetCurrentReadSummary(
+	ctx context.Context,
+) (rspb.ReadSummary, hlc.Timestamp) {
+	return m.CurrentReadSummary, hlc.Timestamp{}
 }
 func (m *mockEvalCtxImpl) GetExternalStorage(
 	ctx context.Context, dest roachpb.ExternalStorage,

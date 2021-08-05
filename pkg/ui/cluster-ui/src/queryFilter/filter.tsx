@@ -22,9 +22,9 @@ import {
   dropdown,
   hidden,
   caretDown,
+  dropdownSelect,
   checkbox,
 } from "./filterClasses";
-import { MultiSelectCheckbox } from "../multiSelectCheckbox/multiSelectCheckbox";
 
 interface QueryFilter {
   onSubmitFilters: (filters: Filters) => void;
@@ -32,14 +32,7 @@ interface QueryFilter {
   appNames: SelectOptions[];
   activeFilters: number;
   filters: Filters;
-  dbNames?: string[];
-  regions?: string[];
-  nodes?: string[];
-  showDB?: boolean;
-  showSqlType?: boolean;
   showScan?: boolean;
-  showRegions?: boolean;
-  showNodes?: boolean;
 }
 interface FilterState {
   hide: boolean;
@@ -55,12 +48,8 @@ export interface Filters {
   app?: string;
   timeNumber?: string;
   timeUnit?: string;
-  database?: string;
-  sqlType?: string;
   fullScan?: boolean;
   distributed?: boolean;
-  regions?: string;
-  nodes?: string;
 }
 
 const timeUnit = [
@@ -68,15 +57,18 @@ const timeUnit = [
   { label: "milliseconds", value: "milliseconds" },
 ];
 
+const defaultSelectProps = {
+  className: dropdownSelect,
+  searchable: false,
+  clearable: false,
+  arrowRenderer: () => <CaretDown className={caretDown} />,
+};
+
 export const defaultFilters: Filters = {
   app: "All",
   timeNumber: "0",
   timeUnit: "seconds",
   fullScan: false,
-  sqlType: "",
-  database: "",
-  regions: "",
-  nodes: "",
 };
 
 /**
@@ -117,10 +109,6 @@ export const inactiveFiltersState: Filters = {
   app: "All",
   timeNumber: "0",
   fullScan: false,
-  sqlType: "",
-  database: "",
-  regions: "",
-  nodes: "",
 };
 
 export const calculateActiveFilters = (filters: Filters) => {
@@ -152,10 +140,10 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
   dropdownRef: React.RefObject<HTMLDivElement> = React.createRef();
 
   componentDidMount() {
-    window.addEventListener("click", this.outsideClick, false);
+    document.addEventListener("click", this.outsideClick, false);
   }
   componentWillUnmount() {
-    window.removeEventListener("click", this.outsideClick, false);
+    document.removeEventListener("click", this.outsideClick, false);
   }
   componentDidUpdate(prevProps: QueryFilter) {
     if (prevProps.filters !== this.props.filters) {
@@ -167,11 +155,10 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
     }
   }
   outsideClick = (event: any) => {
+    if (this.dropdownRef.current.contains(event.target)) {
+      return;
+    }
     this.setState({ hide: true });
-  };
-
-  insideClick = (event: any) => {
-    event.stopPropagation();
   };
 
   toggleFilters = () => {
@@ -222,163 +209,10 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
     });
   };
 
-  isOptionSelected = (option: string, field: string) => {
-    const selection = field.split(",");
-    if (selection.length > 0 && selection.includes(option)) return true;
-    return false;
-  };
-
   render() {
     const { hide, filters } = this.state;
-    const {
-      appNames,
-      dbNames,
-      regions,
-      nodes,
-      activeFilters,
-      showDB,
-      showSqlType,
-      showScan,
-      showRegions,
-      showNodes,
-    } = this.props;
+    const { appNames, activeFilters, showScan } = this.props;
     const dropdownArea = hide ? hidden : dropdown;
-    const customStyles = {
-      container: (provided: any) => ({
-        ...provided,
-        border: "none",
-      }),
-      option: (provided: any, state: any) => ({
-        ...provided,
-        backgroundColor: state.isSelected
-          ? "#DEEBFF"
-          : provided.backgroundColor,
-        color: "#394455",
-      }),
-      control: (provided: any) => ({
-        ...provided,
-        width: "100%",
-      }),
-      singleValue: (provided: any) => ({
-        ...provided,
-        color: "hsl(0, 0%, 50%)",
-      }),
-    };
-    const customStylesSmall = { ...customStyles };
-    customStylesSmall.container = (provided: any) => ({
-      ...provided,
-      width: "141px",
-      border: "none",
-    });
-
-    const databasesOptions = showDB
-      ? dbNames.map(db => ({
-          label: db,
-          value: db,
-          isSelected: this.isOptionSelected(db, filters.database),
-        }))
-      : [];
-    const databaseValue = databasesOptions.filter(option => {
-      return filters.database.split(",").includes(option.label);
-    });
-    const dbFilter = (
-      <div>
-        <div className={filterLabel.margin}>Database</div>
-        <MultiSelectCheckbox
-          options={databasesOptions}
-          placeholder="All"
-          field="database"
-          parent={this}
-          value={databaseValue}
-        />
-      </div>
-    );
-
-    const regionsOptions = showRegions
-      ? regions.map(region => ({
-          label: region,
-          value: region,
-          isSelected: this.isOptionSelected(region, filters.regions),
-        }))
-      : [];
-    const regionsValue = regionsOptions.filter(option =>
-      filters.regions.split(",").includes(option.label),
-    );
-    const regionsFilter = (
-      <div>
-        <div className={filterLabel.margin}>Region</div>
-        <MultiSelectCheckbox
-          options={regionsOptions}
-          placeholder="All"
-          field="regions"
-          parent={this}
-          value={regionsValue}
-        />
-      </div>
-    );
-
-    const nodesOptions = showNodes
-      ? nodes.map(node => ({
-          label: node,
-          value: node,
-          isSelected: this.isOptionSelected(node, filters.nodes),
-        }))
-      : [];
-    const nodesValue = nodesOptions.filter(option => {
-      return filters.nodes.split(",").includes(option.label);
-    });
-    const nodesFilter = (
-      <div>
-        <div className={filterLabel.margin}>Node</div>
-        <MultiSelectCheckbox
-          options={nodesOptions}
-          placeholder="All"
-          field="nodes"
-          parent={this}
-          value={nodesValue}
-        />
-      </div>
-    );
-
-    const sqlTypes = [
-      {
-        label: "DDL",
-        value: "TypeDDL",
-        isSelected: this.isOptionSelected("DDL", filters.sqlType),
-      },
-      {
-        label: "DML",
-        value: "TypeDML",
-        isSelected: this.isOptionSelected("DML", filters.sqlType),
-      },
-      {
-        label: "DCL",
-        value: "TypeDCL",
-        isSelected: this.isOptionSelected("DCL", filters.sqlType),
-      },
-      {
-        label: "TCL",
-        value: "TypeTCL",
-        isSelected: this.isOptionSelected("TCL", filters.sqlType),
-      },
-    ];
-
-    const sqlTypeValue = sqlTypes.filter(option => {
-      return filters.sqlType.split(",").includes(option.label);
-    });
-    const sqlTypeFilter = (
-      <div>
-        <div className={filterLabel.margin}>Statement Type</div>
-        <MultiSelectCheckbox
-          options={sqlTypes}
-          placeholder="All"
-          field="sqlType"
-          parent={this}
-          value={sqlTypeValue}
-        />
-      </div>
-    );
-
     const fullScanFilter = (
       <div className={filterLabel.margin}>
         <input
@@ -395,16 +229,8 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
     );
     // TODO replace all onChange actions in Selects and Checkboxes with one onSubmit in <form />
 
-    // Some app names could be empty strings, so we're adding " " to those names,
-    // this way it's easier for the user to recognize the blank name.
-    const apps = appNames.map(app => {
-      const label =
-        app.label.trim().length === 0 ? '"' + app.label + '"' : app.label;
-      return { label: label, value: app.value };
-    });
-
     return (
-      <div onClick={this.insideClick} ref={this.dropdownRef}>
+      <div onClick={this.outsideClick} ref={this.dropdownRef}>
         <div className={dropdownButton} onClick={this.toggleFilters}>
           Filters ({activeFilters})&nbsp;
           <CaretDown className={caretDown} />
@@ -413,16 +239,12 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
           <div className={dropdownContentWrapper}>
             <div className={filterLabel.top}>App</div>
             <Select
-              options={apps}
+              options={appNames}
               onChange={e => this.handleChange(e, "app")}
-              value={apps.filter(app => app.value === filters.app)}
+              value={filters.app}
               placeholder="All"
-              styles={customStyles}
+              {...defaultSelectProps}
             />
-            {showDB ? dbFilter : ""}
-            {showSqlType ? sqlTypeFilter : ""}
-            {showRegions ? regionsFilter : ""}
-            {showNodes ? nodesFilter : ""}
             <div className={filterLabel.margin}>
               Query fingerprint runs longer than
             </div>
@@ -435,10 +257,10 @@ export class Filter extends React.Component<QueryFilter, FilterState> {
               />
               <Select
                 options={timeUnit}
-                value={timeUnit.filter(unit => unit.label == filters.timeUnit)}
+                value={filters.timeUnit}
                 onChange={e => this.handleChange(e, "timeUnit")}
                 className={timePair.timeUnit}
-                styles={customStylesSmall}
+                {...defaultSelectProps}
               />
             </section>
             {showScan ? fullScanFilter : ""}

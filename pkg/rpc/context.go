@@ -45,6 +45,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
+	encodingproto "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -452,42 +453,34 @@ func (ctx *Context) GetLocalInternalClientForAddr(
 }
 
 type internalClientAdapter struct {
-	server roachpb.InternalServer
+	roachpb.InternalServer
 }
 
 // Batch implements the roachpb.InternalClient interface.
 func (a internalClientAdapter) Batch(
 	ctx context.Context, ba *roachpb.BatchRequest, _ ...grpc.CallOption,
 ) (*roachpb.BatchResponse, error) {
-	return a.server.Batch(ctx, ba)
+	return a.InternalServer.Batch(ctx, ba)
 }
 
 // RangeLookup implements the roachpb.InternalClient interface.
 func (a internalClientAdapter) RangeLookup(
 	ctx context.Context, rl *roachpb.RangeLookupRequest, _ ...grpc.CallOption,
 ) (*roachpb.RangeLookupResponse, error) {
-	return a.server.RangeLookup(ctx, rl)
+	return a.InternalServer.RangeLookup(ctx, rl)
 }
 
 // Join implements the roachpb.InternalClient interface.
 func (a internalClientAdapter) Join(
 	ctx context.Context, req *roachpb.JoinNodeRequest, _ ...grpc.CallOption,
 ) (*roachpb.JoinNodeResponse, error) {
-	return a.server.Join(ctx, req)
+	return a.InternalServer.Join(ctx, req)
 }
 
-// ResetQuorum is part of the roachpb.InternalClient interface.
 func (a internalClientAdapter) ResetQuorum(
 	ctx context.Context, req *roachpb.ResetQuorumRequest, _ ...grpc.CallOption,
 ) (*roachpb.ResetQuorumResponse, error) {
-	return a.server.ResetQuorum(ctx, req)
-}
-
-// TokenBucket is part of the roachpb.InternalClient interface.
-func (a internalClientAdapter) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest, opts ...grpc.CallOption,
-) (*roachpb.TokenBucketResponse, error) {
-	return a.server.TokenBucket(ctx, in)
+	return a.InternalServer.ResetQuorum(ctx, req)
 }
 
 type respStreamClientAdapter struct {
@@ -578,7 +571,7 @@ func (a internalClientAdapter) RangeFeed(
 
 	go func() {
 		defer cancel()
-		err := a.server.RangeFeed(args, rfAdapter)
+		err := a.InternalServer.RangeFeed(args, rfAdapter)
 		if err == nil {
 			err = io.EOF
 		}
@@ -609,7 +602,7 @@ func (a gossipSubscriptionClientAdapter) Send(e *roachpb.GossipSubscriptionEvent
 var _ roachpb.Internal_GossipSubscriptionClient = gossipSubscriptionClientAdapter{}
 var _ roachpb.Internal_GossipSubscriptionServer = gossipSubscriptionClientAdapter{}
 
-// GossipSubscription is part of the roachpb.InternalClient interface.
+// GossipSubscription implements the roachpb.InternalClient interface.
 func (a internalClientAdapter) GossipSubscription(
 	ctx context.Context, args *roachpb.GossipSubscriptionRequest, _ ...grpc.CallOption,
 ) (roachpb.Internal_GossipSubscriptionClient, error) {
@@ -620,7 +613,7 @@ func (a internalClientAdapter) GossipSubscription(
 
 	go func() {
 		defer cancel()
-		err := a.server.GossipSubscription(args, gsAdapter)
+		err := a.InternalServer.GossipSubscription(args, gsAdapter)
 		if err == nil {
 			err = io.EOF
 		}
@@ -736,7 +729,7 @@ func (ctx *Context) grpcDialOptions(
 		// is in setupSpanForIncomingRPC().
 		//
 		tagger := func(span *tracing.Span) {
-			span.SetTag("node", ctx.NodeID.Get().String())
+			span.SetTag("node", ctx.NodeID.String())
 		}
 		unaryInterceptors = append(unaryInterceptors,
 			tracing.ClientInterceptor(tracer, tagger))
@@ -799,7 +792,8 @@ func (c growStackCodec) Unmarshal(data []byte, v interface{}) error {
 // Install the growStackCodec over the default proto codec in order to grow the
 // stack for BatchRequest RPCs prior to unmarshaling.
 func init() {
-	encoding.RegisterCodec(growStackCodec{Codec: codec{}})
+	protoCodec := encoding.GetCodec(encodingproto.Name)
+	encoding.RegisterCodec(growStackCodec{Codec: protoCodec})
 }
 
 // onlyOnceDialer implements the grpc.WithDialer interface but only

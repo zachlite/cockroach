@@ -26,7 +26,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
@@ -49,7 +49,6 @@ type CreateDatabase struct {
 	PrimaryRegion   Name
 	Regions         NameList
 	SurvivalGoal    SurvivalGoal
-	Placement       DataPlacement
 }
 
 // Format implements the NodeFormatter interface.
@@ -65,7 +64,7 @@ func (node *CreateDatabase) Format(ctx *FmtCtx) {
 		// templates are supported, this should call ctx.FormatNode
 		// on the template expr.
 		ctx.WriteString(" TEMPLATE = ")
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, node.Template, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, node.Template, ctx.flags.EncodeFlags())
 	}
 	if node.Encoding != "" {
 		// NB: the encoding is not currently edited out under FmtAnonymize,
@@ -73,7 +72,7 @@ func (node *CreateDatabase) Format(ctx *FmtCtx) {
 		// encodings are supported, this should call ctx.FormatNode
 		// on the encoding expr.
 		ctx.WriteString(" ENCODING = ")
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, node.Encoding, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, node.Encoding, ctx.flags.EncodeFlags())
 	}
 	if node.Collate != "" {
 		// NB: the collation is not currently edited out under FmtAnonymize,
@@ -81,7 +80,7 @@ func (node *CreateDatabase) Format(ctx *FmtCtx) {
 		// collations are supported, this should call ctx.FormatNode
 		// on the collation expr.
 		ctx.WriteString(" LC_COLLATE = ")
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, node.Collate, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, node.Collate, ctx.flags.EncodeFlags())
 	}
 	if node.CType != "" {
 		// NB: the ctype (formatting customization) is not currently
@@ -89,7 +88,7 @@ func (node *CreateDatabase) Format(ctx *FmtCtx) {
 		// cutomizations. If/when custom customizations are supported,
 		// this should call ctx.FormatNode on the ctype expr.
 		ctx.WriteString(" LC_CTYPE = ")
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, node.CType, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, node.CType, ctx.flags.EncodeFlags())
 	}
 	if node.ConnectionLimit != -1 {
 		ctx.WriteString(" CONNECTION LIMIT = ")
@@ -112,18 +111,14 @@ func (node *CreateDatabase) Format(ctx *FmtCtx) {
 		ctx.WriteString(" ")
 		ctx.FormatNode(&node.SurvivalGoal)
 	}
-	if node.Placement != DataPlacementUnspecified {
-		ctx.WriteString(" ")
-		ctx.FormatNode(&node.Placement)
-	}
 }
 
 // IndexElem represents a column with a direction in a CREATE INDEX statement.
 type IndexElem struct {
 	// Column is set if this is a simple column reference (the common case).
 	Column Name
-	// Expr is set if the index element is an expression (part of an expression
-	// index). If set, Column is empty.
+	// Expr is set if the index element is an expression (part of an
+	// expression-based index). If set, Column is empty.
 	Expr       Expr
 	Direction  Direction
 	NullsOrder NullsOrder
@@ -314,7 +309,7 @@ func (n *EnumValue) Format(ctx *FmtCtx) {
 	if f.HasFlags(FmtAnonymize) {
 		ctx.WriteByte('_')
 	} else {
-		lexbase.EncodeSQLString(&ctx.Buffer, string(*n))
+		lex.EncodeSQLString(&ctx.Buffer, string(*n))
 	}
 }
 
@@ -1522,7 +1517,7 @@ func (node *SequenceOptions) Format(ctx *FmtCtx) {
 			// TODO(knz): replace all this with ctx.FormatNode if/when
 			// the cache option supports expressions.
 			if ctx.flags.HasFlags(FmtHideConstants) {
-				ctx.WriteByte('0')
+				ctx.WriteByte('_')
 			} else {
 				ctx.Printf("%d", *option.IntVal)
 			}
@@ -1536,7 +1531,7 @@ func (node *SequenceOptions) Format(ctx *FmtCtx) {
 				// TODO(knz): replace all this with ctx.FormatNode if/when
 				// the min/max value options support expressions.
 				if ctx.flags.HasFlags(FmtHideConstants) {
-					ctx.WriteByte('0')
+					ctx.WriteByte('_')
 				} else {
 					ctx.Printf("%d", *option.IntVal)
 				}
@@ -1550,7 +1545,7 @@ func (node *SequenceOptions) Format(ctx *FmtCtx) {
 			// TODO(knz): replace all this with ctx.FormatNode if/when
 			// the start option supports expressions.
 			if ctx.flags.HasFlags(FmtHideConstants) {
-				ctx.WriteByte('0')
+				ctx.WriteByte('_')
 			} else {
 				ctx.Printf("%d", *option.IntVal)
 			}
@@ -1563,7 +1558,7 @@ func (node *SequenceOptions) Format(ctx *FmtCtx) {
 			// TODO(knz): replace all this with ctx.FormatNode if/when
 			// the increment option supports expressions.
 			if ctx.flags.HasFlags(FmtHideConstants) {
-				ctx.WriteByte('0')
+				ctx.WriteByte('_')
 			} else {
 				ctx.Printf("%d", *option.IntVal)
 			}
@@ -1767,6 +1762,33 @@ func (node *CreateRole) Format(ctx *FmtCtx) {
 	}
 	if node.IfNotExists {
 		ctx.WriteString("IF NOT EXISTS ")
+	}
+	ctx.FormatNode(node.Name)
+
+	if len(node.KVOptions) > 0 {
+		ctx.WriteString(" WITH")
+		node.KVOptions.formatAsRoleOptions(ctx)
+	}
+}
+
+// AlterRole represents an ALTER ROLE statement.
+type AlterRole struct {
+	Name      Expr
+	IfExists  bool
+	IsRole    bool
+	KVOptions KVOptions
+}
+
+// Format implements the NodeFormatter interface.
+func (node *AlterRole) Format(ctx *FmtCtx) {
+	ctx.WriteString("ALTER")
+	if node.IsRole {
+		ctx.WriteString(" ROLE ")
+	} else {
+		ctx.WriteString(" USER ")
+	}
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
 	}
 	ctx.FormatNode(node.Name)
 

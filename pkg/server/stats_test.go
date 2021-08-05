@@ -23,11 +23,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/diagnostics"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/diagutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -38,20 +38,9 @@ import (
 func TestTelemetrySQLStatsIndependence(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-
+	skip.WithIssue(t, 63844, "flaky test")
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
-
-	r := diagutils.NewServer()
-	defer r.Close()
-
-	url := r.URL()
-	params.Knobs.Server = &TestingKnobs{
-		DiagnosticsTestingKnobs: diagnostics.TestingKnobs{
-			OverrideReportingURL: &url,
-		},
-	}
-
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
@@ -65,8 +54,8 @@ CREATE TABLE t.test (x INT PRIMARY KEY);
 	sqlServer := s.(*TestServer).Server.sqlServer.pgServer.SQLServer
 
 	// Flush stats at the beginning of the test.
-	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
-	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.ResetSQLStats(ctx)
+	sqlServer.ResetReportedStats(ctx)
 
 	// Run some queries mixed with diagnostics, and ensure that the statistics
 	// are unnaffected by the calls to report diagnostics.
@@ -80,9 +69,7 @@ CREATE TABLE t.test (x INT PRIMARY KEY);
 	s.DiagnosticsReporter().(*diagnostics.Reporter).ReportDiagnostics(ctx)
 
 	// Ensure that our SQL statement data was not affected by the telemetry report.
-	stats, err := sqlServer.GetScrubbedStmtStats(ctx)
-	require.NoError(t, err)
-
+	stats := sqlServer.GetScrubbedStmtStats()
 	foundStat := false
 	for _, stat := range stats {
 		if stat.Key.Query == "INSERT INTO _ VALUES ($1)" {
@@ -106,7 +93,7 @@ func TestEnsureSQLStatsAreFlushedForTelemetry(t *testing.T) {
 	params.Settings = cluster.MakeClusterSettings()
 	// Set the SQL stat refresh rate very low so that SQL stats are continuously
 	// flushed into the telemetry reporting stats pool.
-	sqlstats.SQLStatReset.Override(ctx, &params.Settings.SV, 10*time.Millisecond)
+	sql.SQLStatReset.Override(&params.Settings.SV, 10*time.Millisecond)
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
@@ -143,9 +130,7 @@ INSERT INTO t.test VALUES (2);
 
 		// We should also not find the stat in the SQL stats pool, since the SQL
 		// stats are getting flushed.
-		stats, err := sqlServer.GetScrubbedStmtStats(ctx)
-		require.NoError(t, err)
-
+		stats := sqlServer.GetScrubbedStmtStats()
 		for _, stat := range stats {
 			// These stats are scrubbed, so look for our scrubbed statement.
 			if strings.HasPrefix(stat.Key.Query, "INSERT INTO _ VALUES (_)") {
@@ -167,8 +152,8 @@ func TestSQLStatCollection(t *testing.T) {
 	sqlServer := s.(*TestServer).Server.sqlServer.pgServer.SQLServer
 
 	// Flush stats at the beginning of the test.
-	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
-	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.ResetSQLStats(ctx)
+	sqlServer.ResetReportedStats(ctx)
 
 	// Execute some queries against the sqlDB to build up some stats.
 	if _, err := sqlDB.Exec(`
@@ -182,9 +167,7 @@ func TestSQLStatCollection(t *testing.T) {
 	}
 
 	// Collect stats from the SQL server and ensure our queries are present.
-	stats, err := sqlServer.GetScrubbedStmtStats(ctx)
-	require.NoError(t, err)
-
+	stats := sqlServer.GetScrubbedStmtStats()
 	foundStat := false
 	var sqlStatData roachpb.StatementStatistics
 
@@ -202,12 +185,10 @@ func TestSQLStatCollection(t *testing.T) {
 
 	// Reset the SQL statistics, which will dump stats into the
 	// reported statistics pool.
-	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.ResetSQLStats(ctx)
 
 	// Query the reported statistics.
-	stats, err = sqlServer.GetScrubbedReportingStats(ctx)
-	require.NoError(t, err)
-
+	stats = sqlServer.GetScrubbedReportingStats()
 	foundStat = false
 	for _, stat := range stats {
 		if stat.Key.Query == "INSERT INTO _ VALUES (_)" {
@@ -232,9 +213,7 @@ func TestSQLStatCollection(t *testing.T) {
 	}
 
 	// Find and record the stats for our second query.
-	stats, err = sqlServer.GetScrubbedStmtStats(ctx)
-	require.NoError(t, err)
-
+	stats = sqlServer.GetScrubbedStmtStats()
 	foundStat = false
 	for _, stat := range stats {
 		if stat.Key.Query == "INSERT INTO _ VALUES (_)" {
@@ -248,12 +227,10 @@ func TestSQLStatCollection(t *testing.T) {
 	}
 
 	// Flush the SQL stats again.
-	sqlServer.GetSQLStatsController().ResetLocalSQLStats(ctx)
+	sqlServer.ResetSQLStats(ctx)
 
 	// Find our statement stat from the reported stats pool.
-	stats, err = sqlServer.GetScrubbedReportingStats(ctx)
-	require.NoError(t, err)
-
+	stats = sqlServer.GetScrubbedReportingStats()
 	foundStat = false
 	for _, stat := range stats {
 		if stat.Key.Query == "INSERT INTO _ VALUES (_)" {

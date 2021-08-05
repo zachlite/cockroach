@@ -38,11 +38,10 @@ var FollowerReadsEnabled = settings.RegisterBoolSetting(
 // advanced closed timestamp.
 func BatchCanBeEvaluatedOnFollower(ba roachpb.BatchRequest) bool {
 	// Explanation of conditions:
-	// 1. the batch cannot have or intend to receive a timestamp set from a
-	//    server-side clock. If a follower with a lagging clock sets its timestamp
-	//    and this then allows the follower to evaluate the batch as a follower
-	//    read, then the batch might miss past writes served at higher timestamps
-	//    on the leaseholder.
+	// 1. the batch needs to be part of a transaction, because non-transactional
+	//    batches often rely on the server setting their timestamp. If a follower
+	//    with a lagging clock sets their timestamp then they might miss past
+	//    writes served at higher timestamps.
 	// 2. each request in the batch needs to be "transactional", because those are
 	//    the only ones that have clearly defined semantics when served under the
 	//    closed timestamp.
@@ -50,11 +49,7 @@ func BatchCanBeEvaluatedOnFollower(ba roachpb.BatchRequest) bool {
 	//    propose writes to Raft.
 	// 4. the batch needs to be non-locking, because unreplicated locks are only
 	//    held on the leaseholder.
-	tsFromServerClock := ba.Txn == nil && (ba.Timestamp.IsEmpty() || ba.TimestampFromServerClock)
-	if tsFromServerClock {
-		return false
-	}
-	return ba.IsAllTransactional() && ba.IsReadOnly() && !ba.IsLocking()
+	return ba.Txn != nil && ba.IsAllTransactional() && ba.IsReadOnly() && !ba.IsLocking()
 }
 
 // canServeFollowerReadRLocked tests, when a range lease could not be acquired,
@@ -88,7 +83,7 @@ func (r *Replica) canServeFollowerReadRLocked(
 		return false
 	}
 
-	requiredFrontier := ba.RequiredFrontier()
+	requiredFrontier := ba.Txn.RequiredFrontier()
 	maxClosed, _ := r.maxClosedRLocked(ctx, requiredFrontier /* sufficient */)
 	canServeFollowerRead := requiredFrontier.LessEq(maxClosed)
 	tsDiff := requiredFrontier.GoTime().Sub(maxClosed.GoTime())
@@ -178,9 +173,9 @@ func (r *Replica) maxClosedRLocked(
 	return maxClosed, true
 }
 
-// GetClosedTimestampV2 returns the closed timestamp. Unlike MaxClosedTimestamp,
-// it only looks at the "new" closed timestamp mechanism, ignoring the old one.
-// It returns an empty result if the new mechanism is not enabled yet. The new
+// ClosedTimestampV2 returns the closed timestamp. Unlike MaxClosedTimestamp, it
+// only looks at the "new" closed timestamp mechanism, ignoring the old one. It
+// returns an empty result if the new mechanism is not enabled yet. The new
 // mechanism has better properties than the old one - namely the closing of
 // timestamps is synchronized with lease transfers and subsumption requests.
 // Callers who need that property should be prepared to get an empty result
@@ -188,7 +183,7 @@ func (r *Replica) maxClosedRLocked(
 //
 // TODO(andrei): Remove this in favor of maxClosed() once the old closed
 // timestamp mechanism is deleted. At that point, the two should be equivalent.
-func (r *Replica) GetClosedTimestampV2(ctx context.Context) hlc.Timestamp {
+func (r *Replica) ClosedTimestampV2(ctx context.Context) hlc.Timestamp {
 	r.mu.RLock()
 	appliedLAI := ctpb.LAI(r.mu.state.LeaseAppliedIndex)
 	leaseholder := r.mu.state.Lease.Replica.NodeID

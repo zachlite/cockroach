@@ -21,15 +21,14 @@ import (
 
 type depMatcher struct {
 	dirPredicate func(thisDir, thatDir scpb.Target_Direction) bool
-	thatStatus   scpb.Status
+	thatState    scpb.State
 	predicate    interface{}
 }
 
 type decOpEdge struct {
-	nextStatus    scpb.Status
-	predicate     interface{}
-	op            interface{}
-	nonRevertible bool
+	nextState scpb.State
+	predicate interface{}
+	op        interface{}
 }
 
 type targetRules struct {
@@ -37,14 +36,14 @@ type targetRules struct {
 	forward, backwards targetOpRules
 }
 
-type targetDepRules map[scpb.Status][]depMatcher
+type targetDepRules map[scpb.State][]depMatcher
 
-type targetOpRules map[scpb.Status][]decOpEdge
+type targetOpRules map[scpb.State][]decOpEdge
 
 var p = buildSchemaChangePlanner(rules)
 
-type opGenFunc func(builder *scgraph.Graph, t *scpb.Target, s scpb.Status, flags Params)
-type depGenFunc func(g *scgraph.Graph, t *scpb.Target, s scpb.Status)
+type opGenFunc func(builder *scgraph.Graph, t *scpb.Target, s scpb.State, flags Params)
+type depGenFunc func(g *scgraph.Graph, t *scpb.Target, s scpb.State)
 
 type schemaChangeTargetPlanner struct {
 	ops  opGenFunc
@@ -69,11 +68,11 @@ func buildSchemaChangeDepGenFunc(e scpb.Element, deps targetDepRules) depGenFunc
 	// signature.
 	tTyp := reflect.TypeOf(e)
 	type matcher struct {
-		dirPred    func(thisDir, thatDir scpb.Target_Direction) bool
-		pred       func(this, that scpb.Element) bool
-		thatStatus scpb.Status
+		dirPred   func(thisDir, thatDir scpb.Target_Direction) bool
+		pred      func(this, that scpb.Element) bool
+		thatState scpb.State
 	}
-	matchers := map[scpb.Status]map[reflect.Type][]matcher{}
+	matchers := map[scpb.State]map[reflect.Type][]matcher{}
 	for s, rules := range deps {
 		for i, rule := range rules {
 			mt := reflect.TypeOf(rule.predicate)
@@ -108,14 +107,14 @@ func buildSchemaChangeDepGenFunc(e scpb.Element, deps targetDepRules) depGenFunc
 				return out[0].Bool()
 			}
 			matchers[s][other] = append(matchers[s][other], matcher{
-				dirPred:    rule.dirPredicate,
-				pred:       f,
-				thatStatus: rule.thatStatus,
+				dirPred:   rule.dirPredicate,
+				pred:      f,
+				thatState: rule.thatState,
 			})
 		}
 	}
-	return func(g *scgraph.Graph, this *scpb.Target, thisStatus scpb.Status) {
-		for t, matchers := range matchers[thisStatus] {
+	return func(g *scgraph.Graph, this *scpb.Target, thisState scpb.State) {
+		for t, matchers := range matchers[thisState] {
 			if err := g.ForEachTarget(func(that *scpb.Target) error {
 				if reflect.TypeOf(that.Element()) != t {
 					return nil
@@ -123,7 +122,7 @@ func buildSchemaChangeDepGenFunc(e scpb.Element, deps targetDepRules) depGenFunc
 				for _, m := range matchers {
 					if m.dirPred(this.Direction, that.Direction) &&
 						m.pred(this.Element(), that.Element()) {
-						g.AddDepEdge(this, thisStatus, that, m.thatStatus)
+						g.AddDepEdge(this, thisState, that, m.thatState)
 					}
 				}
 				return nil
@@ -137,7 +136,6 @@ func buildSchemaChangeDepGenFunc(e scpb.Element, deps targetDepRules) depGenFunc
 var (
 	compileFlagsTyp      = reflect.TypeOf((*Params)(nil)).Elem()
 	opsType              = reflect.TypeOf((*scop.Op)(nil)).Elem()
-	opsSliceType         = reflect.TypeOf(([]scop.Op)(nil)).Elem()
 	boolType             = reflect.TypeOf((*bool)(nil)).Elem()
 	elementInterfaceType = reflect.TypeOf((*scpb.Element)(nil)).Elem()
 )
@@ -156,69 +154,59 @@ func buildSchemaChangeOpGenFunc(e scpb.Element, forward, backwards targetOpRules
 		[]reflect.Type{opsType},
 		false, /* variadic */
 	)
-	opSliceType := reflect.FuncOf(
-		[]reflect.Type{tTyp},
-		[]reflect.Type{opsSliceType},
-		false, /* variadic */
-	)
 	for s, rules := range forward {
 		for i, rule := range rules {
-			if rule.nextStatus == s {
-				panic(errors.Errorf("detected rule into same status: %s for %T[%d]", s, e, i))
+			if rule.nextState == s {
+				panic(errors.Errorf("detected rule into same state: %s for %T[%d]", s, e, i))
 			}
 			if rule.predicate != nil {
 				if pt := reflect.TypeOf(rule.predicate); pt != predicateTyp {
 					panic(errors.Errorf("invalid predicate with signature %v != %v for %T[%d]", pt, predicateTyp, e, i))
 				}
 			}
-			if rule.nextStatus == scpb.Status_UNKNOWN {
+			if rule.nextState == scpb.State_UNKNOWN {
 				if rule.op != nil {
 					panic(errors.Errorf("invalid stopping rule with non-nil op func for %T[%d]", e, i))
 				}
 				continue
 			}
-			if rule.nextStatus != scpb.Status_UNKNOWN && rule.op == nil {
-				panic(errors.Errorf("invalid nil op with next status %s for %T[%d]", rule.nextStatus, e, i))
+			if rule.nextState != scpb.State_UNKNOWN && rule.op == nil {
+				panic(errors.Errorf("invalid nil op with next state %s for %T[%d]", rule.nextState, e, i))
 			}
-			if ot := reflect.TypeOf(rule.op); ot != opType || ot != opSliceType {
-				panic(errors.Errorf("invalid ops with signature %v != (%v || %v) %p %p for (%T, %s)[%d]", ot, opType, opSliceType, ot, opsType, e, s, i))
+			if ot := reflect.TypeOf(rule.op); ot != opType {
+				panic(errors.Errorf("invalid ops with signature %v != %v %p %p for (%T, %s)[%d]", ot, opType, ot, opsType, e, s, i))
 			}
 		}
 	}
 
-	return func(builder *scgraph.Graph, t *scpb.Target, s scpb.Status, flags Params) {
+	return func(builder *scgraph.Graph, t *scpb.Target, s scpb.State, flags Params) {
 		cur := s
 		tv := reflect.ValueOf(t.Element())
 		flagsV := reflect.ValueOf(flags)
 		predicateArgs := []reflect.Value{tv, flagsV}
 		opsArgs := []reflect.Value{tv}
-		var statusRules targetOpRules
+		var stateRules targetOpRules
 		if t.Direction == scpb.Target_ADD {
-			statusRules = forward
+			stateRules = forward
 		} else {
-			statusRules = backwards
+			stateRules = backwards
 		}
 
 	outer:
 		for {
-			rules := statusRules[cur]
+			rules := stateRules[cur]
 			for _, rule := range rules {
 				if rule.predicate != nil {
 					if out := reflect.ValueOf(rule.predicate).Call(predicateArgs); !out[0].Bool() {
 						continue
 					}
 				}
-				if rule.nextStatus == scpb.Status_UNKNOWN {
+				if rule.nextState == scpb.State_UNKNOWN {
 					return
 				}
 				out := reflect.ValueOf(rule.op).Call(opsArgs)
-				if op, ok := out[0].Interface().(scop.Op); ok {
-					builder.AddOpEdges(t, cur, rule.nextStatus, !rule.nonRevertible, op)
-				} else if opArray, ok := out[0].Interface().([]scop.Op); ok {
-					builder.AddOpEdges(t, cur, rule.nextStatus, !rule.nonRevertible, opArray...)
-				}
-
-				cur = rule.nextStatus
+				builder.AddOpEdge(t, cur, rule.nextState, out[0].Interface().(scop.Op))
+				cur = rule.nextState
 				continue outer
 			}
 			break

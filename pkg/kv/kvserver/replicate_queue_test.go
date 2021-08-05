@@ -56,7 +56,6 @@ func TestReplicateQueueRebalance(t *testing.T) {
 
 	const numNodes = 5
 
-	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, numNodes,
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationAuto,
@@ -71,7 +70,7 @@ func TestReplicateQueueRebalance(t *testing.T) {
 	for _, server := range tc.Servers {
 		st := server.ClusterSettings()
 		st.Manual.Store(true)
-		kvserver.LoadBasedRebalancingMode.Override(ctx, &st.SV, int64(kvserver.LBRebalancingOff))
+		kvserver.LoadBasedRebalancingMode.Override(&st.SV, int64(kvserver.LBRebalancingOff))
 	}
 
 	const newRanges = 10
@@ -132,7 +131,7 @@ func TestReplicateQueueRebalance(t *testing.T) {
 			if c < minReplicas {
 				err := errors.Errorf(
 					"not balanced (want at least %d replicas on all stores): %d", minReplicas, counts)
-				log.Infof(ctx, "%v", err)
+				log.Infof(context.Background(), "%v", err)
 				return err
 			}
 		}
@@ -402,7 +401,6 @@ func checkReplicaCount(
 func TestReplicateQueueDecommissioningNonVoters(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.UnderRace(t, "takes a long time or times out under race")
 
 	ctx := context.Background()
 
@@ -513,7 +511,6 @@ func TestReplicateQueueDecommissioningNonVoters(t *testing.T) {
 func TestReplicateQueueDeadNonVoters(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.UnderRace(t, "takes a long time or times out under race")
 
 	ctx := context.Background()
 
@@ -657,8 +654,6 @@ func getNonVoterNodeIDs(rangeDesc roachpb.RangeDescriptor) (result []roachpb.Nod
 // from voter to non-voter.
 func TestReplicateQueueSwapVotersWithNonVoters(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	skip.UnderRace(t, "takes a long time or times out under race")
 
 	ctx := context.Background()
 	serverArgs := make(map[int]base.TestServerArgs)

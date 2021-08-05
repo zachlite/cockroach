@@ -25,7 +25,6 @@ func TestSettingAndCheckingLicense(t *testing.T) {
 	idA, _ := uuid.FromString("A0000000-0000-0000-0000-00000000000A")
 	idB, _ := uuid.FromString("B0000000-0000-0000-0000-00000000000B")
 
-	ctx := context.Background()
 	t0 := timeutil.Unix(0, 0)
 
 	licA, _ := (&licenseccl.License{
@@ -61,10 +60,10 @@ func TestSettingAndCheckingLicense(t *testing.T) {
 		{"", idA, t0, "requires an enterprise license"},
 	} {
 		updater := st.MakeUpdater()
-		if err := updater.Set(ctx, "enterprise.license", tc.lic, "s"); err != nil {
+		if err := updater.Set("enterprise.license", tc.lic, "s"); err != nil {
 			t.Fatal(err)
 		}
-		err := checkEnterpriseEnabledAt(st, tc.checkTime, tc.checkCluster, "", "", true)
+		err := checkEnterpriseEnabledAt(st, tc.checkTime, tc.checkCluster, "", "")
 		if !testutils.IsError(err, tc.err) {
 			l, _ := decode(tc.lic)
 			t.Fatalf("%d: lic %v, update by %T, checked by %s at %s, got %q", i, l, updater, tc.checkCluster, tc.checkTime, err)
@@ -73,7 +72,6 @@ func TestSettingAndCheckingLicense(t *testing.T) {
 }
 
 func TestGetLicenseTypePresent(t *testing.T) {
-	ctx := context.Background()
 	for _, tc := range []struct {
 		licenseType licenseccl.License_Type
 		expected    string
@@ -89,7 +87,7 @@ func TestGetLicenseTypePresent(t *testing.T) {
 			Type:              tc.licenseType,
 			ValidUntilUnixSec: 0,
 		}).Encode()
-		if err := updater.Set(ctx, "enterprise.license", lic, "s"); err != nil {
+		if err := updater.Set("enterprise.license", lic, "s"); err != nil {
 			t.Fatal(err)
 		}
 		actual, err := getLicenseType(st)
@@ -114,7 +112,6 @@ func TestGetLicenseTypeAbsent(t *testing.T) {
 }
 
 func TestSettingBadLicenseStrings(t *testing.T) {
-	ctx := context.Background()
 	for _, tc := range []struct{ lic, err string }{
 		{"blah", "invalid license string"},
 		{"cl-0-blah", "invalid license string"},
@@ -122,7 +119,7 @@ func TestSettingBadLicenseStrings(t *testing.T) {
 		st := cluster.MakeTestingClusterSettings()
 		u := st.MakeUpdater()
 
-		if err := u.Set(ctx, "enterprise.license", tc.lic, "s"); !testutils.IsError(
+		if err := u.Set("enterprise.license", tc.lic, "s"); !testutils.IsError(
 			err, tc.err,
 		) {
 			t.Fatalf("%q: expected err %q, got %v", tc.lic, tc.err, err)
@@ -131,7 +128,6 @@ func TestSettingBadLicenseStrings(t *testing.T) {
 }
 
 func TestTimeToEnterpriseLicenseExpiry(t *testing.T) {
-	ctx := context.Background()
 	id, _ := uuid.FromString("A0000000-0000-0000-0000-00000000000A")
 
 	t0 := timeutil.Unix(1603926294, 0)
@@ -175,7 +171,7 @@ func TestTimeToEnterpriseLicenseExpiry(t *testing.T) {
 		{"No License", "", 0},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
-			if err := updater.Set(ctx, "enterprise.license", tc.lic, "s"); err != nil {
+			if err := updater.Set("enterprise.license", tc.lic, "s"); err != nil {
 				t.Fatal(err)
 			}
 

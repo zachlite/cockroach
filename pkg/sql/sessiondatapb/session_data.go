@@ -80,12 +80,12 @@ func BytesEncodeFormatFromString(val string) (_ BytesEncodeFormat, ok bool) {
 
 func (m VectorizeExecMode) String() string {
 	switch m {
-	case VectorizeOn, VectorizeUnset:
+	case VectorizeOff:
+		return "off"
+	case DeprecatedVectorize201Auto, VectorizeOn:
 		return "on"
 	case VectorizeExperimentalAlways:
 		return "experimental_always"
-	case VectorizeOff:
-		return "off"
 	default:
 		return fmt.Sprintf("invalid (%d)", m)
 	}
@@ -96,12 +96,12 @@ func (m VectorizeExecMode) String() string {
 func VectorizeExecModeFromString(val string) (VectorizeExecMode, bool) {
 	var m VectorizeExecMode
 	switch strings.ToUpper(val) {
+	case "OFF":
+		m = VectorizeOff
 	case "ON":
 		m = VectorizeOn
 	case "EXPERIMENTAL_ALWAYS":
 		m = VectorizeExperimentalAlways
-	case "OFF":
-		m = VectorizeOff
 	default:
 		return 0, false
 	}

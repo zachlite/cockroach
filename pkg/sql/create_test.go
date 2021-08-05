@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
-	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
+	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -55,7 +55,7 @@ func TestDatabaseDescriptor(t *testing.T) {
 	}
 
 	// Database name.
-	nameKey := catalogkeys.MakeDatabaseNameKey(codec, "test")
+	nameKey := catalogkeys.NewDatabaseKey("test").Key(codec)
 	if gr, err := kvDB.Get(ctx, nameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -96,15 +96,18 @@ func TestDatabaseDescriptor(t *testing.T) {
 	if kvs, err := kvDB.Scan(ctx, start, start.PrefixEnd(), 0 /* maxRows */); err != nil {
 		t.Fatal(err)
 	} else {
-		systemDescriptorIDs, err := startupmigrations.ExpectedDescriptorIDs(
+		descriptorIDs, err := sqlmigrations.ExpectedDescriptorIDs(
 			ctx, kvDB, codec, &s.(*server.TestServer).Cfg.DefaultZoneConfig, &s.(*server.TestServer).Cfg.DefaultSystemZoneConfig,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// In addition to the system database and its tables, there are 3 other
-		// databases: defaultdb, system, and postgres.
-		e := len(systemDescriptorIDs) + 3
+		// TODO(arul): Revert this back to to len(descriptorIDs) once the migration
+		//  to the new system.namespace is done.
+		// Every database is initialized with a public schema, which does not have
+		// a descriptor associated with it. There are 3 databases: defaultdb,
+		// system, and postgres.
+		e := len(descriptorIDs) + 3
 		if a := len(kvs); a != e {
 			t.Fatalf("expected %d keys to have been written, found %d keys", e, a)
 		}

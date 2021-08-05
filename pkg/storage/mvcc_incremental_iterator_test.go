@@ -151,9 +151,8 @@ func assertExportedErrs(
 	useTBI bool,
 ) {
 	const big = 1 << 30
-	sstFile := &MemFile{}
-	_, _, err := e.ExportMVCCToSst(context.Background(), startKey, endKey, startTime, endTime,
-		revisions, big, big, useTBI, sstFile)
+	_, _, _, err := e.ExportMVCCToSst(startKey, endKey, startTime, endTime, revisions, big, big,
+		useTBI)
 	require.Error(t, err)
 
 	if intentErr := (*roachpb.WriteIntentError)(nil); errors.As(err, &intentErr) {
@@ -180,11 +179,10 @@ func assertExportedKVs(
 	useTBI bool,
 ) {
 	const big = 1 << 30
-	sstFile := &MemFile{}
-	_, _, err := e.ExportMVCCToSst(context.Background(), startKey, endKey, startTime, endTime,
-		revisions, big, big, useTBI, sstFile)
+	data, _, _, err := e.ExportMVCCToSst(startKey, endKey, startTime, endTime, revisions, big, big,
+		useTBI)
 	require.NoError(t, err)
-	data := sstFile.Data()
+
 	if data == nil {
 		require.Nil(t, expected)
 		return
@@ -911,8 +909,7 @@ func TestMVCCIncrementalIteratorIntentStraddlesSStables(t *testing.T) {
 	// regular MVCCPut operation to generate these keys, which we'll later be
 	// copying into manually created sstables.
 	ctx := context.Background()
-	db1, err := Open(ctx, InMemory(), SettingsForTesting())
-	require.NoError(t, err)
+	db1 := NewInMemForTesting(ctx, roachpb.Attributes{}, 10<<20)
 	defer db1.Close()
 
 	put := func(key, value string, ts int64, txn *roachpb.Transaction) {
@@ -947,8 +944,7 @@ func TestMVCCIncrementalIteratorIntentStraddlesSStables(t *testing.T) {
 	//
 	//   SSTable 2:
 	//     b@2
-	db2, err := Open(ctx, InMemory(), SettingsForTesting())
-	require.NoError(t, err)
+	db2 := NewInMemForTesting(ctx, roachpb.Attributes{}, 10<<20)
 	defer db2.Close()
 
 	// NB: If the original intent was separated, iterating using an interleaving

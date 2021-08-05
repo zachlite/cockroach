@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -30,13 +31,23 @@ func init() {
 
 func initializeMultiRegionMetadata(
 	ctx context.Context,
+	evalCtx *tree.EvalContext,
 	execCfg *sql.ExecutorConfig,
 	liveRegions sql.LiveClusterRegions,
 	goal tree.SurvivalGoal,
 	primaryRegion descpb.RegionName,
 	regions []tree.Name,
 ) (*multiregion.RegionConfig, error) {
-	if err := CheckClusterSupportsMultiRegion(execCfg); err != nil {
+	if err := checkClusterSupportsMultiRegion(evalCtx); err != nil {
+		return nil, err
+	}
+
+	if err := utilccl.CheckEnterpriseEnabled(
+		execCfg.Settings,
+		execCfg.ClusterID(),
+		execCfg.Organization(),
+		"multi-region features",
+	); err != nil {
 		return nil, err
 	}
 
@@ -96,9 +107,6 @@ func initializeMultiRegionMetadata(
 		primaryRegion,
 		survivalGoal,
 		regionEnumID,
-		// TODO(pawalt): Using default placement for now until this gets stitched
-		// together with the proper SQL statements.
-		descpb.DataPlacement_DEFAULT,
 	)
 	if err := multiregion.ValidateRegionConfig(regionConfig); err != nil {
 		return nil, err
@@ -107,15 +115,14 @@ func initializeMultiRegionMetadata(
 	return &regionConfig, nil
 }
 
-// CheckClusterSupportsMultiRegion returns whether the current cluster supports
-// multi-region features.
-func CheckClusterSupportsMultiRegion(execCfg *sql.ExecutorConfig) error {
-	return utilccl.CheckEnterpriseEnabled(
-		execCfg.Settings,
-		execCfg.ClusterID(),
-		execCfg.Organization(),
-		"multi-region features",
-	)
+func checkClusterSupportsMultiRegion(evalCtx *tree.EvalContext) error {
+	if !evalCtx.Settings.Version.IsActive(evalCtx.Context, clusterversion.MultiRegionFeatures) {
+		return pgerror.Newf(
+			pgcode.ObjectNotInPrerequisiteState,
+			`cannot add regions to a database until the cluster upgrade is finalized`,
+		)
+	}
+	return nil
 }
 
 func getMultiRegionEnumAddValuePlacement(

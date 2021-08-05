@@ -154,7 +154,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 		recv := MakeDistSQLReceiver(
 			ctx,
 			rw,
-			stmt.AST.StatementReturnType(),
+			stmt.AST.StatementType(),
 			execCfg.RangeDescriptorCache,
 			txn,
 			execCfg.Clock,
@@ -211,11 +211,12 @@ func TestDistSQLReceiverErrorRanking(t *testing.T) {
 
 	txn := kv.NewTxn(ctx, db, s.NodeID())
 
-	rw := &errOnlyResultWriter{}
+	// We're going to use a rowResultWriter to which only errors will be passed.
+	rw := newCallbackResultWriter(nil /* fn */)
 	recv := MakeDistSQLReceiver(
 		ctx,
 		rw,
-		tree.Rows, /* StatementReturnType */
+		tree.Rows, /* StatementType */
 		nil,       /* rangeCache */
 		txn,
 		nil, /* clockUpdater */

@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/hex"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -37,10 +39,6 @@ type Provider interface {
 	Metrics() metric.Struct
 	Reader
 	Instance
-
-	// CachedReader returns a reader which only consults its local cache and
-	// does not perform any RPCs in the IsAlive call.
-	CachedReader() Reader
 }
 
 // String returns a hex-encoded version of the SessionID.
@@ -71,9 +69,10 @@ type Session interface {
 	// Transactions run by this Instance which ensure that they commit before
 	// this time will be assured that any resources claimed under this session
 	// are known to be valid.
+	//
+	// See discussion in Open Questions in
+	// http://github.com/cockroachdb/cockroach/blob/master/docs/RFCS/20200615_sql_liveness.md
 	Expiration() hlc.Timestamp
-	// RegisterCallbackForSessionExpiry registers a callback to be executed when the session expires.
-	RegisterCallbackForSessionExpiry(func(ctx context.Context))
 }
 
 // Reader abstracts over the state of session records.
@@ -83,6 +82,18 @@ type Reader interface {
 	IsAlive(context.Context, SessionID) (alive bool, err error)
 }
 
+// IsActive returns whether the sqlliveness subsystem's migration to has been
+// performed.
+func IsActive(ctx context.Context, settings *cluster.Settings) bool {
+	return settings.Version.IsActive(
+		ctx,
+		clusterversion.AlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable,
+	)
+}
+
 // NotStartedError can be returned from calls to the sqlliveness subsystem
-// prior to its being started.
+// prior to its being started. The sqlliveness subsystem is started after the
+// sqlmigrations it relies on have completed.
+//
+// TODO(ajwerner): Remove this in 21.1 and make such calls assertion failures.
 var NotStartedError = errors.Errorf("sqlliveness subsystem has not yet been started")

@@ -64,30 +64,33 @@ func newAvg_AGGKINDAggAlloc(
 ) (aggregateFuncAlloc, error) {
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch t.Family() {
-	// {{range .}}
-	case _TYPE_FAMILY:
+	case types.IntFamily:
 		switch t.Width() {
-		// {{range .WidthOverloads}}
-		case _TYPE_WIDTH:
-			// {{with .Overload}}
-			return &avg_TYPE_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
-			// {{end}}
-			// {{end}}
+		case 16:
+			return &avgInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		case 32:
+			return &avgInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		default:
+			return &avgInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
 		}
-		// {{end}}
+	case types.DecimalFamily:
+		return &avgDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.FloatFamily:
+		return &avgFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.IntervalFamily:
+		return &avgInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	default:
+		return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 	}
-	return nil, errors.Errorf("unsupported avg agg type %s", t.Name())
 }
 
 // {{range .}}
-// {{range .WidthOverloads}}
-// {{with .Overload}}
 
 type avg_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	// curSum keeps track of the sum of elements belonging to the current group,
 	// so we can index into the slice once per group, instead of on each
@@ -117,13 +120,13 @@ func (a *avg_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec._RET_TYPE()
 }
 
 func (a *avg_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// {{if .NeedsHelper}}
 	// {{/*
@@ -138,7 +141,6 @@ func (a *avg_TYPE_AGGKINDAgg) Compute(
 	execgen.SETVARIABLESIZE(oldCurSumSize, a.curSum)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.TemplateType(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
@@ -151,21 +153,21 @@ func (a *avg_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_AVG(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_AVG(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_AVG(a, nulls, i, true, true)
@@ -178,21 +180,6 @@ func (a *avg_TYPE_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_AVG(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_AVG(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurSumSize, a.curSum)
 	if newCurSumSize != oldCurSumSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurSumSize - oldCurSumSize))
@@ -246,8 +233,6 @@ func (a *avg_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-// {{end}}
-// {{end}}
 // {{end}}
 
 // {{/*

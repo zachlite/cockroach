@@ -21,7 +21,7 @@ import (
 // See the SpanOption interface for a synopsis.
 type spanOptions struct {
 	Parent        *Span                         // see WithParentAndAutoCollection
-	RemoteParent  SpanMeta                      // see WithParentAndManualCollection
+	RemoteParent  *SpanMeta                     // see WithParentAndManualCollection
 	RefType       opentracing.SpanReferenceType // see WithFollowsFrom
 	LogTags       *logtags.Buffer               // see WithLogTags
 	Tags          map[string]interface{}        // see WithTags
@@ -31,7 +31,7 @@ type spanOptions struct {
 func (opts *spanOptions) parentTraceID() uint64 {
 	if opts.Parent != nil && !opts.Parent.i.isNoop() {
 		return opts.Parent.i.crdb.traceID
-	} else if !opts.RemoteParent.Empty() {
+	} else if opts.RemoteParent != nil {
 		return opts.RemoteParent.traceID
 	}
 	return 0
@@ -40,24 +40,17 @@ func (opts *spanOptions) parentTraceID() uint64 {
 func (opts *spanOptions) parentSpanID() uint64 {
 	if opts.Parent != nil && !opts.Parent.i.isNoop() {
 		return opts.Parent.i.crdb.spanID
-	} else if !opts.RemoteParent.Empty() {
+	} else if opts.RemoteParent != nil {
 		return opts.RemoteParent.spanID
 	}
 	return 0
-}
-
-func (opts *spanOptions) deriveRootSpan() *crdbSpan {
-	if opts.Parent != nil && !opts.Parent.i.isNoop() {
-		return opts.Parent.i.crdb.rootSpan
-	}
-	return nil
 }
 
 func (opts *spanOptions) recordingType() RecordingType {
 	recordingType := RecordingOff
 	if opts.Parent != nil && !opts.Parent.i.isNoop() {
 		recordingType = opts.Parent.i.crdb.recordingType()
-	} else if !opts.RemoteParent.Empty() {
+	} else if opts.RemoteParent != nil {
 		recordingType = opts.RemoteParent.recordingType
 	}
 	return recordingType
@@ -66,21 +59,11 @@ func (opts *spanOptions) recordingType() RecordingType {
 func (opts *spanOptions) shadowTrTyp() (string, bool) {
 	if opts.Parent != nil {
 		return opts.Parent.i.ot.shadowTr.Type()
-	} else if !opts.RemoteParent.Empty() {
+	} else if opts.RemoteParent != nil {
 		s := opts.RemoteParent.shadowTracerType
 		return s, s != ""
 	}
 	return "", false
-}
-
-func (opts *spanOptions) shadowContext() opentracing.SpanContext {
-	if opts.Parent != nil && opts.Parent.i.ot.shadowSpan != nil {
-		return opts.Parent.i.ot.shadowSpan.Context()
-	}
-	if !opts.RemoteParent.Empty() && opts.RemoteParent.shadowCtx != nil {
-		return opts.RemoteParent.shadowCtx
-	}
-	return nil
 }
 
 // SpanOption is the interface satisfied by options to `Tracer.StartSpan`.
@@ -154,12 +137,33 @@ type parentAndManualCollectionOption SpanMeta
 // which corresponds to the expectation that the parent span will
 // wait for the child to Finish(). If this expectation does not hold,
 // WithFollowsFrom should be added to the StartSpan invocation.
-func WithParentAndManualCollection(parent SpanMeta) SpanOption {
-	return (parentAndManualCollectionOption)(parent)
+func WithParentAndManualCollection(parent *SpanMeta) SpanOption {
+	return (*parentAndManualCollectionOption)(parent)
 }
 
-func (p parentAndManualCollectionOption) apply(opts spanOptions) spanOptions {
-	opts.RemoteParent = (SpanMeta)(p)
+func (p *parentAndManualCollectionOption) apply(opts spanOptions) spanOptions {
+	opts.RemoteParent = (*SpanMeta)(p)
+	return opts
+}
+
+type tagsOption []opentracing.Tag
+
+// WithTags is an option to Tracer.StartSpan which populates the
+// tags on the newly created Span.
+func WithTags(tags ...opentracing.Tag) SpanOption {
+	return (tagsOption)(tags)
+}
+
+func (o tagsOption) apply(opts spanOptions) spanOptions {
+	if len(o) == 0 {
+		return opts
+	}
+	if opts.Tags == nil {
+		opts.Tags = map[string]interface{}{}
+	}
+	for _, tag := range o {
+		opts.Tags[tag.Key] = tag.Value
+	}
 	return opts
 }
 

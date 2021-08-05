@@ -26,10 +26,9 @@ import (
 // channelFeedSource wraps the eventsCh returned from a client. It expects that
 // no errors are returned from the client.
 type channelFeedSource struct {
-	t               *testing.T
-	cancelIngestion context.CancelFunc
-	eventCh         chan streamingccl.Event
-	errCh           chan error
+	t       *testing.T
+	eventCh chan streamingccl.Event
+	errCh   chan error
 }
 
 var _ streamingtest.FeedSource = (*channelFeedSource)(nil)
@@ -50,12 +49,11 @@ func (f *channelFeedSource) Next() (streamingccl.Event, bool) {
 
 // Close implements the streamingtest.FeedSource interface.
 func (f *channelFeedSource) Close() {
-	f.cancelIngestion()
+	close(f.eventCh)
 }
 
 func TestSinklessReplicationClient(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
 	defer log.Scope(t).Close(t)
 	h, cleanup := streamingtest.NewReplicationHelper(t)
 	defer cleanup()
@@ -96,7 +94,7 @@ INSERT INTO d.t2 VALUES (2);
 		clientCtx, cancelIngestion := context.WithCancel(ctx)
 		eventCh, errCh, err := client.ConsumePartition(clientCtx, pa, startTime)
 		require.NoError(t, err)
-		feedSource := &channelFeedSource{cancelIngestion: cancelIngestion, eventCh: eventCh, errCh: errCh}
+		feedSource := &channelFeedSource{eventCh: eventCh, errCh: errCh}
 		feed := streamingtest.MakeReplicationFeed(t, feedSource)
 
 		// We should observe 2 versions of this key: one with ("привет", "world"), and a later

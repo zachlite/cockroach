@@ -8,7 +8,9 @@
     "module": "es6",
     "lib": ["es5", "dom"],
     "jsx": "react",
-    "types": ["cypress", "@testing-library/cypress"]
+    "types": ["cypress"]
   },
-  "include": ["**/*.ts"]
+  "include": [
+    "**/*.ts"
+  ]
 }

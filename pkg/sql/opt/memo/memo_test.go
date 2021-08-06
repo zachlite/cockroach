@@ -26,8 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/datadriven"
 )
 
@@ -139,7 +137,7 @@ func TestMemoIsStale(t *testing.T) {
 
 	// Revoke access to the underlying table. The user should retain indirect
 	// access via the view.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).Revoked = true
+	catalog.Table(tree.NewTableName("t", "abc")).Revoked = true
 
 	// Initialize context with starting values.
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
@@ -218,28 +216,16 @@ func TestMemoIsStale(t *testing.T) {
 	evalCtx.SessionData.SafeUpdates = false
 	notStale()
 
-	// Stale intervalStyleEnabled.
-	evalCtx.SessionData.IntervalStyleEnabled = true
-	stale()
-	evalCtx.SessionData.IntervalStyleEnabled = false
-	notStale()
-
-	// Stale DateStyle.
-	evalCtx.SessionData.DataConversionConfig.DateStyle = pgdate.DateStyle{Order: pgdate.Order_YMD}
-	stale()
-	evalCtx.SessionData.DataConversionConfig.DateStyle = pgdate.DefaultDateStyle()
-	notStale()
-
-	// Stale IntervalStyle.
-	evalCtx.SessionData.DataConversionConfig.IntervalStyle = duration.IntervalStyle_ISO_8601
-	stale()
-	evalCtx.SessionData.DataConversionConfig.IntervalStyle = duration.IntervalStyle_POSTGRES
-	notStale()
-
 	// Stale prefer lookup joins for FKs.
 	evalCtx.SessionData.PreferLookupJoinsForFKs = true
 	stale()
 	evalCtx.SessionData.PreferLookupJoinsForFKs = false
+	notStale()
+
+	// Stale improve disjunction selectivity.
+	evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity = true
+	stale()
+	evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity = false
 	notStale()
 
 	// Stale data sources and schema. Create new catalog so that data sources are
@@ -255,24 +241,24 @@ func TestMemoIsStale(t *testing.T) {
 	}
 
 	// User no longer has access to view.
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = true
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = true
 	_, err = o.Memo().IsStale(ctx, &evalCtx, catalog)
 	if exp := "user does not have privilege"; !testutils.IsError(err, exp) {
 		t.Fatalf("expected %q error, but got %+v", exp, err)
 	}
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = false
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = false
 	notStale()
 
 	// Table ID changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 53
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 53
 	notStale()
 
 	// Table Version changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 0
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 0
 	notStale()
 }
 

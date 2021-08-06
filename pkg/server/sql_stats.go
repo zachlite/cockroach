@@ -42,8 +42,7 @@ func (s *statusServer) ResetSQLStats(
 			return nil, status.Errorf(codes.InvalidArgument, err.Error())
 		}
 		if local {
-			controller := s.sqlServer.pgServer.SQLServer.GetSQLStatsController()
-			controller.ResetLocalSQLStats(ctx)
+			s.admin.server.sqlServer.pgServer.SQLServer.ResetSQLStats(ctx)
 			return response, nil
 		}
 		status, err := s.dialNode(ctx, requestedNodeID)

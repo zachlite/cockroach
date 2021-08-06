@@ -13,40 +13,18 @@ package mutations
 import (
 	"sync/atomic"
 
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 )
 
-const productionMaxBatchSize = 10000
+var maxBatchSize int64 = defaultMaxBatchSize
 
-var maxBatchSize = defaultMaxBatchSize
-
-var defaultMaxBatchSize = int64(util.ConstantWithMetamorphicTestRange(
-	"max-batch-size",
-	productionMaxBatchSize, /* defaultValue */
-	1,                      /* min */
-	productionMaxBatchSize, /* max */
-))
-
-var testingMaxBatchByteSize = util.ConstantWithMetamorphicTestRange(
-	"max-batch-byte-size",
-	0,      // we'll use the cluster setting instead if we see zero.
-	1,      /* min */
-	32<<20, /* max */
-)
+const defaultMaxBatchSize = 10000
 
 // MaxBatchSize returns the max number of entries in the KV batch for a
 // mutation operation (delete, insert, update, upsert) - including secondary
 // index updates, FK cascading updates, etc - before the current KV batch is
 // executed and a new batch is started.
-//
-// If forceProductionMaxBatchSize is true, then the "production" value will be
-// returned regardless of whether the build is metamorphic or not. This should
-// only be used by tests the output of which differs if maxBatchSize is
-// randomized.
-func MaxBatchSize(forceProductionMaxBatchSize bool) int {
-	if forceProductionMaxBatchSize {
-		return productionMaxBatchSize
-	}
+func MaxBatchSize() int {
 	return int(atomic.LoadInt64(&maxBatchSize))
 }
 
@@ -62,11 +40,11 @@ func ResetMaxBatchSizeForTests() {
 	atomic.SwapInt64(&maxBatchSize, defaultMaxBatchSize)
 }
 
-// MaxBatchByteSize takes the passed value read from the cluster setting and
-// returns it unless the testing metamorphic value overrides it.
-func MaxBatchByteSize(clusterSetting int, forceProductionBatchSizes bool) int {
-	if forceProductionBatchSizes || testingMaxBatchByteSize == 0 {
-		return clusterSetting
-	}
-	return testingMaxBatchByteSize
-}
+// MutationsTestingMaxBatchSize is a testing cluster setting that sets the
+// default max mutation batch size. A low max batch size is useful to test
+// batching logic of the mutations.
+var MutationsTestingMaxBatchSize = settings.RegisterNonNegativeIntSetting(
+	"sql.testing.mutations.max_batch_size",
+	"the max number of rows that are processed by a single KV batch when performing a mutation operation (0=default)",
+	0,
+)

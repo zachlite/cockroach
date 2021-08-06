@@ -98,7 +98,7 @@ func StartCluster(ctx context.Context, t *testing.T, cfg cluster.TestConfig) (c 
 
 			testutils.SucceedsSoon(t, func() error {
 				select {
-				case <-stopper.ShouldQuiesce():
+				case <-stopper.ShouldStop():
 					t.Fatal("interrupted")
 				case <-time.After(time.Second):
 				}

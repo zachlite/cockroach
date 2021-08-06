@@ -52,17 +52,11 @@ type testHelper struct {
 // The testHelper will accelerate the adoption and cancellation loops inside of
 // the registry.
 func newTestHelper(t *testing.T) (*testHelper, func()) {
-	return newTestHelperForTables(t, jobstest.UseTestTables, nil)
-}
-
-func newTestHelperWithServerArgs(
-	t *testing.T, argsFn func(args *base.TestServerArgs),
-) (*testHelper, func()) {
-	return newTestHelperForTables(t, jobstest.UseTestTables, argsFn)
+	return newTestHelperForTables(t, jobstest.UseTestTables)
 }
 
 func newTestHelperForTables(
-	t *testing.T, envTableType jobstest.EnvTablesType, argsFn func(args *base.TestServerArgs),
+	t *testing.T, envTableType jobstest.EnvTablesType,
 ) (*testHelper, func()) {
 	var execSchedules execSchedulesFn
 
@@ -74,15 +68,9 @@ func newTestHelperForTables(
 			execSchedules = daemon
 		},
 	}
-
-	args := base.TestServerArgs{
+	s, db, kvDB := serverutils.StartServer(t, base.TestServerArgs{
 		Knobs: base.TestingKnobs{JobsTestingKnobs: knobs},
-	}
-	if argsFn != nil {
-		argsFn(&args)
-	}
-
-	s, db, kvDB := serverutils.StartServer(t, args)
+	})
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
 
@@ -117,7 +105,7 @@ func newTestHelperForTables(
 func (h *testHelper) newScheduledJob(t *testing.T, scheduleLabel, sql string) *ScheduledJob {
 	j := NewScheduledJob(h.env)
 	j.SetScheduleLabel(scheduleLabel)
-	j.SetOwner(security.TestUserName())
+	j.SetOwner("test")
 	any, err := types.MarshalAny(&jobspb.SqlStatementExecutionArg{Statement: sql})
 	require.NoError(t, err)
 	j.SetExecutionDetails(InlineExecutorName, jobspb.ExecutionArguments{Args: any})
@@ -131,7 +119,7 @@ func (h *testHelper) newScheduledJobForExecutor(
 ) *ScheduledJob {
 	j := NewScheduledJob(h.env)
 	j.SetScheduleLabel(scheduleLabel)
-	j.SetOwner(security.TestUserName())
+	j.SetOwner("test")
 	j.SetExecutionDetails(executorName, jobspb.ExecutionArguments{Args: executorArgs})
 	return j
 }
@@ -139,16 +127,17 @@ func (h *testHelper) newScheduledJobForExecutor(
 // loadSchedule loads  all columns for the specified scheduled job.
 func (h *testHelper) loadSchedule(t *testing.T, id int64) *ScheduledJob {
 	j := NewScheduledJob(h.env)
-	row, cols, err := h.cfg.InternalExecutor.QueryRowExWithCols(
+	rows, cols, err := h.cfg.InternalExecutor.QueryWithCols(
 		context.Background(), "sched-load", nil,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf(
 			"SELECT * FROM %s WHERE schedule_id = %d",
 			h.env.ScheduledJobsTableName(), id),
 	)
 	require.NoError(t, err)
-	require.NotNil(t, row)
-	require.NoError(t, j.InitFromDatums(row, cols))
+
+	require.Equal(t, 1, len(rows))
+	require.NoError(t, j.InitFromDatums(rows[0], cols))
 	return j
 }
 
@@ -170,12 +159,10 @@ func registerScopedScheduledJobExecutor(name string, ex ScheduledJobExecutor) fu
 
 // addFakeJob adds a fake job associated with the specified scheduleID.
 // Returns the id of the newly created job.
-func addFakeJob(
-	t *testing.T, h *testHelper, scheduleID int64, status Status, txn *kv.Txn,
-) jobspb.JobID {
+func addFakeJob(t *testing.T, h *testHelper, scheduleID int64, status Status, txn *kv.Txn) int64 {
 	payload := []byte("fake payload")
 	datums, err := h.cfg.InternalExecutor.QueryRowEx(context.Background(), "fake-job", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf(`
 INSERT INTO %s (created_by_type, created_by_id, status, payload)
 VALUES ($1, $2, $3, $4)
@@ -186,5 +173,5 @@ RETURNING id`,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, datums)
-	return jobspb.JobID(tree.MustBeDInt(datums[0]))
+	return int64(tree.MustBeDInt(datums[0]))
 }

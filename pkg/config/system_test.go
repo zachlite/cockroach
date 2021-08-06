@@ -13,7 +13,6 @@ package config_test
 import (
 	"context"
 	"math"
-	"reflect"
 	"sort"
 	"testing"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/gogo/protobuf/proto"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,7 +68,7 @@ func sqlKV(tableID uint32, indexID, descID uint64) roachpb.KeyValue {
 func descriptor(descID uint64) roachpb.KeyValue {
 	id := descpb.ID(descID)
 	k := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, id)
-	v := tabledesc.NewBuilder(&descpb.TableDescriptor{ID: id}).BuildImmutable()
+	v := tabledesc.NewImmutable(descpb.TableDescriptor{ID: id})
 	kv := roachpb.KeyValue{Key: k}
 	if err := kv.Value.SetProto(v.DescriptorProto()); err != nil {
 		panic(err)
@@ -140,7 +140,7 @@ func TestGet(t *testing.T) {
 	cfg := config.NewSystemConfig(zonepb.DefaultZoneConfigRef())
 	for tcNum, tc := range testCases {
 		cfg.Values = tc.values
-		if val := cfg.GetValue([]byte(tc.key)); !reflect.DeepEqual(val, tc.value) {
+		if val := cfg.GetValue([]byte(tc.key)); !proto.Equal(val, tc.value) {
 			t.Errorf("#%d: expected=%s, found=%s", tcNum, tc.value, val)
 		}
 	}

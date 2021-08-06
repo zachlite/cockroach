@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -12,7 +12,7 @@ import React from "react";
 import { storiesOf } from "@storybook/react";
 import { MemoryRouter } from "react-router-dom";
 import { cloneDeep, noop, extend } from "lodash";
-import { data, nodeRegions, routeProps } from "./transactions.fixture";
+import { data, routeProps } from "./transactions.fixture";
 
 import { TransactionsPage } from ".";
 import { RequestError } from "../util";
@@ -26,22 +26,14 @@ storiesOf("Transactions Page", module)
     <div style={{ backgroundColor: "#F5F7FA" }}>{storyFn()}</div>
   ))
   .add("with data", () => (
-    <TransactionsPage
-      {...routeProps}
-      data={data}
-      nodeRegions={nodeRegions}
-      refreshData={noop}
-      resetSQLStats={noop}
-    />
+    <TransactionsPage {...routeProps} data={data} refreshData={noop} />
   ))
   .add("without data", () => {
     return (
       <TransactionsPage
         {...routeProps}
         data={getEmptyData()}
-        nodeRegions={nodeRegions}
         refreshData={noop}
-        resetSQLStats={noop}
       />
     );
   })
@@ -56,22 +48,14 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={getEmptyData()}
-        nodeRegions={nodeRegions}
         refreshData={noop}
         history={history}
-        resetSQLStats={noop}
       />
     );
   })
   .add("with loading indicator", () => {
     return (
-      <TransactionsPage
-        {...routeProps}
-        data={undefined}
-        nodeRegions={nodeRegions}
-        refreshData={noop}
-        resetSQLStats={noop}
-      />
+      <TransactionsPage {...routeProps} data={undefined} refreshData={noop} />
     );
   })
   .add("with error alert", () => {
@@ -79,7 +63,6 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={undefined}
-        nodeRegions={nodeRegions}
         error={
           new RequestError(
             "Forbidden",
@@ -88,7 +71,6 @@ storiesOf("Transactions Page", module)
           )
         }
         refreshData={noop}
-        resetSQLStats={noop}
       />
     );
   });

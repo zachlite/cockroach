@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
 
@@ -60,14 +59,8 @@ type FlowCtx struct {
 	// TraceKV is true if KV tracing was requested by the session.
 	TraceKV bool
 
-	// CollectStats is true if execution stats collection was requested.
-	CollectStats bool
-
 	// Local is true if this flow is being run as part of a local-only query.
 	Local bool
-
-	// Gateway is true if this flow is being run on the gateway node.
-	Gateway bool
 
 	// TypeResolverFactory is used to construct transaction bound TypeResolvers
 	// to resolve type references during flow setup. It is not safe for concurrent
@@ -77,10 +70,6 @@ type FlowCtx struct {
 	// on remote nodes with a new descs.Collection. After the flow is complete,
 	// all descriptors leased from the factory must be released.
 	TypeResolverFactory *descs.DistSQLTypeResolverFactory
-
-	// DiskMonitor is this flow's disk monitor. All disk usage for this flow must
-	// be registered through this monitor.
-	DiskMonitor *mon.BytesMonitor
 }
 
 // NewEvalCtx returns a modifiable copy of the FlowCtx's EvalContext.
@@ -108,16 +97,4 @@ func (ctx *FlowCtx) Stopper() *stop.Stopper {
 // Codec returns the SQL codec for this flowCtx.
 func (ctx *FlowCtx) Codec() keys.SQLCodec {
 	return ctx.EvalCtx.Codec
-}
-
-// ProcessorComponentID returns a ComponentID for the given processor in this
-// flow.
-func (ctx *FlowCtx) ProcessorComponentID(procID int32) execinfrapb.ComponentID {
-	return execinfrapb.ProcessorComponentID(ctx.NodeID.SQLInstanceID(), ctx.ID, procID)
-}
-
-// StreamComponentID returns a ComponentID for the given stream in this flow.
-// The stream must originate from the node associated with this FlowCtx.
-func (ctx *FlowCtx) StreamComponentID(streamID execinfrapb.StreamID) execinfrapb.ComponentID {
-	return execinfrapb.StreamComponentID(ctx.NodeID.SQLInstanceID(), ctx.ID, streamID)
 }

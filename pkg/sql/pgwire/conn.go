@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -30,19 +30,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil"
-	"github.com/cockroachdb/cockroach/pkg/util/ring"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/lib/pq/oid"
@@ -60,10 +57,6 @@ type conn struct {
 
 	sessionArgs sql.SessionArgs
 	metrics     *ServerMetrics
-
-	// startTime is the time when the connection attempt was first received
-	// by the server.
-	startTime time.Time
 
 	// rd is a buffered reader consuming conn. All reads from conn go through
 	// this.
@@ -146,14 +139,13 @@ func (s *Server) serveConn(
 	netConn net.Conn,
 	sArgs sql.SessionArgs,
 	reserved mon.BoundAccount,
-	connStart time.Time,
 	authOpt authOptions,
 ) {
 	if log.V(2) {
 		log.Infof(ctx, "new connection with options: %+v", sArgs)
 	}
 
-	c := newConn(netConn, sArgs, &s.metrics, connStart, &s.execCfg.Settings.SV)
+	c := newConn(netConn, sArgs, &s.metrics, &s.execCfg.Settings.SV)
 	c.alwaysLogAuthActivity = alwaysLogAuthActivity || atomic.LoadInt32(&s.testingAuthLogEnabled) > 0
 
 	// Do the reading of commands from the network.
@@ -168,17 +160,12 @@ func (s *Server) serveConn(
 var alwaysLogAuthActivity = envutil.EnvOrDefaultBool("COCKROACH_ALWAYS_LOG_AUTHN_EVENTS", false)
 
 func newConn(
-	netConn net.Conn,
-	sArgs sql.SessionArgs,
-	metrics *ServerMetrics,
-	connStart time.Time,
-	sv *settings.Values,
+	netConn net.Conn, sArgs sql.SessionArgs, metrics *ServerMetrics, sv *settings.Values,
 ) *conn {
 	c := &conn{
 		conn:        netConn,
 		sessionArgs: sArgs,
 		metrics:     metrics,
-		startTime:   connStart,
 		rd:          *bufio.NewReader(netConn),
 		sv:          sv,
 		readBuf:     pgwirebase.MakeReadBuffer(pgwirebase.ReadBufferOptionWithClusterSettings(sv)),
@@ -187,6 +174,7 @@ func newConn(
 	c.res.released = true
 	c.writerState.fi.buf = &c.writerState.buf
 	c.writerState.fi.lastFlushed = -1
+	c.writerState.fi.cmdStarts = make(map[sql.CmdPos]int)
 	c.msgBuilder.init(metrics.BytesOutCount)
 
 	return c
@@ -230,24 +218,20 @@ func (c *conn) serveImpl(
 ) {
 	defer func() { _ = c.conn.Close() }()
 
-	if c.sessionArgs.User.IsRootUser() || c.sessionArgs.User.IsNodeUser() {
+	if c.sessionArgs.User == security.RootUser || c.sessionArgs.User == security.NodeUser {
 		ctx = logtags.AddTag(ctx, "user", log.Safe(c.sessionArgs.User))
 	} else {
 		ctx = logtags.AddTag(ctx, "user", c.sessionArgs.User)
 	}
 
 	inTestWithoutSQL := sqlServer == nil
+	var authLogger *log.SecondaryLogger
 	if !inTestWithoutSQL {
+		authLogger = sqlServer.GetExecutorConfig().AuthLogger
 		sessionStart := timeutil.Now()
 		defer func() {
 			if c.authLogEnabled() {
-				endTime := timeutil.Now()
-				ev := &eventpb.ClientSessionEnd{
-					CommonEventDetails:      eventpb.CommonEventDetails{Timestamp: endTime.UnixNano()},
-					CommonConnectionDetails: authOpt.connDetails,
-					Duration:                endTime.Sub(sessionStart).Nanoseconds(),
-				}
-				log.StructuredEvent(ctx, ev)
+				authLogger.Logf(ctx, "session terminated; duration: %s", timeutil.Now().Sub(sessionStart))
 			}
 		}()
 	}
@@ -280,10 +264,13 @@ func (c *conn) serveImpl(
 
 	// the authPipe below logs authentication messages iff its auth
 	// logger is non-nil. We define this here.
-	logAuthn := !inTestWithoutSQL && c.authLogEnabled()
+	var sessionAuthLogger *log.SecondaryLogger
+	if !inTestWithoutSQL && c.authLogEnabled() {
+		sessionAuthLogger = authLogger
+	}
 
 	// We'll build an authPipe to communicate with the authentication process.
-	authPipe := newAuthPipe(c, logAuthn, authOpt, c.sessionArgs.User)
+	authPipe := newAuthPipe(c, sessionAuthLogger)
 	var authenticator authenticatorIO = authPipe
 
 	// procCh is the channel on which we'll receive the termination signal from
@@ -312,12 +299,14 @@ func (c *conn) serveImpl(
 		}
 		var ac AuthConn = authPipe
 		// Simulate auth succeeding.
-		ac.AuthOK(ctx, fixedIntSizer{size: types.Int})
+		ac.AuthOK(fixedIntSizer{size: types.Int})
 		dummyCh := make(chan error)
 		close(dummyCh)
 		procCh = dummyCh
-
-		if err := c.sendReadyForQuery(); err != nil {
+		// An initial readyForQuery message is part of the handshake.
+		c.msgBuilder.initMsg(pgwirebase.ServerMsgReady)
+		c.msgBuilder.writeByte(byte(sql.IdleTxnBlock))
+		if err := c.msgBuilder.finishMsg(c.conn); err != nil {
 			reserved.Close(ctx)
 			return
 		}
@@ -333,35 +322,42 @@ func (c *conn) serveImpl(
 	// to keep reading from the network connection while authentication is in
 	// progress in order to react to the connection closing).
 	var intSizer unqualifiedIntSizer = fixedIntSizer{size: types.Int}
-	var authDone, ignoreUntilSync bool
+	var authDone bool
 	for {
-		breakLoop, err := func() (bool, error) {
-			typ, n, err := c.readBuf.ReadTypedMsg(&c.rd)
+		if breakLoop, err := func() (breakLoop bool, err error) {
+			var typ pgwirebase.ClientMessageType
+			var n int
+			typ, n, err = c.readBuf.ReadTypedMsg(&c.rd)
 			c.metrics.BytesInCount.Inc(int64(n))
 			if err != nil {
-				if pgwirebase.IsMessageTooBigError(err) {
+				// Only perform this logic on ClientMsgSimpleQuery for v20.2.
+				// We cannot safely do the rest of this (i.e. for portals) without doing
+				// the todo message by jordan regarding error in extended protocol state
+				// below.
+				if pgwirebase.IsMessageTooBigError(err) && typ == pgwirebase.ClientMsgSimpleQuery {
 					log.VInfof(ctx, 1, "pgwire: found big error message; attempting to slurp bytes and return error: %s", err)
 
 					// Slurp the remaining bytes.
 					slurpN, slurpErr := c.readBuf.SlurpBytes(&c.rd, pgwirebase.GetMessageTooBigSize(err))
 					c.metrics.BytesInCount.Inc(int64(slurpN))
 					if slurpErr != nil {
-						return false, errors.Wrap(slurpErr, "pgwire: error slurping remaining bytes")
+						return false, errors.Newf("pgwire: error slurping remaining bytes: %s", slurpErr)
 					}
 
 					// Write out the error over pgwire.
-					if err := c.stmtBuf.Push(ctx, sql.SendError{Err: err}); err != nil {
+					if err := writeErr(
+						ctx,
+						&sqlServer.GetExecutorConfig().Settings.SV,
+						err,
+						&c.msgBuilder,
+						&c.writerState.buf,
+					); err != nil {
 						return false, errors.New("pgwire: error writing too big error message to the client")
 					}
 
-					// If this is a simple query, we have to send the sync message back as
-					// well. Otherwise, we ignore all messages until receiving a sync.
-					if typ == pgwirebase.ClientMsgSimpleQuery {
-						if err = c.stmtBuf.Push(ctx, sql.Sync{}); err != nil {
-							return false, errors.New("pgwire: error writing sync to the client whilst message is too big")
-						}
-					} else {
-						ignoreUntilSync = true
+					// We have to send the sync message back as well.
+					if err = c.stmtBuf.Push(ctx, sql.Sync{}); err != nil {
+						return false, errors.New("pgwire: error writing sync to the client whilst message is too big")
 					}
 
 					// We need to continue processing here for pgwire clients to be able to
@@ -372,16 +368,10 @@ func (c *conn) serveImpl(
 					// packet) and instead return a broken pipe or io.EOF error message.
 					return false, nil
 				}
-				return false, errors.Wrap(err, "pgwire: error reading input")
+				return false, errors.Newf("pgwire: error reading input: %s", err)
 			}
 			timeReceived := timeutil.Now()
 			log.VEventf(ctx, 2, "pgwire: processing %s", typ)
-
-			if ignoreUntilSync && typ != pgwirebase.ClientMsgSync {
-				log.VInfof(ctx, 1, "pgwire: skipping non-sync message after encountering error")
-				return false, nil
-			}
-			ignoreUntilSync = false
 
 			if !authDone {
 				if typ == pgwirebase.ClientMsgPassword {
@@ -403,12 +393,13 @@ func (c *conn) serveImpl(
 					return true, nil //nolint:returnerrcheck
 				}
 				authDone = true
-
-				// We count the connection establish latency until we are ready to
-				// serve a SQL query. It includes the time it takes to authenticate.
-				duration := timeutil.Now().Sub(c.startTime).Nanoseconds()
-				c.metrics.ConnLatency.RecordValue(duration)
 			}
+
+			// TODO(jordan): there's one big missing piece of implementation here.
+			// In Postgres, if an error is encountered during extended protocol mode,
+			// the protocol skips all messages until a Sync is received to "regain
+			// protocol synchronization". We don't do this. If this becomes a problem,
+			// we should copy their behavior.
 
 			switch typ {
 			case pgwirebase.ClientMsgPassword:
@@ -467,17 +458,10 @@ func (c *conn) serveImpl(
 					ctx,
 					sql.SendError{Err: pgwirebase.NewUnrecognizedMsgTypeErr(typ)})
 			}
-		}()
-		if err != nil {
+		}(); err != nil {
 			log.VEventf(ctx, 1, "pgwire: error processing message: %s", err)
-			ignoreUntilSync = true
-			// If we can't read data because the connection was closed or the context
-			// was canceled (e.g. during authentication), then we should break.
-			if netutil.IsClosedConnection(err) || errors.Is(err, context.Canceled) {
-				break
-			}
-		}
-		if breakLoop {
+			break
+		} else if breakLoop {
 			break
 		}
 	}
@@ -514,7 +498,7 @@ func (c *conn) serveImpl(
 		// sent another error for the last query (like a context canceled) is a bad
 		// idea; see #22630. I think we should find a way to return the
 		// AdminShutdown error as the only result of the query.
-		log.Ops.Info(ctx, "closing existing connection while server is draining")
+		log.Info(ctx, "closing existing connection while server is draining")
 		_ /* err */ = writeErr(ctx, &sqlServer.GetExecutorConfig().Settings.SV,
 			newAdminShutdownErr(ErrDrainingExistingConn), &c.msgBuilder, &c.writerState.buf)
 		_ /* n */, _ /* err */ = c.writerState.buf.WriteTo(c.conn)
@@ -634,7 +618,7 @@ func (c *conn) processCommandsAsync(
 			return
 		}
 		// Signal the connection was established to the authenticator.
-		ac.AuthOK(ctx, connHandler)
+		ac.AuthOK(connHandler)
 		// Mark the authentication as succeeded in case a panic
 		// is thrown below and we need to report to the client
 		// using the defer above.
@@ -661,7 +645,7 @@ func (c *conn) bufferParamStatus(param, value string) error {
 	return c.msgBuilder.finishMsg(&c.writerState.buf)
 }
 
-func (c *conn) bufferNotice(ctx context.Context, noticeErr pgnotice.Notice) error {
+func (c *conn) bufferNotice(ctx context.Context, noticeErr error) error {
 	c.msgBuilder.initMsg(pgwirebase.ServerMsgNoticeResponse)
 	return writeErrFields(ctx, c.sv, noticeErr, &c.msgBuilder, &c.writerState.buf)
 }
@@ -691,14 +675,14 @@ func (c *conn) sendInitialConnData(
 	}
 	// The two following status parameters have no equivalent session
 	// variable.
-	if err := c.sendParamStatus("session_authorization", c.sessionArgs.User.Normalized()); err != nil {
+	if err := c.sendParamStatus("session_authorization", c.sessionArgs.User); err != nil {
 		return sql.ConnectionHandler{}, err
 	}
 
 	// TODO(knz): this should retrieve the admin status during
 	// authentication using the roles table, instead of using a
 	// simple/naive username match.
-	isSuperUser := c.sessionArgs.User.IsRootUser()
+	isSuperUser := c.sessionArgs.User == security.RootUser
 	superUserVal := "off"
 	if isSuperUser {
 		superUserVal = "on"
@@ -706,35 +690,14 @@ func (c *conn) sendInitialConnData(
 	if err := c.sendParamStatus("is_superuser", superUserVal); err != nil {
 		return sql.ConnectionHandler{}, err
 	}
-	if err := c.sendReadyForQuery(); err != nil {
-		return sql.ConnectionHandler{}, err
-	}
-	return connHandler, nil
-}
 
-// sendReadyForQuery sends the final messages of the connection handshake.
-// This includes a placeholder BackendKeyData message and a ServerMsgReady
-// message indicating that there is no active transaction.
-func (c *conn) sendReadyForQuery() error {
-	// Send the client a dummy BackendKeyData message. This is necessary for
-	// compatibility with tools that require this message. This information is
-	// normally used by clients to send a CancelRequest message:
-	// https://www.postgresql.org/docs/9.6/static/protocol-flow.html#AEN112861
-	// CockroachDB currently ignores all CancelRequests.
-	c.msgBuilder.initMsg(pgwirebase.ServerMsgBackendKeyData)
-	c.msgBuilder.putInt32(0)
-	c.msgBuilder.putInt32(0)
-	if err := c.msgBuilder.finishMsg(c.conn); err != nil {
-		return err
-	}
-
-	// An initial ServerMsgReady message is part of the handshake.
+	// An initial readyForQuery message is part of the handshake.
 	c.msgBuilder.initMsg(pgwirebase.ServerMsgReady)
 	c.msgBuilder.writeByte(byte(sql.IdleTxnBlock))
 	if err := c.msgBuilder.finishMsg(c.conn); err != nil {
-		return err
+		return sql.ConnectionHandler{}, err
 	}
-	return nil
+	return connHandler, nil
 }
 
 // An error is returned iff the statement buffer has been closed. In that case,
@@ -749,6 +712,8 @@ func (c *conn) handleSimpleQuery(
 	if err != nil {
 		return c.stmtBuf.Push(ctx, sql.SendError{Err: err})
 	}
+
+	tracing.AnnotateTrace()
 
 	startParse := timeutil.Now()
 	stmts, err := c.parser.ParseWithInt(query, unqualifiedIntSize)
@@ -1133,77 +1098,21 @@ type flushInfo struct {
 	// flushed. The command may have further results in the buffer that haven't
 	// been flushed.
 	lastFlushed sql.CmdPos
-	// cmdStarts maintains the state about where the results for the respective
-	// positions begin. We utilize the invariant that positions are
-	// monotonically increasing sequences.
-	cmdStarts cmdIdxBuffer
+	// map from CmdPos to the index of the buffer where the results for the
+	// respective result begins.
+	cmdStarts map[sql.CmdPos]int
 }
 
-type cmdIdx struct {
-	pos sql.CmdPos
-	idx int
-}
-
-var cmdIdxPool = sync.Pool{
-	New: func() interface{} {
-		return &cmdIdx{}
-	},
-}
-
-func (c *cmdIdx) release() {
-	*c = cmdIdx{}
-	cmdIdxPool.Put(c)
-}
-
-type cmdIdxBuffer struct {
-	// We intentionally do not just embed ring.Buffer in order to restrict the
-	// methods that can be called on cmdIdxBuffer.
-	buffer ring.Buffer
-}
-
-func (b *cmdIdxBuffer) empty() bool {
-	return b.buffer.Len() == 0
-}
-
-func (b *cmdIdxBuffer) addLast(pos sql.CmdPos, idx int) {
-	cmdIdx := cmdIdxPool.Get().(*cmdIdx)
-	cmdIdx.pos = pos
-	cmdIdx.idx = idx
-	b.buffer.AddLast(cmdIdx)
-}
-
-// removeLast removes the last cmdIdx from the buffer and will panic if the
-// buffer is empty.
-func (b *cmdIdxBuffer) removeLast() {
-	b.getLast().release()
-	b.buffer.RemoveLast()
-}
-
-// getLast returns the last cmdIdx in the buffer and will panic if the buffer is
-// empty.
-func (b *cmdIdxBuffer) getLast() *cmdIdx {
-	return b.buffer.GetLast().(*cmdIdx)
-}
-
-func (b *cmdIdxBuffer) clear() {
-	for !b.empty() {
-		b.removeLast()
-	}
-}
-
-// registerCmd updates cmdStarts buffer when the first result for a new command
-// is received.
+// registerCmd updates cmdStarts when the first result for a new command is
+// received.
 func (fi *flushInfo) registerCmd(pos sql.CmdPos) {
-	if !fi.cmdStarts.empty() && fi.cmdStarts.getLast().pos >= pos {
-		// Not a new command, nothing to do.
+	if _, ok := fi.cmdStarts[pos]; ok {
 		return
 	}
-	fi.cmdStarts.addLast(pos, fi.buf.Len())
+	fi.cmdStarts[pos] = fi.buf.Len()
 }
 
-func cookTag(
-	tagStr string, buf []byte, stmtType tree.StatementReturnType, rowsAffected int,
-) []byte {
+func cookTag(tagStr string, buf []byte, stmtType tree.StatementType, rowsAffected int) []byte {
 	if tagStr == "INSERT" {
 		// From the postgres docs (49.5. Message Formats):
 		// `INSERT oid rows`... oid is the object ID of the inserted row if
@@ -1247,8 +1156,7 @@ func (c *conn) bufferRow(
 	ctx context.Context,
 	row tree.Datums,
 	formatCodes []pgwirebase.FormatCode,
-	conv sessiondatapb.DataConversionConfig,
-	sessionLoc *time.Location,
+	conv sessiondata.DataConversionConfig,
 	types []*types.T,
 ) {
 	c.msgBuilder.initMsg(pgwirebase.ServerMsgDataRow)
@@ -1260,59 +1168,15 @@ func (c *conn) bufferRow(
 		}
 		switch fmtCode {
 		case pgwirebase.FormatText:
-			c.msgBuilder.writeTextDatum(ctx, col, conv, sessionLoc, types[i])
+			c.msgBuilder.writeTextDatum(ctx, col, conv, types[i])
 		case pgwirebase.FormatBinary:
-			c.msgBuilder.writeBinaryDatum(ctx, col, sessionLoc, types[i])
+			c.msgBuilder.writeBinaryDatum(ctx, col, conv.Location, types[i])
 		default:
 			c.msgBuilder.setError(errors.Errorf("unsupported format code %s", fmtCode))
 		}
 	}
 	if err := c.msgBuilder.finishMsg(&c.writerState.buf); err != nil {
 		panic(errors.AssertionFailedf("unexpected err from buffer: %s", err))
-	}
-}
-
-// bufferBatch serializes a batch and adds all the rows from it to the buffer.
-// It is a noop for zero-length batch.
-//
-// formatCodes describes the desired encoding for each column. It can be nil, in
-// which case all columns are encoded using the text encoding. Otherwise, it
-// needs to contain an entry for every column.
-func (c *conn) bufferBatch(
-	ctx context.Context,
-	batch coldata.Batch,
-	formatCodes []pgwirebase.FormatCode,
-	conv sessiondatapb.DataConversionConfig,
-	sessionLoc *time.Location,
-) {
-	sel := batch.Selection()
-	n := batch.Length()
-	vecs := batch.ColVecs()
-	width := int16(len(vecs))
-	for i := 0; i < n; i++ {
-		rowIdx := i
-		if sel != nil {
-			rowIdx = sel[rowIdx]
-		}
-		c.msgBuilder.initMsg(pgwirebase.ServerMsgDataRow)
-		c.msgBuilder.putInt16(width)
-		for colIdx, col := range vecs {
-			fmtCode := pgwirebase.FormatText
-			if formatCodes != nil {
-				fmtCode = formatCodes[colIdx]
-			}
-			switch fmtCode {
-			case pgwirebase.FormatText:
-				c.msgBuilder.writeTextColumnarElement(ctx, col, rowIdx, conv, sessionLoc)
-			case pgwirebase.FormatBinary:
-				c.msgBuilder.writeBinaryColumnarElement(ctx, col, rowIdx, sessionLoc)
-			default:
-				c.msgBuilder.setError(errors.Errorf("unsupported format code %s", fmtCode))
-			}
-		}
-		if err := c.msgBuilder.finishMsg(&c.writerState.buf); err != nil {
-			panic(fmt.Sprintf("unexpected err from buffer: %s", err))
-		}
 	}
 }
 
@@ -1504,8 +1368,7 @@ func (c *conn) Flush(pos sql.CmdPos) error {
 	}
 
 	c.writerState.fi.lastFlushed = pos
-	// Make sure that the entire cmdStarts buffer is drained.
-	c.writerState.fi.cmdStarts.clear()
+	c.writerState.fi.cmdStarts = make(map[sql.CmdPos]int)
 
 	_ /* n */, err := c.writerState.buf.WriteTo(c.conn)
 	if err != nil {
@@ -1556,20 +1419,20 @@ func (cl *clientConnLock) RTrim(ctx context.Context, pos sql.CmdPos) {
 	if pos <= cl.lastFlushed {
 		panic(errors.AssertionFailedf("asked to trim to pos: %d, below the last flush: %d", pos, cl.lastFlushed))
 	}
-	// If we don't have a start index for pos yet, it must be that no results
-	// for it yet have been produced yet.
-	truncateIdx := cl.buf.Len()
-	// Update cmdStarts buffer: delete commands that were trimmed from the back
-	// of the cmdStarts buffer.
-	for !cl.cmdStarts.empty() {
-		cmdStart := cl.cmdStarts.getLast()
-		if cmdStart.pos < pos {
-			break
-		}
-		truncateIdx = cmdStart.idx
-		cl.cmdStarts.removeLast()
+	idx, ok := cl.cmdStarts[pos]
+	if !ok {
+		// If we don't have a start index for pos yet, it must be that no results
+		// for it yet have been produced yet.
+		idx = cl.buf.Len()
 	}
-	cl.buf.Truncate(truncateIdx)
+	// Remove everything from the buffer after idx.
+	cl.buf.Truncate(idx)
+	// Update cmdStarts: delete commands that were trimmed.
+	for p := range cl.cmdStarts {
+		if p >= pos {
+			delete(cl.cmdStarts, p)
+		}
+	}
 }
 
 // CreateStatementResult is part of the sql.ClientComm interface.
@@ -1578,13 +1441,12 @@ func (c *conn) CreateStatementResult(
 	descOpt sql.RowDescOpt,
 	pos sql.CmdPos,
 	formatCodes []pgwirebase.FormatCode,
-	conv sessiondatapb.DataConversionConfig,
-	location *time.Location,
+	conv sessiondata.DataConversionConfig,
 	limit int,
 	portalName string,
 	implicitTxn bool,
 ) sql.CommandResult {
-	return c.newCommandResult(descOpt, pos, stmt, formatCodes, conv, location, limit, portalName, implicitTxn)
+	return c.newCommandResult(descOpt, pos, stmt, formatCodes, conv, limit, portalName, implicitTxn)
 }
 
 // CreateSyncResult is part of the sql.ClientComm interface.
@@ -1710,6 +1572,14 @@ type readTimeoutConn struct {
 }
 
 func newReadTimeoutConn(c net.Conn, checkExitConds func() error) net.Conn {
+	// net.Pipe does not support setting deadlines. See
+	// https://github.com/golang/go/blob/go1.7.4/src/net/pipe.go#L57-L67
+	//
+	// TODO(andrei): starting with Go 1.10, pipes are supposed to support
+	// timeouts, so this should go away when we upgrade the compiler.
+	if c.LocalAddr().Network() == "pipe" {
+		return c
+	}
 	return &readTimeoutConn{
 		Conn:           c,
 		checkExitConds: checkExitConds,

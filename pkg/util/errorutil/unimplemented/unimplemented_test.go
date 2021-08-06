@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/errors"
 )
 
@@ -50,7 +49,7 @@ func TestUnimplemented(t *testing.T) {
 				}
 				if test.expIssue != 0 {
 					ref := fmt.Sprintf("%s\nSee: %s",
-						errors.UnimplementedErrorHint, build.MakeIssueURL(test.expIssue))
+						errors.UnimplementedErrorHint, MakeURL(test.expIssue))
 					if hint == ref {
 						found |= 2
 					}
@@ -79,7 +78,7 @@ func TestUnimplemented(t *testing.T) {
 				}
 
 				if test.expIssue != 0 {
-					url := build.MakeIssueURL(test.expIssue)
+					url := MakeURL(test.expIssue)
 					if links[0].IssueURL != url {
 						t.Errorf("expected link url %q, got %q", url, links[0].IssueURL)
 					}

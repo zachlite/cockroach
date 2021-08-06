@@ -180,9 +180,9 @@ func init() {
 	}
 }
 
-// CalcArrayOid returns the OID of the array type having elements of the given
+// calcArrayOid returns the OID of the array type having elements of the given
 // type.
-func CalcArrayOid(elemTyp *T) oid.Oid {
+func calcArrayOid(elemTyp *T) oid.Oid {
 	o := elemTyp.Oid()
 	switch elemTyp.Family() {
 	case ArrayFamily:

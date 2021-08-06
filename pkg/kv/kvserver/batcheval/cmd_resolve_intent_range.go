@@ -24,9 +24,12 @@ func init() {
 }
 
 func declareKeysResolveIntentRange(
-	rs ImmutableRangeState, _ roachpb.Header, req roachpb.Request, latchSpans, _ *spanset.SpanSet,
+	_ *roachpb.RangeDescriptor,
+	header roachpb.Header,
+	req roachpb.Request,
+	latchSpans, _ *spanset.SpanSet,
 ) {
-	declareKeysResolveIntentCombined(rs, req, latchSpans)
+	declareKeysResolveIntentCombined(header, req, latchSpans)
 }
 
 // ResolveIntentRange resolves write intents in the specified
@@ -44,8 +47,12 @@ func ResolveIntentRange(
 
 	update := args.AsLockUpdate()
 
-	numKeys, resumeSpan, err := storage.MVCCResolveWriteIntentRange(
-		ctx, readWriter, ms, update, h.MaxSpanRequestKeys)
+	iterAndBuf := storage.GetIterAndBuf(readWriter, storage.IterOptions{UpperBound: args.EndKey})
+	defer iterAndBuf.Cleanup()
+
+	numKeys, resumeSpan, err := storage.MVCCResolveWriteIntentRangeUsingIter(
+		ctx, readWriter, iterAndBuf, ms, update, h.MaxSpanRequestKeys,
+	)
 	if err != nil {
 		return result.Result{}, err
 	}

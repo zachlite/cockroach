@@ -12,17 +12,14 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -36,7 +33,7 @@ type unorderedSynchronizerMsg struct {
 	meta     []execinfrapb.ProducerMetadata
 }
 
-var _ colexecop.Operator = &ParallelUnorderedSynchronizer{}
+var _ colexecbase.Operator = &ParallelUnorderedSynchronizer{}
 var _ execinfra.OpNode = &ParallelUnorderedSynchronizer{}
 
 type parallelUnorderedSynchronizerState int
@@ -61,9 +58,7 @@ const (
 // ParallelUnorderedSynchronizer is an Operator that combines multiple Operator streams
 // into one.
 type ParallelUnorderedSynchronizer struct {
-	colexecop.InitHelper
-
-	inputs []colexecargs.OpWithMetaInfo
+	inputs []SynchronizerInput
 	// readNextBatch is a slice of channels, where each channel corresponds to the
 	// input at the same index in inputs. It is used as a barrier for input
 	// goroutines to wait on until the Next goroutine signals that it is safe to
@@ -102,9 +97,6 @@ type ParallelUnorderedSynchronizer struct {
 	bufferedMeta []execinfrapb.ProducerMetadata
 }
 
-var _ colexecop.DrainableOperator = &ParallelUnorderedSynchronizer{}
-var _ colexecop.ClosableOperator = &ParallelUnorderedSynchronizer{}
-
 // ChildCount implements the execinfra.OpNode interface.
 func (s *ParallelUnorderedSynchronizer) ChildCount(verbose bool) int {
 	return len(s.inputs)
@@ -112,7 +104,30 @@ func (s *ParallelUnorderedSynchronizer) ChildCount(verbose bool) int {
 
 // Child implements the execinfra.OpNode interface.
 func (s *ParallelUnorderedSynchronizer) Child(nth int, verbose bool) execinfra.OpNode {
-	return s.inputs[nth].Root
+	return s.inputs[nth].Op
+}
+
+// SynchronizerInput is a wrapper over a colexecbase.Operator that a
+// synchronizer goroutine will be calling Next on. An accompanying
+// []execinfrapb.MetadataSource may also be specified, in which case
+// DrainMeta will be called from the same goroutine.
+type SynchronizerInput struct {
+	// Op is the input Operator.
+	Op colexecbase.Operator
+	// MetadataSources are metadata sources in the input tree that should be
+	// drained in the same goroutine as Op.
+	MetadataSources execinfrapb.MetadataSources
+	// ToClose are Closers in the input tree that should be closed in the same
+	// goroutine as Op.
+	ToClose Closers
+}
+
+func operatorsToSynchronizerInputs(ops []colexecbase.Operator) []SynchronizerInput {
+	result := make([]SynchronizerInput, len(ops))
+	for i := range result {
+		result[i].Op = ops[i]
+	}
+	return result
 }
 
 // NewParallelUnorderedSynchronizer creates a new ParallelUnorderedSynchronizer.
@@ -122,7 +137,7 @@ func (s *ParallelUnorderedSynchronizer) Child(nth int, verbose bool) execinfra.O
 // guaranteed that these spawned goroutines will have completed on any error or
 // zero-length batch received from Next.
 func NewParallelUnorderedSynchronizer(
-	inputs []colexecargs.OpWithMetaInfo, wg *sync.WaitGroup,
+	inputs []SynchronizerInput, wg *sync.WaitGroup,
 ) *ParallelUnorderedSynchronizer {
 	readNextBatch := make([]chan struct{}, len(inputs))
 	for i := range readNextBatch {
@@ -150,18 +165,10 @@ func NewParallelUnorderedSynchronizer(
 	}
 }
 
-// Init is part of the colexecop.Operator interface.
-func (s *ParallelUnorderedSynchronizer) Init(ctx context.Context) {
-	if !s.InitHelper.Init(ctx) {
-		return
-	}
-	for i, input := range s.inputs {
-		input.Root.Init(s.Ctx)
-		s.nextBatch[i] = func(inputOp colexecop.Operator, inputIdx int) func() {
-			return func() {
-				s.batches[inputIdx] = inputOp.Next()
-			}
-		}(input.Root, i)
+// Init is part of the Operator interface.
+func (s *ParallelUnorderedSynchronizer) Init() {
+	for _, input := range s.inputs {
+		input.Op.Init()
 	}
 }
 
@@ -174,27 +181,27 @@ func (s *ParallelUnorderedSynchronizer) setState(state parallelUnorderedSynchron
 }
 
 // init starts one goroutine per input to read from each input asynchronously
-// and push to batchCh. Canceling the context (passed in Init() above) results
-// in all goroutines terminating, otherwise they keep on pushing batches until a
-// zero-length batch is encountered. Once all inputs terminate, s.batchCh is
-// closed. If an error occurs, the goroutines will make a non-blocking best
-// effort to push that error on s.errCh, resulting in the first error pushed to
-// be observed by the Next goroutine. Inputs are asynchronous so that the
-// synchronizer is minimally affected by slow inputs.
-func (s *ParallelUnorderedSynchronizer) init() {
+// and push to batchCh. Canceling the context results in all goroutines
+// terminating, otherwise they keep on pushing batches until a zero-length batch
+// is encountered. Once all inputs terminate, s.batchCh is closed. If an error
+// occurs, the goroutines will make a non-blocking best effort to push that
+// error on s.errCh, resulting in the first error pushed to be observed by the
+// Next goroutine. Inputs are asynchronous so that the synchronizer is minimally
+// affected by slow inputs.
+func (s *ParallelUnorderedSynchronizer) init(ctx context.Context) {
 	for i, input := range s.inputs {
+		s.nextBatch[i] = func(input SynchronizerInput, inputIdx int) func() {
+			return func() {
+				s.batches[inputIdx] = input.Op.Next(ctx)
+			}
+		}(input, i)
 		s.externalWaitGroup.Add(1)
 		s.internalWaitGroup.Add(1)
 		// TODO(asubiotto): Most inputs are Inboxes, and these have handler
 		// goroutines just sitting around waiting for cancellation. I wonder if we
 		// could reuse those goroutines to push batches to batchCh directly.
-		go func(ctx context.Context, input colexecargs.OpWithMetaInfo, inputIdx int) {
-			var span *tracing.Span
-			ctx, span = execinfra.ProcessorSpan(ctx, fmt.Sprintf("parallel unordered sync input %d", inputIdx))
+		go func(input SynchronizerInput, inputIdx int) {
 			defer func() {
-				if span != nil {
-					span.Finish()
-				}
 				if int(atomic.AddUint32(&s.numFinishedInputs, 1)) == len(s.inputs) {
 					close(s.batchCh)
 				}
@@ -211,11 +218,6 @@ func (s *ParallelUnorderedSynchronizer) init() {
 				case s.errCh <- err:
 				default:
 				}
-			}
-			if s.nextBatch[inputIdx] == nil {
-				// The initialization of this input wasn't successful, so it is
-				// invalid to call Next or DrainMeta on it. Exit early.
-				return
 			}
 			msg := &unorderedSynchronizerMsg{
 				inputIdx: inputIdx,
@@ -241,16 +243,8 @@ func (s *ParallelUnorderedSynchronizer) init() {
 					msg = &unorderedSynchronizerMsg{
 						inputIdx: inputIdx,
 					}
-					if span != nil {
-						for _, s := range input.StatsCollectors {
-							span.RecordStructured(s.GetStats())
-						}
-						if meta := execinfra.GetTraceDataAsMetadata(span); meta != nil {
-							msg.meta = append(msg.meta, *meta)
-						}
-					}
 					if input.MetadataSources != nil {
-						msg.meta = append(msg.meta, input.MetadataSources.DrainMeta()...)
+						msg.meta = input.MetadataSources.DrainMeta(ctx)
 					}
 					if msg.meta == nil {
 						// Initialize msg.meta to be non-nil, which is a signal that
@@ -288,12 +282,12 @@ func (s *ParallelUnorderedSynchronizer) init() {
 					return
 				}
 			}
-		}(s.Ctx, input, i)
+		}(input, i)
 	}
 }
 
-// Next is part of the colexecop.Operator interface.
-func (s *ParallelUnorderedSynchronizer) Next() coldata.Batch {
+// Next is part of the Operator interface.
+func (s *ParallelUnorderedSynchronizer) Next(ctx context.Context) coldata.Batch {
 	for {
 		state := s.getState()
 		switch state {
@@ -301,7 +295,7 @@ func (s *ParallelUnorderedSynchronizer) Next() coldata.Batch {
 			return coldata.ZeroBatch
 		case parallelUnorderedSynchronizerStateUninitialized:
 			s.setState(parallelUnorderedSynchronizerStateRunning)
-			s.init()
+			s.init(ctx)
 		case parallelUnorderedSynchronizerStateRunning:
 			// Signal the input whose batch we returned in the last call to Next that it
 			// is safe to retrieve the next batch. Since Next has been called, we can
@@ -357,12 +351,14 @@ func (s *ParallelUnorderedSynchronizer) notifyInputToReadNextBatch(inputIdx int)
 	}
 }
 
-// DrainMeta is part of the colexecop.MetadataSource interface.
-func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetadata {
+// DrainMeta is part of the MetadataSource interface.
+func (s *ParallelUnorderedSynchronizer) DrainMeta(
+	ctx context.Context,
+) []execinfrapb.ProducerMetadata {
 	prevState := s.getState()
 	s.setState(parallelUnorderedSynchronizerStateDraining)
 	if prevState == parallelUnorderedSynchronizerStateUninitialized {
-		s.init()
+		s.init(ctx)
 	}
 
 	// Non-blocking drain of batchCh. This is important mostly because of the
@@ -417,30 +413,4 @@ func (s *ParallelUnorderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetada
 	// Done.
 	s.setState(parallelUnorderedSynchronizerStateDone)
 	return s.bufferedMeta
-}
-
-// Close is part of the colexecop.ClosableOperator interface.
-func (s *ParallelUnorderedSynchronizer) Close() error {
-	if state := s.getState(); state != parallelUnorderedSynchronizerStateUninitialized {
-		// Input goroutines have been started and will take care of closing the
-		// closers from the corresponding input trees, so we don't need to do
-		// anything.
-		return nil
-	}
-	// If the synchronizer is in "uninitialized" state, it means that the
-	// goroutines for each input haven't been started, so they won't be able to
-	// close the Closers from the corresponding trees. In such a scenario the
-	// synchronizer must close all of them from all input trees. Note that it is
-	// ok to close some input trees even if they haven't been initialized.
-	//
-	// Note that at this point we know that the input goroutines won't be
-	// spawned up (our consumer won't call Next/DrainMeta after calling Close),
-	// so it is safe to close all closers from this goroutine.
-	var lastErr error
-	for _, input := range s.inputs {
-		if err := input.ToClose.Close(); err != nil {
-			lastErr = err
-		}
-	}
-	return lastErr
 }

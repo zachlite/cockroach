@@ -61,7 +61,7 @@ func (p *planner) processSerialInColumnDef(
 	ctx context.Context, d *tree.ColumnTableDef, tableName *tree.TableName,
 ) (
 	*tree.ColumnTableDef,
-	*catalog.ResolvedObjectPrefix,
+	catalog.DatabaseDescriptor,
 	*tree.TableName,
 	tree.SequenceOptions,
 	error,
@@ -124,10 +124,8 @@ func (p *planner) processSerialInColumnDef(
 
 	// We want a sequence; for this we need to generate a new sequence name.
 	// The constraint on the name is that an object of this name must not exist already.
-	seqName := tree.NewTableNameWithSchema(
-		tableName.CatalogName,
-		tableName.SchemaName,
-		tree.Name(tableName.Table()+"_"+string(d.Name)+"_seq"))
+	seqName := tree.NewUnqualifiedTableName(
+		tree.Name(tableName.Table() + "_" + string(d.Name) + "_seq"))
 
 	// The first step in the search is to prepare the seqName to fill in
 	// the catalog/schema parent. This is what ResolveTargetObject does.
@@ -136,7 +134,7 @@ func (p *planner) processSerialInColumnDef(
 	// the cache does not work (well) if the txn retries and the
 	// descriptor was written already in an early txn attempt.
 	un := seqName.ToUnresolvedObjectName()
-	dbDesc, schemaDesc, prefix, err := p.ResolveTargetObject(ctx, un)
+	dbDesc, _, prefix, err := p.ResolveTargetObject(ctx, un)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -148,7 +146,7 @@ func (p *planner) processSerialInColumnDef(
 		if i > 0 {
 			seqName.ObjectName = tree.Name(fmt.Sprintf("%s%d", nameBase, i))
 		}
-		res, err := p.resolveUncachedTableDescriptor(ctx, seqName, false /*required*/, tree.ResolveAnyTableKind)
+		res, err := p.ResolveUncachedTableDescriptor(ctx, seqName, false /*required*/, tree.ResolveAnyTableKind)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -180,9 +178,7 @@ func (p *planner) processSerialInColumnDef(
 
 	newSpec.DefaultExpr.Expr = defaultExpr
 
-	return &newSpec, &catalog.ResolvedObjectPrefix{
-		Database: dbDesc, Schema: schemaDesc,
-	}, seqName, seqOpts, nil
+	return &newSpec, dbDesc, seqName, seqOpts, nil
 }
 
 // SimplifySerialInColumnDefWithRowID analyzes a column definition and

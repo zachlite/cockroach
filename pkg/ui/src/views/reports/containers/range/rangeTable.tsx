@@ -35,13 +35,8 @@ interface RangeTableRow {
 }
 
 interface RangeTableCellContent {
-  // value represents the strings to be rendered. Each one is rendered on its
-  // own line (as a <li>).
   value: string[];
-  // title represents the strings that will constitute the HTML title of the
-  // cell (i.e. the tooltip). If nil, value is used.
   title?: string[];
-  // The classes to be applied to the cell.
   className?: string[];
 }
 
@@ -125,27 +120,23 @@ const rangeTableDisplayList: RangeTableRow[] = [
     compareToLeader: true,
   },
   {
-    variable: "gcAvgAge",
+    variable: "GCAvgAge",
     display: "Dead Value average age",
     compareToLeader: true,
   },
   {
-    variable: "gcBytesAge",
+    variable: "GCBytesAge",
     display: "GC Bytes Age (score)",
     compareToLeader: true,
   },
+  { variable: "NumIntents", display: "Intents", compareToLeader: true },
   {
-    variable: "numIntents",
-    display: "Intents",
-    compareToLeader: true,
-  },
-  {
-    variable: "intentAvgAge",
+    variable: "IntentAvgAge",
     display: "Intent Average Age",
     compareToLeader: true,
   },
   {
-    variable: "intentAge",
+    variable: "IntentAge",
     display: "Intent Age (score)",
     compareToLeader: true,
   },
@@ -180,38 +171,18 @@ const rangeTableDisplayList: RangeTableRow[] = [
     compareToLeader: true,
   },
   {
-    variable: "readLatches",
-    display: "Read Latches",
-    compareToLeader: false,
-  },
-  {
     variable: "writeLatches",
-    display: "Write Latches",
+    display: "Write Latches Local/Global",
     compareToLeader: false,
   },
   {
-    variable: "locks",
-    display: "Locks",
-    compareToLeader: false,
-  },
-  {
-    variable: "locksWithWaitQueues",
-    display: "Locks With Wait-Queues",
-    compareToLeader: false,
-  },
-  {
-    variable: "lockWaitQueueWaiters",
-    display: "Lock Wait-Queue Waiters",
-    compareToLeader: false,
-  },
-  {
-    variable: "top_k_locks_by_wait_queue_waiters",
-    display: "Top Locks By Wait-Queue Waiters",
+    variable: "readLatches",
+    display: "Read Latches Local/Global",
     compareToLeader: false,
   },
   {
     variable: "closedTimestampPolicy",
-    display: "Closed timestamp Policy",
+    display: "Closed timestamp policy",
     compareToLeader: true,
   },
   {
@@ -389,9 +360,27 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     };
   }
 
+  contentLatchInfo(
+    local: Long | number,
+    global: Long | number,
+    isRaftLeader: boolean,
+  ): RangeTableCellContent {
+    if (isRaftLeader) {
+      return this.createContent(
+        `${local.toString()} local / ${global.toString()} global`,
+      );
+    }
+    if (local.toString() === "0" && global.toString() === "0") {
+      return rangeTableEmptyContent;
+    }
+    return this.createContent(
+      `${local.toString()} local / ${global.toString()} global`,
+      "range-table__cell--warning",
+    );
+  }
+
   contentTimestamp(
     timestamp: protos.cockroach.util.hlc.ITimestamp,
-    now: moment.Moment,
   ): RangeTableCellContent {
     if (_.isNil(timestamp) || _.isNil(timestamp.wall_time)) {
       return {
@@ -399,16 +388,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         className: ["range-table__cell--warning"],
       };
     }
-    if (FixLong(timestamp.wall_time).isZero()) {
-      return {
-        value: [""],
-        title: ["0"],
-      };
-    }
     const humanized = Print.Timestamp(timestamp);
-    const delta = Print.TimestampDeltaFromNow(timestamp, now);
     return {
-      value: [humanized, delta],
+      value: [humanized],
       title: [humanized, FixLong(timestamp.wall_time).toString()],
     };
   }
@@ -635,8 +617,6 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
 
     const dormantStoreIDs: Set<number> = new Set();
 
-    const now = moment();
-
     // Convert the infos to a simpler object for display purposes. This helps when trying to
     // determine if any warnings should be displayed.
     const detailsByStoreID: Map<number, RangeTableDetail> = new Map();
@@ -699,10 +679,10 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         leaseEpoch: epoch
           ? this.createContent(lease.epoch)
           : rangeTableEmptyContent,
-        leaseStart: this.contentTimestamp(lease.start, now),
+        leaseStart: this.contentTimestamp(lease.start),
         leaseExpiration: epoch
           ? rangeTableEmptyContent
-          : this.contentTimestamp(lease.expiration, now),
+          : this.contentTimestamp(lease.expiration),
         leaseAppliedIndex: this.createContent(
           FixLong(info.state.state.lease_applied_index),
         ),
@@ -787,32 +767,23 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         rangeMaxBytes: this.contentBytes(FixLong(info.state.range_max_bytes)),
         mvccIntentAge: this.contentDuration(FixLong(mvcc.intent_age)),
 
-        gcAvgAge: this.contentGCAvgAge(mvcc),
-        gcBytesAge: this.createContent(FixLong(mvcc.gc_bytes_age)),
+        GCAvgAge: this.contentGCAvgAge(mvcc),
+        GCBytesAge: this.createContent(FixLong(mvcc.gc_bytes_age)),
 
-        numIntents: this.createContent(FixLong(mvcc.intent_count)),
-        intentAvgAge: this.createContentIntentAvgAge(mvcc),
-        intentAge: this.createContent(FixLong(mvcc.intent_age)),
+        NumIntents: this.createContent(FixLong(mvcc.intent_count)),
+        IntentAvgAge: this.createContentIntentAvgAge(mvcc),
+        IntentAge: this.createContent(FixLong(mvcc.intent_age)),
 
-        readLatches: this.createContent(FixLong(info.read_latches)),
-        writeLatches: this.createContent(FixLong(info.write_latches)),
-        locks: this.createContent(FixLong(info.locks)),
-        locksWithWaitQueues: this.createContent(
-          FixLong(info.locks_with_wait_queues),
+        writeLatches: this.contentLatchInfo(
+          FixLong(info.latches_local.write_count),
+          FixLong(info.latches_global.write_count),
+          raftLeader,
         ),
-        lockWaitQueueWaiters: this.createContent(
-          FixLong(info.lock_wait_queue_waiters),
+        readLatches: this.contentLatchInfo(
+          FixLong(info.latches_local.read_count),
+          FixLong(info.latches_global.read_count),
+          raftLeader,
         ),
-        top_k_locks_by_wait_queue_waiters: this.contentIf(
-          _.size(info.top_k_locks_by_wait_queue_waiters) > 0,
-          () => ({
-            value: _.map(
-              info.top_k_locks_by_wait_queue_waiters,
-              (lock) => `${lock.pretty_key} (${lock.waiters} waiters)`,
-            ),
-          }),
-        ),
-
         closedTimestampPolicy: this.createContent(
           // We index into the enum in order to get the label string, instead of
           // the numeric value.
@@ -826,11 +797,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         ),
         closedTimestampRaft: this.contentTimestamp(
           info.state.state.raft_closed_timestamp,
-          now,
         ),
         closedTimestampSideTransportReplica: this.contentTimestamp(
           info.state.closed_timestamp_sidetransport_info.replica_closed,
-          now,
         ),
         closedTimestampSideTransportReplicaLAI: this.createContent(
           FixLong(info.state.closed_timestamp_sidetransport_info.replica_lai),
@@ -842,7 +811,6 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
         ),
         closedTimestampSideTransportCentral: this.contentTimestamp(
           info.state.closed_timestamp_sidetransport_info.central_closed,
-          now,
         ),
         closedTimestampSideTransportCentralLAI: this.createContent(
           FixLong(info.state.closed_timestamp_sidetransport_info.central_lai),

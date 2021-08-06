@@ -191,9 +191,3 @@ func (m *mockInternalClient) Join(
 ) (*roachpb.JoinNodeResponse, error) {
 	return nil, fmt.Errorf("unsupported Join call")
 }
-
-func (m *mockInternalClient) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest, _ ...grpc.CallOption,
-) (*roachpb.TokenBucketResponse, error) {
-	return nil, fmt.Errorf("unsupported TokenBucket call")
-}

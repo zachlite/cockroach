@@ -10,11 +10,7 @@
 
 import React from "react";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import {
-  SortedTable,
-  ISortedTablePagination,
-  longListWithTooltip,
-} from "../sortedtable";
+import { SortedTable, ISortedTablePagination } from "../sortedtable";
 import {
   transactionsCountBarChart,
   transactionsRowsReadBarChart,
@@ -25,46 +21,41 @@ import {
   transactionsNetworkBytesBarChart,
   transactionsRetryBarChart,
 } from "./transactionsBarCharts";
-import { statisticsTableTitles } from "../statsTableUtil/statsTableUtil";
+import { StatementTableTitle } from "../statementsTable/statementsTableContent";
+import { longToInt } from "./utils";
 import { tableClasses } from "./transactionsTableClasses";
 import { textCell } from "./transactionsCells";
-import { FixLong, longToInt } from "src/util";
+import { FixLong } from "src/util";
 import { SortSetting } from "../sortedtable";
 import {
-  getStatementsByFingerprintId,
+  getStatementsById,
   collectStatementsText,
 } from "../transactionsPage/utils";
 import Long from "long";
 import classNames from "classnames/bind";
-import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
+import statementsPageStyles from "src/statementsTable/statementsTableContent.module.scss";
 
 type Transaction = protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
 type TransactionStats = protos.cockroach.sql.ITransactionStatistics;
-type CollectedTransactionStatistics = protos.cockroach.sql.ICollectedTransactionStatistics;
 type Statement = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
 
 interface TransactionsTable {
-  transactions: TransactionInfo[];
+  transactions: Transaction[];
   sortSetting: SortSetting;
   onChangeSortSetting: (ss: SortSetting) => void;
   handleDetails: (
-    statementFingerprintIds: Long[] | null,
+    statementIds: Long[] | null,
     transactionStats: TransactionStats,
   ) => void;
   pagination: ISortedTablePagination;
   statements: Statement[];
-  nodeRegions: { [key: string]: string };
   search?: string;
   renderNoResult?: React.ReactNode;
 }
 
-export interface TransactionInfo extends Transaction {
-  regionNodes: string[];
-}
-
 const { latencyClasses } = tableClasses;
 
-const cx = classNames.bind(statsTablePageStyles);
+const cx = classNames.bind(statementsPageStyles);
 
 export const TransactionsTable: React.FC<TransactionsTable> = props => {
   const defaultBarChartOptions = {
@@ -75,7 +66,7 @@ export const TransactionsTable: React.FC<TransactionsTable> = props => {
   };
   const sampledExecStatsBarChartOptions = {
     classes: defaultBarChartOptions.classes,
-    displayNoSamples: (d: TransactionInfo) => {
+    displayNoSamples: (d: Transaction) => {
       return longToInt(d.stats_data.stats.exec_stats?.count) == 0;
     },
   };
@@ -111,104 +102,86 @@ export const TransactionsTable: React.FC<TransactionsTable> = props => {
     {
       name: "transactions",
       title: <>Transactions</>,
-      cell: (item: TransactionInfo) =>
+      cell: (item: Transaction) =>
         textCell({
           transactionText: collectStatementsText(
-            getStatementsByFingerprintId(
-              item.stats_data.statement_fingerprint_ids,
-              statements,
-            ),
+            getStatementsById(item.stats_data.statement_ids, statements),
           ),
-          transactionFingerprintIds: item.stats_data.statement_fingerprint_ids,
+          transactionIds: item.stats_data.statement_ids,
           transactionStats: item.stats_data.stats,
           handleDetails,
           search,
         }),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         collectStatementsText(
-          getStatementsByFingerprintId(
-            item.stats_data.statement_fingerprint_ids,
-            statements,
-          ),
+          getStatementsById(item.stats_data.statement_ids, statements),
         ),
     },
     {
       name: "execution count",
-      title: statisticsTableTitles.executionCount("transaction"),
+      title: StatementTableTitle.executionCount,
       cell: countBar,
-      sort: (item: TransactionInfo) =>
-        FixLong(Number(item.stats_data.stats.count)),
+      sort: (item: Transaction) => FixLong(Number(item.stats_data.stats.count)),
     },
     {
       name: "rows read",
-      title: statisticsTableTitles.rowsRead("transaction"),
+      title: StatementTableTitle.rowsRead,
       cell: rowsReadBar,
       className: cx("statements-table__col-rows-read"),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         FixLong(Number(item.stats_data.stats.rows_read.mean)),
     },
     {
       name: "bytes read",
-      title: statisticsTableTitles.bytesRead("transaction"),
+      title: StatementTableTitle.bytesRead,
       cell: bytesReadBar,
       className: cx("statements-table__col-bytes-read"),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         FixLong(Number(item.stats_data.stats.bytes_read.mean)),
     },
     {
       name: "latency",
-      title: statisticsTableTitles.time("transaction"),
+      title: StatementTableTitle.transactionTime,
       cell: latencyBar,
       className: latencyClasses.column,
-      sort: (item: TransactionInfo) => item.stats_data.stats.service_lat.mean,
+      sort: (item: Transaction) => item.stats_data.stats.service_lat.mean,
     },
     {
       name: "contention",
-      title: statisticsTableTitles.contention("transaction"),
+      title: StatementTableTitle.contention,
       cell: contentionBar,
       className: cx("statements-table__col-contention"),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         FixLong(Number(item.stats_data.stats.exec_stats.contention_time?.mean)),
     },
     {
       name: "max memory",
-      title: statisticsTableTitles.maxMemUsage("transaction"),
+      title: StatementTableTitle.maxMemUsage,
       cell: maxMemUsageBar,
       className: cx("statements-table__col-max-mem-usage"),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         FixLong(Number(item.stats_data.stats.exec_stats.max_mem_usage?.mean)),
     },
     {
       name: "network",
-      title: statisticsTableTitles.networkBytes("transaction"),
+      title: StatementTableTitle.networkBytes,
       cell: networkBytesBar,
       className: cx("statements-table__col-network-bytes"),
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         FixLong(Number(item.stats_data.stats.exec_stats.network_bytes?.mean)),
     },
     {
       name: "retries",
-      title: statisticsTableTitles.retries("transaction"),
+      title: StatementTableTitle.retries,
       cell: retryBar,
-      sort: (item: TransactionInfo) =>
+      sort: (item: Transaction) =>
         longToInt(Number(item.stats_data.stats.max_retries)),
-    },
-    {
-      name: "regionNodes",
-      title: statisticsTableTitles.regionNodes("transaction"),
-      className: cx("statements-table__col-regions"),
-      cell: (item: TransactionInfo) => {
-        return longListWithTooltip(item.regionNodes.sort().join(", "), 50);
-      },
-      sort: (item: TransactionInfo) => item.regionNodes.sort().join(", "),
     },
     {
       name: "statements",
       title: <>Statements</>,
-      cell: (item: TransactionInfo) =>
-        item.stats_data.statement_fingerprint_ids.length,
-      sort: (item: TransactionInfo) =>
-        item.stats_data.statement_fingerprint_ids.length,
+      cell: (item: Transaction) => item.stats_data.statement_ids.length,
+      sort: (item: Transaction) => item.stats_data.statement_ids.length,
     },
   ];
 

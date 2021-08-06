@@ -109,11 +109,11 @@ func (m *MockTransactionalSender) CommitTimestamp() hlc.Timestamp {
 
 // CommitTimestampFixed is part of the TxnSender interface.
 func (m *MockTransactionalSender) CommitTimestampFixed() bool {
-	return m.txn.CommitTimestampFixed
+	panic("unimplemented")
 }
 
 // SetFixedTimestamp is part of the TxnSender interface.
-func (m *MockTransactionalSender) SetFixedTimestamp(_ context.Context, ts hlc.Timestamp) error {
+func (m *MockTransactionalSender) SetFixedTimestamp(_ context.Context, ts hlc.Timestamp) {
 	m.txn.WriteTimestamp = ts
 	m.txn.ReadTimestamp = ts
 	m.txn.GlobalUncertaintyLimit = ts
@@ -122,7 +122,6 @@ func (m *MockTransactionalSender) SetFixedTimestamp(_ context.Context, ts hlc.Ti
 	// Set the MinTimestamp to the minimum of the existing MinTimestamp and the fixed
 	// timestamp. This ensures that the MinTimestamp is always <= the other timestamps.
 	m.txn.MinTimestamp.Backward(ts)
-	return nil
 }
 
 // RequiredFrontier is part of the TxnSender interface.

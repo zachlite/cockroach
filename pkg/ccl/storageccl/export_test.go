@@ -12,14 +12,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"math/rand"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	_ "github.com/cockroachdb/cockroach/pkg/cloud/impl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -31,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,7 +52,7 @@ func TestExportCmd(t *testing.T) {
 			RequestHeader: roachpb.RequestHeader{Key: keys.UserTableDataMin, EndKey: keys.MaxKey},
 			StartTime:     start,
 			Storage: roachpb.ExternalStorage{
-				Provider:  roachpb.ExternalStorageProvider_nodelocal,
+				Provider:  roachpb.ExternalStorageProvider_LocalFile,
 				LocalFile: roachpb.ExternalStorage_LocalFilePath{Path: "/foo"},
 			},
 			MVCCFilter:     mvccFilter,
@@ -83,6 +83,13 @@ func TestExportCmd(t *testing.T) {
 			}
 			defer sst.Close()
 
+			fileContents, err := ioutil.ReadFile(filepath.Join(dir, "foo", file.Path))
+			if err != nil {
+				t.Fatalf("%+v", err)
+			}
+			if !bytes.Equal(fileContents, file.SST) {
+				t.Fatal("Returned SST and exported SST don't match!")
+			}
 			sst.SeekGE(storage.MVCCKey{Key: keys.MinKey})
 			for {
 				if valid, err := sst.Valid(); !valid || err != nil {
@@ -284,10 +291,6 @@ INTO
 		const expectedError = `export size \(11 bytes\) exceeds max size \(2 bytes\)`
 		_, pErr := export(t, res5.end, roachpb.MVCCFilter_Latest, noTargetBytes)
 		require.Regexp(t, expectedError, pErr)
-		hints := errors.GetAllHints(pErr.GoError())
-		require.Equal(t, 1, len(hints))
-		const expectedHint = `consider increasing cluster setting "kv.bulk_sst.max_allowed_overage"`
-		require.Regexp(t, expectedHint, hints[0])
 		_, pErr = export(t, res5.end, roachpb.MVCCFilter_All, noTargetBytes)
 		require.Regexp(t, expectedError, pErr)
 
@@ -573,11 +576,9 @@ func assertEqualKVs(
 			var summary roachpb.BulkOpSummary
 			maxSize := uint64(0)
 			prevStart := start
-			sstFile := &storage.MemFile{}
-			summary, start, err = e.ExportMVCCToSst(ctx, start, endKey, startTime, endTime,
-				exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization, sstFile)
+			sst, summary, start, err = e.ExportMVCCToSst(start, endKey, startTime, endTime,
+				exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 			require.NoError(t, err)
-			sst = sstFile.Data()
 			loaded := loadSST(t, sst, startKey, endKey)
 			// Ensure that the pagination worked properly.
 			if start != nil {
@@ -614,8 +615,8 @@ func assertEqualKVs(
 				if dataSizeWhenExceeded == maxSize {
 					maxSize--
 				}
-				_, _, err = e.ExportMVCCToSst(ctx, prevStart, endKey, startTime, endTime,
-					exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization, &storage.MemFile{})
+				_, _, _, err = e.ExportMVCCToSst(prevStart, endKey, startTime, endTime,
+					exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 				require.Regexp(t, fmt.Sprintf("export size \\(%d bytes\\) exceeds max size \\(%d bytes\\)",
 					dataSizeWhenExceeded, maxSize), err)
 			}
@@ -646,10 +647,12 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 
 	mkEngine := func(t *testing.T) (e storage.Engine, cleanup func()) {
 		dir, cleanupDir := testutils.TempDir(t)
-		e, err := storage.Open(ctx,
-			storage.Filesystem(dir),
-			storage.CacheSize(0),
-			storage.Settings(cluster.MakeTestingClusterSettings()))
+		e, err := storage.NewDefaultEngine(
+			0,
+			base.StorageConfig{
+				Settings: cluster.MakeTestingClusterSettings(),
+				Dir:      dir,
+			})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -24,8 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -37,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -268,11 +265,6 @@ type DistSender struct {
 	// testing.
 	clusterID *base.ClusterIDContainer
 
-	// batchInterceptor is set for tenants; when set, information about all
-	// BatchRequests and BatchResponses are passed through this interceptor, which
-	// can potentially throttle requests.
-	kvInterceptor multitenant.TenantSideKVInterceptor
-
 	// disableFirstRangeUpdates disables updates of the first range via
 	// gossip. Used by tests which want finer control of the contents of the
 	// range cache.
@@ -325,11 +317,6 @@ type DistSenderConfig struct {
 	FirstRangeProvider FirstRangeProvider
 	RangeDescriptorDB  rangecache.RangeDescriptorDB
 
-	// KVInterceptor is set for tenants; when set, information about all
-	// BatchRequests and BatchResponses are passed through this interceptor, which
-	// can potentially throttle requests.
-	KVInterceptor multitenant.TenantSideKVInterceptor
-
 	TestingKnobs ClientTestingKnobs
 }
 
@@ -339,11 +326,10 @@ type DistSenderConfig struct {
 // defaults will be used.
 func NewDistSender(cfg DistSenderConfig) *DistSender {
 	ds := &DistSender{
-		st:            cfg.Settings,
-		clock:         cfg.Clock,
-		nodeDescs:     cfg.NodeDescs,
-		metrics:       makeDistSenderMetrics(),
-		kvInterceptor: cfg.KVInterceptor,
+		st:        cfg.Settings,
+		clock:     cfg.Clock,
+		nodeDescs: cfg.NodeDescs,
+		metrics:   makeDistSenderMetrics(),
 	}
 	if ds.st == nil {
 		ds.st = cluster.MakeTestingClusterSettings()
@@ -393,7 +379,7 @@ func NewDistSender(cfg DistSenderConfig) *DistSender {
 	ds.clusterID = &cfg.RPCContext.ClusterID
 	ds.asyncSenderSem = quotapool.NewIntPool("DistSender async concurrency",
 		uint64(senderConcurrencyLimit.Get(&cfg.Settings.SV)))
-	senderConcurrencyLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	senderConcurrencyLimit.SetOnChange(&cfg.Settings.SV, func() {
 		ds.asyncSenderSem.UpdateCapacity(uint64(senderConcurrencyLimit.Get(&cfg.Settings.SV)))
 	})
 	ds.rpcContext.Stopper.AddCloser(ds.asyncSenderSem.Closer("stopper"))
@@ -477,6 +463,11 @@ func (ds *DistSender) FirstRange() (*roachpb.RangeDescriptor, error) {
 		panic("with `nil` firstRangeProvider, DistSender must not use itself as RangeDescriptorDB")
 	}
 	return ds.firstRangeProvider.GetFirstRangeDescriptor()
+}
+
+// NodeDialer returns a Dialer.
+func (ds *DistSender) NodeDialer() *nodedialer.Dialer {
+	return ds.nodeDialer
 }
 
 // getNodeID attempts to return the local node ID. It returns 0 if the DistSender
@@ -622,7 +613,7 @@ func (ds *DistSender) initAndVerifyBatch(
 			case *roachpb.ReverseScanRequest:
 				// Accepted reverse range requests.
 
-			case *roachpb.QueryIntentRequest, *roachpb.EndTxnRequest, *roachpb.GetRequest:
+			case *roachpb.QueryIntentRequest, *roachpb.EndTxnRequest:
 				// Accepted point requests that can be in batches with limit.
 
 			default:
@@ -668,6 +659,17 @@ func splitBatchAndCheckForRefreshSpans(
 		}()
 		if hasRefreshSpans {
 			ba.CanForwardReadTimestamp = false
+
+			// If the final part contains an EndTxn request, unset its
+			// DeprecatedCanCommitAtHigherTimestamp flag as well.
+			lastPart := parts[len(parts)-1]
+			if et := lastPart[len(lastPart)-1].GetEndTxn(); et != nil {
+				etCopy := *et
+				etCopy.DeprecatedCanCommitAtHigherTimestamp = false
+				lastPart = append([]roachpb.RequestUnion(nil), lastPart...)
+				lastPart[len(lastPart)-1].MustSetInner(&etCopy)
+				parts[len(parts)-1] = lastPart
+			}
 		}
 	}
 	return parts
@@ -690,6 +692,19 @@ func unsetCanForwardReadTimestampFlag(ctx context.Context, ba *roachpb.BatchRequ
 		if roachpb.NeedsRefresh(req.GetInner()) {
 			// Unset the flag.
 			ba.CanForwardReadTimestamp = false
+
+			// We would need to also unset the DeprecatedCanCommitAtHigherTimestamp
+			// flag on any EndTxn request in the batch, but it turns out that
+			// because we call this function when a batch is split across
+			// ranges, we'd already have bailed if the EndTxn wasn't a parallel
+			// commit — and if it was a parallel commit then we must not have
+			// any requests that need to refresh (see
+			// txnCommitter.canCommitInParallel). Assert this for our own
+			// sanity.
+			if _, ok := ba.GetArg(roachpb.EndTxn); ok {
+				log.Fatalf(ctx, "batch unexpected contained requests "+
+					"that need to refresh and an EndTxn request: %s", ba.String())
+			}
 			return
 		}
 	}
@@ -718,13 +733,7 @@ func (ds *DistSender) Send(
 	ctx, sp := tracing.EnsureChildSpan(ctx, ds.AmbientContext.Tracer, "dist sender send")
 	defer sp.Finish()
 
-	if ds.kvInterceptor != nil {
-		info := tenantcostmodel.MakeRequestInfo(&ba)
-		if err := ds.kvInterceptor.OnRequestWait(ctx, info); err != nil {
-			return nil, roachpb.NewError(err)
-		}
-	}
-
+	var rplChunks []*roachpb.BatchResponse
 	splitET := false
 	var require1PC bool
 	lastReq := ba.Requests[len(ba.Requests)-1].GetInner()
@@ -744,8 +753,6 @@ func (ds *DistSender) Send(
 		log.Fatalf(ctx, "batch with MaxSpanRequestKeys=%d, TargetBytes=%d needs splitting",
 			log.Safe(ba.MaxSpanRequestKeys), log.Safe(ba.TargetBytes))
 	}
-	var singleRplChunk [1]*roachpb.BatchResponse
-	rplChunks := singleRplChunk[:0:1]
 
 	errIdxOffset := 0
 	for len(parts) > 0 {
@@ -816,11 +823,6 @@ func (ds *DistSender) Send(
 		lastHeader := rplChunks[len(rplChunks)-1].BatchResponse_Header
 		lastHeader.CollectedSpans = reply.CollectedSpans
 		reply.BatchResponse_Header = lastHeader
-
-		if ds.kvInterceptor != nil {
-			info := tenantcostmodel.MakeResponseInfo(reply)
-			ds.kvInterceptor.OnResponse(ctx, info)
-		}
 	}
 
 	return reply, nil
@@ -1247,21 +1249,6 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		canParallelize = canParallelize && !isExpensive
 	}
 
-	// Iterate over the ranges that the batch touches. The iteration is done in
-	// key order - the order of requests in the batch is not relevant for the
-	// iteration. Each iteration sends for evaluation one sub-batch to one range.
-	// The sub-batch is the union of requests in the batch overlapping the
-	// current range. The order of requests in a sub-batch is the same as the
-	// relative order of requests in the complete batch. On the server-side,
-	// requests in a sub-batch are executed in order. Depending on whether the
-	// sub-batches can be executed in parallel or not, each iteration either waits
-	// for the sub-batch results (in the no-parallelism case) or defers the
-	// results to a channel that will be processed in the defer above.
-	//
-	// After each sub-batch is executed, if ba has key or memory limits (which
-	// imply no parallelism), ba.MaxSpanRequestKeys and ba.TargetBytes are
-	// adjusted with the responses for the sub-batch. If a limit is exhausted, the
-	// loop breaks.
 	for ; ri.Valid(); ri.Seek(ctx, seekKey, scanDir) {
 		responseCh := make(chan response, 1)
 		responseChs = append(responseChs, responseCh)
@@ -1384,14 +1371,9 @@ func (ds *DistSender) sendPartialBatchAsync(
 	batchIdx int,
 	responseCh chan response,
 ) bool {
-	if err := ds.rpcContext.Stopper.RunAsyncTaskEx(
-		ctx,
-		stop.TaskOpts{
-			TaskName:   "kv.DistSender: sending partial batch",
-			ChildSpan:  true,
-			Sem:        ds.asyncSenderSem,
-			WaitForSem: false,
-		},
+	if err := ds.rpcContext.Stopper.RunLimitedAsyncTask(
+		ctx, "kv.DistSender: sending partial batch",
+		ds.asyncSenderSem, false, /* wait */
 		func(ctx context.Context) {
 			ds.metrics.AsyncSentCount.Inc(1)
 			responseCh <- ds.sendPartialBatch(
@@ -1793,14 +1775,13 @@ func (ds *DistSender) sendToReplicas(
 	desc := routing.Desc()
 	ba.RangeID = desc.RangeID
 	leaseholder := routing.Leaseholder()
-	// TODO(nvanbenschoten): push ba.RequiresLeaseHolder() into CanSendToFollower.
-	wantLeaseholder := ba.RequiresLeaseHolder() && !CanSendToFollower(ds.clusterID.Get(), ds.st, ds.clock, routing.ClosedTimestampPolicy(), ba)
+	canFollowerRead := CanSendToFollower(ds.clusterID.Get(), ds.st, ds.clock, routing.ClosedTimestampPolicy(), ba)
 	var replicas ReplicaSlice
 	var err error
-	if wantLeaseholder {
-		replicas, err = NewReplicaSlice(ctx, ds.nodeDescs, desc, leaseholder, OnlyPotentialLeaseholders)
-	} else {
+	if canFollowerRead {
 		replicas, err = NewReplicaSlice(ctx, ds.nodeDescs, desc, leaseholder, AllExtantReplicas)
+	} else {
+		replicas, err = NewReplicaSlice(ctx, ds.nodeDescs, desc, leaseholder, OnlyPotentialLeaseholders)
 	}
 	if err != nil {
 		return nil, err
@@ -1813,7 +1794,7 @@ func (ds *DistSender) sendToReplicas(
 	}
 
 	// Try the leaseholder first, if the request wants it.
-	sendToLeaseholder := (leaseholder != nil) && wantLeaseholder
+	sendToLeaseholder := (leaseholder != nil) && !canFollowerRead && ba.RequiresLeaseHolder()
 	if sendToLeaseholder {
 		idx := replicas.Find(leaseholder.ReplicaID)
 		if idx != -1 {
@@ -1823,10 +1804,8 @@ func (ds *DistSender) sendToReplicas(
 			// we created replicas.
 			log.Eventf(ctx, "leaseholder %s missing from replicas", leaseholder)
 		}
-	} else if wantLeaseholder {
-		log.VEvent(ctx, 2, "routing to nearest replica; leaseholder not known")
 	} else {
-		log.VEvent(ctx, 2, "routing to nearest replica; leaseholder not required")
+		log.VEvent(ctx, 2, "routing to nearest replica")
 	}
 
 	opts := SendOptions{

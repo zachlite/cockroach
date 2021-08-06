@@ -88,7 +88,7 @@ func TestTenantUpgrade(t *testing.T) {
 		}
 		// Prevent a logging assertion that the server ID is initialized multiple times.
 		log.TestingClearServerIdentifiers()
-		tenant, err := tc.Server(0).StartTenant(ctx, tenantArgs)
+		tenant, err := tc.Server(0).StartTenant(tenantArgs)
 		require.NoError(t, err)
 		return connectToTenant(t, tenant.SQLAddr())
 	}
@@ -127,7 +127,7 @@ func TestTenantUpgrade(t *testing.T) {
 		cleanup()
 		{
 			log.TestingClearServerIdentifiers()
-			tenantServer, err := tc.Server(0).StartTenant(ctx, base.TestTenantArgs{
+			tenantServer, err := tc.Server(0).StartTenant(base.TestTenantArgs{
 				TenantID: roachpb.MakeTenantID(initialTenantID),
 				Existing: true,
 			})
@@ -153,7 +153,7 @@ func TestTenantUpgrade(t *testing.T) {
 		cleanup()
 		{
 			log.TestingClearServerIdentifiers()
-			tenantServer, err := tc.Server(0).StartTenant(ctx, base.TestTenantArgs{
+			tenantServer, err := tc.Server(0).StartTenant(base.TestTenantArgs{
 				TenantID: roachpb.MakeTenantID(postUpgradeTenantID),
 				Existing: true,
 			})
@@ -165,5 +165,4 @@ func TestTenantUpgrade(t *testing.T) {
 			"SHOW CLUSTER SETTING version",
 			[][]string{{clusterversion.TestingBinaryVersion.String()}})
 	})
-
 }

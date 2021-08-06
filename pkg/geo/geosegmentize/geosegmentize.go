@@ -11,7 +11,6 @@
 package geosegmentize
 
 import (
-	"math"
 	"strconv"
 	"strings"
 
@@ -132,12 +131,9 @@ func Segmentize(
 	return nil, errors.Newf("unknown type: %T", geometry)
 }
 
-// CheckSegmentizeValidNumPoints checks whether segmentize would break down into
-// too many points or NaN points.
-func CheckSegmentizeValidNumPoints(numPoints float64, a geom.Coord, b geom.Coord) error {
-	if math.IsNaN(numPoints) {
-		return errors.Newf("cannot segmentize into %f points", numPoints)
-	}
+// CheckSegmentizeTooManyPoints checks whether segmentize would break down into
+// to many points.
+func CheckSegmentizeTooManyPoints(numPoints float64, a geom.Coord, b geom.Coord) error {
 	if numPoints > float64(geo.MaxAllowedSplitPoints) {
 		return errors.Newf(
 			"attempting to segmentize into too many coordinates; need %s points between %v and %v, max %d",

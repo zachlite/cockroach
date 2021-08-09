@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -106,6 +107,9 @@ type lockTableWaiterImpl struct {
 	// When set, called just before each ContentionEvent is emitted.
 	// Is allowed to mutate the event.
 	onContentionEvent func(ev *roachpb.ContentionEvent)
+
+	// Metric reporting intent resolution failures.
+	conflictingIntentsResolveRejections *metric.Counter
 }
 
 // IntentResolver is an interface used by lockTableWaiterImpl to push
@@ -155,7 +159,6 @@ func (w *lockTableWaiterImpl) WaitOn(
 		case <-newStateC:
 			timerC = nil
 			state := guard.CurState()
-			log.Eventf(ctx, "lock wait-queue event: %s", state)
 			h.emitAndInit(state)
 			switch state.kind {
 			case waitFor, waitForDistinguished:
@@ -170,7 +173,7 @@ func (w *lockTableWaiterImpl) WaitOn(
 					if state.held {
 						err = w.pushLockTxn(ctx, req, state)
 					} else {
-						err = newWriteIntentErr(req, state)
+						err = newWriteIntentErr(state)
 					}
 					if err != nil {
 						return err
@@ -280,12 +283,6 @@ func (w *lockTableWaiterImpl) WaitOn(
 				// request's transaction is sending multiple requests concurrently.
 				// Proceed with waiting without pushing anyone.
 
-			case waitQueueMaxLengthExceeded:
-				// The request attempted to wait in a lock wait-queue whose length was
-				// already equal to or exceeding the request's configured maximum. As a
-				// result, the request was rejected.
-				return newWriteIntentErr(req, state)
-
 			case doneWaiting:
 				// The request has waited for all conflicting locks to be released
 				// and is at the front of any lock wait-queues. It can now stop
@@ -304,7 +301,7 @@ func (w *lockTableWaiterImpl) WaitOn(
 				// the comment in lockTableImpl.tryActiveWait for the proper way to
 				// remove this and other evaluation races.
 				toResolve := guard.ResolveBeforeScanning()
-				return w.ResolveDeferredIntents(ctx, toResolve)
+				return w.resolveDeferredIntents(ctx, toResolve)
 
 			default:
 				panic("unexpected waiting state")
@@ -396,7 +393,7 @@ func (w *lockTableWaiterImpl) pushLockTxn(
 	ctx context.Context, req Request, ws waitingState,
 ) *Error {
 	if w.disableTxnPushing {
-		return newWriteIntentErr(req, ws)
+		return newWriteIntentErr(ws)
 	}
 
 	// Construct the request header and determine which form of push to use.
@@ -438,7 +435,7 @@ func (w *lockTableWaiterImpl) pushLockTxn(
 		// If pushing with an Error WaitPolicy and the push fails, then the lock
 		// holder is still active. Transform the error into a WriteIntentError.
 		if _, ok := err.GetDetail().(*roachpb.TransactionPushError); ok && req.WaitPolicy == lock.WaitPolicy_Error {
-			err = newWriteIntentErr(req, ws)
+			err = newWriteIntentErr(ws)
 		}
 		return err
 	}
@@ -483,7 +480,15 @@ func (w *lockTableWaiterImpl) pushLockTxn(
 	// on whether we need to poison.
 	resolve := roachpb.MakeLockUpdate(pusheeTxn, roachpb.Span{Key: ws.key})
 	opts := intentresolver.ResolveOptions{Poison: true}
-	return w.ir.ResolveIntent(ctx, resolve, opts)
+	if err := w.ir.ResolveIntent(ctx, resolve, opts); err != nil {
+		// If pusheeTxn was finalized, then we record that cleanup was unsuccessful,
+		// otherwise transaction should be cleaning up intents by itself.
+		if pusheeTxn.Status.IsFinalized() {
+			w.conflictingIntentsResolveRejections.Inc(1)
+		}
+		return err
+	}
+	return nil
 }
 
 // pushRequestTxn pushes the owner of the provided request.
@@ -631,8 +636,10 @@ func (w *lockTableWaiterImpl) pushHeader(req Request) roachpb.Header {
 	return h
 }
 
-// ResolveDeferredIntents implements the lockTableWaiter interface.
-func (w *lockTableWaiterImpl) ResolveDeferredIntents(
+// resolveDeferredIntents resolves the batch of intents if the provided error is
+// nil. The batch of intents may be resolved more efficiently than if they were
+// resolved individually.
+func (w *lockTableWaiterImpl) resolveDeferredIntents(
 	ctx context.Context, deferredResolution []roachpb.LockUpdate,
 ) *Error {
 	if len(deferredResolution) == 0 {
@@ -640,7 +647,11 @@ func (w *lockTableWaiterImpl) ResolveDeferredIntents(
 	}
 	// See pushLockTxn for an explanation of these options.
 	opts := intentresolver.ResolveOptions{Poison: true}
-	return w.ir.ResolveIntents(ctx, deferredResolution, opts)
+	err := w.ir.ResolveIntents(ctx, deferredResolution, opts)
+	if err != nil {
+		w.conflictingIntentsResolveRejections.Inc(int64(len(deferredResolution)))
+	}
+	return err
 }
 
 // watchForNotifications selects on the provided channel and watches for any
@@ -776,7 +787,7 @@ func (h *contentionEventHelper) emitAndInit(s waitingState) {
 			}
 			h.tBegin = timeutil.Now()
 		}
-	case waitElsewhere, waitQueueMaxLengthExceeded, doneWaiting:
+	case waitElsewhere, doneWaiting:
 		// If we have an event, emit it now and that's it - the case we're in
 		// does not give us a new transaction/key.
 		if h.ev != nil {
@@ -787,22 +798,10 @@ func (h *contentionEventHelper) emitAndInit(s waitingState) {
 	}
 }
 
-func newWriteIntentErr(req Request, ws waitingState) *Error {
-	err := roachpb.NewError(&roachpb.WriteIntentError{
+func newWriteIntentErr(ws waitingState) *Error {
+	return roachpb.NewError(&roachpb.WriteIntentError{
 		Intents: []roachpb.Intent{roachpb.MakeIntent(ws.txn, ws.key)},
 	})
-	// TODO(nvanbenschoten): setting an error index can assist the KV client in
-	// understanding which request hit an error. This is not necessary, but can
-	// improve error handling, leading to better error messages and performance
-	// optimizations in some cases. We don't have an easy way to associate a given
-	// conflict with a specific request in a batch because we don't retain a
-	// mapping from lock span to request. However, as a best-effort optimization,
-	// we set the error index to 0 if this is the only request in the batch (that
-	// landed on this range, from the client's perspective).
-	if len(req.Requests) == 1 {
-		err.SetErrorIndex(0)
-	}
-	return err
 }
 
 func hasMinPriority(txn *enginepb.TxnMeta) bool {

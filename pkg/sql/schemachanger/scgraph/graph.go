@@ -18,15 +18,15 @@ import (
 
 // Graph is a graph whose nodes are *scpb.Nodes. Graphs are constructed during
 // schema change planning. Edges in the graph represent dependencies between
-// nodes, either due to the sequencing of statuses for a single target or due to
-// inter-target dependencies between statuses.
+// nodes, either due to the sequencing of states for a single target or due to
+// inter-target dependencies between states.
 type Graph struct {
 
 	// Targets is an interned slice of targets.
 	targets []*scpb.Target
 
 	// Interns the Node so that pointer equality can be used.
-	targetNodes []map[scpb.Status]*scpb.Node
+	targetNodes []map[scpb.State]*scpb.Node
 
 	// Maps a target to its index in targetNodes.
 	targetIdxMap map[*scpb.Target]int
@@ -36,63 +36,58 @@ type Graph struct {
 	nodeOpEdges map[*scpb.Node]*OpEdge
 
 	// nodeDepEdges maps a Node to its dependencies.
-	// A Node dependency is another target node which must be
-	// reached before or concurrently with this node.
+	// A Node dependency is another target state which must be
+	// reached before or concurrently with this targetState.
 	nodeDepEdges map[*scpb.Node][]*DepEdge
-
-	// opToNode maps from an operation back to the
-	// opEdge that generated it as an index.
-	opToNode map[scop.Op]*scpb.Node
 
 	edges []Edge
 }
 
 // New constructs a new Graph. All initial nodes ought to correspond to distinct
 // targets. If they do not, an error will be returned.
-func New(initial scpb.State) (*Graph, error) {
+func New(initialNodes []*scpb.Node) (*Graph, error) {
 	g := Graph{
 		targetIdxMap: map[*scpb.Target]int{},
 		nodeOpEdges:  map[*scpb.Node]*OpEdge{},
 		nodeDepEdges: map[*scpb.Node][]*DepEdge{},
-		opToNode:     map[scop.Op]*scpb.Node{},
 	}
-	for _, n := range initial {
+	for _, n := range initialNodes {
 		if existing, ok := g.targetIdxMap[n.Target]; ok {
-			return nil, errors.Errorf("invalid initial state contains duplicate target: %v and %v", n, initial[existing])
+			return nil, errors.Errorf("invalid initial states contains duplicate target: %v and %v", n, initialNodes[existing])
 		}
 		idx := len(g.targets)
 		g.targetIdxMap[n.Target] = idx
 		g.targets = append(g.targets, n.Target)
-		g.targetNodes = append(g.targetNodes, map[scpb.Status]*scpb.Node{
-			n.Status: n,
+		g.targetNodes = append(g.targetNodes, map[scpb.State]*scpb.Node{
+			n.State: n,
 		})
 	}
 	return &g, nil
 }
 
-func (g *Graph) getNode(t *scpb.Target, s scpb.Status) (*scpb.Node, bool) {
-	targetStatuses := g.getTargetStatusMap(t)
-	ts, ok := targetStatuses[s]
+func (g *Graph) getNode(t *scpb.Target, s scpb.State) (*scpb.Node, bool) {
+	targetStates := g.getTargetStatesMap(t)
+	ts, ok := targetStates[s]
 	return ts, ok
 }
 
 // Suppress the linter.
 var _ = (*Graph)(nil).getNode
 
-func (g *Graph) getOrCreateNode(t *scpb.Target, s scpb.Status) *scpb.Node {
-	targetStatuses := g.getTargetStatusMap(t)
-	if ts, ok := targetStatuses[s]; ok {
+func (g *Graph) getOrCreateNode(t *scpb.Target, s scpb.State) *scpb.Node {
+	targetStates := g.getTargetStatesMap(t)
+	if ts, ok := targetStates[s]; ok {
 		return ts
 	}
 	ts := &scpb.Node{
 		Target: t,
-		Status: s,
+		State:  s,
 	}
-	targetStatuses[s] = ts
+	targetStates[s] = ts
 	return ts
 }
 
-func (g *Graph) getTargetStatusMap(target *scpb.Target) map[scpb.Status]*scpb.Node {
+func (g *Graph) getTargetStatesMap(target *scpb.Target) map[scpb.State]*scpb.Node {
 	idx, ok := g.targetIdxMap[target]
 	if !ok {
 		panic(errors.Errorf("target %v does not exist", target))
@@ -115,20 +110,12 @@ func (g *Graph) GetOpEdgeFrom(n *scpb.Node) (*OpEdge, bool) {
 	return oe, ok
 }
 
-// GetDepEdgesFrom returns the unique outgoing op edge from the specified node,
-// if one exists.
-func (g *Graph) GetDepEdgesFrom(n *scpb.Node) ([]*DepEdge, bool) {
-	de, ok := g.nodeDepEdges[n]
-	return de, ok
-}
-
-// AddOpEdges adds an op edges connecting the nodes for two statuses of a target.
-func (g *Graph) AddOpEdges(t *scpb.Target, from, to scpb.Status, revertible bool, ops ...scop.Op) {
+// AddOpEdge adds an op edge connecting the nodes for two states of a target.
+func (g *Graph) AddOpEdge(t *scpb.Target, from, to scpb.State, op scop.Op) {
 	oe := &OpEdge{
-		from:       g.getOrCreateNode(t, from),
-		to:         g.getOrCreateNode(t, to),
-		op:         ops,
-		revertible: revertible,
+		from: g.getOrCreateNode(t, from),
+		to:   g.getOrCreateNode(t, to),
+		op:   op,
 	}
 	if existing, exists := g.nodeOpEdges[oe.from]; exists {
 		panic(errors.Errorf("duplicate outbound op edge %v and %v",
@@ -136,31 +123,22 @@ func (g *Graph) AddOpEdges(t *scpb.Target, from, to scpb.Status, revertible bool
 	}
 	g.edges = append(g.edges, oe)
 	g.nodeOpEdges[oe.from] = oe
-	// Store mapping from op to Edge
-	for _, op := range ops {
-		g.opToNode[op] = oe.From()
-	}
-}
-
-// GetNodeFromOp Gets an Edge from a given op.
-func (g *Graph) GetNodeFromOp(op scop.Op) *scpb.Node {
-	return g.opToNode[op]
 }
 
 // AddDepEdge adds a dep edge connecting two nodes (specified by their targets
-// and statuses).
+// and states).
 func (g *Graph) AddDepEdge(
-	fromTarget *scpb.Target, fromStatus scpb.Status, toTarget *scpb.Target, toStatus scpb.Status,
+	fromTarget *scpb.Target, fromState scpb.State, toTarget *scpb.Target, toState scpb.State,
 ) {
 	de := &DepEdge{
-		from: g.getOrCreateNode(fromTarget, fromStatus),
-		to:   g.getOrCreateNode(toTarget, toStatus),
+		from: g.getOrCreateNode(fromTarget, fromState),
+		to:   g.getOrCreateNode(toTarget, toState),
 	}
 	g.edges = append(g.edges, de)
 	g.nodeDepEdges[de.from] = append(g.nodeDepEdges[de.from], de)
 }
 
-// Edge represents a relationship between two Nodes.
+// Edge represents a relationship between two TargetStates.
 //
 // TODO(ajwerner): Consider hiding Node pointers behind an interface to clarify
 // mutability.
@@ -171,9 +149,8 @@ type Edge interface {
 
 // OpEdge represents an edge changing the state of a target with an op.
 type OpEdge struct {
-	from, to   *scpb.Node
-	op         []scop.Op
-	revertible bool
+	from, to *scpb.Node
+	op       scop.Op
 }
 
 // From implements the Edge interface.
@@ -183,13 +160,10 @@ func (oe *OpEdge) From() *scpb.Node { return oe.from }
 func (oe *OpEdge) To() *scpb.Node { return oe.to }
 
 // Op returns the scop.Op for execution that is associated with the op edge.
-func (oe *OpEdge) Op() []scop.Op { return oe.op }
+func (oe *OpEdge) Op() scop.Op { return oe.op }
 
-// Revertible returns if the dependency edge is revertible
-func (oe *OpEdge) Revertible() bool { return oe.revertible }
-
-// DepEdge represents a dependency between two nodes. A dependency
-// implies that the To() node cannot be reached before the From() node. It
+// DepEdge represents a dependency between two target states. A dependency
+// implies that the To() state cannot be reached before the From() state. It
 // can be reached concurrently.
 type DepEdge struct {
 	from, to *scpb.Node

@@ -20,6 +20,8 @@
 package colexecproj
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
@@ -42,7 +44,7 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ duration.Duration
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ sqltelemetry.EnumTelemetryType
 	_ telemetry.Counter
 )
@@ -76,7 +78,7 @@ func _ASSIGN(_, _, _, _, _, _ interface{}) {
 // so, it'll be redeclared because we execute that template twice. To go
 // around the problem we specify it here.
 type projConstOpBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator      *colmem.Allocator
 	colIdx         int
 	outputIdx      int
@@ -85,7 +87,7 @@ type projConstOpBase struct {
 
 // projOpBase contains all of the fields for non-constant projections.
 type projOpBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator      *colmem.Allocator
 	col1Idx        int
 	col2Idx        int
@@ -99,14 +101,14 @@ type _OP_NAME struct {
 	projOpBase
 }
 
-func (p _OP_NAME) Next() coldata.Batch {
+func (p _OP_NAME) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the projection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
-	batch := p.Input.Next()
+	batch := p.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -138,6 +140,10 @@ func (p _OP_NAME) Next() coldata.Batch {
 		batch.SetLength(n)
 	})
 	return batch
+}
+
+func (p _OP_NAME) Init() {
+	p.Input.Init()
 }
 
 // {{end}}
@@ -255,7 +261,7 @@ func GetProjectionOperator(
 ) (colexecop.Operator, error) {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, outputType, outputIdx)
 	projOpBase := projOpBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
+		OneInputNode:   colexecop.NewOneInputNode(input),
 		allocator:      allocator,
 		col1Idx:        col1Idx,
 		col2Idx:        col2Idx,
@@ -264,9 +270,9 @@ func GetProjectionOperator(
 	}
 
 	leftType, rightType := inputTypes[col1Idx], inputTypes[col2Idx]
-	switch op := op.(type) {
+	switch op.(type) {
 	case tree.BinaryOperator:
-		switch op.Symbol {
+		switch op {
 		// {{range .BinOps}}
 		case tree._NAME:
 			switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
@@ -297,7 +303,7 @@ func GetProjectionOperator(
 			// Tuple comparison has special null-handling semantics, so we will
 			// fallback to the default comparison operator if either of the
 			// input vectors is of a tuple type.
-			switch op.Symbol {
+			switch op {
 			// {{range .CmpOps}}
 			case tree._NAME:
 				switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
@@ -327,7 +333,7 @@ func GetProjectionOperator(
 		return &defaultCmpProjOp{
 			projOpBase:          projOpBase,
 			adapter:             colexeccmp.NewComparisonExprAdapter(cmpExpr, evalCtx),
-			toDatumConverter:    colconv.NewVecToDatumConverter(len(inputTypes), []int{col1Idx, col2Idx}, true /* willRelease */),
+			toDatumConverter:    colconv.NewVecToDatumConverter(len(inputTypes), []int{col1Idx, col2Idx}),
 			datumToVecConverter: colconv.GetDatumToPhysicalFn(outputType),
 		}, nil
 	}

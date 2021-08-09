@@ -15,10 +15,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/authentication"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
@@ -123,7 +121,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 
 	// First check all the databases.
 	if err := forEachDatabaseDesc(params.ctx, params.p, nil /*nil prefix = all databases*/, true, /* requiresPrivileges */
-		func(db catalog.DatabaseDescriptor) error {
+		func(db *dbdesc.Immutable) error {
 			if _, ok := userNames[db.GetPrivileges().Owner()]; ok {
 				userNames[db.GetPrivileges().Owner()] = append(
 					userNames[db.GetPrivileges().Owner()],
@@ -325,43 +323,18 @@ func (n *DropRoleNode) startExec(params runParams) error {
 			params.p.txn,
 			fmt.Sprintf(
 				`DELETE FROM %s WHERE username=$1`,
-				authentication.RoleOptionsTableName,
+				RoleOptionsTableName,
 			),
 			normalizedUsername,
 		)
 		if err != nil {
 			return err
 		}
-
-		// TODO(rafi): Remove this condition in 21.2.
-		if params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.DatabaseRoleSettings) {
-			_, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
-				params.ctx,
-				opName,
-				params.p.txn,
-				fmt.Sprintf(
-					`DELETE FROM %s WHERE role_name = $1`,
-					authentication.DatabaseRoleSettingsTableName,
-				),
-				normalizedUsername,
-			)
-			if err != nil {
-				return err
-			}
-		}
 	}
 
-	// Bump role-related table versions to force a refresh of membership/password
-	// caches.
-	if authentication.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
-	}
 	if numRoleMembershipsDeleted > 0 {
+		// Some role memberships have been deleted, bump role_members table version to
+		// force a refresh of role membership.
 		if err := params.p.BumpRoleMembershipTableVersion(params.ctx); err != nil {
 			return err
 		}

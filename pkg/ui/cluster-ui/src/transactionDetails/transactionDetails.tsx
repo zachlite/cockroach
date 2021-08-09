@@ -66,7 +66,7 @@ interface TransactionDetailsProps {
   transactionStats?: TransactionStats;
   lastReset?: string | Date;
   handleDetails: (
-    statementFingerprintIds: Long[] | null,
+    statementIds: Long[] | null,
     transactionStats: TransactionStats | null,
   ) => void;
   error?: Error | null;
@@ -251,7 +251,6 @@ export class TransactionDetails extends React.Component<
                         "",
                         totalWorkload,
                         nodeRegions,
-                        "transactionDetails",
                       )}
                       className={cx("statements-table")}
                       sortSetting={sortSetting}

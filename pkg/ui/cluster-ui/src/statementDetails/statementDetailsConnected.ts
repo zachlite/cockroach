@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -22,10 +22,7 @@ import {
   selectStatement,
   selectStatementDetailsUiConfig,
 } from "./statementDetails.selectors";
-import {
-  nodeDisplayNameByIDSelector,
-  nodeRegionsByIDSelector,
-} from "../store/nodes";
+import { nodeDisplayNameByIDSelector } from "../store/nodes";
 import { actions as statementActions } from "src/store/statements";
 import {
   actions as statementDiagnosticsActions,
@@ -46,7 +43,6 @@ const mapStateToProps = (
     statement,
     statementsError: state.adminUI.statements.lastError,
     nodeNames: nodeDisplayNameByIDSelector(state),
-    nodeRegions: nodeRegionsByIDSelector(state),
     diagnosticsReports: selectDiagnosticsReportsByStatementFingerprint(
       state,
       statementFingerprint,

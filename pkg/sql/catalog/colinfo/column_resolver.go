@@ -16,6 +16,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -29,34 +30,38 @@ import (
 // mutations are added.
 func ProcessTargetColumns(
 	tableDesc catalog.TableDescriptor, nameList tree.NameList, ensureColumns, allowMutations bool,
-) ([]catalog.Column, error) {
+) ([]descpb.ColumnDescriptor, error) {
 	if len(nameList) == 0 {
 		if ensureColumns {
-			// VisibleColumns is used here to prevent INSERT INTO <table> VALUES
-			// (...) (as opposed to INSERT INTO <table> (...) VALUES (...)) from
-			// writing hidden columns.
+			// VisibleColumns is used here to prevent INSERT INTO <table> VALUES (...)
+			// (as opposed to INSERT INTO <table> (...) VALUES (...)) from writing
+			// hidden columns. At present, the only hidden column is the implicit rowid
+			// primary key column.
 			return tableDesc.VisibleColumns(), nil
 		}
 		return nil, nil
 	}
 
-	var colIDSet catalog.TableColSet
-	cols := make([]catalog.Column, len(nameList))
+	cols := make([]descpb.ColumnDescriptor, len(nameList))
+	colIDSet := make(map[descpb.ColumnID]struct{}, len(nameList))
 	for i, colName := range nameList {
-		col, err := tableDesc.FindColumnWithName(colName)
+		var col *descpb.ColumnDescriptor
+		var err error
+		if allowMutations {
+			col, _, err = tableDesc.FindColumnByName(colName)
+		} else {
+			col, err = tableDesc.FindActiveColumnByName(string(colName))
+		}
 		if err != nil {
 			return nil, err
 		}
-		if !allowMutations && !col.Public() {
-			return nil, NewUndefinedColumnError(string(colName))
-		}
 
-		if colIDSet.Contains(col.GetID()) {
+		if _, ok := colIDSet[col.ID]; ok {
 			return nil, pgerror.Newf(pgcode.Syntax,
 				"multiple assignments to the same column %q", &nameList[i])
 		}
-		colIDSet.Add(col.GetID())
-		cols[i] = col
+		colIDSet[col.ID] = struct{}{}
+		cols[i] = *col
 	}
 
 	return cols, nil
@@ -101,18 +106,23 @@ type ColumnResolver struct {
 // FindSourceMatchingName is part of the tree.ColumnItemResolver interface.
 func (r *ColumnResolver) FindSourceMatchingName(
 	ctx context.Context, tn tree.TableName,
-) (res NumResolutionResults, prefix *tree.TableName, srcMeta ColumnSourceMeta, err error) {
+) (
+	res tree.NumResolutionResults,
+	prefix *tree.TableName,
+	srcMeta tree.ColumnSourceMeta,
+	err error,
+) {
 	if !sourceNameMatches(&r.Source.SourceAlias, tn) {
-		return NoResults, nil, nil, nil
+		return tree.NoResults, nil, nil, nil
 	}
 	prefix = &r.Source.SourceAlias
-	return ExactlyOne, prefix, nil, nil
+	return tree.ExactlyOne, prefix, nil, nil
 }
 
 // FindSourceProvidingColumn is part of the tree.ColumnItemResolver interface.
 func (r *ColumnResolver) FindSourceProvidingColumn(
 	ctx context.Context, col tree.Name,
-) (prefix *tree.TableName, srcMeta ColumnSourceMeta, colHint int, err error) {
+) (prefix *tree.TableName, srcMeta tree.ColumnSourceMeta, colHint int, err error) {
 	colIdx := tree.NoColumnIdx
 	colName := string(col)
 
@@ -136,8 +146,12 @@ func (r *ColumnResolver) FindSourceProvidingColumn(
 
 // Resolve is part of the tree.ColumnItemResolver interface.
 func (r *ColumnResolver) Resolve(
-	ctx context.Context, prefix *tree.TableName, srcMeta ColumnSourceMeta, colHint int, col tree.Name,
-) (ColumnResolutionResult, error) {
+	ctx context.Context,
+	prefix *tree.TableName,
+	srcMeta tree.ColumnSourceMeta,
+	colHint int,
+	col tree.Name,
+) (tree.ColumnResolutionResult, error) {
 	if colHint != -1 {
 		// (*ColumnItem).Resolve() is telling us that we found the source
 		// via FindSourceProvidingColumn(). So we can count on

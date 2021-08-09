@@ -11,13 +11,15 @@
 // TODO(benesch): upstream this.
 
 declare module "rc-progress" {
-  export interface LineProps {
-    strokeColor?: string;
-    strokeWidth?: number;
-    trailWidth?: number;
-    trailColor?: string;
-    className?: string;
-    percent?: number;
+    export interface LineProps {
+      strokeColor?: string;
+      strokeWidth?: number;
+      trailWidth?: number;
+      trailColor?: string;
+      className?: string;
+      percent?: number;
+    }
+    export class Line extends React.Component<LineProps, {}> {
+    }
   }
-  export class Line extends React.Component<LineProps, {}> {}
-}
+  

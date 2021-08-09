@@ -16,12 +16,7 @@ import { getDataFromServer } from "src/util/dataFromServer";
 import DebugAnnotation from "src/views/shared/components/debugAnnotation";
 import InfoBox from "src/views/shared/components/infoBox";
 import LicenseType from "src/views/shared/components/licenseType";
-import {
-  PanelSection,
-  PanelTitle,
-  PanelPair,
-  Panel,
-} from "src/views/shared/components/panelSection";
+import { PanelSection, PanelTitle, PanelPair, Panel } from "src/views/shared/components/panelSection";
 
 import "./debug.styl";
 
@@ -29,13 +24,11 @@ const COMMUNITY_URL = "https://www.cockroachlabs.com/community/";
 
 const NODE_ID = getDataFromServer().NodeID;
 
-function DebugTableLink(props: { name: string; url: string; note?: string }) {
+function DebugTableLink(props: { name: string, url: string, note?: string }) {
   return (
     <tr className="debug-inner-table__row">
       <td className="debug-inner-table__cell">
-        <a className="debug-link" href={props.url}>
-          {props.name}
-        </a>
+        <a className="debug-link" href={props.url}>{props.name}</a>
       </td>
       <td className="debug-inner-table__cell--notes">
         {_.isNil(props.note) ? props.url : props.note}
@@ -44,43 +37,43 @@ function DebugTableLink(props: { name: string; url: string; note?: string }) {
   );
 }
 
-function DebugTableRow(props: { title: string; children?: React.ReactNode }) {
+function DebugTableRow(props: { title: string, children?: React.ReactNode }) {
   return (
     <tr className="debug-table__row">
-      <th className="debug-table__cell debug-table__cell--header">
-        {props.title}
-      </th>
+      <th className="debug-table__cell debug-table__cell--header">{props.title}</th>
       <td className="debug-table__cell">
         <table className="debug-inner-table">
-          <tbody>{props.children}</tbody>
+          <tbody>
+            {props.children}
+          </tbody>
         </table>
       </td>
     </tr>
   );
 }
 
-function DebugTable(props: { heading: string; children?: React.ReactNode }) {
+function DebugTable(props: { heading: string, children?: React.ReactNode }) {
   return (
     <div>
       <h2 className="base-heading">{props.heading}</h2>
       <table className="debug-table">
-        <tbody>{props.children}</tbody>
+        <tbody>
+          {props.children}
+        </tbody>
       </table>
     </div>
   );
 }
 
-function DebugPanelLink(props: { name: string; url: string; note: string }) {
+function DebugPanelLink(props: { name: string, url: string,  note: string }) {
   return (
     <PanelPair>
       <Panel>
-        <a href={props.url}>{props.name}</a>
-        <p>{props.note}</p>
+        <a href={ props.url }>{ props.name }</a>
+        <p>{ props.note }</p>
       </Panel>
       <Panel>
-        <div className="debug-url">
-          <div>{props.url}</div>
-        </div>
+        <div className="debug-url"><div>{ props.url }</div></div>
       </Panel>
     </PanelPair>
   );
@@ -94,16 +87,16 @@ export default function Debug() {
       <div className="debug-header">
         <InfoBox>
           <p>
-            The following pages are meant for advanced monitoring and
-            troubleshooting. Note that these pages are experimental and
-            undocumented. If you find an issue, let us know through{" "}
-            <a href={COMMUNITY_URL}>these channels.</a>
+            The following pages are meant for advanced monitoring and troubleshooting.
+            Note that these pages are experimental and undocumented. If you find an issue,
+            let us know through{" "}
+            <a href={ COMMUNITY_URL }>these channels.</a>
           </p>
         </InfoBox>
 
         <div className="debug-header__annotations">
           <LicenseType />
-          <DebugAnnotation label="Web server" value={`n${NODE_ID}`} />
+          <DebugAnnotation label="Web server" value={ `n${NODE_ID}` } />
         </div>
       </div>
       <PanelSection>
@@ -160,26 +153,15 @@ export default function Debug() {
           />
         </DebugTableRow>
         <DebugTableRow title="Stores">
-          <DebugTableLink
-            name="Stores on this node"
-            url="#/reports/stores/local"
-          />
+          <DebugTableLink name="Stores on this node" url="#/reports/stores/local" />
           <DebugTableLink
             name="Stores on a specific node"
             url="#/reports/stores/1"
             note="#/reports/stores/[node_id]"
           />
-          <DebugTableLink
-            name="Store LSM details on this node"
-            url="/debug/lsm/1"
-            note="/debug/lsm/[store_id]"
-          />
         </DebugTableRow>
         <DebugTableRow title="Security">
-          <DebugTableLink
-            name="Certificates on this node"
-            url="#/reports/certificates/local"
-          />
+          <DebugTableLink name="Certificates on this node" url="#/reports/certificates/local" />
           <DebugTableLink
             name="Certificates on a specific node"
             url="#/reports/certificates/1"
@@ -202,40 +184,15 @@ export default function Debug() {
           <DebugTableLink name="Raft Messages" url="#/raft/messages/all" />
           <DebugTableLink name="Raft for all ranges" url="#/raft/ranges" />
         </DebugTableRow>
-        <DebugTableRow title="Closed timestamps">
-          <DebugTableLink
-            name="Sender on this node"
-            url="/debug/closedts-sender"
-          />
-          <DebugTableLink
-            name="Receiver on this node"
-            url="/debug/closedts-receiver"
-          />
-        </DebugTableRow>
       </DebugTable>
       <DebugTable heading="Tracing and Profiling Endpoints (local node only)">
         <DebugTableRow title="Tracing">
           <DebugTableLink name="Requests" url="/debug/requests" />
           <DebugTableLink name="Events" url="/debug/events" />
           <DebugTableLink
-            name="Logs (JSON)"
-            url="/debug/logspy?count=100&amp;duration=10s&amp;grep=.&flatten=0"
+            name="Logs"
+            url="/debug/logspy?count=1&amp;duration=10s&amp;grep=."
             note="/debug/logspy?count=[count]&amp;duration=[duration]&amp;grep=[regexp]"
-          />
-          <DebugTableLink
-            name="Logs (text)"
-            url="/debug/logspy?count=100&amp;duration=10s&amp;grep=.&flatten=1"
-            note="/debug/logspy?count=[count]&amp;duration=[duration]&amp;grep=[regexp]&amp;flatten=1"
-          />
-          <DebugTableLink
-            name="Logs (text, high verbosity; IMPACTS PERFORMANCE)"
-            url="/debug/logspy?count=100&amp;duration=10s&amp;grep=.&flatten=1&vmodule=*=2"
-            note="/debug/logspy?count=[count]&amp;duration=[duration]&amp;grep=[regexp]&amp;flatten=[0/1]&amp;vmodule=[vmodule]"
-          />
-          <DebugTableLink
-            name="VModule setting"
-            url="/debug/vmodule"
-            note="/debug/vmodule?duration=[duration]&amp;vmodule=[vmodule]"
           />
         </DebugTableRow>
         <DebugTableRow title="Enqueue Range">
@@ -250,33 +207,20 @@ export default function Debug() {
         </DebugTableRow>
         <DebugTableRow title="Profiling UI/pprof">
           <DebugTableLink name="Heap" url="/debug/pprof/ui/heap/" />
-          <DebugTableLink
-            name="Heap (recent allocs)"
-            url="/debug/pprof/ui/heap/?seconds=5&amp;si=alloc_objects"
-          />
-          <DebugTableLink
-            name="Profile"
-            url="/debug/pprof/ui/profile/?seconds=5&amp;labels=true"
-          />
+          <DebugTableLink name="Profile" url="/debug/pprof/ui/profile/?seconds=5&amp;labels=true" />
           <DebugTableLink name="Block" url="/debug/pprof/ui/block/" />
           <DebugTableLink name="Mutex" url="/debug/pprof/ui/mutex/" />
-          <DebugTableLink
-            name="Thread Create"
-            url="/debug/pprof/ui/threadcreate/"
-          />
+          <DebugTableLink name="Thread Create" url="/debug/pprof/ui/threadcreate/" />
           <DebugTableLink name="Goroutines" url="/debug/pprof/ui/goroutine/" />
         </DebugTableRow>
         <DebugTableRow title="Goroutines">
           <DebugTableLink name="UI" url="/debug/pprof/goroutineui" />
-          <DebugTableLink
-            name="UI (count)"
-            url="/debug/pprof/goroutineui?sort=count"
-          />
-          <DebugTableLink
-            name="UI (wait)"
-            url="/debug/pprof/goroutineui?sort=wait"
-          />
+          <DebugTableLink name="UI (count)" url="/debug/pprof/goroutineui?sort=count" />
+          <DebugTableLink name="UI (wait)" url="/debug/pprof/goroutineui?sort=wait" />
           <DebugTableLink name="Raw" url="/debug/pprof/goroutine?debug=2" />
+        </DebugTableRow>
+        <DebugTableRow title="Threads">
+          <DebugTableLink name="Raw" url="/debug/threads" />
         </DebugTableRow>
         <DebugTableRow title="Runtime Trace">
           <DebugTableLink name="Trace" url="/debug/pprof/trace?debug=1" />
@@ -376,10 +320,7 @@ export default function Debug() {
             url="/_status/range/1"
             note="/_status/range/[range_id]"
           />
-          <DebugTableLink
-            name="Range Log"
-            url="/_admin/v1/rangelog?limit=100"
-          />
+          <DebugTableLink name="Range Log" url="/_admin/v1/rangelog?limit=100" />
           <DebugTableLink
             name="Range Log for Specific Range"
             url="/_admin/v1/rangelog/1?limit=100"

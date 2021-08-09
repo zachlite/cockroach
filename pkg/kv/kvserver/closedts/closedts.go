@@ -46,14 +46,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
-// IssueTrackingRemovalOfOldClosedTimestampsCode is the Github issue tracking
-// the deletion of the "old" closed timestamps code (i.e. everything around
-// here) in 21.2, now that 21.1 has a new Raft-based closed-timestamps
-// mechanism. The old mechanism is disabled when the cluster version is
-// sufficiently high, and all the tests failing because of it are skipped with
-// this issue.
-const IssueTrackingRemovalOfOldClosedTimestampsCode = 61299
-
 // ReleaseFunc is a closure returned from Track which is used to record the
 // LeaseAppliedIndex (LAI) given to a tracked proposal. The supplied epoch must
 // match that of the lease under which the proposal was proposed.
@@ -72,7 +64,6 @@ type ReleaseFunc func(context.Context, ctpb.Epoch, roachpb.RangeID, ctpb.LAI)
 type TrackerI interface {
 	Close(next hlc.Timestamp, expCurEpoch ctpb.Epoch) (hlc.Timestamp, map[roachpb.RangeID]ctpb.LAI, bool)
 	Track(ctx context.Context) (hlc.Timestamp, ReleaseFunc)
-	FailedCloseAttempts() int64
 }
 
 // A Storage holds the closed timestamps and associated MLAIs for each node. It
@@ -137,7 +128,7 @@ type Producer interface {
 //    resulting entries to all of its subscribers.
 // 3. it accepts notifications from other nodes, passing these updates through
 //    to its local storage, so that
-// 4. the CanServe method determines via the underlying storage whether a
+// 4. the CanServe method determines via the the underlying storage whether a
 //    given read can be satisfied via follower reads.
 // 5. the MaxClosed method determines via the underlying storage what the maximum
 //    closed timestamp is for the specified LAI.

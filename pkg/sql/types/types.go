@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
-	"runtime/debug"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
@@ -1057,14 +1056,9 @@ func MakeEnum(typeOID, arrayTypeOID oid.Oid) *T {
 // MakeArray constructs a new instance of an ArrayFamily type with the given
 // element type (which may itself be an ArrayFamily type).
 func MakeArray(typ *T) *T {
-	// Do not make an array of type unknown[]. Follow Postgres' behavior and
-	// convert this to type string[].
-	if typ.Family() == UnknownFamily {
-		typ = String
-	}
 	arr := &T{InternalType: InternalType{
 		Family:        ArrayFamily,
-		Oid:           CalcArrayOid(typ),
+		Oid:           calcArrayOid(typ),
 		ArrayContents: typ,
 		Locale:        &emptyLocale,
 	}}
@@ -1384,7 +1378,8 @@ func (t *T) Name() string {
 		panic(errors.AssertionFailedf("unexpected OID: %d", t.Oid()))
 
 	case TupleFamily:
-		return t.SQLStandardName()
+		// Tuple types are currently anonymous, with no name.
+		return ""
 
 	case EnumFamily:
 		if t.Oid() == oid.T_anyenum {
@@ -1637,10 +1632,6 @@ func (t *T) InformationSchemaName() string {
 	if t.Family() == ArrayFamily {
 		return "ARRAY"
 	}
-	// TypeMeta attributes are populated only when it is user defined type.
-	if t.TypeMeta.Name != nil {
-		return "USER-DEFINED"
-	}
 	return t.SQLStandardName()
 }
 
@@ -1767,12 +1758,8 @@ func (t *T) Equivalent(other *T) bool {
 
 	switch t.Family() {
 	case CollatedStringFamily:
-		// CockroachDB differs from Postgres by comparing collation names
-		// case-insensitively and equating hyphens/underscores.
-		if t.Locale() != "" && other.Locale() != "" {
-			if !lex.LocaleNamesAreEqual(t.Locale(), other.Locale()) {
-				return false
-			}
+		if t.Locale() != "" && other.Locale() != "" && t.Locale() != other.Locale() {
+			return false
 		}
 
 	case TupleFamily:
@@ -2117,7 +2104,7 @@ func (t *T) upgradeType() error {
 				return err
 			}
 			t.InternalType.ArrayContents = &arrayContents
-			t.InternalType.Oid = CalcArrayOid(t.ArrayContents())
+			t.InternalType.Oid = calcArrayOid(t.ArrayContents())
 		}
 
 		// Marshaling/unmarshaling nested arrays is not yet supported.
@@ -2190,19 +2177,6 @@ func (t *T) Marshal() (data []byte, err error) {
 		return nil, err
 	}
 	return protoutil.Marshal(&temp.InternalType)
-}
-
-// MarshalToSizedBuffer is like Mashal, except that it deserializes to
-// an existing byte slice with exactly enough remaining space for
-// Size().
-//
-// Marshal is part of the protoutil.Message interface.
-func (t *T) MarshalToSizedBuffer(data []byte) (int, error) {
-	temp := *t
-	if err := temp.downgradeType(); err != nil {
-		return 0, err
-	}
-	return temp.InternalType.MarshalToSizedBuffer(data)
 }
 
 // MarshalTo behaves like Marshal, except that it deserializes to an existing
@@ -2405,11 +2379,9 @@ func (t *T) EnumGetIdxOfPhysical(phys []byte) (int, error) {
 		}
 	}
 	err := errors.Newf(
-		"could not find %v in enum %q representation %s %s",
+		"could not find %v in enum representation %s",
 		phys,
-		t.TypeMeta.Name.FQName(),
 		t.TypeMeta.EnumData.debugString(),
-		debug.Stack(),
 	)
 	return 0, err
 }

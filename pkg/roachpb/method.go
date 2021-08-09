@@ -13,9 +13,6 @@ package roachpb
 // Method is the enumerated type for methods.
 type Method int
 
-// SafeValue implements redact.SafeValue.
-func (Method) SafeValue() {}
-
 //go:generate stringer -type=Method
 const (
 	// Get fetches the value for a key from the KV map, respecting a
@@ -134,14 +131,13 @@ const (
 	WriteBatch
 	// Export dumps a keyrange into files.
 	Export
+	// Import bulk loads key/value entries.
+	Import
 	// AdminScatter moves replicas and leaseholders for a selection of ranges.
 	// Best-effort.
 	AdminScatter
 	// AddSSTable links a file into the RocksDB log-structured merge-tree.
 	AddSSTable
-	// Migrate updates the range state to conform to a specified cluster
-	// version. It is our main mechanism for phasing out legacy code below Raft.
-	Migrate
 	// RecomputeStats applies a delta to a Range's MVCCStats to fix computational errors.
 	RecomputeStats
 	// Refresh verifies no writes to a key have occurred since the
@@ -156,12 +152,9 @@ const (
 	Subsume
 	// RangeStats returns the MVCC statistics for a range.
 	RangeStats
-	// AdminVerifyProtectedTimestamp determines whether the specified protection
-	// record will be respected by this Range.
+	// VerifyProtectedTimestamp determines whether the specified protection record
+	// will be respected by this Range.
 	AdminVerifyProtectedTimestamp
-	// QueryResolvedTimestamp requests the resolved timestamp of the key span it
-	// is issued over.
-	QueryResolvedTimestamp
 	// NumMethods represents the total number of API methods.
 	NumMethods
 )

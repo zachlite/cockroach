@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 
 	"github.com/biogo/store/llrb"
@@ -70,22 +69,6 @@ type Config struct {
 type Entry struct {
 	Key, Value interface{}
 	next, prev *Entry
-}
-
-// Object pool used for short-lived Entry objects.
-var entryPool = sync.Pool{
-	New: func() interface{} { return &Entry{} },
-}
-
-func newEntry(key interface{}) *Entry {
-	e := entryPool.Get().(*Entry)
-	e.Key = key
-	return e
-}
-
-func (e *Entry) release() {
-	*e = Entry{}
-	entryPool.Put(e)
 }
 
 func (e Entry) String() string {
@@ -257,16 +240,7 @@ func (bc *baseCache) Get(key interface{}) (value interface{}, ok bool) {
 		bc.access(e)
 		return e.Value, true
 	}
-	return nil, false
-}
-
-// StealthyGet looks up a key's value from the cache but does not consider it an
-// "access" (with respect to the policy).
-func (bc *baseCache) StealthyGet(key interface{}) (value interface{}, ok bool) {
-	if e := bc.store.get(key); e != nil {
-		return e.Value, true
-	}
-	return nil, false
+	return
 }
 
 // Del removes the provided key from the cache.
@@ -301,13 +275,6 @@ func (bc *baseCache) Clear() {
 // Len returns the number of items in the cache.
 func (bc *baseCache) Len() int {
 	return bc.store.length()
-}
-
-// Do iterates over all entries in the cache and calls fn with each entry.
-func (bc *baseCache) Do(fn func(e *Entry)) {
-	for e := bc.ll.root.next; e != &bc.ll.root; e = e.next {
-		fn(e)
-	}
 }
 
 func (bc *baseCache) access(e *Entry) {
@@ -416,9 +383,7 @@ func (oc *OrderedCache) init() {
 	oc.llrb = llrb.Tree{}
 }
 func (oc *OrderedCache) get(key interface{}) *Entry {
-	eKey := newEntry(key)
-	defer eKey.release()
-	if e, ok := oc.llrb.Get(eKey).(*Entry); ok {
+	if e, ok := oc.llrb.Get(&Entry{Key: key}).(*Entry); ok {
 		return e
 	}
 	return nil
@@ -435,9 +400,7 @@ func (oc *OrderedCache) length() int {
 
 // CeilEntry returns the smallest cache entry greater than or equal to key.
 func (oc *OrderedCache) CeilEntry(key interface{}) (*Entry, bool) {
-	eKey := newEntry(key)
-	defer eKey.release()
-	if e, ok := oc.llrb.Ceil(eKey).(*Entry); ok {
+	if e, ok := oc.llrb.Ceil(&Entry{Key: key}).(*Entry); ok {
 		return e, true
 	}
 	return nil, false
@@ -453,9 +416,7 @@ func (oc *OrderedCache) Ceil(key interface{}) (interface{}, interface{}, bool) {
 
 // FloorEntry returns the greatest cache entry less than or equal to key.
 func (oc *OrderedCache) FloorEntry(key interface{}) (*Entry, bool) {
-	eKey := newEntry(key)
-	defer eKey.release()
-	if e, ok := oc.llrb.Floor(eKey).(*Entry); ok {
+	if e, ok := oc.llrb.Floor(&Entry{Key: key}).(*Entry); ok {
 		return e, true
 	}
 	return nil, false
@@ -493,13 +454,9 @@ func (oc *OrderedCache) Do(f func(k, v interface{}) bool) bool {
 // DoRangeEntry loop will exit; false, it will continue. DoRangeEntry returns
 // whether the iteration exited early.
 func (oc *OrderedCache) DoRangeEntry(f func(e *Entry) bool, from, to interface{}) bool {
-	eFrom := newEntry(from)
-	eTo := newEntry(to)
-	defer eFrom.release()
-	defer eTo.release()
 	return oc.llrb.DoRange(func(e llrb.Comparable) bool {
 		return f(e.(*Entry))
-	}, eFrom, eTo)
+	}, &Entry{Key: from}, &Entry{Key: to})
 }
 
 // DoRangeReverseEntry invokes f on all cache entries in the range (to, from]. from
@@ -508,13 +465,9 @@ func (oc *OrderedCache) DoRangeEntry(f func(e *Entry) bool, from, to interface{}
 // DoRangeReverseEntry loop will exit; false, it will continue.
 // DoRangeReverseEntry returns whether the iteration exited early.
 func (oc *OrderedCache) DoRangeReverseEntry(f func(e *Entry) bool, from, to interface{}) bool {
-	eFrom := newEntry(from)
-	eTo := newEntry(to)
-	defer eFrom.release()
-	defer eTo.release()
 	return oc.llrb.DoRangeReverse(func(e llrb.Comparable) bool {
 		return f(e.(*Entry))
-	}, eFrom, eTo)
+	}, &Entry{Key: from}, &Entry{Key: to})
 }
 
 // DoRange invokes f on all key-value pairs in the range of from -> to. f

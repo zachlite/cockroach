@@ -50,9 +50,8 @@ func newErrBufferCapacityExceeded() *roachpb.Error {
 // Config encompasses the configuration required to create a Processor.
 type Config struct {
 	log.AmbientContext
-	Clock   *hlc.Clock
-	RangeID roachpb.RangeID
-	Span    roachpb.RSpan
+	Clock *hlc.Clock
+	Span  roachpb.RSpan
 
 	TxnPusher TxnPusher
 	// PushTxnsInterval specifies the interval at which a Processor will push
@@ -180,7 +179,7 @@ func NewProcessor(cfg Config) *Processor {
 
 // IteratorConstructor is used to construct an iterator. It should be called
 // from underneath a stopper task to ensure that the engine has not been closed.
-type IteratorConstructor func() storage.SimpleMVCCIterator
+type IteratorConstructor func() storage.SimpleIterator
 
 // Start launches a goroutine to process rangefeed events and send them to
 // registrations.
@@ -194,7 +193,7 @@ type IteratorConstructor func() storage.SimpleMVCCIterator
 func (p *Processor) Start(stopper *stop.Stopper, rtsIterFunc IteratorConstructor) {
 	ctx := p.AnnotateCtx(context.Background())
 	if err := stopper.RunAsyncTask(ctx, "rangefeed.Processor", func(ctx context.Context) {
-		p.run(ctx, p.RangeID, rtsIterFunc, stopper)
+		p.run(ctx, rtsIterFunc, stopper)
 	}); err != nil {
 		pErr := roachpb.NewError(err)
 		p.reg.DisconnectWithErr(all, pErr)
@@ -204,10 +203,7 @@ func (p *Processor) Start(stopper *stop.Stopper, rtsIterFunc IteratorConstructor
 
 // run is called from Start and runs the rangefeed.
 func (p *Processor) run(
-	ctx context.Context,
-	_forStacks roachpb.RangeID,
-	rtsIterFunc IteratorConstructor,
-	stopper *stop.Stopper,
+	ctx context.Context, rtsIterFunc IteratorConstructor, stopper *stop.Stopper,
 ) {
 	defer close(p.stoppedC)
 	ctx, cancelOutputLoops := context.WithCancel(ctx)
@@ -260,7 +256,7 @@ func (p *Processor) run(
 
 			// Run an output loop for the registry.
 			runOutputLoop := func(ctx context.Context) {
-				r.runOutputLoop(ctx, p.RangeID)
+				r.runOutputLoop(ctx)
 				select {
 				case p.unregC <- &r:
 				case <-p.stoppedC:
@@ -475,7 +471,7 @@ func (p *Processor) ForwardClosedTS(closedTS hlc.Timestamp) bool {
 	if p == nil {
 		return true
 	}
-	if closedTS.IsEmpty() {
+	if closedTS == (hlc.Timestamp{}) {
 		return true
 	}
 	return p.sendEvent(event{ct: closedTS}, p.EventChanTimeout)
@@ -542,7 +538,7 @@ func (p *Processor) consumeEvent(ctx context.Context, e *event) {
 	switch {
 	case len(e.ops) > 0:
 		p.consumeLogicalOps(ctx, e.ops)
-	case !e.ct.IsEmpty():
+	case e.ct != hlc.Timestamp{}:
 		p.forwardClosedTS(ctx, e.ct)
 	case e.initRTS:
 		p.initResolvedTS(ctx)

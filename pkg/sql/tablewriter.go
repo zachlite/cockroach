@@ -14,14 +14,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -124,9 +122,6 @@ type tableWriterBase struct {
 	// rows contains the accumulated result rows if rowsNeeded is set on the
 	// corresponding tableWriter.
 	rows *rowcontainer.RowContainer
-	// If set, mutations.MaxBatchSize and row.getKVBatchSize will be overridden
-	// to use the non-test value.
-	forceProductionBatchSizes bool
 }
 
 var maxBatchBytes = settings.RegisterByteSizeSetting(
@@ -141,13 +136,11 @@ func (tb *tableWriterBase) init(
 	tb.txn = txn
 	tb.desc = tableDesc
 	tb.b = txn.NewBatch()
-	tb.forceProductionBatchSizes = evalCtx != nil && evalCtx.TestingKnobs.ForceProductionBatchSizes
-	tb.maxBatchSize = mutations.MaxBatchSize(tb.forceProductionBatchSizes)
-	batchMaxBytes := int(maxBatchBytes.Default())
+	tb.maxBatchSize = mutations.MaxBatchSize()
+	tb.maxBatchByteSize = int(maxBatchBytes.Default())
 	if evalCtx != nil {
-		batchMaxBytes = int(maxBatchBytes.Get(&evalCtx.Settings.SV))
+		tb.maxBatchByteSize = int(maxBatchBytes.Get(&evalCtx.Settings.SV))
 	}
-	tb.maxBatchByteSize = mutations.MaxBatchByteSize(batchMaxBytes, tb.forceProductionBatchSizes)
 }
 
 // flushAndStartNewBatch shares the common flushAndStartNewBatch() code between
@@ -155,20 +148,6 @@ func (tb *tableWriterBase) init(
 func (tb *tableWriterBase) flushAndStartNewBatch(ctx context.Context) error {
 	if err := tb.txn.Run(ctx, tb.b); err != nil {
 		return row.ConvertBatchError(ctx, tb.desc, tb.b)
-	}
-	// Do admission control for response processing. This is the shared write
-	// path for most SQL mutations.
-	responseAdmissionQ := tb.txn.DB().SQLKVResponseAdmissionQ
-	if responseAdmissionQ != nil {
-		requestAdmissionHeader := tb.txn.AdmissionHeader()
-		responseAdmission := admission.WorkInfo{
-			TenantID:   roachpb.SystemTenantID,
-			Priority:   admission.WorkPriority(requestAdmissionHeader.Priority),
-			CreateTime: requestAdmissionHeader.CreateTime,
-		}
-		if _, err := responseAdmissionQ.Admit(ctx, responseAdmission); err != nil {
-			return err
-		}
 	}
 	tb.b = tb.txn.NewBatch()
 	tb.lastBatchSize = tb.currentBatchSize
@@ -178,8 +157,6 @@ func (tb *tableWriterBase) flushAndStartNewBatch(ctx context.Context) error {
 
 // finalize shares the common finalize() code between tableWriters.
 func (tb *tableWriterBase) finalize(ctx context.Context) (err error) {
-	// NB: unlike flushAndStartNewBatch, we don't bother with admission control
-	// for response processing when finalizing.
 	if tb.autoCommit == autoCommitEnabled {
 		log.Event(ctx, "autocommit enabled")
 		// An auto-txn can commit the transaction with the batch. This is an

@@ -17,15 +17,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
 // ConvertToColumnOrdering converts an Ordering type (as defined in data.proto)
-// to a colinfo.ColumnOrdering type.
+// to a sqlbase.ColumnOrdering type.
 func ConvertToColumnOrdering(specOrdering Ordering) colinfo.ColumnOrdering {
 	ordering := make(colinfo.ColumnOrdering, len(specOrdering.Columns))
 	for i, c := range specOrdering.Columns {
@@ -39,13 +38,13 @@ func ConvertToColumnOrdering(specOrdering Ordering) colinfo.ColumnOrdering {
 	return ordering
 }
 
-// ConvertToSpecOrdering converts a colinfo.ColumnOrdering type
+// ConvertToSpecOrdering converts a sqlbase.ColumnOrdering type
 // to an Ordering type (as defined in data.proto).
 func ConvertToSpecOrdering(columnOrdering colinfo.ColumnOrdering) Ordering {
 	return ConvertToMappedSpecOrdering(columnOrdering, nil)
 }
 
-// ConvertToMappedSpecOrdering converts a colinfo.ColumnOrdering type
+// ConvertToMappedSpecOrdering converts a sqlbase.ColumnOrdering type
 // to an Ordering type (as defined in data.proto), using the column
 // indices contained in planToStreamColMap.
 func ConvertToMappedSpecOrdering(
@@ -75,18 +74,15 @@ func ConvertToMappedSpecOrdering(
 // IndexedVar formatting function needs to be added on. It replaces placeholders
 // with their values.
 func ExprFmtCtxBase(evalCtx *tree.EvalContext) *tree.FmtCtx {
-	fmtCtx := evalCtx.FmtCtx(
-		tree.FmtCheckEquivalence,
-		tree.FmtPlaceholderFormat(
-			func(fmtCtx *tree.FmtCtx, p *tree.Placeholder) {
-				d, err := p.Eval(evalCtx)
-				if err != nil {
-					panic(errors.AssertionFailedf("failed to serialize placeholder: %s", err))
-				}
-				d.Format(fmtCtx)
-			},
-		),
-	)
+	fmtCtx := tree.NewFmtCtx(tree.FmtCheckEquivalence)
+	fmtCtx.SetPlaceholderFormat(
+		func(fmtCtx *tree.FmtCtx, p *tree.Placeholder) {
+			d, err := p.Eval(evalCtx)
+			if err != nil {
+				panic(errors.AssertionFailedf("failed to serialize placeholder: %s", err))
+			}
+			d.Format(fmtCtx)
+		})
 	return fmtCtx
 }
 
@@ -182,8 +178,8 @@ type ProducerMetadata struct {
 	Ranges []roachpb.RangeInfo
 	// TODO(vivek): change to type Error
 	Err error
-	// TraceData is sent if tracing is enabled.
-	TraceData []tracingpb.RecordedSpan
+	// TraceData is sent if snowball tracing is enabled.
+	TraceData []tracing.RecordedSpan
 	// LeafTxnFinalState contains the final state of the LeafTxn to be
 	// sent from leaf flows to the RootTxn held by the flow's ultimate
 	// receiver.
@@ -312,12 +308,36 @@ func LocalMetaToRemoteProducerMeta(
 		rpm.Value = &RemoteProducerMetadata_Metrics_{
 			Metrics: meta.Metrics,
 		}
-	} else if meta.Err != nil {
+	} else {
 		rpm.Value = &RemoteProducerMetadata_Error{
 			Error: NewError(ctx, meta.Err),
 		}
-	} else if util.CrdbTestBuild {
-		panic("unhandled field in local meta or all fields are nil")
 	}
 	return rpm
+}
+
+// MetadataSource is an interface implemented by processors and columnar
+// operators that can produce metadata.
+type MetadataSource interface {
+	// DrainMeta returns all the metadata produced by the processor or operator.
+	// It will be called exactly once, usually, when the processor or operator
+	// has finished doing its computations. This is a signal that the output
+	// requires no more rows to be returned.
+	// Implementers can choose what to do on subsequent calls (if such occur).
+	// TODO(yuzefovich): modify the contract to require returning nil on all
+	// calls after the first one.
+	DrainMeta(context.Context) []ProducerMetadata
+}
+
+// MetadataSources is a slice of MetadataSource.
+type MetadataSources []MetadataSource
+
+// DrainMeta calls DrainMeta on all MetadataSources and returns a single slice
+// with all the accumulated metadata.
+func (s MetadataSources) DrainMeta(ctx context.Context) []ProducerMetadata {
+	var result []ProducerMetadata
+	for _, src := range s {
+		result = append(result, src.DrainMeta(ctx)...)
+	}
+	return result
 }

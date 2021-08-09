@@ -92,13 +92,7 @@ func newProjectSetProcessor(
 		processorID,
 		output,
 		nil, /* memMonitor */
-		execinfra.ProcStateOpts{
-			InputsToDrain: []execinfra.RowSource{ps.input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				ps.close()
-				return nil
-			},
-		},
+		execinfra.ProcStateOpts{InputsToDrain: []execinfra.RowSource{ps.input}},
 	); err != nil {
 		return nil, err
 	}
@@ -121,10 +115,11 @@ func newProjectSetProcessor(
 }
 
 // Start is part of the RowSource interface.
-func (ps *projectSetProcessor) Start(ctx context.Context) {
+func (ps *projectSetProcessor) Start(ctx context.Context) context.Context {
+	ctx = ps.input.Start(ctx)
 	ctx = ps.StartInternal(ctx, projectSetProcName)
-	ps.input.Start(ctx)
 	ps.cancelChecker = cancelchecker.NewCancelChecker(ctx)
+	return ctx
 }
 
 // nextInputRow returns the next row or metadata from ps.input. It also
@@ -284,19 +279,10 @@ func (ps *projectSetProcessor) toEncDatum(d tree.Datum, colIdx int) rowenc.EncDa
 	return rowenc.DatumToEncDatum(ctyp, d)
 }
 
-func (ps *projectSetProcessor) close() {
-	if ps.InternalClose() {
-		for _, gen := range ps.gens {
-			if gen != nil {
-				gen.Close(ps.Ctx)
-			}
-		}
-	}
-}
-
 // ConsumerClosed is part of the RowSource interface.
 func (ps *projectSetProcessor) ConsumerClosed() {
-	ps.close()
+	// The consumer is done, Next() will not be called again.
+	ps.InternalClose()
 }
 
 // ChildCount is part of the execinfra.OpNode interface.

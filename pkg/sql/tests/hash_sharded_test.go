@@ -73,7 +73,7 @@ func verifyTableDescriptorState(
 	if !foundCheckConstraint {
 		t.Fatalf(`Could not find hidden check constraint for shard column`)
 	}
-	if idx.GetKeyColumnID(0) != shardColID {
+	if idx.GetColumnID(0) != shardColID {
 		t.Fatalf(`Expected shard column to be the first column in the set of index columns`)
 	}
 }
@@ -112,14 +112,13 @@ func TestBasicHashShardedIndexes(t *testing.T) {
 		shardColID := getShardColumnID(t, tableDesc, "primary" /* shardedIndexName */)
 
 		// Ensure that secondary indexes on table `kv` have the shard column in their
-		// `KeySuffixColumnIDs` field so they can reconstruct the sharded primary key.
+		// `ExtraColumnIDs` field so they can reconstruct the sharded primary key.
 		foo, err := tableDesc.FindIndexWithName("foo")
 		if err != nil {
 			t.Fatal(err)
 		}
 		foundShardColumn := false
-		for i := 0; i < foo.NumKeySuffixColumns(); i++ {
-			colID := foo.GetKeySuffixColumnID(i)
+		for _, colID := range foo.IndexDesc().ExtraColumnIDs {
 			if colID == shardColID {
 				foundShardColumn = true
 				break

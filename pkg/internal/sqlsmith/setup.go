@@ -16,7 +16,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
@@ -72,13 +73,7 @@ func stringSetup(s string) Setup {
 	}
 }
 
-// randTables is a Setup function that creates 1-5 random tables.
 func randTables(r *rand.Rand) string {
-	return randTablesN(r, r.Intn(5)+1)
-}
-
-// randTablesN is a Setup function that creates n random tables.
-func randTablesN(r *rand.Rand, n int) string {
 	var sb strings.Builder
 	// Since we use the stats mutator, disable auto stats generation.
 	sb.WriteString(`
@@ -88,10 +83,10 @@ func randTablesN(r *rand.Rand, n int) string {
 	`)
 
 	// Create the random tables.
-	stmts := randgen.RandCreateTables(r, "table", n,
-		randgen.StatisticsMutator,
-		randgen.PartialIndexMutator,
-		randgen.ForeignKeyMutator,
+	stmts := rowenc.RandCreateTables(r, "table", r.Intn(5)+1,
+		mutations.StatisticsMutator,
+		mutations.PartialIndexMutator,
+		mutations.ForeignKeyMutator,
 	)
 
 	for _, stmt := range stmts {
@@ -103,7 +98,7 @@ func randTablesN(r *rand.Rand, n int) string {
 	numTypes := r.Intn(5) + 1
 	for i := 0; i < numTypes; i++ {
 		name := fmt.Sprintf("rand_typ_%d", i)
-		stmt := randgen.RandCreateType(r, name, letters)
+		stmt := rowenc.RandCreateType(r, name, letters)
 		sb.WriteString(stmt.String())
 		sb.WriteString(";\n")
 	}

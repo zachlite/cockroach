@@ -22,14 +22,11 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx"
 	"github.com/spf13/pflag"
 )
 
@@ -69,8 +66,6 @@ type kv struct {
 	cycleLength                          int64
 	readPercent                          int
 	spanPercent                          int
-	spanLimit                            int
-	writesUseSelectForUpdate             bool
 	seed                                 int64
 	writeSeq                             string
 	sequential                           bool
@@ -119,10 +114,6 @@ var kvMeta = workload.Meta{
 			`Percent (0-100) of operations that are reads of existing keys.`)
 		g.flags.IntVar(&g.spanPercent, `span-percent`, 0,
 			`Percent (0-100) of operations that are spanning queries of all ranges.`)
-		g.flags.IntVar(&g.spanLimit, `span-limit`, 0,
-			`LIMIT count for each spanning query, or 0 for no limit`)
-		g.flags.BoolVar(&g.writesUseSelectForUpdate, `sfu-writes`, false,
-			`Use SFU and transactional writes with a sleep after SFU.`)
 		g.flags.Int64Var(&g.seed, `seed`, 1, `Key hash seed.`)
 		g.flags.BoolVar(&g.zipfian, `zipfian`, false,
 			`Pick keys in a zipfian distribution instead of randomly.`)
@@ -310,32 +301,8 @@ func (w *kv) Ops(
 	}
 	writeStmtStr := buf.String()
 
-	// Select for update statement
-	var sfuStmtStr string
-	if w.writesUseSelectForUpdate {
-		if w.shards != 0 {
-			return workload.QueryLoad{}, fmt.Errorf("select for update in kv requires shard=0")
-		}
-		buf.Reset()
-		buf.WriteString(`SELECT k, v FROM kv WHERE k IN (`)
-		for i := 0; i < w.batchSize; i++ {
-			if i > 0 {
-				buf.WriteString(", ")
-			}
-			fmt.Fprintf(&buf, `$%d`, i+1)
-		}
-		buf.WriteString(`) FOR UPDATE`)
-		sfuStmtStr = buf.String()
-	}
-
 	// Span statement
-	buf.Reset()
-	buf.WriteString(`SELECT count(v) FROM [SELECT v FROM kv`)
-	if w.spanLimit > 0 {
-		fmt.Fprintf(&buf, ` ORDER BY k LIMIT %d`, w.spanLimit)
-	}
-	buf.WriteString(`]`)
-	spanStmtStr := buf.String()
+	spanStmtStr := "SELECT count(v) FROM kv"
 
 	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
 	seq := &sequence{config: w, val: int64(writeSeq)}
@@ -348,14 +315,10 @@ func (w *kv) Ops(
 		}
 		op.readStmt = op.sr.Define(readStmtStr)
 		op.writeStmt = op.sr.Define(writeStmtStr)
-		if len(sfuStmtStr) > 0 {
-			op.sfuStmt = op.sr.Define(sfuStmtStr)
-		}
 		op.spanStmt = op.sr.Define(spanStmtStr)
 		if err := op.sr.Init(ctx, "kv", mcp, w.connFlags); err != nil {
 			return workload.QueryLoad{}, err
 		}
-		op.mcp = mcp
 		if w.sequential {
 			op.g = newSequentialGenerator(seq)
 		} else if w.zipfian {
@@ -373,11 +336,9 @@ type kvOp struct {
 	config          *kv
 	hists           *histogram.Histograms
 	sr              workload.SQLRunner
-	mcp             *workload.MultiConnPool
 	readStmt        workload.StmtHandle
 	writeStmt       workload.StmtHandle
 	spanStmt        workload.StmtHandle
-	sfuStmt         workload.StmtHandle
 	g               keyGenerator
 	numEmptyResults *int64 // accessed atomically
 }
@@ -416,72 +377,16 @@ func (o *kvOp) run(ctx context.Context) error {
 		return err
 	}
 	const argCount = 2
-	writeArgs := make([]interface{}, argCount*o.config.batchSize)
-	var sfuArgs []interface{}
-	if o.config.writesUseSelectForUpdate {
-		sfuArgs = make([]interface{}, o.config.batchSize)
-	}
+	args := make([]interface{}, argCount*o.config.batchSize)
 	for i := 0; i < o.config.batchSize; i++ {
 		j := i * argCount
-		writeArgs[j+0] = o.g.writeKey()
-		if sfuArgs != nil {
-			sfuArgs[i] = writeArgs[j]
-		}
-		writeArgs[j+1] = randomBlock(o.config, o.g.rand())
+		args[j+0] = o.g.writeKey()
+		args[j+1] = randomBlock(o.config, o.g.rand())
 	}
 	start := timeutil.Now()
-	var err error
-	if o.config.writesUseSelectForUpdate {
-		// We could use crdb.ExecuteTx, but we avoid retries in this workload so
-		// that each run call makes 1 attempt, so that rate limiting in workerRun
-		// behaves as expected.
-		var tx *pgx.Tx
-		if tx, err = o.mcp.Get().Begin(); err != nil {
-			return err
-		}
-		defer func() {
-			_ = tx.Rollback()
-		}()
-		rows, err := o.sfuStmt.QueryTx(ctx, tx, sfuArgs...)
-		if err != nil {
-			return err
-		}
-		rows.Close()
-		if err = rows.Err(); err != nil {
-			return err
-		}
-		// Simulate a transaction that does other work between the SFU and write.
-		// TODO(sumeer): this should be configurable.
-		time.Sleep(10 * time.Millisecond)
-		if _, err = o.writeStmt.ExecTx(ctx, tx, writeArgs...); err != nil {
-			// Multiple write transactions can contend and encounter
-			// a serialization failure. We swallow such an error.
-			return o.tryHandleWriteErr("write-write-err", start, err)
-		}
-		if err = tx.Commit(); err != nil {
-			return o.tryHandleWriteErr("write-commit-err", start, err)
-		}
-	} else {
-		_, err = o.writeStmt.Exec(ctx, writeArgs...)
-	}
+	_, err := o.writeStmt.Exec(ctx, args...)
 	elapsed := timeutil.Since(start)
 	o.hists.Get(`write`).Record(elapsed)
-	return err
-}
-
-func (o *kvOp) tryHandleWriteErr(name string, start time.Time, err error) error {
-	// If the error not an instance of pgx.PgError, then it is unexpected.
-	pgErr := pgx.PgError{}
-	if !errors.As(err, &pgErr) {
-		return err
-	}
-	// Transaction retry errors are acceptable. Allow the transaction
-	// to rollback.
-	if pgcode.MakeCode(pgErr.Code) == pgcode.SerializationFailure {
-		elapsed := timeutil.Since(start)
-		o.hists.Get(name).Record(elapsed)
-		return nil
-	}
 	return err
 }
 

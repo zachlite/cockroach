@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -65,8 +66,6 @@ type mockLockTableGuard struct {
 	toResolve     []roachpb.LockUpdate
 }
 
-var _ lockTableGuard = &mockLockTableGuard{}
-
 // mockLockTableGuard implements the lockTableGuard interface.
 func (g *mockLockTableGuard) ShouldWait() bool            { return true }
 func (g *mockLockTableGuard) NewStateChan() chan struct{} { return g.signal }
@@ -79,9 +78,6 @@ func (g *mockLockTableGuard) CurState() waitingState {
 }
 func (g *mockLockTableGuard) ResolveBeforeScanning() []roachpb.LockUpdate {
 	return g.toResolve
-}
-func (g *mockLockTableGuard) CheckOptimisticNoConflicts(*spanset.SpanSet) (ok bool) {
-	return true
 }
 func (g *mockLockTableGuard) notify() { g.signal <- struct{}{} }
 
@@ -101,18 +97,19 @@ var lockTableWaiterTestClock = hlc.Timestamp{WallTime: 12}
 func setupLockTableWaiterTest() (*lockTableWaiterImpl, *mockIntentResolver, *mockLockTableGuard) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
+	LockTableLivenessPushDelay.Override(&st.SV, 0)
+	LockTableDeadlockDetectionPushDelay.Override(&st.SV, 0)
 	manual := hlc.NewManualClock(lockTableWaiterTestClock.WallTime)
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),
 	}
 	w := &lockTableWaiterImpl{
-		st:      st,
-		clock:   hlc.NewClock(manual.UnixNano, time.Nanosecond),
-		stopper: stop.NewStopper(),
-		ir:      ir,
-		lt:      &mockLockTable{},
+		st:                                  st,
+		clock:                               hlc.NewClock(manual.UnixNano, time.Nanosecond),
+		stopper:                             stop.NewStopper(),
+		ir:                                  ir,
+		lt:                                  &mockLockTable{},
+		conflictingIntentsResolveRejections: metric.NewCounter(metric.Metadata{}),
 	}
 	return w, ir, guard
 }
@@ -172,10 +169,6 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 
 			t.Run("waitSelf", func(t *testing.T) {
 				testWaitNoopUntilDone(t, waitSelf, makeReq)
-			})
-
-			t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-				testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush)
 			})
 
 			t.Run("doneWaiting", func(t *testing.T) {
@@ -248,10 +241,6 @@ func TestLockTableWaiterWithNonTxn(t *testing.T) {
 
 		t.Run("waitSelf", func(t *testing.T) {
 			t.Log("waitSelf is not possible for non-transactional request")
-		})
-
-		t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-			testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush)
 		})
 
 		t.Run("doneWaiting", func(t *testing.T) {
@@ -447,10 +436,6 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 			testWaitNoopUntilDone(t, waitSelf, makeReq)
 		})
 
-		t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-			testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush)
-		})
-
 		t.Run("doneWaiting", func(t *testing.T) {
 			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
@@ -463,8 +448,6 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 		})
 	})
 }
-
-var dontExpectPush = hlc.Timestamp{}
 
 func testErrorWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hlc.Timestamp) {
 	ctx := context.Background()
@@ -484,10 +467,9 @@ func testErrorWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPush
 		}
 		g.notify()
 
-		// If the lock is not held or expPushTS is empty, expect an error
-		// immediately. The one exception to this is waitElsewhere, which
-		// expects no error.
-		if !lockHeld || expPushTS == dontExpectPush {
+		// If the lock is not held, expect an error immediately. The one
+		// exception to this is waitElsewhere, which expects no error.
+		if !lockHeld {
 			err := w.WaitOn(ctx, req, g)
 			if k == waitElsewhere {
 				require.Nil(t, err)

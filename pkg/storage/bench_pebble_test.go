@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -23,17 +24,28 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 const testCacheSize = 1 << 30 // 1 GB
 
 func setupMVCCPebble(b testing.TB, dir string) Engine {
-	peb, err := Open(
+	opts := DefaultPebbleOptions()
+	opts.FS = vfs.Default
+	opts.Cache = pebble.NewCache(testCacheSize)
+	defer opts.Cache.Unref()
+
+	peb, err := NewPebble(
 		context.Background(),
-		Filesystem(dir),
-		CacheSize(testCacheSize),
-		Settings(makeSettingsForSeparatedIntents(
-			false /* oldClusterVersion */, true /* enabled */)))
+		PebbleConfig{
+			StorageConfig: base.StorageConfig{
+				Dir: dir,
+				Settings: makeSettingsForSeparatedIntents(
+					false /* oldClusterVersion */, true /* enabled */),
+			},
+			Opts: opts,
+		})
 	if err != nil {
 		b.Fatalf("could not create new pebble instance at %s: %+v", dir, err)
 	}
@@ -46,11 +58,19 @@ func setupMVCCInMemPebble(b testing.TB, loc string) Engine {
 }
 
 func setupMVCCInMemPebbleWithSettings(b testing.TB, settings *cluster.Settings) Engine {
-	peb, err := Open(
+	opts := DefaultPebbleOptions()
+	opts.FS = vfs.NewMem()
+	opts.Cache = pebble.NewCache(testCacheSize)
+	defer opts.Cache.Unref()
+
+	peb, err := NewPebble(
 		context.Background(),
-		InMemory(),
-		Settings(settings),
-		CacheSize(testCacheSize))
+		PebbleConfig{
+			Opts: opts,
+			StorageConfig: base.StorageConfig{
+				Settings: settings,
+			},
+		})
 	if err != nil {
 		b.Fatalf("could not create new in-mem pebble instance: %+v", err)
 	}

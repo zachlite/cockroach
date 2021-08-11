@@ -16,12 +16,7 @@ proto_library(
     srcs = ["session_data.proto"],
     strip_import_prefix = "/pkg",
     visibility = ["//visibility:public"],
-    deps = [
-        "//pkg/util/duration:duration_proto",
-        "//pkg/util/timeutil/pgdate:pgdate_proto",
-        "@com_github_gogo_protobuf//gogoproto:gogo_proto",
-        "@com_google_protobuf//:duration_proto",
-    ],
+    deps = ["@com_github_gogo_protobuf//gogoproto:gogo_proto"],
 )
 
 go_proto_library(
@@ -30,9 +25,5 @@ go_proto_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb",
     proto = ":sessiondatapb_proto",
     visibility = ["//visibility:public"],
-    deps = [
-        "//pkg/util/duration",
-        "//pkg/util/timeutil/pgdate",
-        "@com_github_gogo_protobuf//gogoproto",
-    ],
+    deps = ["@com_github_gogo_protobuf//gogoproto"],
 )

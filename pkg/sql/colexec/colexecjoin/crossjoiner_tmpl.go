@@ -24,6 +24,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
@@ -110,7 +111,7 @@ func (b *crossJoinerBase) buildFromLeftInput(ctx context.Context, destStartIdx i
 										outNulls.SetNull(outStartIdx)
 									} else {
 										val := srcCol.Get(srcStartIdx)
-										outCol.Set(outStartIdx, val)
+										execgen.SET(outCol, outStartIdx, val)
 									}
 									outStartIdx++
 									b.builderState.left.curSrcStartIdx++
@@ -163,7 +164,7 @@ func (b *crossJoinerBase) buildFromLeftInput(ctx context.Context, destStartIdx i
 									} else {
 										val := srcCol.Get(srcStartIdx)
 										for i := 0; i < toAppend; i++ {
-											outCol.Set(outStartIdx, val)
+											execgen.SET(outCol, outStartIdx, val)
 											outStartIdx++
 										}
 									}
@@ -287,15 +288,17 @@ func (b *crossJoinerBase) buildFromRightInput(ctx context.Context, destStartIdx 
 										outNulls.SetNull(outStartIdx)
 									} else {
 										v := srcCol.Get(b.builderState.right.curSrcStartIdx)
-										outCol.Set(outStartIdx, v)
+										execgen.SET(outCol, outStartIdx, v)
 									}
 								} else {
 									out.Copy(
-										coldata.SliceArgs{
-											Src:         src,
-											DestIdx:     outStartIdx,
-											SrcStartIdx: b.builderState.right.curSrcStartIdx,
-											SrcEndIdx:   b.builderState.right.curSrcStartIdx + toAppend,
+										coldata.CopySliceArgs{
+											SliceArgs: coldata.SliceArgs{
+												Src:         src,
+												DestIdx:     outStartIdx,
+												SrcStartIdx: b.builderState.right.curSrcStartIdx,
+												SrcEndIdx:   b.builderState.right.curSrcStartIdx + toAppend,
+											},
 										},
 									)
 								}

@@ -237,8 +237,8 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 		// If there is no time bound iterator, we cannot skip any keys.
 		return
 	}
-	tbiKey := i.timeBoundIter.UnsafeKey().Key
-	iterKey := i.iter.UnsafeKey().Key
+	tbiKey := i.timeBoundIter.Key().Key
+	iterKey := i.iter.Key().Key
 	if iterKey.Compare(tbiKey) > 0 {
 		// If the iterKey got ahead of the TBI key, advance the TBI Key.
 		//
@@ -258,7 +258,7 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 			i.valid = false
 			return
 		}
-		tbiKey = i.timeBoundIter.UnsafeKey().Key
+		tbiKey = i.timeBoundIter.Key().Key
 
 		cmp := iterKey.Compare(tbiKey)
 
@@ -274,7 +274,7 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 				i.valid = false
 				return
 			}
-			tbiKey = i.timeBoundIter.UnsafeKey().Key
+			tbiKey = i.timeBoundIter.Key().Key
 			cmp = iterKey.Compare(tbiKey)
 		}
 

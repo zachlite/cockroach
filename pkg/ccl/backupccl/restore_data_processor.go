@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/errors"
 	gogotypes "github.com/gogo/protobuf/types"
 )
@@ -42,16 +43,11 @@ type restoreDataProcessor struct {
 	input   execinfra.RowSource
 	output  execinfra.RowReceiver
 
-	kr *KeyRewriter
+	kr *storageccl.KeyRewriter
 
-	// numWorkers is the number of workers this processor should use. Initialized
-	// at processor creation based on the cluster setting. If the cluster setting
-	// is updated, the job should be PAUSEd and RESUMEd for the new setting to
-	// take effect.
-	numWorkers int
-	// flushBytes is the maximum buffer size used when creating SSTs to flush. It
-	// remains constant over the lifetime of the processor.
-	flushBytes int64
+	// concurrentWorkerLimit is a semaphore that can change capacity, which controls
+	// the number of active restore worker threads.
+	concurrentWorkerLimit *quotapool.IntPool
 
 	// phaseGroup manages the phases of the restore:
 	// 1) reading entries from the input
@@ -80,7 +76,7 @@ const maxConcurrentRestoreWorkers = 32
 // The maximum is not enforced since if the maximum is reduced in the future that
 // may cause the cluster setting to fail.
 var numRestoreWorkers = settings.RegisterIntSetting(
-	"kv.bulk_io_write.restore_node_concurrency",
+	"kv.bulk_io_write.experimental_restore_node_concurrency",
 	fmt.Sprintf("the number of workers processing a restore per job per node; maximum %d",
 		maxConcurrentRestoreWorkers),
 	1, /* default */
@@ -95,21 +91,27 @@ func newRestoreDataProcessor(
 	input execinfra.RowSource,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
-	sv := &flowCtx.Cfg.Settings.SV
+	sv := &flowCtx.EvalCtx.Settings.SV
 
 	rd := &restoreDataProcessor{
-		flowCtx:    flowCtx,
-		input:      input,
-		spec:       spec,
-		output:     output,
-		progCh:     make(chan RestoreProgress, maxConcurrentRestoreWorkers),
-		metaCh:     make(chan *execinfrapb.ProducerMetadata, 1),
-		numWorkers: int(numRestoreWorkers.Get(sv)),
-		flushBytes: storageccl.MaxIngestBatchSize(flowCtx.Cfg.Settings),
+		flowCtx: flowCtx,
+		input:   input,
+		spec:    spec,
+		output:  output,
+		progCh:  make(chan RestoreProgress, maxConcurrentRestoreWorkers),
+		metaCh:  make(chan *execinfrapb.ProducerMetadata, 1),
+		concurrentWorkerLimit: quotapool.NewIntPool(
+			"restore worker concurrency",
+			uint64(numRestoreWorkers.Get(sv)),
+		),
 	}
 
+	numRestoreWorkers.SetOnChange(sv, func() {
+		rd.concurrentWorkerLimit.UpdateCapacity(uint64(numRestoreWorkers.Get(sv)))
+	})
+
 	var err error
-	rd.kr, err = makeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
+	rd.kr, err = storageccl.MakeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}
@@ -133,8 +135,7 @@ func (rd *restoreDataProcessor) Start(ctx context.Context) {
 	rd.input.Start(ctx)
 
 	rd.phaseGroup = ctxgroup.WithContext(ctx)
-
-	entries := make(chan execinfrapb.RestoreSpanEntry, rd.numWorkers)
+	entries := make(chan execinfrapb.RestoreSpanEntry, maxConcurrentRestoreWorkers)
 	rd.phaseGroup.GoCtx(func(ctx context.Context) error {
 		defer close(entries)
 		return inputReader(ctx, rd.input, entries, rd.metaCh)
@@ -195,7 +196,6 @@ func inputReader(
 		if !ok {
 			return errors.AssertionFailedf(`unexpected datum type %T: %+v`, datum, row)
 		}
-
 		var entry execinfrapb.RestoreSpanEntry
 		if err := protoutil.Unmarshal([]byte(*entryDatumBytes), &entry); err != nil {
 			return errors.Wrap(err, "un-marshaling restore span entry")
@@ -210,9 +210,15 @@ func inputReader(
 }
 
 func (rd *restoreDataProcessor) runRestoreWorkers(entries chan execinfrapb.RestoreSpanEntry) error {
-	return ctxgroup.GroupWorkers(rd.Ctx, rd.numWorkers, func(ctx context.Context, _ int) error {
+	return ctxgroup.GroupWorkers(rd.Ctx, maxConcurrentRestoreWorkers, func(ctx context.Context, n int) error {
 		for {
 			done, err := func() (done bool, _ error) {
+				workerAlloc, err := rd.concurrentWorkerLimit.Acquire(ctx, 1)
+				if err != nil {
+					return done, err
+				}
+				defer rd.concurrentWorkerLimit.Release(workerAlloc)
+
 				entry, ok := <-entries
 				if !ok {
 					done = true
@@ -259,7 +265,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	log.VEventf(rd.Ctx, 1 /* level */, "ingesting span [%s-%s)", entry.Span.Key, entry.Span.EndKey)
 
 	for _, file := range entry.Files {
-		log.VEventf(ctx, 2, "import file %s which starts at %s", file.Path, entry.Span.Key)
+		log.VEventf(ctx, 2, "import file %s %s", file.Path, entry.Span.Key)
 
 		dir, err := rd.flowCtx.Cfg.ExternalStorage(ctx, file.Dir)
 		if err != nil {
@@ -279,7 +285,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	}
 
 	batcher, err := bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return rd.flushBytes })
+		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
 	if err != nil {
 		return summary, err
 	}
@@ -331,7 +337,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		if !ok {
 			// If the key rewriter didn't match this key, it's not data for the
 			// table(s) we're interested in.
-			if log.V(5) {
+			if log.V(3) {
 				log.Infof(ctx, "skipping %s %s", key.Key, value.PrettyPrint())
 			}
 			continue
@@ -341,7 +347,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		value.ClearChecksum()
 		value.InitChecksum(key.Key)
 
-		if log.V(5) {
+		if log.V(3) {
 			log.Infof(ctx, "Put %s -> %s", key.Key, value.PrettyPrint())
 		}
 		if err := batcher.AddMVCCKey(ctx, key, value.RawBytes); err != nil {
@@ -352,6 +358,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	if err := batcher.Flush(ctx); err != nil {
 		return summary, err
 	}
+	log.Event(ctx, "done")
 
 	if restoreKnobs, ok := rd.flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
 		if restoreKnobs.RunAfterProcessingRestoreSpanEntry != nil {

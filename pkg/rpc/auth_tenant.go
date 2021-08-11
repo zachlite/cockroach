@@ -23,9 +23,7 @@ import (
 // tenantAuthorizer authorizes RPCs sent by tenants to a node's tenant RPC
 // server, that is, it ensures that the request only accesses resources
 // available to the tenant.
-type tenantAuthorizer struct {
-	tenantID roachpb.TenantID
-}
+type tenantAuthorizer struct{}
 
 func tenantFromCommonName(commonName string) (roachpb.TenantID, error) {
 	tenID, err := strconv.ParseUint(commonName, 10, 64)
@@ -38,8 +36,6 @@ func tenantFromCommonName(commonName string) (roachpb.TenantID, error) {
 	return roachpb.MakeTenantID(tenID), nil
 }
 
-// authorize enforces a security boundary around endpoints that tenants
-// request from the host KV node.
 func (a tenantAuthorizer) authorize(
 	tenID roachpb.TenantID, fullMethod string, req interface{},
 ) error {
@@ -56,17 +52,8 @@ func (a tenantAuthorizer) authorize(
 	case "/cockroach.roachpb.Internal/GossipSubscription":
 		return a.authGossipSubscription(tenID, req.(*roachpb.GossipSubscriptionRequest))
 
-	case "/cockroach.roachpb.Internal/TokenBucket":
-		return a.authTokenBucket(tenID, req.(*roachpb.TokenBucketRequest))
-
 	case "/cockroach.rpc.Heartbeat/Ping":
-		return nil // no restriction to usage of this endpoint by tenants
-
-	case "/cockroach.server.serverpb.Status/Regions":
-		return nil // no restriction to usage of this endpoint by tenants
-
-	case "/cockroach.server.serverpb.Status/Statements":
-		return a.authTenant(tenID)
+		return nil // no authorization
 
 	default:
 		return authErrorf("unknown method %q", fullMethod)
@@ -170,16 +157,6 @@ func (a tenantAuthorizer) authGossipSubscription(
 	return nil
 }
 
-// authTenant checks if the given tenantID matches the one the
-// authorizer was initialized with. This authorizer is used for
-// endpoints that should remain within a single tenant's pods.
-func (a tenantAuthorizer) authTenant(id roachpb.TenantID) error {
-	if a.tenantID != id {
-		return authErrorf("request from tenant %s not permitted on tenant %s", id, a.tenantID)
-	}
-	return nil
-}
-
 // gossipSubscriptionPatternAllowlist contains keys outside of a tenant's
 // keyspace that GossipSubscription RPC invocations are allowed to touch.
 // WIP: can't import gossip directly.
@@ -187,20 +164,6 @@ var gossipSubscriptionPatternAllowlist = []string{
 	"cluster-id",
 	"node:.*",
 	"system-db",
-}
-
-// authTokenBucket authorizes the provided tenant to invoke the
-// TokenBucket RPC with the provided args.
-func (a tenantAuthorizer) authTokenBucket(
-	tenID roachpb.TenantID, args *roachpb.TokenBucketRequest,
-) error {
-	if args.TenantID == 0 {
-		return authErrorf("token bucket request with unspecified tenant not permitted")
-	}
-	if argTenant := roachpb.MakeTenantID(args.TenantID); argTenant != tenID {
-		return authErrorf("token bucket request for tenant %s not permitted", argTenant)
-	}
-	return nil
 }
 
 func contextWithTenant(ctx context.Context, tenID roachpb.TenantID) context.Context {

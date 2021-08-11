@@ -131,7 +131,6 @@ func TestRevertTable(t *testing.T) {
 
 func TestRevertGCThreshold(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})

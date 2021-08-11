@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
@@ -27,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/jsonpb"
 	pbtypes "github.com/gogo/protobuf/types"
@@ -335,8 +335,7 @@ func doCreateBackupSchedules(
 		backupNode.AppendToLatest = true
 		inc, err := makeBackupSchedule(
 			env, p.User(), scheduleLabel,
-			incRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess,
-			backupNode, fullRecurrence)
+			incRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
 
 		if err != nil {
 			return err
@@ -359,8 +358,7 @@ func doCreateBackupSchedules(
 	backupNode.AppendToLatest = false
 	full, err := makeBackupSchedule(
 		env, p.User(), scheduleLabel,
-		fullRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess,
-		backupNode, incRecurrence)
+		fullRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
 	if err != nil {
 		return err
 	}
@@ -419,7 +417,7 @@ func checkForExistingBackupsInCollection(
 			"the schedule can be created with the 'ignore_existing_backups' option",
 			collectionURI)
 	}
-	if !errors.Is(err, cloud.ErrFileDoesNotExist) {
+	if !errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
 		return errors.Newf("unexpected error occurred when checking for existing backups in %s",
 			collectionURI)
 	}
@@ -436,21 +434,15 @@ func makeBackupSchedule(
 	unpauseOnSuccess int64,
 	updateLastMetricOnSuccess bool,
 	backupNode *tree.Backup,
-	dependentScheduleRecurrence *scheduleRecurrence,
 ) (*jobs.ScheduledJob, error) {
 	sj := jobs.NewScheduledJob(env)
 	sj.SetScheduleLabel(label)
 	sj.SetOwner(owner)
 
-	var dependentCrontab string
-	if dependentScheduleRecurrence != nil {
-		dependentCrontab = dependentScheduleRecurrence.cron
-	}
 	// Prepare arguments for scheduled backup execution.
 	args := &ScheduledBackupExecutionArgs{
-		UnpauseOnSuccess:         unpauseOnSuccess,
-		UpdatesLastBackupMetric:  updateLastMetricOnSuccess,
-		DependentScheduleCrontab: dependentCrontab,
+		UnpauseOnSuccess:        unpauseOnSuccess,
+		UpdatesLastBackupMetric: updateLastMetricOnSuccess,
 	}
 	if backupNode.AppendToLatest {
 		args.BackupType = ScheduledBackupExecutionArgs_INCREMENTAL
@@ -708,7 +700,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
+		clean, err := cloudimpl.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
 		if err != nil {
 			return nil, err
 		}
@@ -722,7 +714,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
+		clean, err := cloudimpl.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
 		if err != nil {
 			return nil, err
 		}
@@ -734,7 +726,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.RedactKMSURI(raw.RawString())
+		clean, err := cloudimpl.RedactKMSURI(raw.RawString())
 		if err != nil {
 			return nil, err
 		}

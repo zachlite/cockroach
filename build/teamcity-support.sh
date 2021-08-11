@@ -1,12 +1,11 @@
 # Common helpers for teamcity-*.sh scripts.
 
 # root is the absolute path to the root directory of the repository.
-root="$(dirname $(cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd ))"
+root=$(cd "$(dirname "$0")/.." && pwd)
 
 source "$root/build/teamcity-common-support.sh"
 
 remove_files_on_exit() {
-  rm -f ~/.ssh/id_rsa{,.pub}
   common_support_remove_files_on_exit
 }
 trap remove_files_on_exit EXIT
@@ -112,21 +111,13 @@ function run_json_test() {
   return $status
 }
 
-function would_stress() {
+function maybe_stress() {
   # Don't stressrace on the release branches; we only want that to happen on the
   # PRs. There's no need in making master flakier than it needs to be; nightly
   # stress will weed out the flaky tests.
+  # NB: as a consequence of the above, this code doesn't know about posting
+  # Github issues.
   if tc_release_branch; then
-    return 1
-  else
-    return 0
-  fi
-}
-
-function maybe_stress() {
-   # NB: This code doesn't know about posting Github issues as we don't stress on
-   # the release branches.
-  if ! would_stress; then
     return 0
   fi
 
@@ -298,10 +289,4 @@ tc_prepare() {
   run mkdir -p artifacts
   maybe_ccache
   tc_end_block "Prepare environment"
-}
-
-generate_ssh_key() {
-  if [[ ! -f ~/.ssh/id_rsa.pub ]]; then
-    ssh-keygen -q -N "" -f ~/.ssh/id_rsa
-  fi
 }

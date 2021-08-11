@@ -15,8 +15,6 @@
 package migrations
 
 import (
-	"context"
-
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/migration"
 )
@@ -28,17 +26,17 @@ func GetMigration(key clusterversion.ClusterVersion) (migration.Migration, bool)
 	return m, ok
 }
 
-// NoPrecondition is a PreconditionFunc that doesn't check anything.
-func NoPrecondition(context.Context, clusterversion.ClusterVersion, migration.TenantDeps) error {
-	return nil
-}
-
 // registry defines the global mapping between a cluster version and the
 // associated migration. The migration is only executed after a cluster-wide
 // bump of the corresponding version gate.
 var registry = make(map[clusterversion.ClusterVersion]migration.Migration)
 
 var migrations = []migration.Migration{
+	migration.NewTenantMigration(
+		"add the system.migrations table",
+		toCV(clusterversion.LongRunningMigrations),
+		migrationsTableMigration,
+	),
 	migration.NewSystemMigration(
 		"use unreplicated TruncatedState and RangeAppliedState for all ranges",
 		toCV(clusterversion.TruncatedAndRangeAppliedStateMigration),
@@ -50,52 +48,19 @@ var migrations = []migration.Migration{
 		postTruncatedStateMigration,
 	),
 	migration.NewTenantMigration(
-		"add the systems.join_tokens table",
-		toCV(clusterversion.JoinTokensTable),
-		NoPrecondition,
-		joinTokensTableMigration,
+		"copy all namespace entries to new namespace table",
+		toCV(clusterversion.NamespaceTableWithSchemasMigration),
+		namespaceMigration,
 	),
 	migration.NewTenantMigration(
-		"delete the deprecated namespace table descriptor at ID=2",
-		toCV(clusterversion.DeleteDeprecatedNamespaceTableDescriptorMigration),
-		NoPrecondition,
-		deleteDeprecatedNamespaceTableDescriptorMigration,
+		"upgrade old foreign key representation",
+		toCV(clusterversion.ForeignKeyRepresentationMigration),
+		foreignKeyRepresentationUpgrade,
 	),
 	migration.NewTenantMigration(
-		"fix all descriptors",
-		toCV(clusterversion.FixDescriptors),
-		NoPrecondition,
-		fixDescriptorMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.sql_statement_stats table",
-		toCV(clusterversion.SQLStatsTable),
-		NoPrecondition,
-		sqlStatementStatsTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.sql_transaction_stats table",
-		toCV(clusterversion.SQLStatsTable),
-		NoPrecondition,
-		sqlTransactionStatsTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.database_role_settings table",
-		toCV(clusterversion.DatabaseRoleSettings),
-		NoPrecondition,
-		databaseRoleSettingsTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the systems.tenant_usage table",
-		toCV(clusterversion.TenantUsageTable),
-		NoPrecondition,
-		tenantUsageTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.sql_instances table",
-		toCV(clusterversion.SQLInstancesTable),
-		NoPrecondition,
-		sqlInstancesTableMigration,
+		"fix system.protected_ts_meta privileges",
+		toCV(clusterversion.ProtectedTsMetaPrivilegesMigration),
+		protectedTsMetaPrivilegesMigration,
 	),
 }
 

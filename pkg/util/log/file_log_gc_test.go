@@ -16,7 +16,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,24 +23,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/require"
 )
 
 func TestGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer ScopeWithoutShowLogs(t).Close(t)
 
-	fs := debugLog.getFileSink()
-	if fs == nil {
-		t.Fatal("no file sink")
-	}
-
-	testLogGC(t, fs, func(ctx context.Context, msg string) {
-		Infof(ctx, msg)
-	})
+	testLogGC(t, debugLog, Infof)
 }
 
 func TestSecondaryGC(t *testing.T) {
@@ -49,59 +39,55 @@ func TestSecondaryGC(t *testing.T) {
 	s := ScopeWithoutShowLogs(t)
 	defer s.Close(t)
 
-	// Make a config including a "gctest" file sink on the OPS channel.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a standalone secondary logger.
 	m := logconfig.ByteSize(math.MaxInt64)
+	f := logconfig.DefaultFileFormat
+	common := logconfig.DefaultConfig().FileDefaults.CommonSinkConfig
+	common.Format = &f
 	bf := false
-	config := logconfig.DefaultConfig()
-	if config.Sinks.FileGroups == nil {
-		config.Sinks.FileGroups = make(map[string]*logconfig.FileSinkConfig)
+	fc := logconfig.FileSinkConfig{
+		CommonSinkConfig: common,
+		Dir:              &s.logDir,
+		MaxFileSize:      &m,
+		MaxGroupSize:     &m,
+		BufferedWrites:   &bf,
 	}
-	config.Sinks.FileGroups["gctest"] = &logconfig.FileSinkConfig{
-		FileDefaults: logconfig.FileDefaults{
-			Dir:            &s.logDir,
-			MaxFileSize:    &m,
-			MaxGroupSize:   &m,
-			BufferedWrites: &bf,
-		},
-		Channels: logconfig.ChannelList{Channels: []Channel{channel.OPS}},
+	logger := &loggerT{}
+	si, fileSink, err := newFileSinkInfo("gctest", fc)
+	if err != nil {
+		t.Fatal(err)
 	}
+	logger.sinkInfos = []*sinkInfo{si}
 
-	// Validate and apply the config
-	require.NoError(t, config.Validate(&s.logDir))
-	TestingResetActive()
-	cleanupFn, err := ApplyConfig(config)
-	require.NoError(t, err)
-	defer cleanupFn()
+	// Enable the garbage collector.
+	go fileSink.gcDaemon(ctx)
 
-	// Find our "gctest" file sink
-	var fs *fileSink
-	require.NoError(t, allSinkInfos.iterFileSinks(
-		func(p *fileSink) error {
-			if strings.HasSuffix(p.prefix, "gctest") {
-				fs = p
-			}
-			return nil
-		}))
-	if fs == nil {
-		t.Fatal("fileSink 'gctest' not found")
-	}
-
-	testLogGC(t, fs, Ops.Info)
+	testLogGC(t, logger,
+		func(ctx context.Context, format string, args ...interface{}) {
+			entry := makeUnstructuredEntry(ctx, severity.INFO, channel.DEV, 1,
+				true,   /* redactable */
+				format, /* nolint:fmtsafe */
+				args...)
+			logger.outputLogEntry(entry)
+		})
 }
 
-func testLogGC(t *testing.T, fileSink *fileSink, logFn func(ctx context.Context, msg string)) {
-	// Set to the provided value, return the original value.
-	setDisableDaemons := func(val bool) bool {
+func testLogGC(
+	t *testing.T,
+	logger *loggerT,
+	logFn func(ctx context.Context, format string, args ...interface{}),
+) {
+	logging.mu.Lock()
+	logging.mu.disableDaemons = true
+	defer func(previous bool) {
 		logging.mu.Lock()
-		ret := logging.mu.disableDaemons
-		logging.mu.disableDaemons = val
+		logging.mu.disableDaemons = previous
 		logging.mu.Unlock()
-		return ret
-	}
-
-	// Immediately disable GC daemons;
-	// defer restoring their original value.
-	defer setDisableDaemons(setDisableDaemons(true))
+	}(logging.mu.disableDaemons)
+	logging.mu.Unlock()
 
 	// Make an entry in the target logger. This ensures That there is at
 	// least one file in the target directory for the logger being
@@ -111,31 +97,31 @@ func testLogGC(t *testing.T, fileSink *fileSink, logFn func(ctx context.Context,
 	// temporary directory, preventing further investigation.
 	logFn(context.Background(), "0")
 
-	dir := fileSink.mu.logDir
-	expectFileCount := func(e int) ([]logpb.FileInfo, error) {
-		listDir, files, err := fileSink.listLogFiles()
-		if err != nil {
-			return nil, err
-		}
-		if a := len(files); a != e {
-			return nil, errors.Errorf("expect %d files, but found %d", e, a)
-		}
-		if listDir != dir {
-			return nil, errors.Errorf("dir expected %q, got %q", dir, listDir)
-		}
-		return files, nil
+	fileSink := logger.getFileSink()
+	if fileSink == nil {
+		t.Fatal("no file sink")
 	}
 
 	// Check that the file was created.
-	files, err := expectFileCount(1)
+	origDir, allFilesOriginal, err := fileSink.listLogFiles()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if e, a := 1, len(allFilesOriginal); e != a {
+		t.Fatalf("expected %d files, but found %d", e, a)
 	}
 
 	// Check that the file exists, and also measure its size.
 	// We'll use this as base value for the maximum combined size
 	// below, to force GC.
-	stat, err := os.Stat(filepath.Join(dir, files[0].Name))
+	dir := fileSink.mu.logDir
+	if dir == "" {
+		t.Fatal(errDirectoryNotSet)
+	}
+	if origDir != dir {
+		t.Fatalf("dir expected %q, got %q", dir, origDir)
+	}
+	stat, err := os.Stat(filepath.Join(dir, allFilesOriginal[0].Name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,25 +145,50 @@ func testLogGC(t *testing.T, fileSink *fileSink, logFn func(ctx context.Context,
 
 	// Create the number of expected log files.
 	const newLogFiles = 20
+
 	for i := 1; i < newLogFiles; i++ {
-		logFn(context.Background(), fmt.Sprint(i))
+		logFn(context.Background(), "%d", i)
 		Flush()
 	}
-	if _, err := expectFileCount(newLogFiles); err != nil {
+
+	_, allFilesBefore, err := fileSink.listLogFiles()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if e, a := newLogFiles, len(allFilesBefore); e != a {
+		t.Fatalf("expected %d files, but found %d", e, a)
 	}
 
 	// Re-enable GC, so that the GC daemon can pick up the files.
-	setDisableDaemons(false)
+	logging.mu.Lock()
+	logging.mu.disableDaemons = false
+	logging.mu.Unlock()
+	// Start the GC daemon, using a context that will terminate it
+	// at the end of the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		fileSink.gcDaemon(ctx)
+		close(done)
+	}()
 
 	// Emit a log line which will rotate the files and trigger GC.
 	logFn(context.Background(), "final")
 	Flush()
 
 	succeedsSoon(t, func() error {
-		_, err := expectFileCount(expectedFilesAfterGC)
-		return err
+		_, allFilesAfter, err := fileSink.listLogFiles()
+		if err != nil {
+			return err
+		}
+		if e, a := expectedFilesAfterGC, len(allFilesAfter); e != a {
+			return fmt.Errorf("expected %d files, but found %d", e, a)
+		}
+		return nil
 	})
+	cancel()
+	<-done
 }
 
 // succeedsSoon is a simplified version of testutils.SucceedsSoon.

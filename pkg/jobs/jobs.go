@@ -16,10 +16,10 @@ import (
 	"reflect"
 	"sync/atomic"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -31,33 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-)
-
-// jobDumpTraceMode is the type that represents the mode in which a traceable
-// job will dump a trace zip.
-type jobDumpTraceMode int64
-
-const (
-	// A Traceable job will not dump a trace zip.
-	noDump jobDumpTraceMode = iota
-	// A Traceable job will dump a trace zip on failure.
-	dumpOnFail
-	// A Traceable job will dump a trace zip in any of paused, canceled, failed,
-	// succeeded states.
-	dumpOnStop
-)
-
-var traceableJobDumpTraceMode = settings.RegisterEnumSetting(
-	"jobs.trace.force_dump_mode",
-	"determines the state in which all traceable jobs will dump their cluster wide, inflight, "+
-		"trace recordings. Traces may be dumped never, on fail, "+
-		"or on any status change i.e paused, canceled, failed, succeeded.",
-	"never",
-	map[int64]string{
-		int64(noDump):     "never",
-		int64(dumpOnFail): "onFail",
-		int64(dumpOnStop): "onStop",
-	},
 )
 
 // Job manages logging the progress of long-running system processes, like
@@ -87,9 +60,8 @@ type CreatedByInfo struct {
 
 // Record bundles together the user-managed fields in jobspb.Payload.
 type Record struct {
-	JobID         jobspb.JobID
 	Description   string
-	Statements    []string
+	Statement     string
 	Username      security.SQLUsername
 	DescriptorIDs descpb.IDs
 	Details       jobspb.Details
@@ -103,22 +75,6 @@ type Record struct {
 	// CreatedBy, if set, annotates this record with the information on
 	// this job creator.
 	CreatedBy *CreatedByInfo
-}
-
-// AppendDescription appends description to this records Description with a
-// ';' separator.
-func (r *Record) AppendDescription(description string) {
-	if len(r.Description) == 0 {
-		r.Description = description
-		return
-	}
-	r.Description = r.Description + ";" + description
-}
-
-// SetNonCancelable sets NonCancelable of this Record to the value returned from
-// updateFn.
-func (r *Record) SetNonCancelable(ctx context.Context, updateFn NonCancelableUpdateFn) {
-	r.NonCancelable = updateFn(ctx, r.NonCancelable)
 }
 
 // StartableJob is a job created with a transaction to be started later.
@@ -141,7 +97,7 @@ type StartableJob struct {
 type TraceableJob interface {
 	// ForceRealSpan forces the registry to create a real Span instead of a
 	// low-overhead non-recordable noop span.
-	ForceRealSpan() bool
+	ForceRealSpan()
 }
 
 func init() {
@@ -199,10 +155,6 @@ const (
 	// job will change its state to StatusPaused the next time it runs
 	// maybeAdoptJobs and will stop running it.
 	StatusPauseRequested Status = "pause-requested"
-	// StatusRevertFailed is for jobs that encountered an non-retryable error when
-	// reverting their changes. Manual cleanup is required when a job ends up in
-	// this state.
-	StatusRevertFailed Status = "revert-failed"
 )
 
 var (
@@ -228,7 +180,7 @@ func deprecatedIsOldSchemaChangeJob(payload *jobspb.Payload) bool {
 // Terminal returns whether this status represents a "terminal" state: a state
 // after which the job should never be updated again.
 func (s Status) Terminal() bool {
-	return s == StatusFailed || s == StatusSucceeded || s == StatusCanceled || s == StatusRevertFailed
+	return s == StatusFailed || s == StatusSucceeded || s == StatusCanceled
 }
 
 // InvalidStatusError is the error returned when the desired operation is
@@ -328,10 +280,45 @@ func (j *Job) RunningStatus(
 	})
 }
 
+// SetDescription updates the description of a created job.
+func (j *Job) SetDescription(ctx context.Context, txn *kv.Txn, updateFn DescriptionUpdateFn) error {
+	return j.Update(ctx, txn, func(_ *kv.Txn, md JobMetadata, ju *JobUpdater) error {
+		prev := md.Payload.Description
+		desc, err := updateFn(ctx, prev)
+		if err != nil {
+			return err
+		}
+		if prev != desc {
+			md.Payload.Description = desc
+			ju.UpdatePayload(md.Payload)
+		}
+		return nil
+	})
+}
+
+// SetNonCancelable updates the NonCancelable field of a created job.
+func (j *Job) SetNonCancelable(
+	ctx context.Context, txn *kv.Txn, updateFn NonCancelableUpdateFn,
+) error {
+	return j.Update(ctx, txn, func(_ *kv.Txn, md JobMetadata, ju *JobUpdater) error {
+		prev := md.Payload.Noncancelable
+		newStatus := updateFn(ctx, prev)
+		if prev != newStatus {
+			md.Payload.Noncancelable = newStatus
+			ju.UpdatePayload(md.Payload)
+		}
+		return nil
+	})
+}
+
 // RunningStatusFn is a callback that computes a job's running status
 // given its details. It is safe to modify details in the callback; those
 // modifications will be automatically persisted to the database record.
 type RunningStatusFn func(ctx context.Context, details jobspb.Details) (RunningStatus, error)
+
+// DescriptionUpdateFn is a callback that computes a job's description
+// given its current one.
+type DescriptionUpdateFn func(ctx context.Context, description string) (string, error)
 
 // NonCancelableUpdateFn is a callback that computes a job's non-cancelable
 // status given its current one.
@@ -383,7 +370,7 @@ func (j *Job) FractionProgressed(
 
 // paused sets the status of the tracked job to paused. It is called by the
 // registry adoption loop by the node currently running a job to move it from
-// PauseRequested to paused.
+// pauseRequested to paused.
 func (j *Job) paused(
 	ctx context.Context, txn *kv.Txn, fn func(context.Context, *kv.Txn) error,
 ) error {
@@ -425,6 +412,9 @@ func (j *Job) unpaused(ctx context.Context, txn *kv.Txn) error {
 		} else {
 			ju.UpdateStatus(StatusReverting)
 		}
+		// NB: A nil lease indicates the job is not resumable, whereas an empty
+		// lease is always considered expired.
+		md.Payload.Lease = &jobspb.Lease{}
 		ju.UpdatePayload(md.Payload)
 		return nil
 	})
@@ -482,11 +472,11 @@ type onPauseRequestFunc func(
 	ctx context.Context, planHookState interface{}, txn *kv.Txn, progress *jobspb.Progress,
 ) error
 
-// PauseRequested sets the status of the tracked job to pause-requested. It does
+// pauseRequested sets the status of the tracked job to pause-requested. It does
 // not directly pause the job; it expects the node that runs the job will
 // actively cancel it when it notices that it is in state StatusPauseRequested
 // and will move it to state StatusPaused.
-func (j *Job) PauseRequested(ctx context.Context, txn *kv.Txn, fn onPauseRequestFunc) error {
+func (j *Job) pauseRequested(ctx context.Context, txn *kv.Txn, fn onPauseRequestFunc) error {
 	return j.Update(ctx, txn, func(txn *kv.Txn, md JobMetadata, ju *JobUpdater) error {
 		// Don't allow 19.2-style schema change jobs to undergo changes in job state
 		// before they undergo a migration to make them properly runnable in 20.1 and
@@ -597,28 +587,6 @@ func (j *Job) failed(
 		ju.UpdateStatus(StatusFailed)
 		md.Payload.Error = err.Error()
 		md.Payload.FinishedMicros = timeutil.ToUnixMicros(j.registry.clock.Now().GoTime())
-		ju.UpdatePayload(md.Payload)
-		return nil
-	})
-}
-
-// RevertFailed marks the tracked job as having failed during revert with the
-// given error. Manual cleanup is required when the job is in this state.
-func (j *Job) revertFailed(
-	ctx context.Context, txn *kv.Txn, err error, fn func(context.Context, *kv.Txn) error,
-) error {
-	return j.Update(ctx, txn, func(txn *kv.Txn, md JobMetadata, ju *JobUpdater) error {
-		if md.Status != StatusReverting {
-			return fmt.Errorf("job with status %s cannot fail during a revert", md.Status)
-		}
-		if fn != nil {
-			if err := fn(ctx, txn); err != nil {
-				return err
-			}
-		}
-		ju.UpdateStatus(StatusRevertFailed)
-		md.Payload.FinishedMicros = timeutil.ToUnixMicros(j.registry.clock.Now().GoTime())
-		md.Payload.Error = err.Error()
 		ju.UpdatePayload(md.Payload)
 		return nil
 	})
@@ -745,7 +713,13 @@ func (j *Job) load(ctx context.Context, txn *kv.Txn) error {
 	var createdBy *CreatedByInfo
 
 	if err := j.runInTxn(ctx, txn, func(ctx context.Context, txn *kv.Txn) error {
-		const stmt = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
+		const newStmt = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
+		const oldStmt = "SELECT payload, progress FROM system.jobs WHERE id = $1"
+		hasCreatedBy := j.registry.settings.Version.IsActive(ctx, clusterversion.AlterSystemJobsAddCreatedByColumns)
+		stmt := oldStmt
+		if hasCreatedBy {
+			stmt = newStmt
+		}
 		row, err := j.registry.ex.QueryRowEx(
 			ctx, "load-job-query", txn, sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			stmt, j.ID())
@@ -763,8 +737,11 @@ func (j *Job) load(ctx context.Context, txn *kv.Txn) error {
 		if err != nil {
 			return err
 		}
-		createdBy, err = unmarshalCreatedBy(row[2], row[3])
-		return err
+		if hasCreatedBy {
+			createdBy, err = unmarshalCreatedBy(row[2], row[3])
+			return err
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -852,7 +829,7 @@ func (sj *StartableJob) Start(ctx context.Context) (err error) {
 			"StartableJob %d cannot be started more than once", sj.ID())
 	}
 
-	if sj.sessionID == "" {
+	if sj.registry.startUsingSQLLivenessAdoption(ctx) && sj.sessionID == "" {
 		return errors.AssertionFailedf(
 			"StartableJob %d cannot be started without sqlliveness session", sj.ID())
 	}

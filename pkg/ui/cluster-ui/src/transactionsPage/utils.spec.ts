@@ -9,7 +9,7 @@
 // licenses/APL.txt.
 
 import { assert } from "chai";
-import { filterTransactions, getStatementsByFingerprintId } from "./utils";
+import { filterTransactions, getStatementsById } from "./utils";
 import { Filters } from "../queryFilter/filter";
 import { data, nodeRegions } from "./transactions.fixture";
 import Long from "long";
@@ -17,9 +17,9 @@ import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 type Transaction = protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
 
-describe("getStatementsByFingerprintId", () => {
-  it("filters statements by fingerprint id", () => {
-    const selectedStatements = getStatementsByFingerprintId(
+describe("getStatementsById", () => {
+  it("filters statements by id", () => {
+    const selectedStatements = getStatementsById(
       [Long.fromInt(4104049045071304794), Long.fromInt(3334049045071304794)],
       [
         { id: Long.fromInt(4104049045071304794) },

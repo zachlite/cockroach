@@ -15,14 +15,12 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessioninit"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
@@ -123,7 +121,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 
 	// First check all the databases.
 	if err := forEachDatabaseDesc(params.ctx, params.p, nil /*nil prefix = all databases*/, true, /* requiresPrivileges */
-		func(db catalog.DatabaseDescriptor) error {
+		func(db *dbdesc.Immutable) error {
 			if _, ok := userNames[db.GetPrivileges().Owner()]; ok {
 				userNames[db.GetPrivileges().Owner()] = append(
 					userNames[db.GetPrivileges().Owner()],
@@ -258,7 +256,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	}
 
 	// All safe - do the work.
-	var numRoleMembershipsDeleted, numRoleSettingsRowsDeleted int
+	var numRoleMembershipsDeleted int
 	for normalizedUsername := range userNames {
 		// Specifically reject special users and roles. Some (root, admin) would fail with
 		// "privileges still exist" first.
@@ -308,7 +306,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 
 		// Drop all role memberships involving the user/role.
-		rowsDeleted, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		numRoleMembershipsDeleted, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
 			params.ctx,
 			"drop-role-membership",
 			params.p.txn,
@@ -318,7 +316,6 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		if err != nil {
 			return err
 		}
-		numRoleMembershipsDeleted += rowsDeleted
 
 		_, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
 			params.ctx,
@@ -326,50 +323,18 @@ func (n *DropRoleNode) startExec(params runParams) error {
 			params.p.txn,
 			fmt.Sprintf(
 				`DELETE FROM %s WHERE username=$1`,
-				sessioninit.RoleOptionsTableName,
+				RoleOptionsTableName,
 			),
 			normalizedUsername,
 		)
 		if err != nil {
 			return err
 		}
-
-		// TODO(rafi): Remove this condition in 21.2.
-		if params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.DatabaseRoleSettings) {
-			rowsDeleted, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
-				params.ctx,
-				opName,
-				params.p.txn,
-				fmt.Sprintf(
-					`DELETE FROM %s WHERE role_name = $1`,
-					sessioninit.DatabaseRoleSettingsTableName,
-				),
-				normalizedUsername,
-			)
-			if err != nil {
-				return err
-			}
-			numRoleSettingsRowsDeleted += rowsDeleted
-		}
 	}
 
-	// Bump role-related table versions to force a refresh of membership/auth
-	// caches.
-	if sessioninit.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if numRoleSettingsRowsDeleted > 0 &&
-			params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.DatabaseRoleSettings) {
-			if err := params.p.bumpDatabaseRoleSettingsTableVersion(params.ctx); err != nil {
-				return err
-			}
-		}
-	}
 	if numRoleMembershipsDeleted > 0 {
+		// Some role memberships have been deleted, bump role_members table version to
+		// force a refresh of role membership.
 		if err := params.p.BumpRoleMembershipTableVersion(params.ctx); err != nil {
 			return err
 		}

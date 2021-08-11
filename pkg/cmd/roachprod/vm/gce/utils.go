@@ -38,7 +38,14 @@ var Subdomain = func() string {
 	return "roachprod.crdb.io"
 }()
 
-const gceDiskStartupScriptTemplate = `#!/usr/bin/env bash
+// Startup script used to find/format/mount all local SSDs and (non-boot)
+// persistent disks in GCE. Each disk is mounted to /mnt/data<disknum> and
+// chmoded to all users.
+//
+// This is a template because the instantiator needs to optionally configure the
+// mounting options. The script cannot take arguments since it is to be invoked
+// by the gcloud tool which cannot pass args.
+const gceLocalSSDStartupScriptTemplate = `#!/usr/bin/env bash
 # Script for setting up a GCE machine for roachprod use.
 
 if [ -e /mnt/data1/.roachprod-initialized ]; then
@@ -46,51 +53,26 @@ if [ -e /mnt/data1/.roachprod-initialized ]; then
   exit 0
 fi
 
-disknum=0
+mount_opts="defaults"
+{{if .ExtraMountOpts}}mount_opts="${mount_opts},{{.ExtraMountOpts}}"{{end}}
+
 # ignore the boot disk: /dev/disk/by-id/google-persistent-disk-0.
-{{if .Zfs}}
-  sudo apt-get update
-  sudo apt-get install -y zfsutils-linux
-
-  # For zfs, we use the device names under /dev instead of the device
-  # links under /dev/disk/by-id/google-local* for local ssds, because
-  # there is an issue where the links for the zfs partitions which are
-  # created under /dev/disk/by-id/ when we run "zpool create ..." are
-  # inaccurate.
-  for d in $(ls /dev/nvme?n? /dev/disk/by-id/google-persistent-disk-[1-9]); do
-    let "disknum++"
-    # skip if the zpool was already created.
-    zpool list -v -P | grep ${d} > /dev/null
-    if [ $? -ne 0 ]; then
-      echo "Disk ${disknum}: ${d} not mounted, creating..."
-      mountpoint="/mnt/data${disknum}"
-      sudo mkdir -p "${mountpoint}"
-      sudo zpool create -f data${disknum} -m ${mountpoint} ${d}
-      sudo chmod 777 ${mountpoint}
-    else
-      echo "Disk ${disknum}: ${d} already mounted, skipping..."
-    fi
-  done
-{{else}}
-  mount_opts="defaults"
-  {{if .ExtraMountOpts}}mount_opts="${mount_opts},{{.ExtraMountOpts}}"{{end}}
-  for d in $(ls /dev/disk/by-id/google-local-* /dev/disk/by-id/google-persistent-disk-[1-9]); do
-    let "disknum++"
-    grep -e "${d}" /etc/fstab > /dev/null
-    if [ $? -ne 0 ]; then
-      echo "Disk ${disknum}: ${d} not mounted, creating..."
-      mountpoint="/mnt/data${disknum}"
-      sudo mkdir -p "${mountpoint}"
-      sudo mkfs.ext4 -F ${d}
-      sudo mount -o ${mount_opts} ${d} ${mountpoint}
-      echo "${d} ${mountpoint} ext4 ${mount_opts} 1 1" | sudo tee -a /etc/fstab
-      sudo chmod 777 ${mountpoint}
-    else
-      echo "Disk ${disknum}: ${d} already mounted, skipping..."
-    fi
-  done
-{{end}}
-
+disknum=0
+for d in $(ls /dev/disk/by-id/google-local-* /dev/disk/by-id/google-persistent-disk-[1-9]); do
+  let "disknum++"
+  grep -e "${d}" /etc/fstab > /dev/null
+  if [ $? -ne 0 ]; then
+    echo "Disk ${disknum}: ${d} not mounted, creating..."
+    mountpoint="/mnt/data${disknum}"
+    sudo mkdir -p "${mountpoint}"
+    sudo mkfs.ext4 -F ${d}
+    sudo mount -o ${mount_opts} ${d} ${mountpoint}
+	echo "${d} ${mountpoint} ext4 ${mount_opts} 1 1" | sudo tee -a /etc/fstab
+	sudo chmod 777 ${mountpoint}
+  else
+    echo "Disk ${disknum}: ${d} already mounted, skipping..."
+  fi
+done
 if [ "${disknum}" -eq "0" ]; then
   echo "No disks mounted, creating /mnt/data1"
   sudo mkdir -p /mnt/data1
@@ -191,13 +173,12 @@ sudo touch /mnt/data1/.roachprod-initialized
 //
 // extraMountOpts, if not empty, is appended to the default mount options. It is
 // a comma-separated list of options for the "mount -o" flag.
-func writeStartupScript(extraMountOpts string, fileSystem string) (string, error) {
+func writeStartupScript(extraMountOpts string) (string, error) {
 	type tmplParams struct {
 		ExtraMountOpts string
-		Zfs            bool
 	}
 
-	args := tmplParams{ExtraMountOpts: extraMountOpts, Zfs: fileSystem == vm.Zfs}
+	args := tmplParams{ExtraMountOpts: extraMountOpts}
 
 	tmpfile, err := ioutil.TempFile("", "gce-startup-script")
 	if err != nil {
@@ -205,7 +186,7 @@ func writeStartupScript(extraMountOpts string, fileSystem string) (string, error
 	}
 	defer tmpfile.Close()
 
-	t := template.Must(template.New("start").Parse(gceDiskStartupScriptTemplate))
+	t := template.Must(template.New("start").Parse(gceLocalSSDStartupScriptTemplate))
 	if err := t.Execute(tmpfile, args); err != nil {
 		return "", err
 	}

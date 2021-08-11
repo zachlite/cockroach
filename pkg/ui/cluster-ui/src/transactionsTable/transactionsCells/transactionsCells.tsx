@@ -33,10 +33,10 @@ type TransactionStats = protos.cockroach.sql.ITransactionStatistics;
 
 interface TextCellProps {
   transactionText: string;
-  transactionFingerprintIds: Long[];
+  transactionIds: Long[];
   transactionStats: TransactionStats;
   handleDetails: (
-    transactionFingerprintIds: Long[],
+    transactionIds: Long[],
     transactionStats: TransactionStats,
   ) => void;
   search: string;
@@ -44,7 +44,7 @@ interface TextCellProps {
 
 export const textCell = ({
   transactionText,
-  transactionFingerprintIds,
+  transactionIds,
   transactionStats,
   handleDetails,
   search,
@@ -62,9 +62,7 @@ export const textCell = ({
       >
         <div className={textWrapper}>
           <div
-            onClick={() =>
-              handleDetails(transactionFingerprintIds, transactionStats)
-            }
+            onClick={() => handleDetails(transactionIds, transactionStats)}
             className={hoverAreaClassName}
           >
             {getHighlightedText(

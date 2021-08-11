@@ -176,7 +176,7 @@ func (ds *DistSender) partialRangeFeed(
 			case errors.HasType(err, (*roachpb.RangeFeedRetryError)(nil)):
 				var t *roachpb.RangeFeedRetryError
 				if ok := errors.As(err, &t); !ok {
-					return errors.AssertionFailedf("wrong error type: %T", err)
+					panic(errors.AssertionFailedf("wrong error type: %T", err))
 				}
 				switch t.Reason {
 				case roachpb.RangeFeedRetryError_REASON_REPLICA_REMOVED,
@@ -187,13 +187,12 @@ func (ds *DistSender) partialRangeFeed(
 					// errors that should not show up again.
 					continue
 				case roachpb.RangeFeedRetryError_REASON_RANGE_SPLIT,
-					roachpb.RangeFeedRetryError_REASON_RANGE_MERGED,
-					roachpb.RangeFeedRetryError_REASON_NO_LEASEHOLDER:
-					// Evict the descriptor from the cache.
+					roachpb.RangeFeedRetryError_REASON_RANGE_MERGED:
+					// Evict the decriptor from the cache.
 					rangeInfo.token.Evict(ctx)
 					return ds.divideAndSendRangeFeedToRanges(ctx, rangeInfo.rs, ts, rangeCh)
 				default:
-					return errors.AssertionFailedf("unrecognized retriable error type: %T", err)
+					log.Fatalf(ctx, "unexpected RangeFeedRetryError reason %v", t.Reason)
 				}
 			default:
 				return err
@@ -204,7 +203,7 @@ func (ds *DistSender) partialRangeFeed(
 }
 
 // singleRangeFeed gathers and rearranges the replicas, and makes a RangeFeed
-// RPC call. Results will be sent on the provided channel. Returns the timestamp
+// RPC call. Results will be send on the provided channel. Returns the timestamp
 // of the maximum rangefeed checkpoint seen, which can be used to re-establish
 // the rangefeed with a larger starting timestamp, reflecting the fact that all
 // values up to the last checkpoint have already been observed. Returns the

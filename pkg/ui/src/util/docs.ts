@@ -64,9 +64,6 @@ export const statementsSql = docsURL(
 export const statementsRetries = docsURL(
   "transactions.html#transaction-retries",
 );
-export const transactionRetryErrorReference = docsURL(
-  "transaction-retry-error-reference.html",
-);
 export const statementsTimeInterval = docsURL(
   "admin-ui-statements-page.html#time-interval",
 );

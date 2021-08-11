@@ -11,7 +11,7 @@
 import { assert } from "chai";
 import { createHashHistory } from "history";
 
-import { MetricConstants, INodeStatus } from "src/util/proto";
+import {MetricConstants, INodeStatus} from "src/util/proto";
 import * as protos from "src/js/protos";
 
 import {
@@ -24,12 +24,10 @@ import {
 import { nodesReducerObj, livenessReducerObj } from "./apiReducers";
 import { createAdminUIStore } from "./state";
 
-function makeNodesState(
-  ...addresses: { id: number; address: string; status?: LivenessStatus }[]
-) {
-  const nodeData = addresses.map((addr) => {
+function makeNodesState(...addresses: { id: number, address: string, status?: LivenessStatus }[]) {
+  const nodeData = addresses.map(addr => {
     return {
-      desc: {
+      desc : {
         node_id: addr.id,
         address: {
           address_field: addr.address,
@@ -37,26 +35,21 @@ function makeNodesState(
       },
     };
   });
-  const livenessData: { statuses: { [key: string]: LivenessStatus } } = {
+  const livenessData: {statuses: {[key: string]: LivenessStatus}} = {
     statuses: {},
   };
-  addresses.forEach((addr) => {
-    livenessData.statuses[addr.id] =
-      addr.status || LivenessStatus.NODE_STATUS_LIVE;
+  addresses.forEach(addr => {
+    livenessData.statuses[addr.id] = addr.status || LivenessStatus.NODE_STATUS_LIVE;
   });
   const store = createAdminUIStore(createHashHistory());
   store.dispatch(nodesReducerObj.receiveData(nodeData));
-  store.dispatch(
-    livenessReducerObj.receiveData(
-      new protos.cockroach.server.serverpb.LivenessResponse(livenessData),
-    ),
-  );
+  store.dispatch(livenessReducerObj.receiveData(new protos.cockroach.server.serverpb.LivenessResponse(livenessData)));
   return store.getState();
 }
 
-describe("node data selectors", function () {
-  describe("display name by ID", function () {
-    it("display name is node id appended to address", function () {
+describe("node data selectors", function() {
+  describe("display name by ID", function() {
+    it("display name is node id appended to address", function() {
       const state: any = makeNodesState(
         { id: 1, address: "addressA" },
         { id: 2, address: "addressB" },
@@ -73,7 +66,7 @@ describe("node data selectors", function () {
       });
     });
 
-    it("generates unique names for re-used addresses", function () {
+    it("generates unique names for re-used addresses", function() {
       const state: any = makeNodesState(
         { id: 1, address: "addressA" },
         { id: 2, address: "addressB" },
@@ -96,37 +89,17 @@ describe("node data selectors", function () {
       });
     });
 
-    it("adds decommissioned flag to decommissioned nodes", function () {
+    it("adds decommissioned flag to decommissioned nodes", function() {
       const state: any = makeNodesState(
-        {
-          id: 1,
-          address: "addressA",
-          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
-        },
+        { id: 1, address: "addressA", status: LivenessStatus.NODE_STATUS_DECOMMISSIONED },
         { id: 2, address: "addressB" },
-        {
-          id: 3,
-          address: "addressC",
-          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
-        },
+        { id: 3, address: "addressC", status: LivenessStatus.NODE_STATUS_DECOMMISSIONED },
         { id: 4, address: "addressD", status: LivenessStatus.NODE_STATUS_DEAD },
-        {
-          id: 5,
-          address: "addressA",
-          status: LivenessStatus.NODE_STATUS_DECOMMISSIONED,
-        },
+        { id: 5, address: "addressA", status: LivenessStatus.NODE_STATUS_DECOMMISSIONED },
         { id: 6, address: "addressC" },
         { id: 7, address: "addressA" },
-        {
-          id: 8,
-          address: "addressE",
-          status: LivenessStatus.NODE_STATUS_DECOMMISSIONING,
-        },
-        {
-          id: 9,
-          address: "addressF",
-          status: LivenessStatus.NODE_STATUS_UNAVAILABLE,
-        },
+        { id: 8, address: "addressE", status: LivenessStatus.NODE_STATUS_DECOMMISSIONING },
+        { id: 9, address: "addressF", status: LivenessStatus.NODE_STATUS_UNAVAILABLE },
       );
 
       const addressesByID = nodeDisplayNameByIDSelector(state);
@@ -144,32 +117,34 @@ describe("node data selectors", function () {
       });
     });
 
-    it("returns empty collection for empty state", function () {
+    it("returns empty collection for empty state", function() {
       const store = createAdminUIStore(createHashHistory());
       assert.deepEqual(nodeDisplayNameByIDSelector(store.getState()), {});
     });
   });
 
-  describe("store IDs by node ID", function () {
-    it("correctly creates storeID map", function () {
+  describe("store IDs by node ID", function() {
+    it("correctly creates storeID map", function() {
       const data = [
         {
           desc: { node_id: 1 },
           store_statuses: [
-            { desc: { store_id: 1 } },
-            { desc: { store_id: 2 } },
-            { desc: { store_id: 3 } },
+            { desc: { store_id: 1 }},
+            { desc: { store_id: 2 }},
+            { desc: { store_id: 3 }},
           ],
         },
         {
           desc: { node_id: 2 },
-          store_statuses: [{ desc: { store_id: 4 } }],
+          store_statuses: [
+            { desc: { store_id: 4 }},
+          ],
         },
         {
           desc: { node_id: 3 },
           store_statuses: [
-            { desc: { store_id: 5 } },
-            { desc: { store_id: 6 } },
+            { desc: { store_id: 5 }},
+            { desc: { store_id: 6 }},
           ],
         },
       ];
@@ -186,7 +161,7 @@ describe("node data selectors", function () {
   });
 });
 
-describe("selectCommissionedNodeStatuses", function () {
+describe("selectCommissionedNodeStatuses", function() {
   const nodeStatuses: INodeStatus[] = [
     {
       desc: {
@@ -195,9 +170,7 @@ describe("selectCommissionedNodeStatuses", function () {
     },
   ];
 
-  function makeStateForLiveness(livenessStatuses: {
-    [id: string]: LivenessStatus;
-  }) {
+  function makeStateForLiveness(livenessStatuses: { [id: string]: LivenessStatus }) {
     return {
       cachedData: {
         nodes: {
@@ -216,7 +189,7 @@ describe("selectCommissionedNodeStatuses", function () {
     };
   }
 
-  it("selects all nodes when liveness status missing", function () {
+  it("selects all nodes when liveness status missing", function() {
     const state = makeStateForLiveness({});
 
     const result = selectCommissionedNodeStatuses(state);
@@ -225,27 +198,15 @@ describe("selectCommissionedNodeStatuses", function () {
   });
 
   const testCases: [string, LivenessStatus, INodeStatus[]][] = [
-    [
-      "excludes decommissioned nodes",
-      LivenessStatus.NODE_STATUS_DECOMMISSIONED,
-      [],
-    ],
-    [
-      "includes decommissioning nodes",
-      LivenessStatus.NODE_STATUS_DECOMMISSIONING,
-      nodeStatuses,
-    ],
+    ["excludes decommissioned nodes", LivenessStatus.NODE_STATUS_DECOMMISSIONED, []],
+    ["includes decommissioning nodes", LivenessStatus.NODE_STATUS_DECOMMISSIONING, nodeStatuses],
     ["includes live nodes", LivenessStatus.NODE_STATUS_LIVE, nodeStatuses],
-    [
-      "includes unavailable nodes",
-      LivenessStatus.NODE_STATUS_UNAVAILABLE,
-      nodeStatuses,
-    ],
+    ["includes unavailable nodes", LivenessStatus.NODE_STATUS_UNAVAILABLE, nodeStatuses],
     ["includes dead nodes", LivenessStatus.NODE_STATUS_DEAD, nodeStatuses],
   ];
 
   testCases.forEach(([name, status, expected]) => {
-    it(name, function () {
+    it(name, function() {
       const state = makeStateForLiveness({ "1": status });
 
       const result = selectCommissionedNodeStatuses(state);
@@ -255,30 +216,29 @@ describe("selectCommissionedNodeStatuses", function () {
   });
 });
 
-describe("sumNodeStats", function () {
-  // Each of these nodes only has half of its capacity "usable" for cockroach data.
-  // See diagram for what these stats mean:
-  // https://github.com/cockroachdb/cockroach/blob/31e4299ab73a43f539b1ba63ed86be5ee18685f6/pkg/storage/metrics.go#L145-L153
-  const nodeStatuses: INodeStatus[] = [
-    {
-      desc: { node_id: 1 },
-      metrics: {
-        [MetricConstants.capacity]: 100,
-        [MetricConstants.usedCapacity]: 10,
-        [MetricConstants.availableCapacity]: 40,
+describe("sumNodeStats", function() {
+  it("sums stats from an array of nodes", function() {
+    // Each of these nodes only has half of its capacity "usable" for cockroach data.
+    // See diagram for what these stats mean:
+    // https://github.com/cockroachdb/cockroach/blob/31e4299ab73a43f539b1ba63ed86be5ee18685f6/pkg/storage/metrics.go#L145-L153
+    const nodeStatuses: INodeStatus[] = [
+      {
+        desc: { node_id: 1 },
+        metrics: {
+          [MetricConstants.capacity]: 100,
+          [MetricConstants.usedCapacity]: 10,
+          [MetricConstants.availableCapacity]: 40,
+        },
       },
-    },
-    {
-      desc: { node_id: 2 },
-      metrics: {
-        [MetricConstants.capacity]: 100,
-        [MetricConstants.usedCapacity]: 10,
-        [MetricConstants.availableCapacity]: 40,
+      {
+        desc: { node_id: 2 },
+        metrics: {
+          [MetricConstants.capacity]: 100,
+          [MetricConstants.usedCapacity]: 10,
+          [MetricConstants.availableCapacity]: 40,
+        },
       },
-    },
-  ];
-
-  it("sums stats from an array of nodes", function () {
+    ];
     const livenessStatusByNodeID: { [key: string]: LivenessStatus } = {
       1: LivenessStatus.NODE_STATUS_LIVE,
       2: LivenessStatus.NODE_STATUS_LIVE,
@@ -289,11 +249,5 @@ describe("sumNodeStats", function () {
     assert.equal(actual.capacityUsed, 20);
     // usable = used + available.
     assert.equal(actual.capacityUsable, 100);
-  });
-
-  it("returns empty stats if liveness statuses are not provided", () => {
-    const { nodeCounts, ...restStats } = sumNodeStats(nodeStatuses, {});
-    Object.entries(restStats).forEach(([_, value]) => assert.equal(value, 0));
-    Object.entries(nodeCounts).forEach(([_, value]) => assert.equal(value, 0));
   });
 });

@@ -1,12 +1,11 @@
 # Common helpers for teamcity-*.sh scripts.
 
 # root is the absolute path to the root directory of the repository.
-root="$(dirname $(cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd ))"
+root=$(cd "$(dirname "$0")/.." && pwd)
 
 source "$root/build/teamcity-common-support.sh"
 
 remove_files_on_exit() {
-  rm -f ~/.ssh/id_rsa{,.pub}
   common_support_remove_files_on_exit
 }
 trap remove_files_on_exit EXIT
@@ -44,6 +43,7 @@ function run_json_test() {
   run_counter=$((run_counter+1))
   tc_start_block "prep"
   # TODO(tbg): better to go through builder for all of this.
+  go install github.com/cockroachdb/cockroach/pkg/cmd/testfilter
   go install github.com/cockroachdb/cockroach/pkg/cmd/github-post
   mkdir -p artifacts
   tmpfile="artifacts/raw.${run_counter}.json.txt"
@@ -53,7 +53,7 @@ function run_json_test() {
   set +e
   run "$@" 2>&1 \
     | tee "${tmpfile}" \
-    | (cd "$root"/pkg/cmd/testfilter && go run main.go -mode=strip) \
+    | testfilter -mode=strip \
     | tee artifacts/stripped.txt
   status=$?
   set -e
@@ -74,7 +74,9 @@ function run_json_test() {
       # env var on PR builds, but we'll have it for builds that are triggered
       # from the release branches.
       echo "GITHUB_API_TOKEN must be set"
-      exit 1
+      # TODO(tbg): let this bake for a few days and if all looks good make it
+      # an error to not have the token specified when it's needed.
+      # exit 1
     else
       tc_start_block "post issues"
       github-post < "${tmpfile}"
@@ -84,8 +86,7 @@ function run_json_test() {
 
   tc_start_block "artifacts"
   # Create (or append to) failures.txt artifact and delete stripped.txt.
-  (cd "$root"/pkg/cmd/testfilter && go run main.go -mode=omit) < artifacts/stripped.txt | \
-      (cd "$root"/pkg/cmd/testfilter && go run main.go -mode=convert) >> artifacts/failures.txt
+  testfilter -mode=omit < artifacts/stripped.txt | testfilter -mode convert >> artifacts/failures.txt
 
   if [ $status -ne 0 ]; then
     # Keep the debug file around for failed builds. Compress it to avoid
@@ -97,7 +98,7 @@ function run_json_test() {
     # around in $tmpfile itself when anything else we don't handle well happens,
     # whatever that may be.
     fullfile=artifacts/full_output.txt
-    (cd "$root"/pkg/cmd/testfilter && go run main.go -mode=convert) < "${tmpfile}" >> "${fullfile}"
+    testfilter -mode convert < "${tmpfile}" >> "${fullfile}"
     tar --strip-components 1 -czf "${tmpfile}.tgz" "${tmpfile}" "${fullfile}"
     rm -f "${fullfile}"
   fi
@@ -112,21 +113,13 @@ function run_json_test() {
   return $status
 }
 
-function would_stress() {
+function maybe_stress() {
   # Don't stressrace on the release branches; we only want that to happen on the
   # PRs. There's no need in making master flakier than it needs to be; nightly
   # stress will weed out the flaky tests.
+  # NB: as a consequence of the above, this code doesn't know about posting
+  # Github issues.
   if tc_release_branch; then
-    return 1
-  else
-    return 0
-  fi
-}
-
-function maybe_stress() {
-   # NB: This code doesn't know about posting Github issues as we don't stress on
-   # the release branches.
-  if ! would_stress; then
     return 0
   fi
 
@@ -298,10 +291,4 @@ tc_prepare() {
   run mkdir -p artifacts
   maybe_ccache
   tc_end_block "Prepare environment"
-}
-
-generate_ssh_key() {
-  if [[ ! -f ~/.ssh/id_rsa.pub ]]; then
-    ssh-keygen -q -N "" -f ~/.ssh/id_rsa
-  fi
 }

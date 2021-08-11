@@ -17,8 +17,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -31,23 +33,48 @@ func updateDescriptorGCMutations(
 	log.Infof(ctx, "updating GCMutations for table %d after removing index %d",
 		tableID, garbageCollectedIndexID)
 	// Remove the mutation from the table descriptor.
-	return sql.DescsTxn(ctx, execCfg, func(
-		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
-	) error {
-		tbl, err := descsCol.GetMutableTableVersionByID(ctx, tableID, txn)
-		if err != nil {
-			return err
-		}
-		for i := 0; i < len(tbl.GCMutations); i++ {
-			other := tbl.GCMutations[i]
-			if other.IndexID == garbageCollectedIndexID {
-				tbl.GCMutations = append(tbl.GCMutations[:i], tbl.GCMutations[i+1:]...)
-				break
+	return descs.Txn(
+		ctx, execCfg.Settings, execCfg.LeaseManager, execCfg.InternalExecutor,
+		execCfg.DB, func(
+			ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+		) error {
+			tbl, err := descsCol.GetMutableTableVersionByID(ctx, tableID, txn)
+			if err != nil {
+				return err
 			}
-		}
-		b := txn.NewBatch()
-		if err := descsCol.WriteDescToBatch(ctx, false /* kvTrace */, tbl, b); err != nil {
+			for i := 0; i < len(tbl.GCMutations); i++ {
+				other := tbl.GCMutations[i]
+				if other.IndexID == garbageCollectedIndexID {
+					tbl.GCMutations = append(tbl.GCMutations[:i], tbl.GCMutations[i+1:]...)
+					break
+				}
+			}
+			b := txn.NewBatch()
+			if err := descsCol.WriteDescToBatch(ctx, false /* kvTrace */, tbl, b); err != nil {
+				return err
+			}
+			return txn.Run(ctx, b)
+		})
+}
+
+// dropTableDesc removes a descriptor from the KV database.
+func dropTableDesc(
+	ctx context.Context, db *kv.DB, codec keys.SQLCodec, tableDesc *tabledesc.Immutable,
+) error {
+	log.Infof(ctx, "removing table descriptor for table %d", tableDesc.ID)
+	return db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		if err := txn.SetSystemConfigTrigger(codec.ForSystemTenant()); err != nil {
 			return err
+		}
+		b := &kv.Batch{}
+
+		// Delete the descriptor.
+		descKey := catalogkeys.MakeDescMetadataKey(codec, tableDesc.ID)
+		b.Del(descKey)
+		// Delete the zone config entry for this table, if necessary.
+		if codec.ForSystemTenant() {
+			zoneKeyPrefix := config.MakeZoneKeyPrefix(config.SystemTenantObjectID(tableDesc.ID))
+			b.DelRange(zoneKeyPrefix, zoneKeyPrefix.PrefixEnd(), false /* returnKeys */)
 		}
 		return txn.Run(ctx, b)
 	})

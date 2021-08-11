@@ -15,8 +15,8 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/errors"
@@ -72,15 +72,15 @@ import (
 // - spillingCallbackFn will be called when the spilling from in-memory to disk
 //   backed operator occurs. It should only be set in tests.
 func NewOneInputDiskSpiller(
-	input colexecop.Operator,
-	inMemoryOp colexecop.BufferingInMemoryOperator,
+	input colexecbase.Operator,
+	inMemoryOp colexecbase.BufferingInMemoryOperator,
 	inMemoryMemMonitorName string,
-	diskBackedOpConstructor func(input colexecop.Operator) colexecop.Operator,
+	diskBackedOpConstructor func(input colexecbase.Operator) colexecbase.Operator,
 	spillingCallbackFn func(),
-) colexecop.Operator {
+) colexecbase.Operator {
 	diskBackedOpInput := newBufferExportingOperator(inMemoryOp, input)
 	return &diskSpillerBase{
-		inputs:                 []colexecop.Operator{input},
+		inputs:                 []colexecbase.Operator{input},
 		inMemoryOp:             inMemoryOp,
 		inMemoryMemMonitorName: inMemoryMemMonitorName,
 		diskBackedOp:           diskBackedOpConstructor(diskBackedOpInput),
@@ -139,19 +139,21 @@ func NewOneInputDiskSpiller(
 // - spillingCallbackFn will be called when the spilling from in-memory to disk
 //   backed operator occurs. It should only be set in tests.
 func NewTwoInputDiskSpiller(
-	inputOne, inputTwo colexecop.Operator,
-	inMemoryOp colexecop.BufferingInMemoryOperator,
+	inputOne, inputTwo colexecbase.Operator,
+	inMemoryOp colexecbase.BufferingInMemoryOperator,
 	inMemoryMemMonitorName string,
-	diskBackedOpConstructor func(inputOne, inputTwo colexecop.Operator) colexecop.Operator,
+	diskBackedOpConstructor func(inputOne, inputTwo colexecbase.Operator) colexecbase.Operator,
 	spillingCallbackFn func(),
-) colexecop.Operator {
+) colexecbase.Operator {
 	diskBackedOpInputOne := newBufferExportingOperator(inMemoryOp, inputOne)
 	diskBackedOpInputTwo := newBufferExportingOperator(inMemoryOp, inputTwo)
 	return &diskSpillerBase{
-		inputs:                 []colexecop.Operator{inputOne, inputTwo},
+		inputs:                 []colexecbase.Operator{inputOne, inputTwo},
 		inMemoryOp:             inMemoryOp,
+		inMemoryOpInitStatus:   OperatorNotInitialized,
 		inMemoryMemMonitorName: inMemoryMemMonitorName,
 		diskBackedOp:           diskBackedOpConstructor(diskBackedOpInputOne, diskBackedOpInputTwo),
+		distBackedOpInitStatus: OperatorNotInitialized,
 		spillingCallbackFn:     spillingCallbackFn,
 	}
 }
@@ -159,24 +161,25 @@ func NewTwoInputDiskSpiller(
 // diskSpillerBase is the common base for the one-input and two-input disk
 // spillers.
 type diskSpillerBase struct {
-	colexecop.NonExplainable
-	colexecop.InitHelper
-	colexecop.CloserHelper
+	NonExplainable
 
-	inputs  []colexecop.Operator
+	closerHelper
+
+	inputs  []colexecbase.Operator
 	spilled bool
 
-	inMemoryOp              colexecop.BufferingInMemoryOperator
-	inMemoryMemMonitorName  string
-	diskBackedOp            colexecop.Operator
-	diskBackedOpInitialized bool
-	spillingCallbackFn      func()
+	inMemoryOp             colexecbase.BufferingInMemoryOperator
+	inMemoryOpInitStatus   OperatorInitStatus
+	inMemoryMemMonitorName string
+	diskBackedOp           colexecbase.Operator
+	distBackedOpInitStatus OperatorInitStatus
+	spillingCallbackFn     func()
 }
 
-var _ colexecop.ResettableOperator = &diskSpillerBase{}
+var _ ResettableOperator = &diskSpillerBase{}
 
-func (d *diskSpillerBase) Init(ctx context.Context) {
-	if !d.InitHelper.Init(ctx) {
+func (d *diskSpillerBase) Init() {
+	if d.inMemoryOpInitStatus == OperatorInitialized {
 		return
 	}
 	// It is possible that Init() call below will hit an out of memory error,
@@ -184,17 +187,18 @@ func (d *diskSpillerBase) Init(ctx context.Context) {
 	//
 	// Also note that d.input is the input to d.inMemoryOp, so calling Init()
 	// only on the latter is sufficient.
-	d.inMemoryOp.Init(d.Ctx)
+	d.inMemoryOp.Init()
+	d.inMemoryOpInitStatus = OperatorInitialized
 }
 
-func (d *diskSpillerBase) Next() coldata.Batch {
+func (d *diskSpillerBase) Next(ctx context.Context) coldata.Batch {
 	if d.spilled {
-		return d.diskBackedOp.Next()
+		return d.diskBackedOp.Next(ctx)
 	}
 	var batch coldata.Batch
 	if err := colexecerror.CatchVectorizedRuntimeError(
 		func() {
-			batch = d.inMemoryOp.Next()
+			batch = d.inMemoryOp.Next(ctx)
 		},
 	); err != nil {
 		if sqlerrors.IsOutOfMemoryError(err) &&
@@ -203,11 +207,14 @@ func (d *diskSpillerBase) Next() coldata.Batch {
 			if d.spillingCallbackFn != nil {
 				d.spillingCallbackFn()
 			}
-			// It is ok if we call Init() multiple times (once after every
-			// Reset) since all calls except for the first one are noops.
-			d.diskBackedOp.Init(d.Ctx)
-			d.diskBackedOpInitialized = true
-			return d.diskBackedOp.Next()
+			if d.distBackedOpInitStatus == OperatorNotInitialized {
+				// The disk spiller might be reset for reuse in which case the
+				// the disk-backed operator has already been initialized and we
+				// don't want to perform the initialization again.
+				d.diskBackedOp.Init()
+				d.distBackedOpInitStatus = OperatorInitialized
+			}
+			return d.diskBackedOp.Next(ctx)
 		}
 		// Either not an out of memory error or an OOM error coming from a
 		// different operator, so we propagate it further.
@@ -216,38 +223,38 @@ func (d *diskSpillerBase) Next() coldata.Batch {
 	return batch
 }
 
-func (d *diskSpillerBase) Reset(ctx context.Context) {
+func (d *diskSpillerBase) reset(ctx context.Context) {
 	for _, input := range d.inputs {
-		if r, ok := input.(colexecop.Resetter); ok {
-			r.Reset(ctx)
+		if r, ok := input.(resetter); ok {
+			r.reset(ctx)
 		}
 	}
-	if r, ok := d.inMemoryOp.(colexecop.Resetter); ok {
-		r.Reset(ctx)
+	if d.inMemoryOpInitStatus == OperatorInitialized {
+		if r, ok := d.inMemoryOp.(resetter); ok {
+			r.reset(ctx)
+		}
 	}
-	if d.diskBackedOpInitialized {
-		if r, ok := d.diskBackedOp.(colexecop.Resetter); ok {
-			r.Reset(ctx)
+	if d.distBackedOpInitStatus == OperatorInitialized {
+		if r, ok := d.diskBackedOp.(resetter); ok {
+			r.reset(ctx)
 		}
 	}
 	d.spilled = false
 }
 
-// Close implements the Closer interface.
-func (d *diskSpillerBase) Close() error {
-	if !d.CloserHelper.Close() {
+// Close closes the diskSpillerBase's input.
+// TODO(asubiotto): Remove this method. It only exists so that we can call Close
+//  from some runTests subtests when not draining the input fully. The test
+//  should pass in the testing.T object used so that the caller can decide to
+//  explicitly close the input after checking the test.
+func (d *diskSpillerBase) Close(ctx context.Context) error {
+	if !d.close() {
 		return nil
 	}
-	var retErr error
-	if c, ok := d.inMemoryOp.(colexecop.Closer); ok {
-		retErr = c.Close()
+	if c, ok := d.diskBackedOp.(Closer); ok {
+		return c.Close(ctx)
 	}
-	if c, ok := d.diskBackedOp.(colexecop.Closer); ok {
-		if err := c.Close(); err != nil {
-			retErr = err
-		}
-	}
-	return retErr
+	return nil
 }
 
 func (d *diskSpillerBase) ChildCount(verbose bool) int {
@@ -290,48 +297,48 @@ func (d *diskSpillerBase) Child(nth int, verbose bool) execinfra.OpNode {
 // initialized when bufferExportingOperator.Init() is called.
 // NOTE: it is assumed that secondSource is the input to firstSource.
 type bufferExportingOperator struct {
-	colexecop.ZeroInputNode
-	colexecop.NonExplainable
+	colexecbase.ZeroInputNode
+	NonExplainable
 
-	firstSource     colexecop.BufferingInMemoryOperator
-	secondSource    colexecop.Operator
+	firstSource     colexecbase.BufferingInMemoryOperator
+	secondSource    colexecbase.Operator
 	firstSourceDone bool
 }
 
-var _ colexecop.ResettableOperator = &bufferExportingOperator{}
+var _ ResettableOperator = &bufferExportingOperator{}
 
 func newBufferExportingOperator(
-	firstSource colexecop.BufferingInMemoryOperator, secondSource colexecop.Operator,
-) colexecop.Operator {
+	firstSource colexecbase.BufferingInMemoryOperator, secondSource colexecbase.Operator,
+) colexecbase.Operator {
 	return &bufferExportingOperator{
 		firstSource:  firstSource,
 		secondSource: secondSource,
 	}
 }
 
-func (b *bufferExportingOperator) Init(context.Context) {
+func (b *bufferExportingOperator) Init() {
 	// Init here is a noop because the operator assumes that both sources have
 	// already been initialized.
 }
 
-func (b *bufferExportingOperator) Next() coldata.Batch {
+func (b *bufferExportingOperator) Next(ctx context.Context) coldata.Batch {
 	if b.firstSourceDone {
-		return b.secondSource.Next()
+		return b.secondSource.Next(ctx)
 	}
 	batch := b.firstSource.ExportBuffered(b.secondSource)
 	if batch.Length() == 0 {
 		b.firstSourceDone = true
-		return b.secondSource.Next()
+		return b.secondSource.Next(ctx)
 	}
 	return batch
 }
 
-func (b *bufferExportingOperator) Reset(ctx context.Context) {
-	if r, ok := b.firstSource.(colexecop.Resetter); ok {
-		r.Reset(ctx)
+func (b *bufferExportingOperator) reset(ctx context.Context) {
+	if r, ok := b.firstSource.(resetter); ok {
+		r.reset(ctx)
 	}
-	if r, ok := b.secondSource.(colexecop.Resetter); ok {
-		r.Reset(ctx)
+	if r, ok := b.secondSource.(resetter); ok {
+		r.reset(ctx)
 	}
 	b.firstSourceDone = false
 }

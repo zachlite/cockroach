@@ -16,16 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
-	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -34,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
-	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
 
@@ -70,7 +66,7 @@ type castInfo struct {
 //    - current timezone
 //    - current time (e.g. 'now'::string).
 //
-// TODO(#55094): move the PerformCast code for each cast into functions defined
+// TODO(radu): move the PerformCast code for each cast into functions defined
 // within each cast.
 //
 var validCasts = []castInfo{
@@ -104,7 +100,6 @@ var validCasts = []castInfo{
 	{from: types.IntervalFamily, to: types.IntFamily, volatility: VolatilityImmutable},
 	{from: types.OidFamily, to: types.IntFamily, volatility: VolatilityImmutable},
 	{from: types.BitFamily, to: types.IntFamily, volatility: VolatilityImmutable},
-	{from: types.JsonFamily, to: types.IntFamily, volatility: VolatilityImmutable},
 
 	// Casts to FloatFamily.
 	{from: types.UnknownFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
@@ -118,7 +113,6 @@ var validCasts = []castInfo{
 	{from: types.TimestampTZFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
 	{from: types.DateFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
 	{from: types.IntervalFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
-	{from: types.JsonFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
 
 	// Casts to Box2D Family.
 	{from: types.UnknownFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
@@ -158,7 +152,6 @@ var validCasts = []castInfo{
 	{from: types.TimestampTZFamily, to: types.DecimalFamily, volatility: VolatilityImmutable},
 	{from: types.DateFamily, to: types.DecimalFamily, volatility: VolatilityImmutable},
 	{from: types.IntervalFamily, to: types.DecimalFamily, volatility: VolatilityImmutable},
-	{from: types.JsonFamily, to: types.DecimalFamily, volatility: VolatilityImmutable},
 
 	// Casts to StringFamily.
 	{from: types.UnknownFamily, to: types.StringFamily, volatility: VolatilityImmutable},
@@ -175,34 +168,14 @@ var validCasts = []castInfo{
 	{from: types.Box2DFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.GeographyFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.StringFamily, volatility: VolatilityStable},
+	{from: types.TimestampFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{
-		from:       types.TimestampFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityImmutable,
-		volatilityHint: "TIMESTAMP to STRING casts are dependent on DateStyle; consider " +
-			"using to_char(timestamp) instead.",
+		from: types.TimestampTZFamily, to: types.StringFamily, volatility: VolatilityStable,
+		volatilityHint: "TIMESTAMPTZ to STRING casts depend on the current timezone; consider using (t AT TIME ZONE 'UTC')::STRING instead.",
 	},
-	{
-		from:       types.TimestampTZFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityStable,
-		volatilityHint: "TIMESTAMPTZ to STRING casts depend on the current timezone; consider " +
-			"using to_char(t AT TIME ZONE 'UTC') instead.",
-	},
-	{
-		from:           types.IntervalFamily,
-		to:             types.StringFamily,
-		volatility:     VolatilityImmutable,
-		volatilityHint: "INTERVAL to STRING casts depends on IntervalStyle; consider using to_char(interval)",
-	},
+	{from: types.IntervalFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.UuidFamily, to: types.StringFamily, volatility: VolatilityImmutable},
-	{
-		from:       types.DateFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityImmutable,
-		volatilityHint: "DATE to STRING casts are dependent on DateStyle; consider " +
-			"using to_char(date) instead.",
-	},
+	{from: types.DateFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.TimeFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.TimeTZFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.OidFamily, to: types.StringFamily, volatility: VolatilityImmutable},
@@ -248,12 +221,7 @@ var validCasts = []castInfo{
 
 	// Casts to DateFamily.
 	{from: types.UnknownFamily, to: types.DateFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.DateFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to DATE casts depend on session DateStyle; use parse_date(string) instead",
-	},
+	{from: types.StringFamily, to: types.DateFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.DateFamily, volatility: VolatilityStable},
 	{from: types.DateFamily, to: types.DateFamily, volatility: VolatilityImmutable},
 	{from: types.TimestampFamily, to: types.DateFamily, volatility: VolatilityImmutable},
@@ -262,12 +230,7 @@ var validCasts = []castInfo{
 
 	// Casts to TimeFamily.
 	{from: types.UnknownFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.TimeFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to TIME casts depend on session DateStyle; use parse_time(string) instead",
-	},
+	{from: types.StringFamily, to: types.TimeFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.TimeFamily, volatility: VolatilityStable},
 	{from: types.TimeFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
 	{from: types.TimeTZFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
@@ -277,12 +240,7 @@ var validCasts = []castInfo{
 
 	// Casts to TimeTZFamily.
 	{from: types.UnknownFamily, to: types.TimeTZFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.TimeTZFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to TIMETZ casts depend on session DateStyle; use parse_timetz(string) instead",
-	},
+	{from: types.StringFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.TimeFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.TimeTZFamily, to: types.TimeTZFamily, volatility: VolatilityImmutable},
@@ -292,8 +250,7 @@ var validCasts = []castInfo{
 	{from: types.UnknownFamily, to: types.TimestampFamily, volatility: VolatilityImmutable},
 	{
 		from: types.StringFamily, to: types.TimestampFamily, volatility: VolatilityStable,
-		volatilityHint: "STRING to TIMESTAMP casts are context-dependent because of relative timestamp strings " +
-			"like 'now' and session settings such as DateStyle; use parse_timestamp(string) instead.",
+		volatilityHint: "STRING to TIMESTAMP casts are context-dependent because of relative timestamp strings like 'now'; use parse_timestamp() instead.",
 	},
 	{from: types.CollatedStringFamily, to: types.TimestampFamily, volatility: VolatilityStable},
 	{from: types.DateFamily, to: types.TimestampFamily, volatility: VolatilityImmutable},
@@ -315,12 +272,7 @@ var validCasts = []castInfo{
 
 	// Casts to IntervalFamily.
 	{from: types.UnknownFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.IntervalFamily,
-		volatility:     VolatilityImmutable,
-		volatilityHint: "STRING to INTERVAL casts depend on session IntervalStyle; use parse_interval(string) instead",
-	},
+	{from: types.StringFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.CollatedStringFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.IntFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.TimeFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
@@ -375,12 +327,8 @@ type castsMapKey struct {
 
 var castsMap map[castsMapKey]*castInfo
 
-// styleCastsMap contains castInfos for casts affected by a style parameter.
-var styleCastsMap map[castsMapKey]*castInfo
-
 func init() {
 	castsMap = make(map[castsMapKey]*castInfo, len(validCasts))
-	styleCastsMap = make(map[castsMapKey]*castInfo)
 	for i := range validCasts {
 		c := &validCasts[i]
 
@@ -389,87 +337,34 @@ func init() {
 
 		key := castsMapKey{from: c.from, to: c.to}
 		castsMap[key] = c
-
-		if isDateStyleCastAffected(c.from, c.to) || isIntervalStyleCastAffected(c.from, c.to) {
-			cCopy := *c
-			cCopy.volatility = VolatilityStable
-			styleCastsMap[key] = &cCopy
-		}
 	}
-}
-
-func isIntervalStyleCastAffected(from, to types.Family) bool {
-	switch from {
-	case types.StringFamily, types.CollatedStringFamily:
-		switch to {
-		case types.IntervalFamily:
-			return true
-		}
-	case types.IntervalFamily:
-		switch to {
-		case types.StringFamily, types.CollatedStringFamily:
-			return true
-		}
-	}
-	return false
-}
-
-func isDateStyleCastAffected(from, to types.Family) bool {
-	switch from {
-	case types.StringFamily, types.CollatedStringFamily:
-		switch to {
-		case types.TimeFamily,
-			types.TimeTZFamily,
-			types.DateFamily,
-			types.TimestampFamily:
-			return true
-		}
-	case types.DateFamily,
-		types.TimestampFamily:
-		switch to {
-		case types.StringFamily, types.CollatedStringFamily:
-			return true
-		}
-	}
-	return false
 }
 
 // lookupCast returns the information for a valid cast.
 // Returns nil if this is not a valid cast.
 // Does not handle array and tuple casts.
-func lookupCast(from, to types.Family, intervalStyleEnabled bool, dateStyleEnabled bool) *castInfo {
-	k := castsMapKey{from: from, to: to}
-	if (intervalStyleEnabled && isIntervalStyleCastAffected(from, to)) ||
-		(dateStyleEnabled && isDateStyleCastAffected(from, to)) {
-		if r, ok := styleCastsMap[k]; ok {
-			return r
-		}
-	}
-	return castsMap[k]
+func lookupCast(from, to types.Family) *castInfo {
+	return castsMap[castsMapKey{from: from, to: to}]
 }
 
 // LookupCastVolatility returns the volatility of a valid cast.
-func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Volatility, ok bool) {
+func LookupCastVolatility(from, to *types.T) (_ Volatility, ok bool) {
 	fromFamily := from.Family()
 	toFamily := to.Family()
 	// Special case for casting between arrays.
 	if fromFamily == types.ArrayFamily && toFamily == types.ArrayFamily {
-		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents(), sd)
+		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents())
 	}
 	// Special case for casting between tuples.
 	if fromFamily == types.TupleFamily && toFamily == types.TupleFamily {
 		fromTypes := from.TupleContents()
 		toTypes := to.TupleContents()
-		// Handle case where an overload makes a tuple get casted to tuple{}.
-		if len(toTypes) == 1 && toTypes[0].Family() == types.AnyFamily {
-			return VolatilityStable, true
-		}
 		if len(fromTypes) != len(toTypes) {
 			return 0, false
 		}
 		maxVolatility := VolatilityLeakProof
 		for i := range fromTypes {
-			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i], sd)
+			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i])
 			if !ok {
 				return 0, false
 			}
@@ -479,13 +374,7 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 		}
 		return maxVolatility, true
 	}
-
-	cast := lookupCast(
-		fromFamily,
-		toFamily,
-		sd != nil && sd.IntervalStyleEnabled,
-		sd != nil && sd.DateStyleEnabled,
-	)
+	cast := lookupCast(fromFamily, toFamily)
 	if cast == nil {
 		return 0, false
 	}
@@ -495,257 +384,45 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 // PerformCast performs a cast from the provided Datum to the specified
 // types.T.
 func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
-	ret, err := performCastWithoutPrecisionTruncation(ctx, d, t)
-	if err != nil {
-		return nil, err
-	}
-	return AdjustValueToType(t, ret)
-}
-
-// AdjustValueToType checks that the width (for strings, byte arrays, and bit
-// strings) and scale (decimal). and, shape/srid (for geospatial types) fits the
-// specified column type.
-//
-// Additionally, some precision truncation may occur for the specified column type.
-//
-// In case of decimals, it can truncate fractional digits in the input
-// value in order to fit the target column. If the input value fits the target
-// column, it is returned unchanged. If the input value can be truncated to fit,
-// then a truncated copy is returned. Otherwise, an error is returned.
-//
-// In the case of time, it can truncate fractional digits of time datums
-// to its relevant rounding for the given type definition.
-//
-// In the case of geospatial types, it will check whether the SRID and Shape in the
-// datum matches the type definition.
-//
-// This method is used by casts, parsing, INSERT and UPDATE. It is important to note
-// that width must be altered *before* this function, as width truncations should
-// only occur during casting and parsing but not update/inserts (see
-// enforceLocalColumnConstraints).
-func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
-	switch typ.Family() {
-	case types.StringFamily, types.CollatedStringFamily:
-		var sv string
-		if v, ok := AsDString(inVal); ok {
-			sv = string(v)
-		} else if v, ok := inVal.(*DCollatedString); ok {
-			sv = v.Contents
-		}
-
-		sv = adjustStringValueToType(typ, sv)
-
-		if typ.Width() > 0 && utf8.RuneCountInString(sv) > int(typ.Width()) {
-			return nil, pgerror.Newf(pgcode.StringDataRightTruncation,
-				"value too long for type %s",
-				typ.SQLString())
-		}
-
-		if typ.Oid() == oid.T_bpchar || typ.Oid() == oid.T_char {
-			if _, ok := AsDString(inVal); ok {
-				return NewDString(sv), nil
-			} else if _, ok := inVal.(*DCollatedString); ok {
-				return NewDCollatedString(sv, typ.Locale(), &CollationEnvironment{})
-			}
-		}
-	case types.IntFamily:
-		if v, ok := AsDInt(inVal); ok {
-			if typ.Width() == 32 || typ.Width() == 16 {
-				// Width is defined in bits.
-				width := uint(typ.Width() - 1)
-
-				// We're performing range checks in line with Go's
-				// implementation of math.(Max|Min)(16|32) numbers that store
-				// the boundaries of the allowed range.
-				// NOTE: when updating the code below, make sure to update
-				// execgen/cast_gen_util.go as well.
-				shifted := v >> width
-				if (v >= 0 && shifted > 0) || (v < 0 && shifted < -1) {
-					if typ.Width() == 16 {
-						return nil, ErrInt2OutOfRange
-					}
-					return nil, ErrInt4OutOfRange
-				}
-			}
-		}
-	case types.BitFamily:
-		if v, ok := AsDBitArray(inVal); ok {
-			if typ.Width() > 0 {
-				bitLen := v.BitLen()
-				switch typ.Oid() {
-				case oid.T_varbit:
-					if bitLen > uint(typ.Width()) {
-						return nil, pgerror.Newf(pgcode.StringDataRightTruncation,
-							"bit string length %d too large for type %s", bitLen, typ.SQLString())
-					}
-				default:
-					if bitLen != uint(typ.Width()) {
-						return nil, pgerror.Newf(pgcode.StringDataLengthMismatch,
-							"bit string length %d does not match type %s", bitLen, typ.SQLString())
-					}
-				}
-			}
-		}
-	case types.DecimalFamily:
-		if inDec, ok := inVal.(*DDecimal); ok {
-			if inDec.Form != apd.Finite || typ.Precision() == 0 {
-				// Non-finite form or unlimited target precision, so no need to limit.
-				break
-			}
-			if int64(typ.Precision()) >= inDec.NumDigits() && typ.Scale() == inDec.Exponent {
-				// Precision and scale of target column are sufficient.
-				break
-			}
-
-			var outDec DDecimal
-			outDec.Set(&inDec.Decimal)
-			err := LimitDecimalWidth(&outDec.Decimal, int(typ.Precision()), int(typ.Scale()))
-			if err != nil {
-				return nil, errors.Wrapf(err, "type %s", typ.SQLString())
-			}
-			return &outDec, nil
-		}
-	case types.ArrayFamily:
-		if inArr, ok := inVal.(*DArray); ok {
-			var outArr *DArray
-			elementType := typ.ArrayContents()
-			for i, inElem := range inArr.Array {
-				outElem, err := AdjustValueToType(elementType, inElem)
-				if err != nil {
-					return nil, err
-				}
-				if outElem != inElem {
-					if outArr == nil {
-						outArr = &DArray{}
-						*outArr = *inArr
-						outArr.Array = make(Datums, len(inArr.Array))
-						copy(outArr.Array, inArr.Array[:i])
-					}
-				}
-				if outArr != nil {
-					outArr.Array[i] = inElem
-				}
-			}
-			if outArr != nil {
-				return outArr, nil
-			}
-		}
-	case types.TimeFamily:
-		if in, ok := inVal.(*DTime); ok {
-			return in.Round(TimeFamilyPrecisionToRoundDuration(typ.Precision())), nil
-		}
-	case types.TimestampFamily:
-		if in, ok := inVal.(*DTimestamp); ok {
-			return in.Round(TimeFamilyPrecisionToRoundDuration(typ.Precision()))
-		}
-	case types.TimestampTZFamily:
-		if in, ok := inVal.(*DTimestampTZ); ok {
-			return in.Round(TimeFamilyPrecisionToRoundDuration(typ.Precision()))
-		}
-	case types.TimeTZFamily:
-		if in, ok := inVal.(*DTimeTZ); ok {
-			return in.Round(TimeFamilyPrecisionToRoundDuration(typ.Precision())), nil
-		}
-	case types.IntervalFamily:
-		if in, ok := inVal.(*DInterval); ok {
-			itm, err := typ.IntervalTypeMetadata()
-			if err != nil {
-				return nil, err
-			}
-			return NewDInterval(in.Duration, itm), nil
-		}
-	case types.GeometryFamily:
-		if in, ok := inVal.(*DGeometry); ok {
-			if err := geo.SpatialObjectFitsColumnMetadata(
-				in.Geometry.SpatialObject(),
-				typ.InternalType.GeoMetadata.SRID,
-				typ.InternalType.GeoMetadata.ShapeType,
-			); err != nil {
-				return nil, err
-			}
-		}
-	case types.GeographyFamily:
-		if in, ok := inVal.(*DGeography); ok {
-			if err := geo.SpatialObjectFitsColumnMetadata(
-				in.Geography.SpatialObject(),
-				typ.InternalType.GeoMetadata.SRID,
-				typ.InternalType.GeoMetadata.ShapeType,
-			); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return inVal, nil
-}
-
-// adjustStringToType checks that the width for strings fits the
-// specified column type.
-func adjustStringValueToType(typ *types.T, sv string) string {
-	switch typ.Oid() {
-	case oid.T_char:
-		// "char" is supposed to truncate long values
-		return util.TruncateString(sv, 1)
-	case oid.T_bpchar:
-		// bpchar types truncate trailing whitespace.
-		return strings.TrimRight(sv, " ")
-	}
-	return sv
-}
-
-// formatBitArrayToType formats bit arrays such that they fill the total width
-// if too short, or truncate if too long.
-func formatBitArrayToType(d *DBitArray, t *types.T) *DBitArray {
-	if t.Width() == 0 || d.BitLen() == uint(t.Width()) {
-		return d
-	}
-	a := d.BitArray.Clone()
-	switch t.Oid() {
-	case oid.T_varbit:
-		// VARBITs do not have padding attached, so only truncate.
-		if uint(t.Width()) < a.BitLen() {
-			a = a.ToWidth(uint(t.Width()))
-		}
-	default:
-		a = a.ToWidth(uint(t.Width()))
-	}
-	return &DBitArray{a}
-}
-
-// performCastWithoutPrecisionTruncation performs the cast, but does not do a
-// check on whether the datum fits the type.
-// In an ideal state, components of AdjustValueToType should be embedded into
-// this function, but the code base needs a general refactor of parsing
-// and casting logic before this can happen.
-// See also: #55094.
-func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
-	// If we're casting a DOidWrapper, then we want to cast the wrapped datum.
-	// It is also reasonable to lose the old Oid value too.
-	// Note that we pass in nil as the first argument since we're not interested
-	// in evaluating the placeholders.
-	d = UnwrapDatum(nil /* evalCtx */, d)
 	switch t.Family() {
 	case types.BitFamily:
 		switch v := d.(type) {
 		case *DBitArray:
-			return formatBitArrayToType(v, t), nil
-		case *DInt:
-			r, err := NewDBitArrayFromInt(int64(*v), uint(t.Width()))
-			if err != nil {
-				return nil, err
+			if t.Width() == 0 || v.BitLen() == uint(t.Width()) {
+				return d, nil
 			}
-			return formatBitArrayToType(r, t), nil
+			var a DBitArray
+			switch t.Oid() {
+			case oid.T_varbit:
+				// VARBITs do not have padding attached.
+				a.BitArray = v.BitArray.Clone()
+				if uint(t.Width()) < a.BitArray.BitLen() {
+					a.BitArray = a.BitArray.ToWidth(uint(t.Width()))
+				}
+			default:
+				a.BitArray = v.BitArray.Clone().ToWidth(uint(t.Width()))
+			}
+			return &a, nil
+		case *DInt:
+			return NewDBitArrayFromInt(int64(*v), uint(t.Width()))
 		case *DString:
 			res, err := bitarray.Parse(string(*v))
 			if err != nil {
 				return nil, err
 			}
-			return formatBitArrayToType(&DBitArray{res}, t), nil
+			if t.Width() > 0 {
+				res = res.ToWidth(uint(t.Width()))
+			}
+			return &DBitArray{BitArray: res}, nil
 		case *DCollatedString:
 			res, err := bitarray.Parse(v.Contents)
 			if err != nil {
 				return nil, err
 			}
-			return formatBitArrayToType(&DBitArray{res}, t), nil
+			if t.Width() > 0 {
+				res = res.ToWidth(uint(t.Width()))
+			}
+			return &DBitArray{BitArray: res}, nil
 		}
 
 	case types.BoolFamily:
@@ -831,13 +508,6 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			res = NewDInt(DInt(iv))
 		case *DOid:
 			res = &v.DInt
-		case *DJSON:
-			if dec, ok := v.AsDecimal(); ok {
-				asInt, err := dec.Int64()
-				if err == nil {
-					res = NewDInt(DInt(asInt))
-				}
-			}
 		}
 		if res != nil {
 			return res, nil
@@ -888,14 +558,6 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			return NewDFloat(DFloat(float64(v.UnixEpochDays()))), nil
 		case *DInterval:
 			return NewDFloat(DFloat(v.AsFloat64())), nil
-		case *DJSON:
-			if dec, ok := v.AsDecimal(); ok {
-				fl, err := dec.Float64()
-				if err != nil {
-					return nil, ErrFloatOutOfRange
-				}
-				return NewDFloat(DFloat(fl)), nil
-			}
 		}
 
 	case types.DecimalFamily:
@@ -944,12 +606,6 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		case *DInterval:
 			v.AsBigInt(&dd.Coeff)
 			dd.Exponent = -9
-		case *DJSON:
-			if dec, ok := v.AsDecimal(); ok {
-				dd.Set(dec)
-			} else {
-				unset = false
-			}
 		default:
 			unset = true
 		}
@@ -974,7 +630,7 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			s = t.BitArray.String()
 		case *DFloat:
 			s = strconv.FormatFloat(float64(*t), 'g',
-				ctx.SessionData.DataConversionConfig.GetFloatPrec(), 64)
+				ctx.SessionData.DataConversion.GetFloatPrec(), 64)
 		case *DBool, *DInt, *DDecimal:
 			s = d.String()
 		case *DTimestamp, *DDate, *DTime, *DTimeTZ, *DGeography, *DGeometry, *DBox2D:
@@ -990,26 +646,14 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 				FmtBareStrings,
 			)
 		case *DTuple:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DArray:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DInterval:
 			// When converting an interval to string, we need a string representation
 			// of the duration (e.g. "5s") and not of the interval itself (e.g.
 			// "INTERVAL '5s'").
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = t.ValueAsString()
 		case *DUuid:
 			s = t.UUID.String()
 		case *DIPAddr:
@@ -1019,11 +663,8 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		case *DCollatedString:
 			s = t.Contents
 		case *DBytes:
-			s = lex.EncodeByteArrayToRawBytes(
-				string(*t),
-				ctx.SessionData.DataConversionConfig.BytesEncodeFormat,
-				false, /* skipHexPrefix */
-			)
+			s = lex.EncodeByteArrayToRawBytes(string(*t),
+				ctx.SessionData.DataConversion.BytesEncodeFormat, false /* skipHexPrefix */)
 		case *DOid:
 			s = t.String()
 		case *DJSON:
@@ -1345,9 +986,9 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		}
 		switch v := d.(type) {
 		case *DString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), string(*v), itm)
+			return ParseDIntervalWithTypeMetadata(string(*v), itm)
 		case *DCollatedString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), v.Contents, itm)
+			return ParseDIntervalWithTypeMetadata(v.Contents, itm)
 		case *DInt:
 			return NewDInterval(duration.FromInt64(int64(*v)), itm), nil
 		case *DFloat:
@@ -1420,58 +1061,143 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 	case types.OidFamily:
 		switch v := d.(type) {
 		case *DOid:
-			return performIntToOidCast(ctx, t, v.DInt)
+			switch t.Oid() {
+			case oid.T_oid:
+				return &DOid{semanticType: t, DInt: v.DInt}, nil
+			case oid.T_regtype:
+				// Mapping an oid to a regtype is easy: we have a hardcoded map.
+				typ, ok := types.OidToType[oid.Oid(v.DInt)]
+				ret := &DOid{semanticType: t, DInt: v.DInt}
+				if !ok {
+					return ret, nil
+				}
+				ret.name = typ.PGName()
+				return ret, nil
+			default:
+				oid, err := queryOid(ctx, t, v)
+				if err != nil {
+					oid = NewDOid(v.DInt)
+					oid.semanticType = t
+				}
+				return oid, nil
+			}
 		case *DInt:
 			// OIDs are always unsigned 32-bit integers. Some languages, like Java,
 			// store OIDs as signed 32-bit integers, so we implement the cast
 			// by converting to a uint32 first. This matches Postgres behavior.
 			i := DInt(uint32(*v))
-			return performIntToOidCast(ctx, t, i)
+			switch t.Oid() {
+			case oid.T_oid:
+				return &DOid{semanticType: t, DInt: i}, nil
+			default:
+				tmpOid := NewDOid(i)
+				oid, err := queryOid(ctx, t, tmpOid)
+				if err != nil {
+					oid = tmpOid
+					oid.semanticType = t
+				}
+				return oid, nil
+			}
 		case *DString:
-			return ParseDOid(ctx, string(*v), t)
+			s := string(*v)
+			// Trim whitespace and unwrap outer quotes if necessary.
+			// This is required to mimic postgres.
+			s = strings.TrimSpace(s)
+			origS := s
+			if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
+				s = s[1 : len(s)-1]
+			}
+
+			switch t.Oid() {
+			case oid.T_oid:
+				i, err := ParseDInt(s)
+				if err != nil {
+					return nil, err
+				}
+				return &DOid{semanticType: t, DInt: *i}, nil
+			case oid.T_regproc, oid.T_regprocedure:
+				// Trim procedure type parameters, e.g. `max(int)` becomes `max`.
+				// Postgres only does this when the cast is ::regprocedure, but we're
+				// going to always do it.
+				// We additionally do not yet implement disambiguation based on type
+				// parameters: we return the match iff there is exactly one.
+				s = pgSignatureRegexp.ReplaceAllString(s, "$1")
+				// Resolve function name.
+				substrs := strings.Split(s, ".")
+				if len(substrs) > 3 {
+					// A fully qualified function name in pg's dialect can contain
+					// at most 3 parts: db.schema.funname.
+					// For example mydb.pg_catalog.max().
+					// Anything longer is always invalid.
+					return nil, pgerror.Newf(pgcode.Syntax,
+						"invalid function name: %s", s)
+				}
+				name := UnresolvedName{NumParts: len(substrs)}
+				for i := 0; i < len(substrs); i++ {
+					name.Parts[i] = substrs[len(substrs)-1-i]
+				}
+				funcDef, err := name.ResolveFunction(ctx.SessionData.SearchPath)
+				if err != nil {
+					return nil, err
+				}
+				return queryOid(ctx, t, NewDString(funcDef.Name))
+			case oid.T_regtype:
+				parsedTyp, err := ctx.Planner.GetTypeFromValidSQLSyntax(s)
+				if err == nil {
+					return &DOid{
+						semanticType: t,
+						DInt:         DInt(parsedTyp.Oid()),
+						name:         parsedTyp.SQLStandardName(),
+					}, nil
+				}
+				// Fall back to searching pg_type, since we don't provide syntax for
+				// every postgres type that we understand OIDs for.
+				// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
+				s = pgSignatureRegexp.ReplaceAllString(s, "$1")
+				dOid, missingTypeErr := queryOid(ctx, t, NewDString(s))
+				if missingTypeErr == nil {
+					return dOid, missingTypeErr
+				}
+				// Fall back to some special cases that we support for compatibility
+				// only. Client use syntax like 'sometype'::regtype to produce the oid
+				// for a type that they want to search a catalog table for. Since we
+				// don't support that type, we return an artificial OID that will never
+				// match anything.
+				switch s {
+				// We don't support triggers, but some tools search for them
+				// specifically.
+				case "trigger":
+				default:
+					return nil, missingTypeErr
+				}
+				return &DOid{
+					semanticType: t,
+					// Types we don't support get OID -1, so they won't match anything
+					// in catalogs.
+					DInt: -1,
+					name: s,
+				}, nil
+
+			case oid.T_regclass:
+				tn, err := ctx.Planner.ParseQualifiedTableName(origS)
+				if err != nil {
+					return nil, err
+				}
+				id, err := ctx.Planner.ResolveTableName(ctx.Ctx(), tn)
+				if err != nil {
+					return nil, err
+				}
+				return &DOid{
+					semanticType: t,
+					DInt:         DInt(id),
+					name:         tn.ObjectName.String(),
+				}, nil
+			default:
+				return queryOid(ctx, t, NewDString(s))
+			}
 		}
 	}
 
 	return nil, pgerror.Newf(
 		pgcode.CannotCoerce, "invalid cast: %s -> %s", d.ResolvedType(), t)
-}
-
-// performIntToOidCast casts the input integer to the OID type given by the
-// input types.T.
-func performIntToOidCast(ctx *EvalContext, t *types.T, v DInt) (Datum, error) {
-	switch t.Oid() {
-	case oid.T_oid:
-		return &DOid{semanticType: t, DInt: v}, nil
-	case oid.T_regtype:
-		// Mapping an oid to a regtype is easy: we have a hardcoded map.
-		ret := &DOid{semanticType: t, DInt: v}
-		if typ, ok := types.OidToType[oid.Oid(v)]; ok {
-			ret.name = typ.PGName()
-		} else if types.IsOIDUserDefinedType(oid.Oid(v)) {
-			typ, err := ctx.Planner.ResolveTypeByOID(ctx.Context, oid.Oid(v))
-			if err != nil {
-				return nil, err
-			}
-			ret.name = typ.PGName()
-		}
-		return ret, nil
-
-	case oid.T_regproc, oid.T_regprocedure:
-		// Mapping an oid to a regproc is easy: we have a hardcoded map.
-		name, ok := OidToBuiltinName[oid.Oid(v)]
-		ret := &DOid{semanticType: t, DInt: v}
-		if !ok {
-			return ret, nil
-		}
-		ret.name = name
-		return ret, nil
-
-	default:
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, NewDOid(v))
-		if err != nil {
-			oid = NewDOid(v)
-			oid.semanticType = t
-		}
-		return oid, nil
-	}
 }

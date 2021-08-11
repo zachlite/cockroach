@@ -1,5 +1,3 @@
-# LogicTest: !fakedist-spec-planning
-
 statement ok
 CREATE USER bar; CREATE USER all_user_db; CREATE USER all_user_schema
 
@@ -182,11 +180,8 @@ true  true  true  true
 query error pgcode 42P01 relation "does_not_exist" does not exist
 SELECT has_column_privilege('does_not_exist', 1, 'SELECT')
 
-query error pgcode 42703 column 100 of relation pg_type does not exist
+query error pgcode 42703 column 100 of relation 'pg_type' does not exist
 SELECT has_column_privilege('pg_type', 100, 'SELECT')
-
-query error pgcode 42703 column 100 of relation pg_type does not exist
-SELECT has_column_privilege('pg_type'::regclass, 100, 'SELECT')
 
 query BBBBB
 SELECT has_column_privilege('pg_type', 1, 'SELECT'),
@@ -266,11 +261,8 @@ true  true  true  true
 query error pgcode 42P01 relation "does_not_exist" does not exist
 SELECT has_column_privilege('does_not_exist', 'col', 'SELECT')
 
-query error pgcode 42703 column "does not exist" does not exist
+query error pgcode 42703 column 'does not exist' of relation 'pg_type' does not exist
 SELECT has_column_privilege('pg_type', 'does not exist', 'SELECT')
-
-query error pgcode 42703 column "does not exist" does not exist
-SELECT has_column_privilege('pg_type'::regclass, 'does not exist', 'SELECT')
 
 query BBBBB
 SELECT has_column_privilege('pg_type', 'typname', 'SELECT'),
@@ -349,7 +341,7 @@ SELECT has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'syst
        has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'system'), 'TEMPORARY'),
        has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'system'), 'TEMP')
 ----
-false  false  false  false
+false  true  false  false
 
 query BBBB
 SELECT has_database_privilege((SELECT oid FROM pg_database WHERE datname = 'test'), 'CREATE'),
@@ -369,7 +361,7 @@ SELECT has_database_privilege('system', '  CrEaTe      '),
        has_database_privilege('system', 'TEMP'),
        has_database_privilege('system', '  CrEaTe      ,CONNECT')
 ----
-false  false  false  false  false
+false  true  false  false  false
 
 query BBBBB
 SELECT has_database_privilege('test', '  CrEaTe      '),
@@ -398,34 +390,6 @@ SELECT has_database_privilege('test'::Name, 'CREATE'),
 ----
 true  true  true  true  true
 
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'CREATE') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'CONNECT') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'TEMP') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
-query T
-SELECT datname FROM pg_database WHERE has_database_privilege(datname, 'TEMPORARY') ORDER BY datname
-----
-defaultdb
-postgres
-test
-
 query error pgcode 22023 unrecognized privilege type: "UPDATE"
 SELECT has_database_privilege('test', 'UPDATE')
 
@@ -443,15 +407,7 @@ SELECT has_database_privilege('bar', 'test', 'CREATE'),
        has_database_privilege('bar', 'test', 'CREATE, CONNECT'),
        has_database_privilege('bar', 'test', 'CREATE, TEMP')
 ----
-true  false  true  true  false  true
-
-statement ok
-GRANT CONNECT ON DATABASE test TO bar
-
-query B
-SELECT has_database_privilege('bar', 'test', 'CONNECT')
-----
-true
+true  true  true  true  true  true
 
 query BBBBBB
 SELECT has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION'),
@@ -461,7 +417,7 @@ SELECT has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION'),
        has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION, CONNECT WITH GRANT OPTION'),
        has_database_privilege('bar', 'test', 'CREATE WITH GRANT OPTION, TEMP WITH GRANT OPTION')
 ----
-false  false  false  false  false  false
+false  true  false  false  false  false
 
 
 ## has_foreign_data_wrapper_privilege
@@ -1141,14 +1097,15 @@ SELECT has_database_privilege('testuser', 'my_db', 'create'),
        has_schema_privilege('testuser', 'public', 'usage'),
        has_table_privilege('testuser', 's.t', 'select')
 ----
-true  false  true
+true false false
 
 user root
 
 statement ok
+use my_db;
 CREATE USER testuser2;
 GRANT testuser TO testuser2;
-GRANT ALL ON SCHEMA my_db.s TO testuser2
+GRANT ALL ON SCHEMA s TO testuser2
 
 user testuser2
 
@@ -1170,4 +1127,4 @@ SELECT has_database_privilege('testuser2', 'my_db', 'create'),
        has_schema_privilege('testuser2', 'public', 'usage'),
        has_table_privilege('testuser2', 's.t', 'select')
 ----
-true  false  true
+true false false

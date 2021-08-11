@@ -47,8 +47,3 @@ func (s *MaskedSetting) Description() string {
 func (s *MaskedSetting) Typ() string {
 	return s.setting.Typ()
 }
-
-// SystemOnly returns the underlying setting's SystemOnly.
-func (s *MaskedSetting) SystemOnly() bool {
-	return s.setting.SystemOnly()
-}

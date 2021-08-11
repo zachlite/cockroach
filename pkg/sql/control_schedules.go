@@ -63,10 +63,10 @@ func loadSchedule(params runParams, scheduleID tree.Datum) (*jobs.ScheduledJob, 
 
 	// Load schedule expression.  This is needed for resume command, but we
 	// also use this query to check for the schedule existence.
-	datums, cols, err := params.ExecCfg().InternalExecutor.QueryRowExWithCols(
+	datums, cols, err := params.ExecCfg().InternalExecutor.QueryWithCols(
 		params.ctx,
 		"load-schedule",
-		params.EvalContext().Txn, sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		params.EvalContext().Txn, sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf(
 			"SELECT schedule_id, schedule_expr FROM %s WHERE schedule_id = $1",
 			env.ScheduledJobsTableName(),
@@ -77,11 +77,11 @@ func loadSchedule(params runParams, scheduleID tree.Datum) (*jobs.ScheduledJob, 
 	}
 
 	// Not an error if schedule does not exist.
-	if datums == nil {
+	if len(datums) != 1 {
 		return nil, nil
 	}
 
-	if err := schedule.InitFromDatums(datums, cols); err != nil {
+	if err := schedule.InitFromDatums(datums[0], cols); err != nil {
 		return nil, err
 	}
 	return schedule, nil
@@ -103,7 +103,7 @@ func deleteSchedule(params runParams, scheduleID int64) error {
 		params.ctx,
 		"delete-schedule",
 		params.EvalContext().Txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf(
 			"DELETE FROM %s WHERE schedule_id = $1",
 			env.ScheduledJobsTableName(),

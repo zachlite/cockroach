@@ -13,19 +13,15 @@ package sql
 import (
 	"context"
 	"fmt"
-	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessioninit"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -86,7 +82,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	}
 
 	// userNames maps users to the objects they own
-	userNames := make(map[security.SQLUsername][]objectAndType)
+	userNames := make(map[string][]objectAndType)
 	for i := range names {
 		name := names[i]
 		normalizedUsername, err := NormalizeAndValidateUsername(name)
@@ -95,7 +91,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 
 		// Update the name in the names slice since we will re-use the name later.
-		names[i] = normalizedUsername.Normalized()
+		names[i] = normalizedUsername
 		userNames[normalizedUsername] = make([]objectAndType, 0)
 	}
 
@@ -106,9 +102,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	}
 	if !hasAdmin {
 		for i := range names {
-			// Normalized above already.
-			name := security.MakeSQLUsernameFromPreNormalizedString(names[i])
-			targetIsAdmin, err := params.p.UserHasAdminRole(params.ctx, name)
+			targetIsAdmin, err := params.p.UserHasAdminRole(params.ctx, names[i])
 			if err != nil {
 				return err
 			}
@@ -123,17 +117,17 @@ func (n *DropRoleNode) startExec(params runParams) error {
 
 	// First check all the databases.
 	if err := forEachDatabaseDesc(params.ctx, params.p, nil /*nil prefix = all databases*/, true, /* requiresPrivileges */
-		func(db catalog.DatabaseDescriptor) error {
-			if _, ok := userNames[db.GetPrivileges().Owner()]; ok {
-				userNames[db.GetPrivileges().Owner()] = append(
-					userNames[db.GetPrivileges().Owner()],
+		func(db *dbdesc.Immutable) error {
+			if _, ok := userNames[db.GetPrivileges().Owner]; ok {
+				userNames[db.GetPrivileges().Owner] = append(
+					userNames[db.GetPrivileges().Owner],
 					objectAndType{
 						ObjectType: "database",
 						ObjectName: db.GetName(),
 					})
 			}
 			for _, u := range db.GetPrivileges().Users {
-				if _, ok := userNames[u.User()]; ok {
+				if _, ok := userNames[u.User]; ok {
 					if f.Len() > 0 {
 						f.WriteString(", ")
 					}
@@ -157,27 +151,27 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		return err
 	}
 
-	lCtx := newInternalLookupCtx(params.ctx, descs, nil /*prefix - we want all descriptors */, nil /* fallback */)
+	lCtx := newInternalLookupCtx(params.ctx, descs, nil /*prefix - we want all descriptors */)
 	// privileges are added.
 	for _, tbID := range lCtx.tbIDs {
 		table := lCtx.tbDescs[tbID]
 		if !descriptorIsVisible(table, true /*allowAdding*/) {
 			continue
 		}
-		if _, ok := userNames[table.GetPrivileges().Owner()]; ok {
+		if _, ok := userNames[table.GetPrivileges().Owner]; ok {
 			tn, err := getTableNameFromTableDescriptor(lCtx, table, "")
 			if err != nil {
 				return err
 			}
-			userNames[table.GetPrivileges().Owner()] = append(
-				userNames[table.GetPrivileges().Owner()],
+			userNames[table.GetPrivileges().Owner] = append(
+				userNames[table.GetPrivileges().Owner],
 				objectAndType{
 					ObjectType: "table",
 					ObjectName: tn.String(),
 				})
 		}
 		for _, u := range table.GetPrivileges().Users {
-			if _, ok := userNames[u.User()]; ok {
+			if _, ok := userNames[u.User]; ok {
 				if f.Len() > 0 {
 					f.WriteString(", ")
 				}
@@ -196,9 +190,9 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		// TODO(arul): Ideally this should be the fully qualified name of the schema,
 		// but at the time of writing there doesn't seem to be a clean way of doing
 		// this.
-		if _, ok := userNames[schemaDesc.GetPrivileges().Owner()]; ok {
-			userNames[schemaDesc.GetPrivileges().Owner()] = append(
-				userNames[schemaDesc.GetPrivileges().Owner()],
+		if _, ok := userNames[schemaDesc.GetPrivileges().Owner]; ok {
+			userNames[schemaDesc.GetPrivileges().Owner] = append(
+				userNames[schemaDesc.GetPrivileges().Owner],
 				objectAndType{
 					ObjectType: "schema",
 					ObjectName: schemaDesc.GetName(),
@@ -206,7 +200,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 	}
 	for _, typDesc := range lCtx.typDescs {
-		if _, ok := userNames[typDesc.GetPrivileges().Owner()]; ok {
+		if _, ok := userNames[typDesc.GetPrivileges().Owner]; ok {
 			if !descriptorIsVisible(typDesc, true /* allowAdding */) {
 				continue
 			}
@@ -214,8 +208,8 @@ func (n *DropRoleNode) startExec(params runParams) error {
 			if err != nil {
 				return err
 			}
-			userNames[typDesc.GetPrivileges().Owner()] = append(
-				userNames[typDesc.GetPrivileges().Owner()],
+			userNames[typDesc.GetPrivileges().Owner] = append(
+				userNames[typDesc.GetPrivileges().Owner],
 				objectAndType{
 					ObjectType: "type",
 					ObjectName: tn.String(),
@@ -240,9 +234,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		)
 	}
 
-	for i := range names {
-		// Name already normalized above.
-		name := security.MakeSQLUsernameFromPreNormalizedString(names[i])
+	for _, name := range names {
 		// Did the user own any objects?
 		ownedObjects := userNames[name]
 		if len(ownedObjects) > 0 {
@@ -258,15 +250,15 @@ func (n *DropRoleNode) startExec(params runParams) error {
 	}
 
 	// All safe - do the work.
-	var numRoleMembershipsDeleted, numRoleSettingsRowsDeleted int
+	var numRoleMembershipsDeleted int
 	for normalizedUsername := range userNames {
 		// Specifically reject special users and roles. Some (root, admin) would fail with
 		// "privileges still exist" first.
-		if normalizedUsername.IsAdminRole() || normalizedUsername.IsPublicRole() {
+		if normalizedUsername == security.AdminRole || normalizedUsername == security.PublicRole {
 			return pgerror.Newf(
 				pgcode.InvalidParameterValue, "cannot drop special role %s", normalizedUsername)
 		}
-		if normalizedUsername.IsRootUser() {
+		if normalizedUsername == security.RootUser {
 			return pgerror.Newf(
 				pgcode.InvalidParameterValue, "cannot drop special user %s", normalizedUsername)
 		}
@@ -308,7 +300,7 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		}
 
 		// Drop all role memberships involving the user/role.
-		rowsDeleted, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		numRoleMembershipsDeleted, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
 			params.ctx,
 			"drop-role-membership",
 			params.p.txn,
@@ -318,7 +310,6 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		if err != nil {
 			return err
 		}
-		numRoleMembershipsDeleted += rowsDeleted
 
 		_, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
 			params.ctx,
@@ -326,63 +317,23 @@ func (n *DropRoleNode) startExec(params runParams) error {
 			params.p.txn,
 			fmt.Sprintf(
 				`DELETE FROM %s WHERE username=$1`,
-				sessioninit.RoleOptionsTableName,
+				RoleOptionsTableName,
 			),
 			normalizedUsername,
 		)
 		if err != nil {
 			return err
 		}
-
-		// TODO(rafi): Remove this condition in 21.2.
-		if params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.DatabaseRoleSettings) {
-			rowsDeleted, err = params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
-				params.ctx,
-				opName,
-				params.p.txn,
-				fmt.Sprintf(
-					`DELETE FROM %s WHERE role_name = $1`,
-					sessioninit.DatabaseRoleSettingsTableName,
-				),
-				normalizedUsername,
-			)
-			if err != nil {
-				return err
-			}
-			numRoleSettingsRowsDeleted += rowsDeleted
-		}
 	}
 
-	// Bump role-related table versions to force a refresh of membership/auth
-	// caches.
-	if sessioninit.CacheEnabled.Get(&params.p.ExecCfg().Settings.SV) {
-		if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
-			return err
-		}
-		if numRoleSettingsRowsDeleted > 0 &&
-			params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.DatabaseRoleSettings) {
-			if err := params.p.bumpDatabaseRoleSettingsTableVersion(params.ctx); err != nil {
-				return err
-			}
-		}
-	}
 	if numRoleMembershipsDeleted > 0 {
+		// Some role memberships have been deleted, bump role_members table version to
+		// force a refresh of role membership.
 		if err := params.p.BumpRoleMembershipTableVersion(params.ctx); err != nil {
 			return err
 		}
 	}
 
-	sort.Strings(names)
-	for _, name := range names {
-		if err := params.p.logEvent(params.ctx,
-			0, /* no target */
-			&eventpb.DropRole{RoleName: name}); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

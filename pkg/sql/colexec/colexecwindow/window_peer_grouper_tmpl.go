@@ -20,6 +20,8 @@
 package colexecwindow
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
@@ -54,7 +56,7 @@ func NewWindowPeerGrouper(
 			orderIdxs[i] = ordCol.ColIdx
 		}
 		input, distinctCol, err = colexecbase.OrderedDistinctColsToOperators(
-			input, orderIdxs, typs, false, /* nullsAreDistinct */
+			input, orderIdxs, typs,
 		)
 		if err != nil {
 			return nil, err
@@ -62,7 +64,7 @@ func NewWindowPeerGrouper(
 	}
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputColIdx)
 	initFields := windowPeerGrouperInitFields{
-		OneInputHelper:  colexecop.MakeOneInputHelper(input),
+		OneInputNode:    colexecop.NewOneInputNode(input),
 		allocator:       allocator,
 		partitionColIdx: partitionColIdx,
 		distinctCol:     distinctCol,
@@ -89,7 +91,7 @@ func NewWindowPeerGrouper(
 }
 
 type windowPeerGrouperInitFields struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator       *colmem.Allocator
 	partitionColIdx int
@@ -111,8 +113,12 @@ type _PEER_GROUPER_STRINGOp struct {
 
 var _ colexecop.Operator = &_PEER_GROUPER_STRINGOp{}
 
-func (p *_PEER_GROUPER_STRINGOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *_PEER_GROUPER_STRINGOp) Init() {
+	p.Input.Init()
+}
+
+func (p *_PEER_GROUPER_STRINGOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b

@@ -55,33 +55,6 @@ var SlowSpanLogThreshold = settings.RegisterDurationSetting(
 	settings.NonNegativeDuration,
 )
 
-// FrontierCheckpointFrequency controls the frequency of frontier checkpoints.
-var FrontierCheckpointFrequency = settings.RegisterDurationSetting(
-	"changefeed.frontier_checkpoint_frequency",
-	"controls the frequency with which span level checkpoints will be written; if 0, disabled.",
-	10*time.Minute,
-	settings.NonNegativeDuration,
-)
-
-// FrontierCheckpointMaxBytes controls the maximum number of key bytes that will be added
-// to the checkpoint record.
-// Checkpoint record could be fairly large.
-// Assume we have a 10T table, and a 1/2G max range size: 20K spans.
-// Span frontier merges adjacent spans, so worst case we have 10K spans.
-// Each span is a pair of keys.  Those could be large.  Assume 1/2K per key.
-// So, 1KB per span.  We could be looking at 10MB checkpoint record.
-//
-// The default for this setting was chosen as follows:
-//   * Assume a very long backfill, running for 25 hours (GC TTL default duration).
-//   * Assume we want to have at most 150MB worth of checkpoints in the job record.
-// Therefore, we should write at most 6 MB of checkpoint/hour; OR, based on the default
-// FrontierCheckpointFrequency setting, 1 MB per checkpoint.
-var FrontierCheckpointMaxBytes = settings.RegisterByteSizeSetting(
-	"changefeed.frontier_checkpoint_max_bytes",
-	"controls the maximum size of the checkpoint as a total size of key bytes",
-	1<<20,
-)
-
 // ScanRequestLimit is the number of Scan requests that can run at once.
 // Scan requests are issued when changefeed performs the backfill.
 // If set to 0, a reasonable default will be chosen.
@@ -128,14 +101,3 @@ func validateSinkThrottleConfig(values *settings.Values, configStr string) error
 	var config = &SinkThrottleConfig{}
 	return json.Unmarshal([]byte(configStr), config)
 }
-
-// MinHighWaterMarkCheckpointAdvance specifies the minimum amount of time the
-// changefeed high water mark must advance for it to be eligible for checkpointing.
-var MinHighWaterMarkCheckpointAdvance = settings.RegisterDurationSetting(
-	"changefeed.min_highwater_advance",
-	"minimum amount of time the changefeed high water mark must advance "+
-		"for it to be eligible for checkpointing; Default of 0 will checkpoint every time frontier "+
-		"advances, as long as the rate of checkpointing keeps up with the rate of frontier changes",
-	0,
-	settings.NonNegativeDuration,
-)

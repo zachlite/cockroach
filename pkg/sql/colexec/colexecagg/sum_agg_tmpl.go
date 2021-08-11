@@ -20,6 +20,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -57,30 +58,35 @@ func newSum_SUMKIND_AGGKINDAggAlloc(
 ) (aggregateFuncAlloc, error) {
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch t.Family() {
-	// {{range .Infos}}
-	case _TYPE_FAMILY:
+	case types.IntFamily:
 		switch t.Width() {
-		// {{range .WidthOverloads}}
-		case _TYPE_WIDTH:
-			// {{with .Overload}}
-			return &sum_SUMKIND_TYPE_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
-			// {{end}}
-			// {{end}}
+		case 16:
+			return &sum_SUMKINDInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		case 32:
+			return &sum_SUMKINDInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		default:
+			return &sum_SUMKINDInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
 		}
-		// {{end}}
+	// {{if eq .SumKind ""}}
+	case types.DecimalFamily:
+		return &sumDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.FloatFamily:
+		return &sumFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.IntervalFamily:
+		return &sumInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	// {{end}}
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower("_SUMKIND"), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 // {{range .Infos}}
-// {{range .WidthOverloads}}
-// {{with .Overload}}
 
 type sum_SUMKIND_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
@@ -107,13 +113,13 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec._RET_TYPE()
 }
 
 func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// {{if .NeedsHelper}}
 	// {{/*
@@ -129,7 +135,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.TemplateType(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
@@ -142,21 +147,21 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_SUM(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_SUM(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_SUM(a, nulls, i, true, true)
@@ -169,21 +174,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_SUM(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_SUM(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
 	if newCurAggSize != oldCurAggSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
@@ -236,8 +226,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-// {{end}}
-// {{end}}
 // {{end}}
 
 // {{/*

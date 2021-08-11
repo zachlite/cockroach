@@ -17,7 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	// Import builtins so they are reflected in tree.FunDefs.
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -117,8 +117,8 @@ func (s *Smither) getRandTableIndex(
 	for _, col := range idx.Columns {
 		ref := s.columns[table][col.Column]
 		if ref == nil {
-			// TODO(yuzefovich): there are some cases here where colRef is nil,
-			// but we aren't yet sure why. Rather than panicking, just return.
+			// TODO (rohany): There are some cases here where colRef is nil, but we
+			//  aren't yet sure why. Rather than panicking, just return.
 			return nil, nil, nil, false
 		}
 		refs = append(refs, &colRef{
@@ -243,7 +243,7 @@ FROM
 	return &typeInfo{
 		udts:        udtMapping,
 		scalarTypes: append(udts, types.Scalar...),
-		seedTypes:   append(udts, randgen.SeedTypes...),
+		seedTypes:   append(udts, rowenc.SeedTypes...),
 	}, nil
 }
 
@@ -438,14 +438,6 @@ func (s *Smither) extractIndexes(
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		// Remove indexes with empty Columns. This is the case for rowid indexes
-		// where the only index column, rowid, is ignored in the SQL statement
-		// above, but the stored columns are not.
-		for name, idx := range indexes {
-			if len(idx.Columns) == 0 {
-				delete(indexes, name)
-			}
-		}
 		ret[*t.TableName] = indexes
 	}
 	return ret, nil
@@ -463,7 +455,7 @@ var operators = func() map[oid.Oid][]operator {
 			bo := ov.(*tree.BinOp)
 			m[bo.ReturnType.Oid()] = append(m[bo.ReturnType.Oid()], operator{
 				BinOp:    bo,
-				Operator: tree.MakeBinaryOperator(BinaryOperator),
+				Operator: BinaryOperator,
 			})
 		}
 	}
@@ -489,8 +481,7 @@ var functions = func() map[tree.FunctionClass]map[oid.Oid][]function {
 			continue
 		}
 		if strings.Contains(def.Name, "crdb_internal.force_") ||
-			strings.Contains(def.Name, "crdb_internal.unsafe_") ||
-			strings.Contains(def.Name, "crdb_internal.create_join_token") {
+			strings.Contains(def.Name, "crdb_internal.unsafe_") {
 			continue
 		}
 		if _, ok := m[def.Class]; !ok {

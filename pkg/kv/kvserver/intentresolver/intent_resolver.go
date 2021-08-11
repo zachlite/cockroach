@@ -73,11 +73,11 @@ const (
 	// ResumeSpan and the batcher will send a new range request.
 	intentResolverRangeRequestSize = 200
 
-	// MaxTxnsPerIntentCleanupBatch is the number of transactions whose
+	// cleanupIntentsTxnsPerBatch is the number of transactions whose
 	// corresponding intents will be resolved at a time. Intents are batched
 	// by transaction to avoid timeouts while resolving intents and ensure that
 	// progress is made.
-	MaxTxnsPerIntentCleanupBatch = 100
+	cleanupIntentsTxnsPerBatch = 100
 
 	// defaultGCBatchIdle is the default duration which the gc request batcher
 	// will wait between requests for a range before sending it.
@@ -419,15 +419,13 @@ func (ir *IntentResolver) runAsyncTask(
 	if ir.testingKnobs.DisableAsyncIntentResolution {
 		return errors.New("intents not processed as async resolution is disabled")
 	}
-	err := ir.stopper.RunAsyncTaskEx(
+	err := ir.stopper.RunLimitedAsyncTask(
 		// If we've successfully launched a background task, dissociate
 		// this work from our caller's context and timeout.
 		ir.ambientCtx.AnnotateCtx(context.Background()),
-		stop.TaskOpts{
-			TaskName:   "storage.IntentResolver: processing intents",
-			Sem:        ir.sem,
-			WaitForSem: false,
-		},
+		"storage.IntentResolver: processing intents",
+		ir.sem,
+		false, /* wait */
 		taskFn,
 	)
 	if err != nil {
@@ -499,7 +497,7 @@ func (ir *IntentResolver) CleanupIntents(
 		var i int
 		for i = 0; i < len(unpushed); i++ {
 			if curTxn := &unpushed[i].Txn; curTxn.ID != prevTxnID {
-				if len(pushTxns) >= MaxTxnsPerIntentCleanupBatch {
+				if len(pushTxns) == cleanupIntentsTxnsPerBatch {
 					break
 				}
 				prevTxnID = curTxn.ID
@@ -621,22 +619,20 @@ func (ir *IntentResolver) CleanupTxnIntentsOnGCAsync(
 	now hlc.Timestamp,
 	onComplete func(pushed, succeeded bool),
 ) error {
-	return ir.stopper.RunAsyncTaskEx(
+	return ir.stopper.RunLimitedAsyncTask(
 		// If we've successfully launched a background task,
 		// dissociate this work from our caller's context and
 		// timeout.
 		ir.ambientCtx.AnnotateCtx(context.Background()),
-		stop.TaskOpts{
-			TaskName: "processing txn intents",
-			Sem:      ir.sem,
-			// We really do not want to hang up the GC queue on this kind of
-			// processing, so it's better to just skip txns which we can't
-			// pass to the async processor (wait=false). Their intents will
-			// get cleaned up on demand, and we'll eventually get back to
-			// them. Not much harm in having old txn records lying around in
-			// the meantime.
-			WaitForSem: false,
-		},
+		"processing txn intents",
+		ir.sem,
+		// We really do not want to hang up the GC queue on this kind of
+		// processing, so it's better to just skip txns which we can't
+		// pass to the async processor (wait=false). Their intents will
+		// get cleaned up on demand, and we'll eventually get back to
+		// them. Not much harm in having old txn records lying around in
+		// the meantime.
+		false, /* wait */
 		func(ctx context.Context) {
 			var pushed, succeeded bool
 			defer func() {
@@ -841,15 +837,10 @@ func (ir *IntentResolver) ResolveIntent(
 // ResolveIntents synchronously resolves intents according to opts.
 func (ir *IntentResolver) ResolveIntents(
 	ctx context.Context, intents []roachpb.LockUpdate, opts ResolveOptions,
-) (pErr *roachpb.Error) {
+) *roachpb.Error {
 	if len(intents) == 0 {
 		return nil
 	}
-	defer func() {
-		if pErr != nil {
-			ir.Metrics.IntentResolutionFailed.Inc(int64(len(intents)))
-		}
-	}()
 	// Avoid doing any work on behalf of expired contexts. See
 	// https://github.com/cockroachdb/cockroach/issues/15997.
 	if err := ctx.Err(); err != nil {

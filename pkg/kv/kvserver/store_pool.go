@@ -174,13 +174,13 @@ func LivenessStatus(
 		}
 		return livenesspb.NodeLivenessStatus_DEAD
 	}
+	if !l.Membership.Active() {
+		return livenesspb.NodeLivenessStatus_DECOMMISSIONING
+	}
+	if l.Draining {
+		return livenesspb.NodeLivenessStatus_DRAINING
+	}
 	if l.IsLive(now) {
-		if !l.Membership.Active() {
-			return livenesspb.NodeLivenessStatus_DECOMMISSIONING
-		}
-		if l.Draining {
-			return livenesspb.NodeLivenessStatus_DRAINING
-		}
 		return livenesspb.NodeLivenessStatus_LIVE
 	}
 	return livenesspb.NodeLivenessStatus_UNAVAILABLE
@@ -244,26 +244,6 @@ const (
 func (sd *storeDetail) status(
 	now time.Time, threshold time.Duration, nl NodeLivenessFunc, suspectDuration time.Duration,
 ) storeStatus {
-	// During normal operation, we expect the state transitions for stores to look like the following:
-	//
-	//                                           Successful heartbeats
-	//                                          throughout the suspect
-	//       +-----------------------+                 duration
-	//       | storeStatusAvailable  |<-+------------------------------------+
-	//       +-----------------------+  |                                    |
-	//                                  |                                    |
-	//                                  |                         +--------------------+
-	//                                  |                         | storeStatusSuspect |
-	//      +---------------------------+                         +--------------------+
-	//      |      Failed liveness                                           ^
-	//      |         heartbeat                                              |
-	//      |                                                                |
-	//      |                                                                |
-	//      |  +----------------------+                                      |
-	//      +->|  storeStatusUnknown  |--------------------------------------+
-	//         +----------------------+          Successful liveness
-	//                                                heartbeat
-	//
 	// The store is considered dead if it hasn't been updated via gossip
 	// within the liveness threshold. Note that lastUpdatedTime is set
 	// when the store detail is created and will have a non-zero value
@@ -290,9 +270,11 @@ func (sd *storeDetail) status(
 		return storeStatusDecommissioning
 	case livenesspb.NodeLivenessStatus_UNAVAILABLE:
 		// We don't want to suspect a node on startup or when it's first added to a
-		// cluster, because we dont know its liveness yet.
+		// cluster, because we dont know it's liveness yet. A node is only considered
+		// suspect if it's been alive and fails to heartbeat liveness.
 		if !sd.lastAvailable.IsZero() {
 			sd.lastUnavailable = now
+			return storeStatusSuspect
 		}
 		return storeStatusUnknown
 	case livenesspb.NodeLivenessStatus_UNKNOWN:
@@ -595,44 +577,14 @@ func (sp *StorePool) ClusterNodeCount() int {
 	return sp.nodeCountFn()
 }
 
-// IsDead determines if a store is dead. It will return an error if the store is
-// not found in the store pool or the status is unknown. If the store is not dead,
-// it returns the time to death.
-func (sp *StorePool) IsDead(storeID roachpb.StoreID) (bool, time.Duration, error) {
-	sp.detailsMu.Lock()
-	defer sp.detailsMu.Unlock()
-
-	sd, ok := sp.detailsMu.storeDetails[storeID]
-	if !ok {
-		return false, 0, errors.Errorf("store %d was not found", storeID)
-	}
-	// NB: We use clock.Now().GoTime() instead of clock.PhysicalTime() is order to
-	// take clock signals from remote nodes into consideration.
-	now := sp.clock.Now().GoTime()
-	timeUntilStoreDead := TimeUntilStoreDead.Get(&sp.st.SV)
-
-	deadAsOf := sd.lastUpdatedTime.Add(timeUntilStoreDead)
-	if now.After(deadAsOf) {
-		return true, 0, nil
-	}
-	// If there's no descriptor (meaning no gossip ever arrived for this
-	// store), return unavailable.
-	if sd.desc == nil {
-		return false, 0, errors.Errorf("store %d status unknown, cant tell if it's dead or alive", storeID)
-	}
-	return false, deadAsOf.Sub(now), nil
-}
-
-// IsUnknown returns true if the given store's status is `storeStatusUnknown`
-// (i.e. it just failed a liveness heartbeat and we cannot ascertain its
-// liveness or deadness at the moment) or an error if the store is not found in
-// the pool.
-func (sp *StorePool) IsUnknown(storeID roachpb.StoreID) (bool, error) {
+// IsSuspect returns true if the node is suspected by the store pool or an error
+// if the store is not found in the pool.
+func (sp *StorePool) IsSuspect(storeID roachpb.StoreID) (bool, error) {
 	status, err := sp.storeStatus(storeID)
 	if err != nil {
 		return false, err
 	}
-	return status == storeStatusUnknown, nil
+	return status == storeStatusSuspect, nil
 }
 
 // IsLive returns true if the node is considered alive by the store pool or an error
@@ -663,17 +615,11 @@ func (sp *StorePool) storeStatus(storeID roachpb.StoreID) (storeStatus, error) {
 
 // liveAndDeadReplicas divides the provided repls slice into two slices: the
 // first for live replicas, and the second for dead replicas.
-//
-// - Replicas for which liveness or deadness cannot be ascertained
-// (storeStatusUnknown) are excluded from the returned slices.
-//
-// - Replicas on decommissioning node/store are considered live.
-//
-// - If `includeSuspectStores` is true, stores that are marked suspect (i.e.
-// stores that have failed a liveness heartbeat in the recent past) are
-// considered live. Otherwise, they are excluded from the returned slices.
+// Replicas for which liveness or deadness cannot be ascertained are excluded
+// from the returned slices.  Replicas on decommissioning node/store are
+// considered live.
 func (sp *StorePool) liveAndDeadReplicas(
-	repls []roachpb.ReplicaDescriptor, includeSuspectStores bool,
+	repls []roachpb.ReplicaDescriptor,
 ) (liveReplicas, deadReplicas []roachpb.ReplicaDescriptor) {
 	sp.detailsMu.Lock()
 	defer sp.detailsMu.Unlock()
@@ -695,12 +641,8 @@ func (sp *StorePool) liveAndDeadReplicas(
 			// We count decommissioning replicas to be alive because they are readable
 			// and should be used for up-replication if necessary.
 			liveReplicas = append(liveReplicas, repl)
-		case storeStatusUnknown:
+		case storeStatusUnknown, storeStatusSuspect:
 		// No-op.
-		case storeStatusSuspect:
-			if includeSuspectStores {
-				liveReplicas = append(liveReplicas, repl)
-			}
 		default:
 			log.Fatalf(context.TODO(), "unknown store status %d", status)
 		}

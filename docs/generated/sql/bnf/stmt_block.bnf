@@ -77,7 +77,6 @@ grant_stmt ::=
 	| 'GRANT' privilege_list 'TO' name_list 'WITH' 'ADMIN' 'OPTION'
 	| 'GRANT' privileges 'ON' 'TYPE' target_types 'TO' name_list
 	| 'GRANT' privileges 'ON' 'SCHEMA' schema_name_list 'TO' name_list
-	| 'GRANT' privileges 'ON' 'ALL' 'TABLES' 'IN' 'SCHEMA' schema_name_list 'TO' name_list
 
 prepare_stmt ::=
 	'PREPARE' table_alias_name prep_type_clause 'AS' preparable_stmt
@@ -88,7 +87,6 @@ revoke_stmt ::=
 	| 'REVOKE' 'ADMIN' 'OPTION' 'FOR' privilege_list 'FROM' name_list
 	| 'REVOKE' privileges 'ON' 'TYPE' target_types 'FROM' name_list
 	| 'REVOKE' privileges 'ON' 'SCHEMA' schema_name_list 'FROM' name_list
-	| 'REVOKE' privileges 'ON' 'ALL' 'TABLES' 'IN' 'SCHEMA' schema_name_list 'FROM' name_list
 
 savepoint_stmt ::=
 	'SAVEPOINT' name
@@ -150,12 +148,12 @@ drop_stmt ::=
 	| drop_schedule_stmt
 
 explain_stmt ::=
-	'EXPLAIN' explainable_stmt
-	| 'EXPLAIN' '(' explain_option_list ')' explainable_stmt
-	| 'EXPLAIN' 'ANALYZE' explainable_stmt
-	| 'EXPLAIN' 'ANALYSE' explainable_stmt
-	| 'EXPLAIN' 'ANALYZE' '(' explain_option_list ')' explainable_stmt
-	| 'EXPLAIN' 'ANALYSE' '(' explain_option_list ')' explainable_stmt
+	'EXPLAIN' preparable_stmt
+	| 'EXPLAIN' '(' explain_option_list ')' preparable_stmt
+	| 'EXPLAIN' 'ANALYZE' preparable_stmt
+	| 'EXPLAIN' 'ANALYSE' preparable_stmt
+	| 'EXPLAIN' 'ANALYZE' '(' explain_option_list ')' preparable_stmt
+	| 'EXPLAIN' 'ANALYSE' '(' explain_option_list ')' preparable_stmt
 
 import_stmt ::=
 	'IMPORT' import_format string_or_placeholder opt_with_options
@@ -236,7 +234,6 @@ show_stmt ::=
 	| show_transactions_stmt
 	| show_users_stmt
 	| show_zone_stmt
-	| show_default_privileges_stmt
 
 truncate_stmt ::=
 	'TRUNCATE' opt_table relation_expr_list opt_drop_behavior
@@ -380,15 +377,10 @@ alter_ddl_stmt ::=
 	| alter_partition_stmt
 	| alter_schema_stmt
 	| alter_type_stmt
-	| alter_default_privileges_stmt
 
 alter_role_stmt ::=
 	'ALTER' role_or_group_or_user string_or_placeholder opt_role_options
 	| 'ALTER' role_or_group_or_user 'IF' 'EXISTS' string_or_placeholder opt_role_options
-	| 'ALTER' role_or_group_or_user string_or_placeholder opt_in_database set_or_reset_clause
-	| 'ALTER' role_or_group_or_user 'IF' 'EXISTS' string_or_placeholder opt_in_database set_or_reset_clause
-	| 'ALTER' 'ROLE_ALL' 'ALL' opt_in_database set_or_reset_clause
-	| 'ALTER' 'USER_ALL' 'ALL' opt_in_database set_or_reset_clause
 
 opt_backup_targets ::=
 	targets
@@ -499,10 +491,6 @@ drop_role_stmt ::=
 drop_schedule_stmt ::=
 	'DROP' 'SCHEDULE' a_expr
 	| 'DROP' 'SCHEDULES' select_stmt
-
-explainable_stmt ::=
-	preparable_stmt
-	| execute_stmt
 
 explain_option_list ::=
 	( explain_option_name ) ( ( ',' explain_option_name ) )*
@@ -661,13 +649,10 @@ show_partitions_stmt ::=
 show_jobs_stmt ::=
 	'SHOW' 'AUTOMATIC' 'JOBS'
 	| 'SHOW' 'JOBS'
-	| 'SHOW' 'CHANGEFEED' 'JOBS'
 	| 'SHOW' 'JOBS' select_stmt
 	| 'SHOW' 'JOBS' 'WHEN' 'COMPLETE' select_stmt
 	| 'SHOW' 'JOBS' for_schedules_clause
-	| 'SHOW' 'CHANGEFEED' 'JOBS' select_stmt
 	| 'SHOW' 'JOB' a_expr
-	| 'SHOW' 'CHANGEFEED' 'JOB' a_expr
 	| 'SHOW' 'JOB' 'WHEN' 'COMPLETE' a_expr
 
 show_locality_stmt ::=
@@ -752,9 +737,6 @@ show_zone_stmt ::=
 	| 'SHOW' 'ZONE' 'CONFIGURATION' from_with_implicit_for_alias 'PARTITION' partition_name 'OF' 'INDEX' table_index_name
 	| 'SHOW' 'ZONE' 'CONFIGURATIONS'
 	| 'SHOW' 'ALL' 'ZONE' 'CONFIGURATIONS'
-
-show_default_privileges_stmt ::=
-	'SHOW' 'DEFAULT' 'PRIVILEGES' opt_for_roles
 
 opt_table ::=
 	'TABLE'
@@ -896,7 +878,6 @@ unreserved_keyword ::=
 	| 'FORCE'
 	| 'FORCE_INDEX'
 	| 'FUNCTION'
-	| 'FUNCTIONS'
 	| 'GENERATED'
 	| 'GEOMETRYM'
 	| 'GEOMETRYZ'
@@ -980,7 +961,6 @@ unreserved_keyword ::=
 	| 'NO'
 	| 'NORMAL'
 	| 'NO_INDEX_JOIN'
-	| 'NO_ZIGZAG_JOIN'
 	| 'NOCREATEDB'
 	| 'NOCREATELOGIN'
 	| 'NOCANCELQUERY'
@@ -1014,7 +994,6 @@ unreserved_keyword ::=
 	| 'PAUSE'
 	| 'PAUSED'
 	| 'PHYSICAL'
-	| 'PLACEMENT'
 	| 'PLAN'
 	| 'PLANS'
 	| 'POINTM'
@@ -1052,7 +1031,6 @@ unreserved_keyword ::=
 	| 'RESET'
 	| 'RESTORE'
 	| 'RESTRICT'
-	| 'RESTRICTED'
 	| 'RESUME'
 	| 'RETRY'
 	| 'REVISION_HISTORY'
@@ -1061,7 +1039,6 @@ unreserved_keyword ::=
 	| 'ROLES'
 	| 'ROLLBACK'
 	| 'ROLLUP'
-	| 'ROUTINES'
 	| 'ROWS'
 	| 'RULE'
 	| 'RUNNING'
@@ -1090,7 +1067,6 @@ unreserved_keyword ::=
 	| 'SHOW'
 	| 'SIMPLE'
 	| 'SKIP'
-	| 'SKIP_LOCALITIES_CHECK'
 	| 'SKIP_MISSING_FOREIGN_KEYS'
 	| 'SKIP_MISSING_SEQUENCES'
 	| 'SKIP_MISSING_SEQUENCE_OWNERS'
@@ -1323,12 +1299,6 @@ alter_type_stmt ::=
 	| 'ALTER' 'TYPE' type_name 'SET' 'SCHEMA' schema_name
 	| 'ALTER' 'TYPE' type_name 'OWNER' 'TO' role_spec
 
-alter_default_privileges_stmt ::=
-	'ALTER' 'DEFAULT' 'PRIVILEGES' opt_for_roles opt_in_schemas abbreviated_grant_stmt
-	| 'ALTER' 'DEFAULT' 'PRIVILEGES' opt_for_roles opt_in_schemas abbreviated_revoke_stmt
-	| 'ALTER' 'DEFAULT' 'PRIVILEGES' 'FOR' 'ALL' 'ROLES' opt_in_schemas abbreviated_grant_stmt
-	| 'ALTER' 'DEFAULT' 'PRIVILEGES' 'FOR' 'ALL' 'ROLES' opt_in_schemas abbreviated_revoke_stmt
-
 role_or_group_or_user ::=
 	'ROLE'
 	| 'USER'
@@ -1337,15 +1307,6 @@ opt_role_options ::=
 	opt_with role_options
 	| 
 
-opt_in_database ::=
-	'IN' 'DATABASE' database_name
-	| 
-
-set_or_reset_clause ::=
-	'SET' set_rest
-	| 'RESET_ALL' 'ALL'
-	| 'RESET' session_var
-
 as_of_clause ::=
 	'AS' 'OF' 'SYSTEM' 'TIME' a_expr
 
@@ -1353,7 +1314,7 @@ backup_options_list ::=
 	( backup_options ) ( ( ',' backup_options ) )*
 
 a_expr ::=
-	( c_expr | '+' a_expr | '-' a_expr | '~' a_expr | 'SQRT' a_expr | 'CBRT' a_expr | qual_op a_expr | 'NOT' a_expr | 'NOT' a_expr | 'DEFAULT' ) ( ( 'TYPECAST' cast_target | 'TYPEANNOTATE' typename | 'COLLATE' collation_name | 'AT' 'TIME' 'ZONE' a_expr | '+' a_expr | '-' a_expr | '*' a_expr | '/' a_expr | 'FLOORDIV' a_expr | '%' a_expr | '^' a_expr | '#' a_expr | '&' a_expr | '|' a_expr | '<' a_expr | '>' a_expr | '?' a_expr | 'JSON_SOME_EXISTS' a_expr | 'JSON_ALL_EXISTS' a_expr | 'CONTAINS' a_expr | 'CONTAINED_BY' a_expr | '=' a_expr | 'CONCAT' a_expr | 'LSHIFT' a_expr | 'RSHIFT' a_expr | 'FETCHVAL' a_expr | 'FETCHTEXT' a_expr | 'FETCHVAL_PATH' a_expr | 'FETCHTEXT_PATH' a_expr | 'REMOVE_PATH' a_expr | 'INET_CONTAINED_BY_OR_EQUALS' a_expr | 'AND_AND' a_expr | 'INET_CONTAINS_OR_EQUALS' a_expr | 'LESS_EQUALS' a_expr | 'GREATER_EQUALS' a_expr | 'NOT_EQUALS' a_expr | qual_op a_expr | 'AND' a_expr | 'OR' a_expr | 'LIKE' a_expr | 'LIKE' a_expr 'ESCAPE' a_expr | 'NOT' 'LIKE' a_expr | 'NOT' 'LIKE' a_expr 'ESCAPE' a_expr | 'ILIKE' a_expr | 'ILIKE' a_expr 'ESCAPE' a_expr | 'NOT' 'ILIKE' a_expr | 'NOT' 'ILIKE' a_expr 'ESCAPE' a_expr | 'SIMILAR' 'TO' a_expr | 'SIMILAR' 'TO' a_expr 'ESCAPE' a_expr | 'NOT' 'SIMILAR' 'TO' a_expr | 'NOT' 'SIMILAR' 'TO' a_expr 'ESCAPE' a_expr | '~' a_expr | 'NOT_REGMATCH' a_expr | 'REGIMATCH' a_expr | 'NOT_REGIMATCH' a_expr | 'IS' 'NAN' | 'IS' 'NOT' 'NAN' | 'IS' 'NULL' | 'ISNULL' | 'IS' 'NOT' 'NULL' | 'NOTNULL' | 'IS' 'TRUE' | 'IS' 'NOT' 'TRUE' | 'IS' 'FALSE' | 'IS' 'NOT' 'FALSE' | 'IS' 'UNKNOWN' | 'IS' 'NOT' 'UNKNOWN' | 'IS' 'DISTINCT' 'FROM' a_expr | 'IS' 'NOT' 'DISTINCT' 'FROM' a_expr | 'IS' 'OF' '(' type_list ')' | 'IS' 'NOT' 'OF' '(' type_list ')' | 'BETWEEN' opt_asymmetric b_expr 'AND' a_expr | 'NOT' 'BETWEEN' opt_asymmetric b_expr 'AND' a_expr | 'BETWEEN' 'SYMMETRIC' b_expr 'AND' a_expr | 'NOT' 'BETWEEN' 'SYMMETRIC' b_expr 'AND' a_expr | 'IN' in_expr | 'NOT' 'IN' in_expr | subquery_op sub_type a_expr ) )*
+	( c_expr | '+' a_expr | '-' a_expr | '~' a_expr | 'SQRT' a_expr | 'CBRT' a_expr | 'NOT' a_expr | 'NOT' a_expr | 'DEFAULT' ) ( ( 'TYPECAST' cast_target | 'TYPEANNOTATE' typename | 'COLLATE' collation_name | 'AT' 'TIME' 'ZONE' a_expr | '+' a_expr | '-' a_expr | '*' a_expr | '/' a_expr | 'FLOORDIV' a_expr | '%' a_expr | '^' a_expr | '#' a_expr | '&' a_expr | '|' a_expr | '<' a_expr | '>' a_expr | '?' a_expr | 'JSON_SOME_EXISTS' a_expr | 'JSON_ALL_EXISTS' a_expr | 'CONTAINS' a_expr | 'CONTAINED_BY' a_expr | '=' a_expr | 'CONCAT' a_expr | 'LSHIFT' a_expr | 'RSHIFT' a_expr | 'FETCHVAL' a_expr | 'FETCHTEXT' a_expr | 'FETCHVAL_PATH' a_expr | 'FETCHTEXT_PATH' a_expr | 'REMOVE_PATH' a_expr | 'INET_CONTAINED_BY_OR_EQUALS' a_expr | 'AND_AND' a_expr | 'INET_CONTAINS_OR_EQUALS' a_expr | 'LESS_EQUALS' a_expr | 'GREATER_EQUALS' a_expr | 'NOT_EQUALS' a_expr | 'AND' a_expr | 'OR' a_expr | 'LIKE' a_expr | 'LIKE' a_expr 'ESCAPE' a_expr | 'NOT' 'LIKE' a_expr | 'NOT' 'LIKE' a_expr 'ESCAPE' a_expr | 'ILIKE' a_expr | 'ILIKE' a_expr 'ESCAPE' a_expr | 'NOT' 'ILIKE' a_expr | 'NOT' 'ILIKE' a_expr 'ESCAPE' a_expr | 'SIMILAR' 'TO' a_expr | 'SIMILAR' 'TO' a_expr 'ESCAPE' a_expr | 'NOT' 'SIMILAR' 'TO' a_expr | 'NOT' 'SIMILAR' 'TO' a_expr 'ESCAPE' a_expr | '~' a_expr | 'NOT_REGMATCH' a_expr | 'REGIMATCH' a_expr | 'NOT_REGIMATCH' a_expr | 'IS' 'NAN' | 'IS' 'NOT' 'NAN' | 'IS' 'NULL' | 'ISNULL' | 'IS' 'NOT' 'NULL' | 'NOTNULL' | 'IS' 'TRUE' | 'IS' 'NOT' 'TRUE' | 'IS' 'FALSE' | 'IS' 'NOT' 'FALSE' | 'IS' 'UNKNOWN' | 'IS' 'NOT' 'UNKNOWN' | 'IS' 'DISTINCT' 'FROM' a_expr | 'IS' 'NOT' 'DISTINCT' 'FROM' a_expr | 'IS' 'OF' '(' type_list ')' | 'IS' 'NOT' 'OF' '(' type_list ')' | 'BETWEEN' opt_asymmetric b_expr 'AND' a_expr | 'NOT' 'BETWEEN' opt_asymmetric b_expr 'AND' a_expr | 'BETWEEN' 'SYMMETRIC' b_expr 'AND' a_expr | 'NOT' 'BETWEEN' 'SYMMETRIC' b_expr 'AND' a_expr | 'IN' in_expr | 'NOT' 'IN' in_expr | subquery_op sub_type a_expr ) )*
 
 for_schedules_clause ::=
 	'FOR' 'SCHEDULES' select_stmt
@@ -1558,7 +1519,7 @@ opt_for_locking_clause ::=
 	| 
 
 set_rest_more ::=
-	set_rest
+	generic_set
 
 to_or_eq ::=
 	'='
@@ -1611,10 +1572,6 @@ opt_partition ::=
 
 partition_name ::=
 	unrestricted_name
-
-opt_for_roles ::=
-	'FOR' role_or_group_or_user name_list
-	| 
 
 relation_expr ::=
 	table_name
@@ -1795,7 +1752,6 @@ alter_database_survival_goal_stmt ::=
 
 alter_database_primary_region_stmt ::=
 	'ALTER' 'DATABASE' database_name primary_region_clause
-	| 'ALTER' 'DATABASE' database_name 'SET' primary_region_clause
 
 alter_zone_range_stmt ::=
 	'ALTER' 'RANGE' zone_name set_zone_config
@@ -1813,22 +1769,8 @@ opt_add_val_placement ::=
 	| 'AFTER' 'SCONST'
 	| 
 
-opt_in_schemas ::=
-	'IN' 'SCHEMA' schema_name_list
-	| 
-
-abbreviated_grant_stmt ::=
-	'GRANT' privileges 'ON' alter_default_privileges_target_object 'TO' name_list opt_with_grant_option
-
-abbreviated_revoke_stmt ::=
-	'REVOKE' privileges 'ON' alter_default_privileges_target_object 'FROM' name_list opt_drop_behavior
-	| 'REVOKE' 'GRANT' 'OPTION' 'FOR' privileges 'ON' alter_default_privileges_target_object 'FROM' name_list opt_drop_behavior
-
 role_options ::=
 	( role_option ) ( ( role_option ) )*
-
-set_rest ::=
-	generic_set
 
 backup_options ::=
 	'ENCRYPTION_PASSPHRASE' '=' string_or_placeholder
@@ -1843,9 +1785,6 @@ c_expr ::=
 	| case_expr
 	| 'EXISTS' select_with_parens
 
-qual_op ::=
-	'OPERATOR' '(' operator_op ')'
-
 cast_target ::=
 	typename
 
@@ -1857,15 +1796,14 @@ opt_asymmetric ::=
 	| 
 
 b_expr ::=
-	( c_expr | '+' b_expr | '-' b_expr | '~' b_expr | qual_op b_expr ) ( ( 'TYPECAST' cast_target | 'TYPEANNOTATE' typename | '+' b_expr | '-' b_expr | '*' b_expr | '/' b_expr | 'FLOORDIV' b_expr | '%' b_expr | '^' b_expr | '#' b_expr | '&' b_expr | '|' b_expr | '<' b_expr | '>' b_expr | '=' b_expr | 'CONCAT' b_expr | 'LSHIFT' b_expr | 'RSHIFT' b_expr | 'LESS_EQUALS' b_expr | 'GREATER_EQUALS' b_expr | 'NOT_EQUALS' b_expr | qual_op b_expr | 'IS' 'DISTINCT' 'FROM' b_expr | 'IS' 'NOT' 'DISTINCT' 'FROM' b_expr | 'IS' 'OF' '(' type_list ')' | 'IS' 'NOT' 'OF' '(' type_list ')' ) )*
+	( c_expr | '+' b_expr | '-' b_expr | '~' b_expr ) ( ( 'TYPECAST' cast_target | 'TYPEANNOTATE' typename | '+' b_expr | '-' b_expr | '*' b_expr | '/' b_expr | 'FLOORDIV' b_expr | '%' b_expr | '^' b_expr | '#' b_expr | '&' b_expr | '|' b_expr | '<' b_expr | '>' b_expr | '=' b_expr | 'CONCAT' b_expr | 'LSHIFT' b_expr | 'RSHIFT' b_expr | 'LESS_EQUALS' b_expr | 'GREATER_EQUALS' b_expr | 'NOT_EQUALS' b_expr | 'IS' 'DISTINCT' 'FROM' b_expr | 'IS' 'NOT' 'DISTINCT' 'FROM' b_expr | 'IS' 'OF' '(' type_list ')' | 'IS' 'NOT' 'OF' '(' type_list ')' ) )*
 
 in_expr ::=
 	select_with_parens
 	| expr_tuple1_ambiguous
 
 subquery_op ::=
-	all_op
-	| qual_op
+	math_op
 	| 'LIKE'
 	| 'NOT' 'LIKE'
 	| 'ILIKE'
@@ -2085,7 +2023,6 @@ restore_options ::=
 	| 'SKIP_MISSING_SEQUENCE_OWNERS'
 	| 'SKIP_MISSING_VIEWS'
 	| 'DETACHED'
-	| 'SKIP_LOCALITIES_CHECK'
 
 scrub_option_list ::=
 	( scrub_option ) ( ( ',' scrub_option ) )*
@@ -2112,6 +2049,9 @@ for_locking_items ::=
 offset_clause ::=
 	'OFFSET' a_expr
 	| 'OFFSET' select_fetch_first_value row_or_rows
+
+generic_set ::=
+	var_name to_or_eq var_list
 
 extra_var_value ::=
 	'ON'
@@ -2294,16 +2234,6 @@ survival_goal_clause ::=
 primary_region_clause ::=
 	'PRIMARY' 'REGION' opt_equal region_name
 
-alter_default_privileges_target_object ::=
-	'TABLES'
-	| 'SEQUENCES'
-	| 'TYPES'
-	| 'SCHEMAS'
-
-opt_with_grant_option ::=
-	'WITH' 'GRANT' 'OPTION'
-	| 
-
 role_option ::=
 	'CREATEROLE'
 	| 'NOCREATEROLE'
@@ -2325,9 +2255,6 @@ role_option ::=
 	| 'NOMODIFYCLUSTERSETTING'
 	| password_clause
 	| valid_until_clause
-
-generic_set ::=
-	var_name to_or_eq var_list
 
 d_expr ::=
 	'ICONST'
@@ -2360,49 +2287,27 @@ array_subscripts ::=
 case_expr ::=
 	'CASE' case_arg when_clause_list case_default 'END'
 
-operator_op ::=
-	all_op
-
 expr_tuple1_ambiguous ::=
 	'(' ')'
 	| '(' tuple1_ambiguous_values ')'
 
-all_op ::=
+math_op ::=
 	'+'
 	| '-'
 	| '*'
 	| '/'
+	| 'FLOORDIV'
 	| '%'
+	| '&'
+	| '|'
 	| '^'
+	| '#'
 	| '<'
 	| '>'
 	| '='
 	| 'LESS_EQUALS'
 	| 'GREATER_EQUALS'
 	| 'NOT_EQUALS'
-	| '?'
-	| '&'
-	| '|'
-	| '#'
-	| 'FLOORDIV'
-	| 'CONTAINS'
-	| 'CONTAINED_BY'
-	| 'LSHIFT'
-	| 'RSHIFT'
-	| 'CONCAT'
-	| 'FETCHVAL'
-	| 'FETCHTEXT'
-	| 'FETCHVAL_PATH'
-	| 'FETCHTEXT_PATH'
-	| 'JSON_SOME_EXISTS'
-	| 'JSON_ALL_EXISTS'
-	| 'NOT_REGMATCH'
-	| 'REGIMATCH'
-	| 'NOT_REGIMATCH'
-	| 'AND_AND'
-	| '~'
-	| 'SQRT'
-	| 'CBRT'
 
 opt_equal ::=
 	'='
@@ -2538,6 +2443,9 @@ all_or_distinct ::=
 for_locking_item ::=
 	for_locking_strength opt_locked_rels opt_nowait_or_skip
 
+var_list ::=
+	( var_value ) ( ( ',' var_value ) )*
+
 opt_ordinality ::=
 	'WITH' 'ORDINALITY'
 	| 
@@ -2658,7 +2566,6 @@ sequence_option_elem ::=
 	'NO' 'CYCLE'
 	| 'OWNED' 'BY' 'NONE'
 	| 'OWNED' 'BY' column_path
-	| 'CACHE' signed_iconst64
 	| 'INCREMENT' signed_iconst64
 	| 'INCREMENT' 'BY' signed_iconst64
 	| 'MINVALUE' signed_iconst64
@@ -2676,9 +2583,6 @@ password_clause ::=
 valid_until_clause ::=
 	'VALID' 'UNTIL' string_or_placeholder
 	| 'VALID' 'UNTIL' 'NULL'
-
-var_list ::=
-	( var_value ) ( ( ',' var_value ) )*
 
 typed_literal ::=
 	func_name_no_crdb_extra 'SCONST'
@@ -2759,7 +2663,6 @@ materialize_clause ::=
 index_flags_param ::=
 	'FORCE_INDEX' '=' index_name
 	| 'NO_INDEX_JOIN'
-	| 'NO_ZIGZAG_JOIN'
 
 opt_asc_desc ::=
 	'ASC'

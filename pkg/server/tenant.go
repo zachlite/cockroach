@@ -13,40 +13,15 @@ package server
 import (
 	"context"
 	"net/http"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/blobs"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/gossip"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptprovider"
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/debug"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/server/status"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/contention"
-	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
 )
 
 // StartTenant starts a stand-alone SQL server against a KV backend.
@@ -57,19 +32,24 @@ func StartTenant(
 	baseCfg BaseConfig,
 	sqlCfg SQLConfig,
 ) (sqlServer *SQLServer, pgAddr string, httpAddr string, _ error) {
-	args, err := makeTenantSQLServerArgs(stopper, kvClusterName, baseCfg, sqlCfg)
+	args, err := makeSQLServerArgs(stopper, kvClusterName, baseCfg, sqlCfg)
 	if err != nil {
 		return nil, "", "", err
 	}
-	err = args.ValidateAddrs(ctx)
+	s, err := newSQLServer(ctx, args)
 	if err != nil {
 		return nil, "", "", err
 	}
-	args.monitorAndMetrics = newRootSQLMemoryMonitor(monitorAndMetricsOptions{
-		memoryPoolSize:          args.MemoryPoolSize,
-		histogramWindowInterval: args.HistogramWindowInterval(),
-		settings:                args.Settings,
-	})
+
+	s.execCfg.SQLStatusServer = newTenantStatusServer(
+		baseCfg.AmbientCtx, &adminPrivilegeChecker{ie: args.circularInternalExecutor},
+		args.sessionRegistry, args.contentionRegistry, baseCfg.Settings, s,
+	)
+
+	// TODO(asubiotto): remove this. Right now it is needed to initialize the
+	// SpanResolver.
+	s.execCfg.DistSQLPlanner.SetNodeInfo(roachpb.NodeDescriptor{NodeID: 0})
+
 	connManager := netutil.MakeServer(
 		args.stopper,
 		// The SQL server only uses connManager.ServeWith. The both below
@@ -119,22 +99,9 @@ func StartTenant(
 			return nil, "", "", err
 		}
 	}
+
 	pgLAddr := pgL.Addr().String()
 	httpLAddr := httpL.Addr().String()
-	args.addr = pgLAddr
-	s, err := newSQLServer(ctx, args)
-	if err != nil {
-		return nil, "", "", err
-	}
-
-	s.execCfg.SQLStatusServer = newTenantStatusServer(
-		baseCfg.AmbientCtx, &adminPrivilegeChecker{ie: args.circularInternalExecutor},
-		args.sessionRegistry, args.contentionRegistry, args.flowScheduler, baseCfg.Settings, s,
-	)
-
-	// TODO(asubiotto): remove this. Right now it is needed to initialize the
-	// SpanResolver.
-	s.execCfg.DistSQLPlanner.SetNodeInfo(roachpb.NodeDescriptor{NodeID: 0})
 	args.recorder.AddNode(
 		args.registry,
 		roachpb.NodeDescriptor{},
@@ -180,6 +147,8 @@ func StartTenant(
 		return nil, "", "", err
 	}
 
+	s.execCfg.DistSQLPlanner.SetNodeInfo(roachpb.NodeDescriptor{NodeID: roachpb.NodeID(args.nodeIDContainer.SQLInstanceID())})
+
 	if err := s.preStart(ctx,
 		args.stopper,
 		args.TestingKnobs,
@@ -200,10 +169,6 @@ func StartTenant(
 	log.SetNodeIDs(clusterID, 0 /* nodeID is not known for a SQL-only server. */)
 	log.SetTenantIDs(args.TenantID.String(), int32(s.SQLInstanceID()))
 
-	if err := args.costController.Start(ctx, args.stopper, status.GetUserCPUSeconds); err != nil {
-		return nil, "", "", err
-	}
-
 	if err := s.startServeSQL(ctx,
 		args.stopper,
 		s.connManager,
@@ -213,223 +178,4 @@ func StartTenant(
 	}
 
 	return s, pgLAddr, httpLAddr, nil
-}
-
-func makeTenantSQLServerArgs(
-	stopper *stop.Stopper, kvClusterName string, baseCfg BaseConfig, sqlCfg SQLConfig,
-) (sqlServerArgs, error) {
-	st := baseCfg.Settings
-	baseCfg.AmbientCtx.AddLogTag("sql", nil)
-	// TODO(tbg): this is needed so that the RPC heartbeats between the testcluster
-	// and this tenant work.
-	//
-	// TODO(tbg): address this when we introduce the real tenant RPCs in:
-	// https://github.com/cockroachdb/cockroach/issues/47898
-	baseCfg.ClusterName = kvClusterName
-
-	clock := hlc.NewClock(hlc.UnixNano, time.Duration(baseCfg.MaxOffset))
-
-	registry := metric.NewRegistry()
-
-	var rpcTestingKnobs rpc.ContextTestingKnobs
-	if p, ok := baseCfg.TestingKnobs.Server.(*TestingKnobs); ok {
-		rpcTestingKnobs = p.ContextTestingKnobs
-	}
-	rpcContext := rpc.NewContext(rpc.ContextOptions{
-		TenantID:   sqlCfg.TenantID,
-		AmbientCtx: baseCfg.AmbientCtx,
-		Config:     baseCfg.Config,
-		Clock:      clock,
-		Stopper:    stopper,
-		Settings:   st,
-		Knobs:      rpcTestingKnobs,
-	})
-
-	var dsKnobs kvcoord.ClientTestingKnobs
-	if dsKnobsP, ok := baseCfg.TestingKnobs.DistSQL.(*kvcoord.ClientTestingKnobs); ok {
-		dsKnobs = *dsKnobsP
-	}
-	rpcRetryOptions := base.DefaultRetryOptions()
-
-	tcCfg := kvtenant.ConnectorConfig{
-		AmbientCtx:        baseCfg.AmbientCtx,
-		RPCContext:        rpcContext,
-		RPCRetryOptions:   rpcRetryOptions,
-		DefaultZoneConfig: &baseCfg.DefaultZoneConfig,
-	}
-	tenantConnect, err := kvtenant.Factory.NewConnector(tcCfg, sqlCfg.TenantKVAddrs)
-	if err != nil {
-		return sqlServerArgs{}, err
-	}
-	resolver := kvtenant.AddressResolver(tenantConnect)
-	nodeDialer := nodedialer.New(rpcContext, resolver)
-
-	provider := kvtenant.TokenBucketProvider(tenantConnect)
-	if tenantKnobs, ok := baseCfg.TestingKnobs.TenantTestingKnobs.(*sql.TenantTestingKnobs); ok &&
-		tenantKnobs.OverrideTokenBucketProvider != nil {
-		provider = tenantKnobs.OverrideTokenBucketProvider(provider)
-	}
-	costController, err := NewTenantSideCostController(st, sqlCfg.TenantID, provider)
-	if err != nil {
-		return sqlServerArgs{}, err
-	}
-
-	dsCfg := kvcoord.DistSenderConfig{
-		AmbientCtx:        baseCfg.AmbientCtx,
-		Settings:          st,
-		Clock:             clock,
-		NodeDescs:         tenantConnect,
-		RPCRetryOptions:   &rpcRetryOptions,
-		RPCContext:        rpcContext,
-		NodeDialer:        nodeDialer,
-		RangeDescriptorDB: tenantConnect,
-		KVInterceptor:     costController,
-		TestingKnobs:      dsKnobs,
-	}
-	ds := kvcoord.NewDistSender(dsCfg)
-
-	var clientKnobs kvcoord.ClientTestingKnobs
-	if p, ok := baseCfg.TestingKnobs.KVClient.(*kvcoord.ClientTestingKnobs); ok {
-		clientKnobs = *p
-	}
-
-	txnMetrics := kvcoord.MakeTxnMetrics(baseCfg.HistogramWindowInterval())
-	registry.AddMetricStruct(txnMetrics)
-	tcsFactory := kvcoord.NewTxnCoordSenderFactory(
-		kvcoord.TxnCoordSenderFactoryConfig{
-			AmbientCtx:        baseCfg.AmbientCtx,
-			Settings:          st,
-			Clock:             clock,
-			Stopper:           stopper,
-			HeartbeatInterval: base.DefaultTxnHeartbeatInterval,
-			Linearizable:      false,
-			Metrics:           txnMetrics,
-			TestingKnobs:      clientKnobs,
-		},
-		ds,
-	)
-	db := kv.NewDB(baseCfg.AmbientCtx, tcsFactory, clock, stopper)
-	rangeFeedKnobs, _ := baseCfg.TestingKnobs.RangeFeed.(*rangefeed.TestingKnobs)
-	rangeFeedFactory, err := rangefeed.NewFactory(stopper, db, rangeFeedKnobs)
-	if err != nil {
-		return sqlServerArgs{}, err
-	}
-
-	circularInternalExecutor := &sql.InternalExecutor{}
-	// Protected timestamps won't be available (at first) in multi-tenant
-	// clusters.
-	var protectedTSProvider protectedts.Provider
-	{
-		pp, err := ptprovider.New(ptprovider.Config{
-			DB:               db,
-			InternalExecutor: circularInternalExecutor,
-			Settings:         st,
-		})
-		if err != nil {
-			panic(err)
-		}
-		protectedTSProvider = dummyProtectedTSProvider{pp}
-	}
-
-	recorder := status.NewMetricsRecorder(clock, nil, rpcContext, nil, st)
-
-	runtime := status.NewRuntimeStatSampler(context.Background(), clock)
-	registry.AddMetricStruct(runtime)
-
-	esb := &externalStorageBuilder{}
-	externalStorage := func(ctx context.Context, dest roachpb.ExternalStorage) (cloud.
-		ExternalStorage, error) {
-		return esb.makeExternalStorage(ctx, dest)
-	}
-	externalStorageFromURI := func(ctx context.Context, uri string,
-		user security.SQLUsername) (cloud.ExternalStorage, error) {
-		return esb.makeExternalStorageFromURI(ctx, uri, user)
-	}
-
-	var blobClientFactory blobs.BlobClientFactory
-	if p, ok := baseCfg.TestingKnobs.Server.(*TestingKnobs); ok && p.TenantBlobClientFactory != nil {
-		blobClientFactory = p.TenantBlobClientFactory
-	}
-	esb.init(sqlCfg.ExternalIODirConfig, baseCfg.Settings, blobClientFactory, circularInternalExecutor, db)
-
-	// We don't need this for anything except some services that want a gRPC
-	// server to register against (but they'll never get RPCs at the time of
-	// writing): the blob service and DistSQL.
-	dummyRPCServer := rpc.NewServer(rpcContext)
-	sessionRegistry := sql.NewSessionRegistry()
-	contentionRegistry := contention.NewRegistry()
-	flowScheduler := flowinfra.NewFlowScheduler(baseCfg.AmbientCtx, stopper, st)
-	return sqlServerArgs{
-		sqlServerOptionalKVArgs: sqlServerOptionalKVArgs{
-			nodesStatusServer: serverpb.MakeOptionalNodesStatusServer(nil),
-			nodeLiveness:      optionalnodeliveness.MakeContainer(nil),
-			gossip:            gossip.MakeOptionalGossip(nil),
-			grpcServer:        dummyRPCServer,
-			isMeta1Leaseholder: func(_ context.Context, _ hlc.ClockTimestamp) (bool, error) {
-				return false, errors.New("isMeta1Leaseholder is not available to secondary tenants")
-			},
-			externalStorage:        externalStorage,
-			externalStorageFromURI: externalStorageFromURI,
-			// Set instance ID to 0 and node ID to nil to indicate
-			// that the instance ID will be bound later during preStart.
-			nodeIDContainer: base.NewSQLIDContainer(0, nil),
-		},
-		sqlServerOptionalTenantArgs: sqlServerOptionalTenantArgs{
-			tenantConnect: tenantConnect,
-		},
-		SQLConfig:                &sqlCfg,
-		BaseConfig:               &baseCfg,
-		stopper:                  stopper,
-		clock:                    clock,
-		runtime:                  runtime,
-		rpcContext:               rpcContext,
-		nodeDescs:                tenantConnect,
-		systemConfigProvider:     tenantConnect,
-		nodeDialer:               nodeDialer,
-		distSender:               ds,
-		db:                       db,
-		registry:                 registry,
-		recorder:                 recorder,
-		sessionRegistry:          sessionRegistry,
-		contentionRegistry:       contentionRegistry,
-		flowScheduler:            flowScheduler,
-		circularInternalExecutor: circularInternalExecutor,
-		circularJobRegistry:      &jobs.Registry{},
-		protectedtsProvider:      protectedTSProvider,
-		rangeFeedFactory:         rangeFeedFactory,
-		regionsServer:            tenantConnect,
-		costController:           costController,
-	}, nil
-}
-
-// NewTenantSideCostController is a hook for CCL code which implements the
-// controller.
-var NewTenantSideCostController = func(
-	st *cluster.Settings, tenantID roachpb.TenantID, provider kvtenant.TokenBucketProvider,
-) (multitenant.TenantSideCostController, error) {
-	// Return a no-op implementation.
-	return noopTenantSideCostController{}, nil
-}
-
-// noopTenantSideCostController is a no-op implementation of
-// TenantSideCostController.
-type noopTenantSideCostController struct{}
-
-var _ multitenant.TenantSideCostController = noopTenantSideCostController{}
-
-func (noopTenantSideCostController) Start(
-	ctx context.Context, stopper *stop.Stopper, cpuSecsFn multitenant.CPUSecsFn,
-) error {
-	return nil
-}
-
-func (noopTenantSideCostController) OnRequestWait(
-	ctx context.Context, info tenantcostmodel.RequestInfo,
-) error {
-	return nil
-}
-
-func (noopTenantSideCostController) OnResponse(
-	ctx context.Context, info tenantcostmodel.ResponseInfo,
-) {
 }

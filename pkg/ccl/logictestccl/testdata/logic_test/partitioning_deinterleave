@@ -1,4 +1,4 @@
-# LogicTest: multiregion-9node-3region-3azs multiregion-9node-3region-3azs-vec-off
+# LogicTest: multiregion-9node-3region-3azs
 
 statement ok
 SET enable_copying_partitioning_when_deinterleaving_table = true

@@ -24,9 +24,6 @@ storiesOf("Transactions Details", module)
   ))
   .add("with data", () => (
     <TransactionDetails
-      transactionText={data.statements
-        .map(s => s.key.key_data.query)
-        .join("\n")}
       statements={data.statements as any}
       nodeRegions={nodeRegions}
       lastReset={Date().toString()}
@@ -36,7 +33,6 @@ storiesOf("Transactions Details", module)
   ))
   .add("with loading indicator", () => (
     <TransactionDetails
-      transactionText={""}
       statements={undefined}
       nodeRegions={nodeRegions}
       lastReset={Date().toString()}
@@ -46,7 +42,6 @@ storiesOf("Transactions Details", module)
   ))
   .add("with error alert", () => (
     <TransactionDetails
-      transactionText={""}
       statements={undefined}
       nodeRegions={nodeRegions}
       error={error}

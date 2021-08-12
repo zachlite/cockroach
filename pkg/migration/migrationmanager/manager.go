@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
@@ -41,7 +40,6 @@ import (
 // cluster.
 type Manager struct {
 	c        migration.Cluster
-	lm       *lease.Manager
 	ie       sqlutil.InternalExecutor
 	jr       *jobs.Registry
 	codec    keys.SQLCodec
@@ -69,7 +67,6 @@ func (m *Manager) Cluster() migration.Cluster {
 // secondary tenants. The testingKnobs parameter may be nil.
 func NewManager(
 	c migration.Cluster,
-	lm *lease.Manager,
 	ie sqlutil.InternalExecutor,
 	jr *jobs.Registry,
 	codec keys.SQLCodec,
@@ -82,7 +79,6 @@ func NewManager(
 	}
 	return &Manager{
 		c:        c,
-		lm:       lm,
 		ie:       ie,
 		jr:       jr,
 		codec:    codec,
@@ -109,23 +105,6 @@ func (m *Manager) Migrate(
 
 	clusterVersions := m.listBetween(from, to)
 	log.Infof(ctx, "migrating cluster from %s to %s (stepping through %s)", from, to, clusterVersions)
-	if len(clusterVersions) == 0 {
-		return nil
-	}
-
-	// Sanity check that we'll actually be able to perform the real
-	// cluster version bump, cluster-wide, before potentially creating a job
-	// that might be doomed to fail.
-	{
-		finalVersion := clusterVersions[len(clusterVersions)-1]
-		if err := validateTargetClusterVersion(ctx, m.c, finalVersion); err != nil {
-			return err
-		}
-	}
-
-	if err := m.checkPreconditions(ctx, clusterVersions); err != nil {
-		return err
-	}
 
 	for _, clusterVersion := range clusterVersions {
 		log.Infof(ctx, "stepping through %s", clusterVersion)
@@ -214,65 +193,47 @@ func (m *Manager) Migrate(
 			// version, and by design also supports the actual version (which is
 			// the direct successor of the fence).
 			fenceVersion := migration.FenceVersionFor(ctx, clusterVersion)
-			if err := bumpClusterVersion(ctx, m.c, fenceVersion); err != nil {
+			req := &serverpb.BumpClusterVersionRequest{ClusterVersion: &fenceVersion}
+			op := fmt.Sprintf("bump-cluster-version=%s", req.ClusterVersion.PrettyPrint())
+			if err := m.c.UntilClusterStable(ctx, func() error {
+				return m.c.ForEveryNode(ctx, op, func(ctx context.Context, client serverpb.MigrationClient) error {
+					_, err := client.BumpClusterVersion(ctx, req)
+					return err
+				})
+			}); err != nil {
 				return err
 			}
 		}
-
-		// Now sanity check that we'll actually be able to perform the real
-		// cluster version bump, cluster-wide.
-		if err := validateTargetClusterVersion(ctx, m.c, clusterVersion); err != nil {
-			return err
+		{
+			// Now sanity check that we'll actually be able to perform the real
+			// cluster version bump, cluster-wide.
+			req := &serverpb.ValidateTargetClusterVersionRequest{ClusterVersion: &clusterVersion}
+			op := fmt.Sprintf("validate-cluster-version=%s", req.ClusterVersion.PrettyPrint())
+			if err := m.c.UntilClusterStable(ctx, func() error {
+				return m.c.ForEveryNode(ctx, op, func(ctx context.Context, client serverpb.MigrationClient) error {
+					_, err := client.ValidateTargetClusterVersion(ctx, req)
+					return err
+				})
+			}); err != nil {
+				return err
+			}
 		}
-
-		// Finally, bump the real version cluster-wide.
-		if err := bumpClusterVersion(ctx, m.c, clusterVersion); err != nil {
-			return err
+		{
+			// Finally, bump the real version cluster-wide.
+			req := &serverpb.BumpClusterVersionRequest{ClusterVersion: &clusterVersion}
+			op := fmt.Sprintf("bump-cluster-version=%s", req.ClusterVersion.PrettyPrint())
+			if err := m.c.UntilClusterStable(ctx, func() error {
+				return m.c.ForEveryNode(ctx, op, func(ctx context.Context, client serverpb.MigrationClient) error {
+					_, err := client.BumpClusterVersion(ctx, req)
+					return err
+				})
+			}); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
-}
-
-// bumpClusterVersion will invoke the BumpClusterVersion rpc on every node
-// until the cluster is stable.
-func bumpClusterVersion(
-	ctx context.Context, c migration.Cluster, clusterVersion clusterversion.ClusterVersion,
-) error {
-	req := &serverpb.BumpClusterVersionRequest{ClusterVersion: &clusterVersion}
-	op := fmt.Sprintf("bump-cluster-version=%s", req.ClusterVersion.PrettyPrint())
-	return forEveryNodeUntilClusterStable(ctx, op, c, func(
-		ctx context.Context, client serverpb.MigrationClient,
-	) error {
-		_, err := client.BumpClusterVersion(ctx, req)
-		return err
-	})
-}
-
-// bumpClusterVersion will invoke the ValidateTargetClusterVersion rpc on
-// every node until the cluster is stable.
-func validateTargetClusterVersion(
-	ctx context.Context, c migration.Cluster, clusterVersion clusterversion.ClusterVersion,
-) error {
-	req := &serverpb.ValidateTargetClusterVersionRequest{ClusterVersion: &clusterVersion}
-	op := fmt.Sprintf("validate-cluster-version=%s", req.ClusterVersion.PrettyPrint())
-	return forEveryNodeUntilClusterStable(ctx, op, c, func(
-		tx context.Context, client serverpb.MigrationClient,
-	) error {
-		_, err := client.ValidateTargetClusterVersion(ctx, req)
-		return err
-	})
-}
-
-func forEveryNodeUntilClusterStable(
-	ctx context.Context,
-	op string,
-	c migration.Cluster,
-	f func(ctx context.Context, client serverpb.MigrationClient) error,
-) error {
-	return c.UntilClusterStable(ctx, func() error {
-		return c.ForEveryNode(ctx, op, f)
-	})
 }
 
 func (m *Manager) runMigration(
@@ -281,6 +242,19 @@ func (m *Manager) runMigration(
 	mig, exists := m.GetMigration(version)
 	if !exists {
 		return nil
+	}
+	// The migration which introduces the infrastructure for running other long
+	// running migrations in jobs. It needs to be special-cased and run without
+	// a job or leasing for bootstrapping purposes. Fortunately it has been
+	// designed to be idempotent and cheap.
+	//
+	// TODO(ajwerner): Remove in 21.2.
+	if version.Version == clusterversion.ByKey(clusterversion.LongRunningMigrations) {
+		return mig.(*migration.TenantMigration).Run(ctx, version, migration.TenantDeps{
+			DB:       m.c.DB(),
+			Codec:    m.codec,
+			Settings: m.settings,
+		})
 	}
 	_, isSystemMigration := mig.(*migration.SystemMigration)
 	if isSystemMigration && !m.codec.ForSystemTenant() {
@@ -299,10 +273,7 @@ func (m *Manager) getOrCreateMigrationJob(
 	newJobID := m.jr.MakeJobID()
 	if err := m.c.DB().Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		alreadyCompleted, err = migrationjob.CheckIfMigrationCompleted(ctx, txn, m.ie, version)
-		if err != nil && ctx.Err() == nil {
-			log.Warningf(ctx, "failed to check if migration already completed: %v", err)
-		}
-		if err != nil || alreadyCompleted {
+		if alreadyCompleted || err != nil {
 			return err
 		}
 		var found bool
@@ -380,35 +351,4 @@ func (m *Manager) listBetween(
 		return m.knobs.ListBetweenOverride(from, to)
 	}
 	return clusterversion.ListBetween(from, to)
-}
-
-// checkPreconditions runs the precondition check for each tenant migration
-// associated with the provided versions.
-func (m *Manager) checkPreconditions(
-	ctx context.Context, versions []clusterversion.ClusterVersion,
-) error {
-	for _, v := range versions {
-		mig, ok := m.GetMigration(v)
-		if !ok {
-			continue
-		}
-		tm, ok := mig.(*migration.TenantMigration)
-		if !ok {
-			continue
-		}
-		if err := tm.Precondition(ctx, v, migration.TenantDeps{
-			DB:               m.c.DB(),
-			Codec:            m.codec,
-			Settings:         m.settings,
-			LeaseManager:     m.lm,
-			InternalExecutor: m.ie,
-		}); err != nil {
-			return errors.Wrapf(
-				err,
-				"verifying precondition for version %s",
-				redact.SafeString(v.PrettyPrint()),
-			)
-		}
-	}
-	return nil
 }

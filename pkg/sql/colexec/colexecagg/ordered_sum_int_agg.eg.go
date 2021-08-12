@@ -10,6 +10,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -41,12 +42,12 @@ func newSumIntOrderedAggAlloc(
 			return &sumIntInt16OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &sumIntInt32OrderedAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &sumIntInt64OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		}
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower("Int"), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 type sumIntInt16OrderedAgg struct {
@@ -69,7 +70,7 @@ func (a *sumIntInt16OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumIntInt16OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -80,10 +81,10 @@ func (a *sumIntInt16OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -121,7 +122,7 @@ func (a *sumIntInt16OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -159,7 +160,7 @@ func (a *sumIntInt16OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -303,7 +304,7 @@ func (a *sumIntInt32OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumIntInt32OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -314,10 +315,10 @@ func (a *sumIntInt32OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -355,7 +356,7 @@ func (a *sumIntInt32OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -393,7 +394,7 @@ func (a *sumIntInt32OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -537,7 +538,7 @@ func (a *sumIntInt64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumIntInt64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -548,10 +549,10 @@ func (a *sumIntInt64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -589,7 +590,7 @@ func (a *sumIntInt64OrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -627,7 +628,7 @@ func (a *sumIntInt64OrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 

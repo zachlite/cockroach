@@ -17,7 +17,7 @@ import "./summarybar.styl";
 
 import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
 import { MetricsDataComponentProps } from "src/views/shared/components/metricQuery";
-import { InfoTooltip } from "src/components/infoTooltip";
+import { ToolTipWrapper } from "src/views/shared/components/toolTip";
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
 
 export enum SummaryMetricsAggregator {
@@ -242,7 +242,13 @@ export class SummaryHeadlineStat extends React.Component<
         </div>
         <div className="summary-headline-stat__title">
           {this.props.title}
-          <InfoTooltip text={this.props.tooltip} />
+          <div className="section-heading__tooltip">
+            <ToolTipWrapper text={this.props.tooltip}>
+              <div className="section-heading__tooltip-hover-area">
+                <div className="section-heading__info-icon">i</div>
+              </div>
+            </ToolTipWrapper>
+          </div>
         </div>
       </div>
     );

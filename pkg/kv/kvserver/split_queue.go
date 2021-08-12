@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -238,7 +237,7 @@ func (sq *splitQueue) processAttempt(
 		// TODO(nvanbenschoten): remove this entirely in v22.1 when it is no longer
 		// needed.
 		var expTime hlc.Timestamp
-		if expDelay := kvserverbase.SplitByLoadMergeDelay.Get(&sq.store.cfg.Settings.SV); expDelay > 0 {
+		if expDelay := SplitByLoadMergeDelay.Get(&sq.store.cfg.Settings.SV); expDelay > 0 {
 			expTime = sq.store.Clock().Now().Add(expDelay.Nanoseconds(), 0)
 		}
 		if _, pErr := r.adminSplitWithDescriptor(

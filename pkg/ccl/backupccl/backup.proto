@@ -46,7 +46,7 @@ message BackupManifest {
     roachpb.Span span = 1 [(gogoproto.nullable) = false];
     string path = 2;
     reserved 3;
-    reserved 4;
+    bytes sha512 = 4;
     reserved 5;
     RowCount entry_counts = 6 [(gogoproto.nullable) = false];
 
@@ -158,10 +158,6 @@ message ScheduledBackupExecutionArgs {
   string backup_statement = 2;
   int64 unpause_on_success = 3;
   bool updates_last_backup_metric = 4;
-  // If the scheduled BACKUP was created along with another schedule, the
-  // crontab of its dependent schedule is stored in this field. Otherwise, the
-  // field will be an empty string.
-  string dependent_schedule_crontab = 5;
 }
 
 // RestoreProgress is the information that the RestoreData processor sends back
@@ -171,34 +167,3 @@ message RestoreProgress {
   int64 progressIdx = 2;
   roachpb.Span dataSpan = 3 [(gogoproto.nullable) = false];
 }
-
-message BackupProcessorPlanningTraceEvent {
-  map<int32, int64> node_to_num_spans = 1 [(gogoproto.nullable) = false];
-  int64 total_num_spans = 2;
-}
-
-message BackupProgressTraceEvent {
-  int64 total_num_files = 1;
-  RowCount total_entry_counts = 2 [(gogoproto.nullable) = false];
-  util.hlc.Timestamp revision_start_time = 3 [(gogoproto.nullable) = false];
-}
-
-// BackupExportTraceRequestEvent is the trace event recorded when an
-// ExportRequest has been sent.
-message BackupExportTraceRequestEvent {
-  string span = 1;
-  int32 attempt = 2;
-  string priority = 3;
-  string req_sent_time = 4;
-}
-
-// BackupExportTraceResponseEvent is the trace event recorded when we receive a
-// response from the ExportRequest.
-message BackupExportTraceResponseEvent {
-  string duration = 1;
-  int32 num_files = 2;
-  repeated RowCount file_summaries = 3 [(gogoproto.nullable) = false];
-  reserved 4 ;
-  string retryable_error = 5;
-}
-

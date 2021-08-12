@@ -23,6 +23,10 @@ import { Pagination } from "../pagination";
 import { TableStatistics } from "../tableStatistics";
 import { baseHeadingClasses } from "../transactionsPage/transactionsPageClasses";
 import { Button } from "../button";
+import {
+  collectStatementsText,
+  generateRegionNode,
+} from "src/transactionsPage/utils";
 import { tableClasses } from "../transactionsTable/transactionsTableClasses";
 import { SqlBox } from "../sql";
 import { aggregateStatements } from "../transactionsPage/utils";
@@ -44,7 +48,7 @@ import { formatTwoPlaces } from "../barCharts";
 import { ArrowLeft } from "@cockroachlabs/icons";
 import {
   populateRegionNodeForStatements,
-  makeStatementFingerprintColumn,
+  makeStatementsColumns,
 } from "src/statementsTable/statementsTable";
 
 const { containerClass } = tableClasses;
@@ -57,13 +61,12 @@ const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 const transactionDetailsStylesCx = classNames.bind(transactionDetailsStyles);
 
 interface TransactionDetailsProps {
-  transactionText: string;
   statements?: Statement[];
   nodeRegions: { [nodeId: string]: string };
   transactionStats?: TransactionStats;
   lastReset?: string | Date;
   handleDetails: (
-    statementFingerprintIds: Long[] | null,
+    statementIds: Long[] | null,
     transactionStats: TransactionStats | null,
   ) => void;
   error?: Error | null;
@@ -104,7 +107,6 @@ export class TransactionDetails extends React.Component<
 
   render() {
     const {
-      transactionText,
       statements,
       transactionStats,
       handleDetails,
@@ -132,6 +134,7 @@ export class TransactionDetails extends React.Component<
           render={() => {
             const { statements, transactionStats, lastReset } = this.props;
             const { sortSetting, pagination } = this.state;
+            const statementsSummary = collectStatementsText(statements);
             const aggregatedStatements = aggregateStatements(statements);
             const totalWorkload = calculateTotalWorkload(statements);
             populateRegionNodeForStatements(aggregatedStatements, nodeRegions);
@@ -145,7 +148,7 @@ export class TransactionDetails extends React.Component<
                   >
                     <Col span={16}>
                       <SqlBox
-                        value={transactionText}
+                        value={statementsSummary}
                         className={transactionDetailsStylesCx("summary-card")}
                       />
                     </Col>
@@ -236,21 +239,19 @@ export class TransactionDetails extends React.Component<
                     pagination={pagination}
                     totalCount={statements.length}
                     lastReset={lastReset}
-                    arrayItemName={
-                      "statement fingerprints for this transaction"
-                    }
+                    arrayItemName={"statements for this transaction"}
                     activeFilters={0}
                     resetSQLStats={resetSQLStats}
                   />
                   <div className={cx("table-area")}>
                     <SortedTable
                       data={aggregatedStatements}
-                      columns={[
-                        makeStatementFingerprintColumn(
-                          "transactionDetails",
-                          "",
-                        ),
-                      ]}
+                      columns={makeStatementsColumns(
+                        aggregatedStatements,
+                        "",
+                        totalWorkload,
+                        nodeRegions,
+                      )}
                       className={cx("statements-table")}
                       sortSetting={sortSetting}
                       onChangeSortSetting={this.onChangeSortSetting}

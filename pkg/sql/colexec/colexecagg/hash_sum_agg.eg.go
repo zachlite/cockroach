@@ -10,6 +10,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -42,34 +43,22 @@ func newSumHashAggAlloc(
 			return &sumInt16HashAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &sumInt32HashAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &sumInt64HashAggAlloc{aggAllocBase: allocBase}, nil
 		}
 	case types.DecimalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumDecimalHashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumDecimalHashAggAlloc{aggAllocBase: allocBase}, nil
 	case types.FloatFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumFloat64HashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumFloat64HashAggAlloc{aggAllocBase: allocBase}, nil
 	case types.IntervalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumIntervalHashAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumIntervalHashAggAlloc{aggAllocBase: allocBase}, nil
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower(""), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 type sumInt16HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg apd.Decimal
@@ -84,12 +73,12 @@ type sumInt16HashAgg struct {
 var _ AggregateFunc = &sumInt16HashAgg{}
 
 func (a *sumInt16HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Decimal()
 }
 
 func (a *sumInt16HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -99,7 +88,7 @@ func (a *sumInt16HashAgg) Compute(
 	col, nulls := vec.Int16(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -188,7 +177,7 @@ func (a *sumInt16HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumInt32HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg apd.Decimal
@@ -203,12 +192,12 @@ type sumInt32HashAgg struct {
 var _ AggregateFunc = &sumInt32HashAgg{}
 
 func (a *sumInt32HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Decimal()
 }
 
 func (a *sumInt32HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -218,7 +207,7 @@ func (a *sumInt32HashAgg) Compute(
 	col, nulls := vec.Int32(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -307,7 +296,7 @@ func (a *sumInt32HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumInt64HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg apd.Decimal
@@ -322,12 +311,12 @@ type sumInt64HashAgg struct {
 var _ AggregateFunc = &sumInt64HashAgg{}
 
 func (a *sumInt64HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Decimal()
 }
 
 func (a *sumInt64HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -337,7 +326,7 @@ func (a *sumInt64HashAgg) Compute(
 	col, nulls := vec.Int64(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -426,7 +415,7 @@ func (a *sumInt64HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumDecimalHashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg apd.Decimal
@@ -440,19 +429,19 @@ type sumDecimalHashAgg struct {
 var _ AggregateFunc = &sumDecimalHashAgg{}
 
 func (a *sumDecimalHashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Decimal()
 }
 
 func (a *sumDecimalHashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := tree.SizeOfDecimal(&a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Decimal(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -539,7 +528,7 @@ func (a *sumDecimalHashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumFloat64HashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg float64
@@ -553,19 +542,19 @@ type sumFloat64HashAgg struct {
 var _ AggregateFunc = &sumFloat64HashAgg{}
 
 func (a *sumFloat64HashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Float64()
 }
 
 func (a *sumFloat64HashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Float64(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -646,7 +635,7 @@ func (a *sumFloat64HashAggAlloc) newAggFunc() AggregateFunc {
 }
 
 type sumIntervalHashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg duration.Duration
@@ -660,19 +649,19 @@ type sumIntervalHashAgg struct {
 var _ AggregateFunc = &sumIntervalHashAgg{}
 
 func (a *sumIntervalHashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Interval()
 }
 
 func (a *sumIntervalHashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Interval(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 

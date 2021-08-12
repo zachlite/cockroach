@@ -31,7 +31,7 @@ func TestValidate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		buf.Write(b)
+		fmt.Fprintf(&buf, "%s", string(b))
 		t.Logf("%s", buf.String())
 		buf.Reset()
 
@@ -39,16 +39,11 @@ func TestValidate(t *testing.T) {
 		if err := c.Validate(&defaultDir); err != nil {
 			fmt.Fprintf(&buf, "ERROR: %v\n", err)
 		} else {
-			// clear the default fields to reduce test over-specification
-			c.FileDefaults = FileDefaults{}
-			c.FluentDefaults = FluentDefaults{}
-			c.HTTPDefaults = HTTPDefaults{}
-
 			b, err := yaml.Marshal(&c)
 			if err != nil {
 				t.Fatal(err)
 			}
-			buf.Write(b)
+			fmt.Fprintf(&buf, "%s", string(b))
 		}
 		return buf.String()
 	})

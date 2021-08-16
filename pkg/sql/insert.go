@@ -14,11 +14,12 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 var insertNodePool = sync.Pool{
@@ -52,7 +53,7 @@ type insertRun struct {
 	checkOrds checkSet
 
 	// insertCols are the columns being inserted into.
-	insertCols []catalog.Column
+	insertCols []descpb.ColumnDescriptor
 
 	// done informs a new call to BatchedNext() that the previous call to
 	// BatchedNext() has completed the work already.
@@ -106,10 +107,10 @@ func (r *insertRun) initRowContainer(params runParams, columns colinfo.ResultCol
 		r.resultRowBuffer[i] = tree.DNull
 	}
 
-	colIDToRetIndex := catalog.ColumnIDToOrdinalMap(r.ti.tableDesc().PublicColumns())
+	colIDToRetIndex := r.ti.tableDesc().ColumnIdxMap()
 	r.rowIdxToTabColIdx = make([]int, len(r.insertCols))
 	for i, col := range r.insertCols {
-		if idx, ok := colIDToRetIndex.Get(col.GetID()); !ok {
+		if idx, ok := colIDToRetIndex[col.ID]; !ok {
 			// Column must be write only and not public.
 			r.rowIdxToTabColIdx[i] = -1
 		} else {
@@ -129,7 +130,7 @@ func (r *insertRun) processSourceRow(params runParams, rowVals tree.Datums) erro
 	// written to when they are partial indexes and the row does not satisfy the
 	// predicate. This set is passed as a parameter to tableInserter.row below.
 	var pm row.PartialIndexUpdateHelper
-	if n := len(r.ti.tableDesc().PartialIndexes()); n > 0 {
+	if n := r.ti.tableDesc().PartialIndexOrds().Len(); n > 0 {
 		offset := len(r.insertCols) + r.checkOrds.Len()
 		partialIndexPutVals := rowVals[offset : offset+n]
 
@@ -205,6 +206,8 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 		return false, nil
 	}
 
+	tracing.AnnotateTrace()
+
 	// Advance one batch. First, clear the last batch.
 	n.run.ti.clearLastBatch(params.ctx)
 
@@ -237,7 +240,8 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 		}
 
 		// Are we done yet with the current batch?
-		if n.run.ti.currentBatchSize >= n.run.ti.maxBatchSize {
+		if n.run.ti.currentBatchSize >= n.run.ti.maxBatchSize ||
+			n.run.ti.b.ApproximateMutationBytes() >= n.run.ti.maxBatchByteSize {
 			break
 		}
 	}

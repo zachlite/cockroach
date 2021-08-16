@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/gogo/protobuf/proto"
 )
@@ -58,30 +57,24 @@ const (
 	fileRegistryFilename = "COCKROACHDB_REGISTRY"
 )
 
-// CheckNoRegistryFile checks that no registry file currently exists.
-// CheckNoRegistryFile should be called if the file registry will not be used.
-func (r *PebbleFileRegistry) CheckNoRegistryFile() error {
-	// NB: We do not assign r.registryFilename if the registry will not be used.
-	registryFilename := r.FS.PathJoin(r.DBDir, fileRegistryFilename)
-	_, err := r.FS.Stat(registryFilename)
-	if err == nil {
+func (r *PebbleFileRegistry) checkNoRegistryFile() error {
+	r.registryFilename = r.FS.PathJoin(r.DBDir, fileRegistryFilename)
+	if f, err := r.FS.Open(r.registryFilename); err == nil {
+		f.Close()
 		return os.ErrExist
-	}
-	if !oserror.IsNotExist(err) {
-		return err
 	}
 	return nil
 }
 
 // Load loads the contents of the file registry from a file, if the file exists, else it is a noop.
-// Load should be called exactly once if the file registry will be used.
+// It must be called at most once, before the other functions.
 func (r *PebbleFileRegistry) Load() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.mu.currProto = &enginepb.FileRegistry{}
 	r.registryFilename = r.FS.PathJoin(r.DBDir, fileRegistryFilename)
 	f, err := r.FS.Open(r.registryFilename)
-	if oserror.IsNotExist(err) {
+	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {

@@ -13,17 +13,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
 	"os"
 	"strings"
 	"text/tabwriter"
 
+	_ "github.com/benesch/cgosymbolizer" // calls runtime.SetCgoTraceback on import
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
-	_ "github.com/cockroachdb/cockroach/pkg/storage/cloudimpl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	// intentionally not all the workloads in pkg/ccl/workloadccl/allccl
 	_ "github.com/cockroachdb/cockroach/pkg/workload/bank"       // registers workloads
@@ -50,14 +51,23 @@ func Main() {
 		os.Args = append(os.Args, "help")
 	}
 
-	// We ignore the error in this lookup, because
-	// we want cobra to handle lookup errors with a verbose
-	// help message in Run() below.
-	cmd, _, _ := cockroachCmd.Find(os.Args[1:])
+	// Change the logging defaults for the main cockroach binary.
+	// The value is overridden after command-line parsing.
+	if err := flag.Lookup(logflags.LogToStderrName).Value.Set("NONE"); err != nil {
+		panic(err)
+	}
 
-	cmdName := commandName(cmd)
+	cmdName := commandName(os.Args[1:])
 
-	err := doMain(cmd, cmdName)
+	log.SetupCrashReporter(
+		context.Background(),
+		cmdName,
+	)
+
+	defer log.RecoverAndReportPanic(context.Background(), &serverCfg.Settings.SV)
+
+	err := Run(os.Args[1:])
+
 	errCode := exit.Success()
 	if err != nil {
 		// Display the error and its details/hints.
@@ -78,80 +88,15 @@ func Main() {
 	exit.WithCode(errCode)
 }
 
-func doMain(cmd *cobra.Command, cmdName string) error {
-	if cmd != nil {
-		// Apply the configuration defaults from environment variables.
-		// This must occur before the parameters are parsed by cobra, so
-		// that the command-line flags can override the defaults in
-		// environment variables.
-		if err := processEnvVarDefaults(cmd); err != nil {
-			return err
-		}
-
-		if !cmdHasCustomLoggingSetup(cmd) {
-			// the customLoggingSetupCmds do their own calls to setupLogging().
-			//
-			// We use a PreRun function, to ensure setupLogging() is only
-			// called after the command line flags have been parsed.
-			//
-			// NB: we cannot use PersistentPreRunE,like in flags.go, because
-			// overriding that here will prevent the persistent pre-run from
-			// running on parent commands. (See the difference between PreRun
-			// and PersistentPreRun in `(*cobra.Command) execute()`.)
-			wrapped := cmd.PreRunE
-			cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-				// We call setupLogging before the PreRunE function since
-				// that function may perform logging.
-				err := setupLogging(context.Background(), cmd,
-					false /* isServerCmd */, true /* applyConfig */)
-
-				if wrapped != nil {
-					if err := wrapped(cmd, args); err != nil {
-						return err
-					}
-				}
-
-				return err
-			}
-		}
-	}
-
-	logcrash.SetupCrashReporter(
-		context.Background(),
-		cmdName,
-	)
-
-	defer logcrash.RecoverAndReportPanic(context.Background(), &serverCfg.Settings.SV)
-
-	return Run(os.Args[1:])
-}
-
-func cmdHasCustomLoggingSetup(thisCmd *cobra.Command) bool {
-	if thisCmd == nil {
-		return false
-	}
-	for _, cmd := range customLoggingSetupCmds {
-		if cmd == thisCmd {
-			return true
-		}
-	}
-	hasCustomLogging := false
-	thisCmd.VisitParents(func(parent *cobra.Command) {
-		for _, cmd := range customLoggingSetupCmds {
-			if cmd == parent {
-				hasCustomLogging = true
-			}
-		}
-	})
-	return hasCustomLogging
-}
-
 // commandName computes the name of the command that args would invoke. For
 // example, the full name of "cockroach debug zip" is "debug zip". If args
 // specify a nonexistent command, commandName returns "cockroach".
-func commandName(cmd *cobra.Command) string {
+func commandName(args []string) string {
 	rootName := cockroachCmd.CommandPath()
-	if cmd != nil {
+	// Ask Cobra to find the command so that flags and their arguments are
+	// ignored. The name of "cockroach --log-dir foo start" is "start", not
+	// "--log-dir" or "foo".
+	if cmd, _, _ := cockroachCmd.Find(os.Args[1:]); cmd != nil {
 		return strings.TrimPrefix(cmd.CommandPath(), rootName+" ")
 	}
 	return rootName
@@ -183,6 +128,10 @@ func (e *cliError) FormatError(p errors.Printer) error {
 // in this package can redirect the output of CLI commands to stdout
 // to be captured.
 var stderr = log.OrigStderr
+
+// stdin aliases os.Stdin; we use an alias here so that tests in this
+// package can redirect the input of the CLI shell.
+var stdin = os.Stdin
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
@@ -244,8 +193,6 @@ var cockroachCmd = &cobra.Command{
 		"\n(use '" + os.Args[0] + " version --build-tag' to display only the build tag)",
 }
 
-var workloadCmd = workloadcli.WorkloadCmd(true /* userFacing */)
-
 func init() {
 	cobra.EnableCommandSorting = false
 
@@ -264,7 +211,6 @@ func init() {
 	cockroachCmd.AddCommand(
 		startCmd,
 		startSingleNodeCmd,
-		connectCmd,
 		initCmd,
 		certCmd,
 		quitCmd,
@@ -273,44 +219,25 @@ func init() {
 		stmtDiagCmd,
 		authCmd,
 		nodeCmd,
+		dumpCmd,
 		nodeLocalCmd,
 		userFileCmd,
-		importCmd,
 
 		// Miscellaneous commands.
 		// TODO(pmattis): stats
 		demoCmd,
-		convertURLCmd,
 		genCmd,
 		versionCmd,
 		DebugCmd,
 		sqlfmtCmd,
-		workloadCmd,
+		workloadcli.WorkloadCmd(true /* userFacing */),
+		systemBenchCmd,
 	)
 }
 
-// isWorkloadCmd returns true iff cmd is a sub-command of 'workload'.
-func isWorkloadCmd(cmd *cobra.Command) bool {
-	return hasParentCmd(cmd, workloadCmd)
-}
-
-// isDemoCmd returns true iff cmd is a sub-command of `demo`.
-func isDemoCmd(cmd *cobra.Command) bool {
-	return hasParentCmd(cmd, demoCmd)
-}
-
-// hasParentCmd returns true iff cmd is a sub-command of refParent.
-func hasParentCmd(cmd, refParent *cobra.Command) bool {
-	if cmd == refParent {
-		return true
-	}
-	hasParent := false
-	cmd.VisitParents(func(thisParent *cobra.Command) {
-		if thisParent == refParent {
-			hasParent = true
-		}
-	})
-	return hasParent
+// AddCmd adds a command to the cli.
+func AddCmd(c *cobra.Command) {
+	cockroachCmd.AddCommand(c)
 }
 
 // Run ...

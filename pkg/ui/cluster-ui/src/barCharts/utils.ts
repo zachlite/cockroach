@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -9,11 +9,15 @@
 // licenses/APL.txt.
 
 import { format as d3Format } from "d3-format";
+import Long from "long";
+import { FixLong } from "src/util/fixLong";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import { TransactionInfo } from "../transactionsTable";
 
 type StatementStatistics = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
 type Transaction = protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
+
+export const longToInt = (d: number | Long) =>
+  Long.fromValue(FixLong(d)).toInt();
 
 export const clamp = (i: number) => (i < 0 ? 0 : i);
 
@@ -21,7 +25,7 @@ export const formatTwoPlaces = d3Format(".2f");
 
 export function bar(
   name: string,
-  value: (d: StatementStatistics | Transaction | TransactionInfo) => number,
+  value: (d: StatementStatistics | Transaction) => number,
 ) {
   return { name, value };
 }

@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -340,9 +339,7 @@ func (ta *TxnAborter) GetExecCount(stmt string) (int, bool) {
 	return 0, false
 }
 
-func (ta *TxnAborter) statementFilter(
-	ctx context.Context, _ *sessiondata.SessionData, stmt string, err error,
-) {
+func (ta *TxnAborter) statementFilter(ctx context.Context, stmt string, err error) {
 	ta.mu.Lock()
 	log.Infof(ctx, "statement filter running on: %s, with err=%v", stmt, err)
 	ri, ok := ta.mu.stmtsToAbort[stmt]
@@ -1107,7 +1104,7 @@ func TestNonRetryableError(t *testing.T) {
 	hitError := false
 	cleanupFilter := cmdFilters.AppendFilter(
 		func(args kvserverbase.FilterArgs) *roachpb.Error {
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
 				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
 					hitError = true
 					return roachpb.NewErrorWithTxn(fmt.Errorf("testError"), args.Hdr.Txn)
@@ -1148,12 +1145,31 @@ func TestReacquireLeaseOnRestart(t *testing.T) {
 	var cmdFilters tests.CommandFilters
 	cmdFilters.AppendFilter(tests.CheckEndTxnTrigger, true)
 
+	var clockUpdate int32
 	testKey := []byte("test_key")
 	storeTestingKnobs := &kvserver.StoreTestingKnobs{
 		EvalKnobs: kvserverbase.BatchEvalTestingKnobs{
 			TestingEvalFilter: cmdFilters.RunFilters,
 		},
 		DisableMaxOffsetCheck: true,
+		ClockBeforeSend: func(c *hlc.Clock, ba roachpb.BatchRequest) {
+			if atomic.LoadInt32(&clockUpdate) > 0 {
+				return
+			}
+
+			// Hack to advance the transaction timestamp on a transaction restart.
+			for _, union := range ba.Requests {
+				if req, ok := union.GetInner().(*roachpb.ScanRequest); ok {
+					if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
+						atomic.AddInt32(&clockUpdate, 1)
+						now := c.Now()
+						now.WallTime += advancement.Nanoseconds()
+						c.Update(now)
+						break
+					}
+				}
+			}
+		},
 	}
 
 	const refreshAttempts = 3
@@ -1167,32 +1183,24 @@ func TestReacquireLeaseOnRestart(t *testing.T) {
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 
-	var clockUpdate, restartDone int32
+	var restartDone int32
 	cleanupFilter := cmdFilters.AppendFilter(
 		func(args kvserverbase.FilterArgs) *roachpb.Error {
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
-				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
-					if atomic.LoadInt32(&clockUpdate) == 0 {
-						atomic.AddInt32(&clockUpdate, 1)
-						// Hack to advance the transaction timestamp on a
-						// transaction restart.
-						now := s.Clock().NowAsClockTimestamp()
-						now.WallTime += advancement.Nanoseconds()
-						s.Clock().Update(now)
-					}
+			// Allow a set number of restarts so that the auto retry on the
+			// first few uncertainty interval errors also fails.
+			if atomic.LoadInt32(&restartDone) > refreshAttempts {
+				return nil
+			}
 
-					// Allow a set number of restarts so that the auto retry on
-					// the first few uncertainty interval errors also fails.
-					if atomic.LoadInt32(&restartDone) <= refreshAttempts {
-						atomic.AddInt32(&restartDone, 1)
-						// Return ReadWithinUncertaintyIntervalError to update
-						// the transaction timestamp on retry.
-						txn := args.Hdr.Txn
-						txn.ResetObservedTimestamps()
-						now := s.Clock().NowAsClockTimestamp()
-						txn.UpdateObservedTimestamp(s.(*server.TestServer).Gossip().NodeID.Get(), now)
-						return roachpb.NewErrorWithTxn(roachpb.NewReadWithinUncertaintyIntervalError(now.ToTimestamp(), now.ToTimestamp(), now.ToTimestamp(), txn), txn)
-					}
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
+				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
+					atomic.AddInt32(&restartDone, 1)
+					// Return ReadWithinUncertaintyIntervalError to update the transaction timestamp on retry.
+					txn := args.Hdr.Txn
+					txn.ResetObservedTimestamps()
+					now := s.Clock().Now()
+					txn.UpdateObservedTimestamp(s.(*server.TestServer).Gossip().NodeID.Get(), now)
+					return roachpb.NewErrorWithTxn(roachpb.NewReadWithinUncertaintyIntervalError(now, now, txn), txn)
 				}
 			}
 			return nil
@@ -1255,15 +1263,15 @@ func TestFlushUncommitedDescriptorCacheOnRestart(t *testing.T) {
 				return nil
 			}
 
-			if req, ok := args.Req.(*roachpb.GetRequest); ok {
+			if req, ok := args.Req.(*roachpb.ScanRequest); ok {
 				if bytes.Contains(req.Key, testKey) && !kv.TestingIsRangeLookupRequest(req) {
 					atomic.AddInt32(&restartDone, 1)
 					// Return ReadWithinUncertaintyIntervalError.
 					txn := args.Hdr.Txn
 					txn.ResetObservedTimestamps()
-					now := s.Clock().NowAsClockTimestamp()
+					now := s.Clock().Now()
 					txn.UpdateObservedTimestamp(s.(*server.TestServer).Gossip().NodeID.Get(), now)
-					return roachpb.NewErrorWithTxn(roachpb.NewReadWithinUncertaintyIntervalError(now.ToTimestamp(), now.ToTimestamp(), now.ToTimestamp(), txn), txn)
+					return roachpb.NewErrorWithTxn(roachpb.NewReadWithinUncertaintyIntervalError(now, now, txn), txn)
 				}
 			}
 			return nil
@@ -1321,10 +1329,9 @@ func TestDistSQLRetryableError(t *testing.T) {
 									err := roachpb.NewReadWithinUncertaintyIntervalError(
 										fArgs.Hdr.Timestamp, /* readTS */
 										hlc.Timestamp{},
-										hlc.Timestamp{},
 										nil)
 									errTxn := fArgs.Hdr.Txn.Clone()
-									errTxn.UpdateObservedTimestamp(roachpb.NodeID(2), hlc.ClockTimestamp{})
+									errTxn.UpdateObservedTimestamp(roachpb.NodeID(2), hlc.Timestamp{})
 									pErr := roachpb.NewErrorWithTxn(err, errTxn)
 									pErr.OriginNode = 2
 									return pErr
@@ -1385,12 +1392,12 @@ func TestDistSQLRetryableError(t *testing.T) {
 	}
 
 	// Let's make sure that DISTSQL will actually be used.
-	row := txn.QueryRow(`SELECT info FROM [EXPLAIN SELECT count(1) FROM t] WHERE info LIKE 'distribution%'`)
-	var automatic string
+	row := txn.QueryRow(`SELECT automatic FROM [EXPLAIN (DISTSQL) SELECT count(1) FROM t]`)
+	var automatic bool
 	if err := row.Scan(&automatic); err != nil {
 		t.Fatal(err)
 	}
-	if automatic != "distribution: full" {
+	if !automatic {
 		t.Fatal("DISTSQL not used for test's query")
 	}
 

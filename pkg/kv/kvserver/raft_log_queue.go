@@ -46,13 +46,11 @@ const (
 	// Allow a limited number of Raft log truncations to be processed
 	// concurrently.
 	raftLogQueueConcurrency = 4
-	// RaftLogQueuePendingSnapshotGracePeriod indicates the grace period after an
-	// in-flight snapshot is marked completed. While a snapshot is in-flight we
-	// will not truncate past the snapshot's log index but we also don't want to
-	// do so the moment the in-flight snapshot completes, since it is only applied
-	// at the receiver a little later. This grace period reduces the probability
-	// of an ill-timed log truncation that would necessitate another snapshot.
-	RaftLogQueuePendingSnapshotGracePeriod = 3 * time.Second
+	// While a snapshot is in flight, we won't truncate past the snapshot's log
+	// index. This behavior is extended to a grace period after the snapshot is
+	// marked as completed as it is applied at the receiver only a little later,
+	// leaving a window for a truncation that requires another snapshot.
+	raftLogQueuePendingSnapshotGracePeriod = 3 * time.Second
 )
 
 // raftLogQueue manages a queue of replicas slated to have their raft logs
@@ -204,7 +202,7 @@ func newTruncateDecision(ctx context.Context, r *Replica) (truncateDecision, err
 	log.Eventf(ctx, "raft status before lastUpdateTimes check: %+v", raftStatus.Progress)
 	log.Eventf(ctx, "lastUpdateTimes: %+v", r.mu.lastUpdateTimes)
 	updateRaftProgressFromActivity(
-		ctx, raftStatus.Progress, r.descRLocked().Replicas().Descriptors(),
+		ctx, raftStatus.Progress, r.descRLocked().Replicas().All(),
 		func(replicaID roachpb.ReplicaID) bool {
 			return r.mu.lastUpdateTimes.isFollowerActiveSince(
 				ctx, replicaID, now, r.store.cfg.RangeLeaseActiveDuration())
@@ -528,7 +526,7 @@ func computeTruncateDecision(input truncateDecisionInput) truncateDecision {
 // is true only if the replica is the raft leader and if the total number of
 // the range's raft log's stale entries exceeds RaftLogQueueStaleThreshold.
 func (rlq *raftLogQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, r *Replica, _ *config.SystemConfig,
+	ctx context.Context, now hlc.Timestamp, r *Replica, _ *config.SystemConfig,
 ) (shouldQ bool, priority float64) {
 	decision, err := newTruncateDecision(ctx, r)
 	if err != nil {

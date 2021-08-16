@@ -13,16 +13,19 @@ package bench
 import (
 	"bytes"
 	"context"
+	gosql "database/sql"
+	"flag"
 	"fmt"
-	"strings"
+	"os"
+	"runtime/pprof"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -30,92 +33,61 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-// A query can be issued using the "simple protocol" or the "prepare protocol".
-//
-// With the simple protocol, all arguments are inlined in the SQL string; the
-// query goes through all phases of planning on each execution. Only these
-// phases are valid with the simple protocol:
-//   - Parse
-//   - OptBuildNoNorm
-//   - OptBuildNorm
-//   - Explore
-//   - ExecBuild
-//
-// With the prepare protocol, the query is built at prepare time (with
-// normalization rules turned on) and the resulting memo is saved and reused. On
-// each execution, placeholders are assigned before exploration. Only these
-// phases are valid with the prepare protocol:
-//  - AssignPlaceholdersNoNorm
-//  - AssignPlaceholdersNorm
-//  - Explore
-//  - ExecBuild
-type Phase int
+type BenchmarkType int
 
 const (
-	// Parse creates the AST from the SQL string.
-	Parse Phase = iota
+	// Parse creates the AST.
+	Parse BenchmarkType = iota
 
-	// OptBuildNoNorm constructs the Memo from the AST, with normalization rules
-	// disabled. OptBuildNoNorm includes the time to Parse.
-	OptBuildNoNorm
+	// OptBuild constructs the Memo from the AST. It runs no normalization or
+	// exploration rules. OptBuild does not include the time to Parse.
+	OptBuild
 
-	// OptBuildNorm constructs the Memo from the AST, with normalization rules
-	// enabled. OptBuildNorm includes the time to Parse.
-	OptBuildNorm
+	// Normalize constructs the Memo from the AST, but enables all normalization
+	// rules, unlike OptBuild. No Explore rules are enabled. Normalize includes
+	// the time to OptBuild.
+	Normalize
 
-	// AssignPlaceholdersNoNorm uses a prepared Memo and assigns placeholders,
-	// with normalization rules disabled.
-	AssignPlaceholdersNoNorm
-
-	// AssignPlaceholdersNorm uses a prepared Memo and assigns placeholders, with
-	// normalization rules enabled.
-	AssignPlaceholdersNorm
-
-	// Explore constructs the Memo (either by building it from the statement or by
-	// assigning placeholders to a prepared Memo) and enables all normalization
+	// Explore constructs the Memo from the AST and enables all normalization
 	// and exploration rules. The Memo is fully optimized. Explore includes the
-	// time to OptBuildNorm or AssignPlaceholdersNorm.
+	// time to OptBuild and Normalize.
 	Explore
 
 	// ExecBuild calls a stub factory to construct a dummy plan from the optimized
 	// Memo. Since the factory is not creating a real plan, only a part of the
-	// execbuild time is captured. ExecBuild includes the time to Explore.
+	// execbuild time is captured.
 	ExecBuild
+
+	// EndToEnd executes the query end-to-end using the cost-based optimizer.
+	EndToEnd
 )
 
-// SimplePhases are the legal phases when running a query that was not prepared.
-var SimplePhases = []Phase{Parse, OptBuildNoNorm, OptBuildNorm, Explore, ExecBuild}
-
-// PreparedPhases are the legal phases when running a query that was prepared.
-var PreparedPhases = []Phase{AssignPlaceholdersNoNorm, AssignPlaceholdersNorm, Explore, ExecBuild}
-
-func (bt Phase) String() string {
-	var strTab = [...]string{
-		Parse:                    "Parse",
-		OptBuildNoNorm:           "OptBuildNoNorm",
-		OptBuildNorm:             "OptBuildNorm",
-		AssignPlaceholdersNoNorm: "AssignPlaceholdersNoNorm",
-		AssignPlaceholdersNorm:   "AssignPlaceholdersNorm",
-		Explore:                  "Explore",
-		ExecBuild:                "ExecBuild",
-	}
-	return strTab[bt]
+var benchmarkTypeStrings = [...]string{
+	Parse:     "Parse",
+	OptBuild:  "OptBuild",
+	Normalize: "Normalize",
+	Explore:   "Explore",
+	ExecBuild: "ExecBuild",
+	EndToEnd:  "EndToEnd",
 }
 
 type benchQuery struct {
-	name  string
-	query string
-	args  []interface{}
+	name    string
+	query   string
+	args    []interface{}
+	prepare bool
 }
 
-var schemas = []string{
+var schemas = [...]string{
 	`CREATE TABLE kv (k BIGINT NOT NULL PRIMARY KEY, v BYTES NOT NULL)`,
 	`
 	CREATE TABLE customer
@@ -174,7 +146,8 @@ var schemas = []string{
 		s_order_cnt  integer,
 		s_remote_cnt integer,
 		s_data       varchar(50),
-		primary key (s_w_id, s_i_id)
+		primary key (s_w_id, s_i_id),
+		index stock_item_fk_idx (s_i_id)
 	)
 	`,
 	`
@@ -198,11 +171,11 @@ var schemas = []string{
 	`
 	CREATE TABLE j
 	(
-		a INT PRIMARY KEY,
-		b INT,
-		INDEX (b)
+	  a INT PRIMARY KEY,
+	  b INT,
+	  INDEX (b)
 	)
-	`,
+  `,
 }
 
 var queries = [...]benchQuery{
@@ -210,16 +183,26 @@ var queries = [...]benchQuery{
 	// 2. Table with no indexes.
 	// 3. Very simple query that returns single row based on key filter.
 	{
-		name:  "kv-read",
-		query: `SELECT k, v FROM kv WHERE k IN ($1)`,
-		args:  []interface{}{1},
+		name:    "kv-read",
+		query:   `SELECT k, v FROM kv WHERE k IN ($1)`,
+		args:    []interface{}{1},
+		prepare: true,
+	},
+
+	// 1. No PREPARE phase, only EXECUTE.
+	{
+		name:    "kv-read-no-prep",
+		query:   `SELECT k, v FROM kv WHERE k IN ($1)`,
+		args:    []interface{}{1},
+		prepare: false,
 	},
 
 	// 1. PREPARE with constant filter value (no placeholders).
 	{
-		name:  "kv-read-const",
-		query: `SELECT k, v FROM kv WHERE k IN (1)`,
-		args:  []interface{}{},
+		name:    "kv-read-const",
+		query:   `SELECT k, v FROM kv WHERE k IN (1)`,
+		args:    []interface{}{},
+		prepare: true,
 	},
 
 	// 1. Table with many columns.
@@ -233,7 +216,8 @@ var queries = [...]benchQuery{
 			FROM customer
 			WHERE c_w_id = $1 AND c_d_id = $2 AND c_id = $3
 		`,
-		args: []interface{}{10, 100, 50},
+		args:    []interface{}{10, 100, 50},
+		prepare: true,
 	},
 
 	// 1. ORDER BY clause.
@@ -248,7 +232,8 @@ var queries = [...]benchQuery{
 			ORDER BY no_o_id ASC
 			LIMIT 1
 		`,
-		args: []interface{}{10, 100},
+		args:    []interface{}{10, 100},
+		prepare: true,
 	},
 
 	// 1. Count and Distinct aggregate functions.
@@ -267,31 +252,8 @@ var queries = [...]benchQuery{
 				AND ol_o_id BETWEEN $3 - 20 AND $3 - 1
 				AND s_quantity < $4
 		`,
-		args: []interface{}{10, 100, 1000, 15},
-	},
-
-	// 1. Table with more than 15 columns (triggers slow path for FastIntMap).
-	// 2. Table with many indexes.
-	// 3. Query with a single fixed column that can't use any of the indexes.
-	{
-		name: "many-columns-and-indexes-a",
-		query: `
-			SELECT id FROM k
-			WHERE x = $1
-		`,
-		args: []interface{}{1},
-	},
-
-	// 1. Table with more than 15 columns (triggers slow path for FastIntMap).
-	// 2. Table with many indexes.
-	// 3. Query that can't use any of the indexes with a more complex filter.
-	{
-		name: "many-columns-and-indexes-b",
-		query: `
-			SELECT id FROM k
-			WHERE x = $1 AND y = $2 AND z = $3
-		`,
-		args: []interface{}{1, 2, 3},
+		args:    []interface{}{10, 100, 1000, 15},
+		prepare: true,
 	},
 }
 
@@ -299,54 +261,70 @@ func init() {
 	security.SetAssetLoader(securitytest.EmbeddedAssets)
 	randutil.SeedForTests()
 	serverutils.InitTestServerFactory(server.TestServerFactory)
+}
 
-	// Add a table with many columns and many indexes.
-	var indexes strings.Builder
-	for i := 0; i < 250; i++ {
-		indexes.WriteString(",\nINDEX (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w)")
+var profileTime = flag.Duration("profile-time", 10*time.Second, "duration of profiling run")
+var profileType = flag.String("profile-type", "ExecBuild", "Parse, OptBuild, Normalize, Explore, ExecBuild, EndToEnd")
+var profileQuery = flag.String("profile-query", "kv-read", "name of query to run")
+
+// TestCPUProfile executes the configured profileQuery in a loop in order to
+// profile its CPU usage. Rather than allow the Go testing infrastructure to
+// start profiling, TestCPUProfile triggers startup, so that it has control over
+// when profiling starts. In particular, profiling is only started once the
+// server or API has been initialized, so that the profiles don't include
+// startup activities.
+//
+// TestCPUProfile writes the output profile to a cpu.out file in the current
+// directory. See the profile flags for ways to configure what is profiled.
+func TestCPUProfile(t *testing.T) {
+	skip.IgnoreLint(t,
+		"Remove this when profiling. Use profile flags above to configure. Sample command line: \n"+
+			"GOMAXPROCS=1 go test -run TestCPUProfile --logtostderr NONE && go tool pprof bench.test cpu.out",
+	)
+
+	h := newHarness()
+	defer h.close()
+
+	var query benchQuery
+	for _, query = range queries {
+		if query.name == *profileQuery {
+			break
+		}
 	}
-	tableK := fmt.Sprintf(`CREATE TABLE k (
-		id INT PRIMARY KEY,
-		a INT, b INT, c INT, d INT, e INT, f INT, g INT, h INT, i INT, j INT,
-		k INT, l INT, m INT, n INT, o INT, p INT, q INT, r INT, s INT, t INT,
-		u INT, v INT, w INT, x INT, y INT, z INT
-		%s
-	)`, indexes.String())
-	schemas = append(schemas, tableK)
+
+	var bmType BenchmarkType
+	for i, s := range benchmarkTypeStrings {
+		if s == *profileType {
+			bmType = BenchmarkType(i)
+		}
+	}
+
+	h.runForProfiling(t, bmType, query, *profileTime)
 }
 
 // BenchmarkPhases measures the time that each of the optimization phases takes
-// to run. See the comments for the Phase enumeration for more details
+// to run. See the comments for the BenchmarkType enumeration for more details
 // on what each phase includes.
 func BenchmarkPhases(b *testing.B) {
+	bm := newHarness()
+	defer bm.close()
+
 	for _, query := range queries {
-		h := newHarness(b, query)
-		b.Run(query.name, func(b *testing.B) {
-			b.Run("Simple", func(b *testing.B) {
-				for _, phase := range SimplePhases {
-					b.Run(phase.String(), func(b *testing.B) {
-						for i := 0; i < b.N; i++ {
-							h.runSimple(b, query, phase)
-						}
-					})
-				}
-			})
-			b.Run("Prepared", func(b *testing.B) {
-				phases := PreparedPhases
-				if h.prepMemo.IsOptimized() {
-					// If the query has no placeholders or the placeholder fast path
-					// succeeded, the only phase which does something is ExecBuild.
-					phases = []Phase{ExecBuild}
-				}
-				for _, phase := range phases {
-					b.Run(phase.String(), func(b *testing.B) {
-						for i := 0; i < b.N; i++ {
-							h.runPrepared(b, phase)
-						}
-					})
-				}
-			})
-		})
+		bm.runForBenchmark(b, Parse, query)
+		bm.runForBenchmark(b, OptBuild, query)
+		bm.runForBenchmark(b, Normalize, query)
+		bm.runForBenchmark(b, Explore, query)
+		bm.runForBenchmark(b, ExecBuild, query)
+	}
+}
+
+// BenchmarkEndToEnd measures the time to execute a query end-to-end.
+func BenchmarkEndToEnd(b *testing.B) {
+	h := newHarness()
+	defer h.close()
+
+	for _, query := range queries {
+		h.runForBenchmark(b, EndToEnd, query)
 	}
 }
 
@@ -355,59 +333,173 @@ type harness struct {
 	semaCtx   tree.SemaContext
 	evalCtx   tree.EvalContext
 	prepMemo  *memo.Memo
-	testCat   *testcat.Catalog
+	cat       *testcat.Catalog
 	optimizer xform.Optimizer
+
+	s  serverutils.TestServerInterface
+	db *gosql.DB
+	sr *sqlutils.SQLRunner
+
+	bmType   BenchmarkType
+	query    benchQuery
+	prepared *gosql.Stmt
+	ready    bool
 }
 
-func newHarness(tb testing.TB, query benchQuery) *harness {
-	h := &harness{
-		ctx:     context.Background(),
-		semaCtx: tree.MakeSemaContext(),
-		evalCtx: tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings()),
+func newHarness() *harness {
+	return &harness{}
+}
+
+func (h *harness) close() {
+	if h.s != nil {
+		h.s.Stopper().Stop(context.Background())
+	}
+}
+
+func (h *harness) runForProfiling(
+	t *testing.T, bmType BenchmarkType, query benchQuery, duration time.Duration,
+) {
+	h.bmType = bmType
+	h.query = query
+	h.prepare(t)
+
+	f, err := os.Create("cpu.out")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	defer f.Close()
+
+	err = pprof.StartCPUProfile(f)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	defer pprof.StopCPUProfile()
+
+	start := timeutil.Now()
+	for {
+		now := timeutil.Now()
+		if now.Sub(start) > duration {
+			break
+		}
+
+		// Minimize overhead of getting timings by iterating 1000 times before
+		// checking if done.
+		for i := 0; i < 1000; i++ {
+			switch bmType {
+			case EndToEnd:
+				h.runUsingServer(t)
+
+			default:
+				h.runUsingAPI(t, bmType, query.prepare)
+			}
+		}
+	}
+}
+
+func (h *harness) runForBenchmark(b *testing.B, bmType BenchmarkType, query benchQuery) {
+	h.bmType = bmType
+	h.query = query
+	h.prepare(b)
+
+	b.Run(fmt.Sprintf("%s/%s", query.name, benchmarkTypeStrings[bmType]), func(b *testing.B) {
+		switch bmType {
+		case EndToEnd:
+			for i := 0; i < b.N; i++ {
+				h.runUsingServer(b)
+			}
+
+		default:
+			for i := 0; i < b.N; i++ {
+				h.runUsingAPI(b, bmType, query.prepare)
+			}
+		}
+	})
+}
+
+func (h *harness) prepare(tb testing.TB) {
+	switch h.bmType {
+	case EndToEnd:
+		h.prepareUsingServer(tb)
+
+	default:
+		h.prepareUsingAPI(tb)
+	}
+}
+
+func (h *harness) prepareUsingServer(tb testing.TB) {
+	if !h.ready {
+		// Set up database.
+		h.s, h.db, _ = serverutils.StartServer(tb, base.TestServerArgs{UseDatabase: "bench"})
+		h.sr = sqlutils.MakeSQLRunner(h.db)
+		h.sr.Exec(tb, `CREATE DATABASE bench`)
+		for _, schema := range schemas {
+			h.sr.Exec(tb, schema)
+		}
+		h.ready = true
 	}
 
-	// Set up the test catalog.
-	h.testCat = testcat.New()
+	if h.query.prepare {
+		var err error
+		h.prepared, err = h.db.Prepare(h.query.query)
+		if err != nil {
+			tb.Fatalf("%v", err)
+		}
+	} else {
+		h.prepared = nil
+	}
+}
+
+func (h *harness) runUsingServer(tb testing.TB) {
+	var err error
+	if h.prepared != nil {
+		_, err = h.prepared.Exec(h.query.args...)
+		if err != nil {
+			tb.Fatalf("%v", err)
+		}
+	} else {
+		h.sr.Exec(tb, h.query.query, h.query.args...)
+	}
+}
+
+func (h *harness) prepareUsingAPI(tb testing.TB) {
+	// Clear any state from previous usage of this harness instance.
+	h.ctx = context.Background()
+	h.semaCtx = tree.MakeSemaContext()
+	h.evalCtx = tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
+	h.prepMemo = nil
+	h.cat = nil
+	h.optimizer = xform.Optimizer{}
+
+	// Set up the catalog.
+	h.cat = testcat.New()
 	for _, schema := range schemas {
-		_, err := h.testCat.ExecuteDDL(schema)
+		_, err := h.cat.ExecuteDDL(schema)
 		if err != nil {
 			tb.Fatalf("%v", err)
 		}
 	}
 
-	if err := h.semaCtx.Placeholders.Init(len(query.args), nil /* typeHints */); err != nil {
+	if err := h.semaCtx.Placeholders.Init(len(h.query.args), nil /* typeHints */); err != nil {
 		tb.Fatal(err)
 	}
-	// Run optbuilder to build the memo for Prepare. Even if we will not be using
-	// the Prepare method, we still want to run the optbuilder to infer any
-	// placeholder types.
-	stmt, err := parser.ParseOne(query.query)
-	if err != nil {
-		tb.Fatalf("%v", err)
-	}
-	h.optimizer.Init(&h.evalCtx, h.testCat)
-	bld := optbuilder.New(h.ctx, &h.semaCtx, &h.evalCtx, h.testCat, h.optimizer.Factory(), stmt.AST)
-	bld.KeepPlaceholders = true
-	if err := bld.Build(); err != nil {
-		tb.Fatalf("%v", err)
-	}
-
-	// If there are no placeholders, we explore during PREPARE.
-	if len(query.args) == 0 {
-		if _, err := h.optimizer.Optimize(); err != nil {
-			tb.Fatalf("%v", err)
+	if h.query.prepare {
+		// Prepare the query by normalizing it (if it has placeholders) or exploring
+		// it (if it doesn't have placeholders), and cache the resulting memo so that
+		// it can be used during execution.
+		if len(h.query.args) > 0 {
+			h.runUsingAPI(tb, Normalize, false /* usePrepared */)
+		} else {
+			h.runUsingAPI(tb, Explore, false /* usePrepared */)
 		}
+		h.prepMemo = h.optimizer.DetachMemo()
 	} else {
-		if _, _, err := h.optimizer.TryPlaceholderFastPath(); err != nil {
-			tb.Fatalf("%v", err)
-		}
+		// Run optbuilder to infer any placeholder types.
+		h.runUsingAPI(tb, OptBuild, false /* usePrepared */)
 	}
-	h.prepMemo = h.optimizer.DetachMemo()
-	h.optimizer = xform.Optimizer{}
 
 	// Construct placeholder values.
-	h.semaCtx.Placeholders.Values = make(tree.QueryArguments, len(query.args))
-	for i, arg := range query.args {
+	h.semaCtx.Placeholders.Values = make(tree.QueryArguments, len(h.query.args))
+	for i, arg := range h.query.args {
 		var parg tree.Expr
 		parg, err := parser.ParseExpr(fmt.Sprintf("%v", arg))
 		if err != nil {
@@ -432,103 +524,65 @@ func newHarness(tb testing.TB, query benchQuery) *harness {
 	}
 	h.evalCtx.Placeholders = &h.semaCtx.Placeholders
 	h.evalCtx.Annotations = &h.semaCtx.Annotations
-	return h
 }
 
-// runSimple simulates running a query through the "simple protocol" (no prepare
-// step). The placeholders are replaced with their values automatically when we
-// build the memo.
-func (h *harness) runSimple(tb testing.TB, query benchQuery, phase Phase) {
-	stmt, err := parser.ParseOne(query.query)
-	if err != nil {
-		tb.Fatalf("%v", err)
-	}
-
-	if phase == Parse {
-		return
-	}
-
-	h.optimizer.Init(&h.evalCtx, h.testCat)
-	if phase == OptBuildNoNorm {
-		h.optimizer.DisableOptimizations()
-	}
-
-	bld := optbuilder.New(h.ctx, &h.semaCtx, &h.evalCtx, h.testCat, h.optimizer.Factory(), stmt.AST)
-	// Note that KeepPlaceholders is false and we have placeholder values in the
-	// evalCtx, so the optbuilder will replace all placeholders with their values.
-	if err = bld.Build(); err != nil {
-		tb.Fatalf("%v", err)
-	}
-
-	if phase == OptBuildNoNorm || phase == OptBuildNorm {
-		return
-	}
-
-	if _, err := h.optimizer.Optimize(); err != nil {
-		panic(err)
-	}
-	execMemo := h.optimizer.Memo()
-
-	if phase == Explore {
-		return
-	}
-
-	if phase != ExecBuild {
-		tb.Fatalf("invalid phase %s for Simple", phase)
-	}
-
-	root := execMemo.RootExpr()
-	eb := execbuilder.New(
-		exec.StubFactory{}, execMemo, nil /* catalog */, root, &h.evalCtx, true, /* allowAutoCommit */
-	)
-	if _, err = eb.Build(); err != nil {
-		tb.Fatalf("%v", err)
-	}
-}
-
-// runPrepared simulates running the query after it was prepared.
-func (h *harness) runPrepared(tb testing.TB, phase Phase) {
-	h.optimizer.Init(&h.evalCtx, h.testCat)
-
-	if !h.prepMemo.IsOptimized() {
-		if phase == AssignPlaceholdersNoNorm {
-			h.optimizer.DisableOptimizations()
-		}
-		err := h.optimizer.Factory().AssignPlaceholders(h.prepMemo)
+func (h *harness) runUsingAPI(tb testing.TB, bmType BenchmarkType, usePrepared bool) {
+	var stmt parser.Statement
+	var err error
+	if !usePrepared {
+		stmt, err = parser.ParseOne(h.query.query)
 		if err != nil {
 			tb.Fatalf("%v", err)
 		}
 	}
 
-	if phase == AssignPlaceholdersNoNorm || phase == AssignPlaceholdersNorm {
+	if bmType == Parse {
+		return
+	}
+
+	h.optimizer.Init(&h.evalCtx, h.cat)
+	if bmType == OptBuild {
+		h.optimizer.DisableOptimizations()
+	}
+
+	if !usePrepared {
+		bld := optbuilder.New(h.ctx, &h.semaCtx, &h.evalCtx, h.cat, h.optimizer.Factory(), stmt.AST)
+		if err = bld.Build(); err != nil {
+			tb.Fatalf("%v", err)
+		}
+	} else if h.prepMemo.HasPlaceholders() {
+		_ = h.optimizer.Factory().AssignPlaceholders(h.prepMemo)
+	}
+
+	if bmType == OptBuild || bmType == Normalize {
 		return
 	}
 
 	var execMemo *memo.Memo
-	if h.prepMemo.IsOptimized() {
-		// No placeholders or the placeholder fast path succeeded; we already did
-		// the exploration at prepare time.
+	if usePrepared && !h.prepMemo.HasPlaceholders() {
 		execMemo = h.prepMemo
 	} else {
 		if _, err := h.optimizer.Optimize(); err != nil {
-			tb.Fatalf("%v", err)
+			panic(err)
 		}
 		execMemo = h.optimizer.Memo()
 	}
 
-	if phase == Explore {
+	if bmType == Explore {
 		return
-	}
-
-	if phase != ExecBuild {
-		tb.Fatalf("invalid phase %s for Prepared", phase)
 	}
 
 	root := execMemo.RootExpr()
 	eb := execbuilder.New(
-		exec.StubFactory{}, execMemo, nil /* catalog */, root, &h.evalCtx, true, /* allowAutoCommit */
+		exec.StubFactory{},
+		&h.optimizer,
+		execMemo,
+		nil, /* catalog */
+		root,
+		&h.evalCtx,
+		true, /* allowAutoCommit */
 	)
-	if _, err := eb.Build(); err != nil {
+	if _, err = eb.Build(); err != nil {
 		tb.Fatalf("%v", err)
 	}
 }
@@ -574,49 +628,13 @@ func makeChain(size int) benchQuery {
 //     AND d.x = e.y
 //
 func BenchmarkChain(b *testing.B) {
+	h := newHarness()
+	defer h.close()
+
 	for i := 1; i < 20; i++ {
 		q := makeChain(i)
-		h := newHarness(b, q)
-		b.Run(q.name, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				h.runSimple(b, q, Explore)
-			}
-		})
-	}
-}
-
-// BenchmarkEndToEnd measures the time to execute a query end-to-end (against a
-// test server).
-func BenchmarkEndToEnd(b *testing.B) {
-	defer log.Scope(b).Close(b)
-
-	// Set up database.
-	srv, db, _ := serverutils.StartServer(b, base.TestServerArgs{UseDatabase: "bench"})
-	defer srv.Stopper().Stop(context.Background())
-	sr := sqlutils.MakeSQLRunner(db)
-	sr.Exec(b, `CREATE DATABASE bench`)
-	for _, schema := range schemas {
-		sr.Exec(b, schema)
-	}
-
-	for _, query := range queries {
-		b.Run(query.name, func(b *testing.B) {
-			b.Run("Simple", func(b *testing.B) {
-				for i := 0; i < b.N; i++ {
-					sr.Exec(b, query.query, query.args...)
-				}
-			})
-			b.Run("Prepared", func(b *testing.B) {
-				prepared, err := db.Prepare(query.query)
-				if err != nil {
-					b.Fatalf("%v", err)
-				}
-				for i := 0; i < b.N; i++ {
-					if _, err = prepared.Exec(query.args...); err != nil {
-						b.Fatalf("%v", err)
-					}
-				}
-			})
-		})
+		for i := 0; i < b.N; i++ {
+			h.runForBenchmark(b, Explore, q)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // ConcurrentRequestLimiter wraps a simple semaphore, adding a tracing span when
@@ -49,9 +50,9 @@ func (l *ConcurrentRequestLimiter) Begin(ctx context.Context) (Reservation, erro
 
 	res, err := l.sem.TryAcquire(ctx, 1)
 	if errors.Is(err, quotapool.ErrNotEnoughQuota) {
-		var span *tracing.Span
+		var span opentracing.Span
 		ctx, span = tracing.ChildSpan(ctx, l.spanName)
-		defer span.Finish()
+		defer tracing.FinishSpan(span)
 		res, err = l.sem.Acquire(ctx, 1)
 	}
 	return res, err

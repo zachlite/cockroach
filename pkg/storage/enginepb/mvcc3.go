@@ -30,11 +30,6 @@ func (ms *MVCCPersistentStats) ToStats() MVCCStats {
 	return MVCCStats(*ms)
 }
 
-// ToStatsPtr converts the receiver to a *MVCCStats.
-func (ms *MVCCPersistentStats) ToStatsPtr() *MVCCStats {
-	return (*MVCCStats)(ms)
-}
-
 // SafeValue implements the redact.SafeValue interface.
 func (ms *MVCCStats) SafeValue() {}
 

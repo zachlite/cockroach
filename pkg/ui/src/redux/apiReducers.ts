@@ -50,8 +50,10 @@ export const healthReducerObj = new CachedDataReducer(
 );
 export const refreshHealth = healthReducerObj.refresh;
 
-function rollupStoreMetrics(res: api.NodesResponseMessage): INodeStatus[] {
-  return _.map(res.nodes, (node) => {
+function rollupStoreMetrics(
+  res: api.NodesResponseMessage,
+): INodeStatus[] {
+  return _.map(res.nodes, node => {
     RollupStoreMetrics(node);
     return node;
   });
@@ -75,11 +77,7 @@ export const refreshRaft = raftReducerObj.refresh;
 export const versionReducerObj = new CachedDataReducer(versionCheck, "version");
 export const refreshVersion = versionReducerObj.refresh;
 
-export const locationsReducerObj = new CachedDataReducer(
-  api.getLocations,
-  "locations",
-  moment.duration(10, "m"),
-);
+export const locationsReducerObj = new CachedDataReducer(api.getLocations, "locations", moment.duration(10, "m"));
 export const refreshLocations = locationsReducerObj.refresh;
 
 const databasesReducerObj = new CachedDataReducer(
@@ -124,9 +122,7 @@ const tableStatsReducerObj = new KeyedCachedDataReducer(
 export const refreshTableStats = tableStatsReducerObj.refresh;
 
 const nonTableStatsReducerObj = new CachedDataReducer(
-  api.getNonTableStats,
-  "nonTableStats",
-  moment.duration(1, "m"),
+  api.getNonTableStats, "nonTableStats", moment.duration(1, "m"),
 );
 export const refreshNonTableStats = nonTableStatsReducerObj.refresh;
 
@@ -144,14 +140,8 @@ export const livenessReducerObj = new CachedDataReducer(
 );
 export const refreshLiveness = livenessReducerObj.refresh;
 
-export const jobsKey = (
-  status: string,
-  type: protos.cockroach.sql.jobs.jobspb.Type,
-  limit: number,
-) =>
-  `${encodeURIComponent(status)}/${encodeURIComponent(
-    type.toString(),
-  )}/${encodeURIComponent(limit.toString())}`;
+export const jobsKey = (status: string, type: protos.cockroach.sql.jobs.jobspb.Type, limit: number) =>
+  `${encodeURIComponent(status)}/${encodeURIComponent(type.toString())}/${encodeURIComponent(limit.toString())}`;
 
 const jobsRequestKey = (req: api.JobsRequestMessage): string =>
   jobsKey(req.status, req.type, req.limit);
@@ -164,29 +154,13 @@ const jobsReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshJobs = jobsReducerObj.refresh;
 
-export const jobRequestKey = (req: api.JobRequestMessage): string =>
-  `${req.job_id}`;
+export const queryToID = (req: api.QueryPlanRequestMessage): string => req.query;
 
-const jobReducerObj = new KeyedCachedDataReducer(
-  api.getJob,
-  "job",
-  jobRequestKey,
-  moment.duration(10, "s"),
-);
-export const refreshJob = jobReducerObj.refresh;
-
-export const queryToID = (req: api.QueryPlanRequestMessage): string =>
-  req.query;
-
-const queryPlanReducerObj = new CachedDataReducer(
-  api.getQueryPlan,
-  "queryPlan",
-);
+const queryPlanReducerObj = new CachedDataReducer(api.getQueryPlan, "queryPlan");
 export const refreshQueryPlan = queryPlanReducerObj.refresh;
 
-export const problemRangesRequestKey = (
-  req: api.ProblemRangesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "all" : req.node_id);
+export const problemRangesRequestKey = (req: api.ProblemRangesRequestMessage): string =>
+  _.isEmpty(req.node_id) ? "all" : req.node_id;
 
 const problemRangesReducerObj = new KeyedCachedDataReducer(
   api.getProblemRanges,
@@ -197,9 +171,8 @@ const problemRangesReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshProblemRanges = problemRangesReducerObj.refresh;
 
-export const certificatesRequestKey = (
-  req: api.CertificatesRequestMessage,
-): string => (_.isEmpty(req.node_id) ? "none" : req.node_id);
+export const certificatesRequestKey = (req: api.CertificatesRequestMessage): string =>
+  _.isEmpty(req.node_id) ? "none" : req.node_id;
 
 const certificatesReducerObj = new KeyedCachedDataReducer(
   api.getCertificates,
@@ -221,9 +194,8 @@ const rangeReducerObj = new KeyedCachedDataReducer(
 );
 export const refreshRange = rangeReducerObj.refresh;
 
-export const allocatorRangeRequestKey = (
-  req: api.AllocatorRangeRequestMessage,
-): string => (_.isNil(req.range_id) ? "none" : req.range_id.toString());
+export const allocatorRangeRequestKey = (req: api.AllocatorRangeRequestMessage): string =>
+  _.isNil(req.range_id) ? "none" : req.range_id.toString();
 
 const allocatorRangeReducerObj = new KeyedCachedDataReducer(
   api.getAllocatorRange,
@@ -282,7 +254,6 @@ const queriesReducerObj = new CachedDataReducer(
   moment.duration(5, "m"),
   moment.duration(1, "m"),
 );
-export const invalidateStatements = queriesReducerObj.invalidateData;
 export const refreshStatements = queriesReducerObj.refresh;
 
 const statementDiagnosticsReportsReducerObj = new CachedDataReducer(
@@ -291,10 +262,8 @@ const statementDiagnosticsReportsReducerObj = new CachedDataReducer(
   moment.duration(5, "m"),
   moment.duration(1, "m"),
 );
-export const refreshStatementDiagnosticsRequests =
-  statementDiagnosticsReportsReducerObj.refresh;
-export const invalidateStatementDiagnosticsRequests =
-  statementDiagnosticsReportsReducerObj.invalidateData;
+export const refreshStatementDiagnosticsRequests = statementDiagnosticsReportsReducerObj.refresh;
+export const invalidateStatementDiagnosticsRequests = statementDiagnosticsReportsReducerObj.invalidateData;
 
 const dataDistributionReducerObj = new CachedDataReducer(
   api.getDataDistribution,
@@ -303,10 +272,7 @@ const dataDistributionReducerObj = new CachedDataReducer(
 );
 export const refreshDataDistribution = dataDistributionReducerObj.refresh;
 
-const metricMetadataReducerObj = new CachedDataReducer(
-  api.getAllMetricMetadata,
-  "metricMetadata",
-);
+const metricMetadataReducerObj = new CachedDataReducer(api.getAllMetricMetadata, "metricMetadata");
 export const refreshMetricMetadata = metricMetadataReducerObj.refresh;
 
 export interface APIReducersState {
@@ -325,7 +291,6 @@ export interface APIReducersState {
   logs: CachedDataReducerState<api.LogEntriesResponseMessage>;
   liveness: CachedDataReducerState<api.LivenessResponseMessage>;
   jobs: KeyedCachedDataReducerState<api.JobsResponseMessage>;
-  job: KeyedCachedDataReducerState<api.JobResponseMessage>;
   queryPlan: CachedDataReducerState<api.QueryPlanResponseMessage>;
   problemRanges: KeyedCachedDataReducerState<api.ProblemRangesResponseMessage>;
   certificates: KeyedCachedDataReducerState<api.CertificatesResponseMessage>;
@@ -350,15 +315,13 @@ export const apiReducersReducer = combineReducers<APIReducersState>({
   [versionReducerObj.actionNamespace]: versionReducerObj.reducer,
   [locationsReducerObj.actionNamespace]: locationsReducerObj.reducer,
   [databasesReducerObj.actionNamespace]: databasesReducerObj.reducer,
-  [databaseDetailsReducerObj.actionNamespace]:
-    databaseDetailsReducerObj.reducer,
+  [databaseDetailsReducerObj.actionNamespace]: databaseDetailsReducerObj.reducer,
   [tableDetailsReducerObj.actionNamespace]: tableDetailsReducerObj.reducer,
   [tableStatsReducerObj.actionNamespace]: tableStatsReducerObj.reducer,
   [nonTableStatsReducerObj.actionNamespace]: nonTableStatsReducerObj.reducer,
   [logsReducerObj.actionNamespace]: logsReducerObj.reducer,
   [livenessReducerObj.actionNamespace]: livenessReducerObj.reducer,
   [jobsReducerObj.actionNamespace]: jobsReducerObj.reducer,
-  [jobReducerObj.actionNamespace]: jobReducerObj.reducer,
   [queryPlanReducerObj.actionNamespace]: queryPlanReducerObj.reducer,
   [problemRangesReducerObj.actionNamespace]: problemRangesReducerObj.reducer,
   [certificatesReducerObj.actionNamespace]: certificatesReducerObj.reducer,
@@ -369,11 +332,9 @@ export const apiReducersReducer = combineReducers<APIReducersState>({
   [sessionsReducerObj.actionNamespace]: sessionsReducerObj.reducer,
   [storesReducerObj.actionNamespace]: storesReducerObj.reducer,
   [queriesReducerObj.actionNamespace]: queriesReducerObj.reducer,
-  [dataDistributionReducerObj.actionNamespace]:
-    dataDistributionReducerObj.reducer,
+  [dataDistributionReducerObj.actionNamespace]: dataDistributionReducerObj.reducer,
   [metricMetadataReducerObj.actionNamespace]: metricMetadataReducerObj.reducer,
-  [statementDiagnosticsReportsReducerObj.actionNamespace]:
-    statementDiagnosticsReportsReducerObj.reducer,
+  [statementDiagnosticsReportsReducerObj.actionNamespace]: statementDiagnosticsReportsReducerObj.reducer,
 });
 
 export { CachedDataReducerState, KeyedCachedDataReducerState };

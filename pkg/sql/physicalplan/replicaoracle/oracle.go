@@ -31,11 +31,11 @@ type Policy byte
 
 var (
 	// RandomChoice chooses lease replicas randomly.
-	RandomChoice = RegisterPolicy(newRandomOracle)
+	RandomChoice = RegisterPolicy(newRandomOracleFactory)
 	// BinPackingChoice bin-packs the choices.
-	BinPackingChoice = RegisterPolicy(newBinPackingOracle)
+	BinPackingChoice = RegisterPolicy(newBinPackingOracleFactory)
 	// ClosestChoice chooses the node closest to the current node.
-	ClosestChoice = RegisterPolicy(newClosestOracle)
+	ClosestChoice = RegisterPolicy(newClosestOracleFactory)
 )
 
 // Config is used to construct an OracleFactory.
@@ -63,45 +63,43 @@ type Oracle interface {
 	// don't care about the leaseholder (e.g. when we're planning for follower
 	// reads).
 	//
-	// When the range's closed timestamp policy is known, it is passed in.
-	// Otherwise, the default closed timestamp policy is provided.
-	//
 	// A RangeUnavailableError can be returned if there's no information in gossip
 	// about any of the nodes that might be tried.
 	ChoosePreferredReplica(
-		ctx context.Context,
-		txn *kv.Txn,
-		rng *roachpb.RangeDescriptor,
-		leaseholder *roachpb.ReplicaDescriptor,
-		ctPolicy roachpb.RangeClosedTimestampPolicy,
-		qState QueryState,
+		ctx context.Context, rng *roachpb.RangeDescriptor, leaseholder *roachpb.ReplicaDescriptor, qState QueryState,
 	) (roachpb.ReplicaDescriptor, error)
 }
 
-// OracleFactory creates an oracle from a Config.
-type OracleFactory func(Config) Oracle
+// OracleFactory creates an oracle for a Txn.
+type OracleFactory interface {
+	Oracle(*kv.Txn) Oracle
+}
 
-// NewOracle creates an oracle with the given policy.
-func NewOracle(policy Policy, cfg Config) Oracle {
-	ff, ok := oracleFactories[policy]
+// OracleFactoryFunc creates an OracleFactory from a Config.
+type OracleFactoryFunc func(Config) OracleFactory
+
+// NewOracleFactory creates an oracle with the given policy.
+func NewOracleFactory(policy Policy, cfg Config) OracleFactory {
+	ff, ok := oracleFactoryFuncs[policy]
 	if !ok {
 		panic(errors.Errorf("unknown Policy %v", policy))
 	}
 	return ff(cfg)
 }
 
-// RegisterPolicy creates a new policy given an OracleFactory. RegisterPolicy is
-// intended to be called only during init and is not safe for concurrent use.
-func RegisterPolicy(f OracleFactory) Policy {
-	if len(oracleFactories) == 255 {
+// RegisterPolicy creates a new policy given a function which constructs an
+// OracleFactory. RegisterPolicy is intended to be called only during init and
+// is not safe for concurrent use.
+func RegisterPolicy(f OracleFactoryFunc) Policy {
+	if len(oracleFactoryFuncs) == 255 {
 		panic("Can only register 255 Policy instances")
 	}
-	r := Policy(len(oracleFactories))
-	oracleFactories[r] = f
+	r := Policy(len(oracleFactoryFuncs))
+	oracleFactoryFuncs[r] = f
 	return r
 }
 
-var oracleFactories = map[Policy]OracleFactory{}
+var oracleFactoryFuncs = map[Policy]OracleFactoryFunc{}
 
 // QueryState encapsulates the history of assignments of ranges to nodes
 // done by an oracle on behalf of one particular query.
@@ -124,19 +122,20 @@ type randomOracle struct {
 	nodeDescs kvcoord.NodeDescStore
 }
 
-func newRandomOracle(cfg Config) Oracle {
+var _ OracleFactory = &randomOracle{}
+
+func newRandomOracleFactory(cfg Config) OracleFactory {
 	return &randomOracle{nodeDescs: cfg.NodeDescs}
 }
 
+func (o *randomOracle) Oracle(_ *kv.Txn) Oracle {
+	return o
+}
+
 func (o *randomOracle) ChoosePreferredReplica(
-	ctx context.Context,
-	_ *kv.Txn,
-	desc *roachpb.RangeDescriptor,
-	_ *roachpb.ReplicaDescriptor,
-	_ roachpb.RangeClosedTimestampPolicy,
-	_ QueryState,
+	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.ReplicaDescriptor, _ QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
-	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc, kvcoord.OnlyPotentialLeaseholders)
+	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, err
 	}
@@ -151,7 +150,7 @@ type closestOracle struct {
 	latencyFunc kvcoord.LatencyFunc
 }
 
-func newClosestOracle(cfg Config) Oracle {
+func newClosestOracleFactory(cfg Config) OracleFactory {
 	return &closestOracle{
 		nodeDescs:   cfg.NodeDescs,
 		nodeDesc:    cfg.NodeDesc,
@@ -159,17 +158,14 @@ func newClosestOracle(cfg Config) Oracle {
 	}
 }
 
+func (o *closestOracle) Oracle(_ *kv.Txn) Oracle {
+	return o
+}
+
 func (o *closestOracle) ChoosePreferredReplica(
-	ctx context.Context,
-	_ *kv.Txn,
-	desc *roachpb.RangeDescriptor,
-	_ *roachpb.ReplicaDescriptor,
-	_ roachpb.RangeClosedTimestampPolicy,
-	_ QueryState,
+	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.ReplicaDescriptor, _ QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
-	// We know we're serving a follower read request, so consider all non-outgoing
-	// replicas.
-	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc, kvcoord.AllExtantReplicas)
+	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, err
 	}
@@ -201,7 +197,7 @@ type binPackingOracle struct {
 	latencyFunc kvcoord.LatencyFunc
 }
 
-func newBinPackingOracle(cfg Config) Oracle {
+func newBinPackingOracleFactory(cfg Config) OracleFactory {
 	return &binPackingOracle{
 		maxPreferredRangesPerLeaseHolder: maxPreferredRangesPerLeaseHolder,
 		nodeDescs:                        cfg.NodeDescs,
@@ -210,12 +206,16 @@ func newBinPackingOracle(cfg Config) Oracle {
 	}
 }
 
+var _ OracleFactory = &binPackingOracle{}
+
+func (o *binPackingOracle) Oracle(_ *kv.Txn) Oracle {
+	return o
+}
+
 func (o *binPackingOracle) ChoosePreferredReplica(
 	ctx context.Context,
-	_ *kv.Txn,
 	desc *roachpb.RangeDescriptor,
 	leaseholder *roachpb.ReplicaDescriptor,
-	_ roachpb.RangeClosedTimestampPolicy,
 	queryState QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
 	// If we know the leaseholder, we choose it.
@@ -223,7 +223,7 @@ func (o *binPackingOracle) ChoosePreferredReplica(
 		return *leaseholder, nil
 	}
 
-	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc, kvcoord.OnlyPotentialLeaseholders)
+	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, err
 	}
@@ -253,12 +253,9 @@ func (o *binPackingOracle) ChoosePreferredReplica(
 // is available in the provided NodeDescStore. If no nodes are available, a
 // RangeUnavailableError is returned.
 func replicaSliceOrErr(
-	ctx context.Context,
-	nodeDescs kvcoord.NodeDescStore,
-	desc *roachpb.RangeDescriptor,
-	filter kvcoord.ReplicaSliceFilter,
+	ctx context.Context, nodeDescs kvcoord.NodeDescStore, desc *roachpb.RangeDescriptor,
 ) (kvcoord.ReplicaSlice, error) {
-	replicas, err := kvcoord.NewReplicaSlice(ctx, nodeDescs, desc, nil, filter)
+	replicas, err := kvcoord.NewReplicaSlice(ctx, nodeDescs, desc, nil /* leaseholder */)
 	if err != nil {
 		return kvcoord.ReplicaSlice{}, sqlerrors.NewRangeUnavailableError(desc.RangeID, err)
 	}

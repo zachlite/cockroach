@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
@@ -65,7 +66,6 @@ func (b *Builder) buildCreateView(cv *memo.CreateViewExpr) (execPlan, error) {
 		cv.ViewQuery,
 		cols,
 		cv.Deps,
-		cv.TypeDeps,
 	)
 	return execPlan{root: root}, err
 }
@@ -94,6 +94,11 @@ func (b *Builder) buildExplainOpt(explain *memo.ExplainExpr) (execPlan, error) {
 		// TODO(radu): add views, sequences
 	}
 
+	// If MEMO option was passed, show the memo.
+	if explain.Options.Flags[tree.ExplainFlagMemo] {
+		planText.WriteString(b.optimizer.FormatMemo(xform.FmtPretty))
+	}
+
 	f := memo.MakeExprFmtCtx(fmtFlags, b.mem, b.catalog)
 	f.FormatExpr(explain.Input)
 	planText.WriteString(f.Buffer.String())
@@ -118,19 +123,34 @@ func (b *Builder) buildExplain(explain *memo.ExplainExpr) (execPlan, error) {
 		return b.buildExplainOpt(explain)
 	}
 
-	node, err := b.factory.ConstructExplain(
-		&explain.Options,
-		explain.StmtType,
-		func(ef exec.ExplainFactory) (exec.Plan, error) {
-			// Create a separate builder for the explain query.
-			explainBld := New(ef, b.mem, b.catalog, explain.Input, b.evalCtx, b.initialAllowAutoCommit)
-			explainBld.disableTelemetry = true
-			return explainBld.Build()
-		},
-	)
+	if explain.Options.Mode == tree.ExplainPlan {
+		node, err := b.factory.ConstructExplainPlan(
+			&explain.Options,
+			func(ef exec.ExplainFactory) (exec.Plan, error) {
+				// Create a separate builder for the explain query.
+				explainBld := New(ef, b.optimizer, b.mem, b.catalog, explain.Input, b.evalCtx, b.initialAllowAutoCommit)
+				explainBld.disableTelemetry = true
+				return explainBld.Build()
+			},
+		)
+		if err != nil {
+			return execPlan{}, err
+		}
+		return planWithColumns(node, explain.ColList), nil
+	}
+
+	// Create a separate builder for the explain query.
+	explainBld := New(b.factory, b.optimizer, b.mem, b.catalog, explain.Input, b.evalCtx, b.initialAllowAutoCommit)
+	explainBld.disableTelemetry = true
+	plan, err := explainBld.Build()
 	if err != nil {
 		return execPlan{}, err
 	}
+	node, err := b.factory.ConstructExplain(&explain.Options, explain.StmtType, plan)
+	if err != nil {
+		return execPlan{}, err
+	}
+
 	return planWithColumns(node, explain.ColList), nil
 }
 
@@ -201,7 +221,6 @@ func (b *Builder) buildAlterTableRelocate(relocate *memo.AlterTableRelocateExpr)
 		table.Index(relocate.Index),
 		input.root,
 		relocate.RelocateLease,
-		relocate.RelocateNonVoters,
 	)
 	if err != nil {
 		return execPlan{}, err
@@ -270,15 +289,6 @@ func (b *Builder) buildCancelSessions(cancel *memo.CancelSessionsExpr) (execPlan
 		telemetry.Inc(sqltelemetry.CancelSessionsUseCounter)
 	}
 	// CancelSessions returns no columns.
-	return execPlan{root: node}, nil
-}
-
-func (b *Builder) buildCreateStatistics(c *memo.CreateStatisticsExpr) (execPlan, error) {
-	node, err := b.factory.ConstructCreateStatistics(c.Syntax)
-	if err != nil {
-		return execPlan{}, err
-	}
-	// CreateStatistics returns no columns.
 	return execPlan{root: node}, nil
 }
 

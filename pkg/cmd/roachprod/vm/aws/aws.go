@@ -13,7 +13,6 @@ package aws
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
@@ -37,151 +36,31 @@ const ProviderName = "aws"
 // init will inject the AWS provider into vm.Providers, but only
 // if the aws tool is available on the local path.
 func init() {
-	// aws-cli version 1 automatically base64 encodes the string passed as --public-key-material.
-	// Version 2 supports file:// and fileb:// prefixes for text and binary files.
-	// The latter prefix will base64-encode the file contents. See
-	// https://docs.aws.amazon.//com/cli/latest/userguide/cliv2-migration.html#cliv2-migration-binaryparam
-	const unsupportedAwsCliVersionPrefix = "aws-cli/1."
-	const unimplemented = "please install the AWS CLI utilities version 2+ " +
+	const unimplemented = "please install the AWS CLI utilities " +
 		"(https://docs.aws.amazon.com/cli/latest/userguide/installing.html)"
-	const noCredentials = "missing AWS credentials, expected ~/.aws/credentials file or AWS_ACCESS_KEY_ID env var"
-
 	var p vm.Provider = &Provider{}
+	if _, err := exec.LookPath("aws"); err == nil {
+		// NB: This is a bit hacky, but using something like `aws iam get-user` is
+		// slow and not something we want to do at startup.
+		haveCredentials := func() bool {
+			const credFile = "${HOME}/.aws/credentials"
+			if _, err := os.Stat(os.ExpandEnv(credFile)); err == nil {
+				return true
+			}
+			if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+				return true
+			}
+			return false
+		}
 
-	haveRequiredVersion := func() bool {
-		cmd := exec.Command("aws", "--version")
-		output, err := cmd.Output()
-		if err != nil {
-			return false
+		if !haveCredentials() {
+			p = flagstub.New(p, unimplemented)
 		}
-		if strings.HasPrefix(string(output), unsupportedAwsCliVersionPrefix) {
-			return false
-		}
-		return true
-	}
-	if !haveRequiredVersion() {
+	} else {
 		p = flagstub.New(p, unimplemented)
-		vm.Providers[ProviderName] = p
-		return
-	}
-
-	// NB: This is a bit hacky, but using something like `aws iam get-user` is
-	// slow and not something we want to do at startup.
-	haveCredentials := func() bool {
-		const credFile = "${HOME}/.aws/credentials"
-		if _, err := os.Stat(os.ExpandEnv(credFile)); err == nil {
-			return true
-		}
-		if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
-			return true
-		}
-		return false
-	}
-	if !haveCredentials() {
-		p = flagstub.New(p, noCredentials)
-		vm.Providers[ProviderName] = p
-		return
 	}
 
 	vm.Providers[ProviderName] = p
-}
-
-// ebsDisk represent EBS disk device.
-// When marshaled to JSON format, produces JSON specification used
-// by AWS sdk to configure attached volumes.
-type ebsDisk struct {
-	VolumeType          string `json:"VolumeType"`
-	VolumeSize          int    `json:"VolumeSize"`
-	IOPs                int    `json:"Iops,omitempty"`
-	Throughput          int    `json:"Throughput,omitempty"`
-	DeleteOnTermination bool   `json:"DeleteOnTermination"`
-}
-
-// ebsVolume represents a mounted volume: name + ebsDisk
-type ebsVolume struct {
-	DeviceName string  `json:"DeviceName"`
-	Disk       ebsDisk `json:"Ebs"`
-}
-
-const ebsDefaultVolumeSizeGB = 500
-const defaultEBSVolumeType = "gp3"
-
-// Set implements flag Value interface.
-func (d *ebsDisk) Set(s string) error {
-	if err := json.Unmarshal([]byte(s), &d); err != nil {
-		return err
-	}
-
-	d.DeleteOnTermination = true
-
-	// Sanity check disk configuration.
-	// This is not strictly needed since AWS sdk would return error anyway,
-	// but we can return a nicer error message sooner.
-	if d.VolumeSize == 0 {
-		d.VolumeSize = ebsDefaultVolumeSizeGB
-	}
-
-	switch strings.ToLower(d.VolumeType) {
-	case "gp2":
-		// Nothing -- size checked above.
-	case "gp3":
-		if d.IOPs > 16000 {
-			return errors.AssertionFailedf("Iops required for gp3 disk: [3000, 16000]")
-		}
-		if d.IOPs == 0 {
-			// 30000 is a base IOPs for gp3.
-			d.IOPs = 3000
-		}
-		if d.Throughput == 0 {
-			// 125MB/s is base throughput for gp3.
-			d.Throughput = 125
-		}
-	case "io1", "io2":
-		if d.IOPs == 0 {
-			return errors.AssertionFailedf("Iops required for %s disk", d.VolumeType)
-		}
-	default:
-		return errors.Errorf("Unknown EBS volume type %s", d.VolumeType)
-	}
-	return nil
-}
-
-// Type implements flag Value interface.
-func (d *ebsDisk) Type() string {
-	return "JSON"
-}
-
-// String Implements flag Value interface.
-func (d *ebsDisk) String() string {
-	return "EBSDisk"
-}
-
-type ebsVolumeList []*ebsVolume
-
-func (vl *ebsVolumeList) newVolume() *ebsVolume {
-	return &ebsVolume{
-		DeviceName: fmt.Sprintf("/dev/sd%c", 'd'+len(*vl)),
-	}
-}
-
-// Set implements flag Value interface.
-func (vl *ebsVolumeList) Set(s string) error {
-	v := vl.newVolume()
-	if err := v.Disk.Set(s); err != nil {
-		return err
-	}
-	*vl = append(*vl, v)
-	return nil
-}
-
-// Type implements flag Value interface.
-func (vl *ebsVolumeList) Type() string {
-	return "JSON"
-}
-
-// String Implements flag Value interface.
-func (vl *ebsVolumeList) String() string {
-	return "EBSVolumeList"
 }
 
 // providerOpts implements the vm.ProviderFlags interface for aws.Provider.
@@ -189,21 +68,18 @@ type providerOpts struct {
 	Profile string
 	Config  *awsConfig
 
-	MachineType      string
-	SSDMachineType   string
-	CPUOptions       string
-	RemoteUserName   string
-	DefaultEBSVolume ebsVolume
-	EBSVolumes       ebsVolumeList
-	UseMultipleDisks bool
+	MachineType        string
+	SSDMachineType     string
+	CPUOptions         string
+	RemoteUserName     string
+	EBSVolumeType      string
+	EBSVolumeSize      int
+	EBSProvisionedIOPs int
+	UseMultipleDisks   bool
 
 	// Use specified ImageAMI when provisioning.
 	// Overrides config.json AMI.
 	ImageAMI string
-
-	// IAMProfile designates the name of the instance profile to use for created
-	// EC2 instances if non-empty.
-	IAMProfile string
 
 	// CreateZones stores the list of zones for used cluster creation.
 	// When > 1 zone specified, geo is automatically used, otherwise, geo depends
@@ -244,6 +120,7 @@ var defaultCreateZones = []string{
 // somewhat complicated because different EC2 regions may as well
 // be parallel universes.
 func (o *providerOpts) ConfigureCreateFlags(flags *pflag.FlagSet) {
+
 	// m5.xlarge is a 4core, 16Gb instance, approximately equal to a GCE n1-standard-4
 	flags.StringVar(&o.MachineType, ProviderName+"-machine-type", defaultMachineType,
 		"Machine type (see https://aws.amazon.com/ec2/instance-types/)")
@@ -260,17 +137,13 @@ func (o *providerOpts) ConfigureCreateFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&o.RemoteUserName, ProviderName+"-user",
 		"ubuntu", "Name of the remote user to SSH as")
 
-	flags.StringVar(&o.DefaultEBSVolume.Disk.VolumeType, ProviderName+"-ebs-volume-type",
-		"", "Type of the EBS volume, only used if local-ssd=false")
-	flags.IntVar(&o.DefaultEBSVolume.Disk.VolumeSize, ProviderName+"-ebs-volume-size",
-		ebsDefaultVolumeSizeGB, "Size in GB of EBS volume, only used if local-ssd=false")
-	flags.IntVar(&o.DefaultEBSVolume.Disk.IOPs, ProviderName+"-ebs-iops",
-		0, "Number of IOPs to provision for supported disk types (io1, io2, gp3)")
-	flags.IntVar(&o.DefaultEBSVolume.Disk.Throughput, ProviderName+"-ebs-throughput",
-		0, "Additional throughput to provision, in MiB/s")
-
-	flags.VarP(&o.EBSVolumes, ProviderName+"-ebs-volume", "",
-		"Additional EBS disk to attached; specified as JSON: {VolumeType=io2,VolumeSize=213,Iops=321}")
+	flags.StringVar(&o.EBSVolumeType, ProviderName+"-ebs-volume-type",
+		"gp2", "Type of the EBS volume, only used if local-ssd=false")
+	flags.IntVar(&o.EBSVolumeSize, ProviderName+"-ebs-volume-size",
+		500, "Size in GB of EBS volume, only used if local-ssd=false")
+	flags.IntVar(&o.EBSProvisionedIOPs, ProviderName+"-ebs-iops",
+		1000, "Number of IOPs to provision, only used if "+ProviderName+
+			"-ebs-volume-type=io1")
 
 	flags.StringSliceVar(&o.CreateZones, ProviderName+"-zones", nil,
 		fmt.Sprintf("aws availability zones to use for cluster creation. If zones are formatted\n"+
@@ -285,9 +158,6 @@ func (o *providerOpts) ConfigureCreateFlags(flags *pflag.FlagSet) {
 		" rate limit (per second) for instance creation. This is used to avoid hitting the request"+
 		" limits from aws, which can vary based on the region, and the size of the cluster being"+
 		" created. Try lowering this limit when hitting 'Request limit exceeded' errors.")
-	flags.StringVar(&o.IAMProfile, ProviderName+"-	iam-profile", "roachprod-testing",
-		"the IAM instance profile to associate with created VMs if non-empty")
-
 }
 
 func (o *providerOpts) ConfigureClusterFlags(flags *pflag.FlagSet, _ vm.MultipleProjectsOption) {
@@ -479,11 +349,6 @@ func (p *Provider) Delete(vms vm.List) error {
 		})
 	}
 	return g.Wait()
-}
-
-// Reset is part of vm.Provider. It is a no-op.
-func (p *Provider) Reset(vms vm.List) error {
-	return nil // unimplemented
 }
 
 // Extend is part of the vm.Provider interface.
@@ -854,53 +719,25 @@ func (p *Provider) runInstance(name string, zone string, opts vm.CreateOpts) err
 		args = append(args, "--cpu-options", cpuOptions)
 	}
 
-	if p.opts.IAMProfile != "" {
-		args = append(args, "--iam-instance-profile", "Name="+p.opts.IAMProfile)
-	}
-
 	// The local NVMe devices are automatically mapped.  Otherwise, we need to map an EBS data volume.
 	if !opts.SSDOpts.UseLocalSSD {
-		if len(p.opts.EBSVolumes) == 0 && p.opts.DefaultEBSVolume.Disk.VolumeType == "" {
-			p.opts.DefaultEBSVolume.Disk.VolumeType = defaultEBSVolumeType
+		var ebsParams string
+		switch t := p.opts.EBSVolumeType; t {
+		case "gp2":
+			ebsParams = fmt.Sprintf("{VolumeSize=%d,VolumeType=%s,DeleteOnTermination=true}",
+				p.opts.EBSVolumeSize, t)
+		case "io1", "io2":
+			ebsParams = fmt.Sprintf("{VolumeSize=%d,VolumeType=%s,Iops=%d,DeleteOnTermination=true}",
+				p.opts.EBSVolumeSize, t, p.opts.EBSProvisionedIOPs)
+		default:
+			return errors.Errorf("Unknown EBS volume type %s", t)
 		}
-
-		if p.opts.DefaultEBSVolume.Disk.VolumeType != "" {
-			// Add default volume to the list of volumes we'll setup.
-			v := p.opts.EBSVolumes.newVolume()
-			v.Disk = p.opts.DefaultEBSVolume.Disk
-			p.opts.EBSVolumes = append(p.opts.EBSVolumes, v)
-		}
+		args = append(args,
+			"--block-device-mapping",
+			// Size is measured in GB.  gp2 type derives guaranteed iops from size.
+			"DeviceName=/dev/sdd,Ebs="+ebsParams,
+		)
 	}
-
-	osDiskVolume := &ebsVolume{
-		DeviceName: "/dev/sda1",
-		Disk: ebsDisk{
-			VolumeType:          defaultEBSVolumeType,
-			VolumeSize:          opts.OsVolumeSize,
-			DeleteOnTermination: true,
-		},
-	}
-
-	p.opts.EBSVolumes = append(p.opts.EBSVolumes, osDiskVolume)
-
-	mapping, err := json.Marshal(p.opts.EBSVolumes)
-	if err != nil {
-		return err
-	}
-
-	deviceMapping, err := ioutil.TempFile("", "aws-block-device-mapping")
-	if err != nil {
-		return err
-	}
-	defer deviceMapping.Close()
-	if _, err := deviceMapping.Write(mapping); err != nil {
-		return err
-	}
-	args = append(args,
-		"--block-device-mapping",
-		"file://"+deviceMapping.Name(),
-	)
-
 	return p.runJSONCommand(args, &data)
 }
 

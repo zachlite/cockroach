@@ -20,10 +20,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/pebble/vfs"
 )
 
-func runTestSSTIterator(t *testing.T, iter SimpleMVCCIterator, allKVs []MVCCKeyValue) {
+func runTestSSTIterator(t *testing.T, iter SimpleIterator, allKVs []MVCCKeyValue) {
 	// Drop the first kv so we can test Seek.
 	expected := allKVs[1:]
 
@@ -105,12 +104,8 @@ func TestSSTIterator(t *testing.T) {
 		if err := ioutil.WriteFile(path, sstFile.Data(), 0600); err != nil {
 			t.Fatalf("%+v", err)
 		}
-		file, err := vfs.Default.Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
 
-		iter, err := NewSSTIterator(file)
+		iter, err := NewSSTIterator(path)
 		if err != nil {
 			t.Fatalf("%+v", err)
 		}
@@ -147,13 +142,13 @@ func TestCockroachComparer(t *testing.T) {
 		Timestamp: hlc.Timestamp{WallTime: 2},
 	}
 
-	if x := EngineComparer.Compare(EncodeKey(keyAMetadata), EncodeKey(keyA1)); x != -1 {
+	if x := MVCCComparer.Compare(EncodeKey(keyAMetadata), EncodeKey(keyA1)); x != -1 {
 		t.Errorf("expected key metadata to sort first got: %d", x)
 	}
-	if x := EngineComparer.Compare(EncodeKey(keyA2), EncodeKey(keyA1)); x != -1 {
+	if x := MVCCComparer.Compare(EncodeKey(keyA2), EncodeKey(keyA1)); x != -1 {
 		t.Errorf("expected higher timestamp to sort first got: %d", x)
 	}
-	if x := EngineComparer.Compare(EncodeKey(keyA2), EncodeKey(keyB2)); x != -1 {
+	if x := MVCCComparer.Compare(EncodeKey(keyA2), EncodeKey(keyB2)); x != -1 {
 		t.Errorf("expected lower key to sort first got: %d", x)
 	}
 }

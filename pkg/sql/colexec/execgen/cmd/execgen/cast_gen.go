@@ -16,7 +16,7 @@ import (
 	"text/template"
 )
 
-const castTmpl = "pkg/sql/colexec/colexecbase/cast_tmpl.go"
+const castTmpl = "pkg/sql/colexec/cast_tmpl.go"
 
 func genCastOperators(inputFileContents string, wr io.Writer) error {
 	r := strings.NewReplacer(
@@ -31,19 +31,20 @@ func genCastOperators(inputFileContents string, wr io.Writer) error {
 	)
 	s := r.Replace(inputFileContents)
 
-	setValues := makeFunctionRegex("_CAST_TUPLES", 2)
-	s = setValues.ReplaceAllString(s, `{{template "castTuples" buildDict "Global" . "HasNulls" $1 "HasSel" $2}}`)
+	castRe := makeFunctionRegex("_CAST", 3)
+	s = castRe.ReplaceAllString(s, makeTemplateFunctionCall("Right.Cast", 3))
 
-	castRe := makeFunctionRegex("_CAST", 4)
-	s = castRe.ReplaceAllString(s, makeTemplateFunctionCall("Right.Cast", 4))
-
+	s = strings.ReplaceAll(s, "_L_SLICE", "execgen.SLICE")
 	s = strings.ReplaceAll(s, "_L_UNSAFEGET", "execgen.UNSAFEGET")
 	s = replaceManipulationFuncsAmbiguous(".Left", s)
 
 	s = strings.ReplaceAll(s, "_R_UNSAFEGET", "execgen.UNSAFEGET")
 	s = replaceManipulationFuncsAmbiguous(".Right", s)
 
-	tmpl, err := template.New("cast").Funcs(template.FuncMap{"buildDict": buildDict}).Parse(s)
+	s = strings.ReplaceAll(s, "_R_SET", "execgen.SET")
+	s = replaceManipulationFuncsAmbiguous(".Right", s)
+
+	tmpl, err := template.New("cast").Parse(s)
 	if err != nil {
 		return err
 	}

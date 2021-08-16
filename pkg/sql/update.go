@@ -14,13 +14,14 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -57,7 +58,7 @@ type updateRun struct {
 
 	// computedCols are the columns that need to be (re-)computed as
 	// the result of updating some of the columns in updateCols.
-	computedCols []catalog.Column
+	computedCols []descpb.ColumnDescriptor
 	// computeExprs are the expressions to evaluate to re-compute the
 	// columns in computedCols.
 	computeExprs []tree.TypedExpr
@@ -103,7 +104,7 @@ type updateRun struct {
 	// updateColsIdx maps the order of the 2nd stage into the order of the 3rd stage.
 	// This provides the inverse mapping of sourceSlots.
 	//
-	updateColsIdx catalog.TableColMap
+	updateColsIdx map[descpb.ColumnID]int
 
 	// rowIdxToRetIdx is the mapping from the columns in ru.FetchCols to the
 	// columns in the resultRowBuffer. A value of -1 is used to indicate
@@ -147,6 +148,8 @@ func (u *updateNode) BatchedNext(params runParams) (bool, error) {
 		return false, nil
 	}
 
+	tracing.AnnotateTrace()
+
 	// Advance one batch. First, clear the last batch.
 	u.run.tu.clearLastBatch(params.ctx)
 
@@ -173,7 +176,8 @@ func (u *updateNode) BatchedNext(params runParams) (bool, error) {
 		}
 
 		// Are we done yet with the current batch?
-		if u.run.tu.currentBatchSize >= u.run.tu.maxBatchSize {
+		if u.run.tu.currentBatchSize >= u.run.tu.maxBatchSize ||
+			u.run.tu.b.ApproximateMutationBytes() >= u.run.tu.maxBatchByteSize {
 			break
 		}
 	}
@@ -251,10 +255,8 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 		// iVarContainerForComputedCols does this.
 		copy(u.run.iVarContainerForComputedCols.CurSourceRow, oldValues)
 		for i := range u.run.tu.ru.UpdateCols {
-			id := u.run.tu.ru.UpdateCols[i].GetID()
-			idx := u.run.tu.ru.FetchColIDtoRowIndex.GetDefault(id)
-			u.run.iVarContainerForComputedCols.CurSourceRow[idx] = u.run.
-				updateValues[i]
+			id := u.run.tu.ru.UpdateCols[i].ID
+			u.run.iVarContainerForComputedCols.CurSourceRow[u.run.tu.ru.FetchColIDtoRowIndex[id]] = u.run.updateValues[i]
 		}
 
 		// Now (re-)compute the computed columns.
@@ -265,11 +267,9 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 			d, err := u.run.computeExprs[i].Eval(params.EvalContext())
 			if err != nil {
 				params.EvalContext().IVarContainer = nil
-				name := u.run.computedCols[i].GetName()
-				return errors.Wrapf(err, "computed column %s", tree.ErrString((*tree.Name)(&name)))
+				return errors.Wrapf(err, "computed column %s", tree.ErrString((*tree.Name)(&u.run.computedCols[i].Name)))
 			}
-			idx := u.run.updateColsIdx.GetDefault(u.run.computedCols[i].GetID())
-			u.run.updateValues[idx] = d
+			u.run.updateValues[u.run.updateColsIdx[u.run.computedCols[i].ID]] = d
 		}
 		params.EvalContext().PopIVarContainer()
 	}
@@ -296,7 +296,7 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 	// Create a set of partial index IDs to not add entries or remove entries
 	// from.
 	var pm row.PartialIndexUpdateHelper
-	if n := len(u.run.tu.tableDesc().PartialIndexes()); n > 0 {
+	if n := u.run.tu.tableDesc().PartialIndexOrds().Len(); n > 0 {
 		offset := len(u.run.tu.ru.FetchCols) + len(u.run.tu.ru.UpdateCols) + u.run.checkOrds.Len() + u.run.numPassthrough
 		partialIndexVals := sourceVals[offset:]
 		partialIndexPutVals := partialIndexVals[:n]
@@ -391,7 +391,7 @@ type sourceSlot interface {
 }
 
 type scalarSlot struct {
-	column      catalog.Column
+	column      descpb.ColumnDescriptor
 	sourceIndex int
 }
 
@@ -402,7 +402,7 @@ func (ss scalarSlot) extractValues(row tree.Datums) tree.Datums {
 func (ss scalarSlot) checkColumnTypes(row []tree.TypedExpr) error {
 	renderedResult := row[ss.sourceIndex]
 	typ := renderedResult.ResolvedType()
-	return colinfo.CheckDatumTypeFitsColumnType(ss.column, typ)
+	return colinfo.CheckDatumTypeFitsColumnType(&ss.column, typ)
 }
 
 // enforceLocalColumnConstraints asserts the column constraints that
@@ -417,12 +417,13 @@ func (ss scalarSlot) checkColumnTypes(row []tree.TypedExpr) error {
 //
 // The row buffer is modified in-place with the result of the
 // checks.
-func enforceLocalColumnConstraints(row tree.Datums, cols []catalog.Column) error {
-	for i, col := range cols {
-		if !col.IsNullable() && row[i] == tree.DNull {
-			return sqlerrors.NewNonNullViolationError(col.GetName())
+func enforceLocalColumnConstraints(row tree.Datums, cols []descpb.ColumnDescriptor) error {
+	for i := range cols {
+		col := &cols[i]
+		if !col.Nullable && row[i] == tree.DNull {
+			return sqlerrors.NewNonNullViolationError(col.Name)
 		}
-		outVal, err := tree.AdjustValueToType(col.GetType(), row[i])
+		outVal, err := colinfo.AdjustValueToColumnType(col.Type, row[i], &col.Name)
 		if err != nil {
 			return err
 		}

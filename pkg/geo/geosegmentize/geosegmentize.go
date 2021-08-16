@@ -37,7 +37,6 @@ func Segmentize(
 	if geometry.Empty() {
 		return geometry, nil
 	}
-	layout := geometry.Layout()
 	switch geometry := geometry.(type) {
 	case *geom.Point, *geom.MultiPoint:
 		return geometry, nil
@@ -55,9 +54,9 @@ func Segmentize(
 		}
 		// Appending end point as it wasn't included in the iteration of coordinates.
 		allFlatCoordinates = append(allFlatCoordinates, geometry.Coord(geometry.NumCoords()-1)...)
-		return geom.NewLineStringFlat(layout, allFlatCoordinates).SetSRID(geometry.SRID()), nil
+		return geom.NewLineStringFlat(geom.XY, allFlatCoordinates).SetSRID(geometry.SRID()), nil
 	case *geom.MultiLineString:
-		segMultiLine := geom.NewMultiLineString(layout).SetSRID(geometry.SRID())
+		segMultiLine := geom.NewMultiLineString(geom.XY).SetSRID(geometry.SRID())
 		for lineIdx := 0; lineIdx < geometry.NumLineStrings(); lineIdx++ {
 			l, err := Segmentize(geometry.LineString(lineIdx), segmentMaxAngleOrLength, segmentizeCoords)
 			if err != nil {
@@ -83,9 +82,9 @@ func Segmentize(
 		}
 		// Appending end point as it wasn't included in the iteration of coordinates.
 		allFlatCoordinates = append(allFlatCoordinates, geometry.Coord(geometry.NumCoords()-1)...)
-		return geom.NewLinearRingFlat(layout, allFlatCoordinates).SetSRID(geometry.SRID()), nil
+		return geom.NewLinearRingFlat(geom.XY, allFlatCoordinates).SetSRID(geometry.SRID()), nil
 	case *geom.Polygon:
-		segPolygon := geom.NewPolygon(layout).SetSRID(geometry.SRID())
+		segPolygon := geom.NewPolygon(geom.XY).SetSRID(geometry.SRID())
 		for loopIdx := 0; loopIdx < geometry.NumLinearRings(); loopIdx++ {
 			l, err := Segmentize(geometry.LinearRing(loopIdx), segmentMaxAngleOrLength, segmentizeCoords)
 			if err != nil {
@@ -98,7 +97,7 @@ func Segmentize(
 		}
 		return segPolygon, nil
 	case *geom.MultiPolygon:
-		segMultiPolygon := geom.NewMultiPolygon(layout).SetSRID(geometry.SRID())
+		segMultiPolygon := geom.NewMultiPolygon(geom.XY).SetSRID(geometry.SRID())
 		for polygonIdx := 0; polygonIdx < geometry.NumPolygons(); polygonIdx++ {
 			p, err := Segmentize(geometry.Polygon(polygonIdx), segmentMaxAngleOrLength, segmentizeCoords)
 			if err != nil {
@@ -112,10 +111,6 @@ func Segmentize(
 		return segMultiPolygon, nil
 	case *geom.GeometryCollection:
 		segGeomCollection := geom.NewGeometryCollection().SetSRID(geometry.SRID())
-		err := segGeomCollection.SetLayout(layout)
-		if err != nil {
-			return nil, err
-		}
 		for geoIdx := 0; geoIdx < geometry.NumGeoms(); geoIdx++ {
 			g, err := Segmentize(geometry.Geom(geoIdx), segmentMaxAngleOrLength, segmentizeCoords)
 			if err != nil {

@@ -14,12 +14,9 @@ package faketreeeval
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -45,20 +42,6 @@ func (so *DummySequenceOperators) GetSerialSequenceNameFromColumn(
 	return nil, errors.WithStack(errSequenceOperators)
 }
 
-// CurrentDatabaseRegionConfig is part of the tree.EvalDatabase interface.
-func (so *DummySequenceOperators) CurrentDatabaseRegionConfig(
-	_ context.Context,
-) (tree.DatabaseRegionConfig, error) {
-	return nil, errors.WithStack(errSequenceOperators)
-}
-
-// ValidateAllMultiRegionZoneConfigsInCurrentDatabase is part of the tree.EvalDatabase interface.
-func (so *DummySequenceOperators) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
-	_ context.Context,
-) error {
-	return errors.WithStack(errSequenceOperators)
-}
-
 // ParseQualifiedTableName is part of the tree.EvalDatabase interface.
 func (so *DummySequenceOperators) ParseQualifiedTableName(sql string) (*tree.TableName, error) {
 	return nil, errors.WithStack(errSequenceOperators)
@@ -71,18 +54,11 @@ func (so *DummySequenceOperators) ResolveTableName(
 	return 0, errors.WithStack(errSequenceOperators)
 }
 
-// SchemaExists is part of the tree.EvalDatabase interface.
-func (so *DummySequenceOperators) SchemaExists(
+// LookupSchema is part of the tree.EvalDatabase interface.
+func (so *DummySequenceOperators) LookupSchema(
 	ctx context.Context, dbName, scName string,
-) (bool, error) {
-	return false, errors.WithStack(errSequenceOperators)
-}
-
-// IsTableVisible is part of the tree.EvalDatabase interface.
-func (so *DummySequenceOperators) IsTableVisible(
-	ctx context.Context, curDB string, searchPath sessiondata.SearchPath, tableID oid.Oid,
-) (bool, bool, error) {
-	return false, false, errors.WithStack(errSequenceOperators)
+) (bool, tree.SchemaMeta, error) {
+	return false, nil, errors.WithStack(errSequenceOperators)
 }
 
 // IsTypeVisible is part of the tree.EvalDatabase interface.
@@ -92,27 +68,16 @@ func (so *DummySequenceOperators) IsTypeVisible(
 	return false, false, errors.WithStack(errEvalPlanner)
 }
 
-// HasPrivilege is part of the tree.EvalDatabase interface.
-func (so *DummySequenceOperators) HasPrivilege(
-	ctx context.Context,
-	specifier tree.HasPrivilegeSpecifier,
-	user security.SQLUsername,
-	kind privilege.Kind,
-	withGrantOpt bool,
-) (bool, error) {
-	return false, errors.WithStack(errEvalPlanner)
+// IsTableVisible is part of the tree.EvalDatabase interface.
+func (so *DummySequenceOperators) IsTableVisible(
+	ctx context.Context, curDB string, searchPath sessiondata.SearchPath, tableID int64,
+) (bool, bool, error) {
+	return false, false, errors.WithStack(errSequenceOperators)
 }
 
 // IncrementSequence is part of the tree.SequenceOperators interface.
 func (so *DummySequenceOperators) IncrementSequence(
 	ctx context.Context, seqName *tree.TableName,
-) (int64, error) {
-	return 0, errors.WithStack(errSequenceOperators)
-}
-
-// IncrementSequenceByID is part of the tree.SequenceOperators interface.
-func (so *DummySequenceOperators) IncrementSequenceByID(
-	ctx context.Context, seqID int64,
 ) (int64, error) {
 	return 0, errors.WithStack(errSequenceOperators)
 }
@@ -125,14 +90,6 @@ func (so *DummySequenceOperators) GetLatestValueInSessionForSequence(
 	return 0, errors.WithStack(errSequenceOperators)
 }
 
-// GetLatestValueInSessionForSequenceByID implements the tree.SequenceOperators
-// interface.
-func (so *DummySequenceOperators) GetLatestValueInSessionForSequenceByID(
-	ctx context.Context, seqID int64,
-) (int64, error) {
-	return 0, errors.WithStack(errSequenceOperators)
-}
-
 // SetSequenceValue implements the tree.SequenceOperators interface.
 func (so *DummySequenceOperators) SetSequenceValue(
 	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
@@ -140,30 +97,9 @@ func (so *DummySequenceOperators) SetSequenceValue(
 	return errors.WithStack(errSequenceOperators)
 }
 
-// SetSequenceValueByID implements the tree.SequenceOperators interface.
-func (so *DummySequenceOperators) SetSequenceValueByID(
-	ctx context.Context, seqID int64, newVal int64, isCalled bool,
-) error {
-	return errors.WithStack(errSequenceOperators)
-}
-
 // DummyEvalPlanner implements the tree.EvalPlanner interface by returning
 // errors.
 type DummyEvalPlanner struct{}
-
-// ResolveOIDFromString is part of the EvalPlanner interface.
-func (ep *DummyEvalPlanner) ResolveOIDFromString(
-	ctx context.Context, resultType *types.T, toResolve *tree.DString,
-) (*tree.DOid, error) {
-	return nil, errors.WithStack(errEvalPlanner)
-}
-
-// ResolveOIDFromOID is part of the EvalPlanner interface.
-func (ep *DummyEvalPlanner) ResolveOIDFromOID(
-	ctx context.Context, resultType *types.T, toResolve *tree.DOid,
-) (*tree.DOid, error) {
-	return nil, errors.WithStack(errEvalPlanner)
-}
 
 // UnsafeUpsertDescriptor is part of the EvalPlanner interface.
 func (ep *DummyEvalPlanner) UnsafeUpsertDescriptor(
@@ -186,11 +122,6 @@ func (ep *DummyEvalPlanner) UnsafeDeleteDescriptor(
 	return errors.WithStack(errEvalPlanner)
 }
 
-// ForceDeleteTableData is part of the EvalPlanner interface.
-func (ep *DummyEvalPlanner) ForceDeleteTableData(ctx context.Context, descID int64) error {
-	return errors.WithStack(errEvalPlanner)
-}
-
 // UnsafeUpsertNamespaceEntry is part of the EvalPlanner interface.
 func (ep *DummyEvalPlanner) UnsafeUpsertNamespaceEntry(
 	ctx context.Context, parentID, parentSchemaID int64, name string, descID int64, force bool,
@@ -207,8 +138,8 @@ func (ep *DummyEvalPlanner) UnsafeDeleteNamespaceEntry(
 
 // MemberOfWithAdminOption is part of the EvalPlanner interface.
 func (ep *DummyEvalPlanner) MemberOfWithAdminOption(
-	ctx context.Context, member security.SQLUsername,
-) (map[security.SQLUsername]bool, error) {
+	ctx context.Context, member string,
+) (map[string]bool, error) {
 	return nil, errors.WithStack(errEvalPlanner)
 }
 
@@ -217,35 +148,16 @@ var _ tree.EvalPlanner = &DummyEvalPlanner{}
 var errEvalPlanner = pgerror.New(pgcode.ScalarOperationCannotRunWithoutFullSessionContext,
 	"cannot evaluate scalar expressions using table lookups in this context")
 
-// CurrentDatabaseRegionConfig is part of the tree.EvalDatabase interface.
-func (ep *DummyEvalPlanner) CurrentDatabaseRegionConfig(
-	_ context.Context,
-) (tree.DatabaseRegionConfig, error) {
-	return nil, errors.WithStack(errEvalPlanner)
-}
-
-// ValidateAllMultiRegionZoneConfigsInCurrentDatabase is part of the tree.EvalDatabase interface.
-func (ep *DummyEvalPlanner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
-	_ context.Context,
-) error {
-	return errors.WithStack(errEvalPlanner)
-}
-
 // ParseQualifiedTableName is part of the tree.EvalDatabase interface.
 func (ep *DummyEvalPlanner) ParseQualifiedTableName(sql string) (*tree.TableName, error) {
 	return parser.ParseQualifiedTableName(sql)
 }
 
-// SchemaExists is part of the tree.EvalDatabase interface.
-func (ep *DummyEvalPlanner) SchemaExists(ctx context.Context, dbName, scName string) (bool, error) {
-	return false, errors.WithStack(errEvalPlanner)
-}
-
-// IsTableVisible is part of the tree.EvalDatabase interface.
-func (ep *DummyEvalPlanner) IsTableVisible(
-	ctx context.Context, curDB string, searchPath sessiondata.SearchPath, tableID oid.Oid,
-) (bool, bool, error) {
-	return false, false, errors.WithStack(errEvalPlanner)
+// LookupSchema is part of the tree.EvalDatabase interface.
+func (ep *DummyEvalPlanner) LookupSchema(
+	ctx context.Context, dbName, scName string,
+) (bool, tree.SchemaMeta, error) {
+	return false, nil, errors.WithStack(errEvalPlanner)
 }
 
 // IsTypeVisible is part of the tree.EvalDatabase interface.
@@ -255,15 +167,11 @@ func (ep *DummyEvalPlanner) IsTypeVisible(
 	return false, false, errors.WithStack(errEvalPlanner)
 }
 
-// HasPrivilege is part of the tree.EvalDatabase interface.
-func (ep *DummyEvalPlanner) HasPrivilege(
-	ctx context.Context,
-	specifier tree.HasPrivilegeSpecifier,
-	user security.SQLUsername,
-	kind privilege.Kind,
-	withGrantOpt bool,
-) (bool, error) {
-	return false, errors.WithStack(errEvalPlanner)
+// IsTableVisible is part of the tree.EvalDatabase interface.
+func (ep *DummyEvalPlanner) IsTableVisible(
+	ctx context.Context, curDB string, searchPath sessiondata.SearchPath, tableID int64,
+) (bool, bool, error) {
+	return false, false, errors.WithStack(errEvalPlanner)
 }
 
 // ResolveTableName is part of the tree.EvalDatabase interface.
@@ -354,8 +262,8 @@ type DummyClientNoticeSender struct{}
 
 var _ tree.ClientNoticeSender = &DummyClientNoticeSender{}
 
-// BufferClientNotice is part of the tree.ClientNoticeSender interface.
-func (c *DummyClientNoticeSender) BufferClientNotice(context.Context, pgnotice.Notice) {}
+// SendClientNotice is part of the tree.ClientNoticeSender interface.
+func (c *DummyClientNoticeSender) SendClientNotice(context.Context, error) {}
 
 // DummyTenantOperator implements the tree.TenantOperator interface.
 type DummyTenantOperator struct{}

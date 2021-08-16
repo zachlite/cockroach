@@ -4,6 +4,13 @@ set -euxo pipefail
 
 source "$(dirname "${0}")/teamcity-support.sh"
 
+
+if [[ -n "${PUBLISH_LATEST}" && -n "$PRE_RELEASE" ]]; then
+  echo "Invalid parameter combination: PUBLISH_LATEST and PRE_RELEASE can't both be set."
+  exit 6
+fi
+
+
 tc_start_block "Variable Setup"
 export BUILDER_HIDE_GOPATH_SRC=1
 
@@ -24,13 +31,15 @@ release_branch=$(echo ${build_name} | grep -E -o '^v[0-9]+\.[0-9]+')
 
 if [[ -z "${DRY_RUN}" ]] ; then
   bucket="${BUCKET:-binaries.cockroachdb.com}"
-  google_credentials="$GOOGLE_COCKROACH_CLOUD_IMAGES_CREDENTIALS"
+  google_credentials="$GOOGLE_COCKROACH_CLOUD_IMAGES_COCKROACHDB_CREDENTIALS"
   if [[ -z "${PRE_RELEASE}" ]] ; then
     dockerhub_repository="docker.io/cockroachdb/cockroach"
   else
     dockerhub_repository="docker.io/cockroachdb/cockroach-unstable"
   fi
-  gcr_repository="us.gcr.io/cockroach-cloud-images/cockroach"
+  gcr_repository="us-docker.pkg.dev/cockroach-cloud-images/cockroachdb/cockroach"
+  # Used for docker login for gcloud
+  gcr_hostname="us-docker.pkg.dev"
   s3_download_hostname="${bucket}"
   git_repo_for_tag="cockroachdb/cockroach"
 else
@@ -38,6 +47,7 @@ else
   google_credentials="$GOOGLE_COCKROACH_RELEASE_CREDENTIALS"
   dockerhub_repository="docker.io/cockroachdb/cockroach-misc"
   gcr_repository="us.gcr.io/cockroach-release/cockroach-test"
+  gcr_hostname="us.gcr.io"
   s3_download_hostname="${bucket}.s3.amazonaws.com"
   git_repo_for_tag="cockroachlabs/release-staging"
   if [[ -z "$(echo ${build_name} | grep -E -o '^v[0-9]+\.[0-9]+\.[0-9]+$')" ]] ; then
@@ -51,9 +61,6 @@ else
     build_name="${build_name}-dryrun"
   fi
 fi
-
-# Used for docker login for gcloud
-gcr_hostname="us.gcr.io"
 
 tc_end_block "Variable Setup"
 
@@ -152,11 +159,9 @@ tc_end_block "Tag docker image as latest-RELEASE_BRANCH"
 
 
 tc_start_block "Tag docker image as latest"
-# Only push the "latest" tag for our most recent release branch and for the
-# latest unstable release
+# Only push the "latest" tag for our most recent release branch.
 # https://github.com/cockroachdb/cockroach/issues/41067
-# https://github.com/cockroachdb/cockroach/issues/48309
-if [[ -n "${PUBLISH_LATEST}" ]]; then
+if [[ -n "${PUBLISH_LATEST}" && -z "$PRE_RELEASE" ]]; then
   docker push "${dockerhub_repository}:latest"
 else
   echo "The ${dockerhub_repository}:latest docker image tag was _not_ pushed."

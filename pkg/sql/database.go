@@ -15,12 +15,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -49,20 +48,39 @@ func (p *planner) renameDatabase(
 	}
 
 	b := &kv.Batch{}
-	newKey := catalogkeys.MakeDatabaseNameKey(p.ExecCfg().Codec, newName)
+	newKey := catalogkv.MakeDatabaseNameKey(ctx, p.ExecCfg().Settings, newName).Key(p.ExecCfg().Codec)
 	descID := desc.GetID()
 	if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
 		log.VEventf(ctx, 2, "CPut %s -> %d", newKey, descID)
 	}
 	b.CPut(newKey, descID, nil)
 
-	desc.DrainingNames = append(desc.DrainingNames, descpb.NameInfo{
-		ParentID:       keys.RootNamespaceID,
-		ParentSchemaID: keys.RootNamespaceID,
-		Name:           oldName,
-	})
-	if err := p.writeNonDropDatabaseChange(ctx, desc, stmt); err != nil {
-		return err
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		descKey := catalogkeys.MakeDescMetadataKey(p.ExecCfg().Codec, descID)
+		descDesc := desc.DescriptorProto()
+
+		if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
+			log.VEventf(ctx, 2, "Put %s -> %s", descKey, descDesc)
+		}
+		b.Put(descKey, descDesc)
+		err := catalogkv.RemoveDatabaseNamespaceEntry(
+			ctx, p.txn, p.ExecCfg().Codec, oldName, p.ExtendedEvalContext().Tracing.KVTracingEnabled(),
+		)
+		if err != nil {
+			return err
+		}
+
+		p.Descriptors().AddUncommittedDatabaseDeprecated(oldName, descID, descs.DBDropped)
+		p.Descriptors().AddUncommittedDatabaseDeprecated(newName, descID, descs.DBCreated)
+	} else {
+		desc.DrainingNames = append(desc.DrainingNames, descpb.NameInfo{
+			ParentID:       keys.RootNamespaceID,
+			ParentSchemaID: keys.RootNamespaceID,
+			Name:           oldName,
+		})
+		if err := p.writeNonDropDatabaseChange(ctx, desc, stmt); err != nil {
+			return err
+		}
 	}
 
 	return p.txn.Run(ctx, b)
@@ -90,37 +108,16 @@ func (p *planner) writeNonDropDatabaseChange(
 func (p *planner) writeDatabaseChangeToBatch(
 	ctx context.Context, desc *dbdesc.Mutable, b *kv.Batch,
 ) error {
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		log.Fatal(ctx, "invalid attempted write of database descriptor")
+	}
+	if err := desc.Validate(); err != nil {
+		return err
+	}
 	return p.Descriptors().WriteDescToBatch(
 		ctx,
 		p.extendedEvalCtx.Tracing.KVTracingEnabled(),
 		desc,
 		b,
 	)
-}
-
-// forEachMutableTableInDatabase calls the given function on every table
-// descriptor inside the given database. Tables that have been
-// dropped are skipped.
-func (p *planner) forEachMutableTableInDatabase(
-	ctx context.Context,
-	dbDesc catalog.DatabaseDescriptor,
-	fn func(ctx context.Context, scName string, tbDesc *tabledesc.Mutable) error,
-) error {
-	allDescs, err := p.Descriptors().GetAllDescriptors(ctx, p.txn)
-	if err != nil {
-		return err
-	}
-
-	lCtx := newInternalLookupCtx(ctx, allDescs, dbDesc, nil /* fallback */)
-	for _, tbID := range lCtx.tbIDs {
-		desc := lCtx.tbDescs[tbID]
-		if desc.Dropped() {
-			continue
-		}
-		mutable := tabledesc.NewBuilder(desc.TableDesc()).BuildExistingMutableTable()
-		if err := fn(ctx, lCtx.schemaNames[desc.GetParentSchemaID()], mutable); err != nil {
-			return err
-		}
-	}
-	return nil
 }

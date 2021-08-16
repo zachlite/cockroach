@@ -117,9 +117,6 @@ func TestNullRanges(t *testing.T) {
 
 	c := coldata.NewMemColumn(types.Int, coldata.BatchSize(), coldata.StandardColumnFactory)
 	for _, tc := range tcs {
-		if tc.end > coldata.BatchSize() {
-			continue
-		}
 		c.Nulls().UnsetNulls()
 		c.Nulls().SetNullRange(tc.start, tc.end)
 
@@ -207,10 +204,6 @@ func TestAppend(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if tc.args.DestIdx+tc.expectedLength > coldata.BatchSize() ||
-			tc.args.SrcEndIdx > coldata.BatchSize() {
-			continue
-		}
 		tc.args.Src = src
 		if tc.args.SrcEndIdx == 0 {
 			// SrcEndIdx is always required.
@@ -284,9 +277,6 @@ func TestCopy(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if tc.args.DestIdx+(tc.args.SrcEndIdx-tc.args.SrcStartIdx) > coldata.BatchSize() {
-			continue
-		}
 		tc.args.Src = src
 		t.Run(tc.name, func(t *testing.T) {
 			dest := coldata.NewMemColumn(typ, coldata.BatchSize(), coldata.StandardColumnFactory)
@@ -307,9 +297,6 @@ func TestCopy(t *testing.T) {
 }
 
 func TestCopyNulls(t *testing.T) {
-	if coldata.BatchSize() < 10 {
-		return
-	}
 	var typ = types.Int
 
 	// Set up the destination vector.
@@ -365,9 +352,6 @@ func TestCopyNulls(t *testing.T) {
 }
 
 func TestCopySelOnDestDoesNotUnsetOldNulls(t *testing.T) {
-	if coldata.BatchSize() < 5 {
-		return
-	}
 	var typ = types.Int
 
 	// Set up the destination vector. It is all nulls except for a single

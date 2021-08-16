@@ -26,18 +26,61 @@ func TestIsTypeSupportedInVersion(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	testCases := []struct {
-		v clusterversion.Key
+		v clusterversion.VersionKey
 		t *types.T
 
 		ok bool
 	}{
-		{clusterversion.GeospatialType, types.Geometry, true},
+		{clusterversion.Version19_2, types.Time, true},
+		{clusterversion.Version19_2, types.Timestamp, true},
+		{clusterversion.Version19_2, types.Interval, true},
+
+		{clusterversion.Version19_2, types.TimeTZ, false},
+		{clusterversion.VersionTimeTZType, types.TimeTZ, true},
+
+		{clusterversion.Version19_2, types.MakeTime(0), false},
+		{clusterversion.Version19_2, types.MakeTimeTZ(0), false},
+		{clusterversion.VersionTimeTZType, types.MakeTimeTZ(0), false},
+		{clusterversion.Version19_2, types.MakeTimestamp(0), false},
+		{clusterversion.Version19_2, types.MakeTimestampTZ(0), false},
+		{
+			clusterversion.Version19_2,
+			types.MakeInterval(types.IntervalTypeMetadata{Precision: 3, PrecisionIsSet: true}),
+			false,
+		},
+		{
+			clusterversion.Version19_2,
+			types.MakeInterval(
+				types.IntervalTypeMetadata{
+					DurationField: types.IntervalDurationField{DurationType: types.IntervalDurationType_SECOND},
+				},
+			),
+			false,
+		},
+		{clusterversion.VersionTimePrecision, types.MakeTime(0), true},
+		{clusterversion.VersionTimePrecision, types.MakeTimeTZ(0), true},
+		{clusterversion.VersionTimePrecision, types.MakeTimestamp(0), true},
+		{clusterversion.VersionTimePrecision, types.MakeTimestampTZ(0), true},
+		{
+			clusterversion.VersionTimePrecision,
+			types.MakeInterval(types.IntervalTypeMetadata{Precision: 3, PrecisionIsSet: true}),
+			true,
+		},
+		{
+			clusterversion.VersionTimePrecision,
+			types.MakeInterval(
+				types.IntervalTypeMetadata{
+					DurationField: types.IntervalDurationField{DurationType: types.IntervalDurationType_SECOND},
+				},
+			),
+			true,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("%s:%s", tc.v, tc.t.SQLString()), func(t *testing.T) {
 			ok, err := isTypeSupportedInVersion(
-				clusterversion.ClusterVersion{Version: clusterversion.ByKey(tc.v)},
+				clusterversion.ClusterVersion{Version: clusterversion.VersionByKey(tc.v)},
 				tc.t,
 			)
 			require.NoError(t, err)

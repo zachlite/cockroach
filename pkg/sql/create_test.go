@@ -55,7 +55,7 @@ func TestDatabaseDescriptor(t *testing.T) {
 	}
 
 	// Database name.
-	nameKey := catalogkeys.MakeDatabaseNameKey(codec, "test")
+	nameKey := catalogkeys.NewDatabaseKey("test").Key(codec)
 	if gr, err := kvDB.Get(ctx, nameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -236,24 +236,24 @@ func verifyTables(
 		tableName := fmt.Sprintf("table_%d", id)
 		kvDB := tc.Servers[count%tc.NumServers()].DB()
 		tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", tableName)
-		if tableDesc.GetID() < descIDStart {
+		if tableDesc.ID < descIDStart {
 			t.Fatalf(
 				"table %s's ID %d is too small. Expected >= %d",
 				tableName,
-				tableDesc.GetID(),
+				tableDesc.ID,
 				descIDStart,
 			)
 
-			if _, ok := tableIDs[tableDesc.GetID()]; ok {
+			if _, ok := tableIDs[tableDesc.ID]; ok {
 				t.Fatalf("duplicate ID: %d", id)
 			}
-			tableIDs[tableDesc.GetID()] = struct{}{}
-			if tableDesc.GetID() > maxID {
-				maxID = tableDesc.GetID()
+			tableIDs[tableDesc.ID] = struct{}{}
+			if tableDesc.ID > maxID {
+				maxID = tableDesc.ID
 			}
 
 		}
-		usedTableIDs[tableDesc.GetID()] = tableName
+		usedTableIDs[tableDesc.ID] = tableName
 	}
 
 	if e, a := expectedNumOfTables, len(usedTableIDs); e != a {

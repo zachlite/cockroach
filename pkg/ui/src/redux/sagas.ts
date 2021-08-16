@@ -16,7 +16,6 @@ import { customAnalyticsSaga } from "./customAnalytics";
 import { statementsSaga } from "./statements";
 import { analyticsSaga } from "./analyticsSagas";
 import { sessionsSaga } from "./sessions";
-import { sqlStatsSaga } from "./sqlStats";
 
 export default function* rootSaga() {
   yield all([
@@ -26,6 +25,5 @@ export default function* rootSaga() {
     fork(statementsSaga),
     fork(analyticsSaga),
     fork(sessionsSaga),
-    fork(sqlStatsSaga),
   ]);
 }

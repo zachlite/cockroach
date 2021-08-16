@@ -23,9 +23,8 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -37,11 +36,11 @@ import (
 
 func New_OPERATIONProjOp(
 	allocator *colmem.Allocator,
-	input, leftProjOpChain, rightProjOpChain colexecop.Operator,
-	leftFeedOp, rightFeedOp *colexecop.FeedOperator,
+	input, leftProjOpChain, rightProjOpChain colexecbase.Operator,
+	leftFeedOp, rightFeedOp *FeedOperator,
 	leftInputType, rightInputType *types.T,
 	leftIdx, rightIdx, outputIdx int,
-) (colexecop.Operator, error) {
+) (colexecbase.Operator, error) {
 	leftFamily := leftInputType.Family()
 	leftIsBool := leftFamily == types.BoolFamily
 	leftIsNull := leftFamily == types.UnknownFamily
@@ -82,15 +81,13 @@ func New_OPERATIONProjOp(
 // {{range .Overloads}}
 
 type _OP_LOWERProjOp struct {
-	colexecop.InitHelper
-
 	allocator *colmem.Allocator
-	input     colexecop.Operator
+	input     colexecbase.Operator
 
-	leftProjOpChain  colexecop.Operator
-	rightProjOpChain colexecop.Operator
-	leftFeedOp       *colexecop.FeedOperator
-	rightFeedOp      *colexecop.FeedOperator
+	leftProjOpChain  colexecbase.Operator
+	rightProjOpChain colexecbase.Operator
+	leftFeedOp       *FeedOperator
+	rightFeedOp      *FeedOperator
 
 	leftIdx   int
 	rightIdx  int
@@ -107,10 +104,10 @@ type _OP_LOWERProjOp struct {
 // outputIdx.
 func new_OP_TITLEProjOp(
 	allocator *colmem.Allocator,
-	input, leftProjOpChain, rightProjOpChain colexecop.Operator,
-	leftFeedOp, rightFeedOp *colexecop.FeedOperator,
+	input, leftProjOpChain, rightProjOpChain colexecbase.Operator,
+	leftFeedOp, rightFeedOp *FeedOperator,
 	leftIdx, rightIdx, outputIdx int,
-) colexecop.Operator {
+) colexecbase.Operator {
 	return &_OP_LOWERProjOp{
 		allocator:        allocator,
 		input:            input,
@@ -121,6 +118,7 @@ func new_OP_TITLEProjOp(
 		leftIdx:          leftIdx,
 		rightIdx:         rightIdx,
 		outputIdx:        outputIdx,
+		origSel:          make([]int, coldata.BatchSize()),
 	}
 }
 
@@ -143,15 +141,11 @@ func (o *_OP_LOWERProjOp) Child(nth int, verbose bool) execinfra.OpNode {
 	}
 }
 
-// Init is part of the colexecop.Operator interface.
-func (o *_OP_LOWERProjOp) Init(ctx context.Context) {
-	if !o.InitHelper.Init(ctx) {
-		return
-	}
-	o.input.Init(o.Ctx)
+func (o *_OP_LOWERProjOp) Init() {
+	o.input.Init()
 }
 
-// Next is part of the colexecop.Operator interface.
+// Next is part of the Operator interface.
 // The idea to handle the short-circuiting logic is similar to what caseOp
 // does: a logical operator has an input and two projection chains. First,
 // it runs the left chain on the input batch. Then, it "subtracts" the
@@ -161,24 +155,23 @@ func (o *_OP_LOWERProjOp) Init(ctx context.Context) {
 // side projection only on the remaining tuples (i.e. those that were not
 // "subtracted"). Next, it restores the original selection vector and
 // populates the result of the logical operation.
-func (o *_OP_LOWERProjOp) Next() coldata.Batch {
-	batch := o.input.Next()
+func (o *_OP_LOWERProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := o.input.Next(ctx)
 	origLen := batch.Length()
 	if origLen == 0 {
 		return coldata.ZeroBatch
 	}
 	usesSel := false
 	if sel := batch.Selection(); sel != nil {
-		o.origSel = colexecutils.EnsureSelectionVectorLength(o.origSel, origLen)
-		copy(o.origSel, sel)
+		copy(o.origSel[:origLen], sel[:origLen])
 		usesSel = true
 	}
 
 	// In order to support the short-circuiting logic, we need to be quite tricky
 	// here. First, we set the input batch for the left projection to run and
 	// actually run the projection.
-	o.leftFeedOp.SetBatch(batch)
-	batch = o.leftProjOpChain.Next()
+	o.leftFeedOp.batch = batch
+	batch = o.leftProjOpChain.Next(ctx)
 
 	// Now we need to populate a selection vector on the batch in such a way that
 	// those tuples that we already know the result of logical operation for do
@@ -250,8 +243,8 @@ func (o *_OP_LOWERProjOp) Next() coldata.Batch {
 		// We only run the right-side projection if there are non-zero number of
 		// remaining tuples.
 		batch.SetLength(curIdx)
-		o.rightFeedOp.SetBatch(batch)
-		batch = o.rightProjOpChain.Next()
+		o.rightFeedOp.batch = batch
+		batch = o.rightProjOpChain.Next(ctx)
 		rightVec = batch.ColVec(o.rightIdx)
 		rightVals = rightVec.Bool()
 	}

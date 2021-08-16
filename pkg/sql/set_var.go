@@ -102,7 +102,7 @@ func (n *setVarNode) startExec(params runParams) error {
 
 	if _, ok := DummyVars[n.name]; ok {
 		telemetry.Inc(sqltelemetry.DummySessionVarValueCounter(n.name))
-		params.p.BufferClientNotice(
+		params.p.SendClientNotice(
 			params.ctx,
 			pgnotice.NewWithSeverityf("WARNING", "setting session var %q is a no-op", n.name),
 		)
@@ -132,9 +132,6 @@ func (n *setVarNode) startExec(params runParams) error {
 
 	if n.v.RuntimeSet != nil {
 		return n.v.RuntimeSet(params.ctx, params.extendedEvalCtx, strVal)
-	}
-	if n.v.SetWithPlanner != nil {
-		return n.v.SetWithPlanner(params.ctx, params.p, strVal)
 	}
 	return n.v.Set(params.ctx, params.p.sessionDataMutator, strVal)
 }

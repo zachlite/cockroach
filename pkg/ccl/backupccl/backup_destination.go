@@ -17,21 +17,21 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
 
-// fetchPreviousBackups takes a list of URIs of previous backups and returns
+// fetchPreviousBackup takes a list of URIs of previous backups and returns
 // their manifest as well as the encryption options of the first backup in the
 // chain.
 func fetchPreviousBackups(
 	ctx context.Context,
-	user security.SQLUsername,
+	user string,
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
 	prevBackupURIs []string,
 	encryptionParams backupEncryptionParams,
@@ -70,7 +70,7 @@ func fetchPreviousBackups(
 //  can determine the latter from the former.
 func resolveDest(
 	ctx context.Context,
-	user security.SQLUsername,
+	user string,
 	nested, appendToLatest bool,
 	defaultURI string,
 	urisByLocalityKV map[string]string,
@@ -136,7 +136,7 @@ func resolveDest(
 			}
 
 			// Pick a piece-specific suffix and update the destination path(s).
-			partName := endTime.GoTime().Format(DateBasedIncFolderName)
+			partName := endTime.GoTime().Format(dateBasedIncFolderName)
 			partName = path.Join(chosenSuffix, partName)
 			defaultURI, urisByLocalityKV, err = getURIsByLocalityKV(to, partName)
 			if err != nil {
@@ -151,7 +151,7 @@ func resolveDest(
 // getBackupManifests fetches the backup manifest from a list of backup URIs.
 func getBackupManifests(
 	ctx context.Context,
-	user security.SQLUsername,
+	user string,
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
 	backupURIs []string,
 	encryption *jobspb.BackupEncryptionOptions,
@@ -195,7 +195,7 @@ func getBackupManifests(
 // base backups.
 func getEncryptionFromBase(
 	ctx context.Context,
-	user security.SQLUsername,
+	user string,
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
 	baseBackupURI string,
 	encryptionParams backupEncryptionParams,
@@ -236,7 +236,7 @@ func getEncryptionFromBase(
 // should use for a backup that is pointing to a collection.
 func resolveBackupCollection(
 	ctx context.Context,
-	user security.SQLUsername,
+	user string,
 	defaultURI string,
 	appendToLatest bool,
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
@@ -253,7 +253,7 @@ func resolveBackupCollection(
 		defer collection.Close()
 		latestFile, err := collection.ReadFile(ctx, latestFileName)
 		if err != nil {
-			if errors.Is(err, cloud.ErrFileDoesNotExist) {
+			if errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
 				return "", "", pgerror.Wrapf(err, pgcode.UndefinedFile, "path does not contain a completed latest backup")
 			}
 			return "", "", pgerror.WithCandidateCode(err, pgcode.Io)
@@ -271,7 +271,7 @@ func resolveBackupCollection(
 		chosenSuffix = strings.TrimPrefix(subdir, "/")
 		chosenSuffix = "/" + chosenSuffix
 	} else {
-		chosenSuffix = endTime.GoTime().Format(DateBasedIntoFolderName)
+		chosenSuffix = endTime.GoTime().Format(dateBasedIntoFolderName)
 	}
 	return collectionURI, chosenSuffix, nil
 }

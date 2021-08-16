@@ -466,8 +466,6 @@ SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
    b INT8[] NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (b, rowid)
 )
 
@@ -527,8 +525,6 @@ SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
    b INT8[] NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (b, rowid)
 )
 
@@ -600,12 +596,10 @@ SHOW CREATE TABLE a
 ----
 a  CREATE TABLE public.a (
    b INT2[] NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (b, rowid)
 )
 
-statement error integer out of range for type int2
+statement error integer out of range for type int2 \(column "b"\)
 INSERT INTO a VALUES (ARRAY[100000])
 
 statement ok
@@ -1368,7 +1362,7 @@ INSERT INTO t VALUES
 
 # Test that the unique index rejects bad inserts.
 # Disabled until #50659 is resolved.
-#statement error pq: duplicate key value violates unique constraint "primary"\nDETAIL: Key \(x\)=\(ARRAY\[1,NULL,10\]\) already exists\.
+#statement error pq: duplicate key value \(x\)=\(ARRAY\[1,NULL,10\]\) violates unique constraint "primary"
 #INSERT INTO t VALUES (ARRAY[1, NULL, 10])
 
 query T

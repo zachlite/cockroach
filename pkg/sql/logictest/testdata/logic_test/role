@@ -664,13 +664,13 @@ GRANT ALL ON DATABASE db2 TO newgroup
 
 user testuser
 
-query TTT colnames
+query TTTT colnames
 SHOW GRANTS ON DATABASE db2
 ----
-database_name  grantee   privilege_type
-db2            admin     ALL
-db2            newgroup  ALL
-db2            root      ALL
+database_name  schema_name  grantee   privilege_type
+db2            public       admin     ALL
+db2            public       newgroup  ALL
+db2            public       root      ALL
 
 statement ok
 CREATE TABLE db2.foo (k int);
@@ -1096,17 +1096,17 @@ GRANT GRANT,SELECT ON privatedb.publictable TO public
 
 user testuser
 
-query TTTTT
+query TT
 SHOW DATABASES
 ----
-publicdb  root  NULL  {}  NULL
+publicdb   root
 
-query TTTTIT
+query TTTTI
 SHOW TABLES FROM publicdb
 ----
-public  publictable  table  root  0  NULL
+public  publictable  table  root  0
 
-query TTTTIT
+query TTTTI
 SHOW TABLES FROM privatedb
 ----
 
@@ -1149,7 +1149,7 @@ SELECT * FROM publicdb.publictable
 statement error user testuser does not have INSERT privilege on relation publictable
 INSERT INTO publicdb.publictable VALUES (1)
 
-query TTTTIT
+query TTTTI
 SHOW TABLES FROM publicdb
 ----
 

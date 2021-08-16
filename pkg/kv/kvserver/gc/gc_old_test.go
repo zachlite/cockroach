@@ -34,7 +34,7 @@ import (
 // testing.
 //
 // runGCOld runs garbage collection for the specified descriptor on the
-// provided Engine (which is not mutated). It uses the provided GCer
+// provided Engine (which is not mutated). It uses the provided gcFn
 // to run garbage collection once on all implicated spans,
 // cleanupIntentsFn to resolve intents synchronously, and
 // cleanupTxnIntentsAsyncFn to asynchronously cleanup intents and
@@ -52,7 +52,8 @@ func runGCOld(
 	cleanupTxnIntentsAsyncFn CleanupTxnIntentsAsyncFunc,
 ) (Info, error) {
 
-	iter := rditer.NewReplicaMVCCDataIterator(desc, snap, false /* seekEnd */)
+	iter := rditer.NewReplicaDataIterator(desc, snap,
+		true /* replicatedOnly */, false /* seekEnd */)
 	defer iter.Close()
 
 	// Compute intent expiration (intent age at which we attempt to resolve).
@@ -102,7 +103,7 @@ func runGCOld(
 				if meta.Txn != nil {
 					// Keep track of intent to resolve if older than the intent
 					// expiration threshold.
-					if meta.Timestamp.ToTimestamp().Less(intentExp) {
+					if hlc.Timestamp(meta.Timestamp).Less(intentExp) {
 						txnID := meta.Txn.ID
 						if _, ok := txnMap[txnID]; !ok {
 							txnMap[txnID] = &roachpb.Transaction{
@@ -126,7 +127,7 @@ func runGCOld(
 					startIdx = 2
 				}
 				// See if any values may be GC'd.
-				if idx, gcTS := gc.Filter(keys[startIdx:], vals[startIdx:]); !gcTS.IsEmpty() {
+				if idx, gcTS := gc.Filter(keys[startIdx:], vals[startIdx:]); gcTS != (hlc.Timestamp{}) {
 					// Batch keys after the total size of version keys exceeds
 					// the threshold limit. This avoids sending potentially large
 					// GC requests through Raft. Iterate through the keys in reverse
@@ -150,6 +151,8 @@ func runGCOld(
 
 							err := gcer.GC(ctx, batchGCKeys)
 
+							// Succeed or fail, allow releasing the memory backing batchGCKeys.
+							iter.ResetAllocator()
 							batchGCKeys = nil
 							batchGCKeysBytes = 0
 

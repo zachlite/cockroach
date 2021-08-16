@@ -21,23 +21,31 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
+	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations/leasemanager"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 	"github.com/stretchr/testify/require"
 )
 
@@ -542,7 +550,7 @@ func TestCreateSystemTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	table := tabledesc.NewBuilder(systemschema.NamespaceTable.TableDesc()).BuildExistingMutableTable()
+	table := tabledesc.NewExistingMutable(systemschema.NamespaceTable.TableDescriptor)
 	table.ID = keys.MaxReservedDescID
 
 	prevPrivileges, ok := descpb.SystemAllowedPrivileges[table.ID]
@@ -557,7 +565,7 @@ func TestCreateSystemTable(t *testing.T) {
 	descpb.SystemAllowedPrivileges[table.ID] = descpb.SystemAllowedPrivileges[keys.NamespaceTableID]
 
 	table.Name = "dummy"
-	nameKey := catalogkeys.MakePublicObjectNameKey(keys.SystemSQLCodec, table.ParentID, table.Name)
+	nameKey := catalogkeys.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
 	descKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
 	descVal := table.DescriptorProto()
 
@@ -597,7 +605,7 @@ func TestCreateSystemTable(t *testing.T) {
 	var descriptor descpb.Descriptor
 	if err := mt.kvDB.GetProto(ctx, descKey, &descriptor); err != nil {
 		t.Error(err)
-	} else if !descVal.Equal(&descriptor) {
+	} else if !proto.Equal(descVal, &descriptor) {
 		t.Errorf("expected %v for key %q, got %v", descVal, descKey, descriptor)
 	}
 
@@ -761,5 +769,303 @@ func TestUpdateSystemLocationData(t *testing.T) {
 	mt.sqlDB.QueryRow(t, `SELECT count(*) FROM system.locations`).Scan(&count)
 	if count != len(roachpb.DefaultLocationInformation) {
 		t.Fatalf("Exected to find 0 rows in system.locations. Found  %d instead", count)
+	}
+}
+
+func TestMigrateNamespaceTableDescriptors(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	mt := makeMigrationTest(ctx, t)
+	defer mt.close(ctx)
+
+	migration := mt.pop(t, "create new system.namespace table")
+	mt.start(t, base.TestServerArgs{})
+
+	// Since we're already on 20.1, mimic the beginning state by deleting the
+	// new namespace descriptor.
+	key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.NamespaceTableID)
+	require.NoError(t, mt.kvDB.Del(ctx, key))
+
+	deprecatedKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.DeprecatedNamespaceTableID)
+	desc := &descpb.Descriptor{}
+	require.NoError(t, mt.kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		_, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
+		return err
+	}))
+
+	// Run the migration.
+	require.NoError(t, mt.runMigration(ctx, migration))
+
+	require.NoError(t, mt.kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		// Check that the persisted descriptors now match our in-memory versions,
+		// ignoring create and modification times.
+		{
+			ts, err := txn.GetProtoTs(ctx, key, desc)
+			require.NoError(t, err)
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.NamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.NamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.NamespaceTable.TableDesc()))
+		}
+		{
+			ts, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
+			require.NoError(t, err)
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.DeprecatedNamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.DeprecatedNamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.DeprecatedNamespaceTable.TableDesc()))
+		}
+		return nil
+	}))
+}
+
+func TestAlterSystemJobsTable(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	// We need to use "old" jobs table descriptor without newly added columns
+	// in order to test migration.
+	// oldJobsTableSchema is system.jobs definition prior to 20.2
+	oldJobsTableSchema := `
+CREATE TABLE system.jobs (
+	id                INT8      DEFAULT unique_rowid() PRIMARY KEY,
+	status            STRING    NOT NULL,
+	created           TIMESTAMP NOT NULL DEFAULT now(),
+	payload           BYTES     NOT NULL,
+	progress          BYTES,
+	INDEX (status, created),
+
+	FAMILY (id, status, created, payload),
+	FAMILY progress (progress)
+)
+`
+	oldJobsTable, err := sql.CreateTestTableDescriptor(
+		context.Background(),
+		keys.SystemDatabaseID,
+		keys.JobsTableID,
+		oldJobsTableSchema,
+		systemschema.JobsTable.Privileges,
+	)
+	require.NoError(t, err)
+
+	const primaryFamilyName = "fam_0_id_status_created_payload"
+	oldPrimaryFamilyColumns := []string{"id", "status", "created", "payload"}
+	newPrimaryFamilyColumns := append(
+		oldPrimaryFamilyColumns, "created_by_type", "created_by_id")
+
+	// Sanity check oldJobsTable does not have new columns.
+	require.Equal(t, 5, len(oldJobsTable.Columns))
+	require.Equal(t, 2, len(oldJobsTable.Families))
+	require.Equal(t, primaryFamilyName, oldJobsTable.Families[0].Name)
+	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
+
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
+	defer func() {
+		systemschema.JobsTable = jobsTable
+	}()
+
+	mt := makeMigrationTest(ctx, t)
+	defer mt.close(ctx)
+
+	migration := mt.pop(t, "add new sqlliveness table and claim columns to system.jobs")
+	migration = mt.pop(t, "add created_by columns to system.jobs")
+	ver201 := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+
+	params, _ := tests.CreateTestServerParams()
+	params.Settings = ver201
+	mt.start(t, params)
+
+	// Run migration and verify we have added columns and renamed column family.
+	require.NoError(t, mt.runMigration(ctx, migration))
+
+	newJobsTable := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.Equal(t, 7, len(newJobsTable.Columns))
+	require.Equal(t, "created_by_type", newJobsTable.Columns[5].Name)
+	require.Equal(t, "created_by_id", newJobsTable.Columns[6].Name)
+	require.Equal(t, 2, len(newJobsTable.Families))
+	// Ensure we keep old family name.
+	require.Equal(t, primaryFamilyName, newJobsTable.Families[0].Name)
+	// Make sure our primary family has new columns added to it.
+	require.Equal(t, newPrimaryFamilyColumns, newJobsTable.Families[0].ColumnNames)
+
+	// Run the migration again -- it should be a no-op.
+	require.NoError(t, mt.runMigration(ctx, migration))
+	newJobsTableAgain := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.True(t, proto.Equal(newJobsTable.TableDesc(), newJobsTableAgain.TableDesc()))
+}
+
+func TestVersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	// We need to use "old" jobs table descriptor without newly added columns
+	// in order to test migration.
+	// oldJobsTableSchema is system.jobs definition prior to 20.2
+
+	oldJobsTableSchema := `
+	CREATE TABLE system.jobs (
+		id                INT8      DEFAULT unique_rowid() PRIMARY KEY,
+		status            STRING    NOT NULL,
+		created           TIMESTAMP NOT NULL DEFAULT now(),
+		payload           BYTES     NOT NULL,
+		progress          BYTES,
+		created_by_type   STRING,
+		created_by_id     INT,
+		INDEX (status, created),
+		INDEX (created_by_type, created_by_id) STORING (status),
+
+		FAMILY fam_0_id_status_created_payload (id, status, created, payload, created_by_type, created_by_id),
+		FAMILY progress (progress)
+	);`
+
+	oldJobsTable, err := sql.CreateTestTableDescriptor(
+		context.Background(),
+		keys.SystemDatabaseID,
+		keys.JobsTableID,
+		oldJobsTableSchema,
+		systemschema.JobsTable.Privileges,
+	)
+	require.NoError(t, err)
+
+	oldPrimaryFamilyColumns := []string{"id", "status", "created", "payload", "created_by_type", "created_by_id"}
+
+	// Sanity check oldJobsTable does not have new columns.
+	require.Equal(t, 7, len(oldJobsTable.Columns))
+	require.Equal(t, 2, len(oldJobsTable.Families))
+	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
+
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
+	defer func() {
+		systemschema.JobsTable = jobsTable
+	}()
+
+	mt := makeMigrationTest(ctx, t)
+	defer mt.close(ctx)
+
+	migration := mt.pop(t, "add created_by columns to system.jobs")
+	migration = mt.pop(t, "add new sqlliveness table and claim columns to system.jobs")
+
+	ver201 := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+
+	params, _ := tests.CreateTestServerParams()
+	params.Settings = ver201
+	mt.start(t, params)
+
+	// Run migration and verify we have added columns and renamed column family.
+	require.NoError(t, mt.runMigration(ctx, migration))
+
+	newJobsTable := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.Equal(t, 9, len(newJobsTable.Columns))
+	require.Equal(t, "claim_session_id", newJobsTable.Columns[7].Name)
+	require.Equal(t, "claim_instance_id", newJobsTable.Columns[8].Name)
+	require.Equal(t, 3, len(newJobsTable.Families))
+	// Ensure we keep old family names.
+	require.Equal(t, "fam_0_id_status_created_payload", newJobsTable.Families[0].Name)
+	require.Equal(t, "progress", newJobsTable.Families[1].Name)
+	// ... and that the new one is here.
+	require.Equal(t, "claim", newJobsTable.Families[2].Name)
+
+	// Run the migration again -- it should be a no-op.
+	require.NoError(t, mt.runMigration(ctx, migration))
+	newJobsTableAgain := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.Equal(t, newJobsTable, newJobsTableAgain)
+}
+
+func TestMarkDeprecatedSchemaChangeJobsFailed(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	mt := makeMigrationTest(ctx, t)
+	defer mt.close(ctx)
+
+	migration := mt.pop(t, "mark non-terminal schema change jobs with a pre-20.1 format version as failed")
+	mt.start(t, base.TestServerArgs{})
+
+	// First, pad the jobs table with 100 GC jobs in the running state to ensure
+	// that the batching works. Regression test for #56859.
+	for i := 0; i < 100; i++ {
+		mt.sqlDB.Exec(t, `CREATE TABLE tbl_to_drop()`)
+		mt.sqlDB.Exec(t, `DROP TABLE tbl_to_drop`)
+	}
+
+	// Write some fake job records for schema changes with a pre-20.1 format
+	// version. Due to their format version, they will never be adopted. We just
+	// verify that the migration marks them as failed if in a non-terminal state,
+	// and otherwise leaves them alone.
+
+	payload := jobspb.Payload{
+		Details: jobspb.WrapPayloadDetails(jobspb.SchemaChangeDetails{
+			FormatVersion: jobspb.BaseFormatVersion,
+		}),
+	}
+	payloadBytes, err := protoutil.Marshal(&payload)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		initialState        jobs.Status
+		expectedFinalStatus jobs.Status
+		expectedErrorPrefix string
+		jobID               int64
+	}{
+		{
+			initialState:        jobs.StatusRunning,
+			expectedFinalStatus: jobs.StatusFailed,
+			expectedErrorPrefix: "schema change jobs started prior to v20.1",
+			jobID:               int64(builtins.GenerateUniqueInt(base.SQLInstanceID(mt.server.NodeID()))),
+		},
+		{
+			initialState:        jobs.StatusReverting,
+			expectedFinalStatus: jobs.StatusFailed,
+			expectedErrorPrefix: "schema change jobs started prior to v20.1",
+			jobID:               int64(builtins.GenerateUniqueInt(base.SQLInstanceID(mt.server.NodeID()))),
+		},
+		{
+			initialState:        jobs.StatusSucceeded,
+			expectedFinalStatus: jobs.StatusSucceeded,
+			jobID:               int64(builtins.GenerateUniqueInt(base.SQLInstanceID(mt.server.NodeID()))),
+		},
+		{
+			initialState:        jobs.StatusCanceled,
+			expectedFinalStatus: jobs.StatusCanceled,
+			jobID:               int64(builtins.GenerateUniqueInt(base.SQLInstanceID(mt.server.NodeID()))),
+		},
+	}
+
+	insertStmt := `INSERT INTO system.jobs (id, status, payload) VALUES ($1, $2, $3)`
+	for _, testCase := range testCases {
+		mt.sqlDB.Exec(t, insertStmt, testCase.jobID, testCase.initialState, payloadBytes)
+	}
+
+	require.NoError(t, mt.runMigration(ctx, migration))
+
+	query := `SELECT status, payload FROM system.jobs WHERE id = $1`
+	for _, testCase := range testCases {
+		var status string
+		var payloadBytes []byte
+		row := mt.sqlDB.QueryRow(t, query, testCase.jobID)
+		row.Scan(&status, &payloadBytes)
+
+		require.Equal(t, status, string(testCase.expectedFinalStatus))
+
+		var payload jobspb.Payload
+		require.NoError(t, protoutil.Unmarshal(payloadBytes, &payload))
+		if testCase.expectedErrorPrefix != "" {
+			require.Regexp(t, testCase.expectedErrorPrefix, payload.Error)
+		} else {
+			require.Empty(t, payload.Error)
+		}
 	}
 }

@@ -12,12 +12,11 @@ package roachpb
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 //go:generate mockgen -package=roachpb -destination=mocks_generated.go . InternalClient,Internal_RangeFeedClient
@@ -53,8 +52,6 @@ const (
 
 // RequiresReadLease returns whether the ReadConsistencyType requires
 // that a read-only request be performed on an active valid leaseholder.
-// TODO(aayush): Rename the method since we no longer require a replica to be a
-// leaseholder to serve a consistent read.
 func (rc ReadConsistencyType) RequiresReadLease() bool {
 	switch rc {
 	case CONSISTENT:
@@ -100,6 +97,7 @@ const (
 	isPrefix                        // requests which should be grouped with the next request in a batch
 	isUnsplittable                  // range command that must not be split during sending
 	skipLeaseCheck                  // commands which skip the check that the evaluting replica has a valid lease
+	consultsTSCache                 // mutating commands which write data at a timestamp
 	updatesTSCache                  // commands which update the timestamp cache
 	updatesTSCacheOnErr             // commands which make read data available on errors
 	needsRefresh                    // commands which require refreshes to avoid serializable retries
@@ -163,6 +161,14 @@ func IsIntentWrite(args Request) bool {
 // a start and an end key.
 func IsRange(args Request) bool {
 	return (args.flags() & isRange) != 0
+}
+
+// ConsultsTimestampCache returns whether the command must consult
+// the timestamp cache to determine whether a mutation is safe at
+// a proposed timestamp or needs to move to a higher timestamp to
+// avoid re-writing history.
+func ConsultsTimestampCache(args Request) bool {
+	return (args.flags() & consultsTSCache) != 0
 }
 
 // UpdatesTimestampCache returns whether the command must update
@@ -321,6 +327,7 @@ func (rh *ResponseHeader) combine(otherRH ResponseHeader) error {
 	rh.ResumeReason = otherRH.ResumeReason
 	rh.NumKeys += otherRH.NumKeys
 	rh.NumBytes += otherRH.NumBytes
+	rh.DeprecatedRangeInfos = append(rh.DeprecatedRangeInfos, otherRH.DeprecatedRangeInfos...)
 	return nil
 }
 
@@ -343,10 +350,7 @@ var _ combinable = &ScanResponse{}
 func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error {
 	other := c.(*AdminVerifyProtectedTimestampResponse)
 	if avptr != nil {
-		avptr.DeprecatedFailedRanges = append(avptr.DeprecatedFailedRanges,
-			other.DeprecatedFailedRanges...)
-		avptr.VerificationFailedRanges = append(avptr.VerificationFailedRanges,
-			other.VerificationFailedRanges...)
+		avptr.FailedRanges = append(avptr.FailedRanges, other.FailedRanges...)
 		if err := avptr.ResponseHeader.combine(other.Header()); err != nil {
 			return err
 		}
@@ -448,9 +452,37 @@ func (r *AdminScatterResponse) combine(c combinable) error {
 			return err
 		}
 
+		// Combined responses will always have only RangeInfo set, rather than
+		// DeprecatedRanges.
+		// TODO(pbardea): Remove in 21.1.
+		r.maybeUpgrade()
+		otherR.maybeUpgrade()
 		r.RangeInfos = append(r.RangeInfos, otherR.RangeInfos...)
 	}
 	return nil
+}
+
+// maybeUpgrade will upgrade responses from 20.1 clients to look like 20.2
+// responses.
+// It converts the DeprecatedRanges field of the response to the equivalent
+// RangeInfos and nils out DeprecatedRanges. Note that the converted RangeInfos
+// will have an empty lease and only have the start and end key of the range
+// descriptor populated.
+func (r *AdminScatterResponse) maybeUpgrade() {
+	if len(r.RangeInfos) == 0 {
+		r.RangeInfos = make([]RangeInfo, len(r.DeprecatedRanges))
+		for i, respRange := range r.DeprecatedRanges {
+			r.RangeInfos[i] = RangeInfo{
+				// respRange.Span's keys are not local keys. The keys were created with
+				// AsRawKey(), so converting back is safe.
+				Desc: RangeDescriptor{
+					StartKey: RKey(respRange.Span.Key),
+					EndKey:   RKey(respRange.Span.EndKey),
+				},
+			}
+		}
+	}
+	r.DeprecatedRanges = nil
 }
 
 var _ combinable = &AdminScatterResponse{}
@@ -499,6 +531,23 @@ func (h *BatchResponse_Header) combine(o BatchResponse_Header) error {
 	}
 	h.Now.Forward(o.Now)
 	h.CollectedSpans = append(h.CollectedSpans, o.CollectedSpans...)
+	// Deduplicate the RangeInfos and maintain them in sorted order.
+	//
+	// TODO(andrei): stop merging RangeInfos once everybody but the DistSender
+	// stops using them.
+	for _, ri := range o.RangeInfos {
+		id := ri.Desc.RangeID
+		i := sort.Search(len(h.RangeInfos), func(i int) bool {
+			return h.RangeInfos[i].Desc.RangeID >= id
+		})
+		if i < len(h.RangeInfos) && h.RangeInfos[i].Desc.RangeID == id {
+			continue
+		}
+		// Insert ri in the middle.
+		h.RangeInfos = append(h.RangeInfos, RangeInfo{})
+		copy(h.RangeInfos[i+1:], h.RangeInfos[i:])
+		h.RangeInfos[i] = ri
+	}
 	return nil
 }
 
@@ -545,6 +594,26 @@ func (sr *ReverseScanResponse) Verify(req Request) error {
 		}
 	}
 	return nil
+}
+
+// MustSetInner sets the Request contained in the union. It panics if the
+// request is not recognized by the union type. The RequestUnion is reset
+// before being repopulated.
+func (ru *RequestUnion) MustSetInner(args Request) {
+	ru.Reset()
+	if !ru.SetInner(args) {
+		panic(errors.AssertionFailedf("%T excludes %T", ru, args))
+	}
+}
+
+// MustSetInner sets the Response contained in the union. It panics if the
+// response is not recognized by the union type. The ResponseUnion is reset
+// before being repopulated.
+func (ru *ResponseUnion) MustSetInner(reply Response) {
+	ru.Reset()
+	if !ru.SetInner(reply) {
+		panic(errors.AssertionFailedf("%T excludes %T", ru, reply))
+	}
 }
 
 // Method implements the Request interface.
@@ -647,16 +716,19 @@ func (*LeaseInfoRequest) Method() Method { return LeaseInfo }
 func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 
 // Method implements the Request interface.
+func (*WriteBatchRequest) Method() Method { return WriteBatch }
+
+// Method implements the Request interface.
 func (*ExportRequest) Method() Method { return Export }
+
+// Method implements the Request interface.
+func (*ImportRequest) Method() Method { return Import }
 
 // Method implements the Request interface.
 func (*AdminScatterRequest) Method() Method { return AdminScatter }
 
 // Method implements the Request interface.
 func (*AddSSTableRequest) Method() Method { return AddSSTable }
-
-// Method implements the Request interface.
-func (*MigrateRequest) Method() Method { return Migrate }
 
 // Method implements the Request interface.
 func (*RecomputeStatsRequest) Method() Method { return RecomputeStats }
@@ -875,8 +947,20 @@ func (ccr *ComputeChecksumRequest) ShallowCopy() Request {
 }
 
 // ShallowCopy implements the Request interface.
+func (r *WriteBatchRequest) ShallowCopy() Request {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
 func (ekr *ExportRequest) ShallowCopy() Request {
 	shallowCopy := *ekr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
+func (r *ImportRequest) ShallowCopy() Request {
+	shallowCopy := *r
 	return &shallowCopy
 }
 
@@ -888,12 +972,6 @@ func (r *AdminScatterRequest) ShallowCopy() Request {
 
 // ShallowCopy implements the Request interface.
 func (r *AddSSTableRequest) ShallowCopy() Request {
-	shallowCopy := *r
-	return &shallowCopy
-}
-
-// ShallowCopy implements the Request interface.
-func (r *MigrateRequest) ShallowCopy() Request {
 	shallowCopy := *r
 	return &shallowCopy
 }
@@ -934,15 +1012,12 @@ func (r *AdminVerifyProtectedTimestampRequest) ShallowCopy() Request {
 	return &shallowCopy
 }
 
-// NewGet returns a Request initialized to get the value at key. If
-// forUpdate is true, an unreplicated, exclusive lock is acquired on on
-// the key, if it exists.
-func NewGet(key Key, forUpdate bool) Request {
+// NewGet returns a Request initialized to get the value at key.
+func NewGet(key Key) Request {
 	return &GetRequest{
 		RequestHeader: RequestHeader{
 			Key: key,
 		},
-		KeyLocking: scanLockStrength(forUpdate),
 	}
 }
 
@@ -1005,37 +1080,6 @@ func NewConditionalPut(key Key, value Value, expValue []byte, allowNotExist bool
 		DeprecatedExpValue:  expValueVal,
 		ExpBytes:            expValue,
 		AllowIfDoesNotExist: allowNotExist,
-	}
-}
-
-// NewConditionalPutInline returns a Request initialized to put an inline value
-// at key if the existing value at key equals expValue.
-//
-// The callee takes ownership of value's underlying bytes and it will mutate
-// them. The caller retains ownership of expVal; NewConditionalPut will copy it
-// into the request.
-//
-// Callers should check the version gate clusterversion.CPutInline to make
-// sure this is supported.
-func NewConditionalPutInline(key Key, value Value, expValue []byte, allowNotExist bool) Request {
-	value.InitChecksum(key)
-	// Compatibility with 20.1 servers.
-	var expValueVal *Value
-	if expValue != nil {
-		expValueVal = &Value{}
-		expValueVal.SetTagAndData(expValue)
-		// The expected value does not need a checksum, so we don't initialize it.
-	}
-
-	return &ConditionalPutRequest{
-		RequestHeader: RequestHeader{
-			Key: key,
-		},
-		Value:               value,
-		DeprecatedExpValue:  expValueVal,
-		ExpBytes:            expValue,
-		AllowIfDoesNotExist: allowNotExist,
-		Inline:              true,
 	}
 }
 
@@ -1109,20 +1153,12 @@ func scanLockStrength(forUpdate bool) lock.Strength {
 	return lock.None
 }
 
-func flagForLockStrength(l lock.Strength) int {
-	if l != lock.None {
-		return isLocking
-	}
-	return 0
-}
-
-func (gr *GetRequest) flags() int {
-	maybeLocking := flagForLockStrength(gr.KeyLocking)
-	return isRead | isTxn | maybeLocking | updatesTSCache | needsRefresh
+func (*GetRequest) flags() int {
+	return isRead | isTxn | updatesTSCache | needsRefresh
 }
 
 func (*PutRequest) flags() int {
-	return isWrite | isTxn | isLocking | isIntentWrite | canBackpressure
+	return isWrite | isTxn | isLocking | isIntentWrite | consultsTSCache | canBackpressure
 }
 
 // ConditionalPut effectively reads without writing if it hits a
@@ -1131,7 +1167,7 @@ func (*PutRequest) flags() int {
 // they return an error immediately instead of continuing a serializable
 // transaction to be retried at end transaction.
 func (*ConditionalPutRequest) flags() int {
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | updatesTSCache | updatesTSCacheOnErr | canBackpressure
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | consultsTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure
 }
 
 // InitPut, like ConditionalPut, effectively reads without writing if it hits a
@@ -1140,7 +1176,7 @@ func (*ConditionalPutRequest) flags() int {
 // return an error immediately instead of continuing a serializable transaction
 // to be retried at end transaction.
 func (*InitPutRequest) flags() int {
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | updatesTSCache | updatesTSCacheOnErr | canBackpressure
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | consultsTSCache | updatesTSCache | updatesTSCacheOnErr | canBackpressure
 }
 
 // Increment reads the existing value, but always leaves an intent so
@@ -1149,11 +1185,11 @@ func (*InitPutRequest) flags() int {
 // error immediately instead of continuing a serializable transaction
 // to be retried at end transaction.
 func (*IncrementRequest) flags() int {
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | canBackpressure
+	return isRead | isWrite | isTxn | isLocking | isIntentWrite | consultsTSCache | canBackpressure
 }
 
 func (*DeleteRequest) flags() int {
-	return isWrite | isTxn | isLocking | isIntentWrite | canBackpressure
+	return isWrite | isTxn | isLocking | isIntentWrite | consultsTSCache | canBackpressure
 }
 
 func (drr *DeleteRangeRequest) flags() int {
@@ -1172,15 +1208,14 @@ func (drr *DeleteRangeRequest) flags() int {
 	// This workaround does not preclude us from creating a separate
 	// "DeleteInlineRange" command at a later date.
 	if drr.Inline {
-		return isRead | isWrite | isRange | isAlone
+		return isWrite | isRange | isAlone
 	}
 	// DeleteRange updates the timestamp cache as it doesn't leave intents or
-	// tombstones for keys which don't yet exist or keys that already have
-	// tombstones on them, but still wants to prevent anybody from writing under
-	// it. Note that, even if we didn't update the ts cache, deletes of keys
-	// that exist would not be lost (since the DeleteRange leaves intents on
-	// those keys), but deletes of "empty space" would.
-	return isRead | isWrite | isTxn | isLocking | isIntentWrite | isRange | updatesTSCache | needsRefresh | canBackpressure
+	// tombstones for keys which don't yet exist, but still wants to prevent
+	// anybody from writing under it. Note that, even if we didn't update the ts
+	// cache, deletes of keys that exist would not be lost (since the DeleteRange
+	// leaves intents on those keys), but deletes of "empty space" would.
+	return isWrite | isTxn | isLocking | isIntentWrite | isRange | consultsTSCache | updatesTSCache | needsRefresh | canBackpressure
 }
 
 // Note that ClearRange commands cannot be part of a transaction as
@@ -1192,12 +1227,18 @@ func (*ClearRangeRequest) flags() int { return isWrite | isRange | isAlone }
 func (*RevertRangeRequest) flags() int { return isWrite | isRange }
 
 func (sr *ScanRequest) flags() int {
-	maybeLocking := flagForLockStrength(sr.KeyLocking)
+	maybeLocking := 0
+	if sr.KeyLocking != lock.None {
+		maybeLocking = isLocking
+	}
 	return isRead | isRange | isTxn | maybeLocking | updatesTSCache | needsRefresh
 }
 
 func (rsr *ReverseScanRequest) flags() int {
-	maybeLocking := flagForLockStrength(rsr.KeyLocking)
+	maybeLocking := 0
+	if rsr.KeyLocking != lock.None {
+		maybeLocking = isLocking
+	}
 	return isRead | isRange | isReverse | isTxn | maybeLocking | updatesTSCache | needsRefresh
 }
 
@@ -1255,13 +1296,14 @@ func (*TransferLeaseRequest) flags() int {
 func (*RecomputeStatsRequest) flags() int                { return isWrite | isAlone }
 func (*ComputeChecksumRequest) flags() int               { return isWrite }
 func (*CheckConsistencyRequest) flags() int              { return isAdmin | isRange }
+func (*WriteBatchRequest) flags() int                    { return isWrite | isRange }
 func (*ExportRequest) flags() int                        { return isRead | isRange | updatesTSCache }
+func (*ImportRequest) flags() int                        { return isAdmin | isAlone }
 func (*AdminScatterRequest) flags() int                  { return isAdmin | isRange | isAlone }
 func (*AdminVerifyProtectedTimestampRequest) flags() int { return isAdmin | isRange | isAlone }
 func (*AddSSTableRequest) flags() int {
 	return isWrite | isRange | isAlone | isUnsplittable | canBackpressure
 }
-func (*MigrateRequest) flags() int { return isWrite | isRange | isAlone }
 
 // RefreshRequest and RefreshRangeRequest both determine which timestamp cache
 // they update based on their Write parameter.
@@ -1280,52 +1322,6 @@ func (*RangeStatsRequest) flags() int { return isRead }
 // parallel commits.
 func (etr *EndTxnRequest) IsParallelCommit() bool {
 	return etr.Commit && len(etr.InFlightWrites) > 0
-}
-
-const (
-	// ExternalStorageAuthImplicit is used by ExternalStorage instances to
-	// indicate access via a node's "implicit" authorization (e.g. machine acct).
-	ExternalStorageAuthImplicit = "implicit"
-
-	// ExternalStorageAuthSpecified is used by ExternalStorage instances to
-	// indicate access is via explicitly provided credentials.
-	ExternalStorageAuthSpecified = "specified"
-)
-
-// AccessIsWithExplicitAuth returns true if the external storage config carries
-// its own explicit credentials to use for access (or does not require them), as
-// opposed to using something about the node to gain implicit access, such as a
-// VM's machine account, network access, file system, etc.
-func (m *ExternalStorage) AccessIsWithExplicitAuth() bool {
-	switch m.Provider {
-	case ExternalStorageProvider_s3:
-		// custom endpoints could be a network resource only accessible via this
-		// node's network context and thus have an element of implicit auth.
-		if m.S3Config.Endpoint != "" {
-			return false
-		}
-		return m.S3Config.Auth != ExternalStorageAuthImplicit
-	case ExternalStorageProvider_gs:
-		return m.GoogleCloudConfig.Auth == ExternalStorageAuthSpecified
-	case ExternalStorageProvider_azure:
-		// Azure storage only uses explicitly supplied credentials.
-		return true
-	case ExternalStorageProvider_userfile:
-		// userfile always checks the user performing the action has grants on the
-		// table used.
-		return true
-	case ExternalStorageProvider_null:
-		return true
-	case ExternalStorageProvider_http:
-		// Arbitrary network endpoints may be accessible only via the node and thus
-		// make use of its implicit access to them.
-		return false
-	case ExternalStorageProvider_nodelocal:
-		// The node's local filesystem is obviously accessed implicitly as the node.
-		return false
-	default:
-		return false
-	}
 }
 
 // BulkOpSummaryID returns the key within a BulkOpSummary's EntryCounts map for
@@ -1391,22 +1387,6 @@ func MakeReplicationChanges(
 	return chgs
 }
 
-// ReplicationChangesForPromotion returns the replication changes that
-// correspond to the promotion of a non-voter to a voter.
-func ReplicationChangesForPromotion(target ReplicationTarget) []ReplicationChange {
-	return []ReplicationChange{
-		{ChangeType: ADD_VOTER, Target: target}, {ChangeType: REMOVE_NON_VOTER, Target: target},
-	}
-}
-
-// ReplicationChangesForDemotion returns the replication changes that correspond
-// to the demotion of a voter to a non-voter.
-func ReplicationChangesForDemotion(target ReplicationTarget) []ReplicationChange {
-	return []ReplicationChange{
-		{ChangeType: ADD_NON_VOTER, Target: target}, {ChangeType: REMOVE_VOTER, Target: target},
-	}
-}
-
 // AddChanges adds a batch of changes to the request in a backwards-compatible
 // way.
 func (acrr *AdminChangeReplicasRequest) AddChanges(chgs ...ReplicationChange) {
@@ -1431,26 +1411,14 @@ func (rc ReplicationChanges) byType(typ ReplicaChangeType) []ReplicationTarget {
 	return sl
 }
 
-// VoterAdditions returns a slice of all contained replication changes that add replicas.
-func (rc ReplicationChanges) VoterAdditions() []ReplicationTarget {
-	return rc.byType(ADD_VOTER)
+// Additions returns a slice of all contained replication changes that add replicas.
+func (rc ReplicationChanges) Additions() []ReplicationTarget {
+	return rc.byType(ADD_REPLICA)
 }
 
-// VoterRemovals returns a slice of all contained replication changes that remove replicas.
-func (rc ReplicationChanges) VoterRemovals() []ReplicationTarget {
-	return rc.byType(REMOVE_VOTER)
-}
-
-// NonVoterAdditions returns a slice of all contained replication
-// changes that add non-voters.
-func (rc ReplicationChanges) NonVoterAdditions() []ReplicationTarget {
-	return rc.byType(ADD_NON_VOTER)
-}
-
-// NonVoterRemovals returns a slice of all contained replication changes
-// that remove non-voters.
-func (rc ReplicationChanges) NonVoterRemovals() []ReplicationTarget {
-	return rc.byType(REMOVE_NON_VOTER)
+// Removals returns a slice of all contained replication changes that remove replicas.
+func (rc ReplicationChanges) Removals() []ReplicationTarget {
+	return rc.byType(REMOVE_REPLICA)
 }
 
 // Changes returns the changes requested by this AdminChangeReplicasRequest, taking
@@ -1490,32 +1458,4 @@ func (rirr *ResolveIntentRangeRequest) AsLockUpdate() LockUpdate {
 		Status:         rirr.Status,
 		IgnoredSeqNums: rirr.IgnoredSeqNums,
 	}
-}
-
-// CreateStoreIdent creates a store identifier out of the details captured
-// within the join node response (the join node RPC is used to allocate a store
-// ID for the client's first store).
-func (r *JoinNodeResponse) CreateStoreIdent() (StoreIdent, error) {
-	nodeID, storeID := NodeID(r.NodeID), StoreID(r.StoreID)
-	clusterID, err := uuid.FromBytes(r.ClusterID)
-	if err != nil {
-		return StoreIdent{}, err
-	}
-
-	sIdent := StoreIdent{
-		ClusterID: clusterID,
-		NodeID:    nodeID,
-		StoreID:   storeID,
-	}
-	return sIdent, nil
-}
-
-// SafeFormat implements redact.SafeFormatter.
-func (c *ContentionEvent) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("conflicted with %s on %s for %.3fs", c.TxnMeta.ID, c.Key, c.Duration.Seconds())
-}
-
-// String implements fmt.Stringer.
-func (c *ContentionEvent) String() string {
-	return redact.StringWithoutMarkers(c)
 }

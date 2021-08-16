@@ -212,10 +212,10 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts,
 		})
@@ -241,11 +241,11 @@ func TestPebbleEncryption(t *testing.T) {
 	require.Equal(t, int32(enginepbccl.EncryptionType_AES128_CTR), stats.EncryptionType)
 	t.Logf("EnvStats:\n%+v\n\n", *stats)
 
-	batch := db.NewUnindexedBatch(true /* writeOnly */)
-	require.NoError(t, batch.PutUnversioned(roachpb.Key("a"), []byte("a")))
+	batch := db.NewWriteOnlyBatch()
+	require.NoError(t, batch.Put(storage.MVCCKey{Key: roachpb.Key("a")}, []byte("a")))
 	require.NoError(t, batch.Commit(true))
 	require.NoError(t, db.Flush())
-	val, err := db.MVCCGet(storage.MVCCKey{Key: roachpb.Key("a")})
+	val, err := db.Get(storage.MVCCKey{Key: roachpb.Key("a")})
 	require.NoError(t, err)
 	require.Equal(t, "a", string(val))
 	db.Close()
@@ -259,25 +259,25 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts2,
 		})
 	require.NoError(t, err)
-	val, err = db.MVCCGet(storage.MVCCKey{Key: roachpb.Key("a")})
+	val, err = db.Get(storage.MVCCKey{Key: roachpb.Key("a")})
 	require.NoError(t, err)
 	require.Equal(t, "a", string(val))
 
 	// Flushing should've created a new sstable under the active key.
 	stats, err = db.GetEnvStats()
 	require.NoError(t, err)
-	t.Logf("EnvStats:\n%+v\n\n", *stats)
 	require.Equal(t, uint64(5), stats.TotalFiles)
-	require.LessOrEqual(t, uint64(5), stats.ActiveKeyFiles)
+	require.Equal(t, uint64(5), stats.ActiveKeyFiles)
 	require.Equal(t, stats.TotalBytes, stats.ActiveKeyBytes)
+	t.Logf("EnvStats:\n%+v\n\n", *stats)
 
 	db.Close()
 }
@@ -299,16 +299,16 @@ func TestPebbleEncryption2(t *testing.T) {
 		}
 
 		foundUnknown := false
-		kvFunc := func(kv roachpb.KeyValue) error {
+		kvFunc := func(kv roachpb.KeyValue) (bool, error) {
 			key := kv.Key
 			val := kv.Value
 			expected := keysCopy[string(key)]
 			if !expected || len(val.RawBytes) == 0 {
 				foundUnknown = true
-				return nil
+				return false, nil
 			}
 			delete(keysCopy, string(key))
-			return nil
+			return false, nil
 		}
 
 		_, err := storage.MVCCIterate(
@@ -347,10 +347,10 @@ func TestPebbleEncryption2(t *testing.T) {
 			context.Background(),
 			storage.PebbleConfig{
 				StorageConfig: base.StorageConfig{
-					Attrs:             roachpb.Attributes{},
-					MaxSize:           512 << 20,
-					UseFileRegistry:   true,
-					EncryptionOptions: encOptionsBytes,
+					Attrs:           roachpb.Attributes{},
+					MaxSize:         512 << 20,
+					UseFileRegistry: true,
+					ExtraOptions:    encOptionsBytes,
 				},
 				Opts: opts,
 			})

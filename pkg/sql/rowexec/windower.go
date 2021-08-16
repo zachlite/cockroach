@@ -12,6 +12,7 @@ package rowexec
 
 import (
 	"context"
+	"fmt"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -26,10 +27,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/optional"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // windowerState represents the state of the processor.
@@ -141,19 +144,24 @@ func newWindower(
 	}
 	w.outputRow = make(rowenc.EncDatumRow, len(w.outputTypes))
 
+	st := flowCtx.Cfg.Settings
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// windower will overflow to disk if this limit is not enough.
-	limit := execinfra.GetWorkMemLimit(flowCtx)
-	if limit < memRequiredByWindower {
-		if !flowCtx.Cfg.TestingKnobs.ForceDiskSpill && flowCtx.Cfg.TestingKnobs.MemoryLimitBytes == 0 {
+	limit := flowCtx.Cfg.TestingKnobs.MemoryLimitBytes
+	if limit <= 0 {
+		limit = execinfra.SettingWorkMemBytes.Get(&st.SV)
+		if limit < memRequiredByWindower {
 			return nil, errors.Errorf(
 				"window functions require %d bytes of RAM but only %d are in the budget. "+
-					"Consider increasing sql.distsql.temp_storage.workmem cluster setting or distsql_workmem session variable",
+					"Consider increasing sql.distsql.temp_storage.workmem setting",
 				memRequiredByWindower, limit)
 		}
-		// The limit is set very low by the tests, but the windower requires
-		// some amount of RAM, so we override the limit.
-		limit = memRequiredByWindower
+	} else {
+		if flowCtx.Cfg.TestingKnobs.ForceDiskSpill || limit < memRequiredByWindower {
+			// The limit is set very low by the tests, but the windower requires
+			// some amount of RAM, so we override the limit.
+			limit = memRequiredByWindower
+		}
 	}
 	limitedMon := mon.NewMonitorInheritWithLimit("windower-limited", limit, evalCtx.Mon)
 	limitedMon.Start(ctx, evalCtx.Mon, mon.BoundAccount{})
@@ -168,7 +176,7 @@ func newWindower(
 		output,
 		limitedMon,
 		execinfra.ProcStateOpts{InputsToDrain: []execinfra.RowSource{w.input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				w.close()
 				return nil
 			}},
@@ -176,9 +184,13 @@ func newWindower(
 		return nil, err
 	}
 
-	w.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "windower-disk")
+	w.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.Cfg.DiskMonitor, "windower-disk")
 	w.allRowsPartitioned = rowcontainer.NewHashDiskBackedRowContainer(
-		evalCtx, w.MemMonitor, w.diskMonitor, flowCtx.Cfg.TempStorage,
+		nil, /* memRowContainer */
+		evalCtx,
+		w.MemMonitor,
+		w.diskMonitor,
+		flowCtx.Cfg.TempStorage,
 	)
 	if err := w.allRowsPartitioned.Init(
 		ctx,
@@ -195,20 +207,21 @@ func newWindower(
 	// them to reuse the same shared memory account with the windower.
 	evalCtx.SingleDatumAggMemAccount = &w.acc
 
-	if execinfra.ShouldCollectStats(ctx, flowCtx) {
+	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		w.input = newInputStatCollector(w.input)
-		w.ExecStatsForTrace = w.execStatsForTrace
+		w.FinishTrace = w.outputStatsToTrace
 	}
 
 	return w, nil
 }
 
 // Start is part of the RowSource interface.
-func (w *windower) Start(ctx context.Context) {
-	ctx = w.StartInternal(ctx, windowerProcName)
+func (w *windower) Start(ctx context.Context) context.Context {
 	w.input.Start(ctx)
+	ctx = w.StartInternal(ctx, windowerProcName)
 	w.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	w.runningState = windowerAccumulating
+	return ctx
 }
 
 // Next is part of the RowSource interface.
@@ -831,19 +844,49 @@ func CreateWindowerSpecFunc(funcStr string) (execinfrapb.WindowerSpec_Func, erro
 	}
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (w *windower) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getInputStats(w.input)
-	if !ok {
-		return nil
+var _ execinfrapb.DistSQLSpanStats = &WindowerStats{}
+
+const windowerTagPrefix = "windower."
+
+// Stats implements the SpanStats interface.
+func (ws *WindowerStats) Stats() map[string]string {
+	inputStatsMap := ws.InputStats.Stats(windowerTagPrefix)
+	inputStatsMap[windowerTagPrefix+MaxMemoryTagSuffix] = humanizeutil.IBytes(ws.MaxAllocatedMem)
+	inputStatsMap[windowerTagPrefix+MaxDiskTagSuffix] = humanizeutil.IBytes(ws.MaxAllocatedDisk)
+	return inputStatsMap
+}
+
+// StatsForQueryPlan implements the DistSQLSpanStats interface.
+func (ws *WindowerStats) StatsForQueryPlan() []string {
+	stats := ws.InputStats.StatsForQueryPlan("" /* prefix */)
+
+	if ws.MaxAllocatedMem != 0 {
+		stats = append(stats,
+			fmt.Sprintf("%s: %s", MaxMemoryQueryPlanSuffix, humanizeutil.IBytes(ws.MaxAllocatedMem)))
 	}
-	return &execinfrapb.ComponentStats{
-		Inputs: []execinfrapb.InputStats{is},
-		Exec: execinfrapb.ExecStats{
-			MaxAllocatedMem:  optional.MakeUint(uint64(w.MemMonitor.MaximumBytes())),
-			MaxAllocatedDisk: optional.MakeUint(uint64(w.diskMonitor.MaximumBytes())),
-		},
-		Output: w.OutputHelper.Stats(),
+
+	if ws.MaxAllocatedDisk != 0 {
+		stats = append(stats,
+			fmt.Sprintf("%s: %s", MaxDiskQueryPlanSuffix, humanizeutil.IBytes(ws.MaxAllocatedDisk)))
+	}
+
+	return stats
+}
+
+func (w *windower) outputStatsToTrace() {
+	is, ok := getInputStats(w.FlowCtx, w.input)
+	if !ok {
+		return
+	}
+	if sp := opentracing.SpanFromContext(w.Ctx); sp != nil {
+		tracing.SetSpanStats(
+			sp,
+			&WindowerStats{
+				InputStats:       is,
+				MaxAllocatedMem:  w.MemMonitor.MaximumBytes(),
+				MaxAllocatedDisk: w.diskMonitor.MaximumBytes(),
+			},
+		)
 	}
 }
 

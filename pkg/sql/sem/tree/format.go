@@ -17,7 +17,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -218,8 +217,6 @@ type FmtCtx struct {
 
 	bytes.Buffer
 
-	dataConversionConfig sessiondatapb.DataConversionConfig
-
 	// NOTE: if you add more flags to this structure, make sure to add
 	// corresponding cleanup code in FmtCtx.Close().
 
@@ -242,77 +239,27 @@ type FmtCtx struct {
 	indexedTypeFormatter func(*FmtCtx, *OIDTypeReference)
 }
 
-// FmtCtxOption is an option to pass into NewFmtCtx.
-type FmtCtxOption func(*FmtCtx)
-
-// FmtAnnotations adds annotations to the FmtCtx.
-func FmtAnnotations(ann *Annotations) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.ann = ann
-	}
-}
-
-// FmtIndexedVarFormat modifies FmtCtx to customize the printing of
-// IndexedVars using the provided function.
-func FmtIndexedVarFormat(fn func(ctx *FmtCtx, idx int)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.indexedVarFormat = fn
-	}
-}
-
-// FmtPlaceholderFormat modifies FmtCtx to customize the printing of
-// StarDatums using the provided function.
-func FmtPlaceholderFormat(placeholderFn func(_ *FmtCtx, _ *Placeholder)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.placeholderFormat = placeholderFn
-	}
-}
-
-// FmtReformatTableNames modifies FmtCtx to to substitute the printing of table
-// naFmtParsable using the provided function.
-func FmtReformatTableNames(tableNameFmt func(*FmtCtx, *TableName)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.tableNameFormatter = tableNameFmt
-	}
-}
-
-// FmtIndexedTypeFormat modifies FmtCtx to customize the printing of
-// IDTypeReferences using the provided function.
-func FmtIndexedTypeFormat(fn func(*FmtCtx, *OIDTypeReference)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.indexedTypeFormatter = fn
-	}
-}
-
-// FmtDataConversionConfig modifies FmtCtx to contain items relevant for the
-// given DataConversionConfig.
-func FmtDataConversionConfig(dcc sessiondatapb.DataConversionConfig) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.dataConversionConfig = dcc
-	}
-}
-
 // NewFmtCtx creates a FmtCtx; only flags that don't require Annotations
 // can be used.
-func NewFmtCtx(f FmtFlags, opts ...FmtCtxOption) *FmtCtx {
-	ctx := fmtCtxPool.Get().(*FmtCtx)
-	ctx.flags = f
-	for _, opts := range opts {
-		opts(ctx)
-	}
-	if ctx.ann == nil && f&flagsRequiringAnnotations != 0 {
+func NewFmtCtx(f FmtFlags) *FmtCtx {
+	return NewFmtCtxEx(f, nil)
+}
+
+// NewFmtCtxEx creates a FmtCtx.
+func NewFmtCtxEx(f FmtFlags, ann *Annotations) *FmtCtx {
+	if ann == nil && f&flagsRequiringAnnotations != 0 {
 		panic(errors.AssertionFailedf("no Annotations provided"))
 	}
+	ctx := fmtCtxPool.Get().(*FmtCtx)
+	ctx.flags = f
+	ctx.ann = ann
 	return ctx
 }
 
-// WithDataConversionConfig modifies FmtCtx to substitute the DataConversionConfig,
-// calls fn, then restore the original session data.
-func (ctx *FmtCtx) WithDataConversionConfig(dcc sessiondatapb.DataConversionConfig, fn func()) {
-	old := ctx.dataConversionConfig
-	FmtDataConversionConfig(dcc)(ctx)
-	defer func() { ctx.dataConversionConfig = old }()
-	fn()
+// SetReformatTableNames modifies FmtCtx to to substitute the printing of table
+// names using the provided function.
+func (ctx *FmtCtx) SetReformatTableNames(tableNameFmt func(*FmtCtx, *TableName)) {
+	ctx.tableNameFormatter = tableNameFmt
 }
 
 // WithReformatTableNames modifies FmtCtx to to substitute the printing of table
@@ -353,6 +300,24 @@ func (ctx *FmtCtx) HasFlags(f FmtFlags) bool {
 // ctx.FormatNode().
 func (ctx *FmtCtx) Printf(f string, args ...interface{}) {
 	fmt.Fprintf(&ctx.Buffer, f, args...)
+}
+
+// SetIndexedVarFormat modifies FmtCtx to customize the printing of
+// IndexedVars using the provided function.
+func (ctx *FmtCtx) SetIndexedVarFormat(fn func(ctx *FmtCtx, idx int)) {
+	ctx.indexedVarFormat = fn
+}
+
+// SetPlaceholderFormat modifies FmtCtx to customize the printing of
+// StarDatums using the provided function.
+func (ctx *FmtCtx) SetPlaceholderFormat(placeholderFn func(_ *FmtCtx, _ *Placeholder)) {
+	ctx.placeholderFormat = placeholderFn
+}
+
+// SetIndexedTypeFormat modifies FmtCtx to customize the printing of
+// IDTypeReferences using the provided function.
+func (ctx *FmtCtx) SetIndexedTypeFormat(fn func(*FmtCtx, *OIDTypeReference)) {
+	ctx.indexedTypeFormatter = fn
 }
 
 // NodeFormatter is implemented by nodes that can be pretty-printed.
@@ -439,8 +404,8 @@ func (ctx *FmtCtx) FormatNode(n NodeFormatter) {
 
 // AsStringWithFlags pretty prints a node to a string given specific flags; only
 // flags that don't require Annotations can be used.
-func AsStringWithFlags(n NodeFormatter, fl FmtFlags, opts ...FmtCtxOption) string {
-	ctx := NewFmtCtx(fl, opts...)
+func AsStringWithFlags(n NodeFormatter, fl FmtFlags) string {
+	ctx := NewFmtCtx(fl)
 	ctx.FormatNode(n)
 	return ctx.CloseAndGetString()
 }
@@ -448,7 +413,7 @@ func AsStringWithFlags(n NodeFormatter, fl FmtFlags, opts ...FmtCtxOption) strin
 // AsStringWithFQNames pretty prints a node to a string with the
 // FmtAlwaysQualifyTableNames flag (which requires annotations).
 func AsStringWithFQNames(n NodeFormatter, ann *Annotations) string {
-	ctx := NewFmtCtx(FmtAlwaysQualifyTableNames, FmtAnnotations(ann))
+	ctx := NewFmtCtxEx(FmtAlwaysQualifyTableNames, ann)
 	ctx.FormatNode(n)
 	return ctx.CloseAndGetString()
 }
@@ -487,11 +452,9 @@ var fmtCtxPool = sync.Pool{
 func (ctx *FmtCtx) Close() {
 	ctx.Buffer.Reset()
 	ctx.flags = 0
-	ctx.ann = nil
 	ctx.indexedVarFormat = nil
 	ctx.tableNameFormatter = nil
 	ctx.placeholderFormat = nil
-	ctx.dataConversionConfig = sessiondatapb.DataConversionConfig{}
 	fmtCtxPool.Put(ctx)
 }
 

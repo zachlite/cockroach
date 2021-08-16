@@ -73,7 +73,6 @@ func makeClusterWideZipRequests(
 // into a debug zip.
 var debugZipTablesPerCluster = []string{
 	"crdb_internal.cluster_contention_events",
-	"crdb_internal.cluster_distsql_flows",
 	"crdb_internal.cluster_database_privileges",
 	"crdb_internal.cluster_queries",
 	"crdb_internal.cluster_sessions",
@@ -84,6 +83,7 @@ var debugZipTablesPerCluster = []string{
 	"system.jobs",       // get the raw, restorable jobs records too.
 	"system.descriptor", // descriptors also contain job-like mutation state.
 	"system.namespace",
+	"system.namespace2", // TODO(sqlexec): consider removing in 20.2 or later.
 	"system.scheduled_jobs",
 
 	"crdb_internal.kv_node_liveness",

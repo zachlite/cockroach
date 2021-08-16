@@ -731,7 +731,7 @@ func applyZoneConfigForMultiRegionDatabase(
 func (p *planner) updateZoneConfigsForAllTables(ctx context.Context, desc *dbdesc.Mutable) error {
 	return p.forEachMutableTableInDatabase(
 		ctx,
-		desc,
+		&desc.Immutable,
 		func(ctx context.Context, scName string, tbDesc *tabledesc.Mutable) error {
 			regionConfig, err := SynthesizeRegionConfig(ctx, p.txn, desc.ID, p.Descriptors())
 			if err != nil {
@@ -814,7 +814,7 @@ func partitionByForRegionalByRow(
 
 // ValidateAllMultiRegionZoneConfigsInCurrentDatabase is part of the tree.EvalDatabase interface.
 func (p *planner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context.Context) error {
-	dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
+	_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
 		p.EvalContext().Ctx(),
 		p.txn,
 		p.CurrentDatabase(),
@@ -851,7 +851,7 @@ func (p *planner) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context
 
 func (p *planner) validateAllMultiRegionZoneConfigsInDatabase(
 	ctx context.Context,
-	dbDesc catalog.DatabaseDescriptor,
+	dbDesc *dbdesc.Immutable,
 	zoneConfigForMultiRegionValidator zoneConfigForMultiRegionValidator,
 ) error {
 	var ids []descpb.ID
@@ -905,7 +905,7 @@ func (p *planner) validateAllMultiRegionZoneConfigsInDatabase(
 func (p *planner) CurrentDatabaseRegionConfig(
 	ctx context.Context,
 ) (tree.DatabaseRegionConfig, error) {
-	dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
+	_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
 		p.EvalContext().Ctx(),
 		p.txn,
 		p.CurrentDatabase(),
@@ -962,9 +962,6 @@ var SynthesizeRegionConfigOptionUseCache SynthesizeRegionConfigOption = func(o *
 // configured state of a multi-region database by coalescing state from both
 // the database descriptor and multi-region type descriptor. By default, it
 // avoids the cache and is intended for use by DDL statements.
-//
-// TODO(ajwerner): Refactor this to take the database descriptor rather than
-// the database ID.
 func SynthesizeRegionConfig(
 	ctx context.Context,
 	txn *kv.Txn,
@@ -1024,8 +1021,8 @@ func SynthesizeRegionConfig(
 
 	regionConfig = multiregion.MakeRegionConfig(
 		regionNames,
-		dbDesc.GetRegionConfig().PrimaryRegion,
-		dbDesc.GetRegionConfig().SurvivalGoal,
+		dbDesc.RegionConfig.PrimaryRegion,
+		dbDesc.RegionConfig.SurvivalGoal,
 		regionEnumID,
 		multiregion.WithTransitioningRegions(transitioningRegionNames),
 	)
@@ -1115,7 +1112,7 @@ func (p *planner) CheckZoneConfigChangePermittedForMultiRegion(
 	// Check if what we're altering is a multi-region entity.
 	if zs.Database != "" {
 		isDB = true
-		dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
+		_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(
 			ctx,
 			p.txn,
 			string(zs.Database),
@@ -1124,7 +1121,7 @@ func (p *planner) CheckZoneConfigChangePermittedForMultiRegion(
 		if err != nil {
 			return err
 		}
-		if dbDesc.GetRegionConfig() == nil {
+		if dbDesc.RegionConfig == nil {
 			// Not a multi-region database, we're done here.
 			return nil
 		}
@@ -1422,14 +1419,14 @@ func (v *zoneConfigForMultiRegionValidatorValidation) newExtraSubzoneError(
 // database zone configuration and we wish to warn the user about that before
 // it occurs (and require the FORCE option to proceed).
 func (p *planner) validateZoneConfigForMultiRegionDatabaseWasNotModifiedByUser(
-	ctx context.Context, dbDesc catalog.DatabaseDescriptor,
+	ctx context.Context, dbDesc *dbdesc.Immutable,
 ) error {
 	// If the user is overriding, our work here is done.
 	if p.SessionData().OverrideMultiRegionZoneConfigEnabled {
 		telemetry.Inc(sqltelemetry.OverrideMultiRegionDatabaseZoneConfigurationSystem)
 		return nil
 	}
-	currentZoneConfig, err := getZoneConfigRaw(ctx, p.txn, p.ExecCfg().Codec, dbDesc.GetID())
+	currentZoneConfig, err := getZoneConfigRaw(ctx, p.txn, p.ExecCfg().Codec, dbDesc.ID)
 	if err != nil {
 		return err
 	}
@@ -1457,7 +1454,7 @@ func (p *planner) validateZoneConfigForMultiRegionDatabaseWasNotModifiedByUser(
 // validateZoneConfigForMultiRegionDatabase validates that the zone config
 // for the databases matches as the multi-region database definition.
 func (p *planner) validateZoneConfigForMultiRegionDatabase(
-	dbDesc catalog.DatabaseDescriptor,
+	dbDesc *dbdesc.Immutable,
 	currentZoneConfig *zonepb.ZoneConfig,
 	zoneConfigForMultiRegionValidator zoneConfigForMultiRegionValidator,
 ) error {
@@ -1558,11 +1555,12 @@ func (p *planner) validateZoneConfigForMultiRegionTable(
 	regionalByRowNewIndexes := make(map[uint32]struct{})
 	for _, mut := range desc.AllMutations() {
 		if pkSwap := mut.AsPrimaryKeySwap(); pkSwap != nil {
-			if pkSwap.HasLocalityConfig() {
-				_ = pkSwap.ForEachNewIndexIDs(func(id descpb.IndexID) error {
+			swapDesc := pkSwap.PrimaryKeySwapDesc()
+			if swapDesc.LocalityConfigSwap != nil {
+				for _, id := range swapDesc.NewIndexes {
 					regionalByRowNewIndexes[uint32(id)] = struct{}{}
-					return nil
-				})
+				}
+				regionalByRowNewIndexes[uint32(swapDesc.NewPrimaryIndexId)] = struct{}{}
 			}
 			// There can only be one pkSwap at a time, so break now.
 			break
@@ -1707,7 +1705,7 @@ func (p *planner) validateZoneConfigForMultiRegionTable(
 // tables are undergoing a schema change that affect their partitions
 // and no tables are transitioning to or from REGIONAL BY ROW.
 func (p *planner) checkNoRegionalByRowChangeUnderway(
-	ctx context.Context, dbDesc catalog.DatabaseDescriptor,
+	ctx context.Context, dbDesc *dbdesc.Immutable,
 ) error {
 	// forEachTableDesc touches all the table keys, which prevents a race
 	// with ADD/REGION committing at the same time as the user transaction.

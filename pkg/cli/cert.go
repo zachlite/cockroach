@@ -299,7 +299,7 @@ func runListCerts(cmd *cobra.Command, args []string) error {
 		addRow(cert, fmt.Sprintf("user: %s", user))
 	}
 
-	return PrintQueryOutput(os.Stdout, certTableHeaders, NewRowSliceIter(rows, alignment))
+	return printQueryOutput(os.Stdout, certTableHeaders, newRowSliceIter(rows, alignment))
 }
 
 var certCmds = []*cobra.Command{

@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -299,7 +300,7 @@ func (expr *AndExpr) TypeCheck(
 func (expr *BinaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := BinOps[expr.Operator.Symbol]
+	ops := BinOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, true, expr.Left, expr.Right)
 	if err != nil {
@@ -484,8 +485,7 @@ func (expr *CastExpr) TypeCheck(
 			// is in its resolvable type set), we desire the cast's type for the
 			// Constant. In many cases, the CastExpr will then become a no-op and will
 			// be elided below. In other cases, the types may be equivalent but not
-			// Identical (e.g. string::char(2) or oid::regclass) and the CastExpr is
-			// still needed.
+			// Identical (e.g. string vs char(2)) and the CastExpr is still needed.
 			desired = exprType
 		}
 	case semaCtx.isUnresolvedPlaceholder(expr.Expr):
@@ -741,7 +741,7 @@ func (expr *ComparisonExpr) TypeCheck(
 	var cmpOp *CmpOp
 	var alwaysNull bool
 	var err error
-	if expr.Operator.Symbol.HasSubOperator() {
+	if expr.Operator.HasSubOperator() {
 		leftTyped, rightTyped, cmpOp, alwaysNull, err = typeCheckComparisonOpWithSubOperator(
 			ctx,
 			semaCtx,
@@ -1311,16 +1311,16 @@ func (expr *AllColumnsSelector) TypeCheck(
 func (expr *RangeCond) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	leftFromTyped, fromTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(GT), expr.Left, expr.From)
+	leftFromTyped, fromTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, GT, expr.Left, expr.From)
 	if err != nil {
 		return nil, err
 	}
-	leftToTyped, toTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(LT), expr.Left, expr.To)
+	leftToTyped, toTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, LT, expr.Left, expr.To)
 	if err != nil {
 		return nil, err
 	}
 	// Ensure that the boundaries of the comparison are well typed.
-	_, _, _, _, err = typeCheckComparisonOp(ctx, semaCtx, MakeComparisonOperator(LT), expr.From, expr.To)
+	_, _, _, _, err = typeCheckComparisonOp(ctx, semaCtx, LT, expr.From, expr.To)
 	if err != nil {
 		return nil, err
 	}
@@ -1344,7 +1344,7 @@ func (expr *Subquery) TypeCheck(_ context.Context, sc *SemaContext, _ *types.T) 
 func (expr *UnaryExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	ops := UnaryOps[expr.Operator.Symbol]
+	ops := UnaryOps[expr.Operator]
 
 	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, ops, false, expr.Expr)
 	if err != nil {
@@ -1459,7 +1459,9 @@ func (expr *Tuple) TypeCheck(
 	// Copy the labels if there are any.
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
-		copy(labels, expr.Labels)
+		for i := range expr.Labels {
+			labels[i] = lexbase.NormalizeName(expr.Labels[i])
+		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)
 	return expr, nil
@@ -1751,25 +1753,6 @@ func typeCheckAndRequireTupleElems(
 		tuple.Exprs[i] = rightTyped
 		tuple.typ.TupleContents()[i] = rightTyped.ResolvedType()
 	}
-	if len(tuple.typ.TupleContents()) > 0 && tuple.typ.TupleContents()[0].Family() == types.CollatedStringFamily {
-		// Make sure that all elements of the tuple have the correct locale set
-		// for collated strings. Note that if the locales were different, an
-		// error would have been already emitted, so here we are only upgrading
-		// an empty locale (which might be set for NULLs) to a non-empty (if
-		// such is found).
-		var typWithLocale *types.T
-		for _, typ := range tuple.typ.TupleContents() {
-			if typ.Locale() != "" {
-				typWithLocale = typ
-				break
-			}
-		}
-		if typWithLocale != nil {
-			for i := range tuple.typ.TupleContents() {
-				tuple.typ.TupleContents()[i] = typWithLocale
-			}
-		}
-	}
 	return tuple, nil
 }
 
@@ -1818,7 +1801,7 @@ func typeCheckComparisonOpWithSubOperator(
 	// Determine the set of comparisons are possible for the sub-operation,
 	// which will be memoized.
 	foldedOp, _, _, _, _ := FoldComparisonExpr(subOp, nil, nil)
-	ops := CmpOps[foldedOp.Symbol]
+	ops := CmpOps[foldedOp]
 
 	var cmpTypeLeft, cmpTypeRight *types.T
 	var leftTyped, rightTyped TypedExpr
@@ -1964,14 +1947,14 @@ func typeCheckComparisonOp(
 	ctx context.Context, semaCtx *SemaContext, op ComparisonOperator, left, right Expr,
 ) (_ TypedExpr, _ TypedExpr, _ *CmpOp, alwaysNull bool, _ error) {
 	foldedOp, foldedLeft, foldedRight, switched, _ := FoldComparisonExpr(op, left, right)
-	ops := CmpOps[foldedOp.Symbol]
+	ops := CmpOps[foldedOp]
 
 	_, leftIsTuple := foldedLeft.(*Tuple)
 	rightTuple, rightIsTuple := foldedRight.(*Tuple)
 
 	_, rightIsSubquery := foldedRight.(SubqueryExpr)
 	switch {
-	case foldedOp.Symbol == In && rightIsTuple:
+	case foldedOp == In && rightIsTuple:
 		sameTypeExprs := make([]Expr, len(rightTuple.Exprs)+1)
 		sameTypeExprs[0] = foldedLeft
 		copy(sameTypeExprs[1:], rightTuple.Exprs)
@@ -2003,7 +1986,7 @@ func typeCheckComparisonOp(
 		}
 		return typedLeft, rightTuple, fn, false, nil
 
-	case foldedOp.Symbol == In && rightIsSubquery:
+	case foldedOp == In && rightIsSubquery:
 		typedLeft, err := foldedLeft.TypeCheck(ctx, semaCtx, types.Any)
 		if err != nil {
 			sigWithErr := fmt.Sprintf(compExprsFmt, left, op, right, err)

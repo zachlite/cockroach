@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package rowenc_test
+package rowenc
 
 import (
 	"fmt"
@@ -17,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -60,7 +58,7 @@ func TestRandParseDatumStringAs(t *testing.T) {
 		const testsForTyp = 100
 		t.Run(typ.String(), func(t *testing.T) {
 			for i := 0; i < testsForTyp; i++ {
-				datum := randgen.RandDatumWithNullChance(rng, typ, 0)
+				datum := RandDatumWithNullChance(rng, typ, 0)
 				ds := tree.AsStringWithFlags(datum, tree.FmtExport)
 
 				// Because of how RandDatumWithNullChanceWorks, we might
@@ -93,7 +91,7 @@ func TestRandParseDatumStringAs(t *testing.T) {
 					t.Fatal(ds, err)
 				}
 
-				parsed, err := rowenc.ParseDatumStringAs(typ, ds, evalCtx)
+				parsed, err := ParseDatumStringAs(typ, ds, evalCtx)
 				if err != nil {
 					t.Fatal(ds, err)
 				}
@@ -288,7 +286,7 @@ func TestParseDatumStringAs(t *testing.T) {
 		t.Run(typ.String(), func(t *testing.T) {
 			for _, s := range exprs {
 				t.Run(fmt.Sprintf("%q", s), func(t *testing.T) {
-					d, err := rowenc.ParseDatumStringAs(typ, s, evalCtx)
+					d, err := ParseDatumStringAs(typ, s, evalCtx)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -296,7 +294,7 @@ func TestParseDatumStringAs(t *testing.T) {
 						t.Fatalf("unexpected type: %s", d.ResolvedType())
 					}
 					ds := tree.AsStringWithFlags(d, tree.FmtExport)
-					parsed, err := rowenc.ParseDatumStringAs(typ, ds, evalCtx)
+					parsed, err := ParseDatumStringAs(typ, ds, evalCtx)
 					if err != nil {
 						t.Fatal(err)
 					}

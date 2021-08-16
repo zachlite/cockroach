@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -561,7 +562,7 @@ func DerivePruneCols(e memo.RelExpr) opt.ColSet {
 		// Any pruneable input columns can potentially be pruned, as long as
 		// they're not used as an ordering column.
 		inputPruneCols := DerivePruneCols(e.Child(0).(memo.RelExpr))
-		ordering := e.Private().(*props.OrderingChoice).ColSet()
+		ordering := e.Private().(*physical.OrderingChoice).ColSet()
 		relProps.Rule.PruneCols = inputPruneCols.Difference(ordering)
 
 	case opt.OrdinalityOp:
@@ -681,11 +682,11 @@ func (c *CustomFuncs) MutationTable(private *memo.MutationPrivate) opt.TableID {
 // NeededColMapLeft returns the subset of a SetPrivate's LeftCols that corresponds to the
 // needed subset of OutCols. This is useful for pruning columns in set operations.
 func (c *CustomFuncs) NeededColMapLeft(needed opt.ColSet, set *memo.SetPrivate) opt.ColSet {
-	return opt.TranslateColSetStrict(needed, set.OutCols, set.LeftCols)
+	return opt.TranslateColSet(needed, set.OutCols, set.LeftCols)
 }
 
 // NeededColMapRight returns the subset of a SetPrivate's RightCols that corresponds to the
 // needed subset of OutCols. This is useful for pruning columns in set operations.
 func (c *CustomFuncs) NeededColMapRight(needed opt.ColSet, set *memo.SetPrivate) opt.ColSet {
-	return opt.TranslateColSetStrict(needed, set.OutCols, set.RightCols)
+	return opt.TranslateColSet(needed, set.OutCols, set.RightCols)
 }

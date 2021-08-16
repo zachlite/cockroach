@@ -59,12 +59,7 @@ func TestCollectionWriteDescToBatch(t *testing.T) {
 
 	db := s0.DB()
 
-	descriptors := descs.NewCollection(
-		s0.ClusterSettings(),
-		s0.LeaseManager().(*lease.Manager),
-		nil, // hydratedTables
-		nil, // virtualSchemas
-	)
+	descriptors := descs.NewCollection(s0.ClusterSettings(), s0.LeaseManager().(*lease.Manager), nil /* hydratedTables */)
 	// Note this transaction abuses the mechanisms normally required for updating
 	// tables and is just for testing what this test intends to exercise.
 	require.NoError(t, db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
@@ -96,20 +91,18 @@ func TestCollectionWriteDescToBatch(t *testing.T) {
 				},
 			},
 			PrimaryIndex: descpb.IndexDescriptor{
-				ID:                  1,
-				Name:                "pk",
-				KeyColumnIDs:        []descpb.ColumnID{1},
-				KeyColumnNames:      []string{"a"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				ID:               1,
+				Name:             "pk",
+				ColumnIDs:        []descpb.ColumnID{1},
+				ColumnNames:      []string{"a"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 			},
 			Privileges:     descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 			NextColumnID:   2,
 			NextFamilyID:   1,
 			NextIndexID:    2,
 			NextMutationID: 1,
-			FormatVersion:  descpb.InterleavedFormatVersion,
+			FormatVersion:  descpb.FamilyFormatVersion,
 		}).BuildCreatedMutableTable()
 		b := txn.NewBatch()
 
@@ -218,6 +211,7 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 	tdb.Exec(t, "CREATE TYPE db.sc.typ AS ENUM ('foo')")
 	lm := s0.LeaseManager().(*lease.Manager)
 	ie := s0.InternalExecutor().(sqlutil.InternalExecutor)
+	var dbID descpb.ID
 	t.Run("database descriptors", func(t *testing.T) {
 		require.NoError(t, descs.Txn(ctx, s0.ClusterSettings(), lm, ie, s0.DB(), func(
 			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
@@ -226,10 +220,11 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 			flags.RequireMutable = true
 			flags.Required = true
 
-			db, err := descriptors.GetMutableDatabaseByName(ctx, txn, "db", flags)
+			_, db, err := descriptors.GetMutableDatabaseByName(ctx, txn, "db", flags)
 			require.NoError(t, err)
+			dbID = db.GetID()
 
-			resolved, err := descriptors.GetMutableDatabaseByName(ctx, txn, "db", flags)
+			_, resolved, err := descriptors.GetMutableDatabaseByName(ctx, txn, "db", flags)
 			require.NoError(t, err)
 
 			require.Same(t, db, resolved)
@@ -244,7 +239,7 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 
 			flags.RequireMutable = false
 
-			immByName, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "db", flags)
+			_, immByName, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "db", flags)
 			require.NoError(t, err)
 			require.Equal(t, mut.OriginalVersion(), immByName.GetVersion())
 
@@ -257,28 +252,26 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 				Name: "db",
 			}})
 
-			// Don't write the descriptor, just write the namespace entry.
-			// This will mean that resolution still is based on the old name.
 			b := &kv.Batch{}
-			b.CPut(catalogkeys.MakeDatabaseNameKey(lm.Codec(), mut.Name), mut.GetID(), nil)
+			b.CPut(catalogkeys.NewDatabaseKey(mut.Name).Key(lm.Codec()), mut.GetID(), nil)
 			err = txn.Run(ctx, b)
 			require.NoError(t, err)
 
-			// Try to get the database descriptor by the new name and fail.
-			failedToResolve, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "new_name", flags)
-			require.Regexp(t, `database "new_name" does not exist`, err)
+			// Try to get the database descriptor by the old name and fail.
+			_, failedToResolve, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "db", flags)
+			require.Regexp(t, `database "db" does not exist`, err)
 			require.Nil(t, failedToResolve)
 
-			// Try to get the database descriptor by the old name and succeed but get
-			// the old version with the old name because the new version has not yet
-			// been written.
-			immResolvedWithNewNameButHasOldName, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "db", flags)
+			// Try to get the database descriptor by the new name and succeed but get
+			// the old version with the old name (this is bizarre but is the
+			// contract now).
+			_, immResolvedWithNewNameButHasOldName, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "new_name", flags)
 			require.NoError(t, err)
 			require.Same(t, immByID, immResolvedWithNewNameButHasOldName)
 
 			require.NoError(t, descriptors.AddUncommittedDescriptor(mut))
 
-			immByNameAfter, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "new_name", flags)
+			_, immByNameAfter, err := descriptors.GetImmutableDatabaseByName(ctx, txn, "new_name", flags)
 			require.NoError(t, err)
 			require.Equal(t, db.GetVersion(), immByNameAfter.GetVersion())
 			require.Equal(t, mut.ImmutableCopy(), immByNameAfter)
@@ -298,23 +291,20 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 			flags.RequireMutable = true
 			flags.Required = true
 
-			db, err := descriptors.GetMutableDatabaseByName(ctx, txn, "db", flags)
+			ok, schema, err := descriptors.GetMutableSchemaByName(ctx, txn, dbID, "sc", flags)
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			ok, resolved, err := descriptors.GetMutableSchemaByName(ctx, txn, dbID, "sc", flags)
+			require.NoError(t, err)
+			require.True(t, ok)
+
+			require.Same(t, schema.Desc, resolved.Desc)
+
+			byID, err := descriptors.GetMutableDescriptorByID(ctx, schema.ID, txn)
 			require.NoError(t, err)
 
-			schema, err := descriptors.GetMutableSchemaByName(ctx, txn, db, "sc", flags)
-			require.NoError(t, err)
-			require.NotNil(t, schema)
-
-			resolved, err := descriptors.GetMutableSchemaByName(ctx, txn, db, "sc", flags)
-			require.NoError(t, err)
-			require.NotNil(t, schema)
-
-			require.Same(t, schema, resolved)
-
-			byID, err := descriptors.GetMutableDescriptorByID(ctx, schema.GetID(), txn)
-			require.NoError(t, err)
-
-			require.Same(t, schema, byID)
+			require.Same(t, schema.Desc, byID)
 			return nil
 		}))
 	})
@@ -349,7 +339,7 @@ func TestAddUncommittedDescriptorAndMutableResolution(t *testing.T) {
 			flags := tree.ObjectLookupFlags{}
 			flags.RequireMutable = true
 			flags.Required = true
-			tn := tree.MakeQualifiedTypeName("db", "sc", "typ")
+			tn := tree.MakeNewQualifiedTypeName("db", "sc", "typ")
 			_, typ, err := descriptors.GetMutableTypeByName(ctx, txn, &tn, flags)
 			require.NoError(t, err)
 
@@ -394,7 +384,7 @@ func TestSyntheticDescriptorResolution(t *testing.T) {
 		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
 	) error {
 		// Resolve the descriptor so we can mutate it.
-		tn := tree.MakeTableNameWithSchema("db", tree.PublicSchemaName, "tbl")
+		tn := tree.MakeTableName("db", "tbl")
 		found, desc, err := descriptors.GetImmutableTableByName(ctx, txn, &tn, tree.ObjectLookupFlags{})
 		require.True(t, found)
 		require.NoError(t, err)
@@ -493,16 +483,16 @@ CREATE TABLE test.schema.t(x INT);
 			s.InternalExecutor().(sqlutil.InternalExecutor),
 			kvDB,
 			func(ctx context.Context, txn *kv.Txn, descsCol *descs.Collection) error {
-				dbDesc, err := descsCol.GetImmutableDatabaseByName(ctx, txn, "test", tree.DatabaseLookupFlags{Required: true})
+				_, dbDesc, err := descsCol.GetImmutableDatabaseByName(ctx, txn, "test", tree.DatabaseLookupFlags{Required: true})
 				if err != nil {
 					return err
 				}
-				schemaDesc, err := descsCol.GetMutableSchemaByName(ctx, txn, dbDesc, "schema", tree.SchemaLookupFlags{Required: true})
+				_, schemaDesc, err := descsCol.GetMutableSchemaByName(ctx, txn, dbDesc.GetID(), "schema", tree.SchemaLookupFlags{Required: true})
 				if err != nil {
 					return err
 				}
 				// Write garbage privileges into the schema desc.
-				privs := schemaDesc.GetPrivileges()
+				privs := schemaDesc.Desc.GetPrivileges()
 				for i := range privs.Users {
 					// SELECT is valid on a database but not a schema, however
 					// due to issue #65697, after running ALTER DATABASE ...
@@ -515,7 +505,7 @@ CREATE TABLE test.schema.t(x INT);
 				}
 
 				descsCol.SkipValidationOnWrite()
-				return descsCol.WriteDesc(ctx, false, schemaDesc.(catalog.MutableDescriptor), txn)
+				return descsCol.WriteDesc(ctx, false, schemaDesc.Desc.(catalog.MutableDescriptor), txn)
 			}),
 	)
 

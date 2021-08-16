@@ -45,7 +45,7 @@ import { findClosestTimeScale } from "src/redux/timewindow";
 
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
 
-interface LineGraphProps extends MetricsDataComponentProps {
+export interface LineGraphProps extends MetricsDataComponentProps {
   title?: string;
   subtitle?: string;
   legend?: boolean;
@@ -404,7 +404,9 @@ export class LineGraph extends React.Component<LineGraphProps, {}> {
   // TODO(davidh): figure out why the timescale doesn't get more granular
   // automatically when a narrower time frame is selected.
   setNewTimeRange(startMillis: number, endMillis: number) {
-    if (startMillis === endMillis) return;
+    if (startMillis === endMillis) {
+      return;
+    }
     const start = MilliToSeconds(startMillis);
     const end = MilliToSeconds(endMillis);
     this.props.setTimeRange({
@@ -507,6 +509,11 @@ export class LineGraph extends React.Component<LineGraphProps, {}> {
       if (this.u) {
         this.u.destroy();
       }
+
+      if (options.series?.length < 2) {
+        options.series.push({ scale: "1" });
+      }
+
       this.u = new uPlot(options, uPlotData, this.el.current);
     }
   }

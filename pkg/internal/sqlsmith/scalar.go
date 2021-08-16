@@ -11,7 +11,7 @@
 package sqlsmith
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -148,7 +148,19 @@ func makeConstExpr(s *Smither, typ *types.T, refs colRefs) tree.TypedExpr {
 		}
 	}
 
-	return makeConstDatum(s, typ)
+	expr := tree.TypedExpr(makeConstDatum(s, typ))
+	// In Postgres mode, make sure the datum is resolved as the type we want.
+	// CockroachDB and Postgres differ in how constants are typed otherwise.
+	if s.postgres {
+		// Casts to REGTYPE, REGCLASS, etc are not deterministic since they
+		// involve OID->name resolution, and the OIDs will not match across
+		// two different databases.
+		if typ.Family() == types.OidFamily {
+			typ = types.Oid
+		}
+		expr = tree.NewTypedCastExpr(expr, typ)
+	}
+	return expr
 }
 
 func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
@@ -158,9 +170,9 @@ func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
 	if s.vectorizable {
 		nullChance = 0
 	}
-	datum = randgen.RandDatumWithNullChance(s.rnd, typ, nullChance)
+	datum = rowenc.RandDatumWithNullChance(s.rnd, typ, nullChance)
 	if f := datum.ResolvedType().Family(); f != types.UnknownFamily && s.simpleDatums {
-		datum = randgen.RandDatumSimple(s.rnd, typ)
+		datum = rowenc.RandDatumSimple(s.rnd, typ)
 	}
 	s.lock.Unlock()
 
@@ -242,7 +254,7 @@ func makeNot(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 }
 
 // TODO(mjibson): add the other operators somewhere.
-var compareOps = [...]tree.ComparisonOperatorSymbol{
+var compareOps = [...]tree.ComparisonOperator{
 	tree.EQ,
 	tree.LT,
 	tree.GT,
@@ -267,10 +279,10 @@ func makeCompareOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool
 	}
 	left := makeScalar(s, typ, refs)
 	right := makeScalar(s, typ, refs)
-	return typedParen(tree.NewTypedComparisonExpr(tree.MakeComparisonOperator(op), left, right), typ), true
+	return typedParen(tree.NewTypedComparisonExpr(op, left, right), typ), true
 }
 
-var vecBinOps = map[tree.BinaryOperatorSymbol]bool{
+var vecBinOps = map[tree.BinaryOperator]bool{
 	tree.Plus:  true,
 	tree.Minus: true,
 	tree.Mult:  true,
@@ -285,13 +297,13 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	}
 	n := s.rnd.Intn(len(ops))
 	op := ops[n]
-	if s.vectorizable && !vecBinOps[op.Operator.Symbol] {
+	if s.vectorizable && !vecBinOps[op.Operator] {
 		return nil, false
 	}
 	if s.postgres {
 		if ignorePostgresBinOps[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}] {
 			return nil, false
@@ -300,7 +312,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	if s.postgres {
 		if transform, needTransform := postgresBinOpTransformations[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}]; needTransform {
 			op.LeftType = transform.leftType
@@ -320,7 +332,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 
 type binOpTriple struct {
 	left  types.Family
-	op    tree.BinaryOperatorSymbol
+	op    tree.BinaryOperator
 	right types.Family
 }
 
@@ -614,7 +626,7 @@ func makeIn(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 		op = tree.NotIn
 	}
 	return tree.NewTypedComparisonExpr(
-		tree.MakeComparisonOperator(op),
+		op,
 		// Cast any NULLs to a concrete type.
 		castType(makeScalar(s, t, refs), t),
 		rhs,
@@ -626,9 +638,9 @@ func makeStringComparison(s *Smither, typ *types.T, refs colRefs) (tree.TypedExp
 	if s.vectorizable {
 		// Vectorized supports only tree.Like and tree.NotLike.
 		if s.coin() {
-			stringComparison = tree.MakeComparisonOperator(tree.Like)
+			stringComparison = tree.Like
 		} else {
-			stringComparison = tree.MakeComparisonOperator(tree.NotLike)
+			stringComparison = tree.NotLike
 		}
 	}
 	switch typ.Family() {

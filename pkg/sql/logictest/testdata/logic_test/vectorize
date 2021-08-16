@@ -32,16 +32,6 @@ SELECT a, CASE WHEN a = 0 THEN 0 WHEN a = 1 THEN 3 ELSE 5 END FROM a ORDER BY 1,
 2  5
 2  5
 
-query II
-SELECT a, CASE a WHEN 0 THEN 0 WHEN 1 THEN 3 ELSE 5 END FROM a ORDER BY 1, 2 LIMIT 6
-----
-0  0
-0  0
-1  3
-1  3
-2  5
-2  5
-
 # Regression test for 40574.
 statement ok
 CREATE TABLE t40574(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT);
@@ -191,10 +181,8 @@ SELECT a, b, (a + 1) * (b + 2) FROM a WHERE a < 3
 2  4  18
 2  5  21
 
-query I
+statement error .* unhandled cast decimal -> int
 SELECT (a + 1.0::DECIMAL)::INT FROM a LIMIT 1
-----
-1
 
 # Operations with constants on the left work.
 query I
@@ -225,10 +213,8 @@ statement ok
 CREATE TABLE intdecfloat (a INT, b DECIMAL, c INT4, d INT2, e FLOAT8);
 INSERT INTO intdecfloat VALUES (1, 2.0, 3, 4, 3.5);
 
-query I
+statement error .* unhandled cast decimal -> int
 SELECT (a + b)::INT FROM intdecfloat
-----
-3
 
 query BB
 SELECT b > a, e < b FROM intdecfloat
@@ -788,27 +774,12 @@ SELECT CASE WHEN x = 0 THEN 0 ELSE NULL END FROM t_case_null
 0
 
 query I
-SELECT CASE x WHEN 0 THEN 0 ELSE NULL END FROM t_case_null
-----
-0
-
-query I
 SELECT CASE WHEN x = 0 THEN NULL ELSE 0 END FROM t_case_null
 ----
 NULL
 
 query I
-SELECT CASE x WHEN 0 THEN NULL ELSE 0 END FROM t_case_null
-----
-NULL
-
-query I
 SELECT CASE WHEN x = 1 THEN 1 ELSE NULL END FROM t_case_null
-----
-NULL
-
-query I
-SELECT CASE x WHEN 1 THEN 1 ELSE NULL END FROM t_case_null
 ----
 NULL
 
@@ -973,21 +944,12 @@ SELECT CASE WHEN a = 0 THEN a ELSE 1:::INT8 END FROM t43550
 ----
 1
 
-query I
-SELECT CASE a WHEN 0 THEN a ELSE 1:::INT8 END FROM t43550
-----
-1
-
 # Regression test for #43855.
 statement ok
 CREATE TABLE t43855(o OID, r REGPROCEDURE);
 
 query i
 SELECT CASE WHEN o = 0 THEN 0:::OID ELSE r END FROM t43855
-----
-
-query i
-SELECT CASE o WHEN 0 THEN 0:::OID ELSE r END FROM t43855
 ----
 
 # Regression test for an aggregate that has output type different from its
@@ -1208,3 +1170,37 @@ statement ok
 CREATE TYPE greeting AS ENUM ('hello');
 CREATE TABLE greeting_table (x greeting);
 EXPLAIN (VEC) SELECT * FROM greeting_table;
+
+# Regression test for #66706. Ensure that cfetcher can correctly determine when
+# consecutive KVs in a unique secondary index belong to the same row.
+statement ok
+SET vectorize=experimental_always
+
+statement ok
+CREATE TABLE t66706 (
+  a STRING,
+  b STRING,
+  UNIQUE INDEX u (b, a),
+  FAMILY (a),
+  FAMILY (b)
+)
+
+statement ok
+INSERT INTO t66706 VALUES
+  (NULL, 'bar'),
+  (NULL, 'bar')
+
+query T
+SELECT b FROM t66706@u WHERE NOT (b = 'foo')
+----
+bar
+bar
+
+# Regression test for ignoring the escaping in the LIKE pattern (#68040).
+statement ok
+CREATE TABLE t68040 (c) AS SELECT 'string with \ backslash'
+
+query T
+SELECT c FROM t68040 WHERE c LIKE '%\\%'
+----
+string with \ backslash

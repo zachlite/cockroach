@@ -115,17 +115,17 @@ specialized hardware or number of cores (e.g. "gpu", "x16c"). For example:
 		Name: "locality",
 		Description: `
 An ordered, comma-separated list of key-value pairs that describe the topography
-of the machine. Topography often includes cloud provider regions and availability
-zones, but can also refer to on-prem concepts like datacenter or rack. Data is
-automatically replicated to maximize diversities of each tier. The order of tiers
-is used to determine the priority of the diversity, so the more inclusive localities
-like region should come before less inclusive localities like availability zone. The
-tiers and order must be the same on all nodes. Including more tiers is better than
-including fewer. For example:
+of the machine. Topography might include country, datacenter or rack
+designations. Data is automatically replicated to maximize diversities of each
+tier. The order of tiers is used to determine the priority of the diversity, so
+the more inclusive localities like country should come before less inclusive
+localities like datacenter. The tiers and order must be the same on all nodes.
+Including more tiers is better than including fewer. For example:
 <PRE>
 
-  --locality=cloud=gce,region=us-west1,zone=us-west-1b
-  --locality=cloud=aws,region=us-east,zone=us-east-2</PRE>`,
+  --locality=country=us,region=us-west,datacenter=us-west-1b,rack=12
+  --locality=country=ca,region=ca-east,datacenter=ca-east-2,rack=4
+  --locality=planet=earth,province=manitoba,colo=secondary,power=3</PRE>`,
 	}
 
 	Background = FlagInfo{
@@ -226,14 +226,13 @@ example [::1]:26257 or [fe80::f6f2:::]:26257.`,
 	DumpMode = FlagInfo{
 		Name: "dump-mode",
 		Description: `
-What to dump. "schema" dumps the schema only. "data" dumps the data only.
-"both" (default) dumps the schema then the data.`,
+What to dump. "schema" dumps the schema only. It is the only supported dump-mode.`,
 	}
 
-	ReadTime = FlagInfo{
+	DumpTime = FlagInfo{
 		Name: "as-of",
 		Description: `
-Reads the data as of the specified timestamp. Formats supported are the same
+Dumps the data as of the specified timestamp. Formats supported are the same
 as the timestamp type.`,
 	}
 
@@ -581,8 +580,8 @@ separated list of locality@address. Addresses can also include ports.
 For example:
 <PRE>
 
-  "region=us-west@127.0.0.1,zone=us-west-1b@127.0.0.1"
-  "region=us-west@127.0.0.1:26257,zone=us-west-1b@127.0.0.1:26258"</PRE>`,
+  "region=us-west@127.0.0.1,datacenter=us-west-1b@127.0.0.1"
+  "region=us-west@127.0.0.1:26257,datacenter=us-west-1b@127.0.0.1:26258"</PRE>`,
 	}
 
 	ListenHTTPAddrAlias = FlagInfo{
@@ -771,7 +770,7 @@ such as "node" or "root"). If multiple mappings are provided for the same
 principal not specified in the map is passed through as-is via the identity
 function. A cert is allowed to authenticate a DB principal if the DB principal
 name is contained in the mapped CommonName or DNS-type SubjectAlternateName
-fields.
+fields. It is permissible for the <cert-principal> string to contain colons.
 `,
 	}
 
@@ -1028,14 +1027,6 @@ long and not particularly human-readable.`,
 		Name: "decode-as-table",
 		Description: `
 Base64-encoded Descriptor to use as the table when decoding KVs.`,
-	}
-
-	FilterKeys = FlagInfo{
-		Name: "type",
-		Description: `
-Only show certain types of keys: values, intents, txns. If omitted all keys
-types are shown. Showing transactions will also implicitly limit key range
-to local keys if keys are not specified explicitly.`,
 	}
 
 	DrainWait = FlagInfo{
@@ -1544,99 +1535,6 @@ one connection or there are no connection for less than 30 sec.
 A new 30s countdown will start when no more SQL connections 
 exist. The interval is specified with a suffix of 's' for seconds, 
 'm' for minutes, and 'h' for hours.
-`,
-	}
-
-	ExportTableTarget = FlagInfo{
-		Name:        "table",
-		Description: `Select the table to export data from.`,
-	}
-
-	ExportDestination = FlagInfo{
-		Name: "destination",
-		Description: `
-The destination to export data. 
-If the export format is readable and this flag left unspecified,
-defaults to display the exported data in the terminal output.
-`,
-	}
-
-	ExportTableFormat = FlagInfo{
-		Name: "format",
-		Description: `
-Selects the format to export table rows from backups. 
-Only csv is supported at the moment.
-`,
-	}
-
-	ExportCSVNullas = FlagInfo{
-		Name:        "nullas",
-		Description: `The string that should be used to represent NULL values.`,
-	}
-
-	StartKey = FlagInfo{
-		Name: "start-key",
-		Description: `
-Start key and format as [<format>:]<key>. Supported formats: raw, hex, bytekey. 
-The raw format supports escaped text. For example, "raw:\x01k" is
-the prefix for range local keys. 
-The bytekey format does not require table-key prefix.`,
-	}
-
-	MaxRows = FlagInfo{
-		Name:        "max-rows",
-		Description: `Maximum number of rows to return (Default 0 is unlimited).`,
-	}
-
-	ExportRevisions = FlagInfo{
-		Name:        "with-revisions",
-		Description: `Export revisions of data from a backup table since the last schema change.`,
-	}
-
-	ExportRevisionsUpTo = FlagInfo{
-		Name:        "up-to",
-		Description: `Export revisions of data from a backup table up to a specific timestamp.`,
-	}
-
-	Recursive = FlagInfo{
-		Name:      "recursive",
-		Shorthand: "r",
-		Description: `
-When set, the entire subtree rooted at the source directory will be uploaded to
-the destination. Every file in the subtree will be uploaded to the corresponding
-path under the destination; i.e. the relative path will be maintained. À la
-rsync, a trailing slash in the source will avoid creating an additional
-directory level under the destination. The destination can be expressed one of
-four ways: empty (not specified), a relative path, a well-formed URI with no
-host, or a full well-formed URI.
-<PRE>
-
-</PRE>
-If a destination is not specified, the default URI scheme and host will be used,
-and the basename from the source will be used as the destination directory.
-For example: 'userfile://defaultdb.public.userfiles_root/yourdirectory' 
-<PRE>
-
-</PRE>
-If the destination is a relative path such as 'path/to/dir', the default
-userfile URI schema and host will be used
-('userfile://defaultdb.public.userfiles_$user/'), and the relative path will be
-appended to it.
-For example: 'userfile://defaultdb.public.userfiles_root/path/to/dir'
-<PRE>
-
-</PRE>
-If the destination is a well-formed URI with no host, such as
-'userfile:///path/to/dir/', the default userfile URI schema and host will be
-used ('userfile://defaultdb.public.userfiles_$user/').
-For example: 'userfile://defaultdb.public.userfiles_root/path/to/dir'
-<PRE>
-
-</PRE>
-If the destination is a full well-formed URI, such as
-'userfile://db.schema.tablename_prefix/path/to/dir', then it will be used
-verbatim.
-For example: 'userfile://foo.bar.baz_root/path/to/dir'
 `,
 	}
 )

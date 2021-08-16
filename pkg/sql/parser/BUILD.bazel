@@ -51,6 +51,7 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":parser"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/sql/lex",
         "//pkg/sql/pgwire/pgerror",
@@ -69,6 +70,7 @@ go_test(
 sh_binary(
     name = "sql-gen",
     srcs = ["sql-gen.sh"],
+    data = ["sql-gen.sh"],
 )
 
 # Define the target to auto-generate sql.go from the grammar file.
@@ -84,7 +86,7 @@ genrule(
           $(location sql.go) $(location @org_golang_x_tools//cmd/goyacc) \
           $(location @com_github_cockroachdb_gostdlib//x/tools/cmd/goimports)
     """,
-    exec_tools = [
+    tools = [
         ":sql-gen",
         "@com_github_cockroachdb_gostdlib//x/tools/cmd/goimports",
         "@org_golang_x_tools//cmd/goyacc",
@@ -95,6 +97,7 @@ genrule(
 sh_binary(
     name = "help-gen-test",
     srcs = ["help_gen_test.sh"],
+    data = ["help_gen_test.sh"],
 )
 
 # Define the target to auto-generate a helpmap test helper file.
@@ -105,10 +108,10 @@ genrule(
     ],
     outs = ["helpmap_test.go"],
     cmd = """
-      $(location :help-gen-test) < $< >$@.tmp
+      $(location :help-gen-test) < $< >$@
       mv -f $@.tmp $@
     """,
-    exec_tools = [
+    tools = [
         ":help-gen-test",
     ],
 )

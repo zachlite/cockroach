@@ -45,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -185,7 +186,6 @@ func queryPairs(t *testing.T, sqlDB *gosql.DB, query string) []pair {
 // and ensures that the data was backfilled properly.
 func TestIndexBackfillerComputedAndGeneratedColumns(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	// A test case exists to exercise the behavior of an index backfill.
 	// The case gets to do arbitrary things to the table (which is created with
@@ -235,16 +235,16 @@ INSERT INTO foo VALUES (1, 2), (2, 3), (3, 4);
 					ID:      mut.NextIndexID,
 					Unique:  true,
 					Version: descpb.StrictIndexColumnIDGuaranteesVersion,
-					KeyColumnNames: []string{
+					ColumnNames: []string{
 						mut.Columns[2].Name,
 					},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+					ColumnDirections: []descpb.IndexDescriptor_Direction{
 						descpb.IndexDescriptor_ASC,
 					},
-					KeyColumnIDs: []descpb.ColumnID{
+					ColumnIDs: []descpb.ColumnID{
 						mut.Columns[2].ID,
 					},
-					KeySuffixColumnIDs: []descpb.ColumnID{
+					ExtraColumnIDs: []descpb.ColumnID{
 						mut.Columns[0].ID,
 					},
 					Type:         descpb.IndexDescriptor_FORWARD,
@@ -312,20 +312,20 @@ INSERT INTO foo VALUES (1), (10), (100);
 					ID:      mut.NextIndexID,
 					Unique:  true,
 					Version: descpb.StrictIndexColumnIDGuaranteesVersion,
-					KeyColumnNames: []string{
+					ColumnNames: []string{
 						mut.Columns[0].Name,
 					},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{
+					ColumnDirections: []descpb.IndexDescriptor_Direction{
 						descpb.IndexDescriptor_ASC,
 					},
 					StoreColumnNames: []string{
 						columnWithDefault.Name,
 						computedColumnNotInPrimaryIndex.Name,
 					},
-					KeyColumnIDs: []descpb.ColumnID{
+					ColumnIDs: []descpb.ColumnID{
 						mut.Columns[0].ID,
 					},
-					KeySuffixColumnIDs: nil,
+					ExtraColumnIDs: nil,
 					StoreColumnIDs: []descpb.ColumnID{
 						columnWithDefault.ID,
 						computedColumnNotInPrimaryIndex.ID,
@@ -359,21 +359,16 @@ INSERT INTO foo VALUES (1), (10), (100);
 		idx, err := table.FindIndexWithID(indexID)
 		colIdxMap := catalog.ColumnIDToOrdinalMap(table.PublicColumns())
 		var valsNeeded util.FastIntSet
-		{
-			colIDsNeeded := idx.CollectKeyColumnIDs()
-			if idx.Primary() {
-				for _, column := range table.PublicColumns() {
-					if !column.IsVirtual() {
-						colIDsNeeded.Add(column.GetID())
-					}
+		if idx.Primary() {
+			for _, column := range table.PublicColumns() {
+				if !column.IsVirtual() {
+					valsNeeded.Add(colIdxMap.GetDefault(column.GetID()))
 				}
-			} else {
-				colIDsNeeded.UnionWith(idx.CollectSecondaryStoredColumnIDs())
-				colIDsNeeded.UnionWith(idx.CollectKeySuffixColumnIDs())
 			}
-
-			colIDsNeeded.ForEach(func(colID descpb.ColumnID) {
-				valsNeeded.Add(colIdxMap.GetDefault(colID))
+		} else {
+			_ = idx.ForEachColumnID(func(id descpb.ColumnID) error {
+				valsNeeded.Add(colIdxMap.GetDefault(id))
+				return nil
 			})
 		}
 		require.NoError(t, err)
@@ -391,9 +386,9 @@ INSERT INTO foo VALUES (1), (10), (100);
 			row.FetcherTableArgs{
 				Spans:            spans,
 				Desc:             table,
-				Index:            idx,
+				Index:            idx.IndexDesc(),
 				ColIdxMap:        colIdxMap,
-				Cols:             table.PublicColumns(),
+				Cols:             table.Columns,
 				ValNeededForCol:  valsNeeded,
 				IsSecondaryIndex: !idx.Primary(),
 			},
@@ -496,7 +491,7 @@ INSERT INTO foo VALUES (1), (10), (100);
 			jobID := jr.MakeJobID()
 			j, err = jr.CreateAdoptableJobWithTxn(ctx, jobs.Record{
 				Description:   "testing",
-				Statements:    []string{"testing"},
+				Statement:     "testing",
 				Username:      security.RootUserName(),
 				DescriptorIDs: []descpb.ID{tableID},
 				Details: jobspb.SchemaChangeDetails{
@@ -519,6 +514,8 @@ INSERT INTO foo VALUES (1), (10), (100);
 			table = mut.ImmutableCopy().(catalog.TableDescriptor)
 			return descriptors.WriteDesc(ctx, false /* kvTrace */, mut, txn)
 		}))
+		_, err := lm.WaitForOneVersion(ctx, tableID, retry.Options{})
+		require.NoError(t, err)
 
 		// Run the index backfill
 		changer := sql.NewSchemaChangerForTesting(

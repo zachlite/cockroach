@@ -921,6 +921,9 @@ func TestTrimSuspendedPortals(t *testing.T) {
 		}
 	}
 
+	// explicitly close portal
+	require.NoError(t, p.SendOneLine(fmt.Sprintf(`Close {"ObjectType": 80,"Name": "%s"}`, portalName)))
+
 	// send commit
 	require.NoError(t, p.SendOneLine(`Query {"String": "COMMIT"}`))
 
@@ -933,7 +936,6 @@ func TestTrimSuspendedPortals(t *testing.T) {
 
 func TestShowLastQueryStatistics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	params := base.TestServerArgs{}

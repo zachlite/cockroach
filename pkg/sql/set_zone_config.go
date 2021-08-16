@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
@@ -39,7 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/proto"
-	"gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v2"
 )
 
 type optionValue struct {
@@ -186,7 +187,7 @@ func (p *planner) SetZoneConfig(ctx context.Context, n *tree.SetZoneConfig) (pla
 		return nil, err
 	}
 	if !p.ExecCfg().Codec.ForSystemTenant() {
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
+		return nil, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
 
 	if err := p.CheckZoneConfigChangePermittedForMultiRegion(
@@ -279,8 +280,11 @@ func checkPrivilegeForSetZoneConfig(ctx context.Context, p *planner, zs tree.Zon
 		if zs.Database == "system" {
 			return p.RequireAdminRole(ctx, "alter the system database")
 		}
-		dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
-			string(zs.Database), tree.DatabaseLookupFlags{Required: true})
+		_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+			string(zs.Database), tree.DatabaseLookupFlags{
+				Required:    true,
+				AvoidCached: true,
+			})
 		if err != nil {
 			return err
 		}
@@ -425,7 +429,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		var indexes []catalog.Index
 		for _, idx := range table.NonDropIndexes() {
-			if idx.GetPartitioning().FindPartitionByName(partitionName) != nil {
+			if tabledesc.FindIndexPartitionByName(idx.IndexDesc(), partitionName) != nil {
 				indexes = append(indexes, idx)
 			}
 		}
@@ -451,7 +455,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 	if n.zoneSpecifier.TargetsPartition() && n.allIndexes {
 		sqltelemetry.IncrementPartitioningCounter(sqltelemetry.AlterAllPartitions)
 		for _, idx := range table.NonDropIndexes() {
-			if idx.GetPartitioning().FindPartitionByName(string(n.zoneSpecifier.Partition)) != nil {
+			if p := tabledesc.FindIndexPartitionByName(idx.IndexDesc(), string(n.zoneSpecifier.Partition)); p != nil {
 				zs := n.zoneSpecifier
 				zs.TableOrIndex.Index = tree.UnrestrictedName(idx.GetName())
 				specifiers = append(specifiers, zs)
@@ -505,7 +509,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		var partialSubzone *zonepb.Subzone
 		if index != nil {
-			partialSubzone = partialZone.GetSubzoneExact(uint32(index.GetID()), partition)
+			partialSubzone = partialZone.GetSubzoneExact(uint32(index.ID), partition)
 			if partialSubzone == nil {
 				partialSubzone = &zonepb.Subzone{Config: *zonepb.NewZoneConfig()}
 			}
@@ -571,7 +575,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 					// In the case of updating a partition, we need try inheriting fields
 					// from the subzone's index, and inherit the remainder from the zone.
 					subzoneInheritedFields := zonepb.ZoneConfig{}
-					if indexSubzone := completeZone.GetSubzone(uint32(index.GetID()), ""); indexSubzone != nil {
+					if indexSubzone := completeZone.GetSubzone(uint32(index.ID), ""); indexSubzone != nil {
 						subzoneInheritedFields.InheritFromParent(&indexSubzone.Config)
 					}
 					subzoneInheritedFields.InheritFromParent(&zoneInheritedFields)
@@ -584,8 +588,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		if deleteZone {
 			if index != nil {
-				didDelete := completeZone.DeleteSubzone(uint32(index.GetID()), partition)
-				_ = partialZone.DeleteSubzone(uint32(index.GetID()), partition)
+				didDelete := completeZone.DeleteSubzone(uint32(index.ID), partition)
+				_ = partialZone.DeleteSubzone(uint32(index.ID), partition)
 				if !didDelete {
 					// If we didn't do any work, return early. We'd otherwise perform an
 					// update that would make it look like one row was affected.
@@ -673,7 +677,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				return err
 			}
 
-			ss, err := params.extendedEvalCtx.NodesStatusServer.OptionalNodesStatusServer(MultitenancyZoneCfgIssueNo)
+			ss, err := params.extendedEvalCtx.NodesStatusServer.OptionalNodesStatusServer(multitenancyZoneCfgIssueNo)
 			if err != nil {
 				return err
 			}
@@ -681,7 +685,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 			// Validate that the result makes sense.
 			if err := validateZoneAttrsAndLocalities(
 				params.ctx,
-				ss.Nodes,
+				ss.ListNodesInternal,
 				&newZone,
 			); err != nil {
 				return err
@@ -717,7 +721,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 					completeZone = zonepb.NewZoneConfig()
 				}
 				completeZone.SetSubzone(zonepb.Subzone{
-					IndexID:       uint32(index.GetID()),
+					IndexID:       uint32(index.ID),
 					PartitionName: partition,
 					Config:        newZone,
 				})
@@ -729,7 +733,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				}
 
 				partialZone.SetSubzone(zonepb.Subzone{
-					IndexID:       uint32(index.GetID()),
+					IndexID:       uint32(index.ID),
 					PartitionName: partition,
 					Config:        finalZone,
 				})
@@ -939,8 +943,7 @@ func validateZoneAttrsAndLocalities(
 	return nil
 }
 
-// MultitenancyZoneCfgIssueNo points to the multitenancy zone config issue number.
-const MultitenancyZoneCfgIssueNo = 49854
+const multitenancyZoneCfgIssueNo = 49854
 
 func writeZoneConfig(
 	ctx context.Context,
@@ -952,7 +955,7 @@ func writeZoneConfig(
 	hasNewSubzones bool,
 ) (numAffected int, err error) {
 	if !execCfg.Codec.ForSystemTenant() {
-		return 0, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
+		return 0, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
 	if len(zone.Subzones) > 0 {
 		st := execCfg.Settings
@@ -1051,7 +1054,7 @@ func RemoveIndexZoneConfigs(
 	txn *kv.Txn,
 	execCfg *ExecutorConfig,
 	tableDesc catalog.TableDescriptor,
-	indexIDs []uint32,
+	indexDescs []descpb.IndexDescriptor,
 ) error {
 	if !execCfg.Codec.ForSystemTenant() {
 		// Tenants are agnostic to zone configs.
@@ -1070,12 +1073,12 @@ func RemoveIndexZoneConfigs(
 	// of them. We only want to rewrite the zone config below if there's actual
 	// work to be done here.
 	zcRewriteNecessary := false
-	for _, indexID := range indexIDs {
+	for _, indexDesc := range indexDescs {
 		for _, s := range zone.Subzones {
-			if s.IndexID == indexID {
+			if s.IndexID == uint32(indexDesc.ID) {
 				// We've found an subzone that matches the given indexID. Delete all of
 				// this index's subzones and move on to the next index.
-				zone.DeleteIndexSubzones(indexID)
+				zone.DeleteIndexSubzones(uint32(indexDesc.ID))
 				zcRewriteNecessary = true
 				break
 			}

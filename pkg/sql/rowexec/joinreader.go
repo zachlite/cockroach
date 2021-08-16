@@ -73,15 +73,9 @@ type joinReader struct {
 
 	diskMonitor *mon.BytesMonitor
 
-	desc      catalog.TableDescriptor
-	index     catalog.Index
-	colIdxMap catalog.TableColMap
-	// Indicates that the join reader should maintain the ordering of the input
-	// stream. This is applicable to both lookup joins and index joins. For lookup
-	// joins, maintaining order is expensive because it requires buffering. For
-	// index joins buffering is not required, but still, if ordering is not
-	// required, we'll change the output order to allow for some Pebble
-	// optimizations.
+	desc             catalog.TableDescriptor
+	index            *descpb.IndexDescriptor
+	colIdxMap        catalog.TableColMap
 	maintainOrdering bool
 
 	// fetcher wraps the row.Fetcher used to perform lookups. This enables the
@@ -94,9 +88,9 @@ type joinReader struct {
 
 	input execinfra.RowSource
 
-	// lookupCols and lookupExpr (and optionally remoteLookupExpr) represent the
-	// part of the join condition used to perform the lookup into the index.
-	// Exactly one of lookupCols or lookupExpr must be non-empty.
+	// lookupCols and lookupExpr represent the part of the join condition used
+	// to perform the lookup into the index. Exactly one of lookupCols or
+	// lookupExpr must be non-empty.
 	//
 	// lookupCols is used when the lookup condition is just a simple equality
 	// between input columns and index columns. In this case, lookupCols contains
@@ -108,15 +102,8 @@ type joinReader struct {
 	// lookupExpr specifies the expression that will be used to construct the
 	// spans for each lookup. See comments in the spec for details about the
 	// supported expressions.
-	//
-	// If remoteLookupExpr is set, this is a locality optimized lookup join. In
-	// this case, lookupExpr contains the lookup join conditions targeting ranges
-	// located on local nodes (relative to the gateway region), and
-	// remoteLookupExpr contains the lookup join conditions targeting remote
-	// nodes. See comments in the spec for more details.
-	lookupCols       []uint32
-	lookupExpr       execinfrapb.ExprHelper
-	remoteLookupExpr execinfrapb.ExprHelper
+	lookupCols []uint32
+	lookupExpr execinfrapb.ExprHelper
 
 	// Batch size for fetches. Not a constant so we can lower for testing.
 	batchSizeBytes    int64
@@ -125,13 +112,6 @@ type joinReader struct {
 	// rowsRead is the total number of rows that this fetcher read from
 	// disk.
 	rowsRead int64
-
-	// curBatchRowsRead is the number of rows that this fetcher read from disk for
-	// the current batch.
-	curBatchRowsRead int64
-
-	// curBatchInputRowCount is the number of input rows in the current batch.
-	curBatchInputRowCount int64
 
 	// State variables for each batch of input rows.
 	scratchInputRows rowenc.EncDatumRows
@@ -166,6 +146,7 @@ type joinReader struct {
 
 var _ execinfra.Processor = &joinReader{}
 var _ execinfra.RowSource = &joinReader{}
+var _ execinfrapb.MetadataSource = &joinReader{}
 var _ execinfra.OpNode = &joinReader{}
 
 const joinReaderProcName = "join reader"
@@ -201,9 +182,6 @@ func newJoinReader(
 		if !spec.LookupExpr.Empty() {
 			return nil, errors.AssertionFailedf("non-empty lookup expressions are not supported for index joins")
 		}
-		if !spec.RemoteLookupExpr.Empty() {
-			return nil, errors.AssertionFailedf("non-empty remote lookup expressions are not supported for index joins")
-		}
 		if !spec.OnExpr.Empty() {
 			return nil, errors.AssertionFailedf("non-empty ON expressions are not supported for index joins")
 		}
@@ -213,7 +191,7 @@ func newJoinReader(
 	tableDesc := spec.BuildTableDescriptor()
 	switch readerType {
 	case indexJoinReaderType:
-		lookupCols = make([]uint32, tableDesc.GetPrimaryIndex().NumKeyColumns())
+		lookupCols = make([]uint32, tableDesc.GetPrimaryIndex().NumColumns())
 		for i := range lookupCols {
 			lookupCols[i] = uint32(i)
 		}
@@ -228,14 +206,9 @@ func newJoinReader(
 		input:                             input,
 		lookupCols:                        lookupCols,
 		outputGroupContinuationForLeftRow: spec.OutputGroupContinuationForLeftRow,
-		// The joiner has a choice to make between getting DistSender-level
-		// parallelism for its lookup batches and setting row and memory limits (due
-		// to implementation limitations, you can't have both at the same time). We
-		// choose parallelism when we know that each lookup returns at most one row:
-		// in case of indexJoinReaderType, we know that there's exactly one lookup
-		// row for each input row. Similarly, in case of spec.LookupColumnsAreKey,
-		// we know that there's at most one lookup row per input row. In other
-		// cases, we use limits.
+		// If the lookup columns form a key, there is only one result per
+		// lookup, so the fetcher should parallelize the key lookups it
+		// performs.
 		shouldLimitBatches: !spec.LookupColumnsAreKey && readerType == lookupJoinReaderType,
 		readerType:         readerType,
 	}
@@ -248,8 +221,9 @@ func newJoinReader(
 	if indexIdx >= len(jr.desc.ActiveIndexes()) {
 		return nil, errors.Errorf("invalid indexIdx %d", indexIdx)
 	}
-	jr.index = jr.desc.ActiveIndexes()[indexIdx]
-	isSecondary = !jr.index.Primary()
+	indexI := jr.desc.ActiveIndexes()[indexIdx]
+	jr.index = indexI.IndexDesc()
+	isSecondary = !indexI.Primary()
 	cols := jr.desc.PublicColumns()
 	if spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic {
 		cols = jr.desc.DeletableColumns()
@@ -257,7 +231,7 @@ func newJoinReader(
 	jr.colIdxMap = catalog.ColumnIDToOrdinalMap(cols)
 	columnTypes := catalog.ColumnTypes(cols)
 
-	columnIDs, _ := catalog.FullIndexColumnIDs(jr.index)
+	columnIDs, _ := jr.index.FullColumnIDs()
 	indexCols := make([]uint32, len(columnIDs))
 	for i, columnID := range columnIDs {
 		indexCols[i] = uint32(columnID)
@@ -309,7 +283,7 @@ func newJoinReader(
 				// We need to generate metadata before closing the processor
 				// because InternalClose() updates jr.Ctx to the "original"
 				// context.
-				trailingMeta := jr.generateMeta()
+				trailingMeta := jr.generateMeta(jr.Ctx)
 				jr.close()
 				return trailingMeta
 			},
@@ -320,7 +294,10 @@ func newJoinReader(
 
 	rightCols := jr.neededRightCols()
 	if isSecondary {
-		set := getIndexColSet(jr.index, jr.colIdxMap)
+		set, err := getIndexColSet(jr.index, jr.colIdxMap)
+		if err != nil {
+			return nil, err
+		}
 		if !rightCols.SubsetOf(set) {
 			return nil, errors.Errorf("joinreader index does not cover all columns")
 		}
@@ -352,13 +329,6 @@ func newJoinReader(
 		semaCtx := flowCtx.TypeResolverFactory.NewSemaContext(flowCtx.EvalCtx.Txn)
 		if err := jr.lookupExpr.Init(spec.LookupExpr, lookupExprTypes, semaCtx, jr.EvalCtx); err != nil {
 			return nil, err
-		}
-		if !spec.RemoteLookupExpr.Empty() {
-			if err := jr.remoteLookupExpr.Init(
-				spec.RemoteLookupExpr, lookupExprTypes, semaCtx, jr.EvalCtx,
-			); err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -397,46 +367,27 @@ func (jr *joinReader) initJoinReaderStrategy(
 			lookupCols:           jr.lookupCols,
 		}
 	} else {
-		// Since jr.lookupExpr is set, we need to use either multiSpanGenerator or
-		// localityOptimizedSpanGenerator, which support looking up multiple spans
-		// per input row.
+		// Since jr.lookupExpr is set, we need to use multiSpanGenerator, which
+		// supports looking up multiple spans per input row.
 		tableOrdToIndexOrd := util.FastIntMap{}
-		columnIDs, _ := catalog.FullIndexColumnIDs(jr.index)
+		columnIDs, _ := jr.index.FullColumnIDs()
 		for i, colID := range columnIDs {
 			tabOrd := jr.colIdxMap.GetDefault(colID)
 			tableOrdToIndexOrd.Set(tabOrd, i)
 		}
 
-		// If jr.remoteLookupExpr is set, this is a locality optimized lookup join
-		// and we need to use localityOptimizedSpanGenerator.
-		if jr.remoteLookupExpr.Expr == nil {
-			multiSpanGen := &multiSpanGenerator{}
-			if err := multiSpanGen.init(
-				spanBuilder,
-				numKeyCols,
-				len(jr.input.OutputTypes()),
-				keyToInputRowIndices,
-				&jr.lookupExpr,
-				tableOrdToIndexOrd,
-			); err != nil {
-				return err
-			}
-			generator = multiSpanGen
-		} else {
-			localityOptSpanGen := &localityOptimizedSpanGenerator{}
-			if err := localityOptSpanGen.init(
-				spanBuilder,
-				numKeyCols,
-				len(jr.input.OutputTypes()),
-				keyToInputRowIndices,
-				&jr.lookupExpr,
-				&jr.remoteLookupExpr,
-				tableOrdToIndexOrd,
-			); err != nil {
-				return err
-			}
-			generator = localityOptSpanGen
+		multiSpanGen := &multiSpanGenerator{}
+		if err := multiSpanGen.init(
+			spanBuilder,
+			numKeyCols,
+			len(jr.input.OutputTypes()),
+			keyToInputRowIndices,
+			&jr.lookupExpr,
+			tableOrdToIndexOrd,
+		); err != nil {
+			return err
 		}
+		generator = multiSpanGen
 	}
 
 	if readerType == indexJoinReaderType {
@@ -460,9 +411,9 @@ func (jr *joinReader) initJoinReaderStrategy(
 	ctx := flowCtx.EvalCtx.Ctx()
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// joinReader will overflow to disk if this limit is not enough.
-	limit := execinfra.GetWorkMemLimit(flowCtx)
+	limit := execinfra.GetWorkMemLimit(flowCtx.Cfg)
 	// Initialize memory monitors and row container for looked up rows.
-	jr.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "joinreader-limited")
+	jr.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "joinreader-limited")
 	jr.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "joinreader-disk")
 	drc := rowcontainer.NewDiskBackedNumberedRowContainer(
 		false, /* deDup */
@@ -489,17 +440,15 @@ func (jr *joinReader) initJoinReaderStrategy(
 }
 
 // getIndexColSet returns a set of all column indices for the given index.
-func getIndexColSet(index catalog.Index, colIdxMap catalog.TableColMap) util.FastIntSet {
+func getIndexColSet(
+	index *descpb.IndexDescriptor, colIdxMap catalog.TableColMap,
+) (util.FastIntSet, error) {
 	cols := util.MakeFastIntSet()
-	{
-		colIDs := index.CollectKeyColumnIDs()
-		colIDs.UnionWith(index.CollectSecondaryStoredColumnIDs())
-		colIDs.UnionWith(index.CollectKeySuffixColumnIDs())
-		colIDs.ForEach(func(colID descpb.ColumnID) {
-			cols.Add(colIdxMap.GetDefault(colID))
-		})
-	}
-	return cols
+	err := index.RunOverAllColumns(func(id descpb.ColumnID) error {
+		cols.Add(colIdxMap.GetDefault(id))
+		return nil
+	})
+	return cols, err
 }
 
 // SetBatchSizeBytes sets the desired batch size. It should only be used in tests.
@@ -515,7 +464,7 @@ func (jr *joinReader) Spilled() bool {
 // neededRightCols returns the set of column indices which need to be fetched
 // from the right side of the join (jr.desc).
 func (jr *joinReader) neededRightCols() util.FastIntSet {
-	neededCols := jr.OutputHelper.NeededColumns()
+	neededCols := jr.Out.NeededColumns()
 
 	if jr.readerType == indexJoinReaderType {
 		// For index joins, all columns from the left side are not output, so no
@@ -653,43 +602,30 @@ func (jr *joinReader) readInput() (
 		jr.updateGroupingStateForNonEmptyBatch()
 	}
 
-	// Figure out what key spans we need to lookup.
 	spans, err := jr.strategy.processLookupRows(jr.scratchInputRows)
 	if err != nil {
 		jr.MoveToDraining(err)
 		return jrStateUnknown, nil, jr.DrainHelper()
 	}
-	jr.curBatchInputRowCount = int64(len(jr.scratchInputRows))
 	jr.scratchInputRows = jr.scratchInputRows[:0]
 	jr.curBatchSizeBytes = 0
-	jr.curBatchRowsRead = 0
 	if len(spans) == 0 {
 		// All of the input rows were filtered out. Skip the index lookup.
 		return jrEmittingRows, outRow, nil
 	}
 
-	// Sort the spans by key order, except for a special case: an index-join with
-	// maintainOrdering. That case can be executed efficiently if we don't sort:
-	// we know that, for an index-join, each input row corresponds to exactly one
-	// lookup row, and vice-versa. So, `spans` has one span per input/lookup-row,
-	// in the right order. joinReaderIndexJoinStrategy.processLookedUpRow()
-	// immediately emits each looked up row (it never buffers or reorders rows)
-	// so, if ordering matters, we cannot sort the spans here.
-	//
-	// In every other case than the one discussed above, we sort the spans because
-	// a) if we sort, we can then configure the fetcher below with a limit (the
-	//    fetcher only accepts a limit if the spans are sorted), and
-	// b) Pebble has various optimizations for Seeks in sorted order.
-	if jr.readerType == indexJoinReaderType && jr.maintainOrdering {
-		// Assert that the index join doesn't have shouldLimitBatches set. Since we
-		// didn't sort above, the fetcher doesn't support a limit.
-		if jr.shouldLimitBatches {
-			err := errors.AssertionFailedf("index join configured with both maintainOrdering and " +
-				"shouldLimitBatched; this shouldn't have happened as the implementation doesn't support it")
-			jr.MoveToDraining(err)
-			return jrStateUnknown, nil, jr.DrainHelper()
-		}
-	} else {
+	// Sort the spans for the following cases:
+	// - For lookupJoinReaderType: this is so that we can rely upon the fetcher
+	//   to limit the number of results per batch. It's safe to reorder the
+	//   spans here because we already restore the original order of the output
+	//   during the output collection phase.
+	// - For indexJoinReaderType when !maintainOrdering: this allows lower
+	//   layers to optimize iteration over the data. Note that the looked up
+	//   rows are output unchanged, in the retrieval order, so it is not safe to
+	//   do this when maintainOrdering is true (the ordering to be maintained
+	//   may be different than the ordering in the index).
+	if jr.readerType == lookupJoinReaderType ||
+		(jr.readerType == indexJoinReaderType && !jr.maintainOrdering) {
 		sort.Sort(spans)
 	}
 
@@ -734,7 +670,6 @@ func (jr *joinReader) performLookup() (joinReaderState, *execinfrapb.ProducerMet
 			break
 		}
 		jr.rowsRead++
-		jr.curBatchRowsRead++
 
 		if nextState, err := jr.strategy.processLookedUpRow(jr.Ctx, lookedUpRow, key); err != nil {
 			jr.MoveToDraining(err)
@@ -743,38 +678,6 @@ func (jr *joinReader) performLookup() (joinReaderState, *execinfrapb.ProducerMet
 			return nextState, nil
 		}
 	}
-
-	// If this is a locality optimized lookup join and we haven't yet generated
-	// remote spans, check whether all input rows in the batch had local matches.
-	// If not all rows matched, generate remote spans and start a scan to search
-	// the remote nodes for the current batch.
-	if jr.remoteLookupExpr.Expr != nil && !jr.strategy.generatedRemoteSpans() &&
-		jr.curBatchRowsRead != jr.curBatchInputRowCount {
-		spans, err := jr.strategy.generateRemoteSpans()
-		if err != nil {
-			jr.MoveToDraining(err)
-			return jrStateUnknown, jr.DrainHelper()
-		}
-
-		if len(spans) != 0 {
-			// Sort the spans so that we can rely upon the fetcher to limit the number
-			// of results per batch. It's safe to reorder the spans here because we
-			// already restore the original order of the output during the output
-			// collection phase.
-			sort.Sort(spans)
-
-			log.VEventf(jr.Ctx, 1, "scanning %d remote spans", len(spans))
-			if err := jr.fetcher.StartScan(
-				jr.Ctx, jr.FlowCtx.Txn, spans, jr.shouldLimitBatches, 0, /* limitHint */
-				jr.FlowCtx.TraceKV, jr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
-			); err != nil {
-				jr.MoveToDraining(err)
-				return jrStateUnknown, jr.DrainHelper()
-			}
-			return jrPerformingLookup, nil
-		}
-	}
-
 	log.VEvent(jr.Ctx, 1, "done joining rows")
 	jr.strategy.prepareToEmit(jr.Ctx)
 
@@ -844,20 +747,25 @@ func (jr *joinReader) execStatsForTrace() *execinfrapb.ComponentStats {
 			KVTime:         fis.WaitTime,
 			ContentionTime: optional.MakeTimeValue(execinfra.GetCumulativeContentionTime(jr.Ctx)),
 		},
-		Output: jr.OutputHelper.Stats(),
+		Output: jr.Out.Stats(),
 	}
 }
 
-func (jr *joinReader) generateMeta() []execinfrapb.ProducerMetadata {
+func (jr *joinReader) generateMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	trailingMeta := make([]execinfrapb.ProducerMetadata, 1, 2)
 	meta := &trailingMeta[0]
 	meta.Metrics = execinfrapb.GetMetricsMeta()
 	meta.Metrics.RowsRead = jr.rowsRead
 	meta.Metrics.BytesRead = jr.fetcher.GetBytesRead()
-	if tfs := execinfra.GetLeafTxnFinalState(jr.Ctx, jr.FlowCtx.Txn); tfs != nil {
+	if tfs := execinfra.GetLeafTxnFinalState(ctx, jr.FlowCtx.Txn); tfs != nil {
 		trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{LeafTxnFinalState: tfs})
 	}
 	return trailingMeta
+}
+
+// DrainMeta is part of the MetadataSource interface.
+func (jr *joinReader) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
+	return jr.generateMeta(ctx)
 }
 
 // ChildCount is part of the execinfra.OpNode interface.

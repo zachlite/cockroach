@@ -22,6 +22,19 @@ import "util/hlc/timestamp.proto";
 import "sql/schemachanger/scpb/scpb.proto";
 import "clusterversion/cluster_version.proto";
 
+message Lease {
+  option (gogoproto.equal) = true;
+
+  // The ID of the node that holds the lease.
+  uint32 node_id = 1 [
+    (gogoproto.customname) = "NodeID",
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"
+  ];
+  // The epoch of the lease holder's node liveness entry.
+  int64 epoch = 2;
+}
+
+
 enum EncryptionMode {
   Passphrase = 0;
   KMS = 1;
@@ -338,7 +351,7 @@ message NewSchemaChangeDetails {
 
 // NewSchemaChangeProgress is the persisted progress for the new schema change job.
 message NewSchemaChangeProgress {
-  repeated cockroach.sql.schemachanger.scpb.Status states = 1;
+  repeated cockroach.sql.schemachanger.scpb.State states = 1;
 }
 
 
@@ -544,7 +557,11 @@ message ResolvedSpan {
   roachpb.Span span = 1 [(gogoproto.nullable) = false];
   util.hlc.Timestamp timestamp = 2 [(gogoproto.nullable) = false];
 
-  reserved 3;
+  // BoundaryReached indicates that this resolved timestamp
+  // corresponds to a schema change boundary. A schema change boundary is a
+  // timestamp at which a new version of a table has been committed that either
+  // indicates a logical backfill or a need for the changefeed to exit.
+  bool deprecated_boundary_reached = 3;
 
   enum BoundaryType {
 
@@ -566,7 +583,7 @@ message ResolvedSpan {
     RESTART = 3;
   }
 
-  BoundaryType boundary_type = 4 ;
+  BoundaryType boundary_type = 4;
 }
 
 message ResolvedSpans {
@@ -575,18 +592,7 @@ message ResolvedSpans {
 
 message ChangefeedProgress {
   reserved 1;
-
-  // Checkpoint describes changefeed checkpoint.
-  // Checkpoints are needed when performing certain operations, such as backfill.
-  // When changefeed restarts from previouis high water mark timestamp, all
-  // spans in checkpoint fill be filtered out during initial scan.
-  // That is: this checkpoint describes spans that have already advanced to the high water mark.
-  message Checkpoint {
-    repeated roachpb.Span spans = 1 [(gogoproto.nullable) = false];
-  }
-
-  reserved 2;
-  Checkpoint checkpoint = 4;
+  repeated ResolvedSpan resolved_spans = 2 [(gogoproto.nullable) = false];
 
   // ProtectedTimestampRecord is the ID of the protected timestamp record
   // corresponding to this job. While the job ought to clean up the record
@@ -652,7 +658,7 @@ message MigrationProgress {
 message Payload {
   string description = 1;
   // If empty, the description is assumed to be the statement.
-  repeated string statement = 16;
+  string statement = 16;
   string username_proto = 2 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
   // For consistency with the SQL timestamp type, which has microsecond
   // precision, we avoid the timestamp.Timestamp WKT, which has nanosecond
@@ -674,7 +680,7 @@ message Payload {
   // reverted. The error is recorded so it can be handled while reverting, if
   // needed.
   errorspb.EncodedError final_resume_error = 19;
-  reserved 9;
+  Lease lease = 9;
   // Noncancelable is used to denote when a job cannot be canceled. This field
   // will not be respected in mixed version clusters where some nodes have
   // a version < 20.1, so it can only be used in cases where all nodes having
@@ -693,9 +699,6 @@ message Payload {
     NewSchemaChangeDetails newSchemaChange = 24;
     MigrationDetails migration = 25;
   }
-  reserved 26;
-
-  // NEXT ID: 27.
 }
 
 message Progress {

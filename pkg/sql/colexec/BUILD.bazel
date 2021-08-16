@@ -31,10 +31,10 @@ go_library(
         "sort_chunks.go",
         "sort_utils.go",
         "sorttopk.go",
+        "stats.go",
         "tuple_proj_op.go",
         "unordered_distinct.go",
         "utils.go",
-        "values.go",
         ":gen-exec",  # keep
         ":gen-sort-partitioner",  # keep
     ],
@@ -48,7 +48,6 @@ go_library(
         "//pkg/server/telemetry",  # keep
         "//pkg/settings",
         "//pkg/sql/catalog/colinfo",  # keep
-        "//pkg/sql/catalog/descpb",
         "//pkg/sql/colcontainer",
         "//pkg/sql/colconv",
         "//pkg/sql/colexec/colexecagg",  # keep
@@ -73,7 +72,6 @@ go_library(
         "//pkg/util/duration",  # keep
         "//pkg/util/encoding",  # keep
         "//pkg/util/humanizeutil",
-        "//pkg/util/json",  # keep
         "//pkg/util/log",
         "//pkg/util/mon",
         "//pkg/util/stringarena",
@@ -125,7 +123,6 @@ go_test(
         "sorttopk_test.go",
         "types_integration_test.go",
         "utils_test.go",
-        "values_test.go",
     ],
     embed = [":colexec"],
     deps = [
@@ -156,9 +153,7 @@ go_test(
         "//pkg/sql/execinfra",
         "//pkg/sql/execinfrapb",
         "//pkg/sql/parser",
-        "//pkg/sql/randgen",
         "//pkg/sql/rowenc",
-        "//pkg/sql/rowexec",
         "//pkg/sql/sem/builtins",
         "//pkg/sql/sem/tree",
         "//pkg/sql/types",
@@ -171,7 +166,6 @@ go_test(
         "//pkg/util/duration",
         "//pkg/util/encoding",
         "//pkg/util/humanizeutil",
-        "//pkg/util/json",
         "//pkg/util/leaktest",
         "//pkg/util/log",
         "//pkg/util/mon",

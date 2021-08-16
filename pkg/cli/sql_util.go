@@ -12,22 +12,29 @@ package cli
 
 import (
 	"context"
+	gosql "database/sql"
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -696,20 +703,45 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 		return nil, err
 	}
 
-	if defaultMode == useSystemDb {
+	if defaultMode == useSystemDb && baseURL.Path == "" {
 		// Override the target database. This is because the current
 		// database can influence the output of CLI commands, and in the
 		// case where the database is missing it will default server-wise to
 		// `defaultdb` which may not exist.
-		baseURL.WithDefaultDatabase("system")
+		baseURL.Path = "system"
 	}
 
 	// If there is no user in the URL already, fill in the default user.
-	baseURL.WithDefaultUsername(security.RootUser)
+	if baseURL.User.Username() == "" {
+		baseURL.User = url.User(security.RootUser)
+	}
+
+	options, err := url.ParseQuery(baseURL.RawQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	// tcpConn is true iff the connection is going over the network.
+	tcpConn := baseURL.Host != ""
+
+	// If there is no TLS mode yet, conjure one based on defaults.
+	if options.Get("sslmode") == "" {
+		if cliCtx.Insecure {
+			options.Set("sslmode", "disable")
+		} else if tcpConn {
+			options.Set("sslmode", "verify-full")
+		}
+		// (We don't use TLS over unix socket conns.)
+	}
+
+	// Prevent explicit TLS request in insecure mode.
+	if cliCtx.Insecure && options.Get("sslmode") != "disable" {
+		return nil, errors.Errorf("cannot use TLS connections in insecure mode")
+	}
 
 	// How we're going to authenticate.
-	usePw, pwdSet, _ := baseURL.GetAuthnPassword()
-	if usePw {
+	_, pwdSet := baseURL.User.Password()
+	if pwdSet {
 		// There's a password already configured.
 
 		// In insecure mode, we don't want the user to get the mistaken
@@ -721,8 +753,8 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 
 	// Load the application name. It's not a command-line flag, so
 	// anything already in the URL should take priority.
-	if prevAppName := baseURL.GetOption("application_name"); prevAppName == "" && appName != "" {
-		_ = baseURL.SetOption("application_name", catconstants.ReportableAppNamePrefix+appName)
+	if options.Get("application_name") == "" && appName != "" {
+		options.Set("application_name", catconstants.ReportableAppNamePrefix+appName)
 	}
 
 	// Set a connection timeout if none is provided already. This
@@ -730,11 +762,12 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 	// network issue, the client will not be left to hang forever.
 	//
 	// This is a lib/pq feature.
-	if baseURL.GetOption("connect_timeout") == "" {
-		_ = baseURL.SetOption("connect_timeout", sqlConnTimeout)
+	if options.Get("connect_timeout") == "" {
+		options.Set("connect_timeout", sqlConnTimeout)
 	}
 
-	sqlURL := baseURL.ToPQ().String()
+	baseURL.RawQuery = options.Encode()
+	sqlURL := baseURL.String()
 
 	if log.V(2) {
 		log.Infof(context.Background(), "connecting with URL: %s", sqlURL)
@@ -742,7 +775,7 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 
 	conn := makeSQLConn(sqlURL)
 
-	conn.passwordMissing = !usePw || !pwdSet
+	conn.passwordMissing = !pwdSet
 
 	return conn, nil
 }
@@ -972,17 +1005,8 @@ func maybeShowTimes(
 
 	// Print a newline early. This provides a discreet visual
 	// feedback that execution finished, and that the next line of
-	// output will be a warning or execution time(s).
+	// output will be execution time(s).
 	fmt.Fprintln(w)
-
-	// We accumulate the timing details into a buffer prior to emitting
-	// them to the output stream, so as to avoid interleaving warnings
-	// or SQL notices with the full timing string.
-	var stats strings.Builder
-
-	// Print a newline so that there is a visual separation between a notice and
-	// the timing information.
-	fmt.Fprintln(&stats)
 
 	// Suggested by Radu: for sub-second results, show simplified
 	// timings in milliseconds.
@@ -996,27 +1020,26 @@ func maybeShowTimes(
 	}
 
 	if sqlCtx.verboseTimings {
-		fmt.Fprintf(&stats, "Time: %s", clientSideQueryLatency)
+		fmt.Fprintf(w, "Time: %s", clientSideQueryLatency)
 	} else {
 		// Simplified displays: human users typically can't
 		// distinguish sub-millisecond latencies.
-		fmt.Fprintf(&stats, "Time: %.*f%s", precision, clientSideQueryLatency.Seconds()*multiplier, unit)
+		fmt.Fprintf(w, "Time: %.*f%s", precision, clientSideQueryLatency.Seconds()*multiplier, unit)
 	}
 
 	if !sqlCtx.enableServerExecutionTimings {
-		fmt.Fprintln(w, stats.String())
+		fmt.Fprintln(w)
 		return
 	}
 
 	// If discrete server/network timings are available, also print them.
 	parseLat, planLat, execLat, serviceLat, jobsLat, containsJobLat, err := conn.getLastQueryStatistics()
 	if err != nil {
-		fmt.Fprint(w, stats.String())
 		fmt.Fprintf(stderr, "\nwarning: %v", err)
 		return
 	}
 
-	fmt.Fprint(&stats, " total")
+	fmt.Fprint(stderr, " total")
 
 	networkLat := clientSideQueryLatency - (serviceLat + jobsLat)
 	// serviceLat can be greater than clientSideQueryLatency for some extremely quick
@@ -1031,10 +1054,10 @@ func maybeShowTimes(
 		// information to not confuse users.
 		// TODO(arul): this can be removed in 22.1.
 		if containsJobLat {
-			fmt.Fprintf(&stats, " (parse %s / plan %s / exec %s / schema change %s / other %s / network %s)",
+			fmt.Fprintf(w, " (parse %s / plan %s / exec %s / schema change %s / other %s / network %s)\n",
 				parseLat, planLat, execLat, jobsLat, otherLat, networkLat)
 		} else {
-			fmt.Fprintf(&stats, " (parse %s / plan %s / exec %s / other %s / network %s)",
+			fmt.Fprintf(w, " (parse %s / plan %s / exec %s / other %s / network %s)\n",
 				parseLat, planLat, execLat, otherLat, networkLat)
 		}
 	} else {
@@ -1045,14 +1068,13 @@ func maybeShowTimes(
 		// small queries, the detail is just noise to the human observer.
 		sep := " ("
 		reportTiming := func(label string, lat time.Duration) {
-			fmt.Fprintf(&stats, "%s%s %.*f%s", sep, label, precision, lat.Seconds()*multiplier, unit)
+			fmt.Fprintf(w, "%s%s %.*f%s", sep, label, precision, lat.Seconds()*multiplier, unit)
 			sep = " / "
 		}
 		reportTiming("execution", serviceLat+jobsLat)
 		reportTiming("network", networkLat)
-		fmt.Fprint(&stats, ")")
+		fmt.Fprintln(w, ")")
 	}
-	fmt.Fprintln(w, stats.String())
 }
 
 // sqlRowsToStrings turns 'rows' into a list of rows, each of which
@@ -1117,6 +1139,183 @@ func getNextRowStrings(rows *sqlRows, colTypes []string, showMoreChars bool) ([]
 		rowStrings[i] = formatVal(v, colTypes[i], showMoreChars, showMoreChars)
 	}
 	return rowStrings, nil
+}
+
+func isNotPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7e || r == '"' || r == '\\' }
+func isNotGraphicUnicode(r rune) bool { return !unicode.IsGraphic(r) }
+func isNotGraphicUnicodeOrTabOrNewline(r rune) bool {
+	return r != '\t' && r != '\n' && !unicode.IsGraphic(r)
+}
+
+func formatVal(
+	val driver.Value, colType string, showPrintableUnicode bool, showNewLinesAndTabs bool,
+) string {
+	log.VInfof(context.Background(), 2, "value: go %T, sql %q", val, colType)
+
+	if b, ok := val.([]byte); ok {
+		if strings.HasPrefix(colType, "_") && len(b) > 0 && b[0] == '{' {
+			return formatArray(b, colType[1:], showPrintableUnicode, showNewLinesAndTabs)
+		}
+
+		if colType == "NAME" {
+			val = string(b)
+			colType = "VARCHAR"
+		}
+	}
+
+	switch t := val.(type) {
+	case nil:
+		return "NULL"
+
+	case float64:
+		width := 64
+		if colType == "FLOAT4" {
+			width = 32
+		}
+		if math.IsInf(t, 1) {
+			return "Infinity"
+		} else if math.IsInf(t, -1) {
+			return "-Infinity"
+		}
+		return strconv.FormatFloat(t, 'g', -1, width)
+
+	case string:
+		if showPrintableUnicode {
+			pred := isNotGraphicUnicode
+			if showNewLinesAndTabs {
+				pred = isNotGraphicUnicodeOrTabOrNewline
+			}
+			if utf8.ValidString(t) && strings.IndexFunc(t, pred) == -1 {
+				return t
+			}
+		} else {
+			if strings.IndexFunc(t, isNotPrintableASCII) == -1 {
+				return t
+			}
+		}
+		s := fmt.Sprintf("%+q", t)
+		// Strip the start and final quotes. The surrounding display
+		// format (e.g. CSV/TSV) will add its own quotes.
+		return s[1 : len(s)-1]
+
+	case []byte:
+		// Format the bytes as per bytea_output = escape.
+		//
+		// We use the "escape" format here because it enables printing
+		// readable strings as-is -- the default hex format would always
+		// render as hexadecimal digits. The escape format is also more
+		// compact.
+		//
+		// TODO(knz): this formatting is unfortunate/incorrect, and exists
+		// only because lib/pq incorrectly interprets the bytes received
+		// from the server. The proper behavior would be for the driver to
+		// not interpret the bytes and for us here to print that as-is, so
+		// that we can let the user see and control the result using
+		// `bytea_output`.
+		return lex.EncodeByteArrayToRawBytes(string(t),
+			sessiondatapb.BytesEncodeEscape, false /* skipHexPrefix */)
+
+	case time.Time:
+		tfmt, ok := timeOutputFormats[colType]
+		if !ok {
+			// Some unknown/new time-like format.
+			tfmt = timeutil.FullTimeFormat
+		}
+		if tfmt == timeutil.TimestampWithTZFormat || tfmt == timeutil.TimeWithTZFormat {
+			if _, offsetSeconds := t.Zone(); offsetSeconds%60 != 0 {
+				tfmt += ":00:00"
+			} else if offsetSeconds%3600 != 0 {
+				tfmt += ":00"
+			}
+		}
+		return t.Format(tfmt)
+	}
+
+	return fmt.Sprint(val)
+}
+
+func formatArray(
+	b []byte, colType string, showPrintableUnicode bool, showNewLinesAndTabs bool,
+) string {
+	// backingArray is the array we're going to parse the server data
+	// into.
+	var backingArray interface{}
+	// parsingArray is a helper structure provided by lib/pq to parse
+	// arrays.
+	var parsingArray gosql.Scanner
+
+	// lib.pq has different array parsers for special value types.
+	//
+	// TODO(knz): This would better use a general-purpose parser
+	// using the OID to look up an array parser in crdb's sql package.
+	// However, unfortunately the OID is hidden from us.
+	switch colType {
+	case "BOOL":
+		boolArray := []bool{}
+		backingArray = &boolArray
+		parsingArray = (*pq.BoolArray)(&boolArray)
+	case "FLOAT4", "FLOAT8":
+		floatArray := []float64{}
+		backingArray = &floatArray
+		parsingArray = (*pq.Float64Array)(&floatArray)
+	case "INT2", "INT4", "INT8", "OID":
+		intArray := []int64{}
+		backingArray = &intArray
+		parsingArray = (*pq.Int64Array)(&intArray)
+	case "TEXT", "VARCHAR", "NAME", "CHAR", "BPCHAR":
+		stringArray := []string{}
+		backingArray = &stringArray
+		parsingArray = (*pq.StringArray)(&stringArray)
+	default:
+		genArray := [][]byte{}
+		backingArray = &genArray
+		parsingArray = &pq.GenericArray{A: &genArray}
+	}
+
+	// Now ask the pq array parser to convert the byte slice
+	// from the server into a Go array.
+	if err := parsingArray.Scan(b); err != nil {
+		// A parsing failure is not a catastrophe; we can still print out
+		// the array as a byte slice. This will do in many cases.
+		log.VInfof(context.Background(), 1, "unable to parse %q (sql %q) as array: %v", b, colType, err)
+		return formatVal(b, "BYTEA", showPrintableUnicode, showNewLinesAndTabs)
+	}
+
+	// We have a go array in "backingArray". Now print it out.
+	var buf strings.Builder
+	buf.WriteByte('{')
+	comma := "" // delimiter
+	v := reflect.ValueOf(backingArray).Elem()
+	for i := 0; i < v.Len(); i++ {
+		buf.WriteString(comma)
+
+		// Access the i-th element in the backingArray.
+		arrayVal := driver.Value(v.Index(i).Interface())
+		// Format the value recursively into a string.
+		vs := formatVal(arrayVal, colType, showPrintableUnicode, showNewLinesAndTabs)
+
+		// If the value contains special characters or a comma, enclose in double quotes.
+		// Also escape the special characters.
+		if strings.IndexByte(vs, ',') >= 0 || reArrayStringEscape.MatchString(vs) {
+			vs = "\"" + reArrayStringEscape.ReplaceAllString(vs, "\\$1") + "\""
+		}
+
+		// Add the string for that one value to the output array representation.
+		buf.WriteString(vs)
+		comma = ","
+	}
+	buf.WriteByte('}')
+	return buf.String()
+}
+
+var reArrayStringEscape = regexp.MustCompile(`(["\\])`)
+
+var timeOutputFormats = map[string]string{
+	"TIMESTAMP":   timeutil.TimestampWithoutTZFormat,
+	"TIMESTAMPTZ": timeutil.TimestampWithTZFormat,
+	"TIME":        timeutil.TimeWithoutTZFormat,
+	"TIMETZ":      timeutil.TimeWithTZFormat,
+	"DATE":        timeutil.DateFormat,
 }
 
 // parseBool parses a boolean string for use in slash commands.

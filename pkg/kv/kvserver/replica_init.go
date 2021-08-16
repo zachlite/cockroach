@@ -95,7 +95,7 @@ func newUnloadedReplica(
 	split.Init(&r.loadBasedSplitter, rand.Intn, func() float64 {
 		return float64(SplitByLoadQPSThreshold.Get(&store.cfg.Settings.SV))
 	}, func() time.Duration {
-		return kvserverbase.SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
+		return SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
 	})
 	r.mu.proposals = map[kvserverbase.CmdIDKey]*ProposalData{}
 	r.mu.checksums = map[uuid.UUID]ReplicaChecksum{}

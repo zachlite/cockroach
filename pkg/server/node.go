@@ -30,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
@@ -40,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -172,12 +170,6 @@ type Node struct {
 	additionalStoreInitCh chan struct{}
 
 	perReplicaServer kvserver.Server
-
-	// Admission control queues and coordinators. Both should be nil or non-nil.
-	kvAdmissionQ     *admission.WorkQueue
-	storeGrantCoords *admission.StoreGrantCoordinators
-
-	tenantUsage multitenant.TenantUsageServer
 }
 
 var _ roachpb.InternalServer = &Node{}
@@ -298,26 +290,20 @@ func NewNode(
 	stores *kvserver.Stores,
 	execCfg *sql.ExecutorConfig,
 	clusterID *base.ClusterIDContainer,
-	kvAdmissionQ *admission.WorkQueue,
-	storeGrantCoords *admission.StoreGrantCoordinators,
-	tenantUsage multitenant.TenantUsageServer,
 ) *Node {
 	var sqlExec *sql.InternalExecutor
 	if execCfg != nil {
 		sqlExec = execCfg.InternalExecutor
 	}
 	n := &Node{
-		storeCfg:         cfg,
-		stopper:          stopper,
-		recorder:         recorder,
-		metrics:          makeNodeMetrics(reg, cfg.HistogramWindowInterval),
-		stores:           stores,
-		txnMetrics:       txnMetrics,
-		sqlExec:          sqlExec,
-		clusterID:        clusterID,
-		kvAdmissionQ:     kvAdmissionQ,
-		storeGrantCoords: storeGrantCoords,
-		tenantUsage:      tenantUsage,
+		storeCfg:   cfg,
+		stopper:    stopper,
+		recorder:   recorder,
+		metrics:    makeNodeMetrics(reg, cfg.HistogramWindowInterval),
+		stores:     stores,
+		txnMetrics: txnMetrics,
+		sqlExec:    sqlExec,
+		clusterID:  clusterID,
 	}
 	n.perReplicaServer = kvserver.MakeServer(&n.Descriptor, n.stores)
 	return n
@@ -632,12 +618,8 @@ func (n *Node) startGossiping(ctx context.Context, stopper *stop.Stopper) {
 		statusTicker := time.NewTicker(gossipStatusInterval)
 		storesTicker := time.NewTicker(gossip.StoresInterval)
 		nodeTicker := time.NewTicker(gossip.NodeDescriptorInterval)
-		defer func() {
-			nodeTicker.Stop()
-			storesTicker.Stop()
-			statusTicker.Stop()
-		}()
-
+		defer storesTicker.Stop()
+		defer nodeTicker.Stop()
 		n.gossipStores(ctx) // one-off run before going to sleep
 		for {
 			select {
@@ -696,18 +678,6 @@ func (n *Node) computePeriodicMetrics(ctx context.Context, tick int) error {
 		}
 		return nil
 	})
-}
-
-// GetPebbleMetrics implements admission.PebbleMetricsProvider.
-func (n *Node) GetPebbleMetrics() []admission.StoreMetrics {
-	var metrics []admission.StoreMetrics
-	_ = n.stores.VisitStores(func(store *kvserver.Store) error {
-		m := store.Engine().GetMetrics()
-		metrics = append(
-			metrics, admission.StoreMetrics{StoreID: int32(store.StoreID()), Metrics: m.Metrics})
-		return nil
-	})
-	return metrics
 }
 
 func (n *Node) startGraphiteStatsExporter(st *cluster.Settings) {
@@ -928,68 +898,7 @@ func (n *Node) Batch(
 	// log tags more expensive and makes local calls differ from remote calls.
 	ctx = n.storeCfg.AmbientCtx.ResetAndAnnotateCtx(ctx)
 
-	var callAdmittedWorkDoneOnKVAdmissionQ bool
-	var tenantID roachpb.TenantID
-	var storeAdmissionQ *admission.WorkQueue
-	if n.kvAdmissionQ != nil {
-		var ok bool
-		tenantID, ok = roachpb.TenantFromContext(ctx)
-		if !ok {
-			tenantID = roachpb.SystemTenantID
-		}
-		bypassAdmission := args.IsAdmin()
-		source := args.AdmissionHeader.Source
-		if !roachpb.IsSystemTenantID(tenantID.ToUint64()) {
-			// Request is from a SQL node.
-			bypassAdmission = false
-			source = roachpb.AdmissionHeader_FROM_SQL
-		}
-		if source == roachpb.AdmissionHeader_OTHER {
-			bypassAdmission = true
-		}
-		createTime := args.AdmissionHeader.CreateTime
-		if !bypassAdmission && createTime == 0 {
-			// TODO(sumeer): revisit this for multi-tenant. Specifically, the SQL use
-			// of zero CreateTime needs to be revisited. It should use high priority.
-			createTime = timeutil.Now().UnixNano()
-		}
-		admissionInfo := admission.WorkInfo{
-			TenantID:        tenantID,
-			Priority:        admission.WorkPriority(args.AdmissionHeader.Priority),
-			CreateTime:      createTime,
-			BypassAdmission: bypassAdmission,
-		}
-		var err error
-		if args.IsWrite() {
-			storeAdmissionQ = n.storeGrantCoords.TryGetQueueForStore(int32(args.Replica.StoreID))
-		}
-		admissionEnabled := true
-		if storeAdmissionQ != nil {
-			if admissionEnabled, err = storeAdmissionQ.Admit(ctx, admissionInfo); err != nil {
-				return nil, err
-			}
-			if !admissionEnabled {
-				// Set storeAdmissionQ to nil so that we don't call AdmittedWorkDone
-				// on it. Additionally, the code below will not call
-				// kvAdmissionQ.Admit, and so callAdmittedWorkDoneOnKVAdmissionQ will
-				// stay false.
-				storeAdmissionQ = nil
-			}
-		}
-		if admissionEnabled {
-			callAdmittedWorkDoneOnKVAdmissionQ, err = n.kvAdmissionQ.Admit(ctx, admissionInfo)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
 	br, err := n.batchInternal(ctx, args)
-	if callAdmittedWorkDoneOnKVAdmissionQ {
-		n.kvAdmissionQ.AdmittedWorkDone(tenantID)
-	}
-	if storeAdmissionQ != nil {
-		storeAdmissionQ.AdmittedWorkDone(tenantID)
-	}
 
 	// We always return errors via BatchResponse.Error so structure is
 	// preserved; plain errors are presumed to be from the RPC
@@ -1238,13 +1147,13 @@ func (n *Node) GossipSubscription(
 				// or system tenant-specific information to leak.
 				var ents config.SystemConfigEntries
 				if err := content.GetProto(&ents); err != nil {
-					return roachpb.Value{}, errors.Wrap(err, "could not unmarshal system config")
+					return roachpb.Value{}, errors.Errorf("could not unmarshal system config: %v", err)
 				}
 
 				var newContent roachpb.Value
 				newEnts := kvtenant.GossipSubscriptionSystemConfigMask.Apply(ents)
 				if err := newContent.SetProto(&newEnts); err != nil {
-					return roachpb.Value{}, errors.Wrap(err, "could not marshal system config")
+					return roachpb.Value{}, errors.Errorf("could not marshal system config: %v", err)
 				}
 				return newContent, nil
 			default:
@@ -1362,64 +1271,3 @@ func (n *Node) Join(
 		ActiveVersion: &activeVersion.Version,
 	}, nil
 }
-
-// TokenBucket is part of the roachpb.InternalServer service.
-func (n *Node) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	// Check tenant ID. Note that in production configuration, the tenant ID has
-	// already been checked in the RPC layer (see rpc.tenantAuthorizer).
-	if in.TenantID == 0 || in.TenantID == roachpb.SystemTenantID.ToUint64() {
-		return &roachpb.TokenBucketResponse{
-			Error: errors.EncodeError(ctx, errors.Errorf(
-				"token bucket request with invalid tenant ID %d", in.TenantID,
-			)),
-		}, nil
-	}
-	tenantID := roachpb.MakeTenantID(in.TenantID)
-	return n.tenantUsage.TokenBucketRequest(ctx, tenantID, in), nil
-}
-
-// NewTenantUsageServer is a hook for CCL code which implements the tenant usage
-// server.
-var NewTenantUsageServer = func(db *kv.DB, executor *sql.InternalExecutor) multitenant.TenantUsageServer {
-	return dummyTenantUsageServer{}
-}
-
-// dummyTenantUsageServer is a stub implementation of TenantUsageServer that
-// errors out on all APIs.
-type dummyTenantUsageServer struct{}
-
-// TokenBucketRequest is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) TokenBucketRequest(
-	ctx context.Context, tenantID roachpb.TenantID, in *roachpb.TokenBucketRequest,
-) *roachpb.TokenBucketResponse {
-	return &roachpb.TokenBucketResponse{
-		Error: errors.EncodeError(ctx, errors.New("tenant usage requires a CCL binary")),
-	}
-}
-
-// ReconfigureTokenBucket is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) ReconfigureTokenBucket(
-	ctx context.Context,
-	txn *kv.Txn,
-	tenantID roachpb.TenantID,
-	availableRU float64,
-	refillRate float64,
-	maxBurstRU float64,
-	asOf time.Time,
-	asOfConsumedRequestUnits float64,
-) error {
-	return errors.Errorf("tenant resource limits require a CCL binary")
-}
-
-// Metrics is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) Metrics() metric.Struct {
-	return emptyMetricStruct{}
-}
-
-type emptyMetricStruct struct{}
-
-var _ metric.Struct = emptyMetricStruct{}
-
-func (emptyMetricStruct) MetricStruct() {}

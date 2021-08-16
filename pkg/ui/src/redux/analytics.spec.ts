@@ -166,32 +166,12 @@ describe("analytics listener", function () {
 
     [
       testRedaction(
-        "old database URL (redirect)",
+        "old database URL",
         "/databases/database/foobar/table/baz",
         "/databases/database/[db]/table/[tbl]",
       ),
       testRedaction(
-        "database URL (redirect)",
-        "/database/foobar",
-        "/database/[db]",
-      ),
-      testRedaction(
-        "database tables URL",
-        "/database/foobar/tables",
-        "/database/[db]/tables",
-      ),
-      testRedaction(
-        "database grants URL",
-        "/database/foobar/grants",
-        "/database/[db]/grants",
-      ),
-      testRedaction(
-        "database table URL (redirect)",
-        "/database/foobar/table",
-        "/database/[db]/table",
-      ),
-      testRedaction(
-        "database table URL",
+        "new database URL",
         "/database/foobar/table/baz",
         "/database/[db]/table/[tbl]",
       ),
@@ -225,25 +205,14 @@ describe("analytics listener", function () {
         sync.page(createLocation(input));
 
         assert.isTrue(pageSpy.calledOnce);
-
-        const actualArgs = pageSpy.args[0][0];
-        const expectedArgs = {
+        assert.deepEqual(pageSpy.args[0][0], {
           userId: clusterID,
           name: expectedLocation.pathname,
           properties: {
             path: expectedLocation.pathname,
             search: expectedLocation.search,
           },
-        };
-        assert.deepEqual(
-          actualArgs,
-          expectedArgs,
-          `Expected:\n${JSON.stringify(
-            expectedArgs,
-            null,
-            2,
-          )}\nActual:\n${JSON.stringify(actualArgs, null, 2)}\n`,
-        );
+        });
       });
     });
   });

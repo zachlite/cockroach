@@ -26,16 +26,15 @@ import {
   aggregateAcrossNodeIDs,
   generateRegionNode,
   getTrxAppFilterOptions,
-  statementFingerprintIdsToText,
 } from "./utils";
 import {
   searchTransactionsData,
   filterTransactions,
-  getStatementsByFingerprintId,
+  getStatementsById,
 } from "./utils";
 import { forIn } from "lodash";
 import Long from "long";
-import { getSearchParams, unique } from "src/util";
+import { aggregateStatementStats, getSearchParams, unique } from "src/util";
 import { EmptyTransactionsPlaceholder } from "./emptyTransactionsPlaceholder";
 import { Loading } from "../loading";
 import { PageConfig, PageConfigItem } from "../pageConfig";
@@ -57,7 +56,7 @@ interface TState {
   pagination: ISortedTablePagination;
   search?: string;
   filters?: Filters;
-  statementFingerprintIds: Long[] | null;
+  statementIds: Long[] | null;
   transactionStats: TransactionStats | null;
 }
 
@@ -98,7 +97,7 @@ export class TransactionsPage extends React.Component<
     },
     search: this.trxSearchParams("q", "").toString(),
     filters: this.filters,
-    statementFingerprintIds: null,
+    statementIds: null,
     transactionStats: null,
   };
 
@@ -200,10 +199,10 @@ export class TransactionsPage extends React.Component<
   };
 
   handleDetails = (
-    statementFingerprintIds: Long[] | null,
+    statementIds: Long[] | null,
     transactionStats: TransactionStats,
   ) => {
-    this.setState({ statementFingerprintIds, transactionStats });
+    this.setState({ statementIds, transactionStats });
   };
 
   lastReset = () => {
@@ -326,18 +325,13 @@ export class TransactionsPage extends React.Component<
 
   renderTransactionDetails() {
     const { statements } = this.props.data;
-    const { statementFingerprintIds } = this.state;
+    const { statementIds } = this.state;
     const transactionDetails =
-      statementFingerprintIds &&
-      getStatementsByFingerprintId(statementFingerprintIds, statements);
-    const transactionText =
-      statementFingerprintIds &&
-      statementFingerprintIdsToText(statementFingerprintIds, statements);
+      statementIds && getStatementsById(statementIds, statements);
 
     return (
       <TransactionDetails
-        transactionText={transactionText}
-        statements={transactionDetails}
+        statements={aggregateStatementStats(transactionDetails)}
         nodeRegions={this.props.nodeRegions}
         transactionStats={this.state.transactionStats}
         lastReset={this.lastReset()}
@@ -349,8 +343,8 @@ export class TransactionsPage extends React.Component<
   }
 
   render() {
-    const { statementFingerprintIds } = this.state;
-    const renderTxDetailsView = !!statementFingerprintIds;
+    const { statementIds } = this.state;
+    const renderTxDetailsView = !!statementIds;
     return renderTxDetailsView
       ? this.renderTransactionDetails()
       : this.renderTransactionsList();

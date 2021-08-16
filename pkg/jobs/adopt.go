@@ -13,7 +13,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -45,46 +44,6 @@ const (
 	NonTerminalStatusTupleString = `(` + nonTerminalStatusList + `)`
 )
 
-const claimQuery = `
-   UPDATE system.jobs
-      SET claim_session_id = $1, claim_instance_id = $2
-    WHERE (claim_session_id IS NULL)
-      AND (status IN ` + claimableStatusTupleString + `)
- ORDER BY created DESC
-    LIMIT $3
-RETURNING id;`
-
-func (r *Registry) maybeDumpTrace(
-	resumerCtx context.Context, resumer Resumer, jobID, traceID int64, jobErr error,
-) {
-	if _, ok := resumer.(TraceableJob); !ok || r.td == nil {
-		return
-	}
-	dumpMode := traceableJobDumpTraceMode.Get(&r.settings.SV)
-	if dumpMode == int64(noDump) {
-		return
-	}
-
-	// Make a new ctx to use in the trace dumper. This is because the resumerCtx
-	// could have been canceled at this point.
-	dumpCtx, _ := r.makeCtx()
-
-	// If the job has failed, and the dump mode is set to anything
-	// except noDump, then we should dump the trace.
-	// The string comparison is unfortunate but is used to differentiate a job
-	// that has failed from a job that has been canceled.
-	if jobErr != nil && !HasErrJobCanceled(jobErr) && resumerCtx.Err() == nil {
-		r.td.Dump(dumpCtx, strconv.Itoa(int(jobID)), traceID, r.ex)
-		return
-	}
-
-	// If the dump mode is set to `dumpOnStop` then we should dump the
-	// trace when the job is any of paused, canceled, succeeded or failed state.
-	if dumpMode == int64(dumpOnStop) {
-		r.td.Dump(dumpCtx, strconv.Itoa(int(jobID)), traceID, r.ex)
-	}
-}
-
 // claimJobs places a claim with the given SessionID to job rows that are
 // available.
 func (r *Registry) claimJobs(ctx context.Context, s sqlliveness.Session) error {
@@ -95,7 +54,14 @@ func (r *Registry) claimJobs(ctx context.Context, s sqlliveness.Session) error {
 			return errors.WithAssertionFailure(err)
 		}
 		numRows, err := r.ex.Exec(
-			ctx, "claim-jobs", txn, claimQuery,
+			ctx, "claim-jobs", txn, `
+   UPDATE system.jobs
+      SET claim_session_id = $1, claim_instance_id = $2
+    WHERE claim_session_id IS NULL
+      AND status IN `+claimableStatusTupleString+`
+ ORDER BY created DESC
+    LIMIT $3
+RETURNING id;`,
 			s.ID().UnsafeBytes(), r.ID(), maxAdoptionsPerLoop,
 		)
 		if err != nil {
@@ -283,9 +249,6 @@ func (r *Registry) runJob(
 	typ := job.mu.payload.Type()
 	job.mu.Unlock()
 
-	// Make sure that we remove the job from the running set when this returns.
-	defer r.unregister(job.ID())
-
 	// Bookkeeping.
 	execCtx, cleanup := r.execCtx("resume-"+taskName, username)
 	defer cleanup()
@@ -298,24 +261,18 @@ func (r *Registry) runJob(
 	//
 	// A new root span will be created on every resumption of the job.
 	var spanOptions []tracing.SpanOption
-	if tj, ok := resumer.(TraceableJob); ok && tj.ForceRealSpan() {
+	if _, ok := resumer.(TraceableJob); ok {
 		spanOptions = append(spanOptions, tracing.WithForceRealSpan())
 	}
-	// TODO(ajwerner): Move this writing up the trace ID down into
-	// stepThroughStateMachine where we're already often (and soon with
-	// exponential backoff, always) updating the job in that call.
 	ctx, span = r.settings.Tracer.StartSpanCtx(ctx, spanName, spanOptions...)
 	defer span.Finish()
-	if span.TraceID() != 0 {
-		if err := job.Update(ctx, nil /* txn */, func(txn *kv.Txn, md JobMetadata,
-			ju *JobUpdater) error {
-			progress := *md.Progress
-			progress.TraceID = span.TraceID()
-			ju.UpdateProgress(&progress)
-			return nil
-		}); err != nil {
-			return err
-		}
+	if err := job.Update(ctx, nil /* txn */, func(txn *kv.Txn, md JobMetadata,
+		ju *JobUpdater) error {
+		md.Progress.TraceID = span.TraceID()
+		ju.UpdateProgress(md.Progress)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Run the actual job.
@@ -326,24 +283,9 @@ func (r *Registry) runJob(
 	if err != nil && ctx.Err() == nil {
 		log.Errorf(ctx, "job %d: adoption completed with error %v", job.ID(), err)
 	}
-
-	r.maybeDumpTrace(ctx, resumer, int64(job.ID()), int64(span.TraceID()), err)
-	if r.knobs.AfterJobStateMachine != nil {
-		r.knobs.AfterJobStateMachine()
-	}
+	r.unregister(job.ID())
 	return err
 }
-
-const cancelQuery = `
-UPDATE system.jobs
-SET status =
-    CASE
-      WHEN status = $1 THEN $2
-      WHEN status = $3 THEN $4
-      ELSE status
-    END
-WHERE (status IN ($1, $3)) AND ((claim_session_id = $5) AND (claim_instance_id = $6))
-RETURNING id, status`
 
 func (r *Registry) servePauseAndCancelRequests(ctx context.Context, s sqlliveness.Session) error {
 	return r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
@@ -357,8 +299,16 @@ func (r *Registry) servePauseAndCancelRequests(ctx context.Context, s sqllivenes
 		// error (otherwise, the system.jobs table might diverge from the jobs
 		// registry).
 		rows, err := r.ex.QueryBufferedEx(
-			ctx, "cancel/pause-requested", txn, sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
-			cancelQuery,
+			ctx, "cancel/pause-requested", txn, sessiondata.InternalExecutorOverride{User: security.NodeUserName()}, `
+UPDATE system.jobs
+SET status =
+		CASE
+			WHEN status = $1 THEN $2
+			WHEN status = $3 THEN $4
+			ELSE status
+		END
+WHERE (status IN ($1, $3)) AND (claim_session_id = $5 AND claim_instance_id = $6)
+RETURNING id, status`,
 			StatusPauseRequested, StatusPaused,
 			StatusCancelRequested, StatusReverting,
 			s.ID().UnsafeBytes(), r.ID(),

@@ -21,7 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	raft "go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -335,7 +335,7 @@ func (s *Store) SplitRange(
 		rightRepl := rightReplOrNil
 		leftRepl.writeStats.splitRequestCounts(rightRepl.writeStats)
 		if err := s.addReplicaInternalLocked(rightRepl); err != nil {
-			return errors.Wrapf(err, "unable to add replica %v", rightRepl)
+			return errors.Errorf("unable to add replica %v: %s", rightRepl, err)
 		}
 
 		// Update the replica's cached byte thresholds. This is a no-op if the system

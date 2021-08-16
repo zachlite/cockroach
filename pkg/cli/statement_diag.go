@@ -20,7 +20,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -43,14 +42,14 @@ diagnostics activation requests.`,
 	RunE: MaybeDecorateGRPCError(runStmtDiagList),
 }
 
-func runStmtDiagList(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagList(cmd *cobra.Command, args []string) error {
 	const timeFmt = "2006-01-02 15:04:05 MST"
 
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	// -- List bundles --
 
@@ -145,7 +144,7 @@ the list command.`,
 	RunE: MaybeDecorateGRPCError(runStmtDiagDownload),
 }
 
-func runStmtDiagDownload(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagDownload(cmd *cobra.Command, args []string) error {
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil || id < 0 {
 		return errors.New("invalid bundle id")
@@ -156,7 +155,7 @@ func runStmtDiagDownload(cmd *cobra.Command, args []string) (resErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	// Retrieve the chunk IDs; these are stored in an INT ARRAY column.
 	rows, err := conn.Query(
@@ -217,12 +216,12 @@ command, or delete all bundles.`,
 	RunE: MaybeDecorateGRPCError(runStmtDiagDelete),
 }
 
-func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagDelete(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if stmtDiagCtx.all {
 		if len(args) > 0 {
@@ -250,7 +249,7 @@ func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
 		return err
 	}
 
-	return conn.ExecTxn(func(conn clisqlclient.TxBoundConn) error {
+	return conn.ExecTxn(func(conn *sqlConn) error {
 		// Delete the request metadata.
 		if err := conn.Exec(
 			"DELETE FROM system.statement_diagnostics_requests WHERE statement_diagnostics_id = $1",
@@ -276,8 +275,8 @@ func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
 	})
 }
 
-func runStmtDiagDeleteAll(conn clisqlclient.Conn) error {
-	return conn.ExecTxn(func(conn clisqlclient.TxBoundConn) error {
+func runStmtDiagDeleteAll(conn *sqlConn) error {
+	return conn.ExecTxn(func(conn *sqlConn) error {
 		// Delete the request metadata.
 		if err := conn.Exec(
 			"DELETE FROM system.statement_diagnostics_requests WHERE completed",
@@ -309,12 +308,12 @@ list command, or cancel all outstanding requests.`,
 	RunE: MaybeDecorateGRPCError(runStmtDiagCancel),
 }
 
-func runStmtDiagCancel(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagCancel(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if stmtDiagCtx.all {
 		if len(args) > 0 {

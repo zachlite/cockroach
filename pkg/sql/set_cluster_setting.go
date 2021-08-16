@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessioninit"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -247,20 +246,9 @@ func (n *setClusterSettingNode) startExec(params runParams) error {
 			}
 
 			if params.p.execCfg.TenantTestingKnobs != nil {
-				if err := params.p.execCfg.TenantTestingKnobs.ClusterSettingsUpdater.Set(ctx, n.name, encoded, n.setting.Typ()); err != nil {
-					return err
-				}
-			}
-		}
-
-		if n.name == sessioninit.CacheEnabledSettingName {
-			if expectedEncodedValue == "false" {
-				// Bump role-related table versions to force other nodes to clear out
-				// their AuthInfo cache.
-				if err := params.p.bumpUsersTableVersion(params.ctx); err != nil {
-					return err
-				}
-				if err := params.p.bumpRoleOptionsTableVersion(params.ctx); err != nil {
+				if err := params.p.execCfg.TenantTestingKnobs.ClusterSettingsUpdater.Set(
+					n.name, encoded, n.setting.Typ(),
+				); err != nil {
 					return err
 				}
 			}

@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,10 +58,6 @@ func (s *statusTrackingExecutor) Metrics() metric.Struct {
 	return nil
 }
 
-func (s *statusTrackingExecutor) GetCreateScheduleStatement(_ *ScheduledJob) (string, error) {
-	return "", errors.AssertionFailedf("unimplemented method: 'GetCreateScheduleStatement'")
-}
-
 var _ ScheduledJobExecutor = &statusTrackingExecutor{}
 
 func newStatusTrackingExecutor() *statusTrackingExecutor {
@@ -77,9 +72,10 @@ func TestScheduledJobExecutorRegistration(t *testing.T) {
 	instance := newStatusTrackingExecutor()
 	defer registerScopedScheduledJobExecutor(executorName, instance)()
 
-	registered, err := GetScheduledJobExecutor(executorName)
+	registered, created, err := GetScheduledJobExecutor(executorName)
 	require.NoError(t, err)
 	require.Equal(t, instance, registered)
+	require.True(t, created)
 }
 
 func TestJobTerminationNotification(t *testing.T) {

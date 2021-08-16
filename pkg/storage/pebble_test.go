@@ -418,32 +418,29 @@ func TestPebbleSeparatorSuccessor(t *testing.T) {
 
 }
 
-func TestPebbleMetricEventListener(t *testing.T) {
+func TestPebbleDiskSlowEmit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 
 	settings := cluster.MakeTestingClusterSettings()
-	MaxSyncDurationFatalOnExceeded.Override(ctx, &settings.SV, false)
-	p, err := Open(ctx, InMemory(), CacheSize(1<<20 /* 1 MiB */), Settings(settings))
-	require.NoError(t, err)
+	MaxSyncDurationFatalOnExceeded.Override(&settings.SV, false)
+	p := newPebbleInMem(
+		context.Background(),
+		roachpb.Attributes{},
+		1<<20,   /* cacheSize */
+		512<<20, /* storeSize */
+		settings,
+	)
 	defer p.Close()
 
-	require.Equal(t, int64(0), p.writeStallCount)
-	require.Equal(t, int64(0), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
-	p.eventListener.WriteStallBegin(pebble.WriteStallBeginInfo{})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(0), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
+	require.Equal(t, uint64(0), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
 	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 1 * time.Second})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(1), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
 	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 70 * time.Second})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(1), p.diskSlowCount)
-	require.Equal(t, int64(1), p.diskStallCount)
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(1), p.diskStallCount)
 }
 
 func TestPebbleIterConsistency(t *testing.T) {
@@ -459,14 +456,10 @@ func TestPebbleIterConsistency(t *testing.T) {
 
 	roEngine := eng.NewReadOnly()
 	batch := eng.NewBatch()
-	roEngine2 := eng.NewReadOnly()
-	batch2 := eng.NewBatch()
 
 	require.False(t, eng.ConsistentIterators())
 	require.True(t, roEngine.ConsistentIterators())
 	require.True(t, batch.ConsistentIterators())
-	require.True(t, roEngine2.ConsistentIterators())
-	require.True(t, batch2.ConsistentIterators())
 
 	// Since an iterator is created on pebbleReadOnly, pebbleBatch before
 	// writing a newer version of "a", the newer version will not be visible to
@@ -474,9 +467,6 @@ func TestPebbleIterConsistency(t *testing.T) {
 	roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
 	batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
 	eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
-	// Pin the state for iterators.
-	require.Nil(t, roEngine2.PinEngineStateForIterators())
-	require.Nil(t, batch2.PinEngineStateForIterators())
 
 	// Write a newer version of "a"
 	require.NoError(t, eng.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
@@ -515,41 +505,26 @@ func TestPebbleIterConsistency(t *testing.T) {
 	checkMVCCIter(roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
 	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
 	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
 
 	checkEngineIter(roEngine.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
 	checkEngineIter(roEngine.NewEngineIterator(IterOptions{Prefix: true}))
 	checkEngineIter(batch.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
 	checkEngineIter(batch.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{Prefix: true}))
 
-	checkIterSeesBothValues := func(iter MVCCIterator) {
-		iter.SeekGE(MVCCKey{Key: []byte("a")})
-		count := 0
-		for ; ; iter.Next() {
-			valid, err := iter.Valid()
-			require.NoError(t, err)
-			if !valid {
-				break
-			}
-			count++
-		}
-		require.Equal(t, 2, count)
-		iter.Close()
-	}
 	// The eng iterator will see both values.
-	checkIterSeesBothValues(eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	// The indexed batches will see 2 values since the second one is written to the batch.
-	require.NoError(t, batch.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	require.NoError(t, batch2.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	checkIterSeesBothValues(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkIterSeesBothValues(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
+	iter := eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")})
+	defer iter.Close()
+	iter.SeekGE(MVCCKey{Key: []byte("a")})
+	count := 0
+	for ; ; iter.Next() {
+		valid, err := iter.Valid()
+		require.NoError(t, err)
+		if !valid {
+			break
+		}
+		count++
+	}
+	require.Equal(t, 2, count)
 }
 
 func BenchmarkMVCCKeyCompare(b *testing.B) {
@@ -632,9 +607,8 @@ func TestSstExportFailureIntentBatching(t *testing.T) {
 
 			require.NoError(t, fillInData(ctx, engine, data))
 
-			destination := &MemFile{}
-			_, _, _, err := engine.ExportMVCCToSst(ctx, key(10), key(20000), ts(999), ts(2000), hlc.Timestamp{},
-				true, 0, 0, false, true, destination)
+			_, _, _, err := engine.ExportMVCCToSst(key(10), key(20000), ts(999), ts(2000),
+				true, 0, 0, true)
 			if len(expectedIntentIndices) == 0 {
 				require.NoError(t, err)
 			} else {

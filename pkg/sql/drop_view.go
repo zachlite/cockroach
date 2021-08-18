@@ -211,16 +211,8 @@ func (p *planner) dropViewImpl(
 		); err != nil {
 			return cascadeDroppedViews, err
 		}
-
 	}
 	viewDesc.DependsOn = nil
-
-	// Remove back-references from the types this view depends on.
-	typesDependedOn := append([]descpb.ID(nil), viewDesc.DependsOnTypes...)
-	backRefJobDesc := fmt.Sprintf("updating type back references %v for table %d", typesDependedOn, viewDesc.ID)
-	if err := p.removeTypeBackReferences(ctx, typesDependedOn, viewDesc.ID, backRefJobDesc); err != nil {
-		return cascadeDroppedViews, err
-	}
 
 	if behavior == tree.DropCascade {
 		dependedOnBy := append([]descpb.TableDescriptor_Reference(nil), viewDesc.DependedOnBy...)
@@ -236,16 +228,13 @@ func (p *planner) dropViewImpl(
 			if err != nil {
 				return cascadeDroppedViews, err
 			}
-			// Check if the dependency was already marked as dropped,
-			// while dealing with any earlier dependent views.
-			if !dependentDesc.Dropped() {
-				cascadedViews, err := p.dropViewImpl(ctx, dependentDesc, queueJob, "dropping dependent view", behavior)
-				if err != nil {
-					return cascadeDroppedViews, err
-				}
-				cascadeDroppedViews = append(cascadeDroppedViews, cascadedViews...)
-				cascadeDroppedViews = append(cascadeDroppedViews, qualifiedView.FQString())
+
+			cascadedViews, err := p.dropViewImpl(ctx, dependentDesc, queueJob, "dropping dependent view", behavior)
+			if err != nil {
+				return cascadeDroppedViews, err
 			}
+			cascadeDroppedViews = append(cascadeDroppedViews, cascadedViews...)
+			cascadeDroppedViews = append(cascadeDroppedViews, qualifiedView.FQString())
 		}
 	}
 

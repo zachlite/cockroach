@@ -53,22 +53,11 @@ export const getTrxAppFilterOptions = (
 export const collectStatementsText = (statements: Statement[]): string =>
   statements.map(s => s.key.key_data.query).join("\n");
 
-export const getStatementsByFingerprintId = (
-  statementFingerprintIds: Long[],
+export const getStatementsById = (
+  statementsIds: Long[],
   statements: Statement[],
 ): Statement[] => {
-  return statements.filter(s =>
-    statementFingerprintIds.some(id => id.eq(s.id)),
-  );
-};
-
-export const statementFingerprintIdsToText = (
-  statementFingerprintIds: Long[],
-  statements: Statement[],
-): string => {
-  return statementFingerprintIds
-    .map(s => statements.find(stmt => stmt.id.eq(s)).key.key_data.query)
-    .join("\n");
+  return statements.filter(s => statementsIds.some(id => id.eq(s.id)));
 };
 
 export const aggregateStatements = (
@@ -90,10 +79,7 @@ export const searchTransactionsData = (
   return transactions.filter((t: Transaction) =>
     search.split(" ").every(val =>
       collectStatementsText(
-        getStatementsByFingerprintId(
-          t.stats_data.statement_fingerprint_ids,
-          statements,
-        ),
+        getStatementsById(t.stats_data.statement_ids, statements),
       )
         .toLowerCase()
         .includes(val.toLowerCase()),
@@ -142,10 +128,7 @@ export const filterTransactions = (
       let foundRegion: boolean = regions.length == 0;
       let foundNode: boolean = nodes.length == 0;
 
-      getStatementsByFingerprintId(
-        t.stats_data.statement_fingerprint_ids,
-        statements,
-      ).some(stmt => {
+      getStatementsById(t.stats_data.statement_ids, statements).some(stmt => {
         stmt.stats.nodes.some(node => {
           if (foundRegion || regions.includes(nodeRegions[node.toString()])) {
             foundRegion = true;
@@ -185,19 +168,18 @@ export const generateRegionNode = (
   // nodes and regions of all the statements to a single list of `region: nodes`
   // for the transaction.
   // E.g. {"gcp-us-east1" : [1,3,4]}
-  getStatementsByFingerprintId(
-    transaction.stats_data.statement_fingerprint_ids,
-    statements,
-  ).forEach(stmt => {
-    stmt.stats.nodes.forEach(n => {
-      const node = n.toString();
-      if (Object.keys(regions).includes(nodeRegions[node])) {
-        regions[nodeRegions[node]].add(longToInt(n));
-      } else {
-        regions[nodeRegions[node]] = new Set([longToInt(n)]);
-      }
-    });
-  });
+  getStatementsById(transaction.stats_data.statement_ids, statements).forEach(
+    stmt => {
+      stmt.stats.nodes.forEach(n => {
+        const node = n.toString();
+        if (Object.keys(regions).includes(nodeRegions[node])) {
+          regions[nodeRegions[node]].add(longToInt(n));
+        } else {
+          regions[nodeRegions[node]] = new Set([longToInt(n)]);
+        }
+      });
+    },
+  );
 
   // Create a list nodes/regions where a transaction was executed on, with
   // format: region (node1,node2)
@@ -219,16 +201,15 @@ export const generateRegionNode = (
 type TransactionWithFingerprint = Transaction & { fingerprint: string };
 
 // withFingerprint adds the concatenated statement fingerprints to the Transaction object since it
-// only comes with statement_fingerprint_ids
+// only comes with statement_ids
 const withFingerprint = function(
   t: Transaction,
   stmts: Statement[],
 ): TransactionWithFingerprint {
   return {
     ...t,
-    fingerprint: statementFingerprintIdsToText(
-      t.stats_data.statement_fingerprint_ids,
-      stmts,
+    fingerprint: collectStatementsText(
+      getStatementsById(t.stats_data.statement_ids, stmts),
     ),
   };
 };

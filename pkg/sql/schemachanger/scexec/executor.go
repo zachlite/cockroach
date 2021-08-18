@@ -14,8 +14,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -25,9 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec/descriptorutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec/scmutationexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -40,9 +36,6 @@ type Executor struct {
 	codec           keys.SQLCodec
 	indexBackfiller IndexBackfiller
 	jobTracker      JobProgressTracker
-	testingKnobs    *NewSchemaChangerTestingKnobs
-	jobRegistry     *jobs.Registry
-	executor        sqlutil.InternalExecutor
 }
 
 // NewExecutor creates a new Executor.
@@ -52,9 +45,6 @@ func NewExecutor(
 	codec keys.SQLCodec,
 	backfiller IndexBackfiller,
 	tracker JobProgressTracker,
-	testingKnobs *NewSchemaChangerTestingKnobs,
-	jobRegistry *jobs.Registry,
-	executor sqlutil.InternalExecutor,
 ) *Executor {
 	return &Executor{
 		txn:             txn,
@@ -62,43 +52,11 @@ func NewExecutor(
 		codec:           codec,
 		indexBackfiller: backfiller,
 		jobTracker:      tracker,
-		testingKnobs:    testingKnobs,
-		jobRegistry:     jobRegistry,
-		executor:        executor,
 	}
-}
-
-// NewSchemaChangerTestingKnobs are testing knobs for the executor.
-type NewSchemaChangerTestingKnobs struct {
-	// BeforeStage is called before ops passed to the executor are executed.
-	// Errors returned are injected into the executor.
-	BeforeStage func(ops scop.Ops, m TestingKnobMetadata) error
-	// BeforeWaitingForConcurrentSchemaChanges is called at the start of waiting
-	// for concurrent schema changes to finish.
-	BeforeWaitingForConcurrentSchemaChanges func(stmts []string)
-}
-
-// ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
-func (*NewSchemaChangerTestingKnobs) ModuleTestingKnobs() {}
-
-// TestingKnobMetadata holds additional information about the execution of the
-// schema change that is used by the testing knobs.
-type TestingKnobMetadata struct {
-	Statements []string
-	Phase      scplan.Phase
 }
 
 // ExecuteOps executes the provided ops. The ops must all be of the same type.
-func (ex *Executor) ExecuteOps(
-	ctx context.Context, toExecute scop.Ops, m TestingKnobMetadata,
-) error {
-	log.Infof(ctx, "executing %d ops of type %s", len(toExecute.Slice()), toExecute.Type().String())
-
-	if ex.testingKnobs != nil && ex.testingKnobs.BeforeStage != nil {
-		if err := ex.testingKnobs.BeforeStage(toExecute, m); err != nil {
-			return err
-		}
-	}
+func (ex *Executor) ExecuteOps(ctx context.Context, toExecute scop.Ops) error {
 	switch typ := toExecute.Type(); typ {
 	case scop.MutationType:
 		return ex.executeDescriptorMutationOps(ctx, toExecute.Slice())
@@ -123,7 +81,7 @@ func (ex *Executor) executeBackfillOps(ctx context.Context, execute []scop.Op) e
 	for _, op := range execute {
 		var err error
 		switch op := op.(type) {
-		case *scop.BackfillIndex:
+		case scop.BackfillIndex:
 			err = ex.executeIndexBackfillOp(ctx, op)
 		default:
 			panic("unimplemented")
@@ -135,7 +93,7 @@ func (ex *Executor) executeBackfillOps(ctx context.Context, execute []scop.Op) e
 	return nil
 }
 
-func (ex *Executor) executeIndexBackfillOp(ctx context.Context, op *scop.BackfillIndex) error {
+func (ex *Executor) executeIndexBackfillOp(ctx context.Context, op scop.BackfillIndex) error {
 	// Note that the leasing here is subtle. We'll avoid the cache and ensure that
 	// the descriptor is read from the store. That means it will not be leased.
 	// This relies on changed to the descriptor not messing with this index
@@ -150,19 +108,19 @@ func (ex *Executor) executeIndexBackfillOp(ctx context.Context, op *scop.Backfil
 	if err != nil {
 		return err
 	}
-	mut, err := descriptorutils.FindMutation(table, descriptorutils.MakeIndexIDMutationSelector(op.IndexID))
+	mut, _, err := descriptorutils.GetIndexMutation(table, op.IndexID)
 	if err != nil {
 		return err
 	}
 
 	// Must be the right index given the above call.
-	idxToBackfill := mut.AsIndex()
+	idxToBackfill := mut.GetIndex()
 
 	// Split off the index span prior to backfilling.
-	if err := ex.maybeSplitIndexSpans(ctx, table.IndexSpan(ex.codec, idxToBackfill.GetID())); err != nil {
+	if err := ex.maybeSplitIndexSpans(ctx, table.IndexSpan(ex.codec, idxToBackfill.ID)); err != nil {
 		return err
 	}
-	return ex.indexBackfiller.BackfillIndex(ctx, ex.jobTracker, table, table.GetPrimaryIndexID(), idxToBackfill.GetID())
+	return ex.indexBackfiller.BackfillIndex(ctx, ex.jobTracker, table, table.GetPrimaryIndexID(), idxToBackfill.ID)
 }
 
 // IndexBackfiller is an abstract index backfiller that performs index backfills
@@ -216,9 +174,11 @@ func (ex *Executor) maybeSplitIndexSpans(ctx context.Context, span roachpb.Span)
 }
 
 func (ex *Executor) executeDescriptorMutationOps(ctx context.Context, ops []scop.Op) error {
-	dg := newMutationDescGetter(ex.descsCollection, ex.txn, ex.executor)
-	mj := &mutationJobs{jobRegistry: ex.jobRegistry}
-	v := scmutationexec.NewMutationVisitor(dg, mj)
+	dg := &mutationDescGetter{
+		descs: ex.descsCollection,
+		txn:   ex.txn,
+	}
+	v := scmutationexec.NewMutationVisitor(dg)
 	for _, op := range ops {
 		if err := op.(scop.MutationOp).Visit(ctx, v); err != nil {
 			return err
@@ -234,71 +194,8 @@ func (ex *Executor) executeDescriptorMutationOps(ctx context.Context, ops []scop
 			return err
 		}
 	}
-	err := dg.SubmitDrainedNames(ctx, ex.codec, ba)
-	if err != nil {
-		return err
-	}
-	_, err = mj.SubmitAllJobs(ctx, ex.txn)
-	if err != nil {
-		return err
-	}
-	err = ex.descsCollection.ValidateUncommittedDescriptors(ctx, ex.txn)
-	if err != nil {
-		return err
-	}
 	if err := ex.txn.Run(ctx, ba); err != nil {
 		return errors.Wrap(err, "writing descriptors")
 	}
 	return nil
-}
-
-// UpdateDescriptorJobIDs updates the job ID for the schema change on the
-// specified set of table descriptors.
-func UpdateDescriptorJobIDs(
-	ctx context.Context,
-	txn *kv.Txn,
-	descriptors *descs.Collection,
-	descIDs []descpb.ID,
-	expectedID jobspb.JobID,
-	newID jobspb.JobID,
-) error {
-	b := txn.NewBatch()
-	for _, id := range descIDs {
-		// Confirm the descriptor is a table, view or sequence
-		// since we can only lock those types.
-		desc, err := descriptors.GetImmutableDescriptorByID(ctx, txn, id,
-			tree.CommonLookupFlags{
-				Required:       true,
-				IncludeDropped: true},
-		)
-		if err != nil {
-			return err
-		}
-		if desc.DescriptorType() != catalog.Table {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		// Currently all "locking" schema changes are on tables. This will probably
-		// need to be expanded at least to types.
-		table, err := descriptors.GetMutableTableByID(ctx, txn, id,
-			tree.ObjectLookupFlags{
-				CommonLookupFlags: tree.CommonLookupFlags{
-					Required:       true,
-					IncludeDropped: true},
-			})
-		if err != nil {
-			return err
-		}
-		if oldID := jobspb.JobID(table.NewSchemaChangeJobID); oldID != expectedID {
-			return errors.AssertionFailedf(
-				"unexpected schema change job ID %d on table %d, expected %d", oldID, table.GetID(), expectedID)
-		}
-		table.NewSchemaChangeJobID = int64(newID)
-		if err := descriptors.WriteDescToBatch(ctx, true /* kvTrace */, table, b); err != nil {
-			return err
-		}
-	}
-	return txn.Run(ctx, b)
 }

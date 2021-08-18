@@ -16,10 +16,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
@@ -28,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/jsonpb"
 	pbtypes "github.com/gogo/protobuf/types"
@@ -332,13 +331,12 @@ func doCreateBackupSchedules(
 	unpauseOnSuccessID := jobs.InvalidScheduleID
 
 	// If needed, create incremental.
-	var inc *jobs.ScheduledJob
-	var incScheduledBackupArgs *ScheduledBackupExecutionArgs
 	if incRecurrence != nil {
 		backupNode.AppendToLatest = true
-		inc, incScheduledBackupArgs, err = makeBackupSchedule(
-			env, p.User(), scheduleLabel, incRecurrence, details, unpauseOnSuccessID,
-			updateMetricOnSuccess, backupNode)
+		inc, err := makeBackupSchedule(
+			env, p.User(), scheduleLabel,
+			incRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
+
 		if err != nil {
 			return err
 		}
@@ -358,10 +356,9 @@ func doCreateBackupSchedules(
 
 	// Create FULL backup schedule.
 	backupNode.AppendToLatest = false
-	var fullScheduledBackupArgs *ScheduledBackupExecutionArgs
-	full, fullScheduledBackupArgs, err := makeBackupSchedule(
-		env, p.User(), scheduleLabel, fullRecurrence, details, unpauseOnSuccessID,
-		updateMetricOnSuccess, backupNode)
+	full, err := makeBackupSchedule(
+		env, p.User(), scheduleLabel,
+		fullRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
 	if err != nil {
 		return err
 	}
@@ -377,49 +374,13 @@ func doCreateBackupSchedules(
 		full.SetNextRun(env.Now())
 	}
 
-	// Create the schedule (we need its ID to link dependent schedules below).
+	// Create the schedule (we need its ID to create incremental below).
 	if err := full.Create(ctx, ex, p.ExtendedEvalContext().Txn); err != nil {
 		return err
 	}
-
-	// If schedule creation has resulted in a full and incremental schedule then
-	// we update both the schedules with the ID of the other "dependent" schedule.
-	if incRecurrence != nil {
-		if err := setDependentSchedule(ctx, ex, fullScheduledBackupArgs, full, inc.ScheduleID(),
-			p.ExtendedEvalContext().Txn); err != nil {
-			return errors.Wrap(err,
-				"failed to update full schedule with dependent incremental schedule id")
-		}
-		if err := setDependentSchedule(ctx, ex, incScheduledBackupArgs, inc, full.ScheduleID(),
-			p.ExtendedEvalContext().Txn); err != nil {
-			return errors.Wrap(err,
-				"failed to update incremental schedule with dependent full schedule id")
-		}
-	}
-
 	collectScheduledBackupTelemetry(incRecurrence, firstRun, fullRecurrencePicked, details)
 	return emitSchedule(full, backupNode, destinations, nil /* incrementalFrom */, kmsURIs,
 		resultsCh)
-}
-
-func setDependentSchedule(
-	ctx context.Context,
-	ex *sql.InternalExecutor,
-	scheduleExecutionArgs *ScheduledBackupExecutionArgs,
-	schedule *jobs.ScheduledJob,
-	dependentID int64,
-	txn *kv.Txn,
-) error {
-	scheduleExecutionArgs.DependentScheduleID = dependentID
-	any, err := pbtypes.MarshalAny(scheduleExecutionArgs)
-	if err != nil {
-		return errors.Wrap(err, "marshaling args")
-	}
-	schedule.SetExecutionDetails(
-		schedule.ExecutorType(),
-		jobspb.ExecutionArguments{Args: any},
-	)
-	return schedule.Update(ctx, ex, txn)
 }
 
 // checkForExistingBackupsInCollection checks that there are no existing backups
@@ -456,7 +417,7 @@ func checkForExistingBackupsInCollection(
 			"the schedule can be created with the 'ignore_existing_backups' option",
 			collectionURI)
 	}
-	if !errors.Is(err, cloud.ErrFileDoesNotExist) {
+	if !errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
 		return errors.Newf("unexpected error occurred when checking for existing backups in %s",
 			collectionURI)
 	}
@@ -473,7 +434,7 @@ func makeBackupSchedule(
 	unpauseOnSuccess int64,
 	updateLastMetricOnSuccess bool,
 	backupNode *tree.Backup,
-) (*jobs.ScheduledJob, *ScheduledBackupExecutionArgs, error) {
+) (*jobs.ScheduledJob, error) {
 	sj := jobs.NewScheduledJob(env)
 	sj.SetScheduleLabel(label)
 	sj.SetOwner(owner)
@@ -490,7 +451,7 @@ func makeBackupSchedule(
 	}
 
 	if err := sj.SetSchedule(recurrence.cron); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	sj.SetScheduleDetails(details)
@@ -503,14 +464,14 @@ func makeBackupSchedule(
 	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtSimple|tree.FmtShowPasswords)
 	any, err := pbtypes.MarshalAny(args)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sj.SetExecutionDetails(
 		tree.ScheduledBackupExecutor.InternalName(),
 		jobspb.ExecutionArguments{Args: any},
 	)
 
-	return sj, args, nil
+	return sj, nil
 }
 
 func emitSchedule(
@@ -739,7 +700,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
+		clean, err := cloudimpl.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
 		if err != nil {
 			return nil, err
 		}
@@ -753,7 +714,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
+		clean, err := cloudimpl.SanitizeExternalStorageURI(raw.RawString(), nil /* extraParams */)
 		if err != nil {
 			return nil, err
 		}
@@ -765,7 +726,7 @@ func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte
 		if !ok {
 			return nil, errors.Errorf("unexpected %T arg in backup schedule: %v", raw, raw)
 		}
-		clean, err := cloud.RedactKMSURI(raw.RawString())
+		clean, err := cloudimpl.RedactKMSURI(raw.RawString())
 		if err != nil {
 			return nil, err
 		}

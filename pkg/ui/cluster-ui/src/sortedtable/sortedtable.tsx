@@ -207,12 +207,10 @@ export class SortedTable<T> extends React.Component<
     (props: SortedTableProps<T>) => props.data,
     (props: SortedTableProps<T>) => props.sortSetting,
     (props: SortedTableProps<T>) => props.columns,
-    (props: SortedTableProps<T>) => props.pagination,
     (
       data: T[],
       sortSetting: SortSetting,
       columns: ColumnDescriptor<T>[],
-      pagination?: ISortedTablePagination,
     ): T[] => {
       if (!sortSetting) {
         return this.paginatedData();
@@ -379,9 +377,7 @@ export class SortedTable<T> extends React.Component<
           </tbody>
         </table>
         {loading && <TableSpinner loadingLabel={loadingLabel} />}
-        {!loading && count === 0 && (
-          <div className={noResultsClass}>{renderNoResult}</div>
-        )}
+        {count === 0 && <div className={noResultsClass}>{renderNoResult}</div>}
       </div>
     );
   }

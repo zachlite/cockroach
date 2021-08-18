@@ -18,7 +18,6 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -39,13 +38,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	enginepb "github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -67,11 +66,6 @@ const (
 	// put operations will possibly be optimized by determining whether
 	// the key space being written is starting out empty.
 	optimizePutThreshold = 10
-
-	// Transaction names used for range changes.
-	// Note that those names are used by tests to perform request filtering
-	// in absence of better criteria. If names are changed, tests should be
-	// updated accordingly to avoid flakiness.
 
 	replicaChangeTxnName = "change-replica"
 	splitTxnName         = "split"
@@ -813,6 +807,11 @@ func (r *Replica) Clock() *hlc.Clock {
 	return r.store.Clock()
 }
 
+// DB returns the Replica's client DB.
+func (r *Replica) DB() *kv.DB {
+	return r.store.DB()
+}
+
 // Engine returns the Replica's underlying Engine. In most cases the
 // evaluation Batch should be used instead.
 func (r *Replica) Engine() storage.Engine {
@@ -1152,6 +1151,8 @@ func (r *Replica) State(ctx context.Context) kvserverpb.RangeInfo {
 	// it's best to keep it out of the Replica.mu critical section.
 	ri.RangefeedRegistrations = int64(r.numRangefeedRegistrations())
 
+	ri.LockTable = r.concMgr.LockTableDebug()
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	ri.ReplicaState = *(protoutil.Clone(&r.mu.state)).(*kvserverpb.ReplicaState)
@@ -1198,8 +1199,8 @@ func (r *Replica) State(ctx context.Context) kvserverpb.RangeInfo {
 	}
 	ri.ClosedTimestampPolicy = r.closedTimestampPolicyRLocked()
 	r.sideTransportClosedTimestamp.mu.Lock()
-	ri.ClosedTimestampSideTransportInfo.ReplicaClosed = r.sideTransportClosedTimestamp.mu.cur.ts
-	ri.ClosedTimestampSideTransportInfo.ReplicaLAI = r.sideTransportClosedTimestamp.mu.cur.lai
+	ri.ClosedTimestampSideTransportInfo.ReplicaClosed = r.sideTransportClosedTimestamp.mu.closedTimestamp
+	ri.ClosedTimestampSideTransportInfo.ReplicaLAI = r.sideTransportClosedTimestamp.mu.lai
 	r.sideTransportClosedTimestamp.mu.Unlock()
 	centralClosed, centralLAI := r.store.cfg.ClosedTimestampReceiver.GetClosedTimestamp(
 		ctx, r.RangeID, r.mu.state.Lease.Replica.NodeID)
@@ -1292,7 +1293,7 @@ func (r *Replica) checkExecutionCanProceed(
 	}
 
 	// Is the lease valid?
-	if ba.ReadConsistency == roachpb.INCONSISTENT {
+	if !ba.ReadConsistency.RequiresReadLease() {
 		// For INCONSISTENT requests, we don't need the lease.
 		st = kvserverpb.LeaseStatus{
 			Now: now,
@@ -1646,7 +1647,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 				PusheeTxn: intent.Txn,
 				PushType:  roachpb.PUSH_ABORT,
 			})
-			if err := r.store.DB().Run(ctx, b); err != nil {
+			if err := r.DB().Run(ctx, b); err != nil {
 				select {
 				case <-r.store.stopper.ShouldQuiesce():
 					// The server is shutting down. The error while pushing the
@@ -1681,7 +1682,7 @@ func (r *Replica) maybeWatchForMergeLocked(ctx context.Context) (bool, error) {
 			var getRes *roachpb.GetResponse
 			for retry := retry.Start(base.DefaultRetryOptions()); retry.Next(); {
 				metaKey := keys.RangeMetaKey(desc.EndKey)
-				res, pErr := kv.SendWrappedWith(ctx, r.store.DB().NonTransactionalSender(), roachpb.Header{
+				res, pErr := kv.SendWrappedWith(ctx, r.DB().NonTransactionalSender(), roachpb.Header{
 					// Use READ_UNCOMMITTED to avoid trying to resolve intents, since
 					// resolving those intents might involve sending requests to this
 					// range, and that could deadlock. See the comment on
@@ -1868,13 +1869,6 @@ func (r *Replica) markSystemConfigGossipFailed() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.mu.failureToGossipSystemConfig = true
-}
-
-// GetResponseMemoryAccount implements the batcheval.EvalContext interface.
-func (r *Replica) GetResponseMemoryAccount() *mon.BoundAccount {
-	// Return an empty account, which places no limits. Places where a real
-	// account is needed use a wrapper for Replica as the EvalContext.
-	return nil
 }
 
 func init() {

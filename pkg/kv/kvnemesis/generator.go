@@ -43,7 +43,6 @@ type OperationConfig struct {
 	Merge          MergeConfig
 	ChangeReplicas ChangeReplicasConfig
 	ChangeLease    ChangeLeaseConfig
-	ChangeZone     ChangeZoneConfig
 }
 
 // ClosureTxnConfig configures the relative probability of running some
@@ -91,12 +90,6 @@ type ClientOperationConfig struct {
 	// ScanForUpdate is an operation that Scans a key range that may contain
 	// values using a per-key locking scan.
 	ScanForUpdate int
-	// ReverseScan is an operation that Scans a key range that may contain
-	// values in reverse key order.
-	ReverseScan int
-	// ReverseScanForUpdate is an operation that Scans a key range that may
-	// contain values using a per-key locking scan in reverse key order.
-	ReverseScanForUpdate int
 }
 
 // BatchOperationConfig configures the relative probability of generating a
@@ -150,13 +143,6 @@ type ChangeLeaseConfig struct {
 	TransferLease int
 }
 
-// ChangeZoneConfig configures the relative probability of generating a zone
-// configuration change operation.
-type ChangeZoneConfig struct {
-	// ToggleGlobalReads sets global_reads to a new value.
-	ToggleGlobalReads int
-}
-
 // newAllOperationsConfig returns a GeneratorConfig that exercises *all*
 // options. You probably want NewDefaultConfig. Most of the time, these will be
 // the same, but having both allows us to merge code for operations that do not
@@ -171,8 +157,6 @@ func newAllOperationsConfig() GeneratorConfig {
 		PutExisting:          1,
 		Scan:                 1,
 		ScanForUpdate:        1,
-		ReverseScan:          1,
-		ReverseScanForUpdate: 1,
 	}
 	batchOpConfig := BatchOperationConfig{
 		Batch: 4,
@@ -205,9 +189,6 @@ func newAllOperationsConfig() GeneratorConfig {
 		ChangeLease: ChangeLeaseConfig{
 			TransferLease: 1,
 		},
-		ChangeZone: ChangeZoneConfig{
-			ToggleGlobalReads: 1,
-		},
 	}}
 }
 
@@ -234,15 +215,12 @@ func NewDefaultConfig() GeneratorConfig {
 	return config
 }
 
-// GeneratorDataTableID is the table ID that corresponds to GeneratorDataSpan.
-const GeneratorDataTableID = 50
-
 // GeneratorDataSpan returns a span that contains all of the operations created
 // by this Generator.
 func GeneratorDataSpan() roachpb.Span {
 	return roachpb.Span{
-		Key:    keys.SystemSQLCodec.TablePrefix(GeneratorDataTableID),
-		EndKey: keys.SystemSQLCodec.TablePrefix(GeneratorDataTableID + 1),
+		Key:    keys.SystemSQLCodec.TablePrefix(50),
+		EndKey: keys.SystemSQLCodec.TablePrefix(51),
 	}
 }
 
@@ -368,8 +346,6 @@ func (g *generator) RandStep(rng *rand.Rand) Step {
 	transferLeaseFn := makeTransferLeaseFn(key, current)
 	addOpGen(&allowed, transferLeaseFn, g.Config.Ops.ChangeLease.TransferLease)
 
-	addOpGen(&allowed, toggleGlobalReads, g.Config.Ops.ChangeZone.ToggleGlobalReads)
-
 	return step(g.selectOp(rng, allowed))
 }
 
@@ -411,8 +387,6 @@ func (g *generator) registerClientOps(allowed *[]opGen, c *ClientOperationConfig
 	}
 	addOpGen(allowed, randScan, c.Scan)
 	addOpGen(allowed, randScanForUpdate, c.ScanForUpdate)
-	addOpGen(allowed, randReverseScan, c.ReverseScan)
-	addOpGen(allowed, randReverseScanForUpdate, c.ReverseScanForUpdate)
 }
 
 func (g *generator) registerBatchOps(allowed *[]opGen, c *BatchOperationConfig) {
@@ -466,18 +440,6 @@ func randScan(g *generator, rng *rand.Rand) Operation {
 
 func randScanForUpdate(g *generator, rng *rand.Rand) Operation {
 	op := randScan(g, rng)
-	op.Scan.ForUpdate = true
-	return op
-}
-
-func randReverseScan(g *generator, rng *rand.Rand) Operation {
-	op := randScan(g, rng)
-	op.Scan.Reverse = true
-	return op
-}
-
-func randReverseScanForUpdate(g *generator, rng *rand.Rand) Operation {
-	op := randReverseScan(g, rng)
 	op.Scan.ForUpdate = true
 	return op
 }
@@ -552,10 +514,6 @@ func makeTransferLeaseFn(key string, current []roachpb.ReplicationTarget) opGenF
 		target := current[rng.Intn(len(current))]
 		return transferLease(key, target.StoreID)
 	}
-}
-
-func toggleGlobalReads(_ *generator, _ *rand.Rand) Operation {
-	return changeZone(ChangeZoneType_ToggleGlobalReads)
 }
 
 func makeRandBatch(c *ClientOperationConfig) opGenFunc {
@@ -678,14 +636,6 @@ func scanForUpdate(key, endKey string) Operation {
 	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), ForUpdate: true}}
 }
 
-func reverseScan(key, endKey string) Operation {
-	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), Reverse: true}}
-}
-
-func reverseScanForUpdate(key, endKey string) Operation {
-	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), Reverse: true, ForUpdate: true}}
-}
-
 func split(key string) Operation {
 	return Operation{Split: &SplitOperation{Key: []byte(key)}}
 }
@@ -700,8 +650,4 @@ func changeReplicas(key string, changes ...roachpb.ReplicationChange) Operation 
 
 func transferLease(key string, target roachpb.StoreID) Operation {
 	return Operation{TransferLease: &TransferLeaseOperation{Key: []byte(key), Target: target}}
-}
-
-func changeZone(changeType ChangeZoneType) Operation {
-	return Operation{ChangeZone: &ChangeZoneOperation{Type: changeType}}
 }

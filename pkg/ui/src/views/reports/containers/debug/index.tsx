@@ -171,8 +171,8 @@ export default function Debug() {
           />
           <DebugTableLink
             name="Store LSM details on this node"
-            url="/debug/lsm"
-            note="/debug/lsm"
+            url="/debug/lsm/1"
+            note="/debug/lsm/[store_id]"
           />
         </DebugTableRow>
         <DebugTableRow title="Security">
@@ -277,6 +277,9 @@ export default function Debug() {
             url="/debug/pprof/goroutineui?sort=wait"
           />
           <DebugTableLink name="Raw" url="/debug/pprof/goroutine?debug=2" />
+        </DebugTableRow>
+        <DebugTableRow title="Threads">
+          <DebugTableLink name="Raw" url="/debug/threads" />
         </DebugTableRow>
         <DebugTableRow title="Runtime Trace">
           <DebugTableLink name="Trace" url="/debug/pprof/trace?debug=1" />

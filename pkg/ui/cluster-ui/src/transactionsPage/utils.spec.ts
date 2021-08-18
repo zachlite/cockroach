@@ -9,11 +9,7 @@
 // licenses/APL.txt.
 
 import { assert } from "chai";
-import {
-  filterTransactions,
-  getStatementsByFingerprintId,
-  statementFingerprintIdsToText,
-} from "./utils";
+import { filterTransactions, getStatementsById } from "./utils";
 import { Filters } from "../queryFilter/filter";
 import { data, nodeRegions } from "./transactions.fixture";
 import Long from "long";
@@ -21,9 +17,9 @@ import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 type Transaction = protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
 
-describe("getStatementsByFingerprintId", () => {
-  it("filters statements by fingerprint id", () => {
-    const selectedStatements = getStatementsByFingerprintId(
+describe("getStatementsById", () => {
+  it("filters statements by id", () => {
+    const selectedStatements = getStatementsById(
       [Long.fromInt(4104049045071304794), Long.fromInt(3334049045071304794)],
       [
         { id: Long.fromInt(4104049045071304794) },
@@ -217,45 +213,6 @@ describe("Filter transactions", () => {
         nodeRegions,
       ).transactions.length,
       9,
-    );
-  });
-});
-
-describe("statementFingerprintIdsToText", () => {
-  it("translate statement fingerprint IDs into queries", () => {
-    const statements = [
-      {
-        id: Long.fromInt(4104049045071304794),
-        key: {
-          // eslint-disable-next-line @typescript-eslint/camelcase
-          key_data: {
-            query: "SELECT _",
-          },
-        },
-      },
-      {
-        id: Long.fromInt(5104049045071304794),
-        key: {
-          // eslint-disable-next-line @typescript-eslint/camelcase
-          key_data: {
-            query: "SELECT _, _",
-          },
-        },
-      },
-    ];
-    const statementFingerprintIds = [
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(5104049045071304794),
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(4104049045071304794),
-    ];
-
-    assert.equal(
-      statementFingerprintIdsToText(statementFingerprintIds, statements),
-      `SELECT _
-SELECT _, _
-SELECT _
-SELECT _`,
     );
   });
 });

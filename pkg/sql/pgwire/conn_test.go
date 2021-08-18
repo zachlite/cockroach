@@ -46,7 +46,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgx"
@@ -194,7 +193,6 @@ func TestConnMessageTooBig(t *testing.T) {
 
 	params, _ := tests.CreateTestServerParams()
 	s, mainDB, _ := serverutils.StartServer(t, params)
-	defer mainDB.Close()
 	defer s.Stopper().Stop(context.Background())
 
 	// Form a 1MB string.
@@ -280,15 +278,11 @@ func TestConnMessageTooBig(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				r := c.QueryRow("long_statement", longStr)
+				r := c.QueryRow("long_statement", shortStr)
 				var str string
 				return r.Scan(&str, &str)
 			},
-			postLongStrAction: func(c *pgx.Conn) error {
-				_, err := c.Exec("SELECT 1")
-				return err
-			},
-			expectedErrRegex: "message size 1.0 MiB bigger than maximum allowed message size 32 KiB",
+			expectedErrRegex: "(EOF)|(broken pipe)|(connection reset by peer)|(write tcp)",
 		},
 		{
 			desc: "prepared statement with argument",
@@ -310,20 +304,7 @@ func TestConnMessageTooBig(t *testing.T) {
 				var str string
 				return r.Scan(&str)
 			},
-			postLongStrAction: func(c *pgx.Conn) error {
-				// The test reuses the same connection, so this makes sure that the
-				// prepared statement is still usable even after we ended a query with a
-				// message too large error.
-				// The test sets the max message size to 32 KiB. Subtracting off 24
-				// bytes from that represents the largest query that will still run
-				// properly. (The request has 16 other bytes to send besides our
-				// string and 8 more bytes for the name of the prepared statement.)
-				borderlineStr := string(make([]byte, (32*1024)-24))
-				r := c.QueryRow("long_arg", borderlineStr)
-				var str string
-				return r.Scan(&str)
-			},
-			expectedErrRegex: "message size 1.0 MiB bigger than maximum allowed message size 32 KiB",
+			expectedErrRegex: "(EOF)|(broken pipe)|(connection reset by peer)|(write tcp)",
 		},
 	}
 
@@ -401,7 +382,10 @@ func TestConnMessageTooBig(t *testing.T) {
 					// We should still be able to use the connection afterwards.
 					require.Error(t, gotErr)
 					require.Regexp(t, tc.expectedErrRegex, gotErr.Error())
-					require.NoError(t, tc.postLongStrAction(c))
+
+					if tc.postLongStrAction != nil {
+						require.NoError(t, tc.postLongStrAction(c))
+					}
 				})
 			})
 		}
@@ -550,7 +534,7 @@ func waitForClientConn(ln net.Listener) (*conn, error) {
 	}
 
 	metrics := makeServerMetrics(sql.MemoryMetrics{} /* sqlMemMetrics */, metric.TestSampleInterval)
-	pgwireConn := newConn(conn, sql.SessionArgs{ConnResultsBufferSize: 16 << 10}, &metrics, timeutil.Now(), nil)
+	pgwireConn := newConn(conn, sql.SessionArgs{ConnResultsBufferSize: 16 << 10}, &metrics, nil)
 	return pgwireConn, nil
 }
 
@@ -1078,12 +1062,9 @@ func TestMaliciousInputs(t *testing.T) {
 			metrics := makeServerMetrics(sqlMetrics, time.Second /* histogramWindow */)
 
 			conn := newConn(
-				r,
-				// ConnResultsBufferSize - really small so that it overflows
+				// ConnResultsBufferBytes - really small so that it overflows
 				// when we produce a few results.
-				sql.SessionArgs{ConnResultsBufferSize: 10},
-				&metrics,
-				timeutil.Now(),
+				r, sql.SessionArgs{ConnResultsBufferSize: 10}, &metrics,
 				nil,
 			)
 			// Ignore the error from serveImpl. There might be one when the client
@@ -1519,7 +1500,7 @@ func TestSetSessionArguments(t *testing.T) {
 	}
 
 	expectedOptions := map[string]string{
-		"search_path": "public, testsp",
+		"search_path": "public,testsp",
 		// setting an isolation level is a noop:
 		// all transactions execute with serializable isolation.
 		"default_transaction_isolation": "serializable",
@@ -1591,154 +1572,4 @@ func TestCancelQuery(t *testing.T) {
 	} else if err.Error() != "context canceled" {
 		t.Fatalf("unexpected error: %s", err)
 	}
-}
-
-func TestRoleDefaultSettings(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-	defer db.Close()
-
-	_, err := db.ExecContext(ctx, "CREATE ROLE testuser WITH LOGIN")
-	require.NoError(t, err)
-
-	pgURL, cleanupFunc := sqlutils.PGUrl(
-		t, s.ServingSQLAddr(), "TestRoleDefaultSettings" /* prefix */, url.User("testuser"),
-	)
-	defer cleanupFunc()
-
-	for i, tc := range []struct {
-		setupStmt             string
-		postConnectStmt       string
-		databaseOverride      string
-		searchPathOptOverride string
-		userOverride          string
-		expectedSearchPath    string
-	}{
-		// The test cases need to be in order since the default settings have
-		// an order of precedence that is being checked here.
-		{
-			setupStmt:          "ALTER ROLE ALL SET search_path = 'a'",
-			expectedSearchPath: "a",
-		},
-		{
-			setupStmt:          "ALTER ROLE ALL IN DATABASE defaultdb SET search_path = 'b'",
-			expectedSearchPath: "b",
-		},
-		{
-			setupStmt:          "ALTER ROLE testuser SET search_path = 'c'",
-			expectedSearchPath: "c",
-		},
-		{
-			setupStmt:          "ALTER ROLE testuser IN DATABASE defaultdb SET search_path = 'd'",
-			expectedSearchPath: "d",
-		},
-		{
-			// Connecting to a different database should use the role-wide default.
-			databaseOverride:   "postgres",
-			expectedSearchPath: "c",
-		},
-		{
-			// Connecting to a non-existent database should use the role-wide default
-			// (and should not error). After connecting, we need to switch to a
-			// real database so that `SHOW var` works correctly.
-			databaseOverride:   "this_is_not_a_database",
-			postConnectStmt:    "SET DATABASE = defaultdb",
-			expectedSearchPath: "c",
-		},
-		{
-			// The setting in the connection URL should take precedence.
-			searchPathOptOverride: "e",
-			expectedSearchPath:    "e",
-		},
-		{
-			// Connecting as a different user, should use the database-wide default.
-			setupStmt:          "CREATE ROLE testuser2 WITH LOGIN",
-			userOverride:       "testuser2",
-			databaseOverride:   "defaultdb",
-			expectedSearchPath: "b",
-		},
-		{
-			// Connecting as a different user and to a different database should
-			// use the global default.
-			userOverride:       "testuser2",
-			databaseOverride:   "postgres",
-			expectedSearchPath: "a",
-		},
-		{
-			// Test that RESETing the global default works.
-			setupStmt:          "ALTER ROLE ALL RESET search_path",
-			userOverride:       "testuser2",
-			databaseOverride:   "postgres",
-			expectedSearchPath: `"$user", public`,
-		},
-		{
-			// Change an existing default setting.
-			setupStmt:          "ALTER ROLE testuser IN DATABASE defaultdb SET search_path = 'f'",
-			expectedSearchPath: "f",
-		},
-		{
-			setupStmt:          "ALTER ROLE testuser IN DATABASE defaultdb SET search_path = DEFAULT",
-			expectedSearchPath: "c",
-		},
-		{
-			setupStmt:          "ALTER ROLE testuser SET search_path TO DEFAULT",
-			expectedSearchPath: "b",
-		},
-		{
-			// Add a default setting for a different variable.
-			setupStmt:          "ALTER ROLE ALL IN DATABASE defaultdb SET serial_normalization = sql_sequence",
-			expectedSearchPath: "b",
-		},
-		{
-			// RESETing the other variable should not affect search_path.
-			setupStmt:          "ALTER ROLE ALL IN DATABASE defaultdb RESET serial_normalization",
-			expectedSearchPath: "b",
-		},
-		{
-			// The global default was already reset earlier, so there should be
-			// no default setting after this.
-			setupStmt:          "ALTER ROLE ALL IN DATABASE defaultdb RESET ALL",
-			expectedSearchPath: `"$user", public`,
-		},
-	} {
-		t.Run(fmt.Sprintf("TestRoleDefaultSettings-%d", i), func(t *testing.T) {
-			_, err := db.ExecContext(ctx, tc.setupStmt)
-			require.NoError(t, err)
-
-			pgURLCopy := pgURL
-			if tc.userOverride != "" {
-				newPGURL, cleanupFunc := sqlutils.PGUrl(
-					t, s.ServingSQLAddr(), "TestRoleDefaultSettings" /* prefix */, url.User(tc.userOverride),
-				)
-				defer cleanupFunc()
-				pgURLCopy = newPGURL
-			}
-			pgURLCopy.Path = tc.databaseOverride
-			if tc.searchPathOptOverride != "" {
-				q := pgURLCopy.Query()
-				q.Add("search_path", tc.searchPathOptOverride)
-				pgURLCopy.RawQuery = q.Encode()
-			}
-
-			thisDB, err := gosql.Open("postgres", pgURLCopy.String())
-			require.NoError(t, err)
-			defer thisDB.Close()
-
-			if tc.postConnectStmt != "" {
-				_, err = thisDB.ExecContext(ctx, tc.postConnectStmt)
-				require.NoError(t, err)
-			}
-
-			var actual string
-			err = thisDB.QueryRow("SHOW search_path").Scan(&actual)
-			require.NoError(t, err)
-			require.Equal(t, tc.expectedSearchPath, actual)
-		})
-
-	}
-
 }

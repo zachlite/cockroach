@@ -214,12 +214,7 @@ func (r *Replica) protectedTimestampRecordCurrentlyApplies(
 
 	var seen bool
 	read = r.readProtectedTimestampsRLocked(ctx, func(r *ptpb.Record) {
-		// Comparing record ID and the timestamp ensures that we find the record
-		// that we are verifying.
-		// A PTS record can be updated with a new Timestamp to protect, and so we
-		// need to ensure that we are not seeing the old version of the record in
-		// case the cache has not been updated.
-		if r.ID == args.RecordID && args.Protected.LessEq(r.Timestamp) {
+		if r.ID == args.RecordID {
 			seen = true
 		}
 	})

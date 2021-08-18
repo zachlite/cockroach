@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -25,7 +24,7 @@ import (
 // for database descriptors.
 type DatabaseDescriptorBuilder interface {
 	catalog.DescriptorBuilder
-	BuildImmutableDatabase() catalog.DatabaseDescriptor
+	BuildImmutableDatabase() *Immutable
 	BuildExistingMutableDatabase() *Mutable
 	BuildCreatedMutableDatabase() *Mutable
 }
@@ -33,8 +32,6 @@ type DatabaseDescriptorBuilder interface {
 type databaseDescriptorBuilder struct {
 	original      *descpb.DatabaseDescriptor
 	maybeModified *descpb.DatabaseDescriptor
-
-	changed bool
 }
 
 var _ DatabaseDescriptorBuilder = &databaseDescriptorBuilder{}
@@ -57,11 +54,12 @@ func (ddb *databaseDescriptorBuilder) DescriptorType() catalog.DescriptorType {
 func (ddb *databaseDescriptorBuilder) RunPostDeserializationChanges(
 	_ context.Context, _ catalog.DescGetter,
 ) error {
+	// Fill in any incorrect privileges that may have been missed due to mixed-versions.
+	// TODO(mberhault): remove this in 2.1 (maybe 2.2) when privilege-fixing migrations have been
+	// run again and mixed-version clusters always write "good" descriptors.
 	ddb.maybeModified = protoutil.Clone(ddb.original).(*descpb.DatabaseDescriptor)
-	privsChanged := descpb.MaybeFixPrivileges(ddb.maybeModified.ID, ddb.maybeModified.ID,
-		&ddb.maybeModified.Privileges, privilege.Database)
-	removedSelfEntryInSchemas := maybeRemoveDroppedSelfEntryFromSchemas(ddb.maybeModified)
-	ddb.changed = privsChanged || removedSelfEntryInSchemas
+	descpb.MaybeFixPrivileges(ddb.maybeModified.ID, &ddb.maybeModified.Privileges)
+	descpb.MaybeFixUsagePrivForTablesAndDBs(&ddb.maybeModified.Privileges)
 	return nil
 }
 
@@ -71,12 +69,12 @@ func (ddb *databaseDescriptorBuilder) BuildImmutable() catalog.Descriptor {
 }
 
 // BuildImmutableDatabase returns an immutable database descriptor.
-func (ddb *databaseDescriptorBuilder) BuildImmutableDatabase() catalog.DatabaseDescriptor {
+func (ddb *databaseDescriptorBuilder) BuildImmutableDatabase() *Immutable {
 	desc := ddb.maybeModified
 	if desc == nil {
 		desc = ddb.original
 	}
-	return &immutable{DatabaseDescriptor: *desc}
+	return &Immutable{DatabaseDescriptor: *desc}
 }
 
 // BuildExistingMutable implements the catalog.DescriptorBuilder interface.
@@ -91,9 +89,8 @@ func (ddb *databaseDescriptorBuilder) BuildExistingMutableDatabase() *Mutable {
 		ddb.maybeModified = protoutil.Clone(ddb.original).(*descpb.DatabaseDescriptor)
 	}
 	return &Mutable{
-		immutable:      immutable{DatabaseDescriptor: *ddb.maybeModified},
-		ClusterVersion: &immutable{DatabaseDescriptor: *ddb.original},
-		changed:        ddb.changed,
+		Immutable:      Immutable{DatabaseDescriptor: *ddb.maybeModified},
+		ClusterVersion: &Immutable{DatabaseDescriptor: *ddb.original},
 	}
 }
 
@@ -109,10 +106,7 @@ func (ddb *databaseDescriptorBuilder) BuildCreatedMutableDatabase() *Mutable {
 	if desc == nil {
 		desc = ddb.original
 	}
-	return &Mutable{
-		immutable: immutable{DatabaseDescriptor: *desc},
-		changed:   ddb.changed,
-	}
+	return &Mutable{Immutable: Immutable{DatabaseDescriptor: *desc}}
 }
 
 // NewInitialOption is an optional argument for NewInitial.
@@ -130,7 +124,6 @@ func MaybeWithDatabaseRegionConfig(regionConfig *multiregion.RegionConfig) NewIn
 			SurvivalGoal:  regionConfig.SurvivalGoal(),
 			PrimaryRegion: regionConfig.PrimaryRegion(),
 			RegionEnumID:  regionConfig.RegionEnumID(),
-			Placement:     regionConfig.Placement(),
 		}
 	}
 }
@@ -144,7 +137,6 @@ func NewInitial(
 		id,
 		name,
 		descpb.NewDefaultPrivilegeDescriptor(owner),
-		descpb.InitDefaultPrivilegeDescriptor(),
 		options...,
 	)
 }
@@ -152,18 +144,13 @@ func NewInitial(
 // NewInitialWithPrivileges constructs a new Mutable for an initial version
 // from an id and name and custom privileges.
 func NewInitialWithPrivileges(
-	id descpb.ID,
-	name string,
-	privileges *descpb.PrivilegeDescriptor,
-	defaultPrivileges *descpb.DefaultPrivilegeDescriptor,
-	options ...NewInitialOption,
+	id descpb.ID, name string, privileges *descpb.PrivilegeDescriptor, options ...NewInitialOption,
 ) *Mutable {
 	ret := descpb.DatabaseDescriptor{
-		Name:              name,
-		ID:                id,
-		Version:           1,
-		Privileges:        privileges,
-		DefaultPrivileges: defaultPrivileges,
+		Name:       name,
+		ID:         id,
+		Version:    1,
+		Privileges: privileges,
 	}
 	for _, option := range options {
 		option(&ret)

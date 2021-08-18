@@ -29,11 +29,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -153,9 +153,6 @@ func (h *testHelper) createBackupSchedule(
 		require.NoError(t, s.InitFromDatums(datums, cols))
 		schedules = append(schedules, s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 
 	return schedules, nil
 }
@@ -183,6 +180,7 @@ func (t userType) String() string {
 // itself with the actual scheduling and the execution of those backups.
 func TestSerializesScheduledBackupExecutionArgs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.UnderRaceWithIssue(t, 60718, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	th, cleanup := newTestHelper(t)
@@ -652,7 +650,6 @@ func TestCreateBackupScheduleInExplicitTxnRollback(t *testing.T) {
 
 	res := th.sqlDB.Query(t, "SELECT id FROM [SHOW SCHEDULES];")
 	require.False(t, res.Next())
-	require.NoError(t, res.Err())
 
 	th.sqlDB.Exec(t, "BEGIN;")
 	th.sqlDB.Exec(t, "CREATE SCHEDULE FOR BACKUP INTO 'nodelocal://1/collection' RECURRING '@daily';")
@@ -660,7 +657,6 @@ func TestCreateBackupScheduleInExplicitTxnRollback(t *testing.T) {
 
 	res = th.sqlDB.Query(t, "SELECT id FROM [SHOW SCHEDULES];")
 	require.False(t, res.Next())
-	require.NoError(t, res.Err())
 }
 
 // Normally, we issue backups with AOST set to be the scheduled nextRun.
@@ -780,7 +776,7 @@ INSERT INTO t values (1), (10), (100);
 	})
 
 	metrics := func() *jobs.ExecutorMetrics {
-		ex, err := jobs.GetScheduledJobExecutor(tree.ScheduledBackupExecutor.InternalName())
+		ex, _, err := jobs.GetScheduledJobExecutor(tree.ScheduledBackupExecutor.InternalName())
 		require.NoError(t, err)
 		require.NotNil(t, ex.Metrics())
 		return ex.Metrics().(*backupMetrics).ExecutorMetrics
@@ -850,151 +846,4 @@ INSERT INTO t values (1), (10), (100);
 			return errors.Newf("expected 2 backup to succeed, got %d", delta)
 		})
 	})
-}
-
-func extractBackupNode(sj *jobs.ScheduledJob) (*tree.Backup, error) {
-	args := &ScheduledBackupExecutionArgs{}
-	if err := pbtypes.UnmarshalAny(sj.ExecutionArgs().Args, args); err != nil {
-		return nil, errors.Wrap(err, "un-marshaling args")
-	}
-
-	node, err := parser.ParseOne(args.BackupStatement)
-	if err != nil {
-		return nil, errors.Wrap(err, "parsing backup statement")
-	}
-
-	if backupStmt, ok := node.AST.(*tree.Backup); ok {
-		return backupStmt, nil
-	}
-
-	return nil, errors.Newf("unexpect node type %T", node)
-}
-
-func constructExpectedScheduledBackupNode(
-	t *testing.T, sj *jobs.ScheduledJob, fullBackupAlways bool, fullRecurrence, recurrence string,
-) *tree.ScheduledBackup {
-	t.Helper()
-	args := &ScheduledBackupExecutionArgs{}
-	err := pbtypes.UnmarshalAny(sj.ExecutionArgs().Args, args)
-	require.NoError(t, err)
-
-	backupNode, err := extractBackupNode(sj)
-	require.NoError(t, err)
-	firstRun, err := tree.MakeDTimestampTZ(sj.ScheduledRunTime(), time.Microsecond)
-	require.NoError(t, err)
-	scheduleOptions := tree.KVOptions{
-		tree.KVOption{
-			Key:   optFirstRun,
-			Value: firstRun,
-		},
-		tree.KVOption{
-			Key:   optOnExecFailure,
-			Value: tree.NewDString(sj.ScheduleDetails().OnError.String()),
-		},
-		tree.KVOption{
-			Key:   optOnPreviousRunning,
-			Value: tree.NewDString(sj.ScheduleDetails().Wait.String()),
-		},
-	}
-	sb := &tree.ScheduledBackup{
-		ScheduleLabel: tree.NewDString(sj.ScheduleLabel()),
-		Recurrence:    tree.NewDString(recurrence),
-		FullBackup: &tree.FullBackupClause{
-			AlwaysFull: fullBackupAlways,
-		},
-		Targets:         backupNode.Targets,
-		To:              backupNode.To,
-		BackupOptions:   backupNode.Options,
-		ScheduleOptions: scheduleOptions,
-	}
-	if !fullBackupAlways {
-		sb.FullBackup.Recurrence = tree.NewDString(fullRecurrence)
-	}
-	return sb
-}
-
-func TestShowCreateScheduleStatement(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	th, cleanup := newTestHelper(t)
-	defer cleanup()
-
-	testCases := []struct {
-		name             string
-		query            string
-		fullBackupAlways bool
-		fullRecurrence   string
-		recurrence       string
-	}{
-		{
-			name:           "full-incremental-schedule",
-			query:          `CREATE SCHEDULE foo FOR BACKUP INTO '%s' RECURRING '@hourly'`,
-			fullRecurrence: "@daily",
-			recurrence:     "@hourly",
-		},
-		{
-			name:             "full-schedule",
-			query:            `CREATE SCHEDULE FOR BACKUP INTO '%s' RECURRING '@hourly' FULL BACKUP ALWAYS`,
-			fullBackupAlways: true,
-			fullRecurrence:   "@hourly",
-			recurrence:       "@hourly",
-		},
-		{
-			name:           "full-incremental-schedule-with-option",
-			query:          `CREATE SCHEDULE FOR BACKUP INTO '%s' RECURRING '@hourly' FULL BACKUP '@daily' WITH SCHEDULE OPTIONS on_execution_failure = 'pause', ignore_existing_backups`,
-			fullRecurrence: "@daily",
-			recurrence:     "@hourly",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer utilccl.TestingEnableEnterprise()()
-			defer th.clearSchedules(t)
-
-			destination := "nodelocal://0/" + tc.name
-			createScheduleQuery := fmt.Sprintf(tc.query, destination)
-			schedules, err := th.createBackupSchedule(t, createScheduleQuery)
-			require.NoError(t, err)
-
-			// Find the full schedule, it will be the one with a scheduled next run.
-			var fullSchedule *jobs.ScheduledJob
-			for _, schedule := range schedules {
-				if !schedule.ScheduledRunTime().IsZero() {
-					fullSchedule = schedule
-					break
-				}
-			}
-			expectedScheduleNode := constructExpectedScheduledBackupNode(t, fullSchedule,
-				tc.fullBackupAlways, tc.fullRecurrence, tc.recurrence)
-
-			t.Run("show-create-all-schedules", func(t *testing.T) {
-				rows := th.sqlDB.QueryStr(t, "SHOW CREATE ALL SCHEDULES")
-				cols, err := th.sqlDB.Query(t, "SHOW CREATE ALL SCHEDULES").Columns()
-				require.NoError(t, err)
-				// The number of rows returned should be equal to the number of schedules created
-				require.Equal(t, len(schedules), len(rows))
-				require.Equal(t, cols, []string{"schedule_id", "create_statement"})
-
-				for _, row := range rows {
-					// Ensure that each row has schedule_id, create_stmt.
-					require.Len(t, row, 2)
-					showCreateScheduleStmt := row[1]
-					require.Equal(t, expectedScheduleNode.String(), showCreateScheduleStmt)
-				}
-			})
-
-			t.Run("show-create-schedule-by-id", func(t *testing.T) {
-				for _, sj := range schedules {
-					rows := th.sqlDB.QueryStr(t, fmt.Sprintf("SHOW CREATE SCHEDULE %d", sj.ScheduleID()))
-					require.Equal(t, 1, len(rows))
-					cols, err := th.sqlDB.Query(t, fmt.Sprintf("SHOW CREATE SCHEDULE %d", sj.ScheduleID())).Columns()
-					require.NoError(t, err)
-					require.Equal(t, cols, []string{"schedule_id", "create_statement"})
-					require.Equal(t, expectedScheduleNode.String(), rows[0][1])
-				}
-			})
-		})
-	}
 }

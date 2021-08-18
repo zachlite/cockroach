@@ -12,13 +12,13 @@ import React, { MouseEvent } from "react";
 import _ from "lodash";
 import { cockroach } from "src/js/protos";
 import { TimestampToMoment } from "src/util/convert";
-import { DATE_FORMAT_24_UTC } from "src/util/format";
+import { DATE_FORMAT } from "src/util/format";
 import { JobStatusCell } from "src/views/jobs/jobStatusCell";
 import { SortSetting } from "src/views/shared/components/sortabletable";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 import { isEqual, map } from "lodash";
 import { JobDescriptionCell } from "src/views/jobs/jobDescriptionCell";
-import Job = cockroach.server.serverpb.IJobResponse;
+import Job = cockroach.server.serverpb.JobsResponse.IJob;
 import JobsResponse = cockroach.server.serverpb.JobsResponse;
 import {
   ColumnDescriptor,
@@ -48,7 +48,7 @@ const jobsTableColumns: ColumnDescriptor<Job>[] = [
     title: "Job ID",
     titleAlign: "right",
     cell: (job) => String(job.id),
-    sort: (job) => job.id?.toNumber(),
+    sort: (job) => job.id.toNumber(),
   },
   {
     name: "users",
@@ -59,7 +59,7 @@ const jobsTableColumns: ColumnDescriptor<Job>[] = [
   {
     name: "creationTime",
     title: "Creation Time",
-    cell: (job) => TimestampToMoment(job?.created).format(DATE_FORMAT_24_UTC),
+    cell: (job) => TimestampToMoment(job?.created).format(DATE_FORMAT),
     sort: (job) => TimestampToMoment(job?.created).valueOf(),
   },
   {

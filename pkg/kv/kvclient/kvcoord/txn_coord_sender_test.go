@@ -338,17 +338,22 @@ func TestTxnCoordSenderEndTxn(t *testing.T) {
 
 			case 1:
 				// Past deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp.Prev())
-				require.NoError(t, err, "Deadline update to past failed")
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp.Prev()) {
+					t.Fatalf("did not update deadline")
+				}
+
 			case 2:
 				// Equal deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp)
-				require.NoError(t, err, "Deadline update to equal failed")
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp) {
+					t.Fatalf("did not update deadline")
+				}
 
 			case 3:
 				// Future deadline.
-				err := txn.UpdateDeadline(ctx, pushedTimestamp.Next())
-				require.NoError(t, err, "Deadline update to future failed")
+
+				if !txn.UpdateDeadlineMaybe(ctx, pushedTimestamp.Next()) {
+					t.Fatalf("did not update deadline")
+				}
 			}
 			err = txn.CommitOrCleanup(ctx)
 
@@ -2158,12 +2163,11 @@ func TestReadOnlyTxnObeysDeadline(t *testing.T) {
 	t.Run("standalone commit", func(t *testing.T) {
 		txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 		// Set a deadline. We'll generate a retriable error with a higher timestamp.
-		err := txn.UpdateDeadline(ctx, clock.Now())
-		require.NoError(t, err, "Deadline update to now failed")
+		txn.UpdateDeadlineMaybe(ctx, clock.Now())
 		if _, err := txn.Get(ctx, "k"); err != nil {
 			t.Fatal(err)
 		}
-		err = txn.Commit(ctx)
+		err := txn.Commit(ctx)
 		assertTransactionRetryError(t, err)
 		if !testutils.IsError(err, "RETRY_COMMIT_DEADLINE_EXCEEDED") {
 			t.Fatalf("expected deadline exceeded, got: %s", err)
@@ -2173,11 +2177,10 @@ func TestReadOnlyTxnObeysDeadline(t *testing.T) {
 	t.Run("commit in batch", func(t *testing.T) {
 		txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 		// Set a deadline. We'll generate a retriable error with a higher timestamp.
-		err := txn.UpdateDeadline(ctx, clock.Now())
-		require.NoError(t, err, "Deadline update to now failed")
+		txn.UpdateDeadlineMaybe(ctx, clock.Now())
 		b := txn.NewBatch()
 		b.Get("k")
-		err = txn.CommitInBatch(ctx, b)
+		err := txn.CommitInBatch(ctx, b)
 		assertTransactionRetryError(t, err)
 		if !testutils.IsError(err, "RETRY_COMMIT_DEADLINE_EXCEEDED") {
 			t.Fatalf("expected deadline exceeded, got: %s", err)
@@ -2428,7 +2431,7 @@ func TestPutsInStagingTxn(t *testing.T) {
 	// DistSender are send serially and the transaction is updated from one to
 	// another. See below.
 	settings := cluster.MakeTestingClusterSettings()
-	senderConcurrencyLimit.Override(ctx, &settings.SV, 0)
+	senderConcurrencyLimit.Override(&settings.SV, 0)
 
 	s, _, db := serverutils.StartServer(t,
 		base.TestServerArgs{
@@ -2669,94 +2672,6 @@ func TestTxnManualRefresh(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			run(t, tc)
-		})
-	}
-}
-
-// TestTxnCoordSenderSetFixedTimestamp tests that SetFixedTimestamp cannot be
-// called after a transaction has already been used in the current epoch to read
-// or write.
-func TestTxnCoordSenderSetFixedTimestamp(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	for _, test := range []struct {
-		name   string
-		before func(*testing.T, *kv.Txn)
-		expErr string
-	}{
-		{
-			name:   "nothing before",
-			before: func(t *testing.T, txn *kv.Txn) {},
-		},
-		{
-			name: "read before",
-			before: func(t *testing.T, txn *kv.Txn) {
-				_, err := txn.Get(ctx, "k")
-				require.NoError(t, err)
-			},
-			expErr: "cannot set fixed timestamp, .* already performed reads",
-		},
-		{
-			name: "write before",
-			before: func(t *testing.T, txn *kv.Txn) {
-				require.NoError(t, txn.Put(ctx, "k", "v"))
-			},
-			expErr: "cannot set fixed timestamp, .* already performed writes",
-		},
-		{
-			name: "read and write before",
-			before: func(t *testing.T, txn *kv.Txn) {
-				_, err := txn.Get(ctx, "k")
-				require.NoError(t, err)
-				require.NoError(t, txn.Put(ctx, "k", "v"))
-			},
-			expErr: "cannot set fixed timestamp, .* already performed reads",
-		},
-		{
-			name: "read before, in prior epoch",
-			before: func(t *testing.T, txn *kv.Txn) {
-				_, err := txn.Get(ctx, "k")
-				require.NoError(t, err)
-				txn.ManualRestart(ctx, txn.ReadTimestamp().Next())
-			},
-		},
-		{
-			name: "write before, in prior epoch",
-			before: func(t *testing.T, txn *kv.Txn) {
-				require.NoError(t, txn.Put(ctx, "k", "v"))
-				txn.ManualRestart(ctx, txn.ReadTimestamp().Next())
-			},
-		},
-		{
-			name: "read and write before, in prior epoch",
-			before: func(t *testing.T, txn *kv.Txn) {
-				_, err := txn.Get(ctx, "k")
-				require.NoError(t, err)
-				require.NoError(t, txn.Put(ctx, "k", "v"))
-				txn.ManualRestart(ctx, txn.ReadTimestamp().Next())
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			s := createTestDB(t)
-			defer s.Stop()
-
-			txn := kv.NewTxn(ctx, s.DB, 0 /* gatewayNodeID */)
-			test.before(t, txn)
-
-			ts := s.Clock.Now()
-			err := txn.SetFixedTimestamp(ctx, ts)
-			if test.expErr != "" {
-				require.Error(t, err)
-				require.Regexp(t, test.expErr, err)
-				require.False(t, txn.CommitTimestampFixed())
-			} else {
-				require.NoError(t, err)
-				require.True(t, txn.CommitTimestampFixed())
-				require.Equal(t, ts, txn.CommitTimestamp())
-			}
 		})
 	}
 }

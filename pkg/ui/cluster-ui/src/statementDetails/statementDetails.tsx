@@ -462,21 +462,18 @@ export class StatementDetails extends React.Component<
     const totalWorkload = calculateTotalWorkload(statsByNode);
     populateRegionNodeForStatements(statsByNode, nodeRegions);
     const nodes: string[] = unique(
-      (stats.nodes || []).map(node => node.toString()),
+      stats.nodes.map(node => node.toString()),
     ).sort();
     const regions = unique(
-      (stats.nodes || []).map(node => nodeRegions[node.toString()]),
+      stats.nodes.map(node => nodeRegions[node.toString()]),
     ).sort();
-    const explainPlan =
+    const logicalPlan =
       stats.sensitive_info && stats.sensitive_info.most_recent_plan_description;
-    const explainGlobalProps = { distribution: distSQL, vectorized: vec };
     const duration = (v: number) => Duration(v * 1e9);
     const hasDiagnosticReports = diagnosticsReports.length > 0;
-    const lastExec =
-      stats.last_exec_timestamp &&
-      moment(stats.last_exec_timestamp.seconds.low * 1e3).format(
-        "MMM DD, YYYY HH:MM",
-      );
+    const lastExec = moment(stats.last_exec_timestamp.seconds.low * 1e3).format(
+      "MMM DD, YYYY HH:MM",
+    );
     return (
       <Tabs
         defaultActiveKey="1"
@@ -695,13 +692,9 @@ export class StatementDetails extends React.Component<
             onSortingChange={this.props.onSortingChange}
           />
         </TabPane>
-        <TabPane tab="Explain Plan" key="explain-plan">
+        <TabPane tab="Logical Plan" key="logical-plan">
           <SummaryCard>
-            <PlanView
-              title="Explain Plan"
-              plan={explainPlan}
-              globalProperties={explainGlobalProps}
-            />
+            <PlanView title="Logical Plan" plan={logicalPlan} />
           </SummaryCard>
         </TabPane>
         <TabPane

@@ -14,8 +14,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
@@ -43,7 +43,7 @@ type upsertRun struct {
 	checkOrds checkSet
 
 	// insertCols are the columns being inserted/upserted into.
-	insertCols []catalog.Column
+	insertCols []descpb.ColumnDescriptor
 
 	// done informs a new call to BatchedNext() that the previous call to
 	// BatchedNext() has completed the work already.
@@ -126,7 +126,10 @@ func (n *upsertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.tw.tableDesc(), n.run.tw.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(
+		n.run.tw.tableDesc().GetID(),
+		n.run.tw.lastBatchSize,
+	)
 
 	return n.run.tw.lastBatchSize > 0, nil
 }

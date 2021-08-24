@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
@@ -139,14 +140,6 @@ func (i iteratorWithCloser) Close() {
 // of rangefeeds using catchup iterators at the same time.
 func (r *Replica) RangeFeed(
 	args *roachpb.RangeFeedRequest, stream roachpb.Internal_RangeFeedServer,
-) *roachpb.Error {
-	return r.rangeFeedWithRangeID(r.RangeID, args, stream)
-}
-
-func (r *Replica) rangeFeedWithRangeID(
-	_forStacks roachpb.RangeID,
-	args *roachpb.RangeFeedRequest,
-	stream roachpb.Internal_RangeFeedServer,
 ) *roachpb.Error {
 	if !r.isSystemRange() && !RangefeedEnabled.Get(&r.store.cfg.Settings.SV) {
 		return roachpb.NewErrorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
@@ -360,7 +353,6 @@ func (r *Replica) registerWithRangefeedRaftMuLocked(
 	cfg := rangefeed.Config{
 		AmbientContext:   r.AmbientContext,
 		Clock:            r.Clock(),
-		RangeID:          r.RangeID,
 		Span:             desc.RSpan(),
 		TxnPusher:        &tp,
 		PushTxnsInterval: r.store.TestingKnobs().RangeFeedPushTxnsInterval,
@@ -626,15 +618,14 @@ func (r *Replica) handleClosedTimestampUpdateRaftMuLocked(ctx context.Context) {
 	// If the closed timestamp is sufficiently stale, signal that we want an
 	// update to the leaseholder so that it will eventually begin to progress
 	// again.
-	behind := r.Clock().PhysicalTime().Sub(closedTS.GoTime())
 	slowClosedTSThresh := 5 * closedts.TargetDuration.Get(&r.store.cfg.Settings.SV)
-	if behind > slowClosedTSThresh {
+	if d := timeutil.Since(closedTS.GoTime()); d > slowClosedTSThresh {
 		m := r.store.metrics.RangeFeedMetrics
 		if m.RangeFeedSlowClosedTimestampLogN.ShouldLog() {
 			if closedTS.IsEmpty() {
 				log.Infof(ctx, "RangeFeed closed timestamp is empty")
 			} else {
-				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, behind)
+				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, d)
 			}
 		}
 

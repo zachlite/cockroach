@@ -37,12 +37,11 @@ import {
 } from "src/sortedtable";
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { StatementTableCell } from "./statementsTableContent";
 import {
-  statisticsTableTitles,
+  StatementTableTitle,
+  StatementTableCell,
   NodeNames,
-  StatisticType,
-} from "../statsTableUtil/statsTableUtil";
+} from "./statementsTableContent";
 
 type IStatementDiagnosticsReport = cockroach.server.serverpb.IStatementDiagnosticsReport;
 type ICollectedStatementStatistics = cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -53,7 +52,6 @@ function makeCommonColumns(
   statements: AggregateStatistics[],
   totalWorkload: number,
   nodeRegions: { [nodeId: string]: string },
-  statType: StatisticType,
 ): ColumnDescriptor<AggregateStatistics>[] {
   const defaultBarChartOptions = {
     classes: {
@@ -89,14 +87,14 @@ function makeCommonColumns(
   const columns: ColumnDescriptor<AggregateStatistics>[] = [
     {
       name: "executionCount",
-      title: statisticsTableTitles.executionCount(statType),
+      title: StatementTableTitle.executionCount,
       className: cx("statements-table__col-count"),
       cell: countBar,
       sort: (stmt: AggregateStatistics) => FixLong(Number(stmt.stats.count)),
     },
     {
       name: "database",
-      title: statisticsTableTitles.database(statType),
+      title: StatementTableTitle.database,
       className: cx("statements-table__col-database"),
       cell: (stmt: AggregateStatistics) => stmt.database,
       sort: (stmt: AggregateStatistics) => stmt.database,
@@ -104,7 +102,7 @@ function makeCommonColumns(
     },
     {
       name: "rowsRead",
-      title: statisticsTableTitles.rowsRead(statType),
+      title: StatementTableTitle.rowsRead,
       className: cx("statements-table__col-rows-read"),
       cell: rowsReadBar,
       sort: (stmt: AggregateStatistics) =>
@@ -112,42 +110,42 @@ function makeCommonColumns(
     },
     {
       name: "bytesRead",
-      title: statisticsTableTitles.bytesRead(statType),
+      title: StatementTableTitle.bytesRead,
       cell: bytesReadBar,
       sort: (stmt: AggregateStatistics) =>
         FixLong(Number(stmt.stats.bytes_read.mean)),
     },
     {
-      name: "time",
-      title: statisticsTableTitles.time(statType),
+      name: "statementTime",
+      title: StatementTableTitle.statementTime,
       className: cx("statements-table__col-latency"),
       cell: latencyBar,
       sort: (stmt: AggregateStatistics) => stmt.stats.service_lat.mean,
     },
     {
       name: "contention",
-      title: statisticsTableTitles.contention(statType),
+      title: StatementTableTitle.contention,
       cell: contentionBar,
       sort: (stmt: AggregateStatistics) =>
         FixLong(Number(stmt.stats.exec_stats.contention_time.mean)),
     },
     {
       name: "maxMemUsage",
-      title: statisticsTableTitles.maxMemUsage(statType),
+      title: StatementTableTitle.maxMemUsage,
       cell: maxMemUsageBar,
       sort: (stmt: AggregateStatistics) =>
         FixLong(Number(stmt.stats.exec_stats.max_mem_usage.mean)),
     },
     {
       name: "networkBytes",
-      title: statisticsTableTitles.networkBytes(statType),
+      title: StatementTableTitle.networkBytes,
       cell: networkBytesBar,
       sort: (stmt: AggregateStatistics) =>
         FixLong(Number(stmt.stats.exec_stats.network_bytes.mean)),
     },
     {
       name: "retries",
-      title: statisticsTableTitles.retries(statType),
+      title: StatementTableTitle.retries,
       className: cx("statements-table__col-retries"),
       cell: retryBar,
       sort: (stmt: AggregateStatistics) =>
@@ -155,7 +153,7 @@ function makeCommonColumns(
     },
     {
       name: "workloadPct",
-      title: statisticsTableTitles.workloadPct(statType),
+      title: StatementTableTitle.workloadPct,
       cell: workloadPctBarChart(
         statements,
         defaultBarChartOptions,
@@ -167,7 +165,7 @@ function makeCommonColumns(
     },
     {
       name: "regionNodes",
-      title: statisticsTableTitles.regionNodes(statType),
+      title: StatementTableTitle.regionNodes,
       className: cx("statements-table__col-regions"),
       cell: (stmt: AggregateStatistics) => {
         return longListWithTooltip(stmt.regionNodes.sort().join(", "), 50);
@@ -215,50 +213,37 @@ export function shortStatement(summary: StatementSummary, original: string) {
   }
 }
 
-export function makeStatementFingerprintColumn(
-  statType: StatisticType,
-  selectedApp: string,
-  search?: string,
-  onStatementClick?: (statement: string) => void,
-): ColumnDescriptor<AggregateStatistics> {
-  return {
-    name: "statements",
-    title: statisticsTableTitles.statements(statType),
-    className: cx("cl-table__col-query-text"),
-    cell: StatementTableCell.statements(search, selectedApp, onStatementClick),
-    sort: stmt => stmt.label,
-    alwaysShow: true,
-  };
-}
-
 export function makeStatementsColumns(
   statements: AggregateStatistics[],
   selectedApp: string,
   // totalWorkload is the sum of service latency of all statements listed on the table.
   totalWorkload: number,
   nodeRegions: { [nodeId: string]: string },
-  statType: StatisticType,
   search?: string,
   activateDiagnosticsRef?: React.RefObject<ActivateDiagnosticsModalRef>,
   onDiagnosticsDownload?: (report: IStatementDiagnosticsReport) => void,
   onStatementClick?: (statement: string) => void,
 ): ColumnDescriptor<AggregateStatistics>[] {
   const columns: ColumnDescriptor<AggregateStatistics>[] = [
-    makeStatementFingerprintColumn(
-      statType,
-      selectedApp,
-      search,
-      onStatementClick,
-    ),
+    {
+      name: "statements",
+      title: StatementTableTitle.statements,
+      className: cx("cl-table__col-query-text"),
+      cell: StatementTableCell.statements(
+        search,
+        selectedApp,
+        onStatementClick,
+      ),
+      sort: stmt => stmt.label,
+      alwaysShow: true,
+    },
   ];
-  columns.push(
-    ...makeCommonColumns(statements, totalWorkload, nodeRegions, statType),
-  );
+  columns.push(...makeCommonColumns(statements, totalWorkload, nodeRegions));
 
   if (activateDiagnosticsRef) {
     const diagnosticsColumn: ColumnDescriptor<AggregateStatistics> = {
       name: "diagnostics",
-      title: statisticsTableTitles.diagnostics(statType),
+      title: StatementTableTitle.diagnostics,
       cell: StatementTableCell.diagnostics(
         activateDiagnosticsRef,
         onDiagnosticsDownload,
@@ -294,7 +279,7 @@ export function makeNodesColumns(
   ];
 
   return original.concat(
-    makeCommonColumns(statements, totalWorkload, nodeRegions, "statement"),
+    makeCommonColumns(statements, totalWorkload, nodeRegions),
   );
 }
 
@@ -316,15 +301,13 @@ export function populateRegionNodeForStatements(
     const regions: { [region: string]: Set<number> } = {};
     // For each region, populate a list of all nodes where the statement was executed.
     // E.g. {"gcp-us-east1" : [1,3,4]}
-    if (stmt.stats.nodes) {
-      stmt.stats.nodes.forEach(node => {
-        if (Object.keys(regions).includes(nodeRegions[node.toString()])) {
-          regions[nodeRegions[node.toString()]].add(longToInt(node));
-        } else {
-          regions[nodeRegions[node.toString()]] = new Set([longToInt(node)]);
-        }
-      });
-    }
+    stmt.stats.nodes.forEach(node => {
+      if (Object.keys(regions).includes(nodeRegions[node.toString()])) {
+        regions[nodeRegions[node.toString()]].add(longToInt(node));
+      } else {
+        regions[nodeRegions[node.toString()]] = new Set([longToInt(node)]);
+      }
+    });
     // Create a list nodes/regions where a statement was executed on, with
     // format: region (node1,node2)
     const regionNodes: string[] = [];

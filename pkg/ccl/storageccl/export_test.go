@@ -12,14 +12,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"math/rand"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	_ "github.com/cockroachdb/cockroach/pkg/cloud/impl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -31,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,7 +52,7 @@ func TestExportCmd(t *testing.T) {
 			RequestHeader: roachpb.RequestHeader{Key: keys.UserTableDataMin, EndKey: keys.MaxKey},
 			StartTime:     start,
 			Storage: roachpb.ExternalStorage{
-				Provider:  roachpb.ExternalStorageProvider_nodelocal,
+				Provider:  roachpb.ExternalStorageProvider_LocalFile,
 				LocalFile: roachpb.ExternalStorage_LocalFilePath{Path: "/foo"},
 			},
 			MVCCFilter:     mvccFilter,
@@ -83,6 +83,13 @@ func TestExportCmd(t *testing.T) {
 			}
 			defer sst.Close()
 
+			fileContents, err := ioutil.ReadFile(filepath.Join(dir, "foo", file.Path))
+			if err != nil {
+				t.Fatalf("%+v", err)
+			}
+			if !bytes.Equal(fileContents, file.SST) {
+				t.Fatal("Returned SST and exported SST don't match!")
+			}
 			sst.SeekGE(storage.MVCCKey{Key: keys.MinKey})
 			for {
 				if valid, err := sst.Valid(); !valid || err != nil {
@@ -284,10 +291,6 @@ INTO
 		const expectedError = `export size \(11 bytes\) exceeds max size \(2 bytes\)`
 		_, pErr := export(t, res5.end, roachpb.MVCCFilter_Latest, noTargetBytes)
 		require.Regexp(t, expectedError, pErr)
-		hints := errors.GetAllHints(pErr.GoError())
-		require.Equal(t, 1, len(hints))
-		const expectedHint = `consider increasing cluster setting "kv.bulk_sst.max_allowed_overage"`
-		require.Regexp(t, expectedHint, hints[0])
 		_, pErr = export(t, res5.end, roachpb.MVCCFilter_All, noTargetBytes)
 		require.Regexp(t, expectedError, pErr)
 
@@ -444,7 +447,7 @@ func exportUsingGoIterator(
 	filter roachpb.MVCCFilter,
 	startTime, endTime hlc.Timestamp,
 	startKey, endKey roachpb.Key,
-	enableTimeBoundIteratorOptimization timeBoundOptimisation,
+	enableTimeBoundIteratorOptimization bool,
 	reader storage.Reader,
 ) ([]byte, error) {
 	memFile := &storage.MemFile{}
@@ -466,7 +469,7 @@ func exportUsingGoIterator(
 
 	iter := storage.NewMVCCIncrementalIterator(reader, storage.MVCCIncrementalIterOptions{
 		EndKey:                              endKey,
-		EnableTimeBoundIteratorOptimization: bool(enableTimeBoundIteratorOptimization),
+		EnableTimeBoundIteratorOptimization: enableTimeBoundIteratorOptimization,
 		StartTime:                           startTime,
 		EndTime:                             endTime,
 	})
@@ -539,29 +542,13 @@ func loadSST(t *testing.T, data []byte, start, end roachpb.Key) []storage.MVCCKe
 	return kvs
 }
 
-type exportRevisions bool
-type batchBoundaries bool
-type timeBoundOptimisation bool
-
-const (
-	exportAll    exportRevisions = true
-	exportLatest exportRevisions = false
-
-	stopAtTimestamps batchBoundaries = true
-	stopAtKeys       batchBoundaries = false
-
-	optimizeTimeBounds     timeBoundOptimisation = true
-	dontOptimizeTimeBounds timeBoundOptimisation = false
-)
-
 func assertEqualKVs(
 	ctx context.Context,
 	e storage.Engine,
 	startKey, endKey roachpb.Key,
 	startTime, endTime hlc.Timestamp,
-	exportAllRevisions exportRevisions,
-	stopMidKey batchBoundaries,
-	enableTimeBoundIteratorOptimization timeBoundOptimisation,
+	exportAllRevisions bool,
+	enableTimeBoundIteratorOptimization bool,
 	targetSize uint64,
 ) func(*testing.T) {
 	return func(t *testing.T) {
@@ -584,18 +571,14 @@ func assertEqualKVs(
 
 		// Run the actual code path used when exporting MVCCs to SSTs.
 		var kvs []storage.MVCCKeyValue
-		var resumeTs hlc.Timestamp
 		for start := startKey; start != nil; {
 			var sst []byte
 			var summary roachpb.BulkOpSummary
 			maxSize := uint64(0)
 			prevStart := start
-			prevTs := resumeTs
-			sstFile := &storage.MemFile{}
-			summary, start, resumeTs, err = e.ExportMVCCToSst(ctx, start, endKey, startTime, endTime, resumeTs,
-				bool(exportAllRevisions), targetSize, maxSize, bool(stopMidKey), bool(enableTimeBoundIteratorOptimization), sstFile)
+			sst, summary, start, err = e.ExportMVCCToSst(start, endKey, startTime, endTime,
+				exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 			require.NoError(t, err)
-			sst = sstFile.Data()
 			loaded := loadSST(t, sst, startKey, endKey)
 			// Ensure that the pagination worked properly.
 			if start != nil {
@@ -632,8 +615,8 @@ func assertEqualKVs(
 				if dataSizeWhenExceeded == maxSize {
 					maxSize--
 				}
-				_, _, _, err = e.ExportMVCCToSst(ctx, prevStart, endKey, startTime, endTime, prevTs,
-					bool(exportAllRevisions), targetSize, maxSize, false, bool(enableTimeBoundIteratorOptimization), &storage.MemFile{})
+				_, _, _, err = e.ExportMVCCToSst(prevStart, endKey, startTime, endTime,
+					exportAllRevisions, targetSize, maxSize, enableTimeBoundIteratorOptimization)
 				require.Regexp(t, fmt.Sprintf("export size \\(%d bytes\\) exceeds max size \\(%d bytes\\)",
 					dataSizeWhenExceeded, maxSize), err)
 			}
@@ -657,7 +640,6 @@ func assertEqualKVs(
 		}
 	}
 }
-
 func TestRandomKeyAndTimestampExport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
@@ -665,10 +647,12 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 
 	mkEngine := func(t *testing.T) (e storage.Engine, cleanup func()) {
 		dir, cleanupDir := testutils.TempDir(t)
-		e, err := storage.Open(ctx,
-			storage.Filesystem(dir),
-			storage.CacheSize(0),
-			storage.Settings(cluster.MakeTestingClusterSettings()))
+		e, err := storage.NewDefaultEngine(
+			0,
+			base.StorageConfig{
+				Settings: cluster.MakeTestingClusterSettings(),
+				Dir:      dir,
+			})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -677,13 +661,12 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 			cleanupDir()
 		}
 	}
-	const keySize = 100
-	const bytesPerValue = 300
 	getNumKeys := func(t *testing.T, rnd *rand.Rand, targetSize uint64) (numKeys int) {
 		const (
-			targetPages = 10
-			minNumKeys  = 2 // need > 1 keys for random key test
-			maxNumKeys  = 5000
+			targetPages   = 10
+			bytesPerValue = 300
+			minNumKeys    = 2 // need > 1 keys for random key test
+			maxNumKeys    = 5000
 		)
 		numKeys = maxNumKeys
 		if targetSize > 0 {
@@ -715,13 +698,11 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 			timestamps = append(timestamps, ts)
 
 			// Make keys unique and ensure they are monotonically increasing.
-			key := roachpb.Key(randutil.RandBytes(rnd, keySize))
+			key := roachpb.Key(randutil.RandBytes(rnd, 100))
 			key = append([]byte(fmt.Sprintf("#%d", i)), key...)
 			keys = append(keys, key)
 
-			averageValueSize := bytesPerValue - keySize
-			valueSize := randutil.RandIntInRange(rnd, averageValueSize-100, averageValueSize+100)
-			value := roachpb.MakeValueFromBytes(randutil.RandBytes(rnd, valueSize))
+			value := roachpb.MakeValueFromBytes(randutil.RandBytes(rnd, 200))
 			value.InitChecksum(key)
 			if err := storage.MVCCPut(ctx, batch, nil, key, ts, value, nil); err != nil {
 				t.Fatal(err)
@@ -763,35 +744,28 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 			tsMax = hlc.Timestamp{WallTime: math.MaxInt64, Logical: 0}
 		)
 
-		keyUpperBound := randutil.RandIntInRange(rnd, 1, numKeys)
-		keyLowerBound := rnd.Intn(keyUpperBound)
-		tsUpperBound := randutil.RandIntInRange(rnd, 1, numKeys)
-		tsLowerBound := rnd.Intn(tsUpperBound)
+		t.Run("ts (0-∞], latest, nontimebound", assertEqualKVs(ctx, e, keyMin, keyMax, tsMin, tsMax, false, false, targetSize))
+		t.Run("ts (0-∞], all, nontimebound", assertEqualKVs(ctx, e, keyMin, keyMax, tsMin, tsMax, true, false, targetSize))
+		t.Run("ts (0-∞], latest, timebound", assertEqualKVs(ctx, e, keyMin, keyMax, tsMin, tsMax, false, true, targetSize))
+		t.Run("ts (0-∞], all, timebound", assertEqualKVs(ctx, e, keyMin, keyMax, tsMin, tsMax, true, true, targetSize))
 
-		for _, s := range []struct {
-			name   string
-			keyMin roachpb.Key
-			keyMax roachpb.Key
-			tsMin  hlc.Timestamp
-			tsMax  hlc.Timestamp
-		}{
-			{"ts (0-∞]", keyMin, keyMax, tsMin, tsMax},
-			{"kv [randLower, randUpper)", keys[keyLowerBound], keys[keyUpperBound], tsMin, tsMax},
-			{"kv (randLowerTime, randUpperTime]", keyMin, keyMax, timestamps[tsLowerBound], timestamps[tsUpperBound]},
-		} {
-			t.Run(fmt.Sprintf("%s, latest, nontimebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportLatest, stopAtKeys, dontOptimizeTimeBounds, targetSize))
-			t.Run(fmt.Sprintf("%s, all, nontimebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportAll, stopAtKeys, dontOptimizeTimeBounds, targetSize))
-			t.Run(fmt.Sprintf("%s, all, split rows, nontimebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportAll, stopAtTimestamps, dontOptimizeTimeBounds, targetSize))
-			t.Run(fmt.Sprintf("%s, latest, timebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportLatest, stopAtKeys, optimizeTimeBounds, targetSize))
-			t.Run(fmt.Sprintf("%s, all, timebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportAll, stopAtKeys, optimizeTimeBounds, targetSize))
-			t.Run(fmt.Sprintf("%s, all, split rows, timebound", s.name),
-				assertEqualKVs(ctx, e, s.keyMin, s.keyMax, s.tsMin, s.tsMax, exportAll, stopAtTimestamps, optimizeTimeBounds, targetSize))
-		}
+		upperBound := randutil.RandIntInRange(rnd, 1, numKeys)
+		lowerBound := rnd.Intn(upperBound)
+
+		// Exercise random key ranges.
+		t.Run("kv [randLower, randUpper), latest, nontimebound", assertEqualKVs(ctx, e, keys[lowerBound], keys[upperBound], tsMin, tsMax, false, false, targetSize))
+		t.Run("kv [randLower, randUpper), all, nontimebound", assertEqualKVs(ctx, e, keys[lowerBound], keys[upperBound], tsMin, tsMax, true, false, targetSize))
+		t.Run("kv [randLower, randUpper), latest, timebound", assertEqualKVs(ctx, e, keys[lowerBound], keys[upperBound], tsMin, tsMax, false, true, targetSize))
+		t.Run("kv [randLower, randUpper), all, timebound", assertEqualKVs(ctx, e, keys[lowerBound], keys[upperBound], tsMin, tsMax, true, true, targetSize))
+
+		upperBound = randutil.RandIntInRange(rnd, 1, numKeys)
+		lowerBound = rnd.Intn(upperBound)
+
+		// Exercise random timestamps.
+		t.Run("kv (randLowerTime, randUpperTime], latest, nontimebound", assertEqualKVs(ctx, e, keyMin, keyMax, timestamps[lowerBound], timestamps[upperBound], false, false, targetSize))
+		t.Run("kv (randLowerTime, randUpperTime], all, nontimebound", assertEqualKVs(ctx, e, keyMin, keyMax, timestamps[lowerBound], timestamps[upperBound], true, false, targetSize))
+		t.Run("kv (randLowerTime, randUpperTime], latest, timebound", assertEqualKVs(ctx, e, keyMin, keyMax, timestamps[lowerBound], timestamps[upperBound], false, true, targetSize))
+		t.Run("kv (randLowerTime, randUpperTime], all, timebound", assertEqualKVs(ctx, e, keyMin, keyMax, timestamps[lowerBound], timestamps[upperBound], true, true, targetSize))
 	}
 	// Exercise min to max time and key ranges.
 	for _, targetSize := range []uint64{
@@ -801,4 +775,5 @@ func TestRandomKeyAndTimestampExport(t *testing.T) {
 			testWithTargetSize(t, targetSize)
 		})
 	}
+
 }

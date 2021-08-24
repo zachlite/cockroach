@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/cockroach/pkg/workload/workloadimpl"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/spf13/pflag"
 	"golang.org/x/exp/rand"
 	"golang.org/x/sync/errgroup"
@@ -43,8 +43,6 @@ type tpcc struct {
 	interleaved      bool
 	nowString        []byte
 	numConns         int
-
-	idleConns int
 
 	// Used in non-uniform random data generation. cLoad is the value of C at load
 	// time. cCustomerID is the value of C for the customer id generator. cItemID
@@ -81,7 +79,7 @@ type tpcc struct {
 
 	usePostgres  bool
 	serializable bool
-	txOpts       pgx.TxOptions
+	txOpts       *pgx.TxOptions
 
 	expensiveChecks bool
 
@@ -167,7 +165,6 @@ var tpccMeta = workload.Meta{
 			`wait`:               {RuntimeOnly: true},
 			`workers`:            {RuntimeOnly: true},
 			`conns`:              {RuntimeOnly: true},
-			`idle-conns`:         {RuntimeOnly: true},
 			`expensive-checks`:   {RuntimeOnly: true, CheckConsistencyOnly: true},
 		}
 
@@ -176,9 +173,6 @@ var tpccMeta = workload.Meta{
 		g.flags.BoolVar(&g.fks, `fks`, true, `Add the foreign keys`)
 		g.flags.BoolVar(&g.deprecatedFkIndexes, `deprecated-fk-indexes`, false, `Add deprecated foreign keys (needed when running against v20.1 or below clusters)`)
 		g.flags.BoolVar(&g.interleaved, `interleaved`, false, `Use interleaved tables`)
-		if err := g.Flags().MarkHidden("interleaved"); err != nil {
-			panic(errors.Wrap(err, "no interleaved flag?"))
-		}
 
 		g.flags.StringVar(&g.mix, `mix`,
 			`newOrder=10,payment=10,orderStatus=1,delivery=1,stockLevel=1`,
@@ -194,7 +188,6 @@ var tpccMeta = workload.Meta{
 			`Number of connections. Defaults to --warehouses * %d (except in nowait mode, where it defaults to --workers`,
 			numConnsPerWarehouse,
 		))
-		g.flags.IntVar(&g.idleConns, `idle-conns`, 0, `Number of idle connections. Defaults to 0`)
 		g.flags.IntVar(&g.partitions, `partitions`, 1, `Partition tables`)
 		g.flags.IntVar(&g.clientPartitions, `client-partitions`, 0, `Make client behave as if the tables are partitioned, but does not actually partition underlying data. Requires --partition-affinity.`)
 		g.flags.IntSliceVar(&g.affinityPartitions, `partition-affinity`, nil, `Run load generator against specific partition (requires partitions). `+
@@ -203,7 +196,7 @@ var tpccMeta = workload.Meta{
 		g.flags.Var(&g.zoneCfg.strategy, `partition-strategy`, `Partition tables according to which strategy [replication, leases]`)
 		g.flags.StringSliceVar(&g.zoneCfg.zones, "zones", []string{}, "Zones for legacy partitioning, the number of zones should match the number of partitions and the zones used to start cockroach. Does not work with --regions.")
 		g.flags.StringSliceVar(&g.multiRegionCfg.regions, "regions", []string{}, "Regions to use for multi-region partitioning. The first region is the PRIMARY REGION. Does not work with --zones.")
-		g.flags.Var(&g.multiRegionCfg.survivalGoal, "survival-goal", "Survival goal to use for multi-region setups. Allowed values: [zone, region].")
+		g.flags.Var(&g.multiRegionCfg.survivalGoal, "survival-goal", "Survival goal to use for multi-region setups. Allowed values: [az, region].")
 		g.flags.IntVar(&g.activeWarehouses, `active-warehouses`, 0, `Run the load generator against a specific number of warehouses. Defaults to --warehouses'`)
 		g.flags.BoolVar(&g.scatter, `scatter`, false, `Scatter ranges`)
 		g.flags.BoolVar(&g.serializable, `serializable`, false, `Force serializable mode`)
@@ -310,7 +303,7 @@ func (w *tpcc) Hooks() workload.Hooks {
 			}
 
 			if w.serializable {
-				w.txOpts = pgx.TxOptions{IsoLevel: pgx.Serializable}
+				w.txOpts = &pgx.TxOptions{IsoLevel: pgx.Serializable}
 			}
 
 			w.auditor = newAuditor(w.activeWarehouses)
@@ -734,8 +727,6 @@ func (w *tpcc) Ops(
 		}
 	}
 
-	counters := setupTPCCMetrics(reg.Registerer())
-
 	sqlDatabase, err := workload.SanitizeUrls(w, w.dbOverride, urls)
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -757,14 +748,13 @@ func (w *tpcc) Ops(
 		MaxConnsPerPool: 50,
 	}
 	fmt.Printf("Initializing %d connections...\n", w.numConns)
-
 	dbs := make([]*workload.MultiConnPool, len(urls))
 	var g errgroup.Group
 	for i := range urls {
 		i := i
 		g.Go(func() error {
 			var err error
-			dbs[i], err = workload.NewMultiConnPool(ctx, cfg, w.connFlags, urls[i])
+			dbs[i], err = workload.NewMultiConnPool(cfg, urls[i])
 			return err
 		})
 	}
@@ -808,21 +798,6 @@ func (w *tpcc) Ops(
 		}
 	}
 
-	fmt.Printf("Initializing %d idle connections...\n", w.idleConns)
-	var conns []*pgx.Conn
-	for i := 0; i < w.idleConns; i++ {
-		for _, url := range urls {
-			connConfig, err := pgx.ParseConfig(url)
-			if err != nil {
-				return workload.QueryLoad{}, err
-			}
-			conn, err := pgx.ConnectConfig(ctx, connConfig)
-			if err != nil {
-				return workload.QueryLoad{}, err
-			}
-			conns = append(conns, conn)
-		}
-	}
 	fmt.Printf("Initializing %d workers and preparing statements...\n", w.workers)
 	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
 	ql.WorkerFns = make([]func(context.Context) error, 0, w.workers)
@@ -859,7 +834,7 @@ func (w *tpcc) Ops(
 		idx := len(ql.WorkerFns) - 1
 		sem <- struct{}{}
 		group.Go(func() error {
-			worker, err := newWorker(ctx, w, db, reg.GetHandle(), counters, warehouse)
+			worker, err := newWorker(ctx, w, db, reg.GetHandle(), warehouse)
 			if err == nil {
 				ql.WorkerFns[idx] = worker.run
 			}
@@ -873,15 +848,6 @@ func (w *tpcc) Ops(
 	// Preregister all of the histograms so they always print.
 	for _, tx := range allTxs {
 		reg.GetHandle().Get(tx.name)
-	}
-
-	// Close idle connections.
-	ql.Close = func(context context.Context) {
-		for _, conn := range conns {
-			if err := conn.Close(ctx); err != nil {
-				log.Warningf(ctx, "%v", err)
-			}
-		}
 	}
 	return ql, nil
 }

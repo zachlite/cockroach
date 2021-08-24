@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
@@ -59,23 +58,6 @@ type Connector interface {
 	// obviates the need for SQL-only tenant processes to join the cluster-wide
 	// gossip network.
 	config.SystemConfigProvider
-
-	// Connector is capable of knowing every region in the cluster.
-	// This is necessary for region validation for zone configurations and
-	// multi-region primitives.
-	serverpb.RegionsServer
-
-	// Connector is capable of providing an endpoint for the TokenBucket API.
-	TokenBucketProvider
-}
-
-// TokenBucketProvider supplies an endpoint (to tenants) for the TokenBucket API
-// (defined in roachpb.Internal), used to interact with the tenant cost control
-// token bucket.
-type TokenBucketProvider interface {
-	TokenBucket(
-		ctx context.Context, in *roachpb.TokenBucketRequest,
-	) (*roachpb.TokenBucketResponse, error)
 }
 
 // ConnectorConfig encompasses the configuration required to create a Connector.
@@ -121,6 +103,6 @@ func AddressResolver(c Connector) nodedialer.AddressResolver {
 var GossipSubscriptionSystemConfigMask = config.MakeSystemConfigMask(
 	// Tenant SQL processes need just enough of the zone hierarchy to understand
 	// which zone configurations apply to their keyspace.
-	config.MakeZoneKey(keys.SystemSQLCodec, keys.RootNamespaceID),
-	config.MakeZoneKey(keys.SystemSQLCodec, keys.TenantsRangesID),
+	config.MakeZoneKey(keys.RootNamespaceID),
+	config.MakeZoneKey(keys.TenantsRangesID),
 )

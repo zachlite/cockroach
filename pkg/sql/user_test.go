@@ -30,7 +30,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/pgtype"
 )
 
 // TestGetUserHashedPasswordTimeout verifies that user login attempts
@@ -79,20 +80,16 @@ GRANT ALL ON DATABASE defaultdb TO foo`); err != nil {
 	}
 
 	// We'll attempt connections on gateway node 0.
-	fooURL, fooCleanupFn := sqlutils.PGUrlWithOptionalClientCerts(t,
+	userURL, cleanupFn := sqlutils.PGUrlWithOptionalClientCerts(t,
 		s.ServingSQLAddr(), t.Name(), url.UserPassword("foo", "testabc"), false /* withClientCerts */)
-	defer fooCleanupFn()
-	barURL, barCleanupFn := sqlutils.PGUrlWithOptionalClientCerts(t,
-		s.ServingSQLAddr(), t.Name(), url.UserPassword("bar", "testabc"), false /* withClientCerts */)
-	defer barCleanupFn()
+	defer cleanupFn()
 	rootURL, rootCleanupFn := sqlutils.PGUrl(t,
 		s.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer rootCleanupFn()
 
 	// Override the timeout built into pgx so we are only subject to
 	// what the server thinks.
-	fooURL.RawQuery += "&connect_timeout=0"
-	barURL.RawQuery += "&connect_timeout=0"
+	userURL.RawQuery += "&connect_timeout=0"
 	rootURL.RawQuery += "&connect_timeout=0"
 
 	fmt.Fprintln(os.Stderr, "-- sanity checks --")
@@ -105,11 +102,11 @@ GRANT ALL ON DATABASE defaultdb TO foo`); err != nil {
 		// required. If this part fails, this means the test cluster is
 		// not properly configured, and the remainder of the test below
 		// would report false positives.
-		unauthURL := fooURL
+		unauthURL := userURL
 		unauthURL.User = url.User("foo")
 		dbSQL, err := pgxConn(t, unauthURL)
 		if err == nil {
-			defer func() { _ = dbSQL.Close(ctx) }()
+			defer func() { _ = dbSQL.Close() }()
 		}
 		if !testutils.IsError(err, "password authentication failed for user foo") {
 			t.Fatalf("expected password error, got %v", err)
@@ -118,12 +115,12 @@ GRANT ALL ON DATABASE defaultdb TO foo`); err != nil {
 
 	func() {
 		// Sanity check: verify that the new user is able to log in with password.
-		dbSQL, err := pgxConn(t, fooURL)
+		dbSQL, err := pgxConn(t, userURL)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = dbSQL.Close(ctx) }()
-		row := dbSQL.QueryRow(ctx, "SELECT current_user")
+		defer func() { _ = dbSQL.Close() }()
+		row := dbSQL.QueryRow("SELECT current_user")
 		var username string
 		if err := row.Scan(&username); err != nil {
 			t.Fatal(err)
@@ -144,32 +141,14 @@ GRANT ALL ON DATABASE defaultdb TO foo`); err != nil {
 	unavailableCh.Store(ch)
 	defer close(ch)
 
-	fmt.Fprintln(os.Stderr, "-- expect no timeout because of cache --")
-
-	func() {
-		// Now attempt to connect again. Since a previous authentication attempt
-		// for this user occurred, the auth-related info should be cached, so
-		// authentication should work.
-		dbSQL, err := pgxConn(t, fooURL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = dbSQL.Close(ctx) }()
-		// A simple query must work even without a system range available.
-		if _, err := dbSQL.Exec(ctx, "SELECT 1"); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
 	fmt.Fprintln(os.Stderr, "-- expect timeout --")
 
 	func() {
-		// Now attempt to connect with a different user. We're expecting a timeout
-		// within 5 seconds.
+		// Now attempt to connect again. We're expecting a timeout within 5 seconds.
 		start := timeutil.Now()
-		dbSQL, err := pgxConn(t, barURL)
+		dbSQL, err := pgxConn(t, userURL)
 		if err == nil {
-			defer func() { _ = dbSQL.Close(ctx) }()
+			defer func() { _ = dbSQL.Close() }()
 		}
 		if !testutils.IsError(err, "internal error while retrieving user account") {
 			t.Fatalf("expected error during connection, got %v", err)
@@ -187,20 +166,25 @@ GRANT ALL ON DATABASE defaultdb TO foo`); err != nil {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = dbSQL.Close(ctx) }()
+		defer func() { _ = dbSQL.Close() }()
 		// A simple query must work for 'root' even without a system range available.
-		if _, err := dbSQL.Exec(ctx, "SELECT 1"); err != nil {
+		if _, err := dbSQL.Exec("SELECT 1"); err != nil {
 			t.Fatal(err)
 		}
 	}()
 }
 
 func pgxConn(t *testing.T, connURL url.URL) (*pgx.Conn, error) {
-	t.Helper()
-	pgxConfig, err := pgx.ParseConfig(connURL.String())
+	pgxConfig, err := pgx.ParseConnectionString(connURL.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return pgx.ConnectConfig(context.Background(), pgxConfig)
+	// Override the conninfo to avoid a bunch of pg_catalog
+	// queries when the connection is being set up.
+	pgxConfig.CustomConnInfo = func(c *pgx.Conn) (*pgtype.ConnInfo, error) {
+		return c.ConnInfo, nil
+	}
+
+	return pgx.Connect(pgxConfig)
 }

@@ -14,42 +14,13 @@ import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import {
   FlatPlanNode,
   FlatPlanNodeAttribute,
-  flattenTreeAttributes,
+  flattenTree,
   flattenAttributes,
 } from "./planView";
 import IAttr = cockroach.sql.ExplainTreePlanNode.IAttr;
+import IExplainTreePlanNode = cockroach.sql.IExplainTreePlanNode;
 
-type IExplainTreePlanNode = cockroach.sql.IExplainTreePlanNode;
-
-const testAttrsDuplicatedKeys: IAttr[] = [
-  {
-    key: "key1",
-    value: "key1-value1",
-  },
-  {
-    key: "key2",
-    value: "key2-value1",
-  },
-  {
-    key: "key1",
-    value: "key1-value2",
-  },
-];
-
-const expectedTestAttrsFlattened: FlatPlanNodeAttribute[] = [
-  {
-    key: "key1",
-    values: ["key1-value1", "key1-value2"],
-    warn: false,
-  },
-  {
-    key: "key2",
-    values: ["key2-value1"],
-    warn: false,
-  },
-];
-
-const testAttrsDistinctKeys: IAttr[] = [
+const testAttrs1: IAttr[] = [
   {
     key: "key1",
     value: "value1",
@@ -60,7 +31,18 @@ const testAttrsDistinctKeys: IAttr[] = [
   },
 ];
 
-const expectedTestAttrsDistinctKeys: FlatPlanNodeAttribute[] = [
+const testAttrs2: IAttr[] = [
+  {
+    key: "key3",
+    value: "value3",
+  },
+  {
+    key: "key4",
+    value: "value4",
+  },
+];
+
+const testFlatAttrs1: FlatPlanNodeAttribute[] = [
   {
     key: "key1",
     values: ["value1"],
@@ -73,87 +55,229 @@ const expectedTestAttrsDistinctKeys: FlatPlanNodeAttribute[] = [
   },
 ];
 
-describe("flattenTreeAttributes", () => {
-  describe("when all nodes have attributes with different keys", () => {
-    it("creates array with exactly one value for each attribute for each node", () => {
-      const node: IExplainTreePlanNode = {
-        name: "root",
-        attrs: testAttrsDistinctKeys,
-        children: [
-          {
-            name: "child",
-            attrs: testAttrsDistinctKeys,
-            children: [
-              {
-                name: "grandchild",
-                attrs: testAttrsDistinctKeys,
-                children: [],
-              },
-            ],
-          },
-        ],
-      };
+const testFlatAttrs2: FlatPlanNodeAttribute[] = [
+  {
+    key: "key3",
+    values: ["value3"],
+    warn: false,
+  },
+  {
+    key: "key4",
+    values: ["value4"],
+    warn: false,
+  },
+];
 
-      const nodeFlattened: FlatPlanNode = {
-        name: "root",
-        attrs: expectedTestAttrsDistinctKeys,
-        children: [
-          {
-            name: "child",
-            attrs: expectedTestAttrsDistinctKeys,
-            children: [
-              {
-                name: "grandchild",
-                attrs: expectedTestAttrsDistinctKeys,
-                children: [],
-              },
-            ],
-          },
-        ],
-      };
+const treePlanWithSingleChildPaths: IExplainTreePlanNode = {
+  name: "root",
+  attrs: null,
+  children: [
+    {
+      name: "single_grandparent",
+      attrs: testAttrs1,
+      children: [
+        {
+          name: "single_parent",
+          attrs: null,
+          children: [
+            {
+              name: "single_child",
+              attrs: testAttrs2,
+              children: [],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
 
-      assert.deepEqual(flattenTreeAttributes(node), nodeFlattened);
+const expectedFlatPlanWithSingleChildPaths: FlatPlanNode[] = [
+  {
+    name: "root",
+    attrs: [],
+    children: [],
+  },
+  {
+    name: "single_grandparent",
+    attrs: testFlatAttrs1,
+    children: [],
+  },
+  {
+    name: "single_parent",
+    attrs: [],
+    children: [],
+  },
+  {
+    name: "single_child",
+    attrs: testFlatAttrs2,
+    children: [],
+  },
+];
+
+const treePlanWithChildren1: IExplainTreePlanNode = {
+  name: "root",
+  attrs: testAttrs1,
+  children: [
+    {
+      name: "single_grandparent",
+      attrs: testAttrs1,
+      children: [
+        {
+          name: "parent_1",
+          attrs: null,
+          children: [
+            {
+              name: "single_child",
+              attrs: testAttrs2,
+              children: [],
+            },
+          ],
+        },
+        {
+          name: "parent_2",
+          attrs: null,
+          children: [],
+        },
+      ],
+    },
+  ],
+};
+
+const expectedFlatPlanWithChildren1: FlatPlanNode[] = [
+  {
+    name: "root",
+    attrs: testFlatAttrs1,
+    children: [],
+  },
+  {
+    name: "single_grandparent",
+    attrs: testFlatAttrs1,
+    children: [
+      [
+        {
+          name: "parent_1",
+          attrs: [],
+          children: [],
+        },
+        {
+          name: "single_child",
+          attrs: testFlatAttrs2,
+          children: [],
+        },
+      ],
+      [
+        {
+          name: "parent_2",
+          attrs: [],
+          children: [],
+        },
+      ],
+    ],
+  },
+];
+
+const treePlanWithChildren2: IExplainTreePlanNode = {
+  name: "root",
+  attrs: null,
+  children: [
+    {
+      name: "single_grandparent",
+      attrs: null,
+      children: [
+        {
+          name: "single_parent",
+          attrs: null,
+          children: [
+            {
+              name: "child_1",
+              attrs: testAttrs1,
+              children: [],
+            },
+            {
+              name: "child_2",
+              attrs: testAttrs2,
+              children: [],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const expectedFlatPlanWithChildren2: FlatPlanNode[] = [
+  {
+    name: "root",
+    attrs: [],
+    children: [],
+  },
+  {
+    name: "single_grandparent",
+    attrs: [],
+    children: [],
+  },
+  {
+    name: "single_parent",
+    attrs: [],
+    children: [
+      [
+        {
+          name: "child_1",
+          attrs: testFlatAttrs1,
+          children: [],
+        },
+      ],
+      [
+        {
+          name: "child_2",
+          attrs: testFlatAttrs2,
+          children: [],
+        },
+      ],
+    ],
+  },
+];
+
+const treePlanWithNoChildren: IExplainTreePlanNode = {
+  name: "root",
+  attrs: testAttrs1,
+  children: [],
+};
+
+const expectedFlatPlanWithNoChildren: FlatPlanNode[] = [
+  {
+    name: "root",
+    attrs: testFlatAttrs1,
+    children: [],
+  },
+];
+
+describe("flattenTree", () => {
+  describe("when node has children", () => {
+    it("flattens single child paths.", () => {
+      assert.deepEqual(
+        flattenTree(treePlanWithSingleChildPaths),
+        expectedFlatPlanWithSingleChildPaths,
+      );
+    });
+    it("increases level if multiple children.", () => {
+      assert.deepEqual(
+        flattenTree(treePlanWithChildren1),
+        expectedFlatPlanWithChildren1,
+      );
+      assert.deepEqual(
+        flattenTree(treePlanWithChildren2),
+        expectedFlatPlanWithChildren2,
+      );
     });
   });
-  describe("when there are nodes with multiple attributes with the same key", () => {
-    it("flattens attributes for each node having multiple attributes with the same key", () => {
-      const node: IExplainTreePlanNode = {
-        name: "root",
-        attrs: testAttrsDuplicatedKeys,
-        children: [
-          {
-            name: "child",
-            attrs: testAttrsDuplicatedKeys,
-            children: [
-              {
-                name: "grandchild",
-                attrs: testAttrsDuplicatedKeys,
-                children: [],
-              },
-            ],
-          },
-        ],
-      };
-
-      const nodeFlattened: FlatPlanNode = {
-        name: "root",
-        attrs: expectedTestAttrsFlattened,
-        children: [
-          {
-            name: "child",
-            attrs: expectedTestAttrsFlattened,
-            children: [
-              {
-                name: "grandchild",
-                attrs: expectedTestAttrsFlattened,
-                children: [],
-              },
-            ],
-          },
-        ],
-      };
-
-      assert.deepEqual(flattenTreeAttributes(node), nodeFlattened);
+  describe("when node has no children", () => {
+    it("returns valid flattened plan.", () => {
+      assert.deepEqual(
+        flattenTree(treePlanWithNoChildren),
+        expectedFlatPlanWithNoChildren,
+      );
     });
   });
 });
@@ -161,18 +285,62 @@ describe("flattenTreeAttributes", () => {
 describe("flattenAttributes", () => {
   describe("when all attributes have different keys", () => {
     it("creates array with exactly one value for each attribute", () => {
-      assert.deepEqual(
-        flattenAttributes(testAttrsDistinctKeys),
-        expectedTestAttrsDistinctKeys,
-      );
+      const testAttrs: IAttr[] = [
+        {
+          key: "key1",
+          value: "value1",
+        },
+        {
+          key: "key2",
+          value: "value2",
+        },
+      ];
+      const expectedTestAttrs: FlatPlanNodeAttribute[] = [
+        {
+          key: "key1",
+          values: ["value1"],
+          warn: false,
+        },
+        {
+          key: "key2",
+          values: ["value2"],
+          warn: false,
+        },
+      ];
+
+      assert.deepEqual(flattenAttributes(testAttrs), expectedTestAttrs);
     });
   });
   describe("when there are multiple attributes with same key", () => {
     it("collects values into one array for same key", () => {
-      assert.deepEqual(
-        flattenAttributes(testAttrsDuplicatedKeys),
-        expectedTestAttrsFlattened,
-      );
+      const testAttrs: IAttr[] = [
+        {
+          key: "key1",
+          value: "key1-value1",
+        },
+        {
+          key: "key2",
+          value: "key2-value1",
+        },
+        {
+          key: "key1",
+          value: "key1-value2",
+        },
+      ];
+      const expectedTestAttrs: FlatPlanNodeAttribute[] = [
+        {
+          key: "key1",
+          values: ["key1-value1", "key1-value2"],
+          warn: false,
+        },
+        {
+          key: "key2",
+          values: ["key2-value1"],
+          warn: false,
+        },
+      ];
+
+      assert.deepEqual(flattenAttributes(testAttrs), expectedTestAttrs);
     });
   });
   describe("when attribute key/value is `spans FULL SCAN`", () => {

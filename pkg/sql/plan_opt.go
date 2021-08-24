@@ -30,7 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -55,7 +55,7 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 	case *tree.AlterIndex, *tree.AlterTable, *tree.AlterSequence,
 		*tree.Analyze,
 		*tree.BeginTransaction,
-		*tree.CommentOnColumn, *tree.CommentOnDatabase, *tree.CommentOnIndex, *tree.CommentOnTable, *tree.CommentOnSchema,
+		*tree.CommentOnColumn, *tree.CommentOnDatabase, *tree.CommentOnIndex, *tree.CommentOnTable,
 		*tree.CommitTransaction,
 		*tree.CopyFrom, *tree.CreateDatabase, *tree.CreateIndex, *tree.CreateView,
 		*tree.CreateSequence,
@@ -197,7 +197,7 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 	}
 
 	// Build the plan tree.
-	if mode := p.SessionData().ExperimentalDistSQLPlanningMode; mode != sessiondatapb.ExperimentalDistSQLPlanningOff {
+	if mode := p.SessionData().ExperimentalDistSQLPlanningMode; mode != sessiondata.ExperimentalDistSQLPlanningOff {
 		planningMode := distSQLDefaultPlanning
 		// If this transaction has modified or created any types, it is not safe to
 		// distribute due to limitations around leasing descriptors modified in the
@@ -214,7 +214,7 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 			p.autoCommit,
 		)
 		if err != nil {
-			if mode == sessiondatapb.ExperimentalDistSQLPlanningAlways &&
+			if mode == sessiondata.ExperimentalDistSQLPlanningAlways &&
 				!strings.Contains(p.stmt.AST.StatementTag(), "SET") {
 				// We do not fallback to the old path because experimental
 				// planning is set to 'always' and we don't have a SET
@@ -395,24 +395,12 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 			return nil, pgerror.Newf(pgcode.Syntax,
 				"placeholders are not supported with PREPARE AS OPT PLAN")
 		}
-		// With a canned plan, we don't want to optimize the memo.
-		return opc.optimizer.DetachMemo(), nil
-	}
-
-	if f.Memo().HasPlaceholders() {
-		// Try the placeholder fast path.
-		_, ok, err := opc.optimizer.TryPlaceholderFastPath()
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			opc.log(ctx, "placeholder fast path")
-		}
+		// With a canned plan, the memo is already optimized.
 	} else {
 		// If the memo doesn't have placeholders and did not encounter any stable
 		// operators that can be constant folded, then fully optimize it now - it
 		// can be reused without further changes to build the execution tree.
-		if !f.FoldingControl().PreventedStableFold() {
+		if !f.Memo().HasPlaceholders() && !f.FoldingControl().PreventedStableFold() {
 			opc.log(ctx, "optimizing (no placeholders)")
 			if _, err := opc.optimizer.Optimize(); err != nil {
 				return nil, err
@@ -436,8 +424,7 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 func (opc *optPlanningCtx) reuseMemo(cachedMemo *memo.Memo) (*memo.Memo, error) {
 	if cachedMemo.IsOptimized() {
 		// The query could have been already fully optimized if there were no
-		// placeholders or the placeholder fast path succeeded (see
-		// buildReusableMemo).
+		// placeholders (see buildReusableMemo).
 		return cachedMemo, nil
 	}
 	f := opc.optimizer.Factory()

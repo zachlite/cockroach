@@ -13,7 +13,6 @@ package tabledesc
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 
@@ -105,11 +104,6 @@ func MakeColumnDefDescs(
 	}
 
 	if d.IsComputed() {
-		// Note: We do not validate the computed column expression here because
-		// it may reference columns that have not yet been added to a table
-		// descriptor. Callers must validate the expression with
-		// schemaexpr.ValidateComputedColumnExpression once all possible
-		// reference columns are part of the table descriptor.
 		s := tree.Serialize(d.Computed.Expr)
 		col.ComputeExpr = &s
 	}
@@ -118,9 +112,9 @@ func MakeColumnDefDescs(
 	if d.PrimaryKey.IsPrimaryKey || (d.Unique.IsUnique && !d.Unique.WithoutIndex) {
 		if !d.PrimaryKey.Sharded {
 			idx = &descpb.IndexDescriptor{
-				Unique:              true,
-				KeyColumnNames:      []string{string(d.Name)},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				Unique:           true,
+				ColumnNames:      []string{string(d.Name)},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 			}
 		} else {
 			buckets, err := EvalShardBucketCount(ctx, semaCtx, evalCtx, d.PrimaryKey.ShardBuckets)
@@ -129,9 +123,9 @@ func MakeColumnDefDescs(
 			}
 			shardColName := GetShardColumnName([]string{string(d.Name)}, buckets)
 			idx = &descpb.IndexDescriptor{
-				Unique:              true,
-				KeyColumnNames:      []string{shardColName, string(d.Name)},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				Unique:           true,
+				ColumnNames:      []string{shardColName, string(d.Name)},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
 				Sharded: descpb.ShardedDescriptor{
 					IsSharded:    true,
 					Name:         shardColName,
@@ -153,7 +147,7 @@ func MakeColumnDefDescs(
 func EvalShardBucketCount(
 	ctx context.Context, semaCtx *tree.SemaContext, evalCtx *tree.EvalContext, shardBuckets tree.Expr,
 ) (int32, error) {
-	const invalidBucketCountMsg = `BUCKET_COUNT must be a 32-bit integer greater than 1, got %v`
+	const invalidBucketCountMsg = `BUCKET_COUNT must be an integer greater than 1`
 	typedExpr, err := schemaexpr.SanitizeVarFreeExpr(
 		ctx, shardBuckets, types.Int, "BUCKET_COUNT", semaCtx, tree.VolatilityVolatile,
 	)
@@ -162,14 +156,11 @@ func EvalShardBucketCount(
 	}
 	d, err := typedExpr.Eval(evalCtx)
 	if err != nil {
-		return 0, pgerror.Wrapf(err, pgcode.InvalidParameterValue, invalidBucketCountMsg, typedExpr)
+		return 0, pgerror.Wrap(err, pgcode.InvalidParameterValue, invalidBucketCountMsg)
 	}
 	buckets := tree.MustBeDInt(d)
 	if buckets < 2 {
-		return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, buckets)
-	}
-	if buckets > math.MaxInt32 {
-		return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, buckets)
+		return 0, pgerror.New(pgcode.InvalidParameterValue, invalidBucketCountMsg)
 	}
 	return int32(buckets), nil
 }
@@ -229,7 +220,7 @@ func (desc *wrapper) collectConstraintInfo(
 			// This prevents the auto-created rowid primary key index from showing up
 			// in show constraints.
 			hidden := true
-			for _, id := range index.KeyColumnIDs {
+			for _, id := range index.ColumnIDs {
 				if !colHiddenMap[id] {
 					hidden = false
 					break
@@ -239,7 +230,7 @@ func (desc *wrapper) collectConstraintInfo(
 				continue
 			}
 			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypePK}
-			detail.Columns = index.KeyColumnNames
+			detail.Columns = index.ColumnNames
 			detail.Index = index
 			info[index.Name] = detail
 		} else if index.Unique {
@@ -248,7 +239,7 @@ func (desc *wrapper) collectConstraintInfo(
 					"duplicate constraint name: %q", index.Name)
 			}
 			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeUnique}
-			detail.Columns = index.KeyColumnNames
+			detail.Columns = index.ColumnNames
 			detail.Index = index
 			info[index.Name] = detail
 		}
@@ -370,7 +361,9 @@ func FindFKReferencedUniqueConstraint(
 			continue
 		}
 
-		if c.IsValidReferencedUniqueConstraint(referencedColIDs) {
+		// TODO(rytaft): We should allow out-of-order unique constraints, as long
+		// as they have the same columns.
+		if descpb.ColumnIDs(c.ColumnIDs).Equals(referencedColIDs) {
 			return c, nil
 		}
 	}
@@ -378,6 +371,66 @@ func FindFKReferencedUniqueConstraint(
 		pgcode.ForeignKeyViolation,
 		"there is no unique constraint matching given keys for referenced table %s",
 		referencedTable.GetName(),
+	)
+}
+
+// FindFKOriginIndex finds the first index in the supplied originTable
+// that can satisfy an outgoing foreign key of the supplied column ids.
+func FindFKOriginIndex(
+	originTable catalog.TableDescriptor, originColIDs descpb.ColumnIDs,
+) (*descpb.IndexDescriptor, error) {
+	// Search for an index on the origin table that matches our foreign
+	// key columns.
+	if primaryIndex := originTable.GetPrimaryIndex(); primaryIndex.IsValidOriginIndex(originColIDs) {
+		return primaryIndex.IndexDesc(), nil
+	}
+	// If the PK doesn't match, find the index corresponding to the origin column.
+	for _, idx := range originTable.PublicNonPrimaryIndexes() {
+		if idx.IsValidOriginIndex(originColIDs) {
+			return idx.IndexDesc(), nil
+		}
+	}
+	return nil, pgerror.Newf(
+		pgcode.ForeignKeyViolation,
+		"there is no index matching given keys for referenced table %s",
+		originTable.GetName(),
+	)
+}
+
+// FindFKOriginIndexInTxn finds the first index in the supplied originTable
+// that can satisfy an outgoing foreign key of the supplied column ids.
+// It returns either an index that is active, or an index that was created
+// in the same transaction that is currently running.
+func FindFKOriginIndexInTxn(
+	originTable *Mutable, originColIDs descpb.ColumnIDs,
+) (*descpb.IndexDescriptor, error) {
+	// Search for an index on the origin table that matches our foreign
+	// key columns.
+	if originTable.PrimaryIndex.IsValidOriginIndex(originColIDs) {
+		return &originTable.PrimaryIndex, nil
+	}
+	// If the PK doesn't match, find the index corresponding to the origin column.
+	for i := range originTable.Indexes {
+		idx := &originTable.Indexes[i]
+		if idx.IsValidOriginIndex(originColIDs) {
+			return idx, nil
+		}
+	}
+	currentMutationID := originTable.ClusterVersion.NextMutationID
+	for i := range originTable.Mutations {
+		mut := &originTable.Mutations[i]
+		if idx := mut.GetIndex(); idx != nil &&
+			mut.MutationID == currentMutationID &&
+			mut.Direction == descpb.DescriptorMutation_ADD {
+			if idx.IsValidOriginIndex(originColIDs) {
+				return idx, nil
+			}
+		}
+	}
+	return nil, pgerror.Newf(
+		pgcode.ForeignKeyViolation,
+		"there is no index matching given keys for referenced table %s",
+		originTable.Name,
 	)
 }
 

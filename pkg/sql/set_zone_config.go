@@ -25,9 +25,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
@@ -183,20 +183,11 @@ func (p *planner) SetZoneConfig(ctx context.Context, n *tree.SetZoneConfig) (pla
 		return nil, err
 	}
 
-	if !p.ExecCfg().Codec.ForSystemTenant() &&
-		!secondaryTenantZoneConfigsEnabled.Get(&p.ExecCfg().Settings.SV) {
-		// Return an unimplemented error here instead of referencing the cluster
-		// setting here as zone configurations for secondary tenants are intended to
-		// be hidden.
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
-	}
-
 	if err := checkPrivilegeForSetZoneConfig(ctx, p, n.ZoneSpecifier); err != nil {
 		return nil, err
 	}
-	if !ZonesTableExists(ctx, p.ExecCfg().Codec, p.ExecCfg().Settings.Version) {
-		// Can't set a zone configuration if `system.zones` doesn't exist.
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
+	if !p.ExecCfg().Codec.ForSystemTenant() {
+		return nil, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
 
 	if err := p.CheckZoneConfigChangePermittedForMultiRegion(
@@ -289,8 +280,11 @@ func checkPrivilegeForSetZoneConfig(ctx context.Context, p *planner, zs tree.Zon
 		if zs.Database == "system" {
 			return p.RequireAdminRole(ctx, "alter the system database")
 		}
-		dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
-			string(zs.Database), tree.DatabaseLookupFlags{Required: true})
+		_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+			string(zs.Database), tree.DatabaseLookupFlags{
+				Required:    true,
+				AvoidCached: true,
+			})
 		if err != nil {
 			return err
 		}
@@ -435,7 +429,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		var indexes []catalog.Index
 		for _, idx := range table.NonDropIndexes() {
-			if idx.GetPartitioning().FindPartitionByName(partitionName) != nil {
+			if tabledesc.FindIndexPartitionByName(idx.IndexDesc(), partitionName) != nil {
 				indexes = append(indexes, idx)
 			}
 		}
@@ -461,7 +455,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 	if n.zoneSpecifier.TargetsPartition() && n.allIndexes {
 		sqltelemetry.IncrementPartitioningCounter(sqltelemetry.AlterAllPartitions)
 		for _, idx := range table.NonDropIndexes() {
-			if idx.GetPartitioning().FindPartitionByName(string(n.zoneSpecifier.Partition)) != nil {
+			if p := tabledesc.FindIndexPartitionByName(idx.IndexDesc(), string(n.zoneSpecifier.Partition)); p != nil {
 				zs := n.zoneSpecifier
 				zs.TableOrIndex.Index = tree.UnrestrictedName(idx.GetName())
 				specifiers = append(specifiers, zs)
@@ -476,7 +470,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		// resolveZone determines the ID of the target object of the zone
 		// specifier. This ought to succeed regardless of whether there is
 		// already a zone config for the target object.
-		targetID, err := resolveZone(params.ctx, params.ExecCfg().Codec, params.p.txn, &zs)
+		targetID, err := resolveZone(params.ctx, params.p.txn, &zs)
 		if err != nil {
 			return err
 		}
@@ -500,9 +494,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		}
 
 		// Retrieve the partial zone configuration
-		partialZone, err := getZoneConfigRaw(
-			params.ctx, params.p.txn, params.ExecCfg().Codec, params.ExecCfg().Settings, targetID,
-		)
+		partialZone, err := getZoneConfigRaw(params.ctx, params.p.txn, params.ExecCfg().Codec, targetID)
 		if err != nil {
 			return err
 		}
@@ -517,7 +509,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		var partialSubzone *zonepb.Subzone
 		if index != nil {
-			partialSubzone = partialZone.GetSubzoneExact(uint32(index.GetID()), partition)
+			partialSubzone = partialZone.GetSubzoneExact(uint32(index.ID), partition)
 			if partialSubzone == nil {
 				partialSubzone = &zonepb.Subzone{Config: *zonepb.NewZoneConfig()}
 			}
@@ -532,9 +524,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		// parameter getInheritedDefault to GetZoneConfigInTxn().
 		// These zones are only used for validations. The merged zone is will
 		// not be written.
-		_, completeZone, completeSubzone, err := GetZoneConfigInTxn(
-			params.ctx, params.p.txn, params.ExecCfg().Codec, targetID, index, partition, n.setDefault,
-		)
+		_, completeZone, completeSubzone, err := GetZoneConfigInTxn(params.ctx, params.p.txn,
+			config.SystemTenantObjectID(targetID), index, partition, n.setDefault)
 
 		if errors.Is(err, errNoZoneConfigApplies) {
 			// No zone config yet.
@@ -565,9 +556,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				// inherit from its parent. We do this by using an empty zoneConfig
 				// and completing at the level of the current zone.
 				zoneInheritedFields := zonepb.ZoneConfig{}
-				if err := completeZoneConfig(
-					&zoneInheritedFields, params.ExecCfg().Codec, targetID, getKey,
-				); err != nil {
+				if err := completeZoneConfig(&zoneInheritedFields, config.SystemTenantObjectID(targetID), getKey); err != nil {
 					return err
 				}
 				partialZone.CopyFromZone(zoneInheritedFields, copyFromParentList)
@@ -575,9 +564,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				// If we are operating on a subZone, we need to inherit all remaining
 				// unset fields in its parent zone, which is partialZone.
 				zoneInheritedFields := *partialZone
-				if err := completeZoneConfig(
-					&zoneInheritedFields, params.ExecCfg().Codec, targetID, getKey,
-				); err != nil {
+				if err := completeZoneConfig(&zoneInheritedFields, config.SystemTenantObjectID(targetID), getKey); err != nil {
 					return err
 				}
 				// In the case we have just an index, we should copy from the inherited
@@ -588,7 +575,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 					// In the case of updating a partition, we need try inheriting fields
 					// from the subzone's index, and inherit the remainder from the zone.
 					subzoneInheritedFields := zonepb.ZoneConfig{}
-					if indexSubzone := completeZone.GetSubzone(uint32(index.GetID()), ""); indexSubzone != nil {
+					if indexSubzone := completeZone.GetSubzone(uint32(index.ID), ""); indexSubzone != nil {
 						subzoneInheritedFields.InheritFromParent(&indexSubzone.Config)
 					}
 					subzoneInheritedFields.InheritFromParent(&zoneInheritedFields)
@@ -601,8 +588,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 		if deleteZone {
 			if index != nil {
-				didDelete := completeZone.DeleteSubzone(uint32(index.GetID()), partition)
-				_ = partialZone.DeleteSubzone(uint32(index.GetID()), partition)
+				didDelete := completeZone.DeleteSubzone(uint32(index.ID), partition)
+				_ = partialZone.DeleteSubzone(uint32(index.ID), partition)
 				if !didDelete {
 					// If we didn't do any work, return early. We'd otherwise perform an
 					// update that would make it look like one row was affected.
@@ -690,22 +677,18 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				return err
 			}
 
-			// TODO(arul): Switch over from using the node status server to using
-			// the region server to validate localities.
-			if params.p.ExecCfg().Codec.ForSystemTenant() {
-				ss, err := params.extendedEvalCtx.NodesStatusServer.OptionalNodesStatusServer(MultitenancyZoneCfgIssueNo)
-				if err != nil {
-					return err
-				}
+			ss, err := params.extendedEvalCtx.NodesStatusServer.OptionalNodesStatusServer(multitenancyZoneCfgIssueNo)
+			if err != nil {
+				return err
+			}
 
-				// Validate that the result makes sense.
-				if err := validateZoneAttrsAndLocalities(
-					params.ctx,
-					ss.ListNodesInternal,
-					&newZone,
-				); err != nil {
-					return err
-				}
+			// Validate that the result makes sense.
+			if err := validateZoneAttrsAndLocalities(
+				params.ctx,
+				ss.ListNodesInternal,
+				&newZone,
+			); err != nil {
+				return err
 			}
 
 			// Are we operating on an index?
@@ -731,16 +714,14 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				// here to complete the missing fields. The reason is because we don't know
 				// here if a zone is a placeholder or not. Can we do a GetConfigInTxn here?
 				// And if it is a placeholder, we use getZoneConfigRaw to create one.
-				completeZone, err = getZoneConfigRaw(
-					params.ctx, params.p.txn, params.ExecCfg().Codec, params.ExecCfg().Settings, targetID,
-				)
+				completeZone, err = getZoneConfigRaw(params.ctx, params.p.txn, params.ExecCfg().Codec, targetID)
 				if err != nil {
 					return err
 				} else if completeZone == nil {
 					completeZone = zonepb.NewZoneConfig()
 				}
 				completeZone.SetSubzone(zonepb.Subzone{
-					IndexID:       uint32(index.GetID()),
+					IndexID:       uint32(index.ID),
 					PartitionName: partition,
 					Config:        newZone,
 				})
@@ -752,7 +733,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				}
 
 				partialZone.SetSubzone(zonepb.Subzone{
-					IndexID:       uint32(index.GetID()),
+					IndexID:       uint32(index.ID),
 					PartitionName: partition,
 					Config:        finalZone,
 				})
@@ -962,47 +943,7 @@ func validateZoneAttrsAndLocalities(
 	return nil
 }
 
-// MultitenancyZoneCfgIssueNo points to the multitenancy zone config issue number.
-const MultitenancyZoneCfgIssueNo = 49854
-
-type zoneConfigUpdate struct {
-	id    descpb.ID
-	value []byte
-}
-
-func prepareZoneConfigWrites(
-	ctx context.Context,
-	execCfg *ExecutorConfig,
-	targetID descpb.ID,
-	table catalog.TableDescriptor,
-	zone *zonepb.ZoneConfig,
-	hasNewSubzones bool,
-) (_ *zoneConfigUpdate, err error) {
-	if !ZonesTableExists(ctx, execCfg.Codec, execCfg.Settings.Version) {
-		// Can't write zone configurations if `system.zones` doesn't exist.
-		return nil, errorutil.UnsupportedWithMultiTenancy(MultitenancyZoneCfgIssueNo)
-	}
-	if len(zone.Subzones) > 0 {
-		st := execCfg.Settings
-		zone.SubzoneSpans, err = GenerateSubzoneSpans(
-			st, execCfg.ClusterID(), execCfg.Codec, table, zone.Subzones, hasNewSubzones)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// To keep the Subzone and SubzoneSpan arrays consistent
-		zone.SubzoneSpans = nil
-	}
-	if zone.IsSubzonePlaceholder() && len(zone.Subzones) == 0 {
-		return &zoneConfigUpdate{id: targetID}, nil
-	}
-	buf, err := protoutil.Marshal(zone)
-	if err != nil {
-		return nil, pgerror.Newf(pgcode.CheckViolation,
-			"could not marshal zone config: %v", err)
-	}
-	return &zoneConfigUpdate{id: targetID, value: buf}, nil
-}
+const multitenancyZoneCfgIssueNo = 49854
 
 func writeZoneConfig(
 	ctx context.Context,
@@ -1013,36 +954,46 @@ func writeZoneConfig(
 	execCfg *ExecutorConfig,
 	hasNewSubzones bool,
 ) (numAffected int, err error) {
-	update, err := prepareZoneConfigWrites(ctx, execCfg, targetID, table, zone, hasNewSubzones)
-	if err != nil {
-		return 0, err
+	if !execCfg.Codec.ForSystemTenant() {
+		return 0, errorutil.UnsupportedWithMultiTenancy(multitenancyZoneCfgIssueNo)
 	}
-	return writeZoneConfigUpdate(ctx, txn, execCfg, update)
-}
+	if len(zone.Subzones) > 0 {
+		st := execCfg.Settings
+		zone.SubzoneSpans, err = GenerateSubzoneSpans(
+			st, execCfg.ClusterID(), execCfg.Codec, table, zone.Subzones, hasNewSubzones)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		// To keep the Subzone and SubzoneSpan arrays consistent
+		zone.SubzoneSpans = nil
+	}
 
-func writeZoneConfigUpdate(
-	ctx context.Context, txn *kv.Txn, execCfg *ExecutorConfig, update *zoneConfigUpdate,
-) (numAffected int, _ error) {
-	if update.value == nil {
+	if zone.IsSubzonePlaceholder() && len(zone.Subzones) == 0 {
 		return execCfg.InternalExecutor.Exec(ctx, "delete-zone", txn,
-			"DELETE FROM system.zones WHERE id = $1", update.id)
+			"DELETE FROM system.zones WHERE id = $1", targetID)
+	}
+
+	buf, err := protoutil.Marshal(zone)
+	if err != nil {
+		return 0, pgerror.Newf(pgcode.CheckViolation,
+			"could not marshal zone config: %v", err)
 	}
 	return execCfg.InternalExecutor.Exec(ctx, "update-zone", txn,
-		"UPSERT INTO system.zones (id, config) VALUES ($1, $2)", update.id, update.value)
+		"UPSERT INTO system.zones (id, config) VALUES ($1, $2)", targetID, buf)
 }
 
 // getZoneConfigRaw looks up the zone config with the given ID. Unlike
 // getZoneConfig, it does not attempt to ascend the zone config hierarchy. If no
 // zone config exists for the given ID, it returns nil.
 func getZoneConfigRaw(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, settings *cluster.Settings, id descpb.ID,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
 ) (*zonepb.ZoneConfig, error) {
-	if !ZonesTableExists(ctx, codec, settings.Version) {
-		// There can't be zone configs for individual objects if `system.zones` does
-		// not exist. Nothing to do here.
+	if !codec.ForSystemTenant() {
+		// Secondary tenants do not have zone configs for individual objects.
 		return nil, nil
 	}
-	kv, err := txn.Get(ctx, config.MakeZoneKey(codec, id))
+	kv, err := txn.Get(ctx, config.MakeZoneKey(config.SystemTenantObjectID(id)))
 	if err != nil {
 		return nil, err
 	}
@@ -1060,20 +1011,15 @@ func getZoneConfigRaw(
 // Unlike getZoneConfig, it does not attempt to ascend the zone config hierarchy.
 // If no zone config exists for the given ID, the map entry is not provided.
 func getZoneConfigRawBatch(
-	ctx context.Context,
-	txn *kv.Txn,
-	codec keys.SQLCodec,
-	settings *cluster.Settings,
-	ids []descpb.ID,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, ids []descpb.ID,
 ) (map[descpb.ID]*zonepb.ZoneConfig, error) {
-	if !ZonesTableExists(ctx, codec, settings.Version) {
-		// There can't be zone configs for individual objects if `system.zones` does
-		// not exist. Nothing to do here.
+	if !codec.ForSystemTenant() {
+		// Secondary tenants do not have zone configs for individual objects.
 		return nil, nil
 	}
 	b := txn.NewBatch()
 	for _, id := range ids {
-		b.Get(config.MakeZoneKey(codec, id))
+		b.Get(config.MakeZoneKey(config.SystemTenantObjectID(id)))
 	}
 	if err := txn.Run(ctx, b); err != nil {
 		return nil, err
@@ -1108,13 +1054,13 @@ func RemoveIndexZoneConfigs(
 	txn *kv.Txn,
 	execCfg *ExecutorConfig,
 	tableDesc catalog.TableDescriptor,
-	indexIDs []uint32,
+	indexDescs []descpb.IndexDescriptor,
 ) error {
 	if !execCfg.Codec.ForSystemTenant() {
 		// Tenants are agnostic to zone configs.
 		return nil
 	}
-	zone, err := getZoneConfigRaw(ctx, txn, execCfg.Codec, execCfg.Settings, tableDesc.GetID())
+	zone, err := getZoneConfigRaw(ctx, txn, execCfg.Codec, tableDesc.GetID())
 	if err != nil {
 		return err
 	}
@@ -1127,12 +1073,12 @@ func RemoveIndexZoneConfigs(
 	// of them. We only want to rewrite the zone config below if there's actual
 	// work to be done here.
 	zcRewriteNecessary := false
-	for _, indexID := range indexIDs {
+	for _, indexDesc := range indexDescs {
 		for _, s := range zone.Subzones {
-			if s.IndexID == indexID {
+			if s.IndexID == uint32(indexDesc.ID) {
 				// We've found an subzone that matches the given indexID. Delete all of
 				// this index's subzones and move on to the next index.
-				zone.DeleteIndexSubzones(indexID)
+				zone.DeleteIndexSubzones(uint32(indexDesc.ID))
 				zcRewriteNecessary = true
 				break
 			}

@@ -39,13 +39,10 @@ import {
   AggregateStatistics,
   populateRegionNodeForStatements,
   makeStatementsColumns,
+  statementColumnLabels,
   StatementsSortedTable,
+  StatementTableColumnKeys,
 } from "../statementsTable";
-import {
-  getLabel,
-  statisticsColumnLabels,
-  StatisticTableColumnKeys,
-} from "../statsTableUtil/statsTableUtil";
 import {
   ActivateStatementDiagnosticsModal,
   ActivateDiagnosticsModalRef,
@@ -344,25 +341,23 @@ export class StatementsPage extends React.Component<
         // list if the list is not empty.
         statement =>
           regions.length == 0 ||
-          (statement.stats.nodes &&
-            containAny(
-              statement.stats.nodes.map(
-                node => nodeRegions[node.toString()],
-                regions,
-              ),
+          containAny(
+            statement.stats.nodes.map(
+              node => nodeRegions[node.toString()],
               regions,
-            )),
+            ),
+            regions,
+          ),
       )
       .filter(
         // The statement must contain at least one value from the selected regions
         // list if the list is not empty.
         statement =>
           nodes.length == 0 ||
-          (statement.stats.nodes &&
-            containAny(
-              statement.stats.nodes.map(node => "n" + node),
-              nodes,
-            )),
+          containAny(
+            statement.stats.nodes.map(node => "n" + node),
+            nodes,
+          ),
       );
   };
 
@@ -402,7 +397,6 @@ export class StatementsPage extends React.Component<
       selectedApp,
       totalWorkload,
       nodeRegions,
-      "statement",
       search,
       this.activateDiagnosticsRef,
       onDiagnosticsReportDownload,
@@ -431,7 +425,7 @@ export class StatementsPage extends React.Component<
       .filter(c => !c.alwaysShow)
       .map(
         (c): SelectOption => ({
-          label: getLabel(c.name as StatisticTableColumnKeys, "statement"),
+          label: statementColumnLabels[c.name as StatementTableColumnKeys],
           value: c.name,
           isSelected: isColumnSelected(c),
         }),

@@ -59,7 +59,7 @@ type FeedSource interface {
 	// to consume.
 	Next() (streamingccl.Event, bool)
 	// Close shuts down the source.
-	Close(ctx context.Context)
+	Close()
 }
 
 // ReplicationFeed allows tests to search for events on a feed.
@@ -80,25 +80,25 @@ func MakeReplicationFeed(t *testing.T, f FeedSource) *ReplicationFeed {
 // ObserveKey consumes the feed until requested key has been seen (or deadline expired).
 // Note: we don't do any buffering here.  Therefore, it is required that the key
 // we want to observe will arrive at some point in the future.
-func (rf *ReplicationFeed) ObserveKey(ctx context.Context, key roachpb.Key) roachpb.KeyValue {
-	require.NoError(rf.t, rf.consumeUntil(ctx, KeyMatches(key)))
+func (rf *ReplicationFeed) ObserveKey(key roachpb.Key) roachpb.KeyValue {
+	require.NoError(rf.t, rf.consumeUntil(KeyMatches(key)))
 	return *rf.msg.GetKV()
 }
 
 // ObserveResolved consumes the feed until we received resolved timestamp that's at least
 // as high as the specified low watermark.  Returns observed resolved timestamp.
-func (rf *ReplicationFeed) ObserveResolved(ctx context.Context, lo hlc.Timestamp) hlc.Timestamp {
-	require.NoError(rf.t, rf.consumeUntil(ctx, ResolvedAtLeast(lo)))
+func (rf *ReplicationFeed) ObserveResolved(lo hlc.Timestamp) hlc.Timestamp {
+	require.NoError(rf.t, rf.consumeUntil(ResolvedAtLeast(lo)))
 	return *rf.msg.GetResolved()
 }
 
 // Close cleans up any resources.
-func (rf *ReplicationFeed) Close(ctx context.Context) {
-	rf.f.Close(ctx)
+func (rf *ReplicationFeed) Close() {
+	rf.f.Close()
 }
 
-func (rf *ReplicationFeed) consumeUntil(ctx context.Context, pred FeedPredicate) error {
-	const maxWait = 20 * time.Second
+func (rf *ReplicationFeed) consumeUntil(pred FeedPredicate) error {
+	const maxWait = 10 * time.Second
 	doneCh := make(chan struct{})
 	mu := struct {
 		syncutil.Mutex
@@ -111,7 +111,7 @@ func (rf *ReplicationFeed) consumeUntil(ctx context.Context, pred FeedPredicate)
 			mu.Lock()
 			mu.err = errors.New("test timed out")
 			mu.Unlock()
-			rf.f.Close(ctx)
+			rf.f.Close()
 		case <-doneCh:
 		}
 	}()

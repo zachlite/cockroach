@@ -1008,19 +1008,9 @@ func (tc *TxnCoordSender) CommitTimestampFixed() bool {
 }
 
 // SetFixedTimestamp is part of the client.TxnSender interface.
-func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) error {
+func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	// The transaction must not have already been used in this epoch.
-	if !tc.interceptorAlloc.txnSpanRefresher.refreshFootprint.empty() {
-		return errors.WithContextTags(errors.AssertionFailedf(
-			"cannot set fixed timestamp, txn %s already performed reads", tc.mu.txn), ctx)
-	}
-	if tc.mu.txn.Sequence != 0 {
-		return errors.WithContextTags(errors.AssertionFailedf(
-			"cannot set fixed timestamp, txn %s already performed writes", tc.mu.txn), ctx)
-	}
-
 	tc.mu.txn.ReadTimestamp = ts
 	tc.mu.txn.WriteTimestamp = ts
 	tc.mu.txn.GlobalUncertaintyLimit = ts
@@ -1029,7 +1019,6 @@ func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestam
 	// Set the MinTimestamp to the minimum of the existing MinTimestamp and the fixed
 	// timestamp. This ensures that the MinTimestamp is always <= the other timestamps.
 	tc.mu.txn.MinTimestamp.Backward(ts)
-	return nil
 }
 
 // RequiredFrontier is part of the client.TxnSender interface.
@@ -1080,13 +1069,6 @@ func (tc *TxnCoordSender) IsSerializablePushAndRefreshNotPossible() bool {
 // Epoch is part of the client.TxnSender interface.
 func (tc *TxnCoordSender) Epoch() enginepb.TxnEpoch {
 	return tc.mu.txn.Epoch
-}
-
-// IsLocking is part of the client.TxnSender interface.
-func (tc *TxnCoordSender) IsLocking() bool {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	return tc.mu.txn.IsLocking()
 }
 
 // IsTracking returns true if the heartbeat loop is running.

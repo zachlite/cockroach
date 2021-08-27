@@ -14,10 +14,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -92,16 +94,15 @@ func TestTenantUnauthenticatedAccess(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
-	_, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
-			TestingKnobs: base.TestingKnobs{
-				TenantTestingKnobs: &sql.TenantTestingKnobs{
-					// Configure the SQL server to access the wrong tenant keyspace.
-					TenantIDCodecOverride: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[1]),
-				},
+	_, err := tc.Server(0).StartTenant(base.TestTenantArgs{
+		TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
+		TestingKnobs: base.TestingKnobs{
+			TenantTestingKnobs: &sql.TenantTestingKnobs{
+				// Configure the SQL server to access the wrong tenant keyspace.
+				TenantIDCodecOverride: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[1]),
 			},
-		})
+		},
+	})
 	require.Error(t, err)
 	require.Regexp(t, `Unauthenticated desc = requested key .* not fully contained in tenant keyspace /Tenant/1{0-1}`, err)
 }
@@ -115,10 +116,9 @@ func TestTenantHTTP(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
-	tenant, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID: serverutils.TestTenantID(),
-		})
+	tenant, err := tc.Server(0).StartTenant(base.TestTenantArgs{
+		TenantID: serverutils.TestTenantID(),
+	})
 	require.NoError(t, err)
 	t.Run("prometheus", func(t *testing.T) {
 		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/_status/vars")
@@ -141,7 +141,7 @@ func TestTenantHTTP(t *testing.T) {
 
 }
 
-func TestNonExistentTenant(t *testing.T) {
+func TestIdleExit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
@@ -149,12 +149,58 @@ func TestNonExistentTenant(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
-	_, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID:        serverutils.TestTenantID(),
-			Existing:        true,
-			SkipTenantCheck: true,
-		})
-	require.Error(t, err)
-	require.Equal(t, "system DB uninitialized, check if tenant is non existent", err.Error())
+	warmupDuration := 500 * time.Millisecond
+	countdownDuration := 4000 * time.Millisecond
+	tenant, err := tc.Server(0).StartTenant(base.TestTenantArgs{
+		TenantID:      serverutils.TestTenantID(),
+		IdleExitAfter: warmupDuration,
+		TestingKnobs: base.TestingKnobs{
+			TenantTestingKnobs: &sql.TenantTestingKnobs{
+				ClusterSettingsUpdater:    cluster.MakeTestingClusterSettings().MakeUpdater(),
+				IdleExitCountdownDuration: countdownDuration,
+			},
+		},
+		Stopper: tc.Stopper(),
+	})
+
+	require.NoError(t, err)
+
+	time.Sleep(warmupDuration / 2)
+	log.Infof(context.Background(), "Opening first con")
+	db := serverutils.OpenDBConn(
+		t, tenant.SQLAddr(), "", false, tc.Stopper(),
+	)
+	r := sqlutils.MakeSQLRunner(db)
+	r.QueryStr(t, `SELECT 1`)
+	require.NoError(t, db.Close())
+
+	time.Sleep(warmupDuration/2 + countdownDuration/2)
+
+	// Opening a connection in the middle of the countdown should stop the
+	// countdown timer. Closing the connection will restart the countdown.
+	log.Infof(context.Background(), "Opening second con")
+	db = serverutils.OpenDBConn(
+		t, tenant.SQLAddr(), "", false, tc.Stopper(),
+	)
+	r = sqlutils.MakeSQLRunner(db)
+	r.QueryStr(t, `SELECT 1`)
+	require.NoError(t, db.Close())
+
+	time.Sleep(countdownDuration / 2)
+
+	// If the tenant is stopped, that most likely means that the second connection
+	// didn't stop the countdown
+	select {
+	case <-tc.Stopper().IsStopped():
+		t.Error("stop on idle triggered too early")
+	default:
+	}
+
+	time.Sleep(countdownDuration * 3 / 2)
+
+	select {
+	case <-tc.Stopper().IsStopped():
+	default:
+		t.Error("stop on idle didn't trigger")
+	}
 }

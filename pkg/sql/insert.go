@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -44,8 +45,6 @@ type insertNode struct {
 	run insertRun
 }
 
-var _ mutationPlanNode = &insertNode{}
-
 // insertRun contains the run-time state of insertNode during local execution.
 type insertRun struct {
 	ti         tableInserter
@@ -54,7 +53,7 @@ type insertRun struct {
 	checkOrds checkSet
 
 	// insertCols are the columns being inserted into.
-	insertCols []catalog.Column
+	insertCols []descpb.ColumnDescriptor
 
 	// done informs a new call to BatchedNext() that the previous call to
 	// BatchedNext() has completed the work already.
@@ -111,7 +110,7 @@ func (r *insertRun) initRowContainer(params runParams, columns colinfo.ResultCol
 	colIDToRetIndex := catalog.ColumnIDToOrdinalMap(r.ti.tableDesc().PublicColumns())
 	r.rowIdxToTabColIdx = make([]int, len(r.insertCols))
 	for i, col := range r.insertCols {
-		if idx, ok := colIDToRetIndex.Get(col.GetID()); !ok {
+		if idx, ok := colIDToRetIndex.Get(col.ID); !ok {
 			// Column must be write only and not public.
 			r.rowIdxToTabColIdx[i] = -1
 		} else {
@@ -256,7 +255,6 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	if lastBatch {
-		n.run.ti.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
 		if err := n.run.ti.finalize(params.ctx); err != nil {
 			return false, err
 		}
@@ -265,7 +263,7 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.tableDesc(), n.run.ti.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.tableDesc().GetID(), n.run.ti.lastBatchSize)
 
 	return n.run.ti.lastBatchSize > 0, nil
 }
@@ -286,8 +284,4 @@ func (n *insertNode) Close(ctx context.Context) {
 // See planner.autoCommit.
 func (n *insertNode) enableAutoCommit() {
 	n.run.ti.enableAutoCommit()
-}
-
-func (n *insertNode) rowsWritten() int64 {
-	return n.run.ti.rowsWritten
 }

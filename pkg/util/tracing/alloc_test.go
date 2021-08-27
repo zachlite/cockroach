@@ -17,6 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/logtags"
+	"github.com/opentracing/opentracing-go"
 )
 
 // BenchmarkTracer_StartSpanCtx primarily helps keep
@@ -29,11 +30,15 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 
 	tr := NewTracer()
 	sv := settings.Values{}
-	tr.Configure(ctx, &sv)
+	tr.Configure(&sv)
 
 	staticLogTags := logtags.Buffer{}
 	staticLogTags.Add("foo", "bar")
 
+	staticTag := opentracing.Tag{
+		Key:   "statictag",
+		Value: "staticvalue",
+	}
 	b.ResetTimer()
 
 	parSp := tr.StartSpan("one-off", WithForceRealSpan())
@@ -49,6 +54,9 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 		}},
 		{"real,logtag", []SpanOption{
 			WithForceRealSpan(), WithLogTags(&staticLogTags),
+		}},
+		{"real,tag", []SpanOption{
+			WithForceRealSpan(), WithTags(staticTag),
 		}},
 		{"real,autoparent", []SpanOption{
 			WithForceRealSpan(), WithParentAndAutoCollection(parSp),
@@ -71,10 +79,9 @@ func BenchmarkTracer_StartSpanCtx(b *testing.B) {
 
 // BenchmarkSpan_GetRecording microbenchmarks GetRecording.
 func BenchmarkSpan_GetRecording(b *testing.B) {
-	ctx := context.Background()
 	var sv settings.Values
 	tr := NewTracer()
-	tr.Configure(ctx, &sv)
+	tr.Configure(&sv)
 
 	sp := tr.StartSpan("foo", WithForceRealSpan())
 

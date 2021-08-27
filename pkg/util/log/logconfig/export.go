@@ -29,6 +29,19 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 		chanSel = onlyChans
 	}
 
+	var buf bytes.Buffer
+	buf.WriteString("@startuml\nleft to right direction\n")
+
+	// Export the channels.
+	buf.WriteString("component sources {\n")
+	for _, ch := range chanSel.Channels {
+		fmt.Fprintf(&buf, "() %s\n", ch)
+	}
+	buf.WriteString("cloud stray as \"stray\\nerrors\"\n}\n")
+
+	// The process stderr stream.
+	buf.WriteString("queue stderr\n")
+
 	// links collects the relationships. We need to collect them and
 	// print them at the end because plantUML does not support
 	// interleaving box and arrow declarations.
@@ -97,16 +110,7 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 	// folders map each directory to a list of files within.
 	folders := map[string][]string{}
 	fileNum := 1
-
-	// Process the file sinks in sorted order,
-	// so the output order is deteministic.
-	var sortedNames []string
-	for prefix := range c.Sinks.FileGroups {
-		sortedNames = append(sortedNames, prefix)
-	}
-	sort.Strings(sortedNames)
-
-	for _, fn := range sortedNames {
+	for _, fn := range c.Sinks.sortedFileGroupNames {
 		fc := c.Sinks.FileGroups[fn]
 		if fc.Filter == logpb.Severity_NONE {
 			// This file is not collecting anything. Skip it.
@@ -171,19 +175,12 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 	//
 	// servers maps each server to its box declaration.
 	servers := map[string]string{}
-
-	sortedNames = nil
-	for serverName := range c.Sinks.FluentServers {
-		sortedNames = append(sortedNames, serverName)
-	}
-	sort.Strings(sortedNames)
-
-	for _, fn := range sortedNames {
+	for _, fn := range c.Sinks.sortedServerNames {
 		fc := c.Sinks.FluentServers[fn]
 		if fc.Filter == logpb.Severity_NONE {
 			continue
 		}
-		skey := fmt.Sprintf("s__%s", fn)
+		skey := fmt.Sprintf("s__%s", fc.serverName)
 		target, thisprocs, thislinks := process(skey, fc.CommonSinkConfig)
 		hasLink := false
 		for _, ch := range fc.Channels.Channels {
@@ -196,40 +193,8 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 		if hasLink {
 			processing = append(processing, thisprocs...)
 			links = append(links, thislinks...)
-			servers[fn] = fmt.Sprintf("queue %s as \"fluent: %s:%s\"",
+			servers[fc.serverName] = fmt.Sprintf("queue %s as \"fluent: %s:%s\"",
 				skey, fc.Net, fc.Address)
-		}
-	}
-
-	// Collect HTTP sinks
-	// Add the destinations into the same map, for display in the "network server"
-	// section of the diagram
-	sortedNames = nil
-	for sinkName := range c.Sinks.HTTPServers {
-		sortedNames = append(sortedNames, sinkName)
-	}
-	sort.Strings(sortedNames)
-
-	for _, name := range sortedNames {
-		cfg := c.Sinks.HTTPServers[name]
-		if cfg.Filter == logpb.Severity_NONE {
-			continue
-		}
-		key := fmt.Sprintf("h__%s", name)
-		target, thisprocs, thislinks := process(key, cfg.CommonSinkConfig)
-		hasLink := false
-		for _, ch := range cfg.Channels.Channels {
-			if !chanSel.HasChannel(ch) {
-				continue
-			}
-			hasLink = true
-			links = append(links, fmt.Sprintf("%s --> %s", ch, target))
-		}
-		if hasLink {
-			processing = append(processing, thisprocs...)
-			links = append(links, thislinks...)
-			servers[name] = fmt.Sprintf("queue %s as \"http: %s\"",
-				key, *cfg.Address)
 		}
 	}
 
@@ -251,22 +216,11 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 		}
 	}
 
-	var buf bytes.Buffer
-	buf.WriteString("@startuml\nleft to right direction\n")
-
-	// Export the channels.
-	buf.WriteString("component sources {\n")
-	for _, ch := range chanSel.Channels {
-		fmt.Fprintf(&buf, "() %s\n", ch)
-	}
-	buf.WriteString("cloud stray as \"stray\\nerrors\"\n}\n")
-
-	// The process stderr stream.
-	buf.WriteString("queue stderr\n")
-
 	// Represent the processing stages, if any.
-	for _, p := range processing {
-		fmt.Fprintf(&buf, "%s\n", p)
+	if len(processing) > 0 {
+		for _, p := range processing {
+			fmt.Fprintf(&buf, "%s\n", p)
+		}
 	}
 
 	// Represent the files, if any.
@@ -284,10 +238,10 @@ func (c *Config) Export(onlyChans ChannelList) (string, string) {
 	}
 
 	// Represent the network servers, if any.
-	if len(servers) > 0 {
+	if len(c.Sinks.sortedServerNames) > 0 {
 		buf.WriteString("cloud network {\n")
-		for _, s := range servers {
-			fmt.Fprintf(&buf, " %s\n", s)
+		for _, s := range c.Sinks.sortedServerNames {
+			fmt.Fprintf(&buf, " %s\n", servers[s])
 		}
 		buf.WriteString("}\n")
 	}

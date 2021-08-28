@@ -34,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
 
@@ -79,17 +78,7 @@ func TestDialNoBreaker(t *testing.T) {
 	assert.True(t, breaker.Ready())
 	assert.Equal(t, breaker.Failures(), int64(0))
 
-	// Now trip the breaker and check that DialNoBreaker will go ahead
-	// and dial anyway, and on top of that open the breaker again (since
-	// the dial will succeed).
-	breaker.Trip()
-	require.True(t, breaker.Tripped())
-	_, err = nd.DialNoBreaker(ctx, staticNodeID, rpc.DefaultClass)
-	require.NoError(t, err)
-	require.False(t, breaker.Tripped())
-
-	// Test that resolver errors also trip the breaker, just like
-	// they would for regular Dial.
+	// Test that resolver errors don't trip the breaker.
 	boom := fmt.Errorf("boom")
 	nd = New(rpcCtx, func(roachpb.NodeID) (net.Addr, error) {
 		return nil, boom
@@ -97,10 +86,10 @@ func TestDialNoBreaker(t *testing.T) {
 	breaker = nd.GetCircuitBreaker(staticNodeID, rpc.DefaultClass)
 	_, err = nd.DialNoBreaker(ctx, staticNodeID, rpc.DefaultClass)
 	assert.Equal(t, errors.Cause(err), boom)
-	assert.Equal(t, breaker.Failures(), int64(1))
+	assert.True(t, breaker.Ready())
+	assert.Equal(t, breaker.Failures(), int64(0))
 
-	// Test that connection errors are reported to the breaker even
-	// with DialNoBreaker.
+	// Test that connection errors don't trip the breaker either.
 	// To do this, we have to trick grpc into never successfully dialing
 	// the server, because if it succeeds once then it doesn't try again
 	// to perform a connection. To trick grpc in this way, we have to
@@ -110,11 +99,10 @@ func TestDialNoBreaker(t *testing.T) {
 	_, ln, _ = newTestServer(t, clock, stopper, false /* useHeartbeat */)
 	nd = New(rpcCtx, newSingleNodeResolver(staticNodeID, ln.Addr()))
 	breaker = nd.GetCircuitBreaker(staticNodeID, rpc.DefaultClass)
-	assert.True(t, breaker.Ready())
-	assert.Equal(t, breaker.Failures(), int64(0))
 	_, err = nd.DialNoBreaker(ctx, staticNodeID, rpc.DefaultClass)
 	assert.NotNil(t, err, "expected dial error")
-	assert.Equal(t, breaker.Failures(), int64(1))
+	assert.True(t, breaker.Ready())
+	assert.Equal(t, breaker.Failures(), int64(0))
 }
 
 func TestConcurrentCancellationAndTimeout(t *testing.T) {

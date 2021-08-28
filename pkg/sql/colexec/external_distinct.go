@@ -44,8 +44,7 @@ func NewExternalDistinct(
 		// limit, so we use an unlimited allocator.
 		// TODO(yuzefovich): it might be worth increasing the number of buckets.
 		return NewUnorderedDistinct(
-			unlimitedAllocator, partitionedInputs[0], distinctCols,
-			inputTypes, distinctSpec.NullsAreDistinct, distinctSpec.ErrorOnDup,
+			unlimitedAllocator, partitionedInputs[0], distinctCols, inputTypes,
 		)
 	}
 	diskBackedFallbackOpConstructor := func(
@@ -74,10 +73,7 @@ func NewExternalDistinct(
 			projection[i] = uint32(i)
 		}
 		diskBackedWithoutOrdinality := colexecbase.NewSimpleProjectOp(diskBackedSorter, len(sortTypes), projection)
-		diskBackedFallbackOp, err := colexecbase.NewOrderedDistinct(
-			diskBackedWithoutOrdinality, distinctCols, inputTypes,
-			distinctSpec.NullsAreDistinct, distinctSpec.ErrorOnDup,
-		)
+		diskBackedFallbackOp, err := colexecbase.NewOrderedDistinct(diskBackedWithoutOrdinality, distinctCols, inputTypes)
 		if err != nil {
 			colexecerror.InternalError(err)
 		}
@@ -87,8 +83,8 @@ func NewExternalDistinct(
 	// in-memory operator tuples, so we plan a special filterer operator to
 	// remove all such tuples.
 	input = &unorderedDistinctFilterer{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		ud:             inMemUnorderedDistinct.(*unorderedDistinct),
+		OneInputNode: colexecop.NewOneInputNode(input),
+		ht:           inMemUnorderedDistinct.(*unorderedDistinct).ht,
 	}
 	numRequiredActivePartitions := colexecop.ExternalSorterMinPartitions
 	ed := newHashBasedPartitioner(

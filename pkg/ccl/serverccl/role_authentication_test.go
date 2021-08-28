@@ -113,11 +113,8 @@ func TestVerifyPassword(t *testing.T) {
 		{"cthon98", "12345", true, ""},
 	} {
 		t.Run("", func(t *testing.T) {
-			execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 			username := security.MakeSQLUsernameFromPreNormalizedString(tc.username)
-			exists, canLogin, validUntil, _, pwRetrieveFn, err := sql.GetUserSessionInitInfo(
-				context.Background(), &execCfg, &ie, username, "", /* databaseName */
-			)
+			exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(context.Background(), &ie, username)
 
 			if err != nil {
 				t.Errorf(
@@ -148,6 +145,16 @@ func TestVerifyPassword(t *testing.T) {
 			err = security.CompareHashAndPassword(ctx, hashedPassword, tc.password)
 			if err != nil {
 				valid = false
+			}
+
+			validUntil, err := validUntilFn(ctx)
+			if err != nil {
+				t.Errorf(
+					"credentials %s/%s failed with error %s, wanted no error",
+					tc.username,
+					tc.password,
+					err,
+				)
 			}
 
 			if validUntil != nil {

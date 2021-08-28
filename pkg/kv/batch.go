@@ -49,10 +49,7 @@ type Batch struct {
 	// The Header which will be used to send the resulting BatchRequest.
 	// To be modified directly.
 	Header roachpb.Header
-	// The AdmissionHeader which will be used when sending the resulting
-	// BatchRequest. To be modified directly.
-	AdmissionHeader roachpb.AdmissionHeader
-	reqs            []roachpb.RequestUnion
+	reqs   []roachpb.RequestUnion
 
 	// approxMutationReqBytes tracks the approximate size of keys and values in
 	// mutations added to this batch via Put, CPut, InitPut, Del, etc.
@@ -72,13 +69,6 @@ type Batch struct {
 	rowsStaticIdx int
 }
 
-// ApproximateMutationBytes returns the approximate byte size of the mutations
-// added to this batch via Put, CPut, InitPut, Del, etc methods. Mutations added
-// via AddRawRequest are not tracked.
-func (b *Batch) ApproximateMutationBytes() int {
-	return b.approxMutationReqBytes
-}
-
 // RawResponse returns the BatchResponse which was the result of a successful
 // execution of the batch, and nil otherwise.
 func (b *Batch) RawResponse() *roachpb.BatchResponse {
@@ -94,15 +84,13 @@ func (b *Batch) MustPErr() *roachpb.Error {
 	return b.pErr
 }
 
-// validate that there were no errors while marshaling keys and values.
-func (b *Batch) validate() error {
-	err := b.resultErr()
-	if err != nil {
-		// Set pErr just as sendAndFill does, so that higher layers can find it
-		// using MustPErr.
-		b.pErr = roachpb.NewError(err)
+func (b *Batch) prepare() error {
+	for _, r := range b.Results {
+		if r.Err != nil {
+			return r.Err
+		}
 	}
-	return err
+	return nil
 }
 
 func (b *Batch) initResult(calls, numRows int, raw bool, err error) {
@@ -269,12 +257,11 @@ func (b *Batch) fillResults(ctx context.Context) {
 			case *roachpb.TruncateLogRequest:
 			case *roachpb.RequestLeaseRequest:
 			case *roachpb.CheckConsistencyRequest:
+			case *roachpb.WriteBatchRequest:
+			case *roachpb.ImportRequest:
 			case *roachpb.AdminScatterRequest:
 			case *roachpb.AddSSTableRequest:
 			case *roachpb.MigrateRequest:
-			case *roachpb.QueryResolvedTimestampRequest:
-			case *roachpb.BarrierRequest:
-			case *roachpb.ScanInterleavedIntentsRequest:
 			default:
 				if result.Err == nil {
 					result.Err = errors.Errorf("unsupported reply: %T for %T",
@@ -771,6 +758,28 @@ func (b *Batch) adminRelocateRange(
 	b.initResult(1, 0, notRaw, nil)
 }
 
+// writeBatch is only exported on DB.
+func (b *Batch) writeBatch(s, e interface{}, data []byte) {
+	begin, err := marshalKey(s)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	end, err := marshalKey(e)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	span := roachpb.Span{Key: begin, EndKey: end}
+	req := &roachpb.WriteBatchRequest{
+		RequestHeader: roachpb.RequestHeaderFromSpan(span),
+		DataSpan:      span,
+		Data:          data,
+	}
+	b.appendReqs(req)
+	b.initResult(1, 0, notRaw, nil)
+}
+
 // addSSTable is only exported on DB.
 func (b *Batch) addSSTable(
 	s, e interface{},
@@ -826,66 +835,9 @@ func (b *Batch) migrate(s, e interface{}, version roachpb.Version) {
 	b.initResult(1, 0, notRaw, nil)
 }
 
-// queryResolvedTimestamp is only exported on DB.
-func (b *Batch) queryResolvedTimestamp(s, e interface{}) {
-	begin, err := marshalKey(s)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	end, err := marshalKey(e)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	req := &roachpb.QueryResolvedTimestampRequest{
-		RequestHeader: roachpb.RequestHeader{
-			Key:    begin,
-			EndKey: end,
-		},
-	}
-	b.appendReqs(req)
-	b.initResult(1, 0, notRaw, nil)
-}
-
-func (b *Batch) scanInterleavedIntents(s, e interface{}) {
-	begin, err := marshalKey(s)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	end, err := marshalKey(e)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	req := &roachpb.ScanInterleavedIntentsRequest{
-		RequestHeader: roachpb.RequestHeader{
-			Key:    begin,
-			EndKey: end,
-		},
-	}
-	b.appendReqs(req)
-	b.initResult(1, 0, notRaw, nil)
-}
-
-func (b *Batch) barrier(s, e interface{}) {
-	begin, err := marshalKey(s)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	end, err := marshalKey(e)
-	if err != nil {
-		b.initResult(0, 0, notRaw, err)
-		return
-	}
-	req := &roachpb.BarrierRequest{
-		RequestHeader: roachpb.RequestHeader{
-			Key:    begin,
-			EndKey: end,
-		},
-	}
-	b.appendReqs(req)
-	b.initResult(1, 0, notRaw, nil)
+// ApproximateMutationBytes returns the approximate byte size of the mutations
+// added to this batch via Put, CPut, InitPut, Del, etc methods. Mutations added
+// via AddRawRequest are not tracked.
+func (b *Batch) ApproximateMutationBytes() int {
+	return b.approxMutationReqBytes
 }

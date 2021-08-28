@@ -39,9 +39,7 @@ func TestGC(t *testing.T) {
 		t.Fatal("no file sink")
 	}
 
-	testLogGC(t, fs, func(ctx context.Context, msg string) {
-		Infof(ctx, msg)
-	})
+	testLogGC(t, fs, Info)
 }
 
 func TestSecondaryGC(t *testing.T) {
@@ -57,13 +55,11 @@ func TestSecondaryGC(t *testing.T) {
 		config.Sinks.FileGroups = make(map[string]*logconfig.FileSinkConfig)
 	}
 	config.Sinks.FileGroups["gctest"] = &logconfig.FileSinkConfig{
-		FileDefaults: logconfig.FileDefaults{
-			Dir:            &s.logDir,
-			MaxFileSize:    &m,
-			MaxGroupSize:   &m,
-			BufferedWrites: &bf,
-		},
-		Channels: logconfig.ChannelList{Channels: []Channel{channel.OPS}},
+		Dir:            &s.logDir,
+		MaxFileSize:    &m,
+		MaxGroupSize:   &m,
+		BufferedWrites: &bf,
+		Channels:       logconfig.ChannelList{Channels: []Channel{channel.OPS}},
 	}
 
 	// Validate and apply the config

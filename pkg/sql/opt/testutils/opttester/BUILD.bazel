@@ -14,9 +14,7 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/opttester",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/build/bazel",
-        "//pkg/jobs/jobspb",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/settings/cluster",
         "//pkg/sql/catalog/descpb",
@@ -28,7 +26,6 @@ go_library(
         "//pkg/sql/opt/norm",
         "//pkg/sql/opt/optbuilder",
         "//pkg/sql/opt/optgen/exprgen",
-        "//pkg/sql/opt/ordering",
         "//pkg/sql/opt/props/physical",
         "//pkg/sql/opt/testutils/testcat",
         "//pkg/sql/opt/xform",
@@ -58,10 +55,4 @@ go_test(
         "//pkg/sql/opt/testutils/testcat",
         "@com_github_cockroachdb_datadriven//:datadriven",
     ],
-)
-
-filegroup(
-    name = "testfixtures",
-    srcs = glob(["testfixtures/**"]),
-    visibility = ["//pkg/sql/opt:__subpackages__"],
 )

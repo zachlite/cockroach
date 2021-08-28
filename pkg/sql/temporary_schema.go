@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -93,28 +94,27 @@ var (
 const TemporarySchemaNameForRestorePrefix string = "pg_temp_0_"
 
 func (p *planner) getOrCreateTemporarySchema(
-	ctx context.Context, db catalog.DatabaseDescriptor,
-) (catalog.SchemaDescriptor, error) {
+	ctx context.Context, dbID descpb.ID,
+) (descpb.ID, error) {
 	tempSchemaName := p.TemporarySchemaName()
-	sc, err := p.Descriptors().GetMutableSchemaByName(ctx, p.txn, db, tempSchemaName, p.CommonLookupFlags(false))
-	if sc != nil || err != nil {
-		return sc, err
-	}
-	sKey := catalogkeys.NewNameKeyComponents(db.GetID(), keys.RootNamespaceID, tempSchemaName)
-
-	// The temporary schema has not been created yet.
-	id, err := catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
+	sKey := catalogkeys.NewSchemaKey(dbID, tempSchemaName)
+	schemaID, err := catalogkv.GetDescriptorID(ctx, p.txn, p.ExecCfg().Codec, sKey)
 	if err != nil {
-		return nil, err
+		return descpb.InvalidID, err
+	} else if schemaID == descpb.InvalidID {
+		// The temporary schema has not been created yet.
+		id, err := catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
+		if err != nil {
+			return descpb.InvalidID, err
+		}
+		if err := p.CreateSchemaNamespaceEntry(ctx, sKey.Key(p.ExecCfg().Codec), id); err != nil {
+			return descpb.InvalidID, err
+		}
+		p.sessionDataMutator.SetTemporarySchemaName(sKey.Name())
+		p.sessionDataMutator.SetTemporarySchemaIDForDatabase(uint32(dbID), uint32(id))
+		return id, nil
 	}
-	if err := p.CreateSchemaNamespaceEntry(ctx, catalogkeys.EncodeNameKey(p.ExecCfg().Codec, sKey), id); err != nil {
-		return nil, err
-	}
-	p.sessionDataMutatorIterator.applyForEachMutator(func(m *sessionDataMutator) {
-		m.SetTemporarySchemaName(sKey.GetName())
-		m.SetTemporarySchemaIDForDatabase(uint32(db.GetID()), uint32(id))
-	})
-	return p.Descriptors().GetImmutableSchemaByID(ctx, p.Txn(), id, p.CommonLookupFlags(true))
+	return schemaID, nil
 }
 
 // CreateSchemaNamespaceEntry creates an entry for the schema in the
@@ -164,14 +164,14 @@ func temporarySchemaSessionID(scName string) (bool, ClusterWideID, error) {
 func cleanupSessionTempObjects(
 	ctx context.Context,
 	settings *cluster.Settings,
-	cf *descs.CollectionFactory,
+	leaseMgr *lease.Manager,
 	db *kv.DB,
 	codec keys.SQLCodec,
 	ie sqlutil.InternalExecutor,
 	sessionID ClusterWideID,
 ) error {
 	tempSchemaName := temporarySchemaName(sessionID)
-	return cf.Txn(ctx, ie, db, func(ctx context.Context, txn *kv.Txn, descsCol *descs.Collection) error {
+	return descs.Txn(ctx, settings, leaseMgr, ie, db, func(ctx context.Context, txn *kv.Txn, descsCol *descs.Collection) error {
 		// We are going to read all database descriptor IDs, then for each database
 		// we will drop all the objects under the temporary schema.
 		dbIDs, err := catalogkv.GetAllDatabaseDescriptorIDs(ctx, txn, codec)
@@ -195,8 +195,7 @@ func cleanupSessionTempObjects(
 			// itself may still exist (eg. a temporary table was created and then
 			// dropped). So we remove the namespace table entry of the temporary
 			// schema.
-			key := catalogkeys.MakeSchemaNameKey(codec, id, tempSchemaName)
-			if err := txn.Del(ctx, key); err != nil {
+			if err := catalogkv.RemoveSchemaNamespaceEntry(ctx, txn, codec, id, tempSchemaName); err != nil {
 				return err
 			}
 		}
@@ -219,7 +218,7 @@ func cleanupSchemaObjects(
 	if err != nil {
 		return err
 	}
-	tbNames, _, err := descsCol.GetObjectNamesAndIDs(
+	tbNames, err := descsCol.GetObjectNames(
 		ctx,
 		txn,
 		dbDesc,
@@ -396,7 +395,7 @@ type TemporaryObjectCleaner struct {
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc
 	testingKnobs           ExecutorTestingKnobs
 	metrics                *temporaryObjectCleanerMetrics
-	collectionFactory      *descs.CollectionFactory
+	leaseMgr               *lease.Manager
 }
 
 // temporaryObjectCleanerMetrics are the metrics for TemporaryObjectCleaner
@@ -423,7 +422,7 @@ func NewTemporaryObjectCleaner(
 	statusServer serverpb.SQLStatusServer,
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc,
 	testingKnobs ExecutorTestingKnobs,
-	cf *descs.CollectionFactory,
+	leaseMgr *lease.Manager,
 ) *TemporaryObjectCleaner {
 	metrics := makeTemporaryObjectCleanerMetrics()
 	registry.AddMetricStruct(metrics)
@@ -436,7 +435,7 @@ func NewTemporaryObjectCleaner(
 		isMeta1LeaseholderFunc:           isMeta1LeaseholderFunc,
 		testingKnobs:                     testingKnobs,
 		metrics:                          metrics,
-		collectionFactory:                cf,
+		leaseMgr:                         leaseMgr,
 	}
 }
 
@@ -491,8 +490,6 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 	defer c.metrics.ActiveCleaners.Dec(1)
 
 	log.Infof(ctx, "running temporary object cleanup background job")
-	// TODO(sumeer): this is not using NewTxnWithSteppingEnabled and so won't be
-	// classified as FROM_SQL for purposes of admission control. Fix.
 	txn := kv.NewTxn(ctx, c.db, 0)
 
 	// Build a set of all session IDs with temporary objects.
@@ -564,7 +561,7 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 				return cleanupSessionTempObjects(
 					ctx,
 					c.settings,
-					c.collectionFactory,
+					c.leaseMgr,
 					c.db,
 					c.codec,
 					ie,

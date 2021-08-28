@@ -32,7 +32,7 @@ func TestStartSpanAlwaysTrace(t *testing.T) {
 	tr._useNetTrace = 1
 	require.True(t, tr.AlwaysTrace())
 	nilMeta := tr.noopSpan.Meta()
-	require.True(t, nilMeta.Empty())
+	require.Nil(t, nilMeta)
 	sp := tr.StartSpan("foo", WithParentAndManualCollection(nilMeta))
 	require.False(t, sp.IsVerbose()) // parent was not verbose, so neither is sp
 	require.False(t, sp.i.isNoop())
@@ -69,18 +69,11 @@ func TestTracerRecording(t *testing.T) {
 	}
 
 	// Initial recording of this fresh (real) span.
-	if err := TestingCheckRecordedSpans(s1.GetRecording(), ``); err != nil {
-		t.Fatal(err)
-	}
-
-	s1.SetVerbose(true)
 	if err := TestingCheckRecordedSpans(s1.GetRecording(), `
 		span: a
-			tags: _unfinished=1 _verbose=1
 	`); err != nil {
 		t.Fatal(err)
 	}
-	s1.SetVerbose(false)
 
 	// Real parent --> real child.
 	real3 := tr.StartSpan("noop3", WithParentAndManualCollection(s1.Meta()))
@@ -244,8 +237,8 @@ func TestTracerInjectExtract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !wireSpanMeta.Empty() {
-		t.Errorf("expected no-op span meta: %v", wireSpanMeta)
+	if wireSpanMeta != nil {
+		t.Errorf("expected noop context: %v", wireSpanMeta)
 	}
 	noop2 := tr2.StartSpan("remote op", WithParentAndManualCollection(wireSpanMeta))
 	if !noop2.i.isNoop() {
@@ -338,8 +331,6 @@ func TestShadowTracer(t *testing.T) {
 	zipTr, err := zipkin.NewTracer(zipRec)
 	require.NoError(t, err)
 
-	ddMgr, ddTr := createDataDogTracer("dummyaddr", "dummyproject")
-
 	for _, tc := range []struct {
 		mgr   shadowTracerManager
 		str   opentracing.Tracer
@@ -367,16 +358,10 @@ func TestShadowTracer(t *testing.T) {
 			str: zipTr,
 			check: func(t *testing.T, spi opentracing.Span) {
 				rs := zipRec.GetSpans()
-				require.Len(t, rs, 2)
-				// The first span we opened is the second one to get recorded.
-				parentSpan := rs[1]
-				require.Len(t, parentSpan.Logs, 1)
-				require.Equal(t, log.String("event", "hello"), parentSpan.Logs[0].Fields[0])
+				require.Len(t, rs, 1)
+				require.Len(t, rs[0].Logs, 1)
+				require.Equal(t, log.String("event", "hello"), rs[0].Logs[0].Fields[0])
 			},
-		},
-		{
-			mgr: ddMgr,
-			str: ddTr,
 		},
 	} {
 		t.Run(tc.mgr.Name(), func(t *testing.T) {
@@ -400,47 +385,33 @@ func TestShadowTracer(t *testing.T) {
 			const testBaggageKey = "test-baggage"
 			const testBaggageVal = "test-val"
 			s.SetBaggageItem(testBaggageKey, testBaggageVal)
-			// Also add a baggage item that is exclusive to the shadow span.
-			// This wouldn't typically happen in practice, but it serves as
-			// a regression test for #62702. Losing the Span context directly
-			// is hard to verify via baggage items since the top-level baggage
-			// is transported separately and re-inserted into the shadow context
-			// on the remote side, i.e. the test-baggage item above shows up
-			// regardless of whether #62702 is fixed. But if we're losing the
-			// shadowCtx, the only-in-shadow item does get lost as well, so if
-			// it does not then we know for sure that the shadowContext was
-			// propagated properly.
-			s.i.ot.shadowSpan.SetBaggageItem("only-in-shadow", "foo")
 
 			carrier := metadataCarrier{metadata.MD{}}
 			if err := tr.InjectMetaInto(s.Meta(), carrier); err != nil {
 				t.Fatal(err)
 			}
 
-			// ExtractMetaFrom also extracts the embedded shadow context.
+			// ExtractMetaFrom also extracts the embedded lightstep context.
 			wireSpanMeta, err := tr.ExtractMetaFrom(carrier)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			s2 := tr.StartSpan("child", WithParentAndManualCollection(wireSpanMeta))
-			defer s2.Finish()
 			s2Ctx := s2.i.ot.shadowSpan.Context()
 
 			// Verify that the baggage is correct in both the tracer context and in the
-			// shadow's context.
+			// lightstep context.
 			shadowBaggage := make(map[string]string)
 			s2Ctx.ForeachBaggageItem(func(k, v string) bool {
 				shadowBaggage[k] = v
 				return true
 			})
-			require.Equal(t, map[string]string{
+			exp := map[string]string{
 				testBaggageKey: testBaggageVal,
-			}, s2.Meta().Baggage)
-			require.Equal(t, map[string]string{
-				testBaggageKey:   testBaggageVal,
-				"only-in-shadow": "foo",
-			}, shadowBaggage)
+			}
+			require.Equal(t, exp, s2.Meta().Baggage)
+			require.Equal(t, exp, shadowBaggage)
 		})
 	}
 

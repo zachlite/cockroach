@@ -105,7 +105,7 @@ func (cv *clusterVersionSetting) initialize(
 	if err != nil {
 		return err
 	}
-	cv.SetInternal(ctx, sv, encoded)
+	cv.SetInternal(sv, encoded)
 	return nil
 }
 

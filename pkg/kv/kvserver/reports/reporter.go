@@ -105,7 +105,7 @@ func (stats *Reporter) reportInterval() (time.Duration, <-chan struct{}) {
 
 // Start the periodic calls to Update().
 func (stats *Reporter) Start(ctx context.Context, stopper *stop.Stopper) {
-	ReporterInterval.SetOnChange(&stats.settings.SV, func(ctx context.Context) {
+	ReporterInterval.SetOnChange(&stats.settings.SV, func() {
 		stats.frequencyMu.Lock()
 		defer stats.frequencyMu.Unlock()
 		// Signal the current waiter (if any), and prepare the channel for future
@@ -489,7 +489,7 @@ func visitDefaultZone(
 func getZoneByID(
 	id config.SystemTenantObjectID, cfg *config.SystemConfig,
 ) (*zonepb.ZoneConfig, error) {
-	zoneVal := cfg.GetValue(config.MakeZoneKey(keys.SystemSQLCodec, descpb.ID(id)))
+	zoneVal := cfg.GetValue(config.MakeZoneKey(id))
 	if zoneVal == nil {
 		return nil, nil
 	}
@@ -604,7 +604,7 @@ func visitRanges(
 			if err != nil {
 				// Sanity check - v.failed() should return an error now (the same as err above).
 				if !v.failed() {
-					return errors.AssertionFailedf("expected visitor %T to have failed() after error: %s", v, err)
+					return errors.Errorf("expected visitor %T to have failed() after error: %s", v, err)
 				}
 				// Remove this visitor; it shouldn't be called any more.
 				visitors = append(visitors[:i], visitors[i+1:]...)

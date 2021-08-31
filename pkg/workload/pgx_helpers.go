@@ -12,15 +12,17 @@ package workload
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/cockroachdb/cockroach-go/crdb"
+	"github.com/jackc/pgx"
 	"golang.org/x/sync/errgroup"
 )
 
 // MultiConnPool maintains a set of pgx ConnPools (to different servers).
 type MultiConnPool struct {
-	Pools []*pgxpool.Pool
+	Pools []*pgx.ConnPool
 	// Atomic counter used by Get().
 	counter uint32
 }
@@ -46,9 +48,7 @@ type MultiConnPoolCfg struct {
 //
 // The pools have approximately the same number of max connections, adding up to
 // MaxTotalConnections.
-func NewMultiConnPool(
-	ctx context.Context, cfg MultiConnPoolCfg, urls ...string,
-) (*MultiConnPool, error) {
+func NewMultiConnPool(cfg MultiConnPoolCfg, urls ...string) (*MultiConnPool, error) {
 	m := &MultiConnPool{}
 	connsPerURL := distribute(cfg.MaxTotalConnections, len(urls))
 	maxConnsPerPool := cfg.MaxConnsPerPool
@@ -56,24 +56,24 @@ func NewMultiConnPool(
 		maxConnsPerPool = cfg.MaxTotalConnections
 	}
 
-	var warmupConns [][]*pgxpool.Conn
+	var warmupConns [][]*pgx.Conn
 	for i := range urls {
+		connCfg, err := pgx.ParseConnectionString(urls[i])
+		if err != nil {
+			return nil, err
+		}
+
 		connsPerPool := distributeMax(connsPerURL[i], maxConnsPerPool)
 		for _, numConns := range connsPerPool {
-			connCfg, err := pgxpool.ParseConfig(urls[i])
-			// Disable the automatic prepared statement cache. We've seen a lot of
-			// churn in this cache since workloads create many of different queries.
-			connCfg.ConnConfig.BuildStatementCache = nil
-			if err != nil {
-				return nil, err
-			}
-			connCfg.MaxConns = int32(numConns)
-			p, err := pgxpool.ConnectConfig(ctx, connCfg)
+			p, err := pgx.NewConnPool(pgx.ConnPoolConfig{
+				ConnConfig:     connCfg,
+				MaxConnections: numConns,
+			})
 			if err != nil {
 				return nil, err
 			}
 
-			warmupConns = append(warmupConns, make([]*pgxpool.Conn, numConns))
+			warmupConns = append(warmupConns, make([]*pgx.Conn, numConns))
 			m.Pools = append(m.Pools, p)
 		}
 	}
@@ -99,7 +99,7 @@ func NewMultiConnPool(
 			sem <- struct{}{}
 			g.Go(func() error {
 				var err error
-				conns[j], err = p.Acquire(ctx)
+				conns[j], err = p.Acquire()
 				<-sem
 				return err
 			})
@@ -108,9 +108,9 @@ func NewMultiConnPool(
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	for i := range m.Pools {
+	for i, p := range m.Pools {
 		for _, c := range warmupConns[i] {
-			c.Release()
+			p.Release(c)
 		}
 	}
 
@@ -118,7 +118,7 @@ func NewMultiConnPool(
 }
 
 // Get returns one of the pools, in round-robin manner.
-func (m *MultiConnPool) Get() *pgxpool.Pool {
+func (m *MultiConnPool) Get() *pgx.ConnPool {
 	if len(m.Pools) == 1 {
 		return m.Pools[0]
 	}
@@ -126,11 +126,58 @@ func (m *MultiConnPool) Get() *pgxpool.Pool {
 	return m.Pools[i%uint32(len(m.Pools))]
 }
 
+// PrepareEx prepares the given statement on all the pools.
+func (m *MultiConnPool) PrepareEx(
+	ctx context.Context, name, sql string, opts *pgx.PrepareExOptions,
+) (*pgx.PreparedStatement, error) {
+	var res *pgx.PreparedStatement
+	var once sync.Once
+	var g errgroup.Group
+	for _, p := range m.Pools {
+		p := p
+		g.Go(func() error {
+			ps, err := p.PrepareEx(ctx, name, sql, opts)
+			if err == nil {
+				// It doesn't matter which PreparedStatement we return, they should
+				// contain the same information.
+				once.Do(func() { res = ps })
+			}
+			return err
+		})
+	}
+	err := g.Wait()
+	return res, err
+}
+
 // Close closes all the pools.
 func (m *MultiConnPool) Close() {
 	for _, p := range m.Pools {
 		p.Close()
 	}
+}
+
+// PgxTx is a thin wrapper that implements the crdb.Tx interface, allowing pgx
+// transactions to be used with ExecuteInTx. The cockroach-go library has native
+// support for pgx in crdb/pgx, but only for pgx v4. CRDB is stuck for now using
+// pgx v3, as v4 needs Go modules.
+type PgxTx pgx.Tx
+
+var _ crdb.Tx = &PgxTx{}
+
+// Exec is part of the crdb.Tx interface.
+func (tx *PgxTx) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	_, err := (*pgx.Tx)(tx).ExecEx(ctx, sql, nil /* QueryExOptions */, args...)
+	return err
+}
+
+// Commit is part of the crdb.Tx interface.
+func (tx *PgxTx) Commit(context.Context) error {
+	return (*pgx.Tx)(tx).Commit()
+}
+
+// Rollback is part of the crdb.Tx interface.
+func (tx *PgxTx) Rollback(context.Context) error {
+	return (*pgx.Tx)(tx).Rollback()
 }
 
 // distribute returns a slice of <num> integers that add up to <total> and are

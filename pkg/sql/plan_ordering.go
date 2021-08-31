@@ -54,8 +54,10 @@ func planReqOrdering(plan planNode) ReqOrdering {
 		// appropriately.
 	case *joinNode:
 		return n.reqOrdering
-	case *unionNode:
+	case *interleavedJoinNode:
 		return n.reqOrdering
+	case *unionNode:
+		// TODO(knz): this can be ordered if the source is ordered already.
 	case *insertNode, *insertFastPathNode:
 		// TODO(knz): RETURNING is ordered by the PK.
 	case *updateNode, *upsertNode:

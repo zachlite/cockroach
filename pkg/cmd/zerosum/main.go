@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cockroachdb/cockroach-go/v2/crdb"
+	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/acceptance/cluster"
 	"github.com/cockroachdb/cockroach/pkg/acceptance/localcluster"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
@@ -34,10 +34,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors/oserror"
 )
 
-var workers = flag.Int("w", 2*runtime.GOMAXPROCS(0), "number of workers")
+var workers = flag.Int("w", 2*runtime.NumCPU(), "number of workers")
 var monkeys = flag.Int("m", 3, "number of monkeys")
 var numNodes = flag.Int("n", 4, "number of nodes")
 var numAccounts = flag.Int("a", 1e5, "number of accounts")
@@ -416,7 +415,7 @@ func main() {
 
 	cockroachBin := func() string {
 		bin := "./cockroach"
-		if _, err := os.Stat(bin); oserror.IsNotExist(err) {
+		if _, err := os.Stat(bin); os.IsNotExist(err) {
 			bin = "cockroach"
 		} else if err != nil {
 			panic(err)

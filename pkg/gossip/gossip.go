@@ -79,6 +79,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
+	"github.com/gogo/protobuf/proto"
 	"google.golang.org/grpc"
 )
 
@@ -404,7 +405,7 @@ func (g *Gossip) SetNodeDescriptor(desc *roachpb.NodeDescriptor) error {
 		log.Fatalf(ctx, "n%d address is empty", desc.NodeID)
 	}
 	if err := g.AddInfoProto(MakeNodeIDKey(desc.NodeID), desc, NodeDescriptorTTL); err != nil {
-		return errors.Wrapf(err, "n%d: couldn't gossip descriptor", desc.NodeID)
+		return errors.Errorf("n%d: couldn't gossip descriptor: %v", desc.NodeID, err)
 	}
 	g.updateClients()
 	return nil
@@ -447,7 +448,7 @@ func (g *Gossip) SetStorage(storage Storage) error {
 	// Maintain lock ordering.
 	var storedBI BootstrapInfo
 	if err := storage.ReadBootstrapInfo(&storedBI); err != nil {
-		log.Ops.Warningf(ctx, "failed to read gossip bootstrap info: %s", err)
+		log.Warningf(ctx, "failed to read gossip bootstrap info: %s", err)
 	}
 
 	g.mu.Lock()
@@ -492,7 +493,7 @@ func (g *Gossip) SetStorage(storage Storage) error {
 	// If a new resolver was found, immediately signal bootstrap.
 	if newResolverFound {
 		if log.V(1) {
-			log.Ops.Infof(ctx, "found new resolvers from storage; signaling bootstrap")
+			log.Infof(ctx, "found new resolvers from storage; signaling bootstrap")
 		}
 		g.signalStalledLocked()
 	}
@@ -564,7 +565,7 @@ func (g *Gossip) LogStatus() {
 	}
 
 	ctx := g.AnnotateCtx(context.TODO())
-	log.Health.Infof(ctx, "gossip status (%s, %d node%s)\n%s%s%s",
+	log.Infof(ctx, "gossip status (%s, %d node%s)\n%s%s%s",
 		status, n, util.Pluralize(int64(n)),
 		g.clientStatus(), g.server.status(),
 		connectivity)
@@ -688,7 +689,7 @@ func (g *Gossip) maybeAddResolverLocked(addr util.UnresolvedAddr) bool {
 	ctx := g.AnnotateCtx(context.TODO())
 	r, err := resolver.NewResolverFromUnresolvedAddr(addr)
 	if err != nil {
-		log.Ops.Warningf(ctx, "bad address %s: %s", addr, err)
+		log.Warningf(ctx, "bad address %s: %s", addr, err)
 		return false
 	}
 	g.resolvers = append(g.resolvers, r)
@@ -814,16 +815,16 @@ func (g *Gossip) updateNodeAddress(key string, content roachpb.Value) {
 	if desc.NodeID == 0 || desc.Address.IsEmpty() {
 		nodeID, err := NodeIDFromKey(key, KeyNodeIDPrefix)
 		if err != nil {
-			log.Health.Errorf(ctx, "unable to update node address for removed node: %s", err)
+			log.Errorf(ctx, "unable to update node address for removed node: %s", err)
 			return
 		}
-		log.Health.Infof(ctx, "removed n%d from gossip", nodeID)
+		log.Infof(ctx, "removed n%d from gossip", nodeID)
 		g.removeNodeDescriptorLocked(nodeID)
 		return
 	}
 
 	existingDesc, ok := g.nodeDescs[desc.NodeID]
-	if !ok || !existingDesc.Equal(&desc) {
+	if !ok || !proto.Equal(existingDesc, &desc) {
 		g.nodeDescs[desc.NodeID] = &desc
 	}
 	// Skip all remaining logic if the address hasn't changed, since that's all
@@ -1273,7 +1274,7 @@ func (g *Gossip) getNextBootstrapAddressLocked() net.Addr {
 		if addr, err := resolver.GetAddress(); err != nil {
 			if _, ok := g.resolversTried[g.resolverIdx]; !ok {
 				ctx := g.AnnotateCtx(context.TODO())
-				log.Ops.Warningf(ctx, "invalid bootstrap address: %+v, %v", resolver, err)
+				log.Warningf(ctx, "invalid bootstrap address: %+v, %v", resolver, err)
 			}
 			continue
 		} else {
@@ -1296,12 +1297,12 @@ func (g *Gossip) getNextBootstrapAddressLocked() net.Addr {
 // lost and requires re-bootstrapping.
 func (g *Gossip) bootstrap() {
 	ctx := g.AnnotateCtx(context.Background())
-	_ = g.server.stopper.RunAsyncTask(ctx, "gossip-bootstrap", func(ctx context.Context) {
+	g.server.stopper.RunWorker(ctx, func(ctx context.Context) {
 		ctx = logtags.AddTag(ctx, "bootstrap", nil)
 		var bootstrapTimer timeutil.Timer
 		defer bootstrapTimer.Stop()
 		for {
-			func(ctx context.Context) {
+			if g.server.stopper.RunTask(ctx, "gossip.Gossip: bootstrap ", func(ctx context.Context) {
 				g.mu.Lock()
 				defer g.mu.Unlock()
 				haveClients := g.outgoing.len() > 0
@@ -1322,7 +1323,9 @@ func (g *Gossip) bootstrap() {
 						g.maybeSignalStatusChangeLocked()
 					}
 				}
-			}(ctx)
+			}) != nil {
+				return
+			}
 
 			// Pause an interval before next possible bootstrap.
 			bootstrapTimer.Reset(g.bootstrapInterval)
@@ -1331,7 +1334,7 @@ func (g *Gossip) bootstrap() {
 			case <-bootstrapTimer.C:
 				bootstrapTimer.Read = true
 				// continue
-			case <-g.server.stopper.ShouldQuiesce():
+			case <-g.server.stopper.ShouldStop():
 				return
 			}
 			log.Eventf(ctx, "idling until bootstrap required")
@@ -1340,7 +1343,7 @@ func (g *Gossip) bootstrap() {
 			case <-g.stalledCh:
 				log.Eventf(ctx, "detected stall; commencing bootstrap")
 				// continue
-			case <-g.server.stopper.ShouldQuiesce():
+			case <-g.server.stopper.ShouldStop():
 				return
 			}
 		}
@@ -1359,7 +1362,7 @@ func (g *Gossip) bootstrap() {
 // is notified via the stalled conditional variable.
 func (g *Gossip) manage() {
 	ctx := g.AnnotateCtx(context.Background())
-	_ = g.server.stopper.RunAsyncTask(ctx, "gossip-manage", func(ctx context.Context) {
+	g.server.stopper.RunWorker(ctx, func(ctx context.Context) {
 		clientsTimer := timeutil.NewTimer()
 		cullTimer := timeutil.NewTimer()
 		stallTimer := timeutil.NewTimer()
@@ -1372,7 +1375,7 @@ func (g *Gossip) manage() {
 		stallTimer.Reset(jitteredInterval(g.stallInterval))
 		for {
 			select {
-			case <-g.server.stopper.ShouldQuiesce():
+			case <-g.server.stopper.ShouldStop():
 				return
 			case c := <-g.disconnected:
 				g.doDisconnected(c)
@@ -1394,9 +1397,9 @@ func (g *Gossip) manage() {
 							return c.peerID == leastUsefulID
 						}); c != nil {
 							if log.V(1) {
-								log.Health.Infof(ctx, "closing least useful client %+v to tighten network graph", c)
+								log.Infof(ctx, "closing least useful client %+v to tighten network graph", c)
 							}
-							log.VEventf(ctx, 1, "culling n%d %s", c.peerID, c.addr)
+							log.Eventf(ctx, "culling %s", c.addr)
 							c.close()
 
 							// After releasing the lock, block until the client disconnects.
@@ -1406,7 +1409,7 @@ func (g *Gossip) manage() {
 						} else {
 							if log.V(1) {
 								g.clientsMu.Lock()
-								log.Health.Infof(ctx, "couldn't find least useful client among %+v", g.clientsMu.clients)
+								log.Infof(ctx, "couldn't find least useful client among %+v", g.clientsMu.clients)
 								g.clientsMu.Unlock()
 							}
 						}
@@ -1445,9 +1448,9 @@ func (g *Gossip) tightenNetwork(ctx context.Context) {
 			return
 		}
 		if nodeAddr, err := g.getNodeIDAddressLocked(distantNodeID); err != nil {
-			log.Health.Errorf(ctx, "unable to get address for n%d: %s", distantNodeID, err)
+			log.Errorf(ctx, "unable to get address for n%d: %s", distantNodeID, err)
 		} else {
-			log.Health.Infof(ctx, "starting client to n%d (%d > %d) to tighten network graph",
+			log.Infof(ctx, "starting client to n%d (%d > %d) to tighten network graph",
 				distantNodeID, distantHops, maxHops)
 			log.Eventf(ctx, "tightening network with new client to %s", nodeAddr)
 			g.startClientLocked(nodeAddr)
@@ -1485,15 +1488,15 @@ func (g *Gossip) maybeSignalStatusChangeLocked() {
 			if orphaned {
 				if len(g.resolvers) == 0 {
 					if log.V(1) {
-						log.Ops.Warningf(ctx, "no resolvers found; use --join to specify a connected node")
+						log.Warningf(ctx, "no resolvers found; use --join to specify a connected node")
 					}
 				} else {
-					log.Health.Warningf(ctx, "no incoming or outgoing connections")
+					log.Warningf(ctx, "no incoming or outgoing connections")
 				}
 			} else if len(g.resolversTried) == len(g.resolvers) {
-				log.Health.Warningf(ctx, "first range unavailable; resolvers exhausted")
+				log.Warningf(ctx, "first range unavailable; resolvers exhausted")
 			} else {
-				log.Health.Warningf(ctx, "first range unavailable; trying remaining resolvers")
+				log.Warningf(ctx, "first range unavailable; trying remaining resolvers")
 			}
 		}
 		if len(g.resolvers) > 0 {
@@ -1502,7 +1505,7 @@ func (g *Gossip) maybeSignalStatusChangeLocked() {
 	} else {
 		if g.stalled {
 			log.Eventf(ctx, "connected")
-			log.Ops.Infof(ctx, "node has connected to cluster via gossip")
+			log.Infof(ctx, "node has connected to cluster via gossip")
 			g.signalConnectedLocked()
 		}
 		g.maybeCleanupBootstrapAddressesLocked()
@@ -1548,7 +1551,7 @@ func (g *Gossip) startClientLocked(addr net.Addr) {
 		g.clientsMu.breakers[addr.String()] = breaker
 	}
 	ctx := g.AnnotateCtx(context.TODO())
-	log.VEventf(ctx, 1, "starting new client to %s", addr)
+	log.Eventf(ctx, "starting new client to %s", addr)
 	c := newClient(g.server.AmbientContext, addr, g.serverMetrics)
 	g.clientsMu.clients = append(g.clientsMu.clients, c)
 	c.startLocked(g, g.disconnected, g.rpcContext, g.server.stopper, breaker)
@@ -1562,7 +1565,7 @@ func (g *Gossip) removeClientLocked(target *client) {
 	for i, candidate := range g.clientsMu.clients {
 		if candidate == target {
 			ctx := g.AnnotateCtx(context.TODO())
-			log.VEventf(ctx, 1, "client %s disconnected", candidate.addr)
+			log.Eventf(ctx, "client %s disconnected", candidate.addr)
 			g.clientsMu.clients = append(g.clientsMu.clients[:i], g.clientsMu.clients[i+1:]...)
 			delete(g.bootstrapping, candidate.addr.String())
 			g.outgoing.removeNode(candidate.peerID)

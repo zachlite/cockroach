@@ -7,6 +7,12 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
+//
+// A "shadow" tracer can be any opentracing.Tracer implementation that is used
+// in addition to the normal functionality of our tracer. It works by attaching
+// a shadow span to every span, and attaching a shadow context to every span
+// context. When injecting a span context, we encapsulate the shadow context
+// inside ours.
 
 package tracing
 
@@ -21,8 +27,6 @@ import (
 	lightstep "github.com/lightstep/lightstep-tracer-go"
 	opentracing "github.com/opentracing/opentracing-go"
 	zipkin "github.com/openzipkin-contrib/zipkin-go-opentracing"
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/opentracer"
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 type shadowTracerManager interface {
@@ -52,76 +56,57 @@ func (m *zipkinManager) Close(tr opentracing.Tracer) {
 	_ = m.collector.Close()
 }
 
-type dataDogManager struct{}
-
-func (dataDogManager) Name() string {
-	return "DataDog"
-}
-
-func (dataDogManager) Close(tr opentracing.Tracer) {
-	// TODO(andrei): Figure out what to do here. The docs suggest that
-	// ddtrace.tracer.Stop() flushes, but the problem is that it operates on
-	// global state, and when shadow tracers are changed, we call this *after*
-	// starting the new one.
-}
-
-// A shadowTracer can be any opentracing.Tracer implementation that is used in
-// addition to the normal functionality of our tracer. It works by attaching a
-// shadow Span to every Span, and attaching a shadow context to every Span
-// context. When injecting a Span context, we encapsulate the shadow context
-// inside ours.
 type shadowTracer struct {
 	opentracing.Tracer
 	manager shadowTracerManager
 }
 
-// Type returns the underlying type of the shadow tracer manager.
-// It is valid to call this on a nil shadowTracer; it will
-// return zero values in this case.
-func (st *shadowTracer) Type() (string, bool) {
-	if st == nil || st.manager == nil {
-		return "", false
-	}
-	return st.manager.Name(), true
+func (st *shadowTracer) Typ() string {
+	return st.manager.Name()
 }
 
 func (st *shadowTracer) Close() {
 	st.manager.Close(st)
 }
 
-// makeShadowSpan creates an otSpan for construction of a Span.
-// This must be called with a non-nil shadowTr, which must have
-// been confirmed to be compatible with parentShadowCtx.
+// linkShadowSpan creates and links a Shadow span to the passed-in span (i.e.
+// fills in s.shadowTr and s.shadowSpan). This should only be called when
+// shadow tracing is enabled.
 //
-// The span contained in `otSpan` will have a parent if parentShadowCtx
-// is not nil. parentType is ignored if parentShadowCtx is nil.
-func makeShadowSpan(
+// The Shadow span will have a parent if parentShadowCtx is not nil.
+// parentType is ignored if parentShadowCtx is nil.
+//
+// The tags (including logTags) from s are copied to the Shadow span.
+func linkShadowSpan(
+	s *span,
 	shadowTr *shadowTracer,
 	parentShadowCtx opentracing.SpanContext,
 	parentType opentracing.SpanReferenceType,
-	opName string,
-	startTime time.Time,
-) otSpan {
-	// Create the shadow lightstep Span.
-	opts := make([]opentracing.StartSpanOption, 0, 2)
+) {
+	// Create the shadow lightstep span.
+	var opts []opentracing.StartSpanOption
 	// Replicate the options, using the lightstep context in the reference.
-	opts = append(opts, opentracing.StartTime(startTime))
+	opts = append(opts, opentracing.StartTime(s.startTime))
+	if s.logTags != nil {
+		opts = append(opts, LogTags(s.logTags))
+	}
+	if s.mu.tags != nil {
+		opts = append(opts, s.mu.tags)
+	}
 	if parentShadowCtx != nil {
 		opts = append(opts, opentracing.SpanReference{
 			Type:              parentType,
 			ReferencedContext: parentShadowCtx,
 		})
 	}
-	return otSpan{
-		shadowTr:   shadowTr,
-		shadowSpan: shadowTr.StartSpan(opName, opts...),
-	}
+	s.shadowTr = shadowTr
+	s.shadowSpan = shadowTr.StartSpan(s.operation, opts...)
 }
 
 func createLightStepTracer(token string) (shadowTracerManager, opentracing.Tracer) {
 	return lightStepManager{}, lightstep.NewTracer(lightstep.Options{
 		AccessToken:      token,
-		MaxLogsPerSpan:   maxLogsPerSpanExternal,
+		MaxLogsPerSpan:   maxLogsPerSpan,
 		MaxBufferedSpans: 10000,
 		UseGRPC:          true,
 	})
@@ -156,12 +141,4 @@ func createZipkinTracer(collectorAddr string) (shadowTracerManager, opentracing.
 		panic(err)
 	}
 	return &zipkinManager{collector: collector}, zipkinTr
-}
-
-func createDataDogTracer(agentAddr, project string) (shadowTracerManager, opentracing.Tracer) {
-	opts := []tracer.StartOption{tracer.WithService(project)}
-	if agentAddr != "" && agentAddr != "default" {
-		opts = append(opts, tracer.WithAgentAddr(agentAddr))
-	}
-	return dataDogManager{}, opentracer.New(opts...)
 }

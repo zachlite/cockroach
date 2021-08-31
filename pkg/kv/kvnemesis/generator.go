@@ -42,8 +42,6 @@ type OperationConfig struct {
 	Split          SplitConfig
 	Merge          MergeConfig
 	ChangeReplicas ChangeReplicasConfig
-	ChangeLease    ChangeLeaseConfig
-	ChangeZone     ChangeZoneConfig
 }
 
 // ClosureTxnConfig configures the relative probability of running some
@@ -74,14 +72,8 @@ type ClosureTxnConfig struct {
 type ClientOperationConfig struct {
 	// GetMissing is an operation that Gets a key that definitely doesn't exist.
 	GetMissing int
-	// GetMissingForUpdate is an operation that Gets a key that definitely
-	// doesn't exist using a locking read.
-	GetMissingForUpdate int
 	// GetExisting is an operation that Gets a key that likely exists.
 	GetExisting int
-	// GetExistingForUpdate is an operation that Gets a key that likely exists
-	// using a locking read.
-	GetExistingForUpdate int
 	// PutMissing is an operation that Puts a key that definitely doesn't exist.
 	PutMissing int
 	// PutExisting is an operation that Puts a key that likely exists.
@@ -91,16 +83,6 @@ type ClientOperationConfig struct {
 	// ScanForUpdate is an operation that Scans a key range that may contain
 	// values using a per-key locking scan.
 	ScanForUpdate int
-	// ReverseScan is an operation that Scans a key range that may contain
-	// values in reverse key order.
-	ReverseScan int
-	// ReverseScanForUpdate is an operation that Scans a key range that may
-	// contain values using a per-key locking scan in reverse key order.
-	ReverseScanForUpdate int
-	// DeleteMissing is an operation that Deletes a key that definitely doesn't exist.
-	DeleteMissing int
-	// DeleteExisting is an operation that Deletes a key that likely exists.
-	DeleteExisting int
 }
 
 // BatchOperationConfig configures the relative probability of generating a
@@ -147,38 +129,18 @@ type ChangeReplicasConfig struct {
 	AtomicSwapReplica int
 }
 
-// ChangeLeaseConfig configures the relative probability of generating an
-// operation that causes a leaseholder change.
-type ChangeLeaseConfig struct {
-	// Transfer the lease to a random replica.
-	TransferLease int
-}
-
-// ChangeZoneConfig configures the relative probability of generating a zone
-// configuration change operation.
-type ChangeZoneConfig struct {
-	// ToggleGlobalReads sets global_reads to a new value.
-	ToggleGlobalReads int
-}
-
 // newAllOperationsConfig returns a GeneratorConfig that exercises *all*
 // options. You probably want NewDefaultConfig. Most of the time, these will be
 // the same, but having both allows us to merge code for operations that do not
 // yet pass (for example, if the new operation finds a kv bug or edge case).
 func newAllOperationsConfig() GeneratorConfig {
 	clientOpConfig := ClientOperationConfig{
-		GetMissing:           1,
-		GetMissingForUpdate:  1,
-		GetExisting:          1,
-		GetExistingForUpdate: 1,
-		PutMissing:           1,
-		PutExisting:          1,
-		Scan:                 1,
-		ScanForUpdate:        1,
-		ReverseScan:          1,
-		ReverseScanForUpdate: 1,
-		DeleteMissing:        1,
-		DeleteExisting:       1,
+		GetMissing:    1,
+		GetExisting:   1,
+		PutMissing:    1,
+		PutExisting:   1,
+		Scan:          1,
+		ScanForUpdate: 1,
 	}
 	batchOpConfig := BatchOperationConfig{
 		Batch: 4,
@@ -208,12 +170,6 @@ func newAllOperationsConfig() GeneratorConfig {
 			RemoveReplica:     1,
 			AtomicSwapReplica: 1,
 		},
-		ChangeLease: ChangeLeaseConfig{
-			TransferLease: 1,
-		},
-		ChangeZone: ChangeZoneConfig{
-			ToggleGlobalReads: 1,
-		},
 	}}
 }
 
@@ -240,15 +196,12 @@ func NewDefaultConfig() GeneratorConfig {
 	return config
 }
 
-// GeneratorDataTableID is the table ID that corresponds to GeneratorDataSpan.
-const GeneratorDataTableID = 50
-
 // GeneratorDataSpan returns a span that contains all of the operations created
 // by this Generator.
 func GeneratorDataSpan() roachpb.Span {
 	return roachpb.Span{
-		Key:    keys.SystemSQLCodec.TablePrefix(GeneratorDataTableID),
-		EndKey: keys.SystemSQLCodec.TablePrefix(GeneratorDataTableID + 1),
+		Key:    keys.SystemSQLCodec.TablePrefix(50),
+		EndKey: keys.SystemSQLCodec.TablePrefix(51),
 	}
 }
 
@@ -322,8 +275,8 @@ type generator struct {
 
 	nextValue int
 
-	// keys is the set of every key that has been written to, including those
-	// deleted or in rolled back transactions.
+	// keys is the set of every key that has been written to, including those in
+	// rolled back transactions.
 	keys map[string]struct{}
 
 	// currentSplits is approximately the set of every split that has been made
@@ -371,10 +324,6 @@ func (g *generator) RandStep(rng *rand.Rand) Step {
 		removeReplicaFn := makeRemoveReplicaFn(key, current)
 		addOpGen(&allowed, removeReplicaFn, g.Config.Ops.ChangeReplicas.RemoveReplica)
 	}
-	transferLeaseFn := makeTransferLeaseFn(key, current)
-	addOpGen(&allowed, transferLeaseFn, g.Config.Ops.ChangeLease.TransferLease)
-
-	addOpGen(&allowed, toggleGlobalReads, g.Config.Ops.ChangeZone.ToggleGlobalReads)
 
 	return step(g.selectOp(rng, allowed))
 }
@@ -408,19 +357,13 @@ func (g *generator) selectOp(rng *rand.Rand, contextuallyValid []opGen) Operatio
 
 func (g *generator) registerClientOps(allowed *[]opGen, c *ClientOperationConfig) {
 	addOpGen(allowed, randGetMissing, c.GetMissing)
-	addOpGen(allowed, randGetMissingForUpdate, c.GetMissingForUpdate)
 	addOpGen(allowed, randPutMissing, c.PutMissing)
-	addOpGen(allowed, randDelMissing, c.DeleteMissing)
 	if len(g.keys) > 0 {
 		addOpGen(allowed, randGetExisting, c.GetExisting)
-		addOpGen(allowed, randGetExistingForUpdate, c.GetExistingForUpdate)
 		addOpGen(allowed, randPutExisting, c.PutExisting)
-		addOpGen(allowed, randDelExisting, c.DeleteExisting)
 	}
 	addOpGen(allowed, randScan, c.Scan)
 	addOpGen(allowed, randScanForUpdate, c.ScanForUpdate)
-	addOpGen(allowed, randReverseScan, c.ReverseScan)
-	addOpGen(allowed, randReverseScanForUpdate, c.ReverseScanForUpdate)
 }
 
 func (g *generator) registerBatchOps(allowed *[]opGen, c *BatchOperationConfig) {
@@ -431,22 +374,9 @@ func randGetMissing(_ *generator, rng *rand.Rand) Operation {
 	return get(randKey(rng))
 }
 
-func randGetMissingForUpdate(_ *generator, rng *rand.Rand) Operation {
-	op := get(randKey(rng))
-	op.Get.ForUpdate = true
-	return op
-}
-
 func randGetExisting(g *generator, rng *rand.Rand) Operation {
 	key := randMapKey(rng, g.keys)
 	return get(key)
-}
-
-func randGetExistingForUpdate(g *generator, rng *rand.Rand) Operation {
-	key := randMapKey(rng, g.keys)
-	op := get(key)
-	op.Get.ForUpdate = true
-	return op
 }
 
 func randPutMissing(g *generator, rng *rand.Rand) Operation {
@@ -478,29 +408,6 @@ func randScanForUpdate(g *generator, rng *rand.Rand) Operation {
 	return op
 }
 
-func randReverseScan(g *generator, rng *rand.Rand) Operation {
-	op := randScan(g, rng)
-	op.Scan.Reverse = true
-	return op
-}
-
-func randReverseScanForUpdate(g *generator, rng *rand.Rand) Operation {
-	op := randReverseScan(g, rng)
-	op.Scan.ForUpdate = true
-	return op
-}
-
-func randDelMissing(g *generator, rng *rand.Rand) Operation {
-	key := randKey(rng)
-	g.keys[key] = struct{}{}
-	return del(key)
-}
-
-func randDelExisting(g *generator, rng *rand.Rand) Operation {
-	key := randMapKey(rng, g.keys)
-	return del(key)
-}
-
 func randSplitNew(g *generator, rng *rand.Rand) Operation {
 	key := randKey(rng)
 	g.currentSplits[key] = struct{}{}
@@ -530,7 +437,7 @@ func randMergeIsSplit(g *generator, rng *rand.Rand) Operation {
 func makeRemoveReplicaFn(key string, current []roachpb.ReplicationTarget) opGenFunc {
 	return func(g *generator, rng *rand.Rand) Operation {
 		change := roachpb.ReplicationChange{
-			ChangeType: roachpb.REMOVE_VOTER,
+			ChangeType: roachpb.REMOVE_REPLICA,
 			Target:     current[rng.Intn(len(current))],
 		}
 		return changeReplicas(key, change)
@@ -553,28 +460,17 @@ func makeAddReplicaFn(key string, current []roachpb.ReplicationTarget, atomicSwa
 		}
 		candidate := candidates[rng.Intn(len(candidates))]
 		changes := []roachpb.ReplicationChange{{
-			ChangeType: roachpb.ADD_VOTER,
+			ChangeType: roachpb.ADD_REPLICA,
 			Target:     candidate,
 		}}
 		if atomicSwap {
 			changes = append(changes, roachpb.ReplicationChange{
-				ChangeType: roachpb.REMOVE_VOTER,
+				ChangeType: roachpb.REMOVE_REPLICA,
 				Target:     current[rng.Intn(len(current))],
 			})
 		}
 		return changeReplicas(key, changes...)
 	}
-}
-
-func makeTransferLeaseFn(key string, current []roachpb.ReplicationTarget) opGenFunc {
-	return func(g *generator, rng *rand.Rand) Operation {
-		target := current[rng.Intn(len(current))]
-		return transferLease(key, target.StoreID)
-	}
-}
-
-func toggleGlobalReads(_ *generator, _ *rand.Rand) Operation {
-	return changeZone(ChangeZoneType_ToggleGlobalReads)
 }
 
 func makeRandBatch(c *ClientOperationConfig) opGenFunc {
@@ -681,10 +577,6 @@ func get(key string) Operation {
 	return Operation{Get: &GetOperation{Key: []byte(key)}}
 }
 
-func getForUpdate(key string) Operation {
-	return Operation{Get: &GetOperation{Key: []byte(key), ForUpdate: true}}
-}
-
 func put(key, value string) Operation {
 	return Operation{Put: &PutOperation{Key: []byte(key), Value: []byte(value)}}
 }
@@ -697,18 +589,6 @@ func scanForUpdate(key, endKey string) Operation {
 	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), ForUpdate: true}}
 }
 
-func reverseScan(key, endKey string) Operation {
-	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), Reverse: true}}
-}
-
-func reverseScanForUpdate(key, endKey string) Operation {
-	return Operation{Scan: &ScanOperation{Key: []byte(key), EndKey: []byte(endKey), Reverse: true, ForUpdate: true}}
-}
-
-func del(key string) Operation {
-	return Operation{Delete: &DeleteOperation{Key: []byte(key)}}
-}
-
 func split(key string) Operation {
 	return Operation{Split: &SplitOperation{Key: []byte(key)}}
 }
@@ -719,12 +599,4 @@ func merge(key string) Operation {
 
 func changeReplicas(key string, changes ...roachpb.ReplicationChange) Operation {
 	return Operation{ChangeReplicas: &ChangeReplicasOperation{Key: []byte(key), Changes: changes}}
-}
-
-func transferLease(key string, target roachpb.StoreID) Operation {
-	return Operation{TransferLease: &TransferLeaseOperation{Key: []byte(key), Target: target}}
-}
-
-func changeZone(changeType ChangeZoneType) Operation {
-	return Operation{ChangeZone: &ChangeZoneOperation{Type: changeType}}
 }

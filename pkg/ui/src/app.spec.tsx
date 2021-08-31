@@ -26,11 +26,14 @@ import { NodeOverview } from "src/views/cluster/containers/nodeOverview";
 import { Logs } from "src/views/cluster/containers/nodeLogs";
 import { EventPageUnconnected } from "src/views/cluster/containers/events";
 import { JobsTable } from "src/views/jobs";
-import { DatabasesPage } from "src/views/databases/databasesPage";
-import { DatabaseDetailsPage } from "src/views/databases/databaseDetailsPage";
-import { DatabaseTablePage } from "src/views/databases/databaseTablePage";
+import {
+  DatabaseGrantsList,
+  DatabaseTablesList,
+} from "src/views/databases/containers/databases";
+import { TableMain } from "src/views/databases/containers/tableDetails";
 import { DataDistributionPage } from "src/views/cluster/containers/dataDistribution";
-import { StatementsPage, StatementDetails } from "@cockroachlabs/cluster-ui";
+import { StatementsPage } from "@cockroachlabs/cluster-ui";
+import { StatementDetails } from "src/views/statements/statementDetails";
 import Debug from "src/views/reports/containers/debug";
 import { ReduxDebug } from "src/views/reports/containers/redux";
 import { CustomChart } from "src/views/reports/containers/customChart";
@@ -54,9 +57,7 @@ describe("Routing to", () => {
     initialEntries: ["/"],
   });
   const store: Store<AdminUIState, Action> = createAdminUIStore(history);
-  const appWrapper: ReactWrapper = mount(
-    <App history={history} store={store} />,
-  );
+  const appWrapper: ReactWrapper = mount(<App history={history} store={store}/>);
 
   after(() => {
     appWrapper.unmount();
@@ -113,9 +114,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* time series metrics */
-  }
+  { /* time series metrics */}
   describe("'/metrics' path", () => {
     it("routes to <NodeGraphs> component", () => {
       navigateToPath("/metrics");
@@ -183,9 +182,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* node details */
-  }
+  { /* node details */}
   describe("'/node' path", () => {
     it("routes to <NodeList> component", () => {
       navigateToPath("/node");
@@ -213,9 +210,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* events & jobs */
-  }
+  { /* events & jobs */}
   describe("'/events' path", () => {
     it("routes to <EventPageUnconnected> component", () => {
       navigateToPath("/events");
@@ -230,29 +225,31 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* databases */
-  }
+  { /* databases */}
   describe("'/databases' path", () => {
-    it("routes to <DatabasesPage> component", () => {
+    it("routes to <DatabaseTablesList> component", () => {
       navigateToPath("/databases");
-      assert.lengthOf(appWrapper.find(DatabasesPage), 1);
+      assert.lengthOf(appWrapper.find(DatabaseTablesList), 1);
+    });
+
+    it("redirected to '/databases/tables'", () => {
+      navigateToPath("/databases");
+      const location = history.location;
+      assert.equal(location.pathname, "/databases/tables");
     });
   });
 
   describe("'/databases/tables' path", () => {
-    it("redirected to '/databases'", () => {
+    it("routes to <DatabaseTablesList> component", () => {
       navigateToPath("/databases/tables");
-      const location = history.location;
-      assert.equal(location.pathname, "/databases");
+      assert.lengthOf(appWrapper.find(DatabaseTablesList), 1);
     });
   });
 
   describe("'/databases/grants' path", () => {
-    it("redirected to '/databases'", () => {
+    it("routes to <DatabaseGrantsList> component", () => {
       navigateToPath("/databases/grants");
-      const location = history.location;
-      assert.equal(location.pathname, "/databases");
+      assert.lengthOf(appWrapper.find(DatabaseGrantsList), 1);
     });
   });
 
@@ -260,46 +257,42 @@ describe("Routing to", () => {
     it("redirected to '/database/:${databaseNameAttr}/table/:${tableNameAttr}'", () => {
       navigateToPath("/databases/database/some-db-name/table/some-table-name");
       const location = history.location;
-      assert.equal(
-        location.pathname,
-        "/database/some-db-name/table/some-table-name",
-      );
+      assert.equal(location.pathname, "/database/some-db-name/table/some-table-name");
     });
   });
 
   describe("'/database' path", () => {
     it("redirected to '/databases'", () => {
-      navigateToPath("/database");
+      navigateToPath("/databases/tables");
       const location = history.location;
-      assert.equal(location.pathname, "/databases");
+      assert.equal(location.pathname, "/databases/tables");
     });
   });
 
   describe("'/database/:${databaseNameAttr}' path", () => {
-    it("routes to <DatabaseDetailsPage> component", () => {
+    it("redirected to '/databases'", () => {
       navigateToPath("/database/some-db-name");
-      assert.lengthOf(appWrapper.find(DatabaseDetailsPage), 1);
+      const location = history.location;
+      assert.equal(location.pathname, "/databases/tables");
     });
   });
 
   describe("'/database/:${databaseNameAttr}/table' path", () => {
-    it("redirected to '/databases/:${databaseNameAttr}'", () => {
+    it("redirected to '/databases/tables'", () => {
       navigateToPath("/database/some-db-name/table");
       const location = history.location;
-      assert.equal(location.pathname, "/database/some-db-name");
+      assert.equal(location.pathname, "/databases/tables");
     });
   });
 
   describe("'/database/:${databaseNameAttr}/table/:${tableNameAttr}' path", () => {
-    it("routes to <DatabaseTablePage> component", () => {
+    it("routes to <TableMain> component", () => {
       navigateToPath("/database/some-db-name/table/some-table-name");
-      assert.lengthOf(appWrapper.find(DatabaseTablePage), 1);
+      assert.lengthOf(appWrapper.find(TableMain), 1);
     });
   });
 
-  {
-    /* data distribution */
-  }
+  { /* data distribution */}
   describe("'/data-distribution' path", () => {
     it("routes to <DataDistributionPage> component", () => {
       navigateToPath("/data-distribution");
@@ -307,9 +300,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* statement statistics */
-  }
+  { /* statement statistics */}
   describe("'/statements' path", () => {
     it("routes to <StatementsPage> component", () => {
       navigateToPath("/statements");
@@ -360,9 +351,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* debug pages */
-  }
+  { /* debug pages */}
   describe("'/debug' path", () => {
     it("routes to <Debug> component", () => {
       navigateToPath("/debug");
@@ -394,9 +383,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* raft pages */
-  }
+  { /* raft pages */}
   describe("'/raft' path", () => {
     it("routes to <Raft> component", () => {
       navigateToPath("/raft");
@@ -508,9 +495,7 @@ describe("Routing to", () => {
     });
   });
 
-  {
-    /* old route redirects */
-  }
+  { /* old route redirects */}
   describe("'/cluster' path", () => {
     it("redirected to '/metrics/overview/cluster'", () => {
       navigateToPath("/cluster");
@@ -534,10 +519,7 @@ describe("Routing to", () => {
       const nodeIDAttr = 1;
       navigateToPath(`/cluster/node/${nodeIDAttr}/${dashboardNameAttr}`);
       const location = history.location;
-      assert.equal(
-        location.pathname,
-        `/metrics/${dashboardNameAttr}/node/${nodeIDAttr}`,
-      );
+      assert.equal(location.pathname, `/metrics/${dashboardNameAttr}/node/${nodeIDAttr}`);
     });
   });
 

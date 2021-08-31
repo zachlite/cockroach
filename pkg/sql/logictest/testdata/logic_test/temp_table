@@ -286,53 +286,41 @@ grant testuser to root
 statement ok
 ALTER TABLE second_db.pg_temp.a OWNER TO testuser
 
-# Regression test for dropping a database which contains schemas from other
-# sessions.
 
-subtest drop_database_with_temp_schemas_from_other_sessions
-
-statement ok
-CREATE DATABASE to_drop;
-ALTER DATABASE to_drop OWNER TO testuser;
-
-user testuser
+# Below is a regression test to deal ensure that views which are "upgraded" to
+# temporary because they reference temporary tables are indeed marked as
+# temporary.
+subtest upgraded_view_marked_temporary
 
 statement ok
-USE to_drop;
-SET experimental_enable_temp_tables=true;
-CREATE TABLE not_temp (i INT PRIMARY KEY);
-CREATE TEMPORARY TABLE testuser_tmp (i INT PRIMARY KEY);
-CREATE TEMPORARY VIEW tempuser_view AS SELECT i FROM testuser_tmp;
+CREATE DATABASE upgraded_view_marked_temporary;
+USE upgraded_view_marked_temporary;
+CREATE TEMPORARY TABLE t (i INT PRIMARY KEY);
+CREATE VIEW v AS SELECT i FROM t;
+
+# Confirm at a low-level that the descriptor for v is marked temporary.
+
+query T
+SELECT crdb_internal.pb_to_json(
+        'cockroach.sql.sqlbase.Descriptor',
+        descriptor
+       )->'table'->>'temporary'
+  FROM system.descriptor
+ WHERE id = 'v'::REGCLASS;
+----
+true
+
+statement ok
 USE test
+
+# Switch to a different user and thus different connection and attempt to
+# drop the database which contains the promoted temporary view. If the view
+# were not properly marked as temporary, this would fail with an opaque error
+# about not being able to find the descriptor.
 
 user root
 
 statement ok
-USE to_drop;
-CREATE TEMPORARY TABLE root_temp (i INT PRIMARY KEY);
-
-let $before_drop
-SELECT now()
-
-statement ok
-USE test;
-DROP DATABASE to_drop CASCADE
-
-query T
-  SELECT regexp_replace(
-            json_array_elements_text(
-                (info::JSONB)->'DroppedSchemaObjects'
-            ),
-            'pg_temp_[^.]+.',
-            'pg_temp.'
-         ) AS name
-    FROM system.eventlog
-   WHERE "timestamp" > '$before_drop'
-ORDER BY name DESC;
-----
-to_drop.public.not_temp
-to_drop.pg_temp.testuser_tmp
-to_drop.pg_temp.tempuser_view
-to_drop.pg_temp.root_temp
+DROP DATABASE upgraded_view_marked_temporary CASCADE;
 
 user testuser

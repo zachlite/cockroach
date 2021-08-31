@@ -11,10 +11,8 @@
 package build
 
 import (
-	"bytes"
 	"fmt"
 	"runtime"
-	"text/tabwriter"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -79,26 +77,6 @@ func (b Info) Short() string {
 		b.Distribution, b.Tag, plat, b.Time, b.GoVersion)
 }
 
-// Long returns a pretty printed build summary
-func (b Info) Long() string {
-	var buf bytes.Buffer
-	tw := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
-	fmt.Fprintf(tw, "Build Tag:        %s\n", b.Tag)
-	fmt.Fprintf(tw, "Build Time:       %s\n", b.Time)
-	fmt.Fprintf(tw, "Distribution:     %s\n", b.Distribution)
-	fmt.Fprintf(tw, "Platform:         %s", b.Platform)
-	if b.CgoTargetTriple != "" {
-		fmt.Fprintf(tw, " (%s)", b.CgoTargetTriple)
-	}
-	fmt.Fprintln(tw)
-	fmt.Fprintf(tw, "Go Version:       %s\n", b.GoVersion)
-	fmt.Fprintf(tw, "C Compiler:       %s\n", b.CgoCompiler)
-	fmt.Fprintf(tw, "Build Commit ID:  %s\n", b.Revision)
-	fmt.Fprintf(tw, "Build Type:       %s", b.Type) // No final newline: cobra prints one for us.
-	_ = tw.Flush()
-	return buf.String()
-}
-
 // GoTime parses the utcTime string and returns a time.Time.
 func (b Info) GoTime() time.Time {
 	val, err := time.Parse(TimeFormat, b.Time)
@@ -139,9 +117,4 @@ func TestingOverrideTag(t string) func() {
 	prev := tag
 	tag = t
 	return func() { tag = prev }
-}
-
-// MakeIssueURL produces a URL to a CockroachDB issue.
-func MakeIssueURL(issue int) string {
-	return fmt.Sprintf("https://go.crdb.dev/issue-v/%d/%s", issue, VersionPrefix())
 }

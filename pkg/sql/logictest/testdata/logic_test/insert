@@ -41,13 +41,13 @@ SELECT v || 'hello' FROM [INSERT INTO kv VALUES ('e', 'f'), ('g', '') RETURNING 
 fhello
 hello
 
-statement error pgcode 23505 duplicate key value violates unique constraint "a"\nDETAIL: Key \(v\)=\('f'\) already exists\.
+statement error pgcode 23505 duplicate key value \(v\)=\('f'\) violates unique constraint "a"
 INSERT INTO kv VALUES ('h', 'f')
 
 statement ok
 INSERT INTO kv VALUES ('f', 'g')
 
-statement error duplicate key value violates unique constraint "a"\nDETAIL: Key \(v\)=\('g'\) already exists\.
+statement error duplicate key value \(v\)=\('g'\) violates unique constraint "a"
 INSERT INTO kv VALUES ('h', 'g')
 
 query TT
@@ -330,7 +330,7 @@ INSERT INTO abc VALUES (1, 2, 10)
 
 # Verify we get the correct message, even though internally the ConditionalPut
 # for the index key will also fail.
-statement error pgcode 23505 duplicate key value violates unique constraint "primary"\nDETAIL: Key \(a,b\)=\(1,2\) already exists\.
+statement error pgcode 23505 duplicate key value \(a,b\)=\(1,2\) violates unique constraint "primary"
 INSERT INTO abc VALUES (1, 2, 20)
 
 statement ok
@@ -352,7 +352,7 @@ CREATE TABLE blindcput (
 
 # The optimization thresholds at 10 k/v operations, so we need at least that
 # many in one batch to trigger it.
-statement error duplicate key value violates unique constraint "primary"\nDETAIL: Key \(x\)=\(1\) already exists\.
+statement error duplicate key value \(x\)=\(1\) violates unique constraint "primary"
 INSERT INTO blindcput values (1, 1), (2, 2), (3, 3), (4, 4), (1, 5)
 
 statement ok
@@ -486,8 +486,6 @@ CREATE TABLE public.sw (
    dc VARCHAR(3) COLLATE en NULL,
    ec STRING COLLATE en NULL,
    fc STRING(3) COLLATE en NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (a, b, c, d, e, f, g, ac, bc, cc, dc, ec, fc, rowid)
 )
 
@@ -501,10 +499,10 @@ INSERT INTO sw VALUES (
    '', '', '', '', '', '', '',
    '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en, '' COLLATE en)
 
-statement error value too long for type CHAR
+statement error value too long for type CHAR \(column "a"\)
 INSERT INTO sw(a) VALUES ('ab')
 
-statement error value too long for type CHAR COLLATE en
+statement error value too long for type CHAR COLLATE en \(column "ac"\)
 INSERT INTO sw(ac) VALUES ('ab' COLLATE en)
 
 statement ok
@@ -512,22 +510,22 @@ INSERT INTO sw (b, c, d, e, f, g, bc, cc, dc, ec, fc) VALUES (
    'b22', 'c22', 'd22', 'e22', 'f22', 'g22',
    'B22' COLLATE en, 'C22' COLLATE en, 'D22' COLLATE en, 'E22' COLLATE en, 'F22' COLLATE en)
 
-statement error value too long for type CHAR\(3\)
+statement error value too long for type CHAR\(3\) \(column "b"\)
 INSERT INTO sw(b) VALUES ('abcd')
 
-statement error value too long for type CHAR\(3\) COLLATE en
+statement error value too long for type CHAR\(3\) COLLATE en \(column "bc"\)
 INSERT INTO sw(bc) VALUES ('abcd' COLLATE en)
 
-statement error value too long for type VARCHAR\(3\)
+statement error value too long for type VARCHAR\(3\) \(column "d"\)
 INSERT INTO sw(d) VALUES ('abcd')
 
-statement error value too long for type VARCHAR\(3\) COLLATE en
+statement error value too long for type VARCHAR\(3\) COLLATE en \(column "dc"\)
 INSERT INTO sw(dc) VALUES ('abcd' COLLATE en)
 
-statement error value too long for type STRING\(3\)
+statement error value too long for type STRING\(3\) \(column "f"\)
 INSERT INTO sw(f) VALUES ('abcd')
 
-statement error value too long for type STRING\(3\) COLLATE en
+statement error value too long for type STRING\(3\) COLLATE en \(column "fc"\)
 INSERT INTO sw(fc) VALUES ('abcd' COLLATE en)
 
 subtest regression_26742
@@ -599,8 +597,6 @@ SELECT create_statement FROM [SHOW CREATE t29494]
 ----
 CREATE TABLE public.t29494 (
    x INT8 NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (x, rowid)
 )
 
@@ -640,8 +636,6 @@ SELECT create_statement FROM [SHOW CREATE t32759]
 CREATE TABLE public.t32759 (
    x INT8 NULL,
    z INT8 NULL,
-   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (x, z, rowid)
 )
 

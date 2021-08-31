@@ -1,5 +1,5 @@
 @import "src/core/index.module";
-@import "src/sortedtable/table.module.scss";
+@import 'src/sortedtable/table.module.scss';
 
 .base-heading {
   padding: 12px 0;
@@ -28,11 +28,10 @@
 
   &__row {
     &--body {
-      background-color: $colors--neutral-10;
       border-top: none;
 
       &:hover {
-        background-color: $colors--neutral-10;
+        background-color: $adminui-white;
       }
     }
   }
@@ -51,6 +50,7 @@
     height: 16px;
     display: inline-block;
 
+
     text-transform: none;
     font-weight: normal;
     white-space: normal;
@@ -68,7 +68,7 @@
     height: 16px;
     border-radius: 50%;
     border: 1px solid $tooltip-color;
-    font-size: 14px;
+    font-size: 12px;
     line-height: 14px;
     text-align: center;
     color: $tooltip-color;
@@ -88,7 +88,6 @@
     height: 100%;
     max-height: 100%;
     overflow: hidden;
-    padding: 24px 32px;
 
     .plan-view-container-scroll {
       max-height: 400px;
@@ -105,15 +104,27 @@
   }
 
   .node-icon {
-    font-size: 14px;
-    margin: 0 4px 0 0;
-    color: $chip-grey;
+    margin: 0 10px 0 0;
+    color: $grey-light;
+  }
+
+  .warning-icon {
+    margin: 0 4px 0 4px;
+    position: relative;
+    top: 3px;
+
+    path {
+      fill: $colors--functional-orange-4;
+    }
   }
 
   .warn {
+    position: relative;
+    left: -5px;
     color: $colors--functional-orange-4;
-    text-transform: uppercase;
-    border-bottom: 1px dashed $adminui-white;
+    background-color: rgba(209, 135, 55, 0.06);
+    border-radius: 2px;
+    padding: 2px;
   }
 
   .nodeDetails {
@@ -122,45 +133,27 @@
     border: 1px solid transparent;
 
     b {
-      font-family: $font-family--monospace;
-      border-bottom: 1px dashed $adminui-white;
-      font-size: 14px;
-      font-weight: 500;
+      font-family: $font-family--semi-bold;
+      font-size: 12px;
+      font-weight: 600;
       line-height: 1.67;
       letter-spacing: 0.3px;
-      color: $chip-grey;
-    }
-
-    &:only-child {
-      .nodeAttributes {
-        border-left: 1px solid transparent;
-      }
-    }
-  }
-
-  .nodeAttributes.globalAttributes {
-    margin-bottom: 40px;
-    padding: 0 0 40px 0;
-    border-left: none;
-    border-bottom: 1px solid $colors--neutral-5;
-
-    .nodeAttributeKey {
-      border-bottom: 1px dashed $adminui-white;
+      color: $text-color;
     }
   }
 
   .nodeAttributes {
-    color: $chip-grey;
-    padding: 3px 14px 12px 8px;
-    margin-left: 2px;
-    border-left: 1px solid $chip-grey;
-    font-family: $font-family--mono-regular;
-    font-size: 14px;
+    color: $adminui-grey-2;
+    padding: 7px 16px 0px 18px;
+    margin-left: 3px;
+    border-left: 1px solid $grey-light;
+    font-family: $font-family--monospace;
+    font-size: 12px;
     font-weight: 500;
     line-height: 1.83;
 
     .nodeAttributeKey {
-      color: $colors--primary-blue-6;
+      color: $colors--primary-green-3;
     }
   }
 
@@ -169,37 +162,85 @@
     margin: 0;
 
     li {
-      padding: 0 0 0 8px;
+      padding: 0;
       margin: 0;
       position: relative;
       list-style-type: none;
 
-      &:not(:last-child):before {
-        content: "";
+      &:not(:first-child):after {
+        content: '';
         width: 1px;
-        height: 100%;
-        background-color: $chip-grey;
+        height: 19px;
+        background-color: $grey-light;
         position: absolute;
-        left: 3px;
+        top: -10px;
+        left: 4px;
       }
 
       ul {
-        padding-left: 32px;
+        padding-left: 27px;
         position: relative;
 
-        &:before {
-          content: "";
-          width: 28px;
-          height: 29px;
-          position: absolute;
-          border-left: 1px solid $chip-grey;
-          border-bottom: 1px solid $chip-grey;
-          top: -10px;
-          left: -5px;
+        &:last-child {
+          &:before {
+            content: '';
+            width: 28px;
+            height: 29px;
+            position: absolute;
+            border-left: 1px solid $grey-light;
+            border-bottom: 1px solid $grey-light;
+            top: -10px;
+            left: 4px;
+            border-bottom-left-radius: 10px;
+          }
+
+          li {
+            &:before {
+              content: none;
+            }
+
+            &:first-child:after {
+              content: none;
+            }
+          }
         }
 
-        li:only-child:before {
-          content: none;
+        li {
+          .nodeDetails {
+            margin-left: 12px;
+          }
+
+          &:not(:first-child):after {
+            left: 16px;
+          }
+
+          &:last-child {
+            .nodeAttributes {
+              border-color: transparent;
+            }
+          }
+
+          &:first-child {
+            &:after {
+              content: '';
+              height: 1px;
+              width: 27px;
+              background-color: $grey-light;
+              position: absolute;
+              top: 18px;
+              left: -22px;
+            }
+          }
+
+          &:before {
+            content: '';
+            width: 1px;
+            height: 100%;
+            background-color: $grey-light;
+            position: absolute;
+            top: -10px;
+            left: -23px;
+          }
         }
       }
     }

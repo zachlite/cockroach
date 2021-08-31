@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/readsummary/rspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -67,11 +66,11 @@ func isTrivial(r *kvserverpb.ReplicatedEvalResult) bool {
 	// it is trivial.
 	allowlist := *r
 	allowlist.Delta = enginepb.MVCCStatsDelta{}
-	allowlist.WriteTimestamp = hlc.Timestamp{}
+	allowlist.Timestamp = hlc.Timestamp{}
 	allowlist.DeprecatedDelta = nil
 	allowlist.PrevLeaseProposal = nil
 	allowlist.State = nil
-	return allowlist.IsZero()
+	return allowlist.Equal(kvserverpb.ReplicatedEvalResult{})
 }
 
 // clearTrivialReplicatedEvalResultFields is used to zero out the fields of a
@@ -85,7 +84,7 @@ func clearTrivialReplicatedEvalResultFields(r *kvserverpb.ReplicatedEvalResult) 
 	// they don't trigger an assertion at the end of the application process
 	// (which checks that all fields were handled).
 	r.IsLeaseRequest = false
-	r.WriteTimestamp = hlc.Timestamp{}
+	r.Timestamp = hlc.Timestamp{}
 	r.PrevLeaseProposal = nil
 	// The state fields cleared here were already applied to the in-memory view of
 	// replica state for this batch.
@@ -119,7 +118,6 @@ func (r *Replica) prepareLocalResult(ctx context.Context, cmd *replicatedCmd) {
 			ReplicatedEvalResult: *cmd.replicatedResult(),
 			StoreID:              r.store.StoreID(),
 			RangeID:              r.RangeID,
-			Req:                  cmd.proposal.Request,
 		})
 		if cmd.proposalRetry == 0 {
 			cmd.proposalRetry = proposalReevaluationReason(newPropRetry)
@@ -207,34 +205,23 @@ func (r *Replica) tryReproposeWithNewLeaseIndex(
 
 	minTS, untrack := r.store.cfg.ClosedTimestamp.Tracker.Track(ctx)
 	defer untrack(ctx, 0, 0, 0) // covers all error paths below
-
-	// We need to track the request again in order to protect its timestamp until
-	// it gets reproposed.
-	// TODO(andrei): Only track if the request consults the ts cache. Some
-	// requests (e.g. EndTxn) don't care about closed timestamps.
-	minTS2, tok := r.mu.proposalBuf.TrackEvaluatingRequest(ctx, p.Request.WriteTimestamp())
-	defer tok.DoneIfNotMoved(ctx)
-	minTS.Forward(minTS2)
-
 	// NB: p.Request.Timestamp reflects the action of ba.SetActiveTimestamp.
-	// The IsIntentWrite condition matches the similar logic for caring
-	// about the closed timestamp cache in applyTimestampCache().
-	if p.Request.IsIntentWrite() && p.Request.WriteTimestamp().LessEq(minTS) {
+	if p.Request.Timestamp.Less(minTS) {
 		// The tracker wants us to forward the request timestamp, but we can't
 		// do that without re-evaluating, so give up. The error returned here
 		// will go to back to DistSender, so send something it can digest.
 		err := newNotLeaseHolderError(
-			*r.mu.state.Lease,
+			r.mu.state.Lease,
 			r.store.StoreID(),
 			r.mu.state.Desc,
-			"reproposal failed due to closed timestamp",
 		)
+		err.CustomMsg = "reproposal failed due to closed timestamp"
 		return roachpb.NewError(err)
 	}
 	// Some tests check for this log message in the trace.
 	log.VEventf(ctx, 2, "retry: proposalIllegalLeaseIndex")
 
-	maxLeaseIndex, pErr := r.propose(ctx, p, tok.Move(ctx))
+	maxLeaseIndex, pErr := r.propose(ctx, p)
 	if pErr != nil {
 		return pErr
 	}
@@ -258,13 +245,7 @@ func (r *Replica) handleSplitResult(ctx context.Context, split *kvserverpb.Split
 
 func (r *Replica) handleMergeResult(ctx context.Context, merge *kvserverpb.Merge) {
 	if err := r.store.MergeRange(
-		ctx,
-		r,
-		merge.LeftDesc,
-		merge.RightDesc,
-		merge.FreezeStart,
-		merge.RightClosedTimestamp,
-		merge.RightReadSummary,
+		ctx, r, merge.LeftDesc, merge.RightDesc, merge.FreezeStart,
 	); err != nil {
 		// Our in-memory state has diverged from the on-disk state.
 		log.Fatalf(ctx, "failed to update store after merging range: %s", err)
@@ -275,16 +256,8 @@ func (r *Replica) handleDescResult(ctx context.Context, desc *roachpb.RangeDescr
 	r.setDescRaftMuLocked(ctx, desc)
 }
 
-func (r *Replica) handleLeaseResult(
-	ctx context.Context, lease *roachpb.Lease, priorReadSum *rspb.ReadSummary,
-) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.leasePostApplyLocked(ctx,
-		r.mu.state.Lease, /* prevLease */
-		lease,            /* newLease */
-		priorReadSum,
-		assertNoLeaseJump)
+func (r *Replica) handleLeaseResult(ctx context.Context, lease *roachpb.Lease) {
+	r.leasePostApply(ctx, *lease, false /* permitJump */)
 }
 
 func (r *Replica) handleTruncatedStateResult(
@@ -317,15 +290,6 @@ func (r *Replica) handleGCThresholdResult(ctx context.Context, thresh *hlc.Times
 	}
 	r.mu.Lock()
 	r.mu.state.GCThreshold = thresh
-	r.mu.Unlock()
-}
-
-func (r *Replica) handleVersionResult(ctx context.Context, version *roachpb.Version) {
-	if (*version == roachpb.Version{}) {
-		log.Fatal(ctx, "not expecting empty replica version downstream of raft")
-	}
-	r.mu.Lock()
-	r.mu.state.Version = version
 	r.mu.Unlock()
 }
 
@@ -392,5 +356,17 @@ func (r *Replica) handleRaftLogDeltaResult(ctx context.Context, delta int64) {
 	}
 	if r.mu.raftLogLastCheckSize < 0 {
 		r.mu.raftLogLastCheckSize = 0
+	}
+}
+
+func (r *Replica) handleSuggestedCompactionsResult(
+	ctx context.Context, scs []kvserverpb.SuggestedCompaction,
+) {
+	// Pebble Stores don't use a compactor.
+	if r.store.compactor == nil {
+		return
+	}
+	for _, sc := range scs {
+		r.store.compactor.Suggest(ctx, sc)
 	}
 }

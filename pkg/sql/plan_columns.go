@@ -10,10 +10,7 @@
 
 package sql
 
-import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-)
+import "github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 
 var noColumns = make(colinfo.ResultColumns, 0)
 
@@ -52,6 +49,8 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 		return n.columns
 	case *joinNode:
 		return n.columns
+	case *interleavedJoinNode:
+		return n.columns
 	case *ordinalityNode:
 		return n.columns
 	case *renderNode:
@@ -63,6 +62,8 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 	case *valuesNode:
 		return n.columns
 	case *virtualTableNode:
+		return n.columns
+	case *explainPlanNode:
 		return n.columns
 	case *windowNode:
 		return n.columns
@@ -100,12 +101,10 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 	// Nodes with a fixed schema.
 	case *scrubNode:
 		return n.getColumns(mut, colinfo.ScrubColumns)
-	case *explainDDLNode:
-		return n.getColumns(mut, colinfo.ExplainPlanColumns)
-	case *explainPlanNode:
-		return n.getColumns(mut, colinfo.ExplainPlanColumns)
+	case *explainDistSQLNode:
+		return n.getColumns(mut, colinfo.ExplainDistSQLColumns)
 	case *explainVecNode:
-		return n.getColumns(mut, colinfo.ExplainPlanColumns)
+		return n.getColumns(mut, colinfo.ExplainVecColumns)
 	case *relocateNode:
 		return n.getColumns(mut, colinfo.AlterTableRelocateColumns)
 	case *scatterNode:
@@ -163,20 +162,10 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 	return noColumns
 }
 
-// planTypes returns the types schema of the rows produced by this planNode. See
-// comments on planColumns for more details.
-func planTypes(plan planNode) []*types.T {
-	columns := planColumns(plan)
-	typs := make([]*types.T, len(columns))
-	for i := range typs {
-		typs[i] = columns[i].Typ
-	}
-	return typs
-}
-
-// optColumnsSlot is a helper struct for nodes with a static signature.
-// It allows instances to reuse a common (shared) ResultColumns slice as long as
-// no read/write access is requested to the slice via planMutableColumns.
+// optColumnsSlot is a helper struct for nodes with a static signature
+// (e.g. explainDistSQLNode). It allows instances to reuse a common
+// (shared) ResultColumns slice as long as no read/write access is
+// requested to the slice via planMutableColumns.
 type optColumnsSlot struct {
 	columns colinfo.ResultColumns
 }

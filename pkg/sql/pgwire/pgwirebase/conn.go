@@ -29,7 +29,10 @@ type Conn interface {
 	// BeginCopyIn sends the message server message initiating the Copy-in
 	// subprotocol (COPY ... FROM STDIN). This message informs the client about
 	// the columns that are expected for the rows to be inserted.
-	BeginCopyIn(ctx context.Context, columns []colinfo.ResultColumn, format FormatCode) error
+	//
+	// Currently, we only support the "text" format for COPY IN.
+	// See: https://www.postgresql.org/docs/current/static/protocol-flow.html#PROTOCOL-COPY
+	BeginCopyIn(ctx context.Context, columns []colinfo.ResultColumn) error
 
 	// SendCommandComplete sends a serverMsgCommandComplete with the given
 	// payload.

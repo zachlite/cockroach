@@ -30,7 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,18 +146,12 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 		testutils.SucceedsSoon(t, func() error {
 			desc, err := tc.LookupRange(tablePrefix)
 			require.NoError(t, err)
-			// Temporarily turn off queues as we're about to make a manual
-			// replication change. We don't want to turn it off throughout
-			// these tests as sometimes we change zone configs and expect
-			// replicas to move according to them.
-			tc.ToggleReplicateQueues(false)
-			defer tc.ToggleReplicateQueues(true)
-			voters := desc.Replicas().VoterDescriptors()
+			voters := desc.Replicas().Voters()
 			if len(voters) == 1 && voters[0].NodeID == tc.Server(1).NodeID() {
 				return nil
 			}
 			if len(voters) == 1 {
-				desc, err = tc.AddVoters(tablePrefix, tc.Target(1))
+				desc, err = tc.AddReplicas(tablePrefix, tc.Target(1))
 				if err != nil {
 					return err
 				}
@@ -165,7 +159,7 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 			if err = tc.TransferRangeLease(desc, tc.Target(1)); err != nil {
 				return err
 			}
-			_, err = tc.RemoveVoters(tablePrefix, tc.Target(0))
+			_, err = tc.RemoveReplicas(tablePrefix, tc.Target(0))
 			return err
 		})
 	}
@@ -270,31 +264,28 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 
 		s, repl := getFirstStoreReplica(t, tc.Server(1), tablePrefix)
 		s.SetReplicateQueueActive(false)
-		require.Len(t, repl.Desc().Replicas().Descriptors(), 1)
+		require.Len(t, repl.Desc().Replicas().All(), 1)
 		// We really need to make sure that the split queue has hit this range,
 		// otherwise we'll fail to backpressure.
-		_ = tc.Stopper().RunAsyncTask(ctx, "force-split", func(context.Context) {
-			_ = s.ForceSplitScanAndProcess()
-		})
-
+		go func() { _ = s.ForceSplitScanAndProcess() }()
 		waitForBlocked(repl.RangeID)
 
 		// Observe backpressure now that the range is just over the limit.
 		// Use pgx so that cancellation does something reasonable.
 		url, cleanup := sqlutils.PGUrl(t, tc.Server(1).ServingSQLAddr(), "", url.User("root"))
 		defer cleanup()
-		conf, err := pgx.ParseConfig(url.String())
+		conf, err := pgx.ParseConnectionString(url.String())
 		require.NoError(t, err)
-		c, err := pgx.ConnectConfig(ctx, conf)
+		c, err := pgx.Connect(conf)
 		require.NoError(t, err)
 		ctxWithCancel, cancel := context.WithCancel(ctx)
 		defer cancel()
 		upsertErrCh := make(chan error)
-		_ = tc.Stopper().RunAsyncTask(ctx, "upsert", func(ctx context.Context) {
-			_, err := c.Exec(ctxWithCancel, "UPSERT INTO foo VALUES ($1, $2)",
-				rRand.Intn(numRows), randutil.RandBytes(rRand, rowSize))
+		go func() {
+			_, err := c.ExecEx(ctxWithCancel, "UPSERT INTO foo VALUES ($1, $2)",
+				nil /* options */, rRand.Intn(numRows), randutil.RandBytes(rRand, rowSize))
 			upsertErrCh <- err
-		})
+		}()
 
 		select {
 		case <-time.After(10 * time.Millisecond):
@@ -302,6 +293,6 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 		case err := <-upsertErrCh:
 			t.Fatalf("expected no error because the request should hang, got %v", err)
 		}
-		require.Equal(t, context.Canceled, errors.Unwrap(<-upsertErrCh))
+		require.Equal(t, context.Canceled, <-upsertErrCh)
 	})
 }

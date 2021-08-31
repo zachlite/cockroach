@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -9,14 +9,8 @@
 // licenses/APL.txt.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { GlobalPropertiesType } from "./planView";
 
 type IExplainTreePlanNode = cockroach.sql.IExplainTreePlanNode;
-
-export const globalProperties: GlobalPropertiesType = {
-  distribution: { numerator: 0, denominator: 0 },
-  vectorized: { numerator: 0, denominator: 0 },
-};
 
 export const logicalPlan: IExplainTreePlanNode = {
   name: "root",

@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -230,9 +229,8 @@ func TestSchedulerLoop(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	m := newStoreMetrics(metric.TestSampleInterval)
 	p := newTestProcessor()
-	s := newRaftScheduler(m, p, 1)
+	s := newRaftScheduler(nil, p, 1)
 	stopper := stop.NewStopper()
 	ctx := context.Background()
 	defer stopper.Stop(ctx)
@@ -246,8 +244,6 @@ func TestSchedulerLoop(t *testing.T) {
 		}
 		return nil
 	})
-
-	require.Equal(t, int64(3), m.RaftSchedulerLatency.TotalCount())
 }
 
 // Verify that when we enqueue the same range multiple times for the same
@@ -256,16 +252,15 @@ func TestSchedulerBuffering(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	m := newStoreMetrics(metric.TestSampleInterval)
 	p := newTestProcessor()
-	s := newRaftScheduler(m, p, 1)
+	s := newRaftScheduler(nil, p, 1)
 	stopper := stop.NewStopper()
 	ctx := context.Background()
 	defer stopper.Stop(ctx)
 	s.Start(ctx, stopper)
 
 	testCases := []struct {
-		flag     raftScheduleFlags
+		state    raftScheduleState
 		expected string
 	}{
 		{stateRaftReady, "ready=[1:1] request=[] tick=[]"},
@@ -275,7 +270,7 @@ func TestSchedulerBuffering(t *testing.T) {
 	}
 
 	for _, c := range testCases {
-		s.signal(s.enqueueN(c.flag, 1, 1, 1, 1, 1))
+		s.signal(s.enqueueN(c.state, 1, 1, 1, 1, 1))
 
 		testutils.SucceedsSoon(t, func() error {
 			if s := p.String(); c.expected != s {

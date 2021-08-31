@@ -25,9 +25,12 @@ func init() {
 }
 
 func declareKeysLeaseInfo(
-	rs ImmutableRangeState, _ roachpb.Header, _ roachpb.Request, latchSpans, _ *spanset.SpanSet,
+	_ *roachpb.RangeDescriptor,
+	header roachpb.Header,
+	req roachpb.Request,
+	latchSpans, _ *spanset.SpanSet,
 ) {
-	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeLeaseKey(rs.GetRangeID())})
+	latchSpans.AddNonMVCC(spanset.SpanReadOnly, roachpb.Span{Key: keys.RangeLeaseKey(header.RangeID)})
 }
 
 // LeaseInfo returns information about the lease holder for the range.
@@ -40,10 +43,8 @@ func LeaseInfo(
 		// If there's a lease request in progress, speculatively return that future
 		// lease.
 		reply.Lease = nextLease
-		reply.CurrentLease = &lease
 	} else {
 		reply.Lease = lease
 	}
-	reply.EvaluatedBy = cArgs.EvalCtx.StoreID()
 	return result.Result{}, nil
 }

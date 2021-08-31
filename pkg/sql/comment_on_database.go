@@ -15,16 +15,15 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 )
 
 type commentOnDatabaseNode struct {
 	n      *tree.CommentOnDatabase
-	dbDesc catalog.DatabaseDescriptor
+	dbDesc *dbdesc.Immutable
 }
 
 // CommentOnDatabase add comment on a database.
@@ -33,16 +32,7 @@ type commentOnDatabaseNode struct {
 func (p *planner) CommentOnDatabase(
 	ctx context.Context, n *tree.CommentOnDatabase,
 ) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"COMMENT ON DATABASE",
-	); err != nil {
-		return nil, err
-	}
-
-	dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
-		string(n.Name), tree.DatabaseLookupFlags{Required: true})
+	dbDesc, err := p.ResolveUncachedDatabaseByName(ctx, string(n.Name), true)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +49,7 @@ func (n *commentOnDatabaseNode) startExec(params runParams) error {
 			params.ctx,
 			"set-db-comment",
 			params.p.Txn(),
-			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			"UPSERT INTO system.comments VALUES ($1, $2, 0, $3)",
 			keys.DatabaseCommentType,
 			n.dbDesc.GetID(),
@@ -72,7 +62,7 @@ func (n *commentOnDatabaseNode) startExec(params runParams) error {
 			params.ctx,
 			"delete-db-comment",
 			params.p.Txn(),
-			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=0",
 			keys.DatabaseCommentType,
 			n.dbDesc.GetID())
@@ -81,17 +71,23 @@ func (n *commentOnDatabaseNode) startExec(params runParams) error {
 		}
 	}
 
-	comment := ""
-	if n.n.Comment != nil {
-		comment = *n.n.Comment
-	}
-	return params.p.logEvent(params.ctx,
-		n.dbDesc.GetID(),
-		&eventpb.CommentOnDatabase{
-			DatabaseName: n.n.Name.String(),
-			Comment:      comment,
-			NullComment:  n.n.Comment == nil,
-		})
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogCommentOnDatabase,
+		int32(n.dbDesc.GetID()),
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			DatabaseName string
+			Statement    string
+			User         string
+			Comment      *string
+		}{
+			n.n.Name.String(),
+			n.n.String(),
+			params.SessionData().User,
+			n.n.Comment},
+	)
 }
 
 func (n *commentOnDatabaseNode) Next(runParams) (bool, error) { return false, nil }

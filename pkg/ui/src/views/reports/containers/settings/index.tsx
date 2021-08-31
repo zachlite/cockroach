@@ -17,7 +17,7 @@ import { withRouter } from "react-router-dom";
 import * as protos from "src/js/protos";
 import { refreshSettings } from "src/redux/apiReducers";
 import { AdminUIState } from "src/redux/state";
-import { Loading } from "@cockroachlabs/cluster-ui";
+import Loading from "src/views/shared/components/loading";
 import "./index.styl";
 import { CachedDataReducerState } from "src/redux/cachedDataReducer";
 
@@ -33,9 +33,7 @@ type SettingsProps = SettingsOwnProps;
  */
 export class Settings extends React.Component<SettingsProps, {}> {
   refresh(props = this.props) {
-    props.refreshSettings(
-      new protos.cockroach.server.serverpb.SettingsRequest(),
-    );
+    props.refreshSettings(new protos.cockroach.server.serverpb.SettingsRequest());
   }
 
   componentDidMount() {
@@ -55,33 +53,25 @@ export class Settings extends React.Component<SettingsProps, {}> {
       <table className="settings-table">
         <thead>
           <tr className="settings-table__row settings-table__row--header">
-            <th className="settings-table__cell settings-table__cell--header">
-              Setting
-            </th>
-            <th className="settings-table__cell settings-table__cell--header">
-              Value
-            </th>
-            <th className="settings-table__cell settings-table__cell--header">
-              Description
-            </th>
+            <th className="settings-table__cell settings-table__cell--header">Setting</th>
+            <th className="settings-table__cell settings-table__cell--header">Value</th>
+            <th className="settings-table__cell settings-table__cell--header">Description</th>
           </tr>
         </thead>
         <tbody>
-          {_.chain(data)
-            .filter((key) => key_values[key].public === wantPublic)
-            .sort()
-            .map((key: number) => (
-              <tr key={key} className="settings-table__row">
-                <td className="settings-table__cell">{key}</td>
-                <td className="settings-table__cell">
-                  {key_values[key].value}
-                </td>
-                <td className="settings-table__cell">
-                  {key_values[key].description}
-                </td>
-              </tr>
-            ))
-            .value()}
+          {
+            _.chain(data)
+              .filter(key => key_values[key].public === wantPublic)
+              .sort()
+              .map((key: number) => (
+                <tr key={key} className="settings-table__row">
+                  <td className="settings-table__cell">{key}</td>
+                  <td className="settings-table__cell">{key_values[key].value}</td>
+                  <td className="settings-table__cell">{key_values[key].description}</td>
+                </tr>
+              ))
+              .value()
+          }
         </tbody>
       </table>
     );
@@ -97,17 +87,10 @@ export class Settings extends React.Component<SettingsProps, {}> {
           error={this.props.settings.lastError}
           render={() => (
             <div>
-              <p className="settings-note">
-                Note that some settings have been redacted for security
-                purposes.
-              </p>
+              <p className="settings-note">Note that some settings have been redacted for security purposes.</p>
               {this.renderTable(true)}
               <h3>Reserved settings</h3>
-              <p className="settings-note">
-                Note that changes to the following settings can yield
-                unpredictable or negative effects on the entire cluster. Use at
-                your own risk.
-              </p>
+              <p className="settings-note">Note that changes to the following settings can yield unpredictable or negative effects on the entire cluster. Use at your own risk.</p>
               {this.renderTable(false)}
             </div>
           )}
@@ -117,8 +100,7 @@ export class Settings extends React.Component<SettingsProps, {}> {
   }
 }
 
-const mapStateToProps = (state: AdminUIState) => ({
-  // RootState contains declaration for whole state
+const mapStateToProps = (state: AdminUIState) => ({ // RootState contains declaration for whole state
   settings: state.cachedData.settings,
 });
 
@@ -127,6 +109,4 @@ const mapDispatchToProps = {
   refreshSettings,
 };
 
-export default withRouter(
-  connect(mapStateToProps, mapDispatchToProps)(Settings),
-);
+export default withRouter(connect(mapStateToProps, mapDispatchToProps)(Settings));

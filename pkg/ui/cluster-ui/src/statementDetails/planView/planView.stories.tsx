@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -11,12 +11,8 @@
 import React from "react";
 import { storiesOf } from "@storybook/react";
 import { PlanView } from "./planView";
-import { logicalPlan, globalProperties } from "./planView.fixtures";
+import { logicalPlan } from "./planView.fixtures";
 
 storiesOf("PlanView", module).add("default", () => (
-  <PlanView
-    title="Explain Plan"
-    globalProperties={globalProperties}
-    plan={logicalPlan}
-  />
+  <PlanView title="Logical Plan" plan={logicalPlan} />
 ));

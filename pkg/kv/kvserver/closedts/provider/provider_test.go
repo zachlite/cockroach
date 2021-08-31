@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -38,7 +37,6 @@ import (
 
 func TestProviderSubscribeNotify(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, closedts.IssueTrackingRemovalOfOldClosedTimestampsCode)
 
 	ctx := context.Background()
 	stopper := stop.NewStopper()
@@ -48,8 +46,8 @@ func TestProviderSubscribeNotify(t *testing.T) {
 	// We'll only unleash the closer loop when the test is basically done, and
 	// once we do that we want it to run aggressively.
 	// Testing that the closer loop works as advertised is left to another test.
-	closedts.TargetDuration.Override(ctx, &st.SV, time.Millisecond)
-	closedts.CloseFraction.Override(ctx, &st.SV, 1.0)
+	closedts.TargetDuration.Override(&st.SV, time.Millisecond)
+	closedts.CloseFraction.Override(&st.SV, 1.0)
 
 	storage := &providertestutils.TestStorage{}
 	unblockClockCh := make(chan struct{})
@@ -61,7 +59,6 @@ func TestProviderSubscribeNotify(t *testing.T) {
 		Clock: func(roachpb.NodeID) (hlc.Timestamp, ctpb.Epoch, error) {
 			select {
 			case <-stopper.ShouldQuiesce():
-				return hlc.Timestamp{}, 0, errors.New("stopping")
 			case <-unblockClockCh:
 			}
 			return hlc.Timestamp{}, ctpb.Epoch(1), errors.New("injected clock error")
@@ -108,7 +105,7 @@ func TestProviderSubscribeNotify(t *testing.T) {
 		defer log.Infof(ctx, "done")
 
 		ch := make(chan ctpb.Entry)
-		_ = stopper.RunAsyncTask(ctx, "subscribe", func(ctx context.Context) {
+		stopper.RunWorker(ctx, func(ctx context.Context) {
 			p.Subscribe(ctx, ch)
 		})
 
@@ -240,11 +237,10 @@ func TestProviderSubscribeNotify(t *testing.T) {
 // handled concurrent subscriptions.
 func TestProviderSubscribeConcurrent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
 
 	st := cluster.MakeTestingClusterSettings()
-	closedts.TargetDuration.Override(ctx, &st.SV, time.Millisecond)
-	closedts.CloseFraction.Override(ctx, &st.SV, 1.0)
+	closedts.TargetDuration.Override(&st.SV, time.Millisecond)
+	closedts.CloseFraction.Override(&st.SV, 1.0)
 
 	stopper := stop.NewStopper()
 	storage := &providertestutils.TestStorage{}
@@ -296,12 +292,10 @@ func TestProviderSubscribeConcurrent(t *testing.T) {
 // value re-enables it.
 func TestProviderTargetDurationSetting(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, closedts.IssueTrackingRemovalOfOldClosedTimestampsCode)
-	ctx := context.Background()
 
 	st := cluster.MakeTestingClusterSettings()
-	closedts.TargetDuration.Override(ctx, &st.SV, time.Millisecond)
-	closedts.CloseFraction.Override(ctx, &st.SV, 1.0)
+	closedts.TargetDuration.Override(&st.SV, time.Millisecond)
+	closedts.CloseFraction.Override(&st.SV, 1.0)
 
 	stopper := stop.NewStopper()
 	storage := &providertestutils.TestStorage{}
@@ -320,7 +314,7 @@ func TestProviderTargetDurationSetting(t *testing.T) {
 		},
 		Close: func(next hlc.Timestamp, expCurEpoch ctpb.Epoch) (hlc.Timestamp, map[roachpb.RangeID]ctpb.LAI, bool) {
 			if called++; called == 1 {
-				closedts.TargetDuration.Override(ctx, &st.SV, 0)
+				closedts.TargetDuration.Override(&st.SV, 0)
 			}
 			select {
 			case calledCh <- struct{}{}:
@@ -347,6 +341,6 @@ func TestProviderTargetDurationSetting(t *testing.T) {
 		t.Fatal("expected no updates to be sent")
 	case <-time.After(someTime):
 	}
-	closedts.TargetDuration.Override(ctx, &st.SV, time.Millisecond)
+	closedts.TargetDuration.Override(&st.SV, time.Millisecond)
 	<-calledCh
 }

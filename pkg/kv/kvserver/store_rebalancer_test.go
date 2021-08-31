@@ -13,6 +13,7 @@ package kvserver
 import (
 	"context"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -23,14 +24,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/gogo/protobuf/proto"
-	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/tracker"
 )
 
 var (
-	// noLocalityStores specifies a set of stores where s5 is
-	// under-utilized in terms of QPS, s2-s4 are in the middle, and s1 is
+	// noLocalityStores specifies a set of stores where one store is
+	// under-utilized in terms of QPS, three are in the middle, and one is
 	// over-utilized.
 	noLocalityStores = []*roachpb.StoreDescriptor{
 		{
@@ -73,8 +73,8 @@ var (
 
 type testRange struct {
 	// The first storeID in the list will be the leaseholder.
-	voters, nonVoters []roachpb.StoreID
-	qps               float64
+	storeIDs []roachpb.StoreID
+	qps      float64
 }
 
 func loadRanges(rr *replicaRankings, s *Store, ranges []testRange) {
@@ -83,25 +83,16 @@ func loadRanges(rr *replicaRankings, s *Store, ranges []testRange) {
 		repl := &Replica{store: s}
 		repl.mu.state.Desc = &roachpb.RangeDescriptor{}
 		repl.mu.zone = s.cfg.DefaultZoneConfig
-		for _, storeID := range r.voters {
+		for _, storeID := range r.storeIDs {
 			repl.mu.state.Desc.InternalReplicas = append(repl.mu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
 				NodeID:    roachpb.NodeID(storeID),
 				StoreID:   storeID,
 				ReplicaID: roachpb.ReplicaID(storeID),
-				Type:      roachpb.ReplicaTypeVoterFull(),
 			})
 		}
 		repl.mu.state.Lease = &roachpb.Lease{
 			Expiration: &hlc.MaxTimestamp,
 			Replica:    repl.mu.state.Desc.InternalReplicas[0],
-		}
-		for _, storeID := range r.nonVoters {
-			repl.mu.state.Desc.InternalReplicas = append(repl.mu.state.Desc.InternalReplicas, roachpb.ReplicaDescriptor{
-				NodeID:    roachpb.NodeID(storeID),
-				StoreID:   storeID,
-				ReplicaID: roachpb.ReplicaID(storeID),
-				Type:      roachpb.ReplicaTypeNonVoter(),
-			})
 		}
 		// TODO(a-robinson): The below three lines won't be needed once the old
 		// rangeInfo code is ripped out of the allocator.
@@ -189,7 +180,7 @@ func TestChooseLeaseToTransfer(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		loadRanges(rr, s, []testRange{{voters: tc.storeIDs, qps: tc.qps}})
+		loadRanges(rr, s, []testRange{{storeIDs: tc.storeIDs, qps: tc.qps}})
 		hottestRanges := rr.topQPS()
 		_, target, _ := sr.chooseLeaseToTransfer(
 			ctx, &hottestRanges, &localDesc, storeList, storeMap, minQPS, maxQPS)
@@ -200,7 +191,7 @@ func TestChooseLeaseToTransfer(t *testing.T) {
 	}
 }
 
-func TestChooseRangeToRebalance(t *testing.T) {
+func TestChooseReplicaToRebalance(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -245,316 +236,64 @@ func TestChooseRangeToRebalance(t *testing.T) {
 	}
 
 	testCases := []struct {
-		voters, nonVoters []roachpb.StoreID
-		// stores that are not to be considered for rebalancing
-		nonLive []roachpb.StoreID
-		qps     float64
-		// the first listed voter target is expected to be the leaseholder
-		expectedRebalancedVoters, expectedRebalancedNonVoters []roachpb.StoreID
+		storeIDs      []roachpb.StoreID
+		qps           float64
+		expectTargets []roachpb.StoreID // the first listed store is expected to be the leaseholder
 	}{
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: nil,
-		},
-		// If s5 is unavailable, s4 is the next best guess.
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{5},
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{4},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{4, 5},
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         500,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{5},
-			qps:                         500,
-			expectedRebalancedVoters:    []roachpb.StoreID{},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         800,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         1.5,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{5},
-			qps:                         1.5,
-			expectedRebalancedVoters:    []roachpb.StoreID{4},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         1.49,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 2},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{5},
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{4, 2},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 3},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 3},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 4},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 4},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         800,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         1.49,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 4, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         500,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 4, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 3, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         500,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 3, 4},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         500,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 4, 3},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 3, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 4, 3},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 3, 5},
-			nonVoters:                   nil,
-			nonLive:                     []roachpb.StoreID{4},
-			qps:                         100,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
+		{[]roachpb.StoreID{1}, 100, []roachpb.StoreID{5}},
+		{[]roachpb.StoreID{1}, 500, []roachpb.StoreID{5}},
+		{[]roachpb.StoreID{1}, 700, []roachpb.StoreID{5}},
+		{[]roachpb.StoreID{1}, 800, nil},
+		{[]roachpb.StoreID{1}, 1.5, []roachpb.StoreID{5}},
+		{[]roachpb.StoreID{1}, 1.49, nil},
+		{[]roachpb.StoreID{1, 2}, 100, []roachpb.StoreID{5, 2}},
+		{[]roachpb.StoreID{1, 3}, 100, []roachpb.StoreID{5, 3}},
+		{[]roachpb.StoreID{1, 4}, 100, []roachpb.StoreID{5, 4}},
+		{[]roachpb.StoreID{1, 2}, 800, nil},
+		{[]roachpb.StoreID{1, 2}, 1.49, nil},
+		{[]roachpb.StoreID{1, 4, 5}, 500, nil},
+		{[]roachpb.StoreID{1, 4, 5}, 100, nil},
+		{[]roachpb.StoreID{1, 3, 5}, 500, nil},
+		{[]roachpb.StoreID{1, 3, 4}, 500, []roachpb.StoreID{5, 4, 3}},
+		{[]roachpb.StoreID{1, 3, 5}, 100, []roachpb.StoreID{5, 4, 3}},
 		// Rebalancing to s2 isn't chosen even though it's better than s1 because it's above the mean.
-		{
-			voters:                      []roachpb.StoreID{1, 3, 4, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2, 4, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2, 3, 5},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 4, 3, 2},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1, 2, 3, 4},
-			nonVoters:                   nil,
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5, 4, 3, 2},
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			// Don't bother moving any replicas around since it won't make much of a
-			// difference. See `minQPSFraction` inside `chooseRangeToRebalance()`.
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   []roachpb.StoreID{2, 3, 4},
-			nonLive:                     nil,
-			qps:                         1,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			// None of the stores are worth moving to because they will be above the
-			// maxQPS after the move.
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   []roachpb.StoreID{2, 3, 4},
-			nonLive:                     nil,
-			qps:                         1000,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   []roachpb.StoreID{2, 3, 4},
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: []roachpb.StoreID{4, 3, 2},
-		},
-		// Voters may rebalance to stores that have a non-voter, and those
-		// displaced non-voters will be rebalanced to other valid stores.
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   []roachpb.StoreID{5},
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: []roachpb.StoreID{4},
-		},
-		{
-			voters:                      []roachpb.StoreID{1},
-			nonVoters:                   []roachpb.StoreID{5, 2, 3},
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    []roachpb.StoreID{5},
-			expectedRebalancedNonVoters: []roachpb.StoreID{2, 3, 4},
-		},
-		{
-			// Voters may rebalance to stores that have a non-voter, but only if the
-			// displaced non-voters can be rebalanced to other underfull (based on
-			// QPS) stores. Note that stores 1 and 2 are above the maxQPS and the
-			// meanQPS, respectively, so non-voters cannot be rebalanced to them.
-			voters:                      []roachpb.StoreID{1, 2},
-			nonVoters:                   []roachpb.StoreID{5, 4, 3},
-			nonLive:                     nil,
-			qps:                         100,
-			expectedRebalancedVoters:    nil,
-			expectedRebalancedNonVoters: nil,
-		},
+		{[]roachpb.StoreID{1, 3, 4, 5}, 100, nil},
+		{[]roachpb.StoreID{1, 2, 4, 5}, 100, nil},
+		{[]roachpb.StoreID{1, 2, 3, 5}, 100, []roachpb.StoreID{5, 4, 3, 2}},
+		{[]roachpb.StoreID{1, 2, 3, 4}, 100, []roachpb.StoreID{5, 4, 3, 2}},
 	}
 
 	for _, tc := range testCases {
 		t.Run("", func(t *testing.T) {
-			a.storePool.isStoreReadyForRoutineReplicaTransfer = func(_ context.Context, storeID roachpb.StoreID) bool {
-				for _, s := range tc.nonLive {
-					if s == storeID {
-						return false
-					}
-				}
-				return true
-			}
-
-			s.cfg.DefaultZoneConfig.NumVoters = proto.Int32(int32(len(tc.voters)))
-			s.cfg.DefaultZoneConfig.NumReplicas = proto.Int32(int32(len(tc.voters) + len(tc.nonVoters)))
-			loadRanges(
-				rr, s, []testRange{
-					{voters: tc.voters, nonVoters: tc.nonVoters, qps: tc.qps},
-				},
-			)
+			s.cfg.DefaultZoneConfig.NumReplicas = proto.Int32(int32(len(tc.storeIDs)))
+			loadRanges(rr, s, []testRange{{storeIDs: tc.storeIDs, qps: tc.qps}})
 			hottestRanges := rr.topQPS()
-			_, voterTargets, nonVoterTargets := sr.chooseRangeToRebalance(
-				ctx, &hottestRanges, &localDesc, storeList, storeMap, minQPS, maxQPS,
-			)
+			_, targets := sr.chooseReplicaToRebalance(
+				ctx, &hottestRanges, &localDesc, storeList, storeMap, minQPS, maxQPS)
 
-			require.Len(t, voterTargets, len(tc.expectedRebalancedVoters))
-			if len(voterTargets) > 0 && voterTargets[0].StoreID != tc.expectedRebalancedVoters[0] {
-				t.Errorf("chooseRangeToRebalance(existing=%v, qps=%f) chose s%d as leaseholder; want s%v",
-					tc.voters, tc.qps, voterTargets[0], tc.expectedRebalancedVoters[0])
+			if len(targets) != len(tc.expectTargets) {
+				t.Fatalf("chooseReplicaToRebalance(existing=%v, qps=%f) got %v; want %v",
+					tc.storeIDs, tc.qps, targets, tc.expectTargets)
+			}
+			if len(targets) == 0 {
+				return
 			}
 
-			voterStoreIDs := make([]roachpb.StoreID, len(voterTargets))
-			for i, target := range voterTargets {
-				voterStoreIDs[i] = target.StoreID
+			if targets[0].StoreID != tc.expectTargets[0] {
+				t.Errorf("chooseReplicaToRebalance(existing=%v, qps=%f) chose s%d as leaseholder; want s%v",
+					tc.storeIDs, tc.qps, targets[0], tc.expectTargets[0])
 			}
-			require.ElementsMatch(t, voterStoreIDs, tc.expectedRebalancedVoters)
 
-			require.Len(t, nonVoterTargets, len(tc.expectedRebalancedNonVoters))
-			nonVoterStoreIDs := make([]roachpb.StoreID, len(nonVoterTargets))
-			for i, target := range nonVoterTargets {
-				nonVoterStoreIDs[i] = target.StoreID
+			targetStores := make([]roachpb.StoreID, len(targets))
+			for i, target := range targets {
+				targetStores[i] = target.StoreID
 			}
-			require.ElementsMatch(t, nonVoterStoreIDs, tc.expectedRebalancedNonVoters)
+			sort.Sort(roachpb.StoreIDSlice(targetStores))
+			sort.Sort(roachpb.StoreIDSlice(tc.expectTargets))
+			if !reflect.DeepEqual(targetStores, tc.expectTargets) {
+				t.Errorf("chooseReplicaToRebalance(existing=%v, qps=%f) chose targets %v; want %v",
+					tc.storeIDs, tc.qps, targetStores, tc.expectTargets)
+			}
 		})
 	}
 }
@@ -589,7 +328,7 @@ func TestNoLeaseTransferToBehindReplicas(t *testing.T) {
 
 	// Load in a range with replicas on an overfull node, a slightly underfull
 	// node, and a very underfull node.
-	loadRanges(rr, s, []testRange{{voters: []roachpb.StoreID{1, 4, 5}, qps: 100}})
+	loadRanges(rr, s, []testRange{{storeIDs: []roachpb.StoreID{1, 4, 5}, qps: 100}})
 	hottestRanges := rr.topQPS()
 	repl := hottestRanges[0].repl
 
@@ -625,11 +364,11 @@ func TestNoLeaseTransferToBehindReplicas(t *testing.T) {
 	// Then do the same, but for replica rebalancing. Make s5 an existing replica
 	// that's behind, and see how a new replica is preferred as the leaseholder
 	// over it.
-	loadRanges(rr, s, []testRange{{voters: []roachpb.StoreID{1, 3, 5}, qps: 100}})
+	loadRanges(rr, s, []testRange{{storeIDs: []roachpb.StoreID{1, 3, 5}, qps: 100}})
 	hottestRanges = rr.topQPS()
 	repl = hottestRanges[0].repl
 
-	_, targets, _ := sr.chooseRangeToRebalance(
+	_, targets := sr.chooseReplicaToRebalance(
 		ctx, &hottestRanges, &localDesc, storeList, storeMap, minQPS, maxQPS)
 	expectTargets := []roachpb.ReplicationTarget{
 		{NodeID: 4, StoreID: 4}, {NodeID: 5, StoreID: 5}, {NodeID: 3, StoreID: 3},

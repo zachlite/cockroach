@@ -34,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -542,11 +541,6 @@ func (r *Replica) leasePostApplyLocked(
 	}
 }
 
-var addSSTPreApplyWarn = struct {
-	threshold time.Duration
-	log.EveryN
-}{30 * time.Second, log.Every(5 * time.Second)}
-
 func addSSTablePreApply(
 	ctx context.Context,
 	st *cluster.Settings,
@@ -571,19 +565,7 @@ func addSSTablePreApply(
 		log.Fatalf(ctx, "sideloaded SSTable at term %d, index %d is missing", term, index)
 	}
 
-	tBegin := timeutil.Now()
-	var tEndDelayed time.Time
-	defer func() {
-		if dur := timeutil.Since(tBegin); dur > addSSTPreApplyWarn.threshold && addSSTPreApplyWarn.ShouldLog() {
-			log.Infof(ctx,
-				"ingesting SST of size %s at index %d took %.2fs (%.2fs on which in PreIngestDelay)",
-				humanizeutil.IBytes(int64(len(sst.Data))), index, dur.Seconds(), tEndDelayed.Sub(tBegin).Seconds(),
-			)
-		}
-	}()
-
 	eng.PreIngestDelay(ctx)
-	tEndDelayed = timeutil.Now()
 
 	copied := false
 	if eng.InMem() {
@@ -641,9 +623,7 @@ func addSSTablePreApply(
 	return copied
 }
 
-func (r *Replica) handleReadWriteLocalEvalResult(
-	ctx context.Context, lResult result.LocalResult, raftMuHeld bool,
-) {
+func (r *Replica) handleReadWriteLocalEvalResult(ctx context.Context, lResult result.LocalResult) {
 	// Fields for which no action is taken in this method are zeroed so that
 	// they don't trigger an assertion at the end of the method (which checks
 	// that all fields were handled).
@@ -709,19 +689,7 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 		lResult.MaybeAddToSplitQueue = false
 	}
 
-	// The following three triggers require the raftMu to be held. If a
-	// trigger is present, acquire the mutex if it is not held already.
-	maybeAcquireRaftMu := func() func() {
-		if raftMuHeld {
-			return func() {}
-		}
-		raftMuHeld = true
-		r.raftMu.Lock()
-		return r.raftMu.Unlock
-	}
-
 	if lResult.MaybeGossipSystemConfig {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipSystemConfigRaftMuLocked(ctx); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -729,7 +697,6 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 	}
 
 	if lResult.MaybeGossipSystemConfigIfHaveFailure {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipSystemConfigIfHaveFailureRaftMuLocked(ctx); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -737,7 +704,6 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 	}
 
 	if lResult.MaybeGossipNodeLiveness != nil {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipNodeLivenessRaftMuLocked(ctx, *lResult.MaybeGossipNodeLiveness); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -839,11 +805,9 @@ func (r *Replica) evaluateProposal(
 	// 2. the request had an impact on the MVCCStats. NB: this is possible
 	//    even with an empty write batch when stats are recomputed.
 	// 3. the request has replicated side-effects.
-	// 4. the request is of a type that requires consensus (eg. Barrier).
 	needConsensus := !batch.Empty() ||
 		ms != (enginepb.MVCCStats{}) ||
-		!res.Replicated.IsZero() ||
-		ba.RequiresConsensus()
+		!res.Replicated.IsZero()
 
 	if needConsensus {
 		// Set the proposal's WriteBatch, which is the serialized representation of

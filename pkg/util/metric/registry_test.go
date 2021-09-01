@@ -16,8 +16,6 @@ import (
 )
 
 func (r *Registry) findMetricByName(name string) Iterable {
-	r.Lock()
-	defer r.Unlock()
 	for _, metric := range r.tracked {
 		if metric.GetName() == name {
 			return metric
@@ -30,6 +28,8 @@ func (r *Registry) findMetricByName(name string) Iterable {
 // Counter with this name is not present (including if a non-Counter Iterable is
 // registered with the name), nil is returned.
 func (r *Registry) getCounter(name string) *Counter {
+	r.Lock()
+	defer r.Unlock()
 	iterable := r.findMetricByName(name)
 	if iterable == nil {
 		return nil
@@ -47,6 +47,8 @@ func (r *Registry) getCounter(name string) *Counter {
 // with this name is not present (including if a non-Gauge Iterable is
 // registered with the name), nil is returned.
 func (r *Registry) getGauge(name string) *Gauge {
+	r.Lock()
+	defer r.Unlock()
 	iterable := r.findMetricByName(name)
 	if iterable == nil {
 		return nil

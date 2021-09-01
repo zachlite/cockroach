@@ -167,25 +167,25 @@ func (ie *InternalExecutor) initConnEx(
 		// If this is already an "internal app", don't put more prefix.
 		appStatsBucketName = sd.ApplicationName
 	}
-	statsWriter := ie.s.sqlStats.GetWriterForApplication(appStatsBucketName)
+	appStats := ie.s.sqlStats.getStatsForApplication(appStatsBucketName)
 
-	sds := sessiondata.NewStack(sd)
-	sdMutIterator := ie.s.makeSessionDataMutatorIterator(sds, nil /* sessionDefaults */)
 	var ex *connExecutor
 	if txn == nil {
 		ex = ie.s.newConnExecutor(
 			ctx,
-			sdMutIterator,
+			sd,
+			nil, /* sdDefaults */
 			stmtBuf,
 			clientComm,
 			ie.memMetrics,
 			&ie.s.InternalMetrics,
-			statsWriter,
+			appStats,
 		)
 	} else {
 		ex = ie.s.newConnExecutorWithTxn(
 			ctx,
-			sdMutIterator,
+			sd,
+			nil, /* sdDefaults */
 			stmtBuf,
 			clientComm,
 			ie.mon,
@@ -193,10 +193,9 @@ func (ie *InternalExecutor) initConnEx(
 			&ie.s.InternalMetrics,
 			txn,
 			ie.syntheticDescriptors,
-			statsWriter,
+			appStats,
 		)
 	}
-
 	ex.executorType = executorTypeInternal
 
 	wg.Add(1)
@@ -393,20 +392,6 @@ func (ie *InternalExecutor) QueryBufferedEx(
 ) ([]tree.Datums, error) {
 	datums, _, err := ie.queryInternalBuffered(ctx, opName, txn, session, stmt, 0 /* limit */, qargs...)
 	return datums, err
-}
-
-// QueryBufferedExWithCols is like QueryBufferedEx, additionally returning the computed
-// ResultColumns of the input query.
-func (ie *InternalExecutor) QueryBufferedExWithCols(
-	ctx context.Context,
-	opName string,
-	txn *kv.Txn,
-	session sessiondata.InternalExecutorOverride,
-	stmt string,
-	qargs ...interface{},
-) ([]tree.Datums, colinfo.ResultColumns, error) {
-	datums, cols, err := ie.queryInternalBuffered(ctx, opName, txn, session, stmt, 0 /* limit */, qargs...)
-	return datums, cols, err
 }
 
 func (ie *InternalExecutor) queryInternalBuffered(
@@ -637,7 +622,6 @@ func (ie *InternalExecutor) execInternal(
 		sd = ie.s.newSessionData(SessionArgs{})
 	}
 	applyOverrides(sessionDataOverride, sd)
-	sd.Internal = true
 	if sd.User().Undefined() {
 		return nil, errors.AssertionFailedf("no user specified for internal query")
 	}

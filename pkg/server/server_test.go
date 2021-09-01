@@ -1125,8 +1125,6 @@ func TestGWRuntimeMarshalProto(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	r, err := http.NewRequest(http.MethodGet, "nope://unused", strings.NewReader(""))
-	require.NoError(t, err)
 	// Regression test against:
 	// https://github.com/cockroachdb/cockroach/issues/49842
 	runtime.DefaultHTTPError(
@@ -1134,7 +1132,7 @@ func TestGWRuntimeMarshalProto(t *testing.T) {
 		runtime.NewServeMux(),
 		&protoutil.ProtoPb{}, // calls XXX_size
 		&httptest.ResponseRecorder{},
-		r,
+		nil, /* request */
 		errors.New("boom"),
 	)
 }

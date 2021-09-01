@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/constraint"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -562,6 +563,7 @@ func rankedCandidateListForRebalancing(
 	existingStoreLocalities map[roachpb.StoreID]roachpb.Locality,
 	isStoreValidForRoutineReplicaTransfer func(context.Context, roachpb.StoreID) bool,
 	options scorerOptions,
+	replicaType targetReplicaType,
 ) []rebalanceOptions {
 	// 1. Determine whether existing replicas are valid and/or necessary.
 	existingStores := make(map[roachpb.StoreID]candidate)
@@ -1182,7 +1184,7 @@ func containsStore(stores []roachpb.StoreID, target roachpb.StoreID) bool {
 // constraintsCheck returns true iff the provided store would be a valid in a
 // range with the provided constraints.
 func constraintsCheck(
-	store roachpb.StoreDescriptor, constraints []roachpb.ConstraintsConjunction,
+	store roachpb.StoreDescriptor, constraints []zonepb.ConstraintsConjunction,
 ) bool {
 	if len(constraints) == 0 {
 		return true

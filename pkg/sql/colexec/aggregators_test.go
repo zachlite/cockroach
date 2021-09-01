@@ -13,7 +13,6 @@ package colexec
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -71,7 +71,7 @@ var aggTypes = []aggType{
 		// This is a wrapper around NewHashAggregator so its signature is
 		// compatible with NewOrderedAggregator.
 		new: func(args *colexecagg.NewAggregatorArgs) (colexecop.ResettableOperator, error) {
-			return NewHashAggregator(args, nil /* newSpillingQueueArgs */, testAllocator, math.MaxInt64)
+			return NewHashAggregator(args, nil /* newSpillingQueueArgs */)
 		},
 		name: "hash",
 	},
@@ -142,7 +142,7 @@ func (tc *aggregatorTestCase) init() error {
 var aggregatorsTestCases = []aggregatorTestCase{
 	{
 		name: "OneTuple",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 		},
@@ -158,7 +158,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "OneGroup",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 1},
@@ -175,7 +175,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "MultiGroup",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 0},
@@ -197,7 +197,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "CarryBetweenInputBatches",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 2},
@@ -218,7 +218,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "CarryBetweenOutputBatches",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 2},
@@ -241,7 +241,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "CarryBetweenInputAndOutputBatches",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 1},
@@ -274,7 +274,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "NoGroupingCols",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 2},
@@ -293,7 +293,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "UnorderedWithNullsInGroupingCol",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{nil, 1},
 			{4, 42},
@@ -313,7 +313,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "CountRows",
-		typs: types.OneIntCol,
+		typs: rowenc.OneIntCol,
 		input: colexectestutils.Tuples{
 			{1},
 			{2},
@@ -346,7 +346,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "OutputOrder",
-		typs: types.ThreeIntCols,
+		typs: rowenc.ThreeIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1, 2},
 			{0, 1, 2},
@@ -623,7 +623,7 @@ var aggregatorsTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "DistinctAggregation",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{0, 2},
@@ -909,7 +909,7 @@ func TestAggregatorRandom(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					a.Init(context.Background())
+					a.Init()
 
 					testOutput := colexectestutils.NewOpTestOutput(a, expectedTuples)
 					if strings.Contains(agg.name, "hash") {
@@ -1068,11 +1068,11 @@ func benchmarkAggregateFunction(
 				if err != nil {
 					b.Fatal(err)
 				}
-				a.Init(ctx)
+				a.Init()
 				// Exhaust aggregator until all batches have been read.
-				for b := a.Next(); b.Length() != 0; b = a.Next() {
+				for b := a.Next(ctx); b.Length() != 0; b = a.Next(ctx) {
 				}
-				if err = a.(colexecop.Closer).Close(); err != nil {
+				if err = a.(colexecop.Closer).Close(ctx); err != nil {
 					b.Fatal(err)
 				}
 				source.Reset(ctx)

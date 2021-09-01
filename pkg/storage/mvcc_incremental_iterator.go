@@ -28,7 +28,6 @@ import (
 // encountered:
 //   1. An inline value (non-user data)
 //   2. An intent whose timestamp lies within the time bounds
-//      (if not using enableWriteIntentAggregation)
 //
 // Note: The endTime is inclusive to be consistent with the non-incremental
 // iterator, where reads at a given timestamp return writes at that
@@ -157,8 +156,8 @@ func NewMVCCIncrementalIterator(
 }
 
 // SeekGE advances the iterator to the first key in the engine which is >= the
-// provided key. startKey is not restricted to metadata key and could point to
-// any version within a history as required.
+// provided key. startKey should be a metadata key to ensure that the iterator
+// has a chance to observe any intents on the key if they are there.
 func (i *MVCCIncrementalIterator) SeekGE(startKey MVCCKey) {
 	if i.timeBoundIter != nil {
 		// Check which is the first key seen by the TBI.
@@ -238,8 +237,8 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 		// If there is no time bound iterator, we cannot skip any keys.
 		return
 	}
-	tbiKey := i.timeBoundIter.UnsafeKey().Key
-	iterKey := i.iter.UnsafeKey().Key
+	tbiKey := i.timeBoundIter.Key().Key
+	iterKey := i.iter.Key().Key
 	if iterKey.Compare(tbiKey) > 0 {
 		// If the iterKey got ahead of the TBI key, advance the TBI Key.
 		//
@@ -259,7 +258,7 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 			i.valid = false
 			return
 		}
-		tbiKey = i.timeBoundIter.UnsafeKey().Key
+		tbiKey = i.timeBoundIter.Key().Key
 
 		cmp := iterKey.Compare(tbiKey)
 
@@ -275,7 +274,7 @@ func (i *MVCCIncrementalIterator) maybeSkipKeys() {
 				i.valid = false
 				return
 			}
-			tbiKey = i.timeBoundIter.UnsafeKey().Key
+			tbiKey = i.timeBoundIter.Key().Key
 			cmp = iterKey.Compare(tbiKey)
 		}
 

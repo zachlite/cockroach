@@ -224,7 +224,7 @@ func (s *Sender) Run(ctx context.Context, nodeID roachpb.NodeID) {
 	waitForUpgrade := !s.st.Version.IsActive(ctx, clusterversion.ClosedTimestampsRaftTransport)
 
 	confCh := make(chan struct{}, 1)
-	confChanged := func(ctx context.Context) {
+	confChanged := func() {
 		select {
 		case confCh <- struct{}{}:
 		default:

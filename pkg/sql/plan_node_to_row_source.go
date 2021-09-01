@@ -28,6 +28,7 @@ type metadataForwarder interface {
 
 type planNodeToRowSource struct {
 	execinfra.ProcessorBase
+	execinfra.StreamingProcessor
 
 	input execinfra.RowSource
 
@@ -70,14 +71,6 @@ func makePlanNodeToRowSource(
 
 var _ execinfra.LocalProcessor = &planNodeToRowSource{}
 
-// MustBeStreaming implements the execinfra.Processor interface.
-func (p *planNodeToRowSource) MustBeStreaming() bool {
-	// hookFnNode is special because it might be blocked forever if we decide to
-	// buffer its output.
-	_, isHookFnNode := p.node.(*hookFnNode)
-	return isHookFnNode
-}
-
 // InitWithOutput implements the LocalProcessor interface.
 func (p *planNodeToRowSource) InitWithOutput(
 	flowCtx *execinfra.FlowCtx, post *execinfrapb.PostProcessSpec, output execinfra.RowReceiver,
@@ -91,21 +84,7 @@ func (p *planNodeToRowSource) InitWithOutput(
 		0, /* processorID */
 		output,
 		nil, /* memMonitor */
-		execinfra.ProcStateOpts{
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				var meta []execinfrapb.ProducerMetadata
-				if p.InternalClose() {
-					// Check if we're wrapping a mutation and emit the rows
-					// written metric if so.
-					if m, ok := p.node.(mutationPlanNode); ok {
-						metrics := execinfrapb.GetMetricsMeta()
-						metrics.RowsWritten = m.rowsWritten()
-						meta = []execinfrapb.ProducerMetadata{{Metrics: metrics}}
-					}
-				}
-				return meta
-			},
-		},
+		execinfra.ProcStateOpts{},
 	)
 }
 

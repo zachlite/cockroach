@@ -71,7 +71,7 @@ func decodeUntaggedDatumToCol(
 		var data []byte
 		buf, data, err = encoding.DecodeUntaggedBytesValue(buf)
 		vec.Bytes().Set(idx, data)
-	case types.DateFamily:
+	case types.DateFamily, types.OidFamily:
 		var i int64
 		buf, i, err = encoding.DecodeUntaggedIntValue(buf)
 		vec.Int64()[idx] = i
@@ -94,10 +94,6 @@ func decodeUntaggedDatumToCol(
 			// We map these to 64-bit INT now. See #34161.
 			vec.Int64()[idx] = i
 		}
-	case types.JsonFamily:
-		var data []byte
-		buf, data, err = encoding.DecodeUntaggedBytesValue(buf)
-		vec.JSON().Bytes.Set(idx, data)
 	case types.UuidFamily:
 		var data uuid.UUID
 		buf, data, err = encoding.DecodeUntaggedUUIDValue(buf)

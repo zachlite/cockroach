@@ -13,7 +13,6 @@ package sql_test
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -47,29 +46,31 @@ CREATE INDEX bc ON test.t(b, c);
 
 	// Retrieve the numeric descriptors.
 	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
-	tID := tableDesc.GetID()
+	tID := tableDesc.ID
 	var aID, bID, cID descpb.ColumnID
-	for _, c := range tableDesc.PublicColumns() {
-		switch c.GetName() {
+	for i := range tableDesc.Columns {
+		c := &tableDesc.Columns[i]
+		switch c.Name {
 		case "a":
-			aID = c.GetID()
+			aID = c.ID
 		case "b":
-			bID = c.GetID()
+			bID = c.ID
 		case "c":
-			cID = c.GetID()
+			cID = c.ID
 		}
 	}
-	pkID := tableDesc.GetPrimaryIndexID()
-	secID := tableDesc.PublicNonPrimaryIndexes()[0].GetID()
+	pkID := tableDesc.PrimaryIndex.ID
+	secID := tableDesc.Indexes[0].ID
 
 	// Retrieve the numeric descriptors.
 	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "hidden")
-	tIDHidden := tableDesc.GetID()
+	tIDHidden := tableDesc.ID
 	var rowIDHidden descpb.ColumnID
-	for _, c := range tableDesc.PublicColumns() {
-		switch c.GetName() {
+	for i := range tableDesc.Columns {
+		c := &tableDesc.Columns[i]
+		switch c.Name {
 		case "rowid":
-			rowIDHidden = c.GetID()
+			rowIDHidden = c.ID
 		}
 	}
 
@@ -118,7 +119,7 @@ ALTER TABLE test.t DROP COLUMN xx;
 
 	for i, d := range testData {
 		t.Run(d.tableExpr, func(t *testing.T) {
-			sql := `SELECT info FROM [EXPLAIN(VERBOSE) SELECT * FROM ` + d.tableExpr + `] WHERE info LIKE '%columns:%'`
+			sql := `SELECT columns FROM [EXPLAIN(VERBOSE) SELECT * FROM ` + d.tableExpr + "] WHERE columns != ''"
 			var columns string
 			if err := db.QueryRow(sql).Scan(&columns); err != nil {
 				if d.expectedError != "" {
@@ -129,8 +130,7 @@ ALTER TABLE test.t DROP COLUMN xx;
 					t.Fatalf("%d: %s: query failed: %v", i, d.tableExpr, err)
 				}
 			}
-			r := regexp.MustCompile("^.*columns: ")
-			columns = r.ReplaceAllString(columns, "")
+
 			if columns != d.expectedColumns {
 				t.Fatalf("%d: %s: expected: %s, got: %s", i, d.tableExpr, d.expectedColumns, columns)
 			}

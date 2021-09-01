@@ -133,12 +133,12 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 	log.Infof(ctx, "removing replica r%d/%d", rep.RangeID, replicaID)
 
 	s.mu.Lock()
-	if it := s.getOverlappingKeyRangeLocked(desc); it.repl != rep {
+	if placeholder := s.getOverlappingKeyRangeLocked(desc); placeholder != rep {
 		// This is a fatal error because uninitialized replicas shouldn't make it
 		// this far. This method will need some changes when we introduce GC of
 		// uninitialized replicas.
 		s.mu.Unlock()
-		log.Fatalf(ctx, "replica %+v unexpectedly overlapped by %+v", rep, it.item)
+		log.Fatalf(ctx, "replica %+v unexpectedly overlapped by %+v", rep, placeholder)
 	}
 	// Adjust stats before calling Destroy. This can be called before or after
 	// Destroy, but this configuration helps avoid races in stat verification
@@ -168,21 +168,16 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 		s.mu.Lock()
 		defer s.mu.Unlock() // must unlock before s.scanner.RemoveReplica(), to avoid deadlock
 
-		s.unlinkReplicaByRangeIDLocked(ctx, rep.RangeID)
-		// There can't be a placeholder, as the replica is still in replicasByKey
-		// and it is initialized. (A placeholder would also be in replicasByKey
-		// and overlap the replica, which is impossible).
-		if ph, ok := s.mu.replicaPlaceholders[rep.RangeID]; ok {
-			log.Fatalf(ctx, "initialized replica %s unexpectedly had a placeholder: %+v", rep, ph)
-		}
-		if it := s.mu.replicasByKey.DeleteReplica(ctx, rep); it.repl != rep {
+		s.unlinkReplicaByRangeIDLocked(rep.RangeID)
+		if placeholder := s.mu.replicasByKey.Delete(rep); placeholder != rep {
 			// We already checked that our replica was present in replicasByKey
 			// above. Nothing should have been able to change that.
-			log.Fatalf(ctx, "replica %+v unexpectedly overlapped by %+v", rep, it.item)
+			log.Fatalf(ctx, "replica %+v unexpectedly overlapped by %+v", rep, placeholder)
 		}
-		if it := s.getOverlappingKeyRangeLocked(desc); it.item != nil {
-			log.Fatalf(ctx, "corrupted replicasByKey map: %s and %s overlapped", rep, it.item)
+		if rep2 := s.getOverlappingKeyRangeLocked(desc); rep2 != nil {
+			log.Fatalf(ctx, "corrupted replicasByKey map: %s and %s overlapped", rep, rep2)
 		}
+		delete(s.mu.replicaPlaceholders, rep.RangeID)
 	}()
 
 	s.maybeGossipOnCapacityChange(ctx, rangeRemoveEvent)
@@ -249,7 +244,15 @@ func (s *Store) removeUninitializedReplicaRaftMuLocked(
 		log.Fatalf(ctx, "uninitialized replica %v was unexpectedly replaced", existing)
 	}
 
-	s.unlinkReplicaByRangeIDLocked(ctx, rep.RangeID)
+	// Only an uninitialized replica can have a placeholder since, by
+	// definition, an initialized replica will be present in the
+	// replicasByKey map. While the replica will usually consume the
+	// placeholder itself, that isn't guaranteed and so this invocation
+	// here is crucial (i.e. don't remove it).
+	if s.removePlaceholderLocked(ctx, rep.RangeID) {
+		atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
+	}
+	s.unlinkReplicaByRangeIDLocked(rep.RangeID)
 }
 
 // unlinkReplicaByRangeIDLocked removes all of the store's references to the
@@ -257,7 +260,7 @@ func (s *Store) removeUninitializedReplicaRaftMuLocked(
 // to be removed from the replicasByKey map.
 //
 // store.mu must be held.
-func (s *Store) unlinkReplicaByRangeIDLocked(ctx context.Context, rangeID roachpb.RangeID) {
+func (s *Store) unlinkReplicaByRangeIDLocked(rangeID roachpb.RangeID) {
 	s.mu.AssertHeld()
 	s.unquiescedReplicas.Lock()
 	delete(s.unquiescedReplicas.m, rangeID)
@@ -265,116 +268,36 @@ func (s *Store) unlinkReplicaByRangeIDLocked(ctx context.Context, rangeID roachp
 	delete(s.mu.uninitReplicas, rangeID)
 	s.replicaQueues.Delete(int64(rangeID))
 	s.mu.replicas.Delete(int64(rangeID))
-	s.unregisterLeaseholderByID(ctx, rangeID)
 }
 
-// removePlaceholder removes a placeholder for the specified range.
-// Requires that the raftMu of the replica whose place is being held
-// is locked. See removePlaceholderType for existence semantics.
-func (s *Store) removePlaceholder(
-	ctx context.Context, ph *ReplicaPlaceholder, typ removePlaceholderType,
-) (removed bool, _ error) {
+// removePlaceholder removes a placeholder for the specified range if it
+// exists, returning true if a placeholder was present and removed and false
+// otherwise. Requires that the raftMu of the replica whose place is being held
+// is locked.
+func (s *Store) removePlaceholder(ctx context.Context, rngID roachpb.RangeID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.removePlaceholderLocked(ctx, ph, typ)
+	return s.removePlaceholderLocked(ctx, rngID)
 }
 
-type removePlaceholderType byte
-
-const (
-	// The placeholder was filled, i.e. the snapshot was applied successfully.
-	// This is only legal to use when the placeholder exists, and so in particular
-	// it can't be invoked multiple times.
-	removePlaceholderFilled removePlaceholderType = iota
-	// Raft didn't apply snapshot. Note that this is only counting snapshots
-	// that raft dropped in the presence of a placeholder, which means snapshots
-	// that targeted an uninitialized replica. There is currently no reason for
-	// those to ever be dropped, if anything snapshots that get dropped would
-	// target an already initialized replica, but those will not augment the
-	// metric related to this const.
-	//
-	// This type allows idempotent deletion, i.e. it can be invoked even if the
-	// placeholder has already been filled or removed before, simplifying the
-	// cleanup on failed operations.
-	removePlaceholderDropped
-	// The snapshot never got to raft, i.e. failed during receipt, for example.
-	// This does not account for failed snapshots targeting initialized replicas.
-	//
-	// This type allows idempotent deletion, i.e. it can be invoked even if the
-	// placeholder has already been filled or removed before, simplifying the
-	// cleanup on failed operations.
-	removePlaceholderFailed
-)
-
-// removePlaceholderLocked removes a placeholder for the specified range.
-// Requires that the raftMu of the replica whose place is being held
-// is locked. See removePlaceholderType for existence semantics.
-//
-// If typ is removePlaceholderFilled, an error is returned unless `removed`
-// is true. For the other types, removal is idempotent.
-func (s *Store) removePlaceholderLocked(
-	ctx context.Context, inPH *ReplicaPlaceholder, typ removePlaceholderType,
-) (removed bool, _ error) {
-	wasTainted := !atomic.CompareAndSwapInt32(&inPH.tainted, 0, 1)
-	idempotent := wasTainted && typ == removePlaceholderFailed || typ == removePlaceholderDropped
-	if wasTainted {
-		// The placeholder was already tainted, i.e. it was passed to
-		// removePlaceholderLocked before.
-		if !idempotent {
-			// We need the placeholder to exist, but it's already gone. This is a bug.
-			return false, errors.AssertionFailedf(
-				"attempt to remove already removed placeholder %+v", inPH,
-			)
-		}
-		// Continue so that we can verify that the placeholder is indeed gone.
-	}
-
-	rngID := inPH.Desc().RangeID
+// removePlaceholderLocked removes the specified placeholder. Requires that
+// Store.mu and the raftMu of the replica whose place is being held are locked.
+func (s *Store) removePlaceholderLocked(ctx context.Context, rngID roachpb.RangeID) bool {
 	placeholder, ok := s.mu.replicaPlaceholders[rngID]
-
-	if wasTainted != !ok {
-		return false, errors.AssertionFailedf("expected placeholder to exist: %t but found in store: %t", !wasTainted, ok)
-	}
-
 	if !ok {
-		// The placeholder is not in the store, but that's ok since wasTainted is
-		// thus true (since we got here) and this implies that idempotent==true
-		// (again since we made it here).
-		return false, nil
+		return false
 	}
-
-	if placeholder != inPH {
-		if idempotent {
-			// In idempotent mode, the placeholder was not in the store before, so
-			// nothing would have prevented another placeholder for the same range to
-			// slip in.
-			return false, nil
+	switch exRng := s.mu.replicasByKey.Delete(placeholder).(type) {
+	case *ReplicaPlaceholder:
+		delete(s.mu.replicaPlaceholders, rngID)
+		if exRng2 := s.getOverlappingKeyRangeLocked(&exRng.rangeDesc); exRng2 != nil {
+			log.Fatalf(ctx, "corrupted replicasByKey map: %s and %s overlapped", exRng, exRng2)
 		}
-		// The placeholder acts as a lock, and when we're filling or dropping it we
-		// only do so once, so how would we now see a different placeholder from the
-		// one we previously inserted? There must be a bug.
-		return false, errors.AssertionFailedf(
-			"placeholder %s is being dropped or filled, but store has conflicting placeholder %s",
-			inPH, placeholder,
-		)
+		return true
+	case nil:
+		log.Fatalf(ctx, "r%d: placeholder not found", rngID)
+	default:
+		log.Fatalf(ctx, "r%d: expected placeholder, got %T", rngID, exRng)
 	}
-
-	// Remove the placeholder from the store.
-
-	if it := s.mu.replicasByKey.DeletePlaceholder(ctx, placeholder); it.ph != placeholder {
-		return false, errors.AssertionFailedf("placeholder %v not found, got %+v", placeholder, it)
-	}
-	delete(s.mu.replicaPlaceholders, rngID)
-	if it := s.getOverlappingKeyRangeLocked(&placeholder.rangeDesc); it.item != nil {
-		return false, errors.AssertionFailedf("corrupted replicasByKey map: %s and %s overlapped", it.ph, it.item)
-	}
-	switch typ {
-	case removePlaceholderDropped:
-		atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
-	case removePlaceholderFailed:
-		atomic.AddInt32(&s.counts.failedPlaceholders, 1)
-	case removePlaceholderFilled:
-		atomic.AddInt32(&s.counts.filledPlaceholders, 1)
-	}
-	return true, nil
+	return false // appease the compiler
 }

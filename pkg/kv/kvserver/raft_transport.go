@@ -147,7 +147,7 @@ type RaftTransport struct {
 	stopper *stop.Stopper
 
 	queues   [rpc.NumConnectionClasses]syncutil.IntMap // map[roachpb.NodeID]*chan *RaftMessageRequest
-	stats    [rpc.NumConnectionClasses]syncutil.IntMap // map[roachpb.NodeID]*raftTransportStats
+	stats    [rpc.NumConnectionClasses]syncutil.IntMap // map[roachpb.NodeID]*chan *RaftMessageRequest
 	dialer   *nodedialer.Dialer
 	handlers syncutil.IntMap // map[roachpb.StoreID]*RaftMessageHandler
 }
@@ -614,15 +614,11 @@ func (t *RaftTransport) startProcessNewQueue(
 		}
 		defer cleanup(ch)
 		defer t.queues[class].Delete(int64(toNodeID))
-		// NB: we dial without a breaker here because the caller has already
-		// checked the breaker. Checking it again can cause livelock, see:
-		// https://github.com/cockroachdb/cockroach/issues/68419
-		conn, err := t.dialer.DialNoBreaker(ctx, toNodeID, class)
+		conn, err := t.dialer.Dial(ctx, toNodeID, class)
 		if err != nil {
 			// DialNode already logs sufficiently, so just return.
 			return
 		}
-
 		client := NewMultiRaftClient(conn)
 		batchCtx, cancel := context.WithCancel(ctx)
 		defer cancel()

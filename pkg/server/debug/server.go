@@ -17,14 +17,15 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"path"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/sidetransport"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/debug/goroutineui"
 	"github.com/cockroachdb/cockroach/pkg/server/debug/pprofui"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -39,6 +40,7 @@ import (
 	"github.com/rcrowley/go-metrics/exp"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/trace"
+	"google.golang.org/grpc/metadata"
 )
 
 func init() {
@@ -48,15 +50,40 @@ func init() {
 	}
 }
 
+// RemoteMode controls who can access /debug/requests.
+type RemoteMode string
+
+const (
+	// RemoteOff disallows access to /debug/requests.
+	RemoteOff RemoteMode = "off"
+	// RemoteLocal allows only host-local access to /debug/requests.
+	RemoteLocal RemoteMode = "local"
+	// RemoteAny allows all access to /debug/requests.
+	RemoteAny RemoteMode = "any"
+)
+
 // Endpoint is the entry point under which the debug tools are housed.
 const Endpoint = "/debug/"
 
-var _ = func() *settings.StringSetting {
-	// This setting definition still exists so as to not break
-	// deployment scripts that set it unconditionally.
-	v := settings.RegisterStringSetting("server.remote_debugging.mode", "unused", "local")
-	v.SetRetired()
-	return v
+// DebugRemote controls which clients are allowed to access certain
+// confidential debug pages, such as those served under the /debug/ prefix.
+var DebugRemote = func() *settings.StringSetting {
+	s := settings.RegisterValidatedStringSetting(
+		"server.remote_debugging.mode",
+		"set to enable remote debugging, localhost-only or disable (any, local, off)",
+		"local",
+		func(sv *settings.Values, s string) error {
+			switch RemoteMode(strings.ToLower(s)) {
+			case RemoteOff, RemoteLocal, RemoteAny:
+				return nil
+			default:
+				return errors.Errorf("invalid mode: '%s'", s)
+			}
+		},
+	)
+	s.SetReportable(true)
+	s.SetVisibility(settings.Public)
+	return s
 }()
 
 // Server serves the /debug/* family of tools.
@@ -159,6 +186,11 @@ func NewServer(st *cluster.Settings, hbaConfDebugFn http.HandlerFunc) *Server {
 		_ = dump.HTML(w)
 	})
 
+	mux.HandleFunc("/debug/threads", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Add("Content-type", "text/plain")
+		fmt.Fprint(w, storage.ThreadStacks())
+	})
+
 	return &Server{
 		st:  st,
 		mux: mux,
@@ -198,32 +230,25 @@ func (ds *Server) RegisterEngines(specs []base.StoreSpec, engines []storage.Engi
 		// TODO(yevgeniy): Consider adding accessors to storage.Engine to get their path.
 		return errors.New("number of store specs must match number of engines")
 	}
-
-	storeIDs := make([]roachpb.StoreIdent, len(engines))
-	for i := range engines {
-		id, err := kvserver.ReadStoreIdent(context.Background(), engines[i])
-		if err != nil {
-			return err
-		}
-		storeIDs[i] = id
-	}
-
-	ds.mux.HandleFunc("/debug/lsm", func(w http.ResponseWriter, req *http.Request) {
-		for i := range engines {
-			fmt.Fprintf(w, "Store %d:\n", storeIDs[i].StoreID)
-			_, _ = io.WriteString(w, engines[i].GetMetrics().String())
-			fmt.Fprintln(w)
-		}
-	})
-
 	for i := 0; i < len(specs); i++ {
 		if specs[i].InMemory {
 			// TODO(yevgeniy): Add plumbing to support LSM visualization for in memory engines.
 			continue
 		}
 
+		id, err := kvserver.ReadStoreIdent(context.Background(), engines[i])
+		if err != nil {
+			return err
+		}
+
+		eng := engines[i]
+		ds.mux.HandleFunc(fmt.Sprintf("/debug/lsm/%d", id.StoreID),
+			func(w http.ResponseWriter, req *http.Request) {
+				_, _ = io.WriteString(w, eng.GetCompactionStats())
+			})
+
 		dir := specs[i].Path
-		ds.mux.HandleFunc(fmt.Sprintf("/debug/lsm-viz/%d", storeIDs[i].StoreID),
+		ds.mux.HandleFunc(fmt.Sprintf("/debug/lsm-viz/%d", id.StoreID),
 			func(w http.ResponseWriter, req *http.Request) {
 				if err := analyzeLSM(dir, w); err != nil {
 					fmt.Fprintf(w, "error analyzing LSM at %s: %v", dir, err)
@@ -255,10 +280,70 @@ func (ds *Server) RegisterClosedTimestampSideTransport(
 		})
 }
 
-// ServeHTTP serves various tools under the /debug endpoint.
+// ServeHTTP serves various tools under the /debug endpoint. It restricts access
+// according to the `server.remote_debugging.mode` cluster variable.
 func (ds *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if authed := ds.authRequest(r); !authed {
+		http.Error(w, "not allowed (due to the 'server.remote_debugging.mode' setting)",
+			http.StatusForbidden)
+		return
+	}
+
 	handler, _ := ds.mux.Handler(r)
 	handler.ServeHTTP(w, r)
+}
+
+// authRequest restricts access to /debug/*.
+func (ds *Server) authRequest(r *http.Request) bool {
+	return authRequest(r.RemoteAddr, ds.st)
+}
+
+// authRequest restricts access according to the DebugRemote setting.
+func authRequest(remoteAddr string, st *cluster.Settings) bool {
+	switch RemoteMode(strings.ToLower(DebugRemote.Get(&st.SV))) {
+	case RemoteAny:
+		return true
+	case RemoteLocal:
+		return isLocalhost(remoteAddr)
+	default:
+		return false
+	}
+}
+
+// isLocalhost returns true if the remoteAddr represents a client talking to
+// us via localhost.
+func isLocalhost(remoteAddr string) bool {
+	// RemoteAddr is commonly in the form "IP" or "IP:port".
+	// If it is in the form "IP:port", split off the port.
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+// GatewayRemoteAllowed returns whether a request that has been passed through
+// the grpc gateway should be allowed accessed to privileged debugging
+// information. Because this function assumes the presence of a context field
+// populated by the grpc gateway, it's not applicable for other uses.
+func GatewayRemoteAllowed(ctx context.Context, st *cluster.Settings) bool {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		// This should only happen for direct grpc connections, which are allowed.
+		return true
+	}
+	peerAddr, ok := md["x-forwarded-for"]
+	if !ok || len(peerAddr) == 0 {
+		// This should only happen for direct grpc connections, which are allowed.
+		return true
+	}
+
+	return authRequest(peerAddr[0], st)
 }
 
 func handleLanding(w http.ResponseWriter, r *http.Request) {

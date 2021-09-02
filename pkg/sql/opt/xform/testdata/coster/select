@@ -95,29 +95,29 @@ limit
  ├── columns: id:1!null
  ├── cardinality: [0 - 0]
  ├── stats: [rows=0]
- ├── cost: 535024.65
+ ├── cost: 530024.55
  ├── key: (1)
  ├── project
  │    ├── columns: id:1!null
  │    ├── cardinality: [0 - 0]
  │    ├── stats: [rows=0]
- │    ├── cost: 535024.64
+ │    ├── cost: 530024.54
  │    ├── key: (1)
  │    ├── limit hint: 10.00
  │    └── select
- │         ├── columns: id:1!null geog:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │         ├── columns: id:1!null geog:2 crdb_internal_mvcc_timestamp:3
  │         ├── cardinality: [0 - 0]
  │         ├── stats: [rows=0]
- │         ├── cost: 535024.63
+ │         ├── cost: 530024.53
  │         ├── key: (1)
- │         ├── fd: (1)-->(2-4)
+ │         ├── fd: (1)-->(2,3)
  │         ├── limit hint: 10.00
  │         ├── scan g
- │         │    ├── columns: id:1!null geog:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │         │    ├── columns: id:1!null geog:2 crdb_internal_mvcc_timestamp:3
  │         │    ├── stats: [rows=500000]
- │         │    ├── cost: 530024.61
+ │         │    ├── cost: 525024.51
  │         │    ├── key: (1)
- │         │    └── fd: (1)-->(2-4)
+ │         │    └── fd: (1)-->(2,3)
  │         └── filters
  │              └── false [constraints=(contradiction; tight)]
  └── 10

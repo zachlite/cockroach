@@ -248,17 +248,11 @@ ORDER BY
 			return errors.Errorf("order.sum(o_ol_cnt): %d != order_line.count(*): %d", left, right)
 		}
 	}
-	if err := leftRows.Err(); err != nil {
-		return errors.Wrap(err, "on `order`")
-	}
-	if err := rightRows.Err(); err != nil {
-		return errors.Wrap(err, "on `order_line`")
-	}
 	if i == 0 {
 		return errors.Errorf("0 rows returned")
 	}
 	if leftRows.Next() || rightRows.Next() {
-		return errors.Errorf("at %s: length of order.sum(o_ol_cnt) != order_line.count(*)", ts)
+		return errors.Errorf("length of order.sum(o_ol_cnt) != order_line.count(*)")
 	}
 
 	if err := leftRows.Close(); err != nil {

@@ -33,6 +33,13 @@ type planObserver struct {
 
 	// leaveNode is invoked upon leaving a tree node.
 	leaveNode func(nodeName string, plan planNode) error
+
+	// followRowSourceToPlanNode controls whether the tree walker continues
+	// walking when it encounters a rowSourceToPlanNode, which indicates that the
+	// logical plan has been mutated for distribution. This should normally be
+	// set to false, as normally the planNodeToRowSource on the other end will
+	// take care of propagating signals via its own walker.
+	followRowSourceToPlanNode bool
 }
 
 // walkPlan performs a depth-first traversal of the plan given as
@@ -268,9 +275,9 @@ func (v *planVisitor) visitInternal(plan planNode, name string) {
 		n.source = v.visit(n.source)
 
 	case *rowSourceToPlanNode:
-		// No need to recurse into the original planNode since
-		// planNodeToRowSource on the other end of the adapter will take care of
-		// propagating signals via its own walker.
+		if v.observer.followRowSourceToPlanNode && n.originalPlanNode != nil {
+			v.visit(n.originalPlanNode)
+		}
 
 	case *errorIfRowsNode:
 		n.plan = v.visit(n.plan)
@@ -329,10 +336,8 @@ var planNodeNames = map[reflect.Type]string{
 	reflect.TypeOf(&alterDatabaseOwnerNode{}):         "alter database owner",
 	reflect.TypeOf(&alterDatabaseAddRegionNode{}):     "alter database add region",
 	reflect.TypeOf(&alterDatabasePrimaryRegionNode{}): "alter database primary region",
-	reflect.TypeOf(&alterDatabasePlacementNode{}):     "alter database placement",
 	reflect.TypeOf(&alterDatabaseSurvivalGoalNode{}):  "alter database survive",
 	reflect.TypeOf(&alterDatabaseDropRegionNode{}):    "alter database drop region",
-	reflect.TypeOf(&alterDefaultPrivilegesNode{}):     "alter default privileges",
 	reflect.TypeOf(&alterIndexNode{}):                 "alter index",
 	reflect.TypeOf(&alterSequenceNode{}):              "alter sequence",
 	reflect.TypeOf(&alterSchemaNode{}):                "alter schema",
@@ -342,7 +347,6 @@ var planNodeNames = map[reflect.Type]string{
 	reflect.TypeOf(&alterTableSetSchemaNode{}):        "alter table set schema",
 	reflect.TypeOf(&alterTypeNode{}):                  "alter type",
 	reflect.TypeOf(&alterRoleNode{}):                  "alter role",
-	reflect.TypeOf(&alterRoleSetNode{}):               "alter role set var",
 	reflect.TypeOf(&applyJoinNode{}):                  "apply join",
 	reflect.TypeOf(&bufferNode{}):                     "buffer",
 	reflect.TypeOf(&cancelQueriesNode{}):              "cancel queries",
@@ -352,7 +356,6 @@ var planNodeNames = map[reflect.Type]string{
 	reflect.TypeOf(&commentOnDatabaseNode{}):          "comment on database",
 	reflect.TypeOf(&commentOnIndexNode{}):             "comment on index",
 	reflect.TypeOf(&commentOnTableNode{}):             "comment on table",
-	reflect.TypeOf(&commentOnSchemaNode{}):            "comment on schema",
 	reflect.TypeOf(&controlJobsNode{}):                "control jobs",
 	reflect.TypeOf(&controlSchedulesNode{}):           "control schedules",
 	reflect.TypeOf(&createDatabaseNode{}):             "create database",

@@ -37,7 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
+	"github.com/elastic/gosigar"
 )
 
 // Context defaults.
@@ -133,13 +133,9 @@ type BaseConfig struct {
 	// CPUProfileDirName is the directory name for CPU profile dumps.
 	CPUProfileDirName string
 
-	// InflightTraceDirName is the directory name for job traces.
-	InflightTraceDirName string
-
 	// DefaultZoneConfig is used to set the default zone config inside the server.
 	// It can be overridden during tests by setting the DefaultZoneConfigOverride
-	// server testing knob. Whatever is installed here is in turn used to
-	// initialize stores, which need a default span config.
+	// server testing knob.
 	DefaultZoneConfig zonepb.ZoneConfig
 
 	// Locality is a description of the topography of the server.
@@ -311,6 +307,9 @@ type SQLConfig struct {
 	// The tenant that the SQL server runs on the behalf of.
 	TenantID roachpb.TenantID
 
+	// LeaseManagerConfig holds configuration values specific to the LeaseManager.
+	LeaseManagerConfig *base.LeaseManagerConfig
+
 	// SocketFile, if non-empty, sets up a TLS-free local listener using
 	// a unix datagram socket at the specified path.
 	SocketFile string
@@ -348,6 +347,7 @@ func MakeSQLConfig(tenID roachpb.TenantID, tempStorageCfg base.TempStorageConfig
 		TableStatCacheSize: defaultSQLTableStatCacheSize,
 		QueryCacheSize:     defaultSQLQueryCacheSize,
 		TempStorageConfig:  tempStorageCfg,
+		LeaseManagerConfig: base.NewLeaseManagerConfig(),
 	}
 	return sqlCfg
 }
@@ -480,8 +480,6 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 
 	skipSizeCheck := cfg.TestingKnobs.Store != nil &&
 		cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs).SkipMinSizeCheck
-	disableSeparatedIntents := cfg.TestingKnobs.Store != nil &&
-		cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs).StorageKnobs.DisableSeparatedIntents
 	for i, spec := range cfg.Stores.Specs {
 		log.Eventf(ctx, "initializing %+v", spec)
 		var sizeInBytes = spec.Size.InBytes
@@ -517,28 +515,15 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				}
 				engines = append(engines, e)
 			} else {
-				e, err := storage.Open(ctx,
-					storage.InMemory(),
-					storage.Attributes(spec.Attributes),
-					storage.CacheSize(cfg.CacheSize),
-					storage.MaxSize(sizeInBytes),
-					storage.EncryptionAtRest(spec.EncryptionOptions),
-					storage.Settings(cfg.Settings))
-				if err != nil {
-					return Engines{}, err
-				}
-				engines = append(engines, e)
+				engines = append(engines, storage.NewInMem(ctx, spec.Attributes, cfg.CacheSize, sizeInBytes, cfg.Settings))
 			}
 		} else {
-			if err := vfs.Default.MkdirAll(spec.Path, 0755); err != nil {
-				return Engines{}, errors.Wrap(err, "creating store directory")
-			}
-			du, err := vfs.Default.GetDiskUsage(spec.Path)
-			if err != nil {
-				return Engines{}, errors.Wrap(err, "retrieving disk usage")
-			}
 			if spec.Size.Percent > 0 {
-				sizeInBytes = int64(float64(du.TotalBytes) * spec.Size.Percent / 100)
+				fileSystemUsage := gosigar.FileSystemUsage{}
+				if err := fileSystemUsage.Get(spec.Path); err != nil {
+					return Engines{}, err
+				}
+				sizeInBytes = int64(float64(fileSystemUsage.Total) * spec.Size.Percent / 100)
 			}
 			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
 				return Engines{}, errors.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
@@ -549,14 +534,12 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				i, humanizeutil.IBytes(sizeInBytes), openFileLimitPerStore))
 
 			storageConfig := base.StorageConfig{
-				Attrs:                   spec.Attributes,
-				Dir:                     spec.Path,
-				MaxSize:                 sizeInBytes,
-				BallastSize:             storage.BallastSizeBytes(spec, du),
-				Settings:                cfg.Settings,
-				UseFileRegistry:         spec.UseFileRegistry,
-				DisableSeparatedIntents: disableSeparatedIntents,
-				EncryptionOptions:       spec.EncryptionOptions,
+				Attrs:           spec.Attributes,
+				Dir:             spec.Path,
+				MaxSize:         sizeInBytes,
+				Settings:        cfg.Settings,
+				UseFileRegistry: spec.UseFileRegistry,
+				ExtraOptions:    spec.ExtraOptions,
 			}
 			pebbleConfig := storage.PebbleConfig{
 				StorageConfig: storageConfig,

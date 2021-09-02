@@ -117,31 +117,20 @@ func (fs *encryptedFS) Create(name string) (vfs.File, error) {
 	if err != nil {
 		return f, err
 	}
-	// NB: f.Close() must be called except in the case of a successful return.
 	settings, stream, err := fs.streamCreator.CreateNew(context.TODO())
 	if err != nil {
-		_ = f.Close()
+		f.Close()
 		return nil, err
 	}
-	// Add an entry for the file to the pebble file registry if it is encrypted.
-	// We choose not to store an entry for unencrypted files since the absence of
-	// a file in the file registry implies that it is unencrypted.
-	if settings.EncryptionType == enginepbccl.EncryptionType_Plaintext {
-		if err := fs.fileRegistry.MaybeDeleteEntry(name); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-	} else {
-		fproto := &enginepb.FileEntry{}
-		fproto.EnvType = fs.streamCreator.envType
-		if fproto.EncryptionSettings, err = protoutil.Marshal(settings); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		if err := fs.fileRegistry.SetFileEntry(name, fproto); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
+	fproto := &enginepb.FileEntry{}
+	fproto.EnvType = fs.streamCreator.envType
+	if fproto.EncryptionSettings, err = protoutil.Marshal(settings); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err = fs.fileRegistry.SetFileEntry(name, fproto); err != nil {
+		f.Close()
+		return nil, err
 	}
 	ef := &encryptedFile{File: f, stream: stream}
 	return vfs.WithFd(f, ef), nil
@@ -192,38 +181,12 @@ func (fs *encryptedFS) Remove(name string) error {
 	return fs.fileRegistry.MaybeDeleteEntry(name)
 }
 
-// Rename implements vfs.FS.Rename. A rename operation needs to both
-// move the file's file registry entry and move the files on the
-// physical filesystem. These operations cannot be done atomically. The
-// encryptedFS's Rename operation provides atomicity only if the
-// destination path does not exist.
-//
-// Rename will first copy the old path's file registry entry to the
-// new path. If the destination exists, a crash after this copy will
-// leave the file at the new path unreadable.
-//
-// Rename then performs a filesystem rename of the actual file. If a
-// crash occurs after the rename, the file at the new path will be
-// readable. The file at the old path won't exist, but the file registry
-// will contain a dangling entry for the old path. The dangling entry
-// will be elided when the file registry is loaded again.
+// Rename implements vfs.FS.Rename.
 func (fs *encryptedFS) Rename(oldname, newname string) error {
-	// First copy the metadata from the old name to the new name. If a
-	// file exists at newname, this copy action will make the file at
-	// newname unlegible, because the encryption-at-rest metadata will
-	// not match the file's encryption. This is what makes Rename
-	// non-atomic. If no file exists at newname, the dangling copied
-	// entry has no effect.
-	if err := fs.fileRegistry.MaybeCopyEntry(oldname, newname); err != nil {
-		return err
-	}
-	// Perform the filesystem rename. After the filesystem rename, the
-	// new path is guaranteed to be readable.
 	if err := fs.FS.Rename(oldname, newname); err != nil {
 		return err
 	}
-	// Remove the old name's metadata.
-	return fs.fileRegistry.MaybeDeleteEntry(oldname)
+	return fs.fileRegistry.MaybeRenameEntry(oldname, newname)
 }
 
 // ReuseForWrite implements vfs.FS.ReuseForWrite.
@@ -292,10 +255,9 @@ func (e *encryptionStatsHandler) GetKeyIDFromSettings(settings []byte) (string, 
 	return s.KeyId, nil
 }
 
-// init initializes function hooks used in non-CCL code.
+// Init initializes engine.NewEncryptedEncFunc.
 func init() {
 	storage.NewEncryptedEnvFunc = newEncryptedEnv
-	storage.CanRegistryElideFunc = canRegistryElide
 }
 
 // newEncryptedEnv creates an encrypted environment and returns the vfs.FS to use for reading and
@@ -356,15 +318,4 @@ func newEncryptedEnv(
 		}
 	}
 	return dataFS, &encryptionStatsHandler{storeKM: storeKeyManager, dataKM: dataKeyManager}, nil
-}
-
-func canRegistryElide(entry *enginepb.FileEntry) bool {
-	if entry == nil {
-		return true
-	}
-	settings := &enginepbccl.EncryptionSettings{}
-	if err := protoutil.Unmarshal(entry.EncryptionSettings, settings); err != nil {
-		return false
-	}
-	return settings.EncryptionType == enginepbccl.EncryptionType_Plaintext
 }

@@ -15,15 +15,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -132,6 +131,7 @@ func newCSVWriterProcessor(
 	input execinfra.RowSource,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
+
 	c := &csvWriter{
 		flowCtx:     flowCtx,
 		processorID: processorID,
@@ -140,7 +140,7 @@ func newCSVWriterProcessor(
 		output:      output,
 	}
 	semaCtx := tree.MakeSemaContext()
-	if err := c.out.Init(&execinfrapb.PostProcessSpec{}, c.OutputTypes(), &semaCtx, flowCtx.NewEvalCtx()); err != nil {
+	if err := c.out.Init(&execinfrapb.PostProcessSpec{}, c.OutputTypes(), &semaCtx, flowCtx.NewEvalCtx(), output); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -165,16 +165,9 @@ func (sp *csvWriter) OutputTypes() []*types.T {
 	return res
 }
 
-func (sp *csvWriter) MustBeStreaming() bool {
-	return false
-}
-
 func (sp *csvWriter) Run(ctx context.Context) {
 	ctx, span := tracing.ChildSpan(ctx, "csvWriter")
-	defer span.Finish()
-
-	instanceID := sp.flowCtx.EvalCtx.NodeID.SQLInstanceID()
-	uniqueID := builtins.GenerateUniqueInt(instanceID)
+	defer tracing.FinishSpan(span)
 
 	err := func() error {
 		typs := sp.input.OutputTypes()
@@ -185,7 +178,7 @@ func (sp *csvWriter) Run(ctx context.Context) {
 
 		writer := newCSVExporter(sp.spec)
 
-		var nullsAs string
+		nullsAs := ""
 		if sp.spec.Options.NullEncoding != nil {
 			nullsAs = *sp.spec.Options.NullEncoding
 		}
@@ -220,13 +213,8 @@ func (sp *csvWriter) Run(ctx context.Context) {
 
 				for i, ed := range row {
 					if ed.IsNull() {
-						if sp.spec.Options.NullEncoding != nil {
-							csvRow[i] = nullsAs
-							continue
-						} else {
-							return errors.New("NULL value encountered during EXPORT, " +
-								"use `WITH nullas` to specify the string representation of NULL")
-						}
+						csvRow[i] = nullsAs
+						continue
 					}
 					if err := ed.EnsureDecoded(typs[i], alloc); err != nil {
 						return err
@@ -246,7 +234,7 @@ func (sp *csvWriter) Run(ctx context.Context) {
 				return errors.Wrap(err, "failed to flush csv writer")
 			}
 
-			conf, err := cloud.ExternalStorageConfFromURI(sp.spec.Destination, sp.spec.User())
+			conf, err := cloudimpl.ExternalStorageConfFromURI(sp.spec.Destination, sp.spec.User)
 			if err != nil {
 				return err
 			}
@@ -256,7 +244,12 @@ func (sp *csvWriter) Run(ctx context.Context) {
 			}
 			defer es.Close()
 
-			part := fmt.Sprintf("n%d.%d", uniqueID, chunk)
+			nodeID, err := sp.flowCtx.EvalCtx.NodeID.OptionalNodeIDErr(47970)
+			if err != nil {
+				return err
+			}
+
+			part := fmt.Sprintf("n%d.%d", nodeID, chunk)
 			chunk++
 			filename := writer.FileName(sp.spec, part)
 			// Close writer to ensure buffer and any compression footer is flushed.
@@ -267,7 +260,7 @@ func (sp *csvWriter) Run(ctx context.Context) {
 
 			size := writer.Len()
 
-			if err := cloud.WriteFile(ctx, es, filename, bytes.NewReader(writer.Bytes())); err != nil {
+			if err := es.WriteFile(ctx, filename, bytes.NewReader(writer.Bytes())); err != nil {
 				return err
 			}
 			res := rowenc.EncDatumRow{
@@ -285,7 +278,7 @@ func (sp *csvWriter) Run(ctx context.Context) {
 				),
 			}
 
-			cs, err := sp.out.EmitRow(ctx, res, sp.output)
+			cs, err := sp.out.EmitRow(ctx, res)
 			if err != nil {
 				return err
 			}

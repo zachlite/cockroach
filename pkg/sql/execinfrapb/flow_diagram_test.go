@@ -122,6 +122,7 @@ func TestPlanDiagramIndexJoin(t *testing.T) {
 				}},
 				Core: ProcessorCoreUnion{JoinReader: &JoinReaderSpec{Table: *desc}},
 				Post: PostProcessSpec{
+					Filter:        Expression{Expr: "@1+@2<@3"},
 					Projection:    true,
 					OutputColumns: []uint32{2},
 				},
@@ -135,10 +136,7 @@ func TestPlanDiagramIndexJoin(t *testing.T) {
 		},
 	}
 
-	flags := DiagramFlags{
-		ShowInputTypes: true,
-	}
-	json, url, err := GeneratePlanDiagramURL("SOME SQL HERE", flows, flags)
+	json, url, err := GeneratePlanDiagramURL("SOME SQL HERE", flows, true /* showInputTypes */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +149,7 @@ func TestPlanDiagramIndexJoin(t *testing.T) {
 			  {"nodeIdx":0,"inputs":[],"core":{"title":"TableReader/0","details":["Table@SomeIndex","Out: @1,@2"]},"outputs":[],"stage":1},
 				{"nodeIdx":1,"inputs":[],"core":{"title":"TableReader/1","details":["Table@SomeIndex","Out: @1,@2"]},"outputs":[],"stage":1},
 				{"nodeIdx":2,"inputs":[],"core":{"title":"TableReader/2","details":["Table@SomeIndex","Out: @1,@2"]},"outputs":[],"stage":1},
-				{"nodeIdx":2,"inputs":[{"title":"ordered","details":["@2+"]}],"core":{"title":"JoinReader/3","details":["Table@primary","Out: @3"]},"outputs":[],"stage":2},
+				{"nodeIdx":2,"inputs":[{"title":"ordered","details":["@2+"]}],"core":{"title":"JoinReader/3","details":["Table@primary","Filter: @1+@2\u003c@3","Out: @3"]},"outputs":[],"stage":2},
 		    {"nodeIdx":2,"inputs":[],"core":{"title":"Response","details":[]},"outputs":[]}
 		  ],
 		  "edges":[
@@ -165,7 +163,7 @@ func TestPlanDiagramIndexJoin(t *testing.T) {
 
 	compareDiagrams(t, json, expected)
 
-	expectedURL := "https://cockroachdb.github.io/distsqlplan/decode.html#eJy0ksFq8zAQhO__U4S5_oJack86-RJoStu0cW_FB9VagsGWXEmGFON3L5ZLE0NSUtIed8cz33hRD_9WQyJf3y8X-dPd4ma5WYLBWE0PqiEP-QIOBgGGFAVD62xJ3ls3Sn38cKV3kAlDZdoujOuCobSOIHuEKtQEiWf1WtOGlCZ3lYBBU1BVHeOjlOW2oZXRtAPDugtykXGWCRQDg-3CPtgHtSVIPrADOD8fzn8dLs6Hiz-F75nWaXKk57RM_EcxHGl4ayvzWTA9VrB1VaPc-1e99GQ38ZPDbMi31niaIU8lJ2Nx0luaftTbzpX06GwZX940rqMvLjT5MKnpNKxMlOLxDs38ErO4xJx-a76emZOhGP59BAAA___j2TIH"
+	expectedURL := "https://cockroachdb.github.io/distsqlplan/decode.html#eJy0ksFLwzAUxu_-FeO77oFt4imnXiZO1OnmTXuozWMUuqQmKUxG_3dpKm6DTSbTY_L1e79fH9nAv9dQWMzuJ6PF093oZjKfgGCs5odixR7qBSkIAgSJnNA4W7L31vXRJn441WuohFCZpg39dU4orWOoDUIVaobCc_FW85wLze4yAUFzKKo6jo9RtrArnhrNaxBmbVCjLKVMIO8Itg3bwT4US4ZKO9qBp6fD0z-Hi9Ph4l_hW6Z1mh3rfVomxsi7A4a3tjJfgvKQYOOqVeE-QLiu6sCuNxxn4rVNEllm8ltbHnUWv1nYnH1jjec9lWOTk_6HWC95WIC3rSv50dkyvsjhOIu9eKHZhyGVw2FqYhSXultOzymLc8ryx_LVXjnp8u7iMwAA__-WuTh_"
 	if url.String() != expectedURL {
 		t.Errorf("expected `%s` got `%s`", expectedURL, url.String())
 	}
@@ -187,6 +185,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 		LeftEqColumns:  []uint32{0, 2},
 		RightEqColumns: []uint32{2, 1},
 		OnExpr:         Expression{Expr: "@1+@2<@6"},
+		MergedColumns:  true,
 	}
 
 	flows[1] = &FlowSpec{
@@ -231,7 +230,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 			{
 				Input: []InputSyncSpec{
 					{
-						Type: InputSyncSpec_PARALLEL_UNORDERED,
+						Type: InputSyncSpec_UNORDERED,
 						Streams: []StreamEndpointSpec{
 							{StreamID: 11},
 							{StreamID: 21},
@@ -239,7 +238,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 						},
 					},
 					{
-						Type: InputSyncSpec_PARALLEL_UNORDERED,
+						Type: InputSyncSpec_UNORDERED,
 						Streams: []StreamEndpointSpec{
 							{StreamID: 41},
 							{StreamID: 51},
@@ -261,7 +260,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 			},
 			{
 				Input: []InputSyncSpec{{
-					Type: InputSyncSpec_PARALLEL_UNORDERED,
+					Type: InputSyncSpec_UNORDERED,
 					Streams: []StreamEndpointSpec{
 						{StreamID: 101},
 						{StreamID: 102},
@@ -314,7 +313,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 			{
 				Input: []InputSyncSpec{
 					{
-						Type: InputSyncSpec_PARALLEL_UNORDERED,
+						Type: InputSyncSpec_UNORDERED,
 						Streams: []StreamEndpointSpec{
 							{StreamID: 12},
 							{StreamID: 22},
@@ -322,7 +321,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 						},
 					},
 					{
-						Type: InputSyncSpec_PARALLEL_UNORDERED,
+						Type: InputSyncSpec_UNORDERED,
 						Streams: []StreamEndpointSpec{
 							{StreamID: 42},
 							{StreamID: 52},
@@ -360,10 +359,7 @@ func TestPlanDiagramJoin(t *testing.T) {
 		}},
 	}
 
-	flags := DiagramFlags{
-		ShowInputTypes: true,
-	}
-	diagram, err := GeneratePlanDiagram("SOME SQL HERE", flows, flags)
+	diagram, err := GeneratePlanDiagram("SOME SQL HERE", flows, true /* showInputTypes */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,11 +375,11 @@ func TestPlanDiagramJoin(t *testing.T) {
 			"processors":[
 				{"nodeIdx":0,"inputs":[],"core":{"title":"TableReader/0","details":["TableA@primary","Out: @1,@2,@4"]},"outputs":[{"title":"by hash","details":["@1,@2"]}],"stage":0},
 				{"nodeIdx":1,"inputs":[],"core":{"title":"TableReader/1","details":["TableA@primary","Out: @1,@2,@4"]},"outputs":[{"title":"by hash","details":["@1,@2"]}],"stage":0},
-				{"nodeIdx":1,"inputs":[{"title":"unordered","details":[]},{"title":"unordered","details":[]}],"core":{"title":"HashJoiner/2","details":["left(@1,@3)=right(@3,@2)","ON @1+@2\u003c@6","Out: @1,@2,@3,@4,@5,@6"]},"outputs":[],"stage":0},
+				{"nodeIdx":1,"inputs":[{"title":"unordered","details":[]},{"title":"unordered","details":[]}],"core":{"title":"HashJoiner/2","details":["left(@1,@3)=right(@3,@2)","ON @1+@2\u003c@6","Merged columns: 2","Out: @1,@2,@3,@4,@5,@6"]},"outputs":[],"stage":0},
 				{"nodeIdx":1,"inputs":[{"title":"unordered","details":[]}],"core":{"title":"No-op/3","details":[]},"outputs":[],"stage":0},
 				{"nodeIdx":2,"inputs":[],"core":{"title":"TableReader/4","details":["TableA@primary","Out: @1,@2,@4"]},"outputs":[{"title":"by hash","details":["@1,@2"]}],"stage":0},
 				{"nodeIdx":2,"inputs":[],"core":{"title":"TableReader/5","details":["TableB@primary","Out: @2,@3,@5"]},"outputs":[{"title":"by hash","details":["@3,@2"]}],"stage":0},
-				{"nodeIdx":2,"inputs":[{"title":"unordered","details":[]},{"title":"unordered","details":[]}],"core":{"title":"HashJoiner/6","details":["left(@1,@3)=right(@3,@2)","ON @1+@2\u003c@6"]},"outputs":[],"stage":0},
+				{"nodeIdx":2,"inputs":[{"title":"unordered","details":[]},{"title":"unordered","details":[]}],"core":{"title":"HashJoiner/6","details":["left(@1,@3)=right(@3,@2)","ON @1+@2\u003c@6","Merged columns: 2"]},"outputs":[],"stage":0},
 				{"nodeIdx":3,"inputs":[],"core":{"title":"TableReader/7","details":["TableB@primary","Out: @2,@3,@5"]},"outputs":[{"title":"by hash","details":["@3,@2"]}],"stage":0},
 				{"nodeIdx":1,"inputs":[],"core":{"title":"Response","details":[]},"outputs":[],"stage":0}
 			],

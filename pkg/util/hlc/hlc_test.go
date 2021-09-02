@@ -13,16 +13,13 @@ package hlc
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"regexp"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
@@ -56,7 +53,7 @@ func ExampleNewClock() {
 	}
 
 	if t.WallTime-s.WallTime > 0 {
-		log.Fatalf(context.Background(), "HLC timestamp %s deviates from physical clock %s", s, t)
+		log.Fatalf(context.Background(), "HLC timestamp %d deviates from physical clock %d", s, t)
 	}
 
 	if s.Logical > 0 {
@@ -305,37 +302,37 @@ func TestHLCClock(t *testing.T) {
 		wallClock int64
 		event     Event
 		// If this is a receive event, this holds the "input" timestamp.
-		input *ClockTimestamp
+		input *Timestamp
 		// The expected timestamp generated from the input.
-		expected ClockTimestamp
+		expected Timestamp
 	}{
 		// A few valid steps to warm up.
-		{5, SEND, nil, ClockTimestamp{WallTime: 5, Logical: 0}},
-		{6, SEND, nil, ClockTimestamp{WallTime: 6, Logical: 0}},
-		{10, RECV, &ClockTimestamp{WallTime: 10, Logical: 5}, ClockTimestamp{WallTime: 10, Logical: 6}},
+		{5, SEND, nil, Timestamp{WallTime: 5, Logical: 0}},
+		{6, SEND, nil, Timestamp{WallTime: 6, Logical: 0}},
+		{10, RECV, &Timestamp{WallTime: 10, Logical: 5}, Timestamp{WallTime: 10, Logical: 6}},
 		// Our clock mysteriously jumps back.
-		{7, SEND, nil, ClockTimestamp{WallTime: 10, Logical: 7}},
+		{7, SEND, nil, Timestamp{WallTime: 10, Logical: 7}},
 		// Wall clocks coincide, but the local logical clock wins.
-		{8, RECV, &ClockTimestamp{WallTime: 10, Logical: 4}, ClockTimestamp{WallTime: 10, Logical: 9}},
+		{8, RECV, &Timestamp{WallTime: 10, Logical: 4}, Timestamp{WallTime: 10, Logical: 9}},
 		// Wall clocks coincide, but the remote logical clock wins.
-		{10, RECV, &ClockTimestamp{WallTime: 10, Logical: 99}, ClockTimestamp{WallTime: 10, Logical: 100}},
+		{10, RECV, &Timestamp{WallTime: 10, Logical: 99}, Timestamp{WallTime: 10, Logical: 100}},
 		// The physical clock has caught up and takes over.
-		{11, RECV, &ClockTimestamp{WallTime: 10, Logical: 31}, ClockTimestamp{WallTime: 11, Logical: 1}},
-		{11, SEND, nil, ClockTimestamp{WallTime: 11, Logical: 2}},
+		{11, RECV, &Timestamp{WallTime: 10, Logical: 31}, Timestamp{WallTime: 11, Logical: 1}},
+		{11, SEND, nil, Timestamp{WallTime: 11, Logical: 2}},
 	}
 
-	var current ClockTimestamp
+	var current Timestamp
 	for i, step := range expectedHistory {
 		m.Set(step.wallClock)
 		switch step.event {
 		case SEND:
-			current = c.NowAsClockTimestamp()
+			current = c.Now()
 		case RECV:
 			fallthrough
 		default:
-			previous := c.NowAsClockTimestamp()
+			previous := c.Now()
 			c.Update(*step.input)
-			current = c.NowAsClockTimestamp()
+			current = c.Now()
 			if current == previous {
 				t.Errorf("%d: clock not updated", i)
 			}
@@ -373,10 +370,9 @@ func TestHybridManualClock(t *testing.T) {
 	require.LessOrEqual(t, c.Now().WallTime, UnixNano())
 	require.LessOrEqual(t, UnixNano(), c.Now().WallTime)
 
-	inc := time.Second.Nanoseconds()
-	m.Increment(inc)
-	require.LessOrEqual(t, c.Now().WallTime, UnixNano()+inc)
-	require.LessOrEqual(t, UnixNano()+inc, c.Now().WallTime)
+	m.Increment(10)
+	require.LessOrEqual(t, c.Now().WallTime, UnixNano()+10)
+	require.LessOrEqual(t, UnixNano()+10, c.Now().WallTime)
 }
 
 // TestHybridManualClockPause test the Pause() functionality of the
@@ -392,14 +388,8 @@ func TestHybridManualClockPause(t *testing.T) {
 	require.Equal(t, now, c.Now().WallTime)
 	time.Sleep(10 * time.Millisecond)
 	require.Equal(t, now, c.Now().WallTime)
-	inc := time.Second.Nanoseconds()
-	m.Increment(inc)
-	require.Equal(t, now+inc, c.Now().WallTime)
-	m.Resume()
-	trueNow := UnixNano()
-	require.LessOrEqual(t, trueNow+inc, c.Now().WallTime)
-	time.Sleep(10 * time.Millisecond)
-	require.Less(t, trueNow+inc, c.Now().WallTime)
+	m.Increment(10)
+	require.Equal(t, now+10, c.Now().WallTime)
 }
 
 func TestHLCMonotonicityCheck(t *testing.T) {
@@ -524,38 +514,11 @@ func TestHLCEnforceWallTimeWithinBoundsInUpdate(t *testing.T) {
 			c := NewClock(m.UnixNano, time.Nanosecond)
 			c.mu.wallTimeUpperBound = test.wallTimeUpperBound
 			fatal = false
-			err := c.UpdateAndCheckMaxOffset(ctx, ClockTimestamp{WallTime: test.messageWallTime})
+			err := c.UpdateAndCheckMaxOffset(ctx, Timestamp{WallTime: test.messageWallTime})
 			a.Nil(err)
 			a.Equal(test.isFatal, fatal)
 		})
 	}
-}
-
-// Ensure that an appropriately structured error is returned when trying to
-// update a clock using a timestamp too far in the future.
-func TestClock_UpdateAndCheckMaxOffset_UntrustworthyValue(t *testing.T) {
-	t0 := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-	m := NewManualClock(t0.UnixNano())
-	c := NewClock(m.UnixNano, 500*time.Millisecond)
-	require.NoError(t, c.UpdateAndCheckMaxOffset(context.Background(), ClockTimestamp{
-		WallTime: t0.Add(499 * time.Millisecond).UnixNano(),
-	}))
-	err := c.UpdateAndCheckMaxOffset(context.Background(), ClockTimestamp{
-		WallTime: t0.Add(time.Second).UnixNano(),
-	})
-	require.True(t, IsUntrustworthyRemoteWallTimeError(err), err)
-
-	// Test that the error properly round-trips through protobuf encoding.
-	t.Run("encoding", func(t *testing.T) {
-		err := errors.Wrapf(err, "wrapping")
-		encoded := errors.EncodeError(context.Background(), err)
-		marshaled, err := protoutil.Marshal(&encoded)
-		require.NoError(t, err)
-		var unmarshaled errors.EncodedError
-		require.NoError(t, protoutil.Unmarshal(marshaled, &unmarshaled))
-		decoded := errors.DecodeError(context.Background(), unmarshaled)
-		require.True(t, IsUntrustworthyRemoteWallTimeError(decoded), decoded)
-	})
 }
 
 func TestResetAndRefreshHLCUpperBound(t *testing.T) {
@@ -654,87 +617,5 @@ func TestLateStartForwardClockJump(t *testing.T) {
 	}
 	<-tickedCh
 	c.Now()
-}
 
-func TestSleepUntil(t *testing.T) {
-	m := NewManualClock(100000)
-	c := NewClock(m.UnixNano, 0)
-
-	before := c.Now()
-	waitDur := int64(1000)
-	waitUntil := before.Add(waitDur, 0)
-
-	doneC := make(chan struct{}, 1)
-	go func() {
-		_ = c.SleepUntil(context.Background(), waitUntil)
-		doneC <- struct{}{}
-	}()
-
-	step := waitDur / 25
-	for waitLeft := waitDur; waitLeft > 0; waitLeft -= step {
-		require.Empty(t, doneC)
-
-		m.Increment(step)
-		time.Sleep(1 * time.Millisecond)
-	}
-	<-doneC
-}
-
-func TestSleepUntilContextCancellation(t *testing.T) {
-	m := NewManualClock(100000)
-	c := NewClock(m.UnixNano, 0)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancel()
-	waitUntil := c.Now().Add(100000, 0)
-
-	err := c.SleepUntil(ctx, waitUntil)
-	require.Equal(t, context.DeadlineExceeded, err)
-}
-
-func BenchmarkUpdate(b *testing.B) {
-	b.StopTimer()
-
-	concurrency := 32    // number of concurrent updaters
-	updates := int(10e6) // total number of updates to perform
-	advanceChance := 0.2 // chance for each worker to advance time
-	advanceMax := 5      // max amount to advance time by per update
-
-	// We pre-generate random timestamps for each worker, to avoid it skewing
-	// the benchmark.
-	//
-	// This benchmark may not be entirely realistic, since each worker advances
-	// its own clock independent of other workers, which probably leads to
-	// having one front-runner. However, synchronizing them while running ends up
-	// benchmarking the contention of the benchmark synchronization rather than
-	// the HLC.
-	r := rand.New(rand.NewSource(34704832098))
-	timestamps := make([][]ClockTimestamp, concurrency)
-	for w := 0; w < concurrency; w++ {
-		timestamps[w] = make([]ClockTimestamp, updates/concurrency)
-		wallTime := 0
-		for i := 0; i < updates/concurrency; i++ {
-			if r.Float64() < advanceChance {
-				wallTime += r.Intn(advanceMax + 1)
-			}
-			timestamps[w][i] = ClockTimestamp{WallTime: int64(wallTime)}
-		}
-	}
-
-	b.StartTimer()
-	for n := 0; n < b.N; n++ {
-		clock := NewClock(func() int64 { return 0 }, time.Second)
-		wg := sync.WaitGroup{}
-		for w := 0; w < concurrency; w++ {
-			w := w // make sure we don't close over the loop variable
-			wg.Add(1)
-			go func() {
-				for _, timestamp := range timestamps[w] {
-					clock.Update(timestamp)
-				}
-				wg.Done()
-			}()
-		}
-		wg.Wait()
-	}
 }

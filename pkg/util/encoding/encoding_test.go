@@ -30,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timetz"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
@@ -1120,7 +1119,7 @@ func TestEncodeDecodeTimeTZ(t *testing.T) {
 		t.Run(fmt.Sprintf("dir:%d", dir), func(t *testing.T) {
 			for i := range testCases {
 				t.Run(fmt.Sprintf("tc:%d", i), func(t *testing.T) {
-					current, _, err := timetz.ParseTimeTZ(timeutil.Now(), pgdate.DefaultDateStyle(), testCases[i], time.Microsecond)
+					current, _, err := timetz.ParseTimeTZ(timeutil.Now(), testCases[i], time.Microsecond)
 					assert.NoError(t, err)
 
 					var b []byte
@@ -1151,18 +1150,18 @@ func TestEncodeDecodeTimeTZ(t *testing.T) {
 
 func TestEncodeDecodeBox2D(t *testing.T) {
 	testCases := []struct {
-		ordered []geopb.BoundingBox
+		ordered []geo.CartesianBoundingBox
 	}{
 		{
-			ordered: []geopb.BoundingBox{
-				{LoX: -100, HiX: 99, LoY: -100, HiY: 100},
-				{LoX: -100, HiX: 100, LoY: -100, HiY: 100},
-				{LoX: -50, HiX: 100, LoY: -100, HiY: 100},
-				{LoX: 0, HiX: 100, LoY: 0, HiY: 100},
-				{LoX: 0, HiX: 100, LoY: 50, HiY: 100},
-				{LoX: 10, HiX: 100, LoY: -100, HiY: 100},
-				{LoX: 10, HiX: 100, LoY: -10, HiY: 50},
-				{LoX: 10, HiX: 100, LoY: -10, HiY: 100},
+			ordered: []geo.CartesianBoundingBox{
+				{BoundingBox: geopb.BoundingBox{LoX: -100, HiX: 99, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: -100, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: -50, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 0, HiX: 100, LoY: 0, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 0, HiX: 100, LoY: 50, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -10, HiY: 50}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -10, HiY: 100}},
 			},
 		},
 	}
@@ -1174,7 +1173,7 @@ func TestEncodeDecodeBox2D(t *testing.T) {
 					for j := range tc.ordered {
 						var b []byte
 						var err error
-						var decoded geopb.BoundingBox
+						var decoded geo.CartesianBoundingBox
 
 						if dir == Ascending {
 							b, err = EncodeBox2DAscending(b, tc.ordered[j])
@@ -1232,15 +1231,13 @@ func TestEncodeDecodeGeometry(t *testing.T) {
 
 						var b []byte
 						var decoded geopb.SpatialObject
-						spaceCurveIndex, err := parsed.SpaceCurveIndex()
-						require.NoError(t, err)
 						if dir == Ascending {
-							b, err = EncodeGeoAscending(b, spaceCurveIndex, &spatialObject)
+							b, err = EncodeGeoAscending(b, parsed.SpaceCurveIndex(), &spatialObject)
 							require.NoError(t, err)
 							_, err = DecodeGeoAscending(b, &decoded)
 							require.NoError(t, err)
 						} else {
-							b, err = EncodeGeoDescending(b, spaceCurveIndex, &spatialObject)
+							b, err = EncodeGeoDescending(b, parsed.SpaceCurveIndex(), &spatialObject)
 							require.NoError(t, err)
 							_, err = DecodeGeoDescending(b, &decoded)
 							require.NoError(t, err)

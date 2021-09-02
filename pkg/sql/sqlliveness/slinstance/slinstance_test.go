@@ -40,15 +40,15 @@ func TestSQLInstance(t *testing.T) {
 		clusterversion.TestingBinaryVersion,
 		clusterversion.TestingBinaryMinSupportedVersion,
 		true /* initializeVersion */)
-	slinstance.DefaultTTL.Override(ctx, &settings.SV, 2*time.Microsecond)
-	slinstance.DefaultHeartBeat.Override(ctx, &settings.SV, time.Microsecond)
+	slinstance.DefaultTTL.Override(&settings.SV, 2*time.Microsecond)
+	slinstance.DefaultHeartBeat.Override(&settings.SV, time.Microsecond)
 
 	fakeStorage := slstorage.NewFakeStorage()
-	sqlInstance := slinstance.NewSQLInstance(stopper, clock, fakeStorage, settings, nil)
+	sqlInstance := slinstance.NewSQLInstance(stopper, clock, fakeStorage, settings)
 	sqlInstance.Start(ctx)
 
 	// Add one more instance to introduce concurrent access to storage.
-	dummy := slinstance.NewSQLInstance(stopper, clock, fakeStorage, settings, nil)
+	dummy := slinstance.NewSQLInstance(stopper, clock, fakeStorage, settings)
 	dummy.Start(ctx)
 
 	s1, err := sqlInstance.Session(ctx)
@@ -87,7 +87,7 @@ func TestSQLInstance(t *testing.T) {
 
 	// Force next call to Session to fail.
 	stopper.Stop(ctx)
-	sqlInstance.ClearSessionForTest(ctx)
+	sqlInstance.ClearSession()
 	_, err = sqlInstance.Session(ctx)
 	require.Error(t, err)
 }

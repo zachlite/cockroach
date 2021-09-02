@@ -39,78 +39,17 @@ import "github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 //
 // ATTENTION: When updating these fields, add a brief description of what
 // changed to the version history below.
-const Version execinfrapb.DistSQLVersion = 50
+const Version execinfrapb.DistSQLVersion = 36
 
 // MinAcceptedVersion is the oldest version that the server is compatible with.
 // A server will not accept flows with older versions.
-const MinAcceptedVersion execinfrapb.DistSQLVersion = 48
+const MinAcceptedVersion execinfrapb.DistSQLVersion = 35
 
 /*
 
 **  VERSION HISTORY **
 
 Please add new entries at the top.
-
-- Version: 50 (MinAcceptedVersion: 48)
-  - A new field, MinSampleSize, was added to both SamplerSpec and
-    SamplerAggregatorSpec to support dynamically shrinking sample sets.
-
-- Version: 49 (MinAcceptedVersion: 48)
-  - A new field RemoteLookupExpr was added to JoinReaderSpec for supporting
-    locality optimized lookup joins.
-
-- Version: 48 (MinAcceptedVersion: 48)
-  - Zero value for VectorizeExecMode changed meaning from "off" to "on".
-
-- Version: 47 (MinAcceptedVersion: 47)
-  - A new synchronizer type (serial unordered) has been introduced explicitly.
-    MinAcceptedVersion needed to be bumped because if the older server receives
-    a SetupFlowRequest with the new synchronizer type, it might lead to an
-    undefined behavior.
-
-- Version: 46 (MinAcceptedVersion: 44)
-  - A new field LookupExpr was added to JoinReaderSpec for supporting
-    lookup joins with multiple spans per input row.
-
-- Version: 45 (MinAcceptedVersion: 44)
-  - A new field PrefixEqualityColumns was added to InvertedJoinerSpec for
-    performing inverted joins on multi-column inverted indexes.
-
-- Version: 44 (MinAcceptedVersion: 44)
-  - Changes to the component statistics proto.
-
-- Version: 43 (MinAcceptedVersion: 43)
-	- Filter was removed from PostProcessSpec and a new Filterer processor was
-	  added.
-
-- Version: 42 (MinAcceptedVersion: 42)
-  - A new field NeededColumns is added to TableReaderSpec which is now required
-    by the vectorized ColBatchScans to be set up.
-
-- Version: 41 (MinAcceptedVersion: 40)
-  - A paired joiner approach for lookup joins was added, for left
-    outer/semi/anti joins involving a pair of joinReaders, where the
-    first join uses a non-covering index.
-
-- Version: 40 (MinAcceptedVersion: 40)
-  - A new field was added execinfrapb.ProcessorSpec to propagate the result
-    column types of a processor. This change is not backwards compatible
-    because from now on the specs are expected to have that field set and the
-    field can be used during the flow setup.
-
-- Version: 39 (MinAcceptedVersion: 39)
-  - Many parameters from sessiondata.SessionData object were pulled into a
-    protobuf struct for easier propagation to the remote nodes during the
-    execution.
-
-- Version: 38 (MinAcceptedVersion: 37)
-  - A paired joiner approach for inverted joins was added, for left
-    outer/semi/anti joins involving the invertedJoiner and joinReader.
-
-- Version: 37 (MinAcceptedVersion: 37)
-  - An InterleavedReaderJoiner processor was removed, and the old processor
-    spec would be unrecognized by a server running older versions, hence the
-    bump to the version and to the minimal accepted version.
 
 - Version: 36 (MinAcceptedVersion: 35)
     - Added an aggregator for ST_Collect. The change is backwards compatible

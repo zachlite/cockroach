@@ -112,10 +112,10 @@ func diffRange(l, r *roachpb.RaftSnapshotData) ReplicaSnapshotDiffSlice {
 		case 0:
 			// Timestamp sorting is weird. Timestamp{} sorts first, the
 			// remainder sort in descending order. See storage/engine/doc.go.
-			if !e.Timestamp.EqOrdering(v.Timestamp) {
-				if e.Timestamp.IsEmpty() {
+			if e.Timestamp != v.Timestamp {
+				if e.Timestamp == (hlc.Timestamp{}) {
 					addLeaseHolder()
-				} else if v.Timestamp.IsEmpty() {
+				} else if v.Timestamp == (hlc.Timestamp{}) {
 					addReplica()
 				} else if v.Timestamp.Less(e.Timestamp) {
 					addLeaseHolder()

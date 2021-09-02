@@ -11,9 +11,7 @@
 package ptverifier
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
@@ -81,7 +79,7 @@ func getRecordWithTimestamp(
 
 func makeVerificationBatch(r *ptpb.Record, aliveAt hlc.Timestamp) kv.Batch {
 	// Need to perform validation, build a batch and run it.
-	mergedSpans, _ := roachpb.MergeSpans(&r.Spans)
+	mergedSpans, _ := roachpb.MergeSpans(r.Spans)
 	var b kv.Batch
 	for _, s := range mergedSpans {
 		var req roachpb.AdminVerifyProtectedTimestampRequest
@@ -97,44 +95,20 @@ func makeVerificationBatch(r *ptpb.Record, aliveAt hlc.Timestamp) kv.Batch {
 
 func parseResponse(b *kv.Batch, r *ptpb.Record) error {
 	rawResponse := b.RawResponse()
-	var errBuilder bytes.Buffer
-	for _, resp := range rawResponse.Responses {
-		resp := resp.GetInner().(*roachpb.AdminVerifyProtectedTimestampResponse)
-		if len(resp.DeprecatedFailedRanges) == 0 && len(resp.VerificationFailedRanges) == 0 {
+	var failed []roachpb.RangeDescriptor
+	for _, r := range rawResponse.Responses {
+		resp := r.GetInner().(*roachpb.AdminVerifyProtectedTimestampResponse)
+		if len(resp.FailedRanges) == 0 {
 			continue
 		}
-
-		// Write the error header the first time we encounter failed ranges.
-		if errBuilder.Len() == 0 {
-			_, _ = errBuilder.WriteString(fmt.Sprintf("failed to verify protection record %s with ts: %s:\n",
-				r.ID.String(), r.Timestamp.String()))
-		}
-
-		useDeprecated := len(resp.VerificationFailedRanges) == 0
-		for _, failedRange := range resp.VerificationFailedRanges {
-			if failedRange.Reason != "" {
-				// Write the per range reason for failure.
-				_, _ = errBuilder.WriteString(fmt.Sprintf("range ID: %d, range span: %s - %s: %s\n",
-					failedRange.RangeID, failedRange.StartKey.String(), failedRange.EndKey.String(),
-					failedRange.Reason))
-			} else {
-				// If no reason was saved, dump relevant information.
-				_, _ = errBuilder.WriteString(fmt.Sprintf("range ID: %d, range span: %s - %s\n",
-					failedRange.RangeID, failedRange.StartKey.String(), failedRange.EndKey.String()))
-			}
-		}
-
-		if !useDeprecated {
-			continue
-		}
-
-		for _, rangeDesc := range resp.DeprecatedFailedRanges {
-			_, _ = errBuilder.WriteString(fmt.Sprintf("range ID: %d, range span: %s - %s\n",
-				rangeDesc.RangeID, rangeDesc.StartKey.String(), rangeDesc.EndKey.String()))
+		if len(failed) == 0 {
+			failed = resp.FailedRanges
+		} else {
+			failed = append(failed, resp.FailedRanges...)
 		}
 	}
-	if errBuilder.Len() > 0 {
-		return errors.Newf("protected ts verification error: %s", errBuilder.String())
+	if len(failed) > 0 {
+		return errors.Errorf("failed to verify protection %v on %v", r, failed)
 	}
 	return nil
 }

@@ -27,7 +27,7 @@ func crdbInternalSendNotice(
 	if ctx.ClientNoticeSender == nil {
 		return nil, errors.AssertionFailedf("notice sender not set")
 	}
-	ctx.ClientNoticeSender.BufferClientNotice(
+	ctx.ClientNoticeSender.SendClientNotice(
 		ctx.Context,
 		pgnotice.NewWithSeverityf(strings.ToUpper(severity), "%s", msg),
 	)

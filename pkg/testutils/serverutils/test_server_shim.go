@@ -114,10 +114,6 @@ type TestServerInterface interface {
 	// MigrationServer returns the internal *migrationServer as in interface{}
 	MigrationServer() interface{}
 
-	// SpanConfigAccessor returns the underlying spanconfig.KVAccessor as an
-	// interface{}.
-	SpanConfigAccessor() interface{}
-
 	// SQLServer returns the *sql.Server as an interface{}.
 	SQLServer() interface{}
 
@@ -130,8 +126,8 @@ type TestServerInterface interface {
 	// JobRegistry returns the *jobs.Registry as an interface{}.
 	JobRegistry() interface{}
 
-	// StartupMigrationsManager returns the *startupmigrations.Manager as an interface{}.
-	StartupMigrationsManager() interface{}
+	// SQLMigrationsManager returns the *sqlmigrations.Manager as an interface{}.
+	SQLMigrationsManager() interface{}
 
 	// NodeLiveness exposes the NodeLiveness instance used by the TestServer as an
 	// interface{}.
@@ -139,10 +135,6 @@ type TestServerInterface interface {
 
 	// HeartbeatNodeLiveness heartbeats the server's NodeLiveness record.
 	HeartbeatNodeLiveness() error
-
-	// NodeDialer exposes the NodeDialer instance used by the TestServer as an
-	// interface{}.
-	NodeDialer() interface{}
 
 	// SetDistSQLSpanResolver changes the SpanResolver used for DistSQL inside the
 	// server's executor. The argument must be a physicalplan.SpanResolver
@@ -226,7 +218,7 @@ type TestServerInterface interface {
 	DiagnosticsReporter() interface{}
 
 	// StartTenant spawns off tenant process connecting to this TestServer.
-	StartTenant(ctx context.Context, params base.TestTenantArgs) (TestTenantInterface, error)
+	StartTenant(params base.TestTenantArgs) (TestTenantInterface, error)
 
 	// ScratchRange splits off a range suitable to be used as KV scratch space.
 	// (it doesn't overlap system spans or SQL tables).
@@ -240,13 +232,6 @@ type TestServerInterface interface {
 
 	// MetricsRecorder periodically records node-level and store-level metrics.
 	MetricsRecorder() *status.MetricsRecorder
-
-	// CollectionFactory returns a *descs.CollectionFactory.
-	CollectionFactory() interface{}
-
-	// TestingKnobs returns the TestingKnobs in use by the test
-	// server.
-	TestingKnobs() *base.TestingKnobs
 }
 
 // TestServerFactory encompasses the actual implementation of the shim
@@ -355,7 +340,7 @@ func StartServerRaw(args base.TestServerArgs) (TestServerInterface, error) {
 func StartTenant(
 	t testing.TB, ts TestServerInterface, params base.TestTenantArgs,
 ) (TestTenantInterface, *gosql.DB) {
-	tenant, err := ts.StartTenant(context.Background(), params)
+	tenant, err := ts.StartTenant(params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +351,7 @@ func StartTenant(
 	}
 
 	goDB := OpenDBConn(
-		t, tenant.SQLAddr(), params.UseDatabase, false /* insecure */, stopper)
+		t, tenant.SQLAddr(), "", false /* insecure */, stopper)
 	return tenant, goDB
 }
 

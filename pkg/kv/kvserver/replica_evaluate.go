@@ -269,7 +269,7 @@ func evaluateBatch(
 		// may carry a response transaction and in the case of WriteTooOldError
 		// (which is sometimes deferred) it is fully populated.
 		curResult, err := evaluateCommand(
-			ctx, readWriter, rec, ms, baHeader, args, reply, lul)
+			ctx, idKey, index, readWriter, rec, ms, baHeader, args, reply, lul)
 
 		if filter := rec.EvalKnobs().TestingPostEvalFilter; filter != nil {
 			filterArgs := kvserverbase.FilterArgs{
@@ -451,9 +451,8 @@ func evaluateBatch(
 		return nil, mergedResult, roachpb.NewErrorWithTxn(writeTooOldState.err, baHeader.Txn)
 	}
 
-	// The batch evaluation will not return an error (i.e. either everything went
-	// fine or we're deferring a WriteTooOldError by having bumped
-	// baHeader.Txn.WriteTimestamp).
+	// The batch evaluation will not return an error (i.e. either everything went fine or
+	// we're deferring a WriteTooOldError by having bumped baHeader.Txn.Timestamp).
 
 	// Update the batch response timestamp field to the timestamp at which the
 	// batch's reads were evaluated.
@@ -481,6 +480,8 @@ func evaluateBatch(
 // remaining for this batch (MaxInt64 for no limit).
 func evaluateCommand(
 	ctx context.Context,
+	raftCmdID kvserverbase.CmdIDKey,
+	index int,
 	readWriter storage.ReadWriter,
 	rec batcheval.EvalContext,
 	ms *enginepb.MVCCStats,

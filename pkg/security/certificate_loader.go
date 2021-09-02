@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
 )
@@ -98,10 +97,6 @@ const (
 
 	// Maximum allowable permissions.
 	maxKeyPermissions os.FileMode = 0700
-
-	// Maximum allowable permissions if file is owned by root.
-	maxGroupKeyPermissions os.FileMode = 0740
-
 	// Filename extenstions.
 	certExtension = `.crt`
 	keyExtension  = `.key`
@@ -170,6 +165,11 @@ type CertInfo struct {
 	// Error is any error encountered when loading the certificate/key pair.
 	// For example: bad permissions on the key will be stored here.
 	Error error
+}
+
+func exceedsPermissions(objectMode, allowedMode os.FileMode) bool {
+	mask := os.FileMode(0777) ^ allowedMode
+	return mask&objectMode != 0
 }
 
 func isCertificateFile(filename string) bool {
@@ -390,9 +390,11 @@ func (cl *CertificateLoader) findKey(ci *CertInfo) error {
 	}
 
 	if !cl.skipPermissionChecks {
-		aclInfo := sysutil.GetFileACLInfo(info)
-		if err = checkFilePermissions(os.Getgid(), fullKeyPath, aclInfo); err != nil {
-			return err
+		// Check permissions bits.
+		filePerm := fileMode.Perm()
+		if exceedsPermissions(filePerm, maxKeyPermissions) {
+			return errors.Errorf("key file %s has permissions %s, exceeds %s",
+				fullKeyPath, filePerm, maxKeyPermissions)
 		}
 	}
 

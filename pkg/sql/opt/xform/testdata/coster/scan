@@ -409,42 +409,42 @@ UPSERT INTO t64570 VALUES (10, 10, 10)
 upsert t64570
  ├── columns: <none>
  ├── arbiter indexes: primary
- ├── canary column: x:9
- ├── fetch columns: x:9 y:10 v:11
+ ├── canary column: x:8
+ ├── fetch columns: x:8 y:9 v:10
  ├── insert-mapping:
- │    ├── column1:6 => x:1
- │    ├── column2:7 => y:2
- │    └── column3:8 => v:3
+ │    ├── column1:5 => x:1
+ │    ├── column2:6 => y:2
+ │    └── column3:7 => v:3
  ├── update-mapping:
- │    └── column3:8 => v:3
+ │    └── column3:7 => v:3
  ├── cardinality: [0 - 0]
  ├── volatile, mutations
  ├── stats: [rows=0]
  ├── cost: 5.14483333
  └── left-join (cross)
-      ├── columns: column1:6!null column2:7!null column3:8!null x:9 y:10 v:11
+      ├── columns: column1:5!null column2:6!null column3:7!null x:8 y:9 v:10
       ├── cardinality: [1 - 1]
       ├── multiplicity: left-rows(exactly-one), right-rows(exactly-one)
       ├── stats: [rows=1]
       ├── cost: 5.13483333
       ├── key: ()
-      ├── fd: ()-->(6-11)
+      ├── fd: ()-->(5-10)
       ├── values
-      │    ├── columns: column1:6!null column2:7!null column3:8!null
+      │    ├── columns: column1:5!null column2:6!null column3:7!null
       │    ├── cardinality: [1 - 1]
       │    ├── stats: [rows=1]
       │    ├── cost: 0.02
       │    ├── key: ()
-      │    ├── fd: ()-->(6-8)
+      │    ├── fd: ()-->(5-7)
       │    └── (10, 10, 10)
       ├── scan t64570
-      │    ├── columns: x:9!null y:10!null v:11
-      │    ├── constraint: /9/10: [/10/10 - /10/10]
+      │    ├── columns: x:8!null y:9!null v:10
+      │    ├── constraint: /8/9: [/10/10 - /10/10]
       │    ├── cardinality: [0 - 1]
-      │    ├── stats: [rows=0.933333333, distinct(9)=0.933333333, null(9)=0, distinct(10)=0.933333333, null(10)=0, distinct(9,10)=0.933333333, null(9,10)=0]
+      │    ├── stats: [rows=0.933333333, distinct(8)=0.933333333, null(8)=0, distinct(9)=0.933333333, null(9)=0, distinct(8,9)=0.933333333, null(8,9)=0]
       │    ├── cost: 5.066
       │    ├── key: ()
-      │    └── fd: ()-->(9-11)
+      │    └── fd: ()-->(8-10)
       └── filters (true)
 
 # Regression test for #68556.

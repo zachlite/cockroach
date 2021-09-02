@@ -270,7 +270,7 @@ func (rb *routerBase) init(ctx context.Context, flowCtx *execinfra.FlowCtx, type
 		// to take the mutex.
 		evalCtx := flowCtx.NewEvalCtx()
 		rb.outputs[i].memoryMonitor = execinfra.NewLimitedMonitor(
-			ctx, evalCtx.Mon, flowCtx,
+			ctx, evalCtx.Mon, flowCtx.Cfg,
 			fmt.Sprintf("router-limited-%d", rb.outputs[i].streamID),
 		)
 		rb.outputs[i].diskMonitor = execinfra.NewMonitor(
@@ -412,6 +412,10 @@ func (rb *routerBase) ProducerDone() {
 		o.mu.Unlock()
 		o.mu.cond.Signal()
 	}
+}
+
+func (rb *routerBase) Types() []*types.T {
+	return rb.types
 }
 
 // updateStreamState updates the status of one stream and, if this was the last

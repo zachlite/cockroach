@@ -12,7 +12,7 @@ go_library(
     deps = [
         "//pkg/base",
         "//pkg/ccl/utilccl/licenseccl",
-        "//pkg/kv/kvclient/kvcoord:with-mocks",
+        "//pkg/kv/kvclient/kvcoord",
         "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/sql/catalog/colinfo",
@@ -23,7 +23,6 @@ go_library(
         "//pkg/util/grpcutil",
         "//pkg/util/timeutil",
         "//pkg/util/uuid",
-        "@com_github_cockroachdb_circuitbreaker//:circuitbreaker",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_redact//:redact",
     ],

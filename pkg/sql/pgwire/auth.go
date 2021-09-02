@@ -13,18 +13,13 @@ package pgwire
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -45,9 +40,6 @@ type authOptions struct {
 	// connType is the actual type of client connection (e.g. local,
 	// hostssl, hostnossl).
 	connType hba.ConnType
-	// connDetails is the event payload common to all auth/session events.
-	connDetails eventpb.CommonConnectionDetails
-
 	// auth is the current HBA configuration as returned by
 	// (*Server).GetAuthenticationConfiguration().
 	auth *hba.Conf
@@ -91,87 +83,48 @@ func (c *conn) handleAuthentication(
 
 	// Check that the requested user exists and retrieve the hashed
 	// password in case password authentication is needed.
-	exists, canLogin, isSuperuser, validUntil, defaultSettings, pwRetrievalFn, err := sql.GetUserSessionInitInfo(
-		ctx,
-		execCfg,
-		authOpt.ie,
-		c.sessionArgs.User,
-		c.sessionArgs.SessionDefaults["database"],
+	exists, canLogin, pwRetrievalFn, validUntilFn, err := sql.GetUserHashedPassword(
+		ctx, authOpt.ie, c.sessionArgs.User,
 	)
 	if err != nil {
-		log.Warningf(ctx, "user retrieval failed for user=%q: %+v", c.sessionArgs.User, err)
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_USER_RETRIEVAL_ERROR, err)
-		return nil, sendError(pgerror.WithCandidateCode(err, pgcode.InvalidAuthorizationSpecification))
+		ac.Logf(ctx, "user retrieval failed for user=%q: %v", c.sessionArgs.User, err)
+		return nil, sendError(err)
 	}
-	c.sessionArgs.IsSuperuser = isSuperuser
 
 	if !exists {
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_USER_NOT_FOUND, nil)
-		return nil, sendError(pgerror.Newf(
-			pgcode.InvalidAuthorizationSpecification,
-			security.ErrPasswordUserAuthFailed,
-			c.sessionArgs.User,
-		))
+		ac.Logf(ctx, "user does not exist: %q", c.sessionArgs.User)
+		return nil, sendError(errors.Errorf(security.ErrPasswordUserAuthFailed, c.sessionArgs.User))
 	}
 
 	if !canLogin {
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_LOGIN_DISABLED, nil)
-		return nil, sendError(pgerror.Newf(
-			pgcode.InvalidAuthorizationSpecification,
-			"%s does not have login privilege",
-			c.sessionArgs.User,
-		))
+		ac.Logf(ctx, "%q does not have login privilege", c.sessionArgs.User)
+		return nil, sendError(errors.Errorf(
+			"%s does not have login privilege", c.sessionArgs.User))
 	}
 
 	// Retrieve the authentication method.
 	tlsState, hbaEntry, methodFn, err := c.findAuthenticationMethod(authOpt)
 	if err != nil {
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_METHOD_NOT_FOUND, err)
-		return nil, sendError(pgerror.WithCandidateCode(err, pgcode.InvalidAuthorizationSpecification))
+		ac.Logf(ctx, "auth method lookup failed: %v", err)
+		return nil, sendError(err)
 	}
-
-	ac.SetAuthMethod(hbaEntry.Method.String())
-	ac.LogAuthInfof(ctx, "HBA rule: %s", hbaEntry.Input)
+	ac.Logf(ctx, "connection matches HBA rule: %s", hbaEntry.Input)
 
 	// Ask the method to authenticate.
 	authenticationHook, err := methodFn(ctx, ac, tlsState, pwRetrievalFn,
-		validUntil, execCfg, hbaEntry)
+		validUntilFn, execCfg, hbaEntry)
 
 	if err != nil {
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_METHOD_NOT_FOUND, err)
-		return nil, sendError(pgerror.WithCandidateCode(err, pgcode.InvalidAuthorizationSpecification))
+		ac.Logf(ctx, "authentication pre-hook failed: %v", err)
+		return nil, sendError(err)
+	}
+	if connClose, err = authenticationHook(c.sessionArgs.User, true /* public */); err != nil {
+		ac.Logf(ctx, "authentication failed: %v", err)
+		return connClose, sendError(err)
 	}
 
-	if connClose, err = authenticationHook(ctx, c.sessionArgs.User, true /* public */); err != nil {
-		ac.LogAuthFailed(ctx, eventpb.AuthFailReason_CREDENTIALS_INVALID, err)
-		return connClose, sendError(pgerror.WithCandidateCode(err, pgcode.InvalidAuthorizationSpecification))
-	}
+	ac.Logf(ctx, "authentication succeeded")
 
-	// Add all the defaults to this session's defaults. If there is an
-	// error (e.g., a setting that no longer exists, or bad input),
-	// log a warning instead of preventing login.
-	// The defaultSettings array is ordered by precedence. This means that if
-	// SessionDefaults already has an entry for a given setting name, then
-	// it should not be replaced.
-	for _, settingEntry := range defaultSettings {
-		for _, setting := range settingEntry.Settings {
-			keyVal := strings.SplitN(setting, "=", 2)
-			if len(keyVal) != 2 {
-				log.Ops.Warningf(ctx, "%s has malformed default setting: %q", c.sessionArgs.User, setting)
-				continue
-			}
-			if err := sql.CheckSessionVariableValueValid(ctx, execCfg.Settings, keyVal[0], keyVal[1]); err != nil {
-				log.Ops.Warningf(ctx, "%s has invalid default setting: %v", c.sessionArgs.User, err)
-				continue
-			}
-			if _, ok := c.sessionArgs.SessionDefaults[keyVal[0]]; !ok {
-				c.sessionArgs.SessionDefaults[keyVal[0]] = keyVal[1]
-			}
-
-		}
-	}
-
-	ac.LogAuthOK(ctx)
 	c.msgBuilder.initMsg(pgwirebase.ServerMsgAuth)
 	c.msgBuilder.putInt32(authOK)
 	return connClose, c.msgBuilder.finishMsg(c.conn)
@@ -272,7 +225,10 @@ type authenticatorIO interface {
 	// authResult blocks for an authentication decision. This call also informs
 	// the authenticator that no more auth data is coming from the client;
 	// noMorePwdData() is called internally.
-	authResult() error
+	//
+	// The auth result is either an unqualifiedIntSizer (in case the auth
+	// succeeded) or an auth error.
+	authResult() (unqualifiedIntSizer, error)
 }
 
 // AuthConn is the interface used by the authenticator for interacting with the
@@ -291,23 +247,15 @@ type AuthConn interface {
 	// AuthOK declares that authentication succeeded and provides a
 	// unqualifiedIntSizer, to be returned by authenticator.authResult(). Future
 	// authenticator.sendPwdData() calls fail.
-	AuthOK(context.Context)
+	AuthOK(unqualifiedIntSizer)
 	// AuthFail declares that authentication has failed and provides an error to
 	// be returned by authenticator.authResult(). Future
 	// authenticator.sendPwdData() calls fail. The error has already been written
 	// to the client connection.
 	AuthFail(err error)
-
-	// SetAuthMethod sets the authentication method for subsequent
-	// logging messages.
-	SetAuthMethod(method string)
-	// LogAuthInfof logs details about the progress of the
-	// authentication.
-	LogAuthInfof(ctx context.Context, format string, args ...interface{})
-	// LogAuthFailed logs details about an authentication failure.
-	LogAuthFailed(ctx context.Context, reason eventpb.AuthFailReason, err error)
-	// LogAuthOK logs when the authentication handshake has completed.
-	LogAuthOK(ctx context.Context)
+	// Logf logs a message on the authentication log, if auth logs
+	// are enabled.
+	Logf(ctx context.Context, format string, args ...interface{})
 }
 
 // authPipe is the implementation for the authenticator and AuthConn interfaces.
@@ -315,11 +263,7 @@ type AuthConn interface {
 // two represent the two "ends" of the pipe and we'll pass data between them.
 type authPipe struct {
 	c   *conn // Only used for writing, not for reading.
-	log bool
-
-	connDetails eventpb.CommonConnectionDetails
-	authDetails eventpb.CommonSessionDetails
-	authMethod  string
+	log *log.SecondaryLogger
 
 	ch chan []byte
 	// writerDone is a channel closed by noMorePwdData().
@@ -329,18 +273,14 @@ type authPipe struct {
 }
 
 type authRes struct {
-	err error
+	intSizer unqualifiedIntSizer
+	err      error
 }
 
-func newAuthPipe(c *conn, logAuthn bool, authOpt authOptions, user security.SQLUsername) *authPipe {
+func newAuthPipe(c *conn, log *log.SecondaryLogger) *authPipe {
 	ap := &authPipe{
-		c:           c,
-		log:         logAuthn,
-		connDetails: authOpt.connDetails,
-		authDetails: eventpb.CommonSessionDetails{
-			Transport: authOpt.connType.String(),
-			User:      user.Normalized(),
-		},
+		c:          c,
+		log:        log,
 		ch:         make(chan []byte),
 		writerDone: make(chan struct{}),
 		readerDone: make(chan authRes, 1),
@@ -380,65 +320,26 @@ func (p *authPipe) GetPwdData() ([]byte, error) {
 }
 
 // AuthOK is part of the AuthConn interface.
-func (p *authPipe) AuthOK(ctx context.Context) {
-	p.readerDone <- authRes{err: nil}
+func (p *authPipe) AuthOK(intSizer unqualifiedIntSizer) {
+	p.readerDone <- authRes{intSizer: intSizer}
 }
 
 func (p *authPipe) AuthFail(err error) {
 	p.readerDone <- authRes{err: err}
 }
 
-func (p *authPipe) SetAuthMethod(method string) {
-	p.authMethod = method
-}
-
-func (p *authPipe) LogAuthOK(ctx context.Context) {
-	if p.log {
-		ev := &eventpb.ClientAuthenticationOk{
-			CommonConnectionDetails: p.connDetails,
-			CommonSessionDetails:    p.authDetails,
-			Method:                  p.authMethod,
-		}
-		log.StructuredEvent(ctx, ev)
+func (p *authPipe) Logf(ctx context.Context, format string, args ...interface{}) {
+	if p.log == nil {
+		return
 	}
-}
-
-func (p *authPipe) LogAuthInfof(ctx context.Context, format string, args ...interface{}) {
-	if p.log {
-		ev := &eventpb.ClientAuthenticationInfo{
-			CommonConnectionDetails: p.connDetails,
-			CommonSessionDetails:    p.authDetails,
-			Info:                    fmt.Sprintf(format, args...),
-			Method:                  p.authMethod,
-		}
-		log.StructuredEvent(ctx, ev)
-	}
-}
-
-func (p *authPipe) LogAuthFailed(
-	ctx context.Context, reason eventpb.AuthFailReason, detailedErr error,
-) {
-	if p.log {
-		var errStr string
-		if detailedErr != nil {
-			errStr = detailedErr.Error()
-		}
-		ev := &eventpb.ClientAuthenticationFailed{
-			CommonConnectionDetails: p.connDetails,
-			CommonSessionDetails:    p.authDetails,
-			Reason:                  reason,
-			Detail:                  errStr,
-			Method:                  p.authMethod,
-		}
-		log.StructuredEvent(ctx, ev)
-	}
+	p.log.Logf(ctx, format, args...)
 }
 
 // authResult is part of the authenticator interface.
-func (p *authPipe) authResult() error {
+func (p *authPipe) authResult() (unqualifiedIntSizer, error) {
 	p.noMorePwdData()
 	res := <-p.readerDone
-	return res.err
+	return res.intSizer, res.err
 }
 
 // SendAuthRequest is part of the AuthConn interface.

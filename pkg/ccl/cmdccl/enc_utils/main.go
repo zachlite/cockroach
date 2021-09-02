@@ -183,7 +183,7 @@ func readFile(filename string) ([]byte, error) {
 
 	data, err := ioutil.ReadFile(absPath)
 	if err != nil {
-		return nil, errors.Wrapf(err, "could not read %s", absPath)
+		return nil, errors.Errorf("could not read %s: %v", absPath, err)
 	}
 
 	reg, ok := fileRegistry[filename]
@@ -202,7 +202,7 @@ func readFile(filename string) ([]byte, error) {
 
 	cipher, err := aes.NewCipher(key.rawKey)
 	if err != nil {
-		return nil, errors.Wrapf(err, "could not build AES cipher for file %s", absPath)
+		return nil, errors.Errorf("could not build AES cipher for file %s: %v", absPath, err)
 	}
 
 	size := len(data)

@@ -14,7 +14,6 @@ import (
 	"context"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -22,8 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
-	"github.com/cockroachdb/errors"
 )
 
 type createDatabaseNode struct {
@@ -33,14 +30,6 @@ type createDatabaseNode struct {
 // CreateDatabase creates a database.
 // Privileges: superuser or CREATEDB
 func (p *planner) CreateDatabase(ctx context.Context, n *tree.CreateDatabase) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"CREATE DATABASE",
-	); err != nil {
-		return nil, err
-	}
-
 	if n.Name == "" {
 		return nil, errEmptyDatabaseName
 	}
@@ -88,58 +77,12 @@ func (p *planner) CreateDatabase(ctx context.Context, n *tree.CreateDatabase) (p
 		)
 	}
 
-	if n.SurvivalGoal != tree.SurvivalGoalDefault &&
-		n.PrimaryRegion == tree.PrimaryRegionNotSpecifiedName {
-		return nil, pgerror.New(
-			pgcode.InvalidDatabaseDefinition,
-			"PRIMARY REGION must be specified when using SURVIVE",
-		)
-	}
-
-	if n.Placement != tree.DataPlacementUnspecified {
-		if !p.EvalContext().SessionData().PlacementEnabled {
-			return nil, errors.WithHint(pgerror.New(
-				pgcode.FeatureNotSupported,
-				"PLACEMENT requires that the session setting enable_multiregion_placement_policy "+
-					"is enabled",
-			),
-				"to use PLACEMENT, enable the session setting with SET"+
-					" enable_multiregion_placement_policy = true or enable the cluster setting"+
-					" sql.defaults.multiregion_placement_policy.enabled",
-			)
-		}
-
-		if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.DatabasePlacementPolicy) {
-			return nil, pgerror.Newf(pgcode.FeatureNotSupported,
-				"version %v must be finalized to use PLACEMENT",
-				clusterversion.ByKey(clusterversion.DatabasePlacementPolicy))
-		}
-
-		if n.PrimaryRegion == tree.PrimaryRegionNotSpecifiedName {
-			return nil, pgerror.New(
-				pgcode.InvalidDatabaseDefinition,
-				"PRIMARY REGION must be specified when using PLACEMENT",
-			)
-		}
-
-		if n.Placement == tree.DataPlacementRestricted &&
-			n.SurvivalGoal == tree.SurvivalGoalRegionFailure {
-			return nil, pgerror.New(
-				pgcode.InvalidDatabaseDefinition,
-				"PLACEMENT RESTRICTED can only be used with SURVIVE ZONE FAILURE",
-			)
-		}
-	}
-
 	hasCreateDB, err := p.HasRoleOption(ctx, roleoption.CREATEDB)
 	if err != nil {
 		return nil, err
 	}
 	if !hasCreateDB {
-		return nil, pgerror.New(
-			pgcode.InsufficientPrivilege,
-			"permission denied to create database",
-		)
+		return nil, pgerror.New(pgcode.InsufficientPrivilege, "permission denied to create database")
 	}
 
 	return &createDatabaseNode{n: n}, nil
@@ -156,10 +99,18 @@ func (n *createDatabaseNode) startExec(params runParams) error {
 	if created {
 		// Log Create Database event. This is an auditable log event and is
 		// recorded in the same transaction as the table descriptor update.
-		if err := params.p.logEvent(params.ctx, desc.GetID(),
-			&eventpb.CreateDatabase{
-				DatabaseName: n.n.Name.String(),
-			}); err != nil {
+		if err := MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+			params.ctx,
+			params.p.txn,
+			EventLogCreateDatabase,
+			int32(desc.GetID()),
+			int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+			struct {
+				DatabaseName string
+				Statement    string
+				User         string
+			}{n.n.Name.String(), n.n.String(), params.SessionData().User},
+		); err != nil {
 			return err
 		}
 	}
@@ -169,9 +120,3 @@ func (n *createDatabaseNode) startExec(params runParams) error {
 func (*createDatabaseNode) Next(runParams) (bool, error) { return false, nil }
 func (*createDatabaseNode) Values() tree.Datums          { return tree.Datums{} }
 func (*createDatabaseNode) Close(context.Context)        {}
-
-// ReadingOwnWrites implements the planNodeReadingOwnWrites Interface. This is
-// required because we create a type descriptor for multi-region databases,
-// which must be read during validation. We also call CONFIGURE ZONE which
-// perms multiple KV operations on descriptors and expects to see its own writes.
-func (*createDatabaseNode) ReadingOwnWrites() {}

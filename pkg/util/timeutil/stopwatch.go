@@ -11,28 +11,24 @@
 package timeutil
 
 import (
+	"sync/atomic"
 	"time"
-
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
 // StopWatch is a utility stop watch that can be safely started and stopped
 // multiple times and can be used concurrently.
 type StopWatch struct {
-	mu struct {
-		syncutil.Mutex
-		// started is true if the stop watch has been started and haven't been
-		// stopped after that.
-		started bool
-		// startedAt is the time when the stop watch was started.
-		startedAt time.Time
-		// elapsed is the total time measured by the stop watch (i.e. between
-		// all Starts and Stops).
-		elapsed time.Duration
-		// timeSource is the source of time used by the stop watch. It is always
-		// timeutil.Now except for tests.
-		timeSource func() time.Time
-	}
+	// started is used as boolean where 0 indicates false and 1 indicates true.
+	// started is "true" if the stop watch has been started.
+	started int32
+	// startedAt is the time when the stop watch was started.
+	startedAt time.Time
+	// elapsed is the total time measured by the stop watch (i.e. between all
+	// Starts and Stops).
+	elapsed time.Duration
+	// timeSource is the source of time used by the stop watch. It is always
+	// timeutil.Now except for tests.
+	timeSource func() time.Time
 }
 
 // NewStopWatch creates a new StopWatch.
@@ -47,18 +43,13 @@ func NewTestStopWatch(timeSource func() time.Time) *StopWatch {
 }
 
 func newStopWatch(timeSource func() time.Time) *StopWatch {
-	w := &StopWatch{}
-	w.mu.timeSource = timeSource
-	return w
+	return &StopWatch{timeSource: timeSource}
 }
 
 // Start starts the stop watch if it hasn't already been started.
 func (w *StopWatch) Start() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.mu.started {
-		w.mu.started = true
-		w.mu.startedAt = w.mu.timeSource()
+	if atomic.CompareAndSwapInt32(&w.started, 0, 1) {
+		w.startedAt = w.timeSource()
 	}
 }
 
@@ -66,19 +57,14 @@ func (w *StopWatch) Start() {
 // the duration that elapsed since it was started. If the stop watch has
 // already been stopped, it is a noop.
 func (w *StopWatch) Stop() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.mu.started {
-		w.mu.started = false
-		w.mu.elapsed += w.mu.timeSource().Sub(w.mu.startedAt)
+	if atomic.CompareAndSwapInt32(&w.started, 1, 0) {
+		w.elapsed += w.timeSource().Sub(w.startedAt)
 	}
 }
 
 // Elapsed returns the total time measured by the stop watch so far.
 func (w *StopWatch) Elapsed() time.Duration {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.mu.elapsed
+	return w.elapsed
 }
 
 // TestTimeSource is a source of time that remembers when it was created (in

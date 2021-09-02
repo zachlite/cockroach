@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -33,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -40,7 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
-	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
+	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/jobutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -121,7 +121,7 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	}
 
 	tbDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
-	var dbDesc catalog.DatabaseDescriptor
+	var dbDesc *dbdesc.Immutable
 	require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		dbDesc, err = catalogkv.GetDatabaseDescByID(ctx, txn, keys.SystemSQLCodec, tbDesc.GetParentID())
 		return err
@@ -165,7 +165,8 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	if err := descExists(sqlDB, true, tbDesc.GetID()); err != nil {
 		t.Fatal(err)
 	}
-	tbNameKey := catalogkeys.EncodeNameKey(keys.SystemSQLCodec, tbDesc)
+	tbNameKey := catalogkeys.MakeNameMetadataKey(keys.SystemSQLCodec,
+		tbDesc.GetParentID(), keys.PublicSchemaID, tbDesc.GetName())
 	if gr, err := kvDB.Get(ctx, tbNameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -180,7 +181,7 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 		t.Fatal(err)
 	}
 
-	dbNameKey := catalogkeys.EncodeNameKey(keys.SystemSQLCodec, dbDesc)
+	dbNameKey := catalogkeys.MakeNameMetadataKey(keys.SystemSQLCodec, 0, 0, dbDesc.Name)
 	if gr, err := kvDB.Get(ctx, dbNameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -226,8 +227,8 @@ CREATE DATABASE t;
 		t.Fatal(err)
 	}
 
-	dKey := catalogkeys.MakeDatabaseNameKey(keys.SystemSQLCodec, "t")
-	r, err := kvDB.Get(ctx, dKey)
+	dKey := catalogkeys.NewDatabaseKey("t")
+	r, err := kvDB.Get(ctx, dKey.Key(keys.SystemSQLCodec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +286,7 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 
 	tbDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	tb2Desc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv2")
-	var dbDesc catalog.DatabaseDescriptor
+	var dbDesc *dbdesc.Immutable
 	require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		dbDesc, err = catalogkv.GetDatabaseDescByID(ctx, txn, keys.SystemSQLCodec, tbDesc.GetParentID())
 		return err
@@ -576,10 +577,6 @@ func TestDropIndexInterleaved(t *testing.T) {
 	const chunkSize = 200
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
-		Server: &server.TestingKnobs{
-			DisableAutomaticVersionUpgrade: 1,
-			BinaryVersionOverride:          clusterversion.ByKey(clusterversion.PreventNewInterleavedTables - 1),
-		},
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			BackfillChunkSize: chunkSize,
 		},
@@ -623,7 +620,7 @@ func TestDropTable(t *testing.T) {
 	}
 
 	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
-	nameKey := catalogkeys.MakePublicObjectNameKey(keys.SystemSQLCodec, keys.MinNonPredefinedUserDescID, "kv")
+	nameKey := catalogkeys.NewPublicTableKey(keys.MinNonPredefinedUserDescID, "kv").Key(keys.SystemSQLCodec)
 	gr, err := kvDB.Get(ctx, nameKey)
 
 	if err != nil {
@@ -723,7 +720,7 @@ func TestDropTableDeleteData(t *testing.T) {
 
 		descs = append(descs, catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", tableName))
 
-		nameKey := catalogkeys.MakePublicObjectNameKey(keys.SystemSQLCodec, keys.MinNonPredefinedUserDescID, tableName)
+		nameKey := catalogkeys.NewPublicTableKey(keys.MinNonPredefinedUserDescID, tableName).Key(keys.SystemSQLCodec)
 		gr, err := kvDB.Get(ctx, nameKey)
 		if err != nil {
 			t.Fatal(err)
@@ -857,7 +854,7 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -922,12 +919,7 @@ func TestDropTableInterleavedDeleteData(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	params, _ := tests.CreateTestServerParams()
-	params.Knobs = base.TestingKnobs{
-		Server: &server.TestingKnobs{
-			DisableAutomaticVersionUpgrade: 1,
-			BinaryVersionOverride:          clusterversion.ByKey(clusterversion.PreventNewInterleavedTables - 1),
-		},
-	}
+
 	defer gcjob.SetSmallMaxGCIntervalForTest()()
 
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
@@ -1157,7 +1149,7 @@ func TestDropNameReuse(t *testing.T) {
 
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -1340,7 +1332,6 @@ WHERE
 // entire database.
 func TestDropDatabaseWithForeignKeys(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())

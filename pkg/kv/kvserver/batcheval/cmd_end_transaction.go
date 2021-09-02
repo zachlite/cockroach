@@ -202,12 +202,11 @@ func EndTxn(
 
 	// Fetch existing transaction.
 	var existingTxn roachpb.Transaction
-	recordAlreadyExisted, err := storage.MVCCGetProto(
+	if ok, err := storage.MVCCGetProto(
 		ctx, readWriter, key, hlc.Timestamp{}, &existingTxn, storage.MVCCGetOptions{},
-	)
-	if err != nil {
+	); err != nil {
 		return result.Result{}, err
-	} else if !recordAlreadyExisted {
+	} else if !ok {
 		// No existing transaction record was found - create one by writing it
 		// below in updateFinalizedTxn.
 		reply.Txn = h.Txn.Clone()
@@ -252,7 +251,7 @@ func EndTxn(
 					return result.Result{}, err
 				}
 				if err := updateFinalizedTxn(
-					ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
+					ctx, readWriter, ms, key, args, reply.Txn, externalLocks,
 				); err != nil {
 					return result.Result{}, err
 				}
@@ -331,9 +330,7 @@ func EndTxn(
 	if err != nil {
 		return result.Result{}, err
 	}
-	if err := updateFinalizedTxn(
-		ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
-	); err != nil {
+	if err := updateFinalizedTxn(ctx, readWriter, ms, key, args, reply.Txn, externalLocks); err != nil {
 		return result.Result{}, err
 	}
 
@@ -456,13 +453,6 @@ func resolveLocalLocks(
 		// These transactions rely on having their locks resolved synchronously.
 		resolveAllowance = math.MaxInt64
 	}
-	onlySeparatedIntents := false
-	st := evalCtx.ClusterSettings()
-	// Some tests have st == nil.
-	if st != nil {
-		onlySeparatedIntents = st.Version.ActiveVersionOrEmpty(ctx).IsActive(
-			clusterversion.PostSeparatedIntentsMigration)
-	}
 	for _, span := range args.LockSpans {
 		if err := func() error {
 			if resolveAllowance == 0 {
@@ -503,7 +493,7 @@ func resolveLocalLocks(
 			if inSpan != nil {
 				update.Span = *inSpan
 				num, resumeSpan, err := storage.MVCCResolveWriteIntentRange(
-					ctx, readWriter, ms, update, resolveAllowance, onlySeparatedIntents)
+					ctx, readWriter, ms, update, resolveAllowance)
 				if err != nil {
 					return err
 				}
@@ -565,18 +555,11 @@ func updateFinalizedTxn(
 	key []byte,
 	args *roachpb.EndTxnRequest,
 	txn *roachpb.Transaction,
-	recordAlreadyExisted bool,
 	externalLocks []roachpb.Span,
 ) error {
 	if txnAutoGC && len(externalLocks) == 0 {
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d locks)", txn.Short(), len(args.LockSpans))
-		}
-		if !recordAlreadyExisted {
-			// Nothing to delete, so there's no use writing a deletion tombstone. This
-			// can help avoid sending a proposal through Raft, if nothing else in the
-			// BatchRequest writes.
-			return nil
 		}
 		return storage.MVCCDelete(ctx, readWriter, ms, key, hlc.Timestamp{}, nil /* txn */)
 	}
@@ -966,8 +949,11 @@ func splitTriggerHelper(
 		// - node two becomes the lease holder for [c,e). Its timestamp cache does
 		//   not know about the read at 'd' which happened at the beginning.
 		// - node two can illegally propose a write to 'd' at a lower timestamp.
+		//
+		// TODO(tschottdorf): why would this use r.store.Engine() and not the
+		// batch? We do the same thing for other usages of the state loader.
 		sl := MakeStateLoader(rec)
-		leftLease, err := sl.LoadLease(ctx, batch)
+		leftLease, err := sl.LoadLease(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load lease")
 		}
@@ -984,7 +970,7 @@ func splitTriggerHelper(
 		}
 		rightLease := leftLease
 		rightLease.Replica = replica
-		gcThreshold, err := sl.LoadGCThreshold(ctx, batch)
+		gcThreshold, err := sl.LoadGCThreshold(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}
@@ -1015,7 +1001,7 @@ func splitTriggerHelper(
 			truncStateType = stateloader.TruncatedStateLegacyReplicated
 		}
 
-		replicaVersion, err := sl.LoadVersion(ctx, batch)
+		replicaVersion, err := sl.LoadVersion(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}

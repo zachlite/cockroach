@@ -1,14 +1,44 @@
 # Empty configuration: use and propagate defaults.
 yaml
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     default:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -21,14 +51,44 @@ sinks:
     custom:
       channels: DEV
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     custom:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -43,15 +103,44 @@ sinks:
     custom:
       channels: DEV
 ----
+file-defaults:
+  dir: /custom
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     custom:
       channels: all
       dir: /custom
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /custom
@@ -61,20 +150,50 @@ capture-stray-errors:
 # Check that default severity propagates.
 yaml
 file-defaults:
-  filter: WARNING
+       filter: WARNING
 sinks:
-  file-groups:
-    custom:
-      channels: DEV
+   file-groups:
+     custom:
+       channels: DEV
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: WARNING
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     custom:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: WARNING
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -88,11 +207,37 @@ sinks:
         address: "127.0.0.1:5170"
         channels: DEV
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     default:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   fluent-servers:
     custom:
       channels: [DEV]
@@ -106,6 +251,10 @@ sinks:
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -118,14 +267,44 @@ sinks:
       custom:
          channels: all
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     custom:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -139,15 +318,44 @@ sinks:
       channels: DEV
       auditable: true
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     custom:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
       buffered-writes: false
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -162,11 +370,37 @@ sinks:
       address: localhost:5170
       auditable: true
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     default:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   fluent-servers:
     custom:
       channels: [DEV]
@@ -180,6 +414,10 @@ sinks:
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -193,14 +431,44 @@ sinks:
       exit-on-error: false
       auditable: true
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: INFO
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   file-groups:
     default:
       channels: all
+      dir: /default-dir
+      max-file-size: 10MiB
+      max-group-size: 100MiB
+      buffered-writes: true
       filter: INFO
+      format: crdb-v2
+      redact: false
+      redactable: true
+      exit-on-error: true
   stderr:
     channels: [DEV]
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir
@@ -210,10 +478,32 @@ capture-stray-errors:
 yaml
 file-defaults: {filter: NONE}
 ----
+file-defaults:
+  dir: /default-dir
+  max-file-size: 10MiB
+  max-group-size: 100MiB
+  buffered-writes: true
+  filter: NONE
+  format: crdb-v2
+  redact: false
+  redactable: true
+  exit-on-error: true
+  auditable: false
+fluent-defaults:
+  filter: INFO
+  format: json-fluent-compact
+  redact: false
+  redactable: true
+  exit-on-error: false
+  auditable: false
 sinks:
   stderr:
     channels: all
     filter: NONE
+    format: crdb-v2-tty
+    redact: false
+    redactable: true
+    exit-on-error: true
 capture-stray-errors:
   enable: true
   dir: /default-dir

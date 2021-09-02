@@ -55,7 +55,8 @@ func (e *explainPlanNode) startExec(params runParams) error {
 
 	distribution := getPlanDistribution(
 		params.ctx, params.p, params.extendedEvalCtx.ExecCfg.NodeID,
-		params.extendedEvalCtx.SessionData().DistSQLMode, plan.main,
+		params.extendedEvalCtx.SessionData.DistSQLMode,
+		&params.extendedEvalCtx.Settings.SV, plan.main,
 	)
 	ob.AddDistribution(distribution.String())
 
@@ -82,11 +83,15 @@ func (e *explainPlanNode) startExec(params runParams) error {
 		// cause an error or panic, so swallow the error. See #40677 for example.
 		distSQLPlanner.FinalizePlan(planCtx, physicalPlan)
 		flows := physicalPlan.GenerateFlowSpecs()
-		flowCtx := newFlowCtxForExplainPurposes(planCtx, params.p)
+		flowCtx := newFlowCtxForExplainPurposes(planCtx, params)
+		flowCtx.Cfg.ClusterID = &distSQLPlanner.rpcCtx.ClusterID
 
-		ctxSessionData := flowCtx.EvalCtx.SessionData()
+		ctxSessionData := flowCtx.EvalCtx.SessionData
+		vectorizedThresholdMet := physicalPlan.MaxEstimatedRowCount >= ctxSessionData.VectorizeRowCountThreshold
 		var willVectorize bool
 		if ctxSessionData.VectorizeMode == sessiondatapb.VectorizeOff {
+			willVectorize = false
+		} else if !vectorizedThresholdMet && ctxSessionData.VectorizeMode == sessiondatapb.VectorizeOn {
 			willVectorize = false
 		} else {
 			willVectorize = true
@@ -175,8 +180,8 @@ func emitExplain(
 			return "<virtual table spans>"
 		}
 		tabDesc := table.(*optTable).desc
-		idx := index.(*optIndex).idx
-		spans, err := generateScanSpans(evalCtx, codec, tabDesc, idx, scanParams)
+		idxDesc := index.(*optIndex).desc
+		spans, err := generateScanSpans(evalCtx, codec, tabDesc, idxDesc, scanParams)
 		if err != nil {
 			return err.Error()
 		}
@@ -192,7 +197,7 @@ func emitExplain(
 		if !codec.ForSystemTenant() {
 			skip = 4
 		}
-		return catalogkeys.PrettySpans(idx, spans, skip)
+		return catalogkeys.PrettySpans(idxDesc, spans, skip)
 	}
 
 	return explain.Emit(explainPlan, ob, spanFormatFn)
@@ -231,8 +236,5 @@ func newPhysPlanForExplainPurposes(
 	if plan.isPhysicalPlan() {
 		return plan.physPlan.PhysicalPlan, nil
 	}
-	physPlan, err := distSQLPlanner.createPhysPlanForPlanNode(planCtx, plan.planNode)
-	// Release the resources right away since we won't be running the plan.
-	planCtx.getCleanupFunc()()
-	return physPlan, err
+	return distSQLPlanner.createPhysPlanForPlanNode(planCtx, plan.planNode)
 }

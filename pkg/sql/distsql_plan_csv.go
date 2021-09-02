@@ -24,18 +24,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/logtags"
 )
 
 // RowResultWriter is a thin wrapper around a RowContainer.
 type RowResultWriter struct {
-	rowContainer *rowContainerHelper
+	rowContainer *rowcontainer.RowContainer
 	rowsAffected int
 	err          error
 }
@@ -43,7 +43,9 @@ type RowResultWriter struct {
 var _ rowResultWriter = &RowResultWriter{}
 
 // NewRowResultWriter creates a new RowResultWriter.
-func NewRowResultWriter(rowContainer *rowContainerHelper) *RowResultWriter {
+func NewRowResultWriter(rowContainer *rowcontainer.RowContainer) *RowResultWriter {
+	// TODO(yuzefovich): consider using disk-backed row container in some cases
+	// (for example, in case of subqueries and apply-joins).
 	return &RowResultWriter{rowContainer: rowContainer}
 }
 
@@ -54,10 +56,8 @@ func (b *RowResultWriter) IncrementRowsAffected(ctx context.Context, n int) {
 
 // AddRow implements the rowResultWriter interface.
 func (b *RowResultWriter) AddRow(ctx context.Context, row tree.Datums) error {
-	if b.rowContainer != nil {
-		return b.rowContainer.addRow(ctx, row)
-	}
-	return nil
+	_, err := b.rowContainer.AddRow(ctx, row)
+	return err
 }
 
 // SetError is part of the rowResultWriter interface.
@@ -155,9 +155,6 @@ func presplitTableBoundaries(
 	cfg *ExecutorConfig,
 	tables map[string]*execinfrapb.ReadImportDataSpec_ImportTable,
 ) error {
-	var span *tracing.Span
-	ctx, span = tracing.ChildSpan(ctx, "import-pre-splitting-table-boundaries")
-	defer span.Finish()
 	expirationTime := cfg.DB.Clock().Now().Add(time.Hour.Nanoseconds(), 0)
 	for _, tbl := range tables {
 		// TODO(ajwerner): Consider passing in the wrapped descriptors.

@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -225,7 +224,6 @@ func NewMergeJoinOp(
 	leftOrdering []execinfrapb.Ordering_Column,
 	rightOrdering []execinfrapb.Ordering_Column,
 	diskAcc *mon.BoundAccount,
-	evalCtx *tree.EvalContext,
 ) (colexecop.ResettableOperator, error) {
 	// Merge joiner only supports the case when the physical types in the
 	// equality columns in both inputs are the same. We, however, also need to
@@ -275,7 +273,7 @@ func NewMergeJoinOp(
 			}
 			if castLeftToRight {
 				castColumnIdx := len(actualLeftTypes)
-				left, err = colexecbase.GetCastOperator(unlimitedAllocator, left, int(leftColIdx), castColumnIdx, leftType, rightType, evalCtx)
+				left, err = colexecbase.GetCastOperator(unlimitedAllocator, left, int(leftColIdx), castColumnIdx, leftType, rightType)
 				if err != nil {
 					return nil, err
 				}
@@ -283,7 +281,7 @@ func NewMergeJoinOp(
 				actualLeftOrdering[i].ColIdx = uint32(castColumnIdx)
 			} else {
 				castColumnIdx := len(actualRightTypes)
-				right, err = colexecbase.GetCastOperator(unlimitedAllocator, right, int(rightColIdx), castColumnIdx, rightType, leftType, evalCtx)
+				right, err = colexecbase.GetCastOperator(unlimitedAllocator, right, int(rightColIdx), castColumnIdx, rightType, leftType)
 				if err != nil {
 					return nil, err
 				}
@@ -420,7 +418,7 @@ func newMergeJoinBase(
 	diskQueueCfg.CacheMode = colcontainer.DiskQueueCacheModeReuseCache
 	diskQueueCfg.SetDefaultBufferSizeBytesForCacheMode()
 	base := &mergeJoinBase{
-		joinHelper:         newJoinHelper(left, right),
+		twoInputNode:       newTwoInputNode(left, right),
 		unlimitedAllocator: unlimitedAllocator,
 		memoryLimit:        memoryLimit,
 		diskQueueCfg:       diskQueueCfg,
@@ -445,15 +443,13 @@ func newMergeJoinBase(
 	var err error
 	base.left.distincterInput = &colexecop.FeedOperator{}
 	base.left.distincter, base.left.distinctOutput, err = colexecbase.OrderedDistinctColsToOperators(
-		base.left.distincterInput, lEqCols, leftTypes, false, /* nullsAreDistinct */
-	)
+		base.left.distincterInput, lEqCols, leftTypes)
 	if err != nil {
 		return base, err
 	}
 	base.right.distincterInput = &colexecop.FeedOperator{}
 	base.right.distincter, base.right.distinctOutput, err = colexecbase.OrderedDistinctColsToOperators(
-		base.right.distincterInput, rEqCols, rightTypes, false, /* nullsAreDistinct */
-	)
+		base.right.distincterInput, rEqCols, rightTypes)
 	if err != nil {
 		return base, err
 	}
@@ -462,7 +458,7 @@ func newMergeJoinBase(
 
 // mergeJoinBase extracts the common logic between all merge join operators.
 type mergeJoinBase struct {
-	*joinHelper
+	twoInputNode
 	colexecop.CloserHelper
 
 	unlimitedAllocator *colmem.Allocator
@@ -510,11 +506,10 @@ func (o *mergeJoinBase) Reset(ctx context.Context) {
 	o.resetBuilderCrossProductState()
 }
 
-func (o *mergeJoinBase) Init(ctx context.Context) {
-	if !o.init(ctx) {
-		return
-	}
+func (o *mergeJoinBase) Init() {
 	o.outputTypes = o.joinType.MakeOutputTypes(o.left.sourceTypes, o.right.sourceTypes)
+	o.left.source.Init()
+	o.right.source.Init()
 	o.bufferedGroup.left.firstTuple = o.unlimitedAllocator.NewMemBatchWithFixedCapacity(
 		o.left.sourceTypes, 1, /* capacity */
 	).ColVecs()
@@ -525,7 +520,6 @@ func (o *mergeJoinBase) Init(ctx context.Context) {
 		o.unlimitedAllocator, o.joinType, o.left.sourceTypes, o.right.sourceTypes,
 		o.memoryLimit, o.diskQueueCfg, o.fdSemaphore, o.diskAcc,
 	)
-	o.bufferedGroup.helper.init(o.Ctx)
 
 	o.builderState.lGroups = make([]group, 1)
 	o.builderState.rGroups = make([]group, 1)
@@ -548,7 +542,12 @@ func (o *mergeJoinBase) resetBuilderCrossProductState() {
 // A zero-length batch needs to be appended when no more batches will be
 // appended to the buffered group.
 func (o *mergeJoinBase) appendToBufferedGroup(
-	input *mergeJoinInput, batch coldata.Batch, sel []int, groupStartIdx int, groupLength int,
+	ctx context.Context,
+	input *mergeJoinInput,
+	batch coldata.Batch,
+	sel []int,
+	groupStartIdx int,
+	groupLength int,
 ) {
 	var (
 		bufferedGroup     *mjBufferedGroup
@@ -572,7 +571,7 @@ func (o *mergeJoinBase) appendToBufferedGroup(
 	if batch.Length() == 0 || groupLength == 0 {
 		// We have finished appending to this buffered group, so we need to
 		// Enqueue a zero-length batch per the contract of the spilling queue.
-		bufferedTuples.Enqueue(o.Ctx, coldata.ZeroBatch)
+		bufferedTuples.Enqueue(ctx, coldata.ZeroBatch)
 		return
 	}
 	// TODO(yuzefovich): for LEFT/RIGHT ANTI joins we only need to store the
@@ -587,20 +586,22 @@ func (o *mergeJoinBase) appendToBufferedGroup(
 		o.unlimitedAllocator.PerformOperation(bufferedGroup.firstTuple, func() {
 			for colIdx := range sourceTypes {
 				bufferedGroup.firstTuple[colIdx].Copy(
-					coldata.SliceArgs{
-						Src:         batch.ColVec(colIdx),
-						Sel:         sel,
-						DestIdx:     0,
-						SrcStartIdx: groupStartIdx,
-						SrcEndIdx:   groupStartIdx + 1,
+					coldata.CopySliceArgs{
+						SliceArgs: coldata.SliceArgs{
+							Src:         batch.ColVec(colIdx),
+							Sel:         sel,
+							DestIdx:     0,
+							SrcStartIdx: groupStartIdx,
+							SrcEndIdx:   groupStartIdx + 1,
+						},
 					},
 				)
 			}
 		})
 	}
 
-	// We don't impose any memory limits on the scratch batch because we rely on
-	// the inputs to the merge joiner to produce reasonably sized batches.
+	// For now, we don't enforce any footprint-based memory limit.
+	// TODO(yuzefovich): refactor this.
 	const maxBatchMemSize = math.MaxInt64
 	bufferedGroup.scratchBatch, _ = o.unlimitedAllocator.ResetMaybeReallocate(
 		input.sourceTypes, bufferedGroup.scratchBatch, groupLength, maxBatchMemSize,
@@ -608,18 +609,20 @@ func (o *mergeJoinBase) appendToBufferedGroup(
 	o.unlimitedAllocator.PerformOperation(bufferedGroup.scratchBatch.ColVecs(), func() {
 		for colIdx := range input.sourceTypes {
 			bufferedGroup.scratchBatch.ColVec(colIdx).Copy(
-				coldata.SliceArgs{
-					Src:         batch.ColVec(colIdx),
-					Sel:         sel,
-					DestIdx:     0,
-					SrcStartIdx: groupStartIdx,
-					SrcEndIdx:   groupStartIdx + groupLength,
+				coldata.CopySliceArgs{
+					SliceArgs: coldata.SliceArgs{
+						Src:         batch.ColVec(colIdx),
+						Sel:         sel,
+						DestIdx:     0,
+						SrcStartIdx: groupStartIdx,
+						SrcEndIdx:   groupStartIdx + groupLength,
+					},
 				},
 			)
 		}
 		bufferedGroup.scratchBatch.SetLength(groupLength)
 	})
-	bufferedTuples.Enqueue(o.Ctx, bufferedGroup.scratchBatch)
+	bufferedTuples.Enqueue(ctx, bufferedGroup.scratchBatch)
 }
 
 // setBuilderSourceToBatch sets the builder state to use groups from the
@@ -633,19 +636,19 @@ func (o *mergeJoinBase) setBuilderSourceToBatch() {
 
 // initProberState sets the batches, lengths, and current indices to the right
 // locations given the last iteration of the operator.
-func (o *mergeJoinBase) initProberState() {
+func (o *mergeJoinBase) initProberState(ctx context.Context) {
 	// If this is the first batch or we're done with the current batch, get the
 	// next batch.
 	if o.proberState.lBatch == nil || (o.proberState.lLength != 0 && o.proberState.lIdx == o.proberState.lLength) {
-		o.proberState.lIdx, o.proberState.lBatch = 0, o.left.source.Next()
+		o.proberState.lIdx, o.proberState.lBatch = 0, o.left.source.Next(ctx)
 		o.proberState.lLength = o.proberState.lBatch.Length()
 	}
 	if o.proberState.rBatch == nil || (o.proberState.rLength != 0 && o.proberState.rIdx == o.proberState.rLength) {
-		o.proberState.rIdx, o.proberState.rBatch = 0, o.right.source.Next()
+		o.proberState.rIdx, o.proberState.rBatch = 0, o.right.source.Next(ctx)
 		o.proberState.rLength = o.proberState.rBatch.Length()
 	}
 	if o.bufferedGroup.needToReset {
-		o.bufferedGroup.helper.Reset(o.Ctx)
+		o.bufferedGroup.helper.Reset(ctx)
 		o.bufferedGroup.needToReset = false
 	}
 }
@@ -663,9 +666,9 @@ func (o *mergeJoinBase) sourceFinished() bool {
 
 // finishBufferedGroup appends a zero-length batch to the buffered group which
 // is required by the contract of the spilling queue.
-func (o *mergeJoinBase) finishBufferedGroup(input *mergeJoinInput) {
+func (o *mergeJoinBase) finishBufferedGroup(ctx context.Context, input *mergeJoinInput) {
 	o.appendToBufferedGroup(
-		input, coldata.ZeroBatch, nil, /* sel */
+		ctx, input, coldata.ZeroBatch, nil, /* sel */
 		0 /* groupStartIdx */, 0, /* groupLength */
 	)
 }
@@ -681,19 +684,16 @@ func (o *mergeJoinBase) finishBufferedGroup(input *mergeJoinInput) {
 // unbounded buffering.
 // SIDE EFFECT: can append to the buffered group corresponding to the source.
 func (o *mergeJoinBase) completeBufferedGroup(
-	input *mergeJoinInput, batch coldata.Batch, rowIdx int,
+	ctx context.Context, input *mergeJoinInput, batch coldata.Batch, rowIdx int,
 ) (_ coldata.Batch, idx int, batchLength int) {
 	batchLength = batch.Length()
 	if o.isBufferedGroupFinished(input, batch, rowIdx) {
-		o.finishBufferedGroup(input)
+		o.finishBufferedGroup(ctx, input)
 		return batch, rowIdx, batchLength
 	}
 
 	isBufferedGroupComplete := false
-	// It is ok that we might call Init() multiple times - it'll be a noop after
-	// the first one.
-	input.distincter.Init(o.Ctx)
-	input.distincter.(colexecop.Resetter).Reset(o.Ctx)
+	input.distincter.(colexecop.Resetter).Reset(ctx)
 	// Ignore the first row of the distincter in the first pass since we already
 	// know that we are in the same group and, thus, the row is not distinct,
 	// regardless of what the distincter outputs.
@@ -706,7 +706,7 @@ func (o *mergeJoinBase) completeBufferedGroup(
 		// so the distincter - in a sense - compares the incoming tuples to the
 		// first tuple of the first iteration (which we know is the same group).
 		input.distincterInput.SetBatch(batch)
-		input.distincter.Next()
+		input.distincter.Next(ctx)
 
 		sel = batch.Selection()
 		var groupLength int
@@ -733,19 +733,19 @@ func (o *mergeJoinBase) completeBufferedGroup(
 		loopStartIndex = 0
 
 		// Buffer all the tuples that are part of the buffered group.
-		o.appendToBufferedGroup(input, batch, sel, rowIdx, groupLength)
+		o.appendToBufferedGroup(ctx, input, batch, sel, rowIdx, groupLength)
 		rowIdx += groupLength
 
 		if !isBufferedGroupComplete {
 			// The buffered group is still not complete which means that we have
 			// just appended all the tuples from batch to it, so we need to get a
 			// fresh batch from the input.
-			rowIdx, batch = 0, input.source.Next()
+			rowIdx, batch = 0, input.source.Next(ctx)
 			batchLength = batch.Length()
 			if batchLength == 0 {
 				// The input has been exhausted, so the buffered group is now complete.
 				isBufferedGroupComplete = true
-				o.finishBufferedGroup(input)
+				o.finishBufferedGroup(ctx, input)
 			}
 		}
 	}
@@ -754,33 +754,35 @@ func (o *mergeJoinBase) completeBufferedGroup(
 }
 
 // finishProbe completes the buffered groups on both sides of the input.
-func (o *mergeJoinBase) finishProbe() {
+func (o *mergeJoinBase) finishProbe(ctx context.Context) {
 	o.proberState.lBatch, o.proberState.lIdx, o.proberState.lLength = o.completeBufferedGroup(
+		ctx,
 		&o.left,
 		o.proberState.lBatch,
 		o.proberState.lIdx,
 	)
 	o.proberState.rBatch, o.proberState.rIdx, o.proberState.rLength = o.completeBufferedGroup(
+		ctx,
 		&o.right,
 		o.proberState.rBatch,
 		o.proberState.rIdx,
 	)
 }
 
-func (o *mergeJoinBase) Close() error {
+func (o *mergeJoinBase) Close(ctx context.Context) error {
 	if !o.CloserHelper.Close() {
 		return nil
 	}
 	var lastErr error
 	for _, op := range []colexecop.Operator{o.left.source, o.right.source} {
 		if c, ok := op.(colexecop.Closer); ok {
-			if err := c.Close(); err != nil {
+			if err := c.Close(ctx); err != nil {
 				lastErr = err
 			}
 		}
 	}
 	if h := o.bufferedGroup.helper; h != nil {
-		if err := h.Close(); err != nil {
+		if err := h.Close(ctx); err != nil {
 			lastErr = err
 		}
 	}

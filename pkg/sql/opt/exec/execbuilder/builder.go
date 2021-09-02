@@ -93,10 +93,6 @@ type Builder struct {
 	// containsFullIndexScan is set to true if the statement contains a secondary
 	// index scan.
 	ContainsFullIndexScan bool
-
-	// containsBoundedStalenessScan is true if the query uses bounded
-	// staleness and contains a scan.
-	containsBoundedStalenessScan bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -225,12 +221,6 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 		}
 	}
 	return nil
-}
-
-// boundedStaleness returns true if this query uses bounded staleness.
-func (b *Builder) boundedStaleness() bool {
-	return b.evalCtx != nil && b.evalCtx.AsOfSystemTime != nil &&
-		b.evalCtx.AsOfSystemTime.BoundedStaleness
 }
 
 // mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -

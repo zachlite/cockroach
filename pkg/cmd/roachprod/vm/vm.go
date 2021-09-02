@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/config"
 	"github.com/cockroachdb/errors"
@@ -128,13 +127,6 @@ func (vl List) ProviderIDs() []string {
 	return ret
 }
 
-const (
-	// Zfs refers to the zfs file system.
-	Zfs = "zfs"
-	// Ext4 refers to the ext4 file system.
-	Ext4 = "ext4"
-)
-
 // CreateOpts is the set of options when creating VMs.
 type CreateOpts struct {
 	ClusterName    string
@@ -146,10 +138,7 @@ type CreateOpts struct {
 		// NoExt4Barrier, if set, makes the "-o nobarrier" flag be used when
 		// mounting the SSD. Ignored if UseLocalSSD is not set.
 		NoExt4Barrier bool
-		// The file system to be used. This is set to "ext4" by default.
-		FileSystem string
 	}
-	OsVolumeSize int
 }
 
 // MultipleProjectsOption is used to specify whether a command accepts multiple
@@ -362,21 +351,4 @@ func ExpandZonesFlag(zoneFlag []string) (zones []string, err error) {
 		}
 	}
 	return zones, nil
-}
-
-// DNSSafeAccount takes a string and returns a cleaned version of the string that can be used in DNS entries.
-// Unsafe characters are dropped. No length check is performed.
-func DNSSafeAccount(account string) string {
-	safe := func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return unicode.ToLower(r)
-		default:
-			// Negative value tells strings.Map to drop the rune.
-			return -1
-		}
-	}
-	return strings.Map(safe, account)
 }

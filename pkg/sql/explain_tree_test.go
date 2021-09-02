@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -83,7 +82,7 @@ func TestPlanToTreeAndPlanToString(t *testing.T) {
 			if d.Cmd == "plan-string" {
 				ob := ih.buildExplainAnalyzePlan(
 					explain.Flags{Verbose: true, ShowTypes: true},
-					sessionphase.NewTimes(),
+					&phaseTimes{},
 					&execstats.QueryLevelStats{},
 				)
 				return ob.BuildString()

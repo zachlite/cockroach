@@ -85,8 +85,6 @@ func TestContextualHelp(t *testing.T) {
 		{`ALTER PARTITION ??`, `ALTER PARTITION`},
 		{`ALTER PARTITION p OF INDEX tbl@idx ??`, `ALTER PARTITION`},
 
-		{`ALTER DEFAULT PRIVILEGES ??`, `ALTER DEFAULT PRIVILEGES`},
-
 		{`ANALYZE ??`, `ANALYZE`},
 		{`ANALYZE blah ??`, `ANALYZE`},
 		{`ANALYSE ??`, `ANALYZE`},
@@ -319,9 +317,6 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW CREATE TABLE blah ??`, `SHOW CREATE`},
 		{`SHOW CREATE VIEW blah ??`, `SHOW CREATE`},
 		{`SHOW CREATE SEQUENCE blah ??`, `SHOW CREATE`},
-
-		{`SHOW CREATE SCHEDULE blah ??`, `SHOW CREATE SCHEDULES`},
-		{`SHOW CREATE ALL SCHEDULES ??`, `SHOW CREATE SCHEDULES`},
 
 		{`SHOW DATABASES ??`, `SHOW DATABASES`},
 

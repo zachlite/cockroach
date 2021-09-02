@@ -224,16 +224,8 @@ func (e *emitter) nodeName(n *Node) (string, error) {
 		a := n.args.(*applyJoinArgs)
 		return e.joinNodeName("apply", a.JoinType), nil
 
-	case hashSetOpOp:
-		a := n.args.(*hashSetOpArgs)
-		name := strings.ToLower(a.Typ.String())
-		if a.All {
-			name += " all"
-		}
-		return name, nil
-
-	case streamingSetOpOp:
-		a := n.args.(*streamingSetOpArgs)
+	case setOpOp:
+		a := n.args.(*setOpArgs)
 		name := strings.ToLower(a.Typ.String())
 		if a.All {
 			name += " all"
@@ -295,9 +287,7 @@ var nodeNames = [...]string{
 	scanBufferOp:           "scan buffer",
 	scanOp:                 "", // This node does not have a fixed name.
 	sequenceSelectOp:       "sequence select",
-	hashSetOpOp:            "", // This node does not have a fixed name.
-	streamingSetOpOp:       "", // This node does not have a fixed name.
-	unionAllOp:             "union all",
+	setOpOp:                "", // This node does not have a fixed name.
 	showTraceOp:            "show trace",
 	simpleProjectOp:        "project",
 	serializingProjectOp:   "project",
@@ -356,12 +346,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			if s.VectorizedBatchCount.HasValue() {
 				e.ob.AddField("vectorized batch count", humanizeutil.Count(s.VectorizedBatchCount.Value()))
 			}
-		}
-		if s.KVTime.HasValue() {
-			e.ob.AddField("KV time", humanizeutil.Duration(s.KVTime.Value()))
-		}
-		if s.KVContentionTime.HasValue() {
-			e.ob.AddField("KV contention time", humanizeutil.Duration(s.KVContentionTime.Value()))
 		}
 		if s.KVRowsRead.HasValue() {
 			e.ob.AddField("KV rows read", humanizeutil.Count(s.KVRowsRead.Value()))
@@ -482,8 +466,8 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			ob.Attr("already ordered", colinfo.ColumnOrdering(a.Ordering[:p]).String(n.Columns()))
 		}
 
-	case unionAllOp:
-		a := n.args.(*unionAllArgs)
+	case setOpOp:
+		a := n.args.(*setOpArgs)
 		if a.HardLimit > 0 {
 			ob.Attr("limit", a.HardLimit)
 		}
@@ -587,7 +571,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			ob.Attr("equality cols are key", "")
 		}
 		ob.Expr("lookup condition", a.LookupExpr, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
-		ob.Expr("remote lookup condition", a.RemoteLookupExpr, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
 		ob.Expr("pred", a.OnCond, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
 		e.emitLockingPolicy(a.Locking)
 
@@ -766,8 +749,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		serializingProjectOp,
 		ordinalityOp,
 		max1RowOp,
-		hashSetOpOp,
-		streamingSetOpOp,
 		explainOptOp,
 		explainOp,
 		showTraceOp,

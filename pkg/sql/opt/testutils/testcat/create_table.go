@@ -115,7 +115,7 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 	if !hasPrimaryIndex {
 		var rowid cat.Column
 		ordinal := len(tab.Columns)
-		rowid.Init(
+		rowid.InitNonVirtual(
 			ordinal,
 			cat.StableID(1+ordinal),
 			"rowid",
@@ -142,7 +142,7 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 	// Add the MVCC timestamp system column.
 	var mvcc cat.Column
 	ordinal := len(tab.Columns)
-	mvcc.Init(
+	mvcc.InitNonVirtual(
 		ordinal,
 		cat.StableID(1+ordinal),
 		colinfo.MVCCTimestampColumnName,
@@ -154,22 +154,6 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 		nil, /* computedExpr */
 	)
 	tab.Columns = append(tab.Columns, mvcc)
-
-	// Add the tableoid system column.
-	var tableoid cat.Column
-	ordinal = len(tab.Columns)
-	tableoid.Init(
-		ordinal,
-		cat.StableID(1+ordinal),
-		colinfo.TableOIDColumnName,
-		cat.System,
-		types.Oid,
-		true, /* nullable */
-		cat.Hidden,
-		nil, /* defaultExpr */
-		nil, /* computedExpr */
-	)
-	tab.Columns = append(tab.Columns, tableoid)
 
 	// Cache the partitioning statement for the primary index.
 	if stmt.PartitionByTable != nil {
@@ -290,7 +274,7 @@ func (tc *Catalog) createVirtualTable(stmt *tree.CreateTable) *Table {
 
 	// Add the dummy PK column.
 	var pk cat.Column
-	pk.Init(
+	pk.InitNonVirtual(
 		0, /* ordinal */
 		0, /* stableID */
 		"crdb_internal_vtable_pk",
@@ -346,7 +330,7 @@ func (tc *Catalog) CreateTableAs(name tree.TableName, columns []cat.Column) *Tab
 
 	var rowid cat.Column
 	ordinal := len(columns)
-	rowid.Init(
+	rowid.InitNonVirtual(
 		ordinal,
 		cat.StableID(1+ordinal),
 		"rowid",
@@ -381,26 +365,8 @@ func (tc *Catalog) resolveFK(tab *Table, d *tree.ForeignKeyConstraintTableDef) {
 		targetTable = tc.Table(&d.Table)
 	}
 
-	referencedColNames := d.ToCols
-	if len(referencedColNames) == 0 {
-		// If no columns are specified, attempt to default to PK, ignoring implicit
-		// columns.
-		idx := targetTable.Index(cat.PrimaryIndex)
-		numImplicitCols := idx.ImplicitPartitioningColumnCount()
-		referencedColNames = make(
-			tree.NameList,
-			0,
-			idx.KeyColumnCount()-numImplicitCols,
-		)
-		for i := numImplicitCols; i < idx.KeyColumnCount(); i++ {
-			referencedColNames = append(
-				referencedColNames,
-				idx.Column(i).ColName(),
-			)
-		}
-	}
-	toCols := make([]int, len(referencedColNames))
-	for i, c := range referencedColNames {
+	toCols := make([]int, len(d.ToCols))
+	for i, c := range d.ToCols {
 		toCols[i] = targetTable.FindOrdinal(string(c))
 	}
 
@@ -562,7 +528,10 @@ func (tt *Table) addUniqueConstraint(
 func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 	ordinal := len(tt.Columns)
 	nullable := !def.PrimaryKey.IsPrimaryKey && def.Nullable.Nullability != tree.NotNull
-	typ := tree.MustBeStaticallyKnownType(def.Type)
+	typ, err := tree.ResolveType(context.Background(), def.Type, tt.Catalog)
+	if err != nil {
+		panic(err)
+	}
 
 	name := def.Name
 	kind := cat.Ordinary
@@ -605,7 +574,7 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 			*computedExpr,
 		)
 	} else {
-		col.Init(
+		col.InitNonVirtual(
 			ordinal,
 			cat.StableID(1+ordinal),
 			name,
@@ -742,7 +711,7 @@ func (tt *Table) addIndexWithVersion(
 		}
 		// Add the rest of the columns in the table.
 		for i, col := range tt.Columns {
-			if !pkOrdinals.Contains(i) && col.Kind() != cat.Inverted && !col.IsVirtualComputed() {
+			if !pkOrdinals.Contains(i) && col.Kind() != cat.VirtualInverted && !col.IsVirtualComputed() {
 				idx.addColumnByOrdinal(tt, i, tree.Ascending, nonKeyCol)
 			}
 		}
@@ -893,7 +862,7 @@ func (tt *Table) addFamily(def *tree.FamilyTableDef) {
 }
 
 // addColumn adds a column to the index. If necessary, creates a virtual column
-// (for inverted and expression indexes).
+// (for inverted and expression-based indexes).
 //
 // isLastIndexCol indicates if this is the last explicit column in the index as
 // specified in the schema; it is used to indicate the inverted column if the
@@ -901,17 +870,15 @@ func (tt *Table) addFamily(def *tree.FamilyTableDef) {
 func (ti *Index) addColumn(
 	tt *Table, elem tree.IndexElem, colType colType, isLastIndexCol bool,
 ) *cat.Column {
-	var ordinal int
-	var colName tree.Name
 	if elem.Expr != nil {
+		if ti.Inverted && isLastIndexCol {
+			panic("expression-based inverted column not supported")
+		}
 		col := columnForIndexElemExpr(tt, elem.Expr)
-		ordinal = col.Ordinal()
-		colName = col.ColName()
-	} else {
-		ordinal = tt.FindOrdinal(string(elem.Column))
-		colName = elem.Column
+		return ti.addColumnByOrdinal(tt, col.Ordinal(), elem.Direction, colType)
 	}
 
+	ordinal := tt.FindOrdinal(string(elem.Column))
 	if ti.Inverted && isLastIndexCol {
 		// The last column of an inverted index is special: the index key does not
 		// contain values from the column itself, but contains inverted index
@@ -921,9 +888,9 @@ func (ti *Index) addColumn(
 		// TODO(radu,mjibson): update this when the corresponding type in the real
 		// catalog is fixed (see sql.newOptTable).
 		typ := tt.Columns[ordinal].DatumType()
-		col.InitInverted(
+		col.InitVirtualInverted(
 			len(tt.Columns),
-			colName+"_inverted_key",
+			elem.Column+"_inverted_key",
 			typ,
 			false,   /* nullable */
 			ordinal, /* invertedSourceColumnOrdinal */
@@ -941,11 +908,17 @@ func (ti *Index) addColumn(
 // reused. Otherwise, a new column is added to the table.
 func columnForIndexElemExpr(tt *Table, expr tree.Expr) cat.Column {
 	exprStr := serializeTableDefExpr(expr)
+	// Find an existing virtual computed column with the same expression.
+	for _, col := range tt.Columns {
+		if col.IsVirtualComputed() && col.ComputedExprStr() == exprStr {
+			return col
+		}
+	}
 	// Add a new virtual computed column with a unique name.
 	var name tree.Name
 	for n, done := 1, false; !done; n++ {
 		done = true
-		name = tree.Name(fmt.Sprintf("crdb_internal_idx_expr_%d", n))
+		name = tree.Name(fmt.Sprintf("idx_expr_%d", n))
 		for _, col := range tt.Columns {
 			if col.ColName() == name {
 				done = false
@@ -975,7 +948,7 @@ func (ti *Index) addColumnByOrdinal(
 	col := tt.Column(ord)
 	if colType == keyCol || colType == strictKeyCol {
 		typ := col.DatumType()
-		if col.Kind() == cat.Inverted {
+		if col.Kind() == cat.VirtualInverted {
 			if !colinfo.ColumnTypeIsInvertedIndexable(typ) {
 				panic(fmt.Errorf(
 					"column %s of type %s is not allowed as the last column of an inverted index",

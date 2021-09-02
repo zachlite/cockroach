@@ -140,23 +140,21 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		mf := logconfig.ByteSize(math.MaxInt64)
 		f := logconfig.DefaultFileFormat
 		fakeConfig := logconfig.FileSinkConfig{
-			FileDefaults: logconfig.FileDefaults{
-				CommonSinkConfig: logconfig.CommonSinkConfig{
-					Filter:      severity.INFO,
-					Criticality: &bt,
-					Format:      &f,
-					Redact:      &bf,
-					// Be careful about stripping the redaction markers from log
-					// entries. The captured fd2 writes are inherently unsafe, so
-					// we don't want the header entry to give a mistaken
-					// impression to the entry parser.
-					Redactable: &bf,
-				},
-				Dir:            config.CaptureFd2.Dir,
-				MaxGroupSize:   config.CaptureFd2.MaxGroupSize,
-				MaxFileSize:    &mf,
-				BufferedWrites: &bf,
+			CommonSinkConfig: logconfig.CommonSinkConfig{
+				Filter:      severity.INFO,
+				Criticality: &bt,
+				Format:      &f,
+				Redact:      &bf,
+				// Be careful about stripping the redaction markers from log
+				// entries. The captured fd2 writes are inherently unsafe, so
+				// we don't want the header entry to give a mistaken
+				// impression to the entry parser.
+				Redactable: &bf,
 			},
+			Dir:            config.CaptureFd2.Dir,
+			MaxGroupSize:   config.CaptureFd2.MaxGroupSize,
+			MaxFileSize:    &mf,
+			BufferedWrites: &bf,
 		}
 		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig)
 		if err != nil {
@@ -252,7 +250,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		if prefix == "default" {
 			prefix = ""
 		}
-		fileSinkInfo, _, err := newFileSinkInfo(prefix, *fc)
+		fileSinkInfo, fileSink, err := newFileSinkInfo(prefix, *fc)
 		if err != nil {
 			cleanupFn()
 			return nil, err
@@ -265,6 +263,10 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 			l := chans[ch]
 			l.sinkInfos = append(l.sinkInfos, fileSinkInfo)
 		}
+
+		// Start the GC process. This ensures that old capture files get
+		// erased as new files get created.
+		go fileSink.gcDaemon(secLoggersCtx)
 	}
 
 	// Create the fluent sinks.

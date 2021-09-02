@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/partitionccl"
@@ -614,7 +615,6 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 			[][]string{
 				{"bank"},
 				{"comments"},
-				{"database_role_settings"},
 				{"jobs"},
 				{"locations"},
 				{"role_members"},
@@ -633,6 +633,8 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 	// out any errors that may occur if some of the system table restoration
 	// functions are not idempotent.
 	t.Run("retry-during-custom-system-table-restore", func(t *testing.T) {
+		defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
+
 		customRestoreSystemTables := make([]string, 0)
 		for table, config := range systemTableBackupConfiguration {
 			if config.customRestoreFunc != nil {
@@ -641,10 +643,7 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 		}
 		for _, customRestoreSystemTable := range customRestoreSystemTables {
 			t.Run(customRestoreSystemTable, func(t *testing.T) {
-				args := base.TestClusterArgs{ServerArgs: base.TestServerArgs{
-					Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
-				}}
-				_, tcRestore, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, args)
+				_, tcRestore, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, base.TestClusterArgs{})
 				defer cleanupEmptyCluster()
 
 				// Inject a retry error, that returns once.
@@ -703,7 +702,6 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 			[][]string{
 				{"bank"},
 				{"comments"},
-				{"database_role_settings"},
 				{"jobs"},
 				{"locations"},
 				{"role_members"},
@@ -891,10 +889,6 @@ func TestReintroduceOfflineSpans(t *testing.T) {
 	dbBackupLoc := "nodelocal://0/my_db_backup"
 	clusterBackupLoc := "nodelocal://0/my_cluster_backup"
 
-	// the small test-case will get entirely buffered/merged by small-file merging
-	// and not report any progress in the meantime unless it is disabled.
-	srcDB.Exec(t, `SET CLUSTER SETTING bulkio.backup.merge_file_size = '0'`)
-
 	// Take a backup that we'll use to create an OFFLINE descriptor.
 	srcDB.Exec(t, `CREATE INDEX new_idx ON data.bank (balance)`)
 	srcDB.Exec(t, `BACKUP DATABASE data TO $1 WITH revision_history`, dbBackupLoc)
@@ -953,10 +947,8 @@ func TestReintroduceOfflineSpans(t *testing.T) {
 	})
 
 	t.Run("restore-canceled", func(t *testing.T) {
-		args := base.TestClusterArgs{ServerArgs: base.TestServerArgs{
-			Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()}},
-		}
-		_, _, destDB, cleanupDst := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, args)
+		defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
+		_, _, destDB, cleanupDst := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, base.TestClusterArgs{})
 		defer cleanupDst()
 
 		destDB.Exec(t, `RESTORE FROM $1 AS OF SYSTEM TIME `+tsMidRestore, clusterBackupLoc)

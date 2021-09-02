@@ -101,9 +101,6 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
               <th className="lease-table__cell lease-table__cell--header">
                 Start Delta
               </th>
-              <th className="lease-table__cell lease-table__cell--header">
-                Acquisition Type
-              </th>
             </tr>
             {_.map(leaseHistory, (lease, key) => {
               let prevProposedTimestamp: protos.cockroach.util.hlc.ITimestamp = null;
@@ -135,11 +132,6 @@ export default class LeaseTable extends React.Component<LeaseTableProps, {}> {
                   {this.renderLeaseTimestampCell(lease.start)}
                   {this.renderLeaseCell(
                     Print.TimestampDelta(lease.start, prevStart),
-                  )}
-                  {this.renderLeaseCell(
-                    protos.cockroach.roachpb.LeaseAcquisitionType[
-                      lease.acquisition_type
-                    ],
                   )}
                 </tr>
               );

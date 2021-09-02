@@ -131,15 +131,15 @@ type Memo struct {
 
 	// The following are selected fields from SessionData which can affect
 	// planning. We need to cross-check these before reusing a cached memo.
-	reorderJoinsLimit       int
-	zigzagJoinEnabled       bool
-	useHistograms           bool
-	useMultiColStats        bool
-	localityOptimizedSearch bool
-	safeUpdates             bool
-	preferLookupJoinsForFKs bool
-	saveTablesPrefix        string
-	intervalStyleEnabled    bool
+	reorderJoinsLimit             int
+	zigzagJoinEnabled             bool
+	useHistograms                 bool
+	useMultiColStats              bool
+	localityOptimizedSearch       bool
+	safeUpdates                   bool
+	preferLookupJoinsForFKs       bool
+	saveTablesPrefix              string
+	improveDisjunctionSelectivity bool
 
 	// curID is the highest currently in-use scalar expression ID.
 	curID opt.ScalarID
@@ -169,16 +169,16 @@ func (m *Memo) Init(evalCtx *tree.EvalContext) {
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
 	*m = Memo{
-		metadata:                m.metadata,
-		reorderJoinsLimit:       evalCtx.SessionData.ReorderJoinsLimit,
-		zigzagJoinEnabled:       evalCtx.SessionData.ZigzagJoinEnabled,
-		useHistograms:           evalCtx.SessionData.OptimizerUseHistograms,
-		useMultiColStats:        evalCtx.SessionData.OptimizerUseMultiColStats,
-		localityOptimizedSearch: evalCtx.SessionData.LocalityOptimizedSearch,
-		safeUpdates:             evalCtx.SessionData.SafeUpdates,
-		preferLookupJoinsForFKs: evalCtx.SessionData.PreferLookupJoinsForFKs,
-		saveTablesPrefix:        evalCtx.SessionData.SaveTablesPrefix,
-		intervalStyleEnabled:    evalCtx.SessionData.IntervalStyleEnabled,
+		metadata:                      m.metadata,
+		reorderJoinsLimit:             evalCtx.SessionData.ReorderJoinsLimit,
+		zigzagJoinEnabled:             evalCtx.SessionData.ZigzagJoinEnabled,
+		useHistograms:                 evalCtx.SessionData.OptimizerUseHistograms,
+		useMultiColStats:              evalCtx.SessionData.OptimizerUseMultiColStats,
+		localityOptimizedSearch:       evalCtx.SessionData.LocalityOptimizedSearch,
+		safeUpdates:                   evalCtx.SessionData.SafeUpdates,
+		preferLookupJoinsForFKs:       evalCtx.SessionData.PreferLookupJoinsForFKs,
+		saveTablesPrefix:              evalCtx.SessionData.SaveTablesPrefix,
+		improveDisjunctionSelectivity: evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity,
 	}
 	m.metadata.Init()
 	m.logPropsBuilder.init(evalCtx, m)
@@ -287,7 +287,7 @@ func (m *Memo) IsStale(
 		m.safeUpdates != evalCtx.SessionData.SafeUpdates ||
 		m.preferLookupJoinsForFKs != evalCtx.SessionData.PreferLookupJoinsForFKs ||
 		m.saveTablesPrefix != evalCtx.SessionData.SaveTablesPrefix ||
-		m.intervalStyleEnabled != evalCtx.SessionData.IntervalStyleEnabled {
+		m.improveDisjunctionSelectivity != evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity {
 		return true, nil
 	}
 

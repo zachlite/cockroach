@@ -38,22 +38,10 @@ func (h Header) WriteTimestamp() hlc.Timestamp {
 	return ts
 }
 
-// RequiredFrontier returns the largest timestamp at which the request may read
-// values when performing a read-only operation. For non-transactional requests,
-// this is the batch timestamp. For transactional requests, this is the maximum
-// of the transaction's read timestamp, its write timestamp, and its global
-// uncertainty limit.
-func (h Header) RequiredFrontier() hlc.Timestamp {
-	if h.Txn != nil {
-		return h.Txn.RequiredFrontier()
-	}
-	return h.Timestamp
-}
-
 // SetActiveTimestamp sets the correct timestamp at which the request is to be
 // carried out. For transactional requests, ba.Timestamp must be zero initially
 // and it will be set to txn.ReadTimestamp (note though this mostly impacts
-// reads; writes use txn.WriteTimestamp). For non-transactional requests, if no
+// reads; writes use txn.Timestamp). For non-transactional requests, if no
 // timestamp is specified, nowFn is used to create and set one.
 func (ba *BatchRequest) SetActiveTimestamp(nowFn func() hlc.Timestamp) error {
 	if txn := ba.Txn; txn != nil {
@@ -74,7 +62,6 @@ func (ba *BatchRequest) SetActiveTimestamp(nowFn func() hlc.Timestamp) error {
 		// When not transactional, allow empty timestamp and use nowFn instead
 		if ba.Timestamp.IsEmpty() {
 			ba.Timestamp = nowFn()
-			ba.TimestampFromServerClock = true
 		}
 	}
 	return nil

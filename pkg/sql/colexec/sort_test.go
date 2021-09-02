@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -145,7 +144,7 @@ func TestSort(t *testing.T) {
 	for _, tc := range sortAllTestCases {
 		colexectestutils.RunTestsWithTyps(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, [][]*types.T{tc.typs}, tc.expected, colexectestutils.OrderedVerifier,
 			func(input []colexecop.Operator) (colexecop.Operator, error) {
-				return NewSorter(testAllocator, input[0], tc.typs, tc.ordCols, execinfra.DefaultMemoryLimit)
+				return NewSorter(testAllocator, input[0], tc.typs, tc.ordCols)
 			})
 	}
 }
@@ -173,9 +172,9 @@ func TestSortRandomized(t *testing.T) {
 				}
 				colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{tups}, expected, colexectestutils.OrderedVerifier, func(input []colexecop.Operator) (colexecop.Operator, error) {
 					if topK {
-						return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, uint64(k), execinfra.DefaultMemoryLimit), nil
+						return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, uint64(k)), nil
 					}
-					return NewSorter(testAllocator, input[0], typs[:nCols], ordCols, execinfra.DefaultMemoryLimit)
+					return NewSorter(testAllocator, input[0], typs[:nCols], ordCols)
 				})
 			}
 		}
@@ -259,8 +258,8 @@ func TestAllSpooler(t *testing.T) {
 	for _, tc := range tcs {
 		colexectestutils.RunTestsWithFn(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, nil, func(t *testing.T, input []colexecop.Operator) {
 			allSpooler := newAllSpooler(testAllocator, input[0], tc.typ)
-			allSpooler.init(context.Background())
-			allSpooler.spool()
+			allSpooler.init()
+			allSpooler.spool(context.Background())
 			if len(tc.tuples) != allSpooler.getNumTuples() {
 				t.Fatal(fmt.Sprintf("allSpooler spooled wrong number of tuples: expected %d, but received %d", len(tc.tuples), allSpooler.getNumTuples()))
 			}
@@ -315,16 +314,16 @@ func BenchmarkSort(b *testing.B) {
 						source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
 						var sorter colexecop.Operator
 						if topK {
-							sorter = NewTopKSorter(testAllocator, source, typs, ordCols, k, execinfra.DefaultMemoryLimit)
+							sorter = NewTopKSorter(testAllocator, source, typs, ordCols, k)
 						} else {
 							var err error
-							sorter, err = NewSorter(testAllocator, source, typs, ordCols, execinfra.DefaultMemoryLimit)
+							sorter, err = NewSorter(testAllocator, source, typs, ordCols)
 							if err != nil {
 								b.Fatal(err)
 							}
 						}
-						sorter.Init(ctx)
-						for out := sorter.Next(); out.Length() != 0; out = sorter.Next() {
+						sorter.Init()
+						for out := sorter.Next(ctx); out.Length() != 0; out = sorter.Next(ctx) {
 						}
 					}
 				})
@@ -360,8 +359,8 @@ func BenchmarkAllSpooler(b *testing.B) {
 				for n := 0; n < b.N; n++ {
 					source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
 					allSpooler := newAllSpooler(testAllocator, source, typs)
-					allSpooler.init(ctx)
-					allSpooler.spool()
+					allSpooler.init()
+					allSpooler.spool(ctx)
 				}
 			})
 		}

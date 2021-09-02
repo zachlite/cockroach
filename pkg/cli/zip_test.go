@@ -16,7 +16,6 @@ import (
 	"context"
 	enc_hex "encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -67,17 +66,9 @@ table_name NOT IN (
 	-- allowlisted tables that don't need to be in debug zip
 	'backward_dependencies',
 	'builtin_functions',
-	'cluster_contended_keys',
-	'cluster_contended_indexes',
-	'cluster_contended_tables',
-	'cluster_inflight_traces',
-	'create_statements',
-	'create_type_statements',
-	'cross_db_references',
 	'databases',
 	'forward_dependencies',
 	'index_columns',
-	'interleaved',
 	'lost_descriptors_with_data',
 	'table_columns',
 	'table_indexes',
@@ -103,13 +94,17 @@ ORDER BY name ASC`)
 		"system.jobs",
 		"system.descriptor",
 		"system.namespace",
+		"system.namespace2",
 		"system.scheduled_jobs",
 	)
 	sort.Strings(tables)
 
 	var exp []string
 	exp = append(exp, debugZipTablesPerNode...)
-	exp = append(exp, debugZipTablesPerCluster...)
+	for _, t := range debugZipTablesPerCluster {
+		t = strings.TrimPrefix(t, `"".`)
+		exp = append(exp, t)
+	}
 	sort.Strings(exp)
 
 	assert.Equal(t, exp, tables)
@@ -122,12 +117,12 @@ func TestZip(t *testing.T) {
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
 
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
 	out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=1s " + os.DevNull)
 	if err != nil {
@@ -165,7 +160,7 @@ func TestConcurrentZip(t *testing.T) {
 	defer tc.Stopper().Stop(ctx)
 
 	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
+	c := cliTest{
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
@@ -198,12 +193,12 @@ func TestZipSpecialNames(t *testing.T) {
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
 
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
 	c.RunWithArgs([]string{"sql", "-e", `
 create database "a:b";
@@ -283,7 +278,7 @@ func TestUnavailableZip(t *testing.T) {
 	defer close(ch)
 
 	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
+	c := cliTest{
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
@@ -325,10 +320,14 @@ func eraseNonDeterministicZipOutput(out string) string {
 	out = re.ReplaceAllString(out, `rpc error: ...`)
 
 	// The number of memory profiles previously collected is not deterministic.
-	re = regexp.MustCompile(`(?m)requesting heap files for node 1\.\.\..*found$`)
-	out = re.ReplaceAllString(out, `requesting heap files for node 1... ? found`)
-	re = regexp.MustCompile(`(?m)\^writing.*memprof*$`)
+	re = regexp.MustCompile(`(?m)^\[node \d+\] \d+ heap profiles found$`)
+	out = re.ReplaceAllString(out, `[node ?] ? heap profiles found`)
+	re = regexp.MustCompile(`(?m)^\[node \d+\] retrieving (memprof|memstats).*$` + "\n")
 	out = re.ReplaceAllString(out, ``)
+	re = regexp.MustCompile(`(?m)^\[node \d+\] writing profile.*$` + "\n")
+	out = re.ReplaceAllString(out, ``)
+
+	//out = strings.ReplaceAll(out, "\n\n", "\n")
 	return out
 }
 
@@ -357,7 +356,7 @@ func TestPartialZip(t *testing.T) {
 	tc.StopServer(1)
 
 	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
+	c := cliTest{
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
@@ -406,7 +405,7 @@ func TestPartialZip(t *testing.T) {
 	// is no risk to see the override bumped due to a gossip update
 	// because this setting is not otherwise set in the test cluster.
 	s := tc.Server(0)
-	kvserver.TimeUntilStoreDead.Override(ctx, &s.ClusterSettings().SV, kvserver.TestTimeUntilStoreDead)
+	kvserver.TimeUntilStoreDead.Override(&s.ClusterSettings().SV, kvserver.TestTimeUntilStoreDead)
 
 	// This last case may take a little while to converge. To make this work with datadriven and at the same
 	// time retain the ability to use the `-rewrite` flag, we use a retry loop within that already checks the
@@ -466,12 +465,8 @@ func TestZipRetries(t *testing.T) {
 			Host:     s.ServingSQLAddr(),
 			RawQuery: "sslmode=disable",
 		}
-		sqlConn := sqlConnCtx.MakeSQLConn(ioutil.Discard, ioutil.Discard, sqlURL.String())
-		defer func() {
-			if err := sqlConn.Close(); err != nil {
-				t.Fatal(err)
-			}
-		}()
+		sqlConn := makeSQLConn(sqlURL.String())
+		defer sqlConn.Close()
 
 		zr := zipCtx.newZipReporter("test")
 		zc := debugZipContext{
@@ -519,12 +514,12 @@ func TestToHex(t *testing.T) {
 
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
 	// Create a job to have non-empty system.jobs table.
 	c.RunWithArgs([]string{"sql", "-e", "CREATE STATISTICS foo FROM system.namespace"})

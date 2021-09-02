@@ -12,6 +12,7 @@ package sql
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -27,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // The logging functions in this file are the different stages of a
@@ -174,17 +174,13 @@ type eventLogOptions struct {
 func (p *planner) logEventsWithOptions(
 	ctx context.Context, depth int, opts eventLogOptions, entries ...eventLogEntry,
 ) error {
-
-	redactableStmt := formatStmtKeyAsRedactableString(p.extendedEvalCtx.VirtualSchemas, p.stmt.AST, p.extendedEvalCtx.EvalContext.Annotations)
-
 	commonPayload := sqlEventCommonExecPayload{
 		user:         p.User(),
-		stmt:         redactableStmt,
+		stmt:         tree.AsStringWithFQNames(p.stmt.AST, p.extendedEvalCtx.EvalContext.Annotations),
 		stmtTag:      p.stmt.AST.StatementTag(),
 		placeholders: p.extendedEvalCtx.EvalContext.Placeholders.Values,
 		appName:      p.SessionData().ApplicationName,
 	}
-
 	return logEventInternalForSQLStatements(ctx,
 		p.extendedEvalCtx.ExecCfg, p.txn,
 		1+depth,
@@ -236,7 +232,7 @@ func logEventInternalForSchemaChanges(
 // necessary to populate an eventpb.CommonSQLExecDetails.
 type sqlEventCommonExecPayload struct {
 	user         security.SQLUsername
-	stmt         redact.RedactableString
+	stmt         string
 	stmtTag      string
 	placeholders tree.QueryArguments
 	appName      string
@@ -476,12 +472,10 @@ VALUES($1, $2, $3, $4, $5)`
 	args := make([]interface{}, 0, len(entries)*colsPerEvent)
 	constructArgs := func(reportingID int32, entry eventLogEntry) error {
 		event := entry.event
-		infoBytes := redact.RedactableBytes("{")
-		_, infoBytes = event.AppendJSONFields(false /* printComma */, infoBytes)
-		infoBytes = append(infoBytes, '}')
-		// In the system.eventlog table, we do not use redaction markers.
-		// (compatibility with previous versions of CockroachDB.)
-		infoBytes = infoBytes.StripMarkers()
+		infoBytes, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
 		eventType := eventpb.GetEventTypeName(event)
 		args = append(
 			args,

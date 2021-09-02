@@ -73,17 +73,18 @@ func newUnloadedReplica(
 		store:          store,
 		abortSpan:      abortspan.New(desc.RangeID),
 		concMgr: concurrency.NewManager(concurrency.Config{
-			NodeDesc:          store.nodeDesc,
-			RangeDesc:         desc,
-			Settings:          store.ClusterSettings(),
-			DB:                store.DB(),
-			Clock:             store.Clock(),
-			Stopper:           store.Stopper(),
-			IntentResolver:    store.intentResolver,
-			TxnWaitMetrics:    store.txnWaitMetrics,
-			SlowLatchGauge:    store.metrics.SlowLatchRequests,
-			DisableTxnPushing: store.TestingKnobs().DontPushOnWriteIntentError,
-			TxnWaitKnobs:      store.TestingKnobs().TxnWaitKnobs,
+			NodeDesc:                           store.nodeDesc,
+			RangeDesc:                          desc,
+			Settings:                           store.ClusterSettings(),
+			DB:                                 store.DB(),
+			Clock:                              store.Clock(),
+			Stopper:                            store.Stopper(),
+			IntentResolver:                     store.intentResolver,
+			TxnWaitMetrics:                     store.txnWaitMetrics,
+			SlowLatchGauge:                     store.metrics.SlowLatchRequests,
+			ConflictingIntentCleanupRejections: store.metrics.ConflictingIntentsResolveRejected,
+			DisableTxnPushing:                  store.TestingKnobs().DontPushOnWriteIntentError,
+			TxnWaitKnobs:                       store.TestingKnobs().TxnWaitKnobs,
 		}),
 	}
 	r.mu.pendingLeaseRequest = makePendingLeaseRequest(r)
@@ -94,7 +95,7 @@ func newUnloadedReplica(
 	split.Init(&r.loadBasedSplitter, rand.Intn, func() float64 {
 		return float64(SplitByLoadQPSThreshold.Get(&store.cfg.Settings.SV))
 	}, func() time.Duration {
-		return kvserverbase.SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
+		return SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
 	})
 	r.mu.proposals = map[kvserverbase.CmdIDKey]*ProposalData{}
 	r.mu.checksums = map[uuid.UUID]ReplicaChecksum{}

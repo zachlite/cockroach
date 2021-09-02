@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -34,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 )
 
 const (
@@ -44,9 +42,9 @@ const (
 
 // Catalog implements the cat.Catalog interface for testing purposes.
 type Catalog struct {
-	tree.TypeReferenceResolver
 	testSchema Schema
 	counter    int
+	enumTypes  map[string]*types.T
 }
 
 type dataSource interface {
@@ -172,11 +170,6 @@ func (tc *Catalog) ResolveDataSourceByID(
 	}
 	return nil, false, pgerror.Newf(pgcode.UndefinedTable,
 		"relation [%d] does not exist", id)
-}
-
-// ResolveTypeByOID is part of the cat.Catalog interface.
-func (tc *Catalog) ResolveTypeByOID(context.Context, oid.Oid) (*types.T, error) {
-	return nil, errors.Newf("test catalog cannot handle user defined types")
 }
 
 // CheckPrivilege is part of the cat.Catalog interface.
@@ -396,6 +389,10 @@ func (tc *Catalog) ExecuteDDLWithIndexVersion(
 		tc.CreateSequence(stmt)
 		return "", nil
 
+	case *tree.CreateType:
+		tc.CreateType(stmt)
+		return "", nil
+
 	case *tree.SetZoneConfig:
 		tc.SetZoneConfig(stmt)
 		return "", nil
@@ -489,19 +486,17 @@ func (s *Schema) Name() *cat.SchemaName {
 }
 
 // GetDataSourceNames is part of the cat.Schema interface.
-func (s *Schema) GetDataSourceNames(ctx context.Context) ([]cat.DataSourceName, descpb.IDs, error) {
+func (s *Schema) GetDataSourceNames(ctx context.Context) ([]cat.DataSourceName, error) {
 	var keys []string
 	for k := range s.dataSources {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	names := make([]cat.DataSourceName, 0, len(keys))
-	IDs := make(descpb.IDs, 0, len(keys))
+	var res []cat.DataSourceName
 	for _, k := range keys {
-		names = append(names, s.dataSources[k].fqName())
-		IDs = append(IDs, descpb.ID(s.dataSources[k].ID()))
+		res = append(res, s.dataSources[k].fqName())
 	}
-	return names, IDs, nil
+	return res, nil
 }
 
 // View implements the cat.View interface for testing purposes.
@@ -573,11 +568,6 @@ func (tv *View) ColumnName(i int) tree.Name {
 	return tv.ColumnNames[i]
 }
 
-// CollectTypes is part of the cat.DataSource interface.
-func (tv *View) CollectTypes(ord int) (descpb.IDs, error) {
-	return nil, nil
-}
-
 // Table implements the cat.Table interface for testing purposes.
 type Table struct {
 	TabID      cat.StableID
@@ -589,7 +579,7 @@ type Table struct {
 	Checks     []cat.CheckConstraint
 	Families   []*Family
 	IsVirtual  bool
-	Catalog    cat.Catalog
+	Catalog    *Catalog
 
 	// If Revoked is true, then the user has had privileges on the table revoked.
 	Revoked bool
@@ -762,47 +752,6 @@ func (tt *Table) FindOrdinal(name string) int {
 	))
 }
 
-// CollectTypes is part of the cat.DataSource interface.
-func (tt *Table) CollectTypes(ord int) (descpb.IDs, error) {
-	visitor := &tree.TypeCollectorVisitor{
-		OIDs: make(map[oid.Oid]struct{}),
-	}
-	addOIDsInExpr := func(exprStr string) error {
-		expr, err := parser.ParseExpr(exprStr)
-		if err != nil {
-			return err
-		}
-		tree.WalkExpr(visitor, expr)
-		return nil
-	}
-
-	// Collect UDTs in default expression, computed column and the column type itself.
-	col := tt.Columns[ord]
-	if col.HasDefault() {
-		if err := addOIDsInExpr(col.DefaultExprStr()); err != nil {
-			return nil, err
-		}
-	}
-	if col.IsComputed() {
-		if err := addOIDsInExpr(col.ComputedExprStr()); err != nil {
-			return nil, err
-		}
-	}
-	if col.DatumType() != nil && col.DatumType().UserDefined() {
-		visitor.OIDs[col.DatumType().Oid()] = struct{}{}
-	}
-
-	ids := make(descpb.IDs, 0, len(visitor.OIDs))
-	for collectedOid := range visitor.OIDs {
-		id, err := typedesc.UserDefinedTypeOIDToID(collectedOid)
-		if err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
 // Index implements the cat.Index interface for testing purposes.
 type Index struct {
 	IdxName string
@@ -841,7 +790,7 @@ type Index struct {
 	// predicate is the partial index predicate expression, if it exists.
 	predicate string
 
-	// invertedOrd is the ordinal of the Inverted column, if the index is
+	// invertedOrd is the ordinal of the VirtualInverted column, if the index is
 	// an inverted index.
 	invertedOrd int
 
@@ -911,10 +860,10 @@ func (ti *Index) Column(i int) cat.IndexColumn {
 	return ti.Columns[i]
 }
 
-// InvertedColumn is part of the cat.Index interface.
-func (ti *Index) InvertedColumn() cat.IndexColumn {
+// VirtualInvertedColumn is part of the cat.Index interface.
+func (ti *Index) VirtualInvertedColumn() cat.IndexColumn {
 	if !ti.IsInverted() {
-		panic("non-inverted indexes do not have inverted columns")
+		panic("non-inverted indexes do not have inverted virtual columns")
 	}
 	return ti.Column(ti.invertedOrd)
 }
@@ -1276,11 +1225,6 @@ func (ts *Sequence) String() string {
 	tp := treeprinter.New()
 	cat.FormatSequence(ts.Catalog, ts, tp)
 	return tp.String()
-}
-
-// CollectTypes is part of the cat.DataSource interface.
-func (ts *Sequence) CollectTypes(ord int) (descpb.IDs, error) {
-	return nil, nil
 }
 
 // Family implements the cat.Family interface for testing purposes.

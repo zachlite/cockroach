@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	pbtypes "github.com/gogo/protobuf/types"
@@ -129,13 +130,6 @@ var generators = map[string]builtinDefinition{
 			seriesTSValueGeneratorType,
 			makeTSSeriesGenerator,
 			"Produces a virtual table containing the timestamp values from `start` to `end`, inclusive, by increment of `step`.",
-			tree.VolatilityImmutable,
-		),
-		makeGeneratorOverload(
-			tree.ArgTypes{{"start", types.TimestampTZ}, {"end", types.TimestampTZ}, {"step", types.Interval}},
-			seriesTSTZValueGeneratorType,
-			makeTSTZSeriesGenerator,
-			"Produces a virtual table containing the timestampTZ values from `start` to `end`, inclusive, by increment of `step`.",
 			tree.VolatilityImmutable,
 		),
 	),
@@ -496,13 +490,13 @@ func (k *keywordsValueGenerator) Start(_ context.Context, _ *kv.Txn) error {
 // Next implements the tree.ValueGenerator interface.
 func (k *keywordsValueGenerator) Next(_ context.Context) (bool, error) {
 	k.curKeyword++
-	return k.curKeyword < len(lexbase.KeywordNames), nil
+	return k.curKeyword < len(lex.KeywordNames), nil
 }
 
 // Values implements the tree.ValueGenerator interface.
 func (k *keywordsValueGenerator) Values() (tree.Datums, error) {
-	kw := lexbase.KeywordNames[k.curKeyword]
-	cat := lexbase.KeywordsCategories[kw]
+	kw := lex.KeywordNames[k.curKeyword]
+	cat := lex.KeywordsCategories[kw]
 	desc := keywordCategoryDescriptions[cat]
 	return tree.Datums{tree.NewDString(kw), tree.NewDString(cat), tree.NewDString(desc)}, nil
 }
@@ -527,8 +521,6 @@ type seriesValueGenerator struct {
 var seriesValueGeneratorType = types.Int
 
 var seriesTSValueGeneratorType = types.Timestamp
-
-var seriesTSTZValueGeneratorType = types.TimestampTZ
 
 var errStepCannotBeZero = pgerror.New(pgcode.InvalidParameterValue, "step cannot be 0")
 
@@ -586,14 +578,6 @@ func seriesGenTSValue(s *seriesValueGenerator) (tree.Datums, error) {
 	return tree.Datums{ts}, nil
 }
 
-func seriesGenTSTZValue(s *seriesValueGenerator) (tree.Datums, error) {
-	ts, err := tree.MakeDTimestampTZ(s.value.(time.Time), time.Microsecond)
-	if err != nil {
-		return nil, err
-	}
-	return tree.Datums{ts}, nil
-}
-
 func makeSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGenerator, error) {
 	start := int64(tree.MustBeDInt(args[0]))
 	stop := int64(tree.MustBeDInt(args[1]))
@@ -629,25 +613,6 @@ func makeTSSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGen
 		step:      step,
 		genType:   seriesTSValueGeneratorType,
 		genValue:  seriesGenTSValue,
-		next:      seriesTSNext,
-	}, nil
-}
-
-func makeTSTZSeriesGenerator(_ *tree.EvalContext, args tree.Datums) (tree.ValueGenerator, error) {
-	start := args[0].(*tree.DTimestampTZ).Time
-	stop := args[1].(*tree.DTimestampTZ).Time
-	step := args[2].(*tree.DInterval).Duration
-
-	if step.Compare(duration.Duration{}) == 0 {
-		return nil, errStepCannotBeZero
-	}
-
-	return &seriesValueGenerator{
-		origStart: start,
-		stop:      stop,
-		step:      step,
-		genType:   seriesTSTZValueGeneratorType,
-		genValue:  seriesGenTSTZValue,
 		next:      seriesTSNext,
 	}, nil
 }
@@ -1547,7 +1512,7 @@ func (p *payloadsForSpanGenerator) Next(_ context.Context) (bool, error) {
 			return false, nil
 		}
 		currRecording := p.span.GetRecording()[p.recordingIndex]
-		currRecording.Structured(func(item *pbtypes.Any, _ time.Time) {
+		currRecording.Structured(func(item *pbtypes.Any) {
 			payload, err := protoreflect.MessageToJSON(item, true /* emitDefaults */)
 			if err != nil {
 				return
@@ -1574,11 +1539,9 @@ func (p *payloadsForSpanGenerator) Values() (tree.Datums, error) {
 	// leftover from JSON value conversion.
 	payloadTypeAsString := strings.TrimSuffix(
 		strings.TrimPrefix(
-			strings.TrimPrefix(
-				payloadTypeAsJSON.String(),
-				"\"type.googleapis.com/",
-			),
-			"cockroach."),
+			payloadTypeAsJSON.String(),
+			"\"type.googleapis.com/cockroach.",
+		),
 		"\"",
 	)
 
@@ -1689,11 +1652,12 @@ const (
 // showCreateAllTablesGenerator supports the execution of
 // crdb_internal.show_create_all_tables(dbName).
 type showCreateAllTablesGenerator struct {
-	ie     sqlutil.InternalExecutor
-	txn    *kv.Txn
-	ids    []int64
-	dbName string
-	acc    mon.BoundAccount
+	ie        sqlutil.InternalExecutor
+	txn       *kv.Txn
+	timestamp string
+	ids       []int64
+	dbName    string
+	acc       mon.BoundAccount
 
 	// The following variables are updated during
 	// calls to Next() and change throughout the lifecycle of
@@ -1725,7 +1689,7 @@ func (s *showCreateAllTablesGenerator) Start(ctx context.Context, txn *kv.Txn) e
 	// We also account for the memory in the BoundAccount memory monitor in
 	// showCreateAllTablesGenerator.
 	ids, err := getTopologicallySortedTableIDs(
-		ctx, s.ie, txn, s.dbName, &s.acc,
+		ctx, s.ie, txn, s.dbName, s.timestamp, &s.acc,
 	)
 	if err != nil {
 		return err
@@ -1751,7 +1715,7 @@ func (s *showCreateAllTablesGenerator) Next(ctx context.Context) (bool, error) {
 		}
 
 		createStmt, err := getCreateStatement(
-			ctx, s.ie, s.txn, s.ids[s.idx], s.dbName,
+			ctx, s.ie, s.txn, s.ids[s.idx], s.timestamp, s.dbName,
 		)
 		if err != nil {
 			return false, err
@@ -1797,7 +1761,7 @@ func (s *showCreateAllTablesGenerator) Next(ctx context.Context) (bool, error) {
 			statementReturnType = alterValidateFKStatements
 		}
 		alterStmt, err := getAlterStatements(
-			ctx, s.ie, s.txn, s.ids[s.idx], s.dbName, statementReturnType,
+			ctx, s.ie, s.txn, s.ids[s.idx], s.timestamp, s.dbName, statementReturnType,
 		)
 		if err != nil {
 			return false, err
@@ -1834,9 +1798,15 @@ func makeShowCreateAllTablesGenerator(
 	ctx *tree.EvalContext, args tree.Datums,
 ) (tree.ValueGenerator, error) {
 	dbName := string(tree.MustBeDString(args[0]))
+	tsI, err := tree.MakeDTimestamp(timeutil.Now(), time.Microsecond)
+	if err != nil {
+		return nil, err
+	}
+	ts := tsI.String()
 	return &showCreateAllTablesGenerator{
-		dbName: dbName,
-		ie:     ctx.InternalExecutor.(sqlutil.InternalExecutor),
-		acc:    ctx.Mon.MakeBoundAccount(),
+		timestamp: ts,
+		dbName:    dbName,
+		ie:        ctx.InternalExecutor.(sqlutil.InternalExecutor),
+		acc:       ctx.Mon.MakeBoundAccount(),
 	}, nil
 }

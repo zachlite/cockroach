@@ -18,7 +18,6 @@ import (
 	"unsafe"
 
 	circuit "github.com/cockroachdb/circuitbreaker"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -122,7 +121,7 @@ func (n *Dialer) DialInternalClient(
 		return nil, nil, err
 	}
 	if localClient := n.rpcContext.GetLocalInternalClientForAddr(addr.String(), nodeID); localClient != nil {
-		log.VEvent(ctx, 2, kvbase.RoutingRequestLocallyMsg)
+		log.VEvent(ctx, 2, "sending request to local client")
 
 		// Create a new context from the existing one with the "local request" field set.
 		// This tells the handler that this is an in-process request, bypassing ctx.Peer checks.
@@ -158,7 +157,7 @@ func (n *Dialer) dial(
 	defer func() {
 		// Enforce a minimum interval between warnings for failed connections.
 		if err != nil && ctx.Err() == nil && breaker != nil && breaker.ShouldLog() {
-			log.Health.Infof(ctx, "unable to connect to n%d: %s", nodeID, err)
+			log.Infof(ctx, "unable to connect to n%d: %s", nodeID, err)
 		}
 	}()
 	conn, err := n.rpcContext.GRPCDialNode(addr.String(), nodeID, class).Connect(ctx)
@@ -238,25 +237,6 @@ func (n *Dialer) getBreaker(nodeID roachpb.NodeID, class rpc.ConnectionClass) *w
 		value, _ = breakers.LoadOrStore(int64(nodeID), unsafe.Pointer(breaker))
 	}
 	return (*wrappedBreaker)(value)
-}
-
-// Latency returns the exponentially weighted moving average latency to the
-// given node ID. Returns a latency of 0 with no error if we don't have enough
-// samples to compute a reliable average.
-func (n *Dialer) Latency(nodeID roachpb.NodeID) (time.Duration, error) {
-	if n == nil || n.resolver == nil {
-		return 0, errors.New("no node dialer configured")
-	}
-	addr, err := n.resolver(nodeID)
-	if err != nil {
-		// Don't trip the breaker.
-		return 0, err
-	}
-	latency, ok := n.rpcContext.RemoteClocks.Latency(addr.String())
-	if !ok {
-		latency = 0
-	}
-	return latency, nil
 }
 
 type dialerAdapter Dialer

@@ -47,7 +47,7 @@ func TestVerifyPassword(t *testing.T) {
 	}
 
 	//location is used for timezone testing.
-	shanghaiLoc, err := timeutil.LoadLocation("Asia/Shanghai")
+	shanghaiLoc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,9 +113,7 @@ func TestVerifyPassword(t *testing.T) {
 		{"cthon98", "12345", true, ""},
 	} {
 		t.Run("", func(t *testing.T) {
-			execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
-			username := security.MakeSQLUsernameFromPreNormalizedString(tc.username)
-			exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(context.Background(), &execCfg, &ie, username)
+			exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(context.Background(), &ie, tc.username)
 
 			if err != nil {
 				t.Errorf(
@@ -143,7 +141,7 @@ func TestVerifyPassword(t *testing.T) {
 				)
 			}
 
-			err = security.CompareHashAndPassword(ctx, hashedPassword, tc.password)
+			err = security.CompareHashAndPassword(hashedPassword, tc.password)
 			if err != nil {
 				valid = false
 			}

@@ -14,13 +14,7 @@ import React from "react";
 import * as protos from "src/js/protos";
 
 import { AdminUIState } from "src/redux/state";
-import {
-  refreshDatabaseDetails,
-  refreshTableDetails,
-  refreshTableStats,
-  generateTableID,
-  KeyedCachedDataReducerState,
-} from "src/redux/apiReducers";
+import { refreshDatabaseDetails, refreshTableDetails, refreshTableStats, generateTableID, KeyedCachedDataReducerState} from "src/redux/apiReducers";
 
 import { SortSetting } from "src/views/shared/components/sortabletable";
 
@@ -51,9 +45,7 @@ interface DatabaseSummaryActions {
   refreshTableStats: typeof refreshTableStats;
 }
 
-export type DatabaseSummaryProps = DatabaseSummaryExplicitData &
-  DatabaseSummaryConnectedData &
-  DatabaseSummaryActions;
+export type DatabaseSummaryProps = DatabaseSummaryExplicitData & DatabaseSummaryConnectedData & DatabaseSummaryActions;
 
 interface DatabaseSummaryState {
   finishedLoadingTableData: boolean;
@@ -64,10 +56,7 @@ interface DatabaseSummaryState {
 // TODO(mrtracy): We need to find a better abstraction for the common
 // "refresh-on-mount-or-receiveProps" we have in many of our connected
 // components; that would allow us to avoid this inheritance.
-export class DatabaseSummaryBase extends React.Component<
-  DatabaseSummaryProps,
-  DatabaseSummaryState
-> {
+export class DatabaseSummaryBase extends React.Component<DatabaseSummaryProps, DatabaseSummaryState> {
   // loadTableDetails loads data for each table which have no info in the store.
   // TODO(mrtracy): Should this be refreshing data always? Not sure if there
   // is a performance concern with invalidation periods.
@@ -76,35 +65,23 @@ export class DatabaseSummaryBase extends React.Component<
       for (const tblInfo of props.tableInfos) {
         // TODO(davidh): this is a stopgap inserted to deal with DBs containing hundreds of tables
         await Promise.all([
-          _.isUndefined(tblInfo.numColumns)
-            ? props.refreshTableDetails(
-                new protos.cockroach.server.serverpb.TableDetailsRequest({
-                  database: props.name,
-                  table: tblInfo.name,
-                }),
-              )
-            : null,
-          _.isUndefined(tblInfo.physicalSize)
-            ? props.refreshTableStats(
-                new protos.cockroach.server.serverpb.TableStatsRequest({
-                  database: props.name,
-                  table: tblInfo.name,
-                }),
-              )
-            : null,
+        _.isUndefined(tblInfo.numColumns) ? props.refreshTableDetails(new protos.cockroach.server.serverpb.TableDetailsRequest({
+            database: props.name,
+            table: tblInfo.name,
+          })) : null,
+        _.isUndefined(tblInfo.physicalSize) ? props.refreshTableStats(new protos.cockroach.server.serverpb.TableStatsRequest({
+            database: props.name,
+            table: tblInfo.name,
+          })) : null,
         ]);
       }
     }
-    this.setState({ finishedLoadingTableData: true });
+    this.setState({finishedLoadingTableData: true});
   }
 
   // Refresh when the component is mounted.
   async componentDidMount() {
-    this.props.refreshDatabaseDetails(
-      new protos.cockroach.server.serverpb.DatabaseDetailsRequest({
-        database: this.props.name,
-      }),
-    );
+    this.props.refreshDatabaseDetails(new protos.cockroach.server.serverpb.DatabaseDetailsRequest({ database: this.props.name }));
     if (this.props.updateOnLoad) {
       await this.loadTableDetails();
     }
@@ -117,13 +94,8 @@ export class DatabaseSummaryBase extends React.Component<
     }
   }
 
-  // Leaving this render method alone during linting cleanup since it's
-  // used to discourage render without subclassing.
-  // eslint-disable-next-line react/require-render-return
   render(): React.ReactElement<any> {
-    throw new Error(
-      "DatabaseSummaryBase should never be instantiated directly. ",
-    );
+      throw new Error("DatabaseSummaryBase should never be instantiated directly. ");
   }
 }
 
@@ -138,15 +110,12 @@ export function databaseDetails(state: AdminUIState) {
 // to be expensive. My current intuition is that this will not be a bottleneck.
 export function tableInfos(state: AdminUIState, dbName: string) {
   const dbDetails = databaseDetails(state);
-  const tableNames =
-    dbDetails[dbName] &&
-    dbDetails[dbName].data &&
-    dbDetails[dbName].data.table_names;
+  const tableNames = dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.table_names;
   if (!tableNames) {
     return null;
   }
   const details = state.cachedData.tableDetails;
-  const stats = state.cachedData.tableStats;
+  const stats =  state.cachedData.tableStats;
   return _.map(tableNames, (tableName) => {
     const tblId = generateTableID(dbName, tableName);
     const tblDetails = details[tblId] && details[tblId].data;
@@ -157,8 +126,6 @@ export function tableInfos(state: AdminUIState, dbName: string) {
 
 // Function which extracts the grants for a single database from redux state.
 export function grants(state: AdminUIState, dbName: string) {
-  const dbDetails = databaseDetails(state);
-  return (
-    dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.grants
-  );
+    const dbDetails = databaseDetails(state);
+    return dbDetails[dbName] && dbDetails[dbName].data && dbDetails[dbName].data.grants;
 }

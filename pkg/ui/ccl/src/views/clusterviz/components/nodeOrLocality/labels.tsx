@@ -16,6 +16,7 @@ interface LabelsProps {
 }
 
 export class Labels extends React.Component<LabelsProps> {
+
   render() {
     return (
       <g
@@ -26,11 +27,14 @@ export class Labels extends React.Component<LabelsProps> {
         transform="translate(50 22)"
       >
         <title>{this.props.tooltip}</title>
-        <text fill={DARK_BLUE}>{this.props.label}</text>
+        <text fill={DARK_BLUE}>
+          {this.props.label}
+        </text>
         <text fill={MAIN_BLUE} y="20">
           {this.props.subLabel}
         </text>
       </g>
     );
   }
+
 }

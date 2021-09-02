@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -48,9 +47,9 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 		errorCode   codes.Code
 		expectRetry bool
 	}{
-		{codes.FailedPrecondition, true}, // target node is decommissioned; retry
-		{codes.PermissionDenied, false},  // this node is decommissioned; abort
-		{codes.Unauthenticated, false},   // this node is not part of cluster; abort
+		{codes.FailedPrecondition, true},
+		{codes.PermissionDenied, true},
+		{codes.Unauthenticated, false}, // this node is not part of cluster; abort
 	} {
 		t.Run(spec.errorCode.String(), func(t *testing.T) {
 			clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
@@ -81,7 +80,7 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 
 			ctrl := gomock.NewController(t)
 			transport := NewMockTransport(ctrl)
-			rangeDB := rangecache.NewMockRangeDescriptorDB(ctrl)
+			rangeDB := NewMockGenRangeDescriptorDB(ctrl)
 
 			// We start off with a cached lease on r1.
 			cachedLease := roachpb.Lease{
@@ -98,7 +97,6 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 					ctx, nil, grpcstatus.Error(spec.errorCode, ""))
 			}
 			transport.EXPECT().IsExhausted().Return(true)
-			transport.EXPECT().Release()
 
 			// Once all replicas have failed, it should try to refresh the lease using
 			// the range cache. We let this succeed once.
@@ -107,7 +105,6 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 			// It then tries the replicas again. This time we just report the
 			// transport as exhausted immediately.
 			transport.EXPECT().IsExhausted().Return(true)
-			transport.EXPECT().Release()
 
 			// This invalidates the cache yet again. This time we error.
 			rangeDB.EXPECT().FirstRange().Return(nil, grpcstatus.Error(spec.errorCode, ""))
@@ -124,7 +121,6 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 				transport.EXPECT().IsExhausted().Return(false)
 				transport.EXPECT().NextReplica().Return(desc.InternalReplicas[0])
 				transport.EXPECT().NextInternalClient(gomock.Any()).Return(ctx, client, nil)
-				transport.EXPECT().Release()
 			}
 
 			ds := NewDistSender(DistSenderConfig{
@@ -134,7 +130,7 @@ func TestDistSenderRangeFeedRetryOnTransportErrors(t *testing.T) {
 				RPCRetryOptions: &retry.Options{MaxRetries: 10},
 				RPCContext:      rpcContext,
 				TestingKnobs: ClientTestingKnobs{
-					TransportFactory: func(SendOptions, *nodedialer.Dialer, ReplicaSlice) (Transport, error) {
+					TransportFactory: func(SendOptions, *nodedialer.Dialer, []roachpb.ReplicaDescriptor) (Transport, error) {
 						return transport, nil
 					},
 				},

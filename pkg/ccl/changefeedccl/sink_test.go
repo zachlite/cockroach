@@ -19,7 +19,6 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -70,30 +69,6 @@ func (p *asyncProducerMock) Close() error {
 	close(p.successesCh)
 	close(p.errorsCh)
 	return nil
-}
-
-// consumeAndSucceed consumes input messages and sends them to successes channel.
-// Returns function that must be called to stop this consumer
-// to clean up. The cleanup function must be called before closing asyncProducerMock.
-func (p *asyncProducerMock) consumeAndSucceed() (cleanup func()) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	done := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-done:
-				return
-			case m := <-p.inputCh:
-				p.successesCh <- m
-			}
-		}
-	}()
-	return func() {
-		close(done)
-		wg.Wait()
-	}
 }
 
 // consume consumes input messages but does not acknowledge neither successes, nor errors.
@@ -148,13 +123,7 @@ func (p *asyncProducerMock) outstanding() int {
 	return len(p.mu.outstanding)
 }
 
-func topic(name string) tableDescriptorTopic {
-	return tableDescriptorTopic{tabledesc.NewBuilder(&descpb.TableDescriptor{Name: name}).BuildImmutableTable()}
-}
-
 const memoryUnlimited int64 = math.MaxInt64
-const noTopicPrefix = ""
-const defaultTopicName = ""
 
 func getBoundAccountWithBudget(budget int64) (account mon.BoundAccount, cleanup func()) {
 	mm := mon.NewMonitorWithLimit(
@@ -166,20 +135,18 @@ func getBoundAccountWithBudget(budget int64) (account mon.BoundAccount, cleanup 
 }
 
 func makeTestKafkaSink(
-	t testing.TB,
-	topicPrefix string,
-	topicNameOverride string,
-	p sarama.AsyncProducer,
-	budget int64,
-	targetNames ...string,
+	t testing.TB, p sarama.AsyncProducer, budget int64, targetNames ...string,
 ) (s *kafkaSink, cleanup func()) {
 	mem, release := getBoundAccountWithBudget(budget)
 
-	targets := makeChangefeedTargets(targetNames...)
+	topics := make(map[string]struct{}, len(targetNames))
+	for _, name := range targetNames {
+		topics[SQLNameToKafkaName(name)] = struct{}{}
+	}
 
 	s = &kafkaSink{
 		ctx:      context.Background(),
-		topics:   makeTopicsMap(topicPrefix, topicNameOverride, targets),
+		topics:   topics,
 		producer: p,
 	}
 	s.mu.mem = mem
@@ -203,11 +170,19 @@ func TestKafkaSink(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	table := func(name string) *tabledesc.Immutable {
+		return tabledesc.NewImmutable(descpb.TableDescriptor{Name: name})
+	}
+
 	ctx := context.Background()
+
 	p := newAsyncProducerMock(1)
-	sink, cleanup := makeTestKafkaSink(
-		t, noTopicPrefix, defaultTopicName, p, memoryUnlimited, "t")
+	sink, cleanup := makeTestKafkaSink(t, p, memoryUnlimited, "t")
 	defer cleanup()
+
+	targets := make(jobspb.ChangefeedTargets, 1)
+	targets[0] = jobspb.ChangefeedTarget{StatementTimeName: `t`}
+	sink.setTargets(targets)
 
 	// No inflight
 	if err := sink.Flush(ctx); err != nil {
@@ -215,7 +190,7 @@ func TestKafkaSink(t *testing.T) {
 	}
 
 	// Timeout
-	if err := sink.EmitRow(ctx, topic(`t`), []byte(`1`), nil, zeroTS); err != nil {
+	if err := sink.EmitRow(ctx, table(`t`), []byte(`1`), nil, zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m1 := <-p.inputCh
@@ -239,15 +214,15 @@ func TestKafkaSink(t *testing.T) {
 	}
 
 	// Mixed success and error.
-	if err := sink.EmitRow(ctx, topic(`t`), []byte(`2`), nil, zeroTS); err != nil {
+	if err := sink.EmitRow(ctx, table(`t`), []byte(`2`), nil, zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m2 := <-p.inputCh
-	if err := sink.EmitRow(ctx, topic(`t`), []byte(`3`), nil, zeroTS); err != nil {
+	if err := sink.EmitRow(ctx, table(`t`), []byte(`3`), nil, zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m3 := <-p.inputCh
-	if err := sink.EmitRow(ctx, topic(`t`), []byte(`4`), nil, zeroTS); err != nil {
+	if err := sink.EmitRow(ctx, table(`t`), []byte(`4`), nil, zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m4 := <-p.inputCh
@@ -264,7 +239,7 @@ func TestKafkaSink(t *testing.T) {
 	}
 
 	// Check simple success again after error
-	if err := sink.EmitRow(ctx, topic(`t`), []byte(`5`), nil, zeroTS); err != nil {
+	if err := sink.EmitRow(ctx, table(`t`), []byte(`5`), nil, zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m5 := <-p.inputCh
@@ -278,82 +253,27 @@ func TestKafkaSinkEscaping(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	table := func(name string) *tabledesc.Immutable {
+		return tabledesc.NewImmutable(descpb.TableDescriptor{Name: name})
+	}
+
 	ctx := context.Background()
+
 	p := newAsyncProducerMock(1)
-	sink, cleanup := makeTestKafkaSink(
-		t, noTopicPrefix, defaultTopicName, p, memoryUnlimited, `☃`)
+	sink, cleanup := makeTestKafkaSink(t, p, memoryUnlimited, `☃`)
 	defer cleanup()
 
-	if err := sink.EmitRow(ctx, topic(`☃`), []byte(`k☃`), []byte(`v☃`), zeroTS); err != nil {
+	targets := make(jobspb.ChangefeedTargets, 1)
+	targets[0] = jobspb.ChangefeedTarget{StatementTimeName: `☃`}
+	sink.setTargets(targets)
+
+	if err := sink.EmitRow(ctx, table(`☃`), []byte(`k☃`), []byte(`v☃`), zeroTS); err != nil {
 		t.Fatal(err)
 	}
 	m := <-p.inputCh
 	require.Equal(t, `_u2603_`, m.Topic)
 	require.Equal(t, sarama.ByteEncoder(`k☃`), m.Key)
 	require.Equal(t, sarama.ByteEncoder(`v☃`), m.Value)
-}
-
-func TestKafkaTopicNameProvided(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	const topicOverride = "general"
-	p := newAsyncProducerMock(1)
-	sink, cleanup := makeTestKafkaSink(
-		t, noTopicPrefix, topicOverride, p, memoryUnlimited, "particular0", "particular1")
-	defer cleanup()
-
-	//all messages go to the general topic
-	require.NoError(t, sink.EmitRow(ctx, topic("particular0"), []byte(`k☃`), []byte(`v☃`), zeroTS))
-	m := <-p.inputCh
-	require.Equal(t, topicOverride, m.Topic)
-}
-
-func TestKafkaTopicNameWithPrefix(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	p := newAsyncProducerMock(1)
-	const topicPrefix = "prefix-"
-	const topicOverride = "☃"
-	sink, clenaup := makeTestKafkaSink(
-		t, topicPrefix, topicOverride, p, memoryUnlimited, "particular0", "particular1")
-	defer clenaup()
-
-	//the prefix is applied and the name is escaped
-	require.NoError(t, sink.EmitRow(ctx, topic("particular0"), []byte(`k☃`), []byte(`v☃`), zeroTS))
-	m := <-p.inputCh
-	require.Equal(t, `prefix-_u2603_`, m.Topic)
-}
-
-// goos: darwin
-// goarch: amd64
-// pkg: github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl
-// cpu: Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz
-// BenchmarkEmitRow-16    	  573620	      1779 ns/op	     235 B/op	       6 allocs/op
-func BenchmarkEmitRow(b *testing.B) {
-	defer leaktest.AfterTest(b)()
-	defer log.Scope(b).Close(b)
-
-	ctx := context.Background()
-	p := newAsyncProducerMock(unbuffered)
-	const tableName = `defaultdb.public.funky_table☃`
-	topic := topic(tableName)
-	sink, cleanup := makeTestKafkaSink(b, noTopicPrefix, defaultTopicName, p, memoryUnlimited, tableName)
-	stopConsume := p.consumeAndSucceed()
-	defer func() {
-		stopConsume()
-		cleanup()
-	}()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		require.NoError(b, sink.EmitRow(ctx, topic, []byte(`k☃`), []byte(`v☃`), hlc.Timestamp{}))
-	}
-
-	b.ReportAllocs()
 }
 
 type testEncoder struct{}
@@ -370,10 +290,9 @@ func TestSQLSink(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	overrideTopic := func(name string) tableDescriptorTopic {
+	table := func(name string) *tabledesc.Immutable {
 		id, _ := strconv.ParseUint(name, 36, 64)
-		return tableDescriptorTopic{
-			tabledesc.NewBuilder(&descpb.TableDescriptor{Name: name, ID: descpb.ID(id)}).BuildImmutableTable()}
+		return tabledesc.NewImmutable(descpb.TableDescriptor{Name: name, ID: descpb.ID(id)})
 	}
 
 	ctx := context.Background()
@@ -382,20 +301,16 @@ func TestSQLSink(t *testing.T) {
 	sqlDB := sqlutils.MakeSQLRunner(sqlDBRaw)
 	sqlDB.Exec(t, `CREATE DATABASE d`)
 
-	pgURL, cleanup := sqlutils.PGUrl(t, s.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
+	sinkURL, cleanup := sqlutils.PGUrl(t, s.ServingSQLAddr(), t.Name(), url.User(security.RootUser))
 	defer cleanup()
-	pgURL.Path = `d`
+	sinkURL.Path = `d`
 
-	fooTopic := overrideTopic(`foo`)
-	barTopic := overrideTopic(`bar`)
 	targets := jobspb.ChangefeedTargets{
-		fooTopic.GetID(): jobspb.ChangefeedTarget{StatementTimeName: `foo`},
-		barTopic.GetID(): jobspb.ChangefeedTarget{StatementTimeName: `bar`},
+		table(`foo`).GetID(): jobspb.ChangefeedTarget{StatementTimeName: `foo`},
+		table(`bar`).GetID(): jobspb.ChangefeedTarget{StatementTimeName: `bar`},
 	}
-	const testTableName = `sink`
-	sink, err := makeSQLSink(sinkURL{URL: &pgURL}, testTableName, targets)
+	sink, err := makeSQLSink(sinkURL.String(), `sink`, targets)
 	require.NoError(t, err)
-	require.NoError(t, sink.(*sqlSink).Dial())
 	defer func() { require.NoError(t, sink.Close()) }()
 
 	// Empty
@@ -403,10 +318,10 @@ func TestSQLSink(t *testing.T) {
 
 	// Undeclared topic
 	require.EqualError(t,
-		sink.EmitRow(ctx, overrideTopic(`nope`), nil, nil, zeroTS), `cannot emit to undeclared topic: `)
+		sink.EmitRow(ctx, table(`nope`), nil, nil, zeroTS), `cannot emit to undeclared topic: `)
 
 	// With one row, nothing flushes until Flush is called.
-	require.NoError(t, sink.EmitRow(ctx, fooTopic, []byte(`k1`), []byte(`v0`), zeroTS))
+	require.NoError(t, sink.EmitRow(ctx, table(`foo`), []byte(`k1`), []byte(`v0`), zeroTS))
 	sqlDB.CheckQueryResults(t, `SELECT key, value FROM sink ORDER BY PRIMARY KEY sink`,
 		[][]string{},
 	)
@@ -420,7 +335,7 @@ func TestSQLSink(t *testing.T) {
 	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM sink`, [][]string{{`0`}})
 	for i := 0; i < sqlSinkRowBatchSize+1; i++ {
 		require.NoError(t,
-			sink.EmitRow(ctx, fooTopic, []byte(`k1`), []byte(`v`+strconv.Itoa(i)), zeroTS))
+			sink.EmitRow(ctx, table(`foo`), []byte(`k1`), []byte(`v`+strconv.Itoa(i)), zeroTS))
 	}
 	// Should have auto flushed after sqlSinkRowBatchSize
 	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM sink`, [][]string{{`3`}})
@@ -429,9 +344,9 @@ func TestSQLSink(t *testing.T) {
 	sqlDB.Exec(t, `TRUNCATE sink`)
 
 	// Two tables interleaved in time
-	require.NoError(t, sink.EmitRow(ctx, fooTopic, []byte(`kfoo`), []byte(`v0`), zeroTS))
-	require.NoError(t, sink.EmitRow(ctx, barTopic, []byte(`kbar`), []byte(`v0`), zeroTS))
-	require.NoError(t, sink.EmitRow(ctx, fooTopic, []byte(`kfoo`), []byte(`v1`), zeroTS))
+	require.NoError(t, sink.EmitRow(ctx, table(`foo`), []byte(`kfoo`), []byte(`v0`), zeroTS))
+	require.NoError(t, sink.EmitRow(ctx, table(`bar`), []byte(`kbar`), []byte(`v0`), zeroTS))
+	require.NoError(t, sink.EmitRow(ctx, table(`foo`), []byte(`kfoo`), []byte(`v1`), zeroTS))
 	require.NoError(t, sink.Flush(ctx))
 	sqlDB.CheckQueryResults(t, `SELECT topic, key, value FROM sink ORDER BY PRIMARY KEY sink`,
 		[][]string{{`bar`, `kbar`, `v0`}, {`foo`, `kfoo`, `v0`}, {`foo`, `kfoo`, `v1`}},
@@ -442,11 +357,11 @@ func TestSQLSink(t *testing.T) {
 	// guarantee that at lease two of them end up in the same partition.
 	for i := 0; i < sqlSinkNumPartitions+1; i++ {
 		require.NoError(t,
-			sink.EmitRow(ctx, fooTopic, []byte(`v`+strconv.Itoa(i)), []byte(`v0`), zeroTS))
+			sink.EmitRow(ctx, table(`foo`), []byte(`v`+strconv.Itoa(i)), []byte(`v0`), zeroTS))
 	}
 	for i := 0; i < sqlSinkNumPartitions+1; i++ {
 		require.NoError(t,
-			sink.EmitRow(ctx, fooTopic, []byte(`v`+strconv.Itoa(i)), []byte(`v1`), zeroTS))
+			sink.EmitRow(ctx, table(`foo`), []byte(`v`+strconv.Itoa(i)), []byte(`v1`), zeroTS))
 	}
 	require.NoError(t, sink.Flush(ctx))
 	sqlDB.CheckQueryResults(t, `SELECT partition, key, value FROM sink ORDER BY PRIMARY KEY sink`,
@@ -466,7 +381,7 @@ func TestSQLSink(t *testing.T) {
 	// Emit resolved
 	var e testEncoder
 	require.NoError(t, sink.EmitResolvedTimestamp(ctx, e, zeroTS))
-	require.NoError(t, sink.EmitRow(ctx, fooTopic, []byte(`foo0`), []byte(`v0`), zeroTS))
+	require.NoError(t, sink.EmitRow(ctx, table(`foo`), []byte(`foo0`), []byte(`v0`), zeroTS))
 	require.NoError(t, sink.EmitResolvedTimestamp(ctx, e, hlc.Timestamp{WallTime: 1}))
 	require.NoError(t, sink.Flush(ctx))
 	sqlDB.CheckQueryResults(t,
@@ -624,23 +539,27 @@ func TestKafkaSinkTracksMemory(t *testing.T) {
 	p := newAsyncProducerMock(unbuffered)
 	stopConsume := p.consume()
 
-	sink, cleanup := makeTestKafkaSink(
-		t, noTopicPrefix, defaultTopicName, p, memCapacity, "t")
+	sink, cleanup := makeTestKafkaSink(t, p, memCapacity, "t")
 	defer func() {
 		stopConsume()
 		cleanup()
 	}()
 
+	targets := make(jobspb.ChangefeedTargets, 1)
+	targets[0] = jobspb.ChangefeedTarget{StatementTimeName: `t`}
+	sink.setTargets(targets)
+
 	// No inflight
 	require.NoError(t, sink.Flush(ctx))
 
 	// Emit few messages
-	rnd, _ := randutil.NewTestPseudoRand()
+	rnd, _ := randutil.NewPseudoRand()
 	key := randutil.RandBytes(rnd, 1+rnd.Intn(64))
 	val := randutil.RandBytes(rnd, 1+rnd.Intn(512))
 	kvLen := int64(len(key)) + int64(len(val))
 
-	testTopic := topic(`t`)
+	testTopic := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t`})
+
 	for i := 0; i < 10; i++ {
 		require.NoError(t, sink.EmitRow(ctx, testTopic, key, val, zeroTS))
 	}
@@ -661,13 +580,13 @@ func TestKafkaSinkTracksMemory(t *testing.T) {
 	// regular messages since it doesn't have Key set.
 	// We bypass majority of EmitResolvedTimestamp logic since we don't have
 	// a real kafka client instantiated.  Instead, we call emitMessage directly.
-	reg := cdctest.StartTestSchemaRegistry()
+	reg := makeTestSchemaRegistry()
 	defer reg.Close()
 	opts := map[string]string{
 		changefeedbase.OptEnvelope:                string(changefeedbase.OptEnvelopeWrapped),
-		changefeedbase.OptConfluentSchemaRegistry: reg.URL(),
+		changefeedbase.OptConfluentSchemaRegistry: reg.server.URL,
 	}
-	encoder, err := newConfluentAvroEncoder(ctx, opts, makeChangefeedTargets("t"))
+	encoder, err := newConfluentAvroEncoder(opts, jobspb.ChangefeedTargets{})
 	require.NoError(t, err)
 	payload, err := encoder.EncodeResolvedTimestamp(ctx, "t", hlc.Timestamp{})
 	require.NoError(t, err)

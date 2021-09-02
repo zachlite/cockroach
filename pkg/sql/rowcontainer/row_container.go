@@ -13,11 +13,11 @@ package rowcontainer
 import (
 	"container/heap"
 	"context"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -180,6 +180,11 @@ func (mc *MemRowContainer) InitWithMon(
 	mc.scratchRow = make(tree.Datums, len(types))
 	mc.scratchEncRow = make(rowenc.EncDatumRow, len(types))
 	mc.evalCtx = evalCtx
+}
+
+// Types returns the MemRowContainer's types.
+func (mc *MemRowContainer) Types() []*types.T {
+	return mc.types
 }
 
 // Less is part of heap.Interface and is only meant to be used internally.
@@ -831,7 +836,7 @@ func (f *DiskBackedIndexedRowContainer) GetRow(
 					} else {
 						// We choose to ignore minor details like IndexedRow overhead and
 						// the cache overhead.
-						usage := memsize.Int + int64(row.Size())
+						usage := sizeOfInt + int64(row.Size())
 						if err := f.cacheMemAcc.Grow(ctx, usage); err != nil {
 							if sqlerrors.IsOutOfMemoryError(err) {
 								// We hit the memory limit, so we need to cap the cache size
@@ -988,3 +993,5 @@ func (ir IndexedRow) GetDatums(startColIdx, endColIdx int) (tree.Datums, error) 
 	}
 	return datums, nil
 }
+
+const sizeOfInt = int64(unsafe.Sizeof(int(0)))

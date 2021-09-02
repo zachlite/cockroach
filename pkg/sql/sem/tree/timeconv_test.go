@@ -56,12 +56,12 @@ func TestClusterTimestampConversion(t *testing.T) {
 	db := kv.NewDB(testutils.MakeAmbientCtx(), senderFactory, clock, stopper)
 
 	for _, d := range testData {
-		ts := hlc.ClockTimestamp{WallTime: d.walltime, Logical: d.logical}
+		ts := hlc.Timestamp{WallTime: d.walltime, Logical: d.logical}
 		txnProto := roachpb.MakeTransaction(
 			"test",
 			nil, // baseKey
 			roachpb.NormalUserPriority,
-			ts.ToTimestamp(),
+			ts,
 			0, /* maxOffsetNs */
 		)
 

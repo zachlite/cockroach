@@ -17,13 +17,10 @@ import NavigationBar from "src/views/app/components/layoutSidebar";
 import TimeWindowManager from "src/views/app/containers/timewindow";
 import AlertBanner from "src/views/app/containers/alertBanner";
 import RequireLogin from "src/views/login/requireLogin";
-import {
-  clusterIdSelector,
-  clusterNameSelector,
-  singleVersionSelector,
-} from "src/redux/nodes";
+import { clusterIdSelector, clusterNameSelector, singleVersionSelector } from "src/redux/nodes";
 import { AdminUIState } from "src/redux/state";
 import LoginIndicator from "src/views/app/components/loginIndicator";
+import FeedbackSurveyLink from "src/views/app/components/feedbackSurveyLink/feedbackSurveyLink";
 import {
   GlobalNavigation,
   CockroachLabsLockupIcon,
@@ -71,8 +68,8 @@ class Layout extends React.Component<LayoutProps & RouteComponentProps> {
           titleTemplate="%s | Cockroach Console"
           defaultTitle="Cockroach Console"
         />
-        <TimeWindowManager />
-        <AlertBanner />
+        <TimeWindowManager/>
+        <AlertBanner/>
         <div className="layout-panel">
           <div className="layout-panel__header">
             <GlobalNavigation>
@@ -80,6 +77,7 @@ class Layout extends React.Component<LayoutProps & RouteComponentProps> {
                 <CockroachLabsLockupIcon height={26} />
               </Left>
               <Right>
+                <FeedbackSurveyLink />
                 <LoginIndicator />
               </Right>
             </GlobalNavigation>
@@ -94,10 +92,10 @@ class Layout extends React.Component<LayoutProps & RouteComponentProps> {
           </div>
           <div className="layout-panel__body">
             <div className="layout-panel__sidebar">
-              <NavigationBar />
+              <NavigationBar/>
             </div>
             <div ref={this.contentRef} className="layout-panel__content">
-              {this.props.children}
+              { this.props.children }
             </div>
           </div>
         </div>

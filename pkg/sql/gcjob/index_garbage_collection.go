@@ -14,15 +14,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -35,7 +32,8 @@ func gcIndexes(
 	execCfg *sql.ExecutorConfig,
 	parentID descpb.ID,
 	progress *jobspb.SchemaChangeGCProgress,
-) error {
+) (bool, error) {
+	didGC := false
 	droppedIndexes := progress.Indexes
 	if log.V(2) {
 		log.Infof(ctx, "GC is being considered on table %d for indexes indexes: %+v", parentID, droppedIndexes)
@@ -45,15 +43,15 @@ func gcIndexes(
 	// are no longer in use. This is necessary in the case of truncate, where we
 	// schedule a GC Job in the transaction that commits the truncation.
 	if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, parentID); err != nil {
-		return err
+		return false, err
 	}
 
-	var parentTable catalog.TableDescriptor
+	var parentTable *tabledesc.Immutable
 	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		parentTable, err = catalogkv.MustGetTableDescByID(ctx, txn, execCfg.Codec, parentID)
 		return err
 	}); err != nil {
-		return errors.Wrapf(err, "fetching parent table %d", parentID)
+		return false, errors.Wrapf(err, "fetching parent table %d", parentID)
 	}
 
 	for _, index := range droppedIndexes {
@@ -61,67 +59,53 @@ func gcIndexes(
 			continue
 		}
 
-		if err := clearIndex(ctx, execCfg, parentTable, index.IndexID); err != nil {
-			return errors.Wrapf(err, "clearing index %d from table %d", index.IndexID, parentTable.GetID())
+		indexDesc := descpb.IndexDescriptor{ID: index.IndexID}
+		if err := clearIndex(ctx, execCfg, parentTable, indexDesc); err != nil {
+			return false, errors.Wrapf(err, "clearing index %d", indexDesc.ID)
 		}
 
 		// All the data chunks have been removed. Now also removed the
 		// zone configs for the dropped indexes, if any.
-		removeIndexZoneConfigs := func(
-			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-		) error {
-			freshParentTableDesc, err := descriptors.GetMutableTableByID(
-				ctx, txn, parentID, tree.ObjectLookupFlags{
-					CommonLookupFlags: tree.CommonLookupFlags{
-						AvoidCached:    true,
-						Required:       true,
-						IncludeDropped: true,
-						IncludeOffline: true,
-					},
-				})
-			if err != nil {
-				return err
-			}
-			return sql.RemoveIndexZoneConfigs(
-				ctx, txn, execCfg, freshParentTableDesc, []uint32{uint32(index.IndexID)},
-			)
-		}
-		lm, ie, db := execCfg.LeaseManager, execCfg.InternalExecutor, execCfg.DB
-		if err := descs.Txn(
-			ctx, execCfg.Settings, lm, ie, db, removeIndexZoneConfigs,
-		); err != nil {
-			return errors.Wrapf(err, "removing index %d zone configs", index.IndexID)
+		if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			return sql.RemoveIndexZoneConfigs(ctx, txn, execCfg, parentTable.GetID(), []descpb.IndexDescriptor{indexDesc})
+		}); err != nil {
+			return false, errors.Wrapf(err, "removing index %d zone configs", indexDesc.ID)
 		}
 
-		if err := completeDroppedIndex(
-			ctx, execCfg, parentTable, index.IndexID, progress,
-		); err != nil {
-			return err
+		if err := completeDroppedIndex(ctx, execCfg, parentTable, index.IndexID, progress); err != nil {
+			return false, err
 		}
+
+		didGC = true
 	}
-	return nil
+
+	return didGC, nil
 }
 
 // clearIndexes issues Clear Range requests over all specified indexes.
 func clearIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	tableDesc catalog.TableDescriptor,
-	indexID descpb.IndexID,
+	tableDesc *tabledesc.Immutable,
+	index descpb.IndexDescriptor,
 ) error {
-	log.Infof(ctx, "clearing index %d from table %d", indexID, tableDesc.GetID())
+	log.Infof(ctx, "clearing index %d from table %d", index.ID, tableDesc.ID)
+	if index.IsInterleaved() {
+		return errors.Errorf("unexpected interleaved index %d", index.ID)
+	}
 
-	sp := tableDesc.IndexSpan(execCfg.Codec, indexID)
-	start, err := keys.Addr(sp.Key)
-	if err != nil {
-		return errors.Errorf("failed to addr index start: %v", err)
-	}
-	end, err := keys.Addr(sp.EndKey)
-	if err != nil {
-		return errors.Errorf("failed to addr index end: %v", err)
-	}
-	rSpan := roachpb.RSpan{Key: start, EndKey: end}
-	return clearSpanData(ctx, execCfg.DB, execCfg.DistSender, rSpan)
+	sp := tableDesc.IndexSpan(execCfg.Codec, index.ID)
+
+	// ClearRange cannot be run in a transaction, so create a
+	// non-transactional batch to send the request.
+	b := &kv.Batch{}
+	b.AddRawRequest(&roachpb.ClearRangeRequest{
+		RequestHeader: roachpb.RequestHeader{
+			Key:    sp.Key,
+			EndKey: sp.EndKey,
+		},
+	})
+	return execCfg.DB.Run(ctx, b)
 }
 
 // completeDroppedIndexes updates the mutations of the table descriptor to
@@ -129,11 +113,11 @@ func clearIndex(
 func completeDroppedIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	table catalog.TableDescriptor,
+	table *tabledesc.Immutable,
 	indexID descpb.IndexID,
 	progress *jobspb.SchemaChangeGCProgress,
 ) error {
-	if err := updateDescriptorGCMutations(ctx, execCfg, table.GetID(), indexID); err != nil {
+	if err := updateDescriptorGCMutations(ctx, execCfg, table.ID, indexID); err != nil {
 		return errors.Wrapf(err, "updating GC mutations")
 	}
 

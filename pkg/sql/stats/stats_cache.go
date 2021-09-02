@@ -14,15 +14,14 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -30,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cache"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -69,9 +67,6 @@ type TableStatisticsCache struct {
 
 	LeaseMgr *lease.Manager
 	Settings *cluster.Settings
-
-	// Used when decoding KV from the range feed.
-	datumAlloc rowenc.DatumAlloc
 }
 
 // The cache stores *cacheEntry objects. The fields are protected by the
@@ -83,22 +78,18 @@ type cacheEntry struct {
 	mustWait bool
 	waitCond sync.Cond
 
-	// lastRefreshTimestamp is the timestamp at which the last refresh was
-	// requested; note that the refresh may be ongoing.
-	// It is zero for entries that were not refreshed since they were added to the
-	// cache.
-	lastRefreshTimestamp hlc.Timestamp
-
-	// If refreshing is true, we are in the process of fetching the updated stats
-	// from the database.  In the mean time, other callers can use the stale stats
-	// and do not need to wait.
+	// If refreshing is true, the current statistics for this table are stale,
+	// and we are in the process of fetching the updated stats from the database.
+	// In the mean time, other callers can use the stale stats and do not need to
+	// wait.
 	//
-	// If a goroutine tries to perform a refresh when a refresh is already in
-	// progress, it will see that refreshing=true and will just update
-	// lastRefreshTimestamp before returning. When the original goroutine that was
-	// performing the refresh returns from the database and sees that the
-	// timestamp was moved, it will trigger another refresh.
-	refreshing bool
+	// If a goroutine tries to perform a refresh when a refresh is already
+	// in progress, it will see that refreshing=true and will set the
+	// mustRefreshAgain flag to true before returning. When the original
+	// goroutine that was performing the refresh returns from the database and
+	// sees that mustRefreshAgain=true, it will trigger another refresh.
+	refreshing       bool
+	mustRefreshAgain bool
 
 	stats []*TableStatistic
 
@@ -109,14 +100,13 @@ type cacheEntry struct {
 // NewTableStatisticsCache creates a new TableStatisticsCache that can hold
 // statistics for <cacheSize> tables.
 func NewTableStatisticsCache(
-	ctx context.Context,
 	cacheSize int,
+	gw gossip.OptionalGossip,
 	db *kv.DB,
 	sqlExecutor sqlutil.InternalExecutor,
 	codec keys.SQLCodec,
 	leaseManager *lease.Manager,
 	settings *cluster.Settings,
-	rangeFeedFactory *rangefeed.Factory,
 ) *TableStatisticsCache {
 	tableStatsCache := &TableStatisticsCache{
 		ClientDB:    db,
@@ -129,81 +119,27 @@ func NewTableStatisticsCache(
 		Policy:      cache.CacheLRU,
 		ShouldEvict: func(s int, key, value interface{}) bool { return s > cacheSize },
 	})
-
-	// Set up a range feed to watch for updates to system.table_statistics.
-
-	statsTablePrefix := codec.TablePrefix(keys.TableStatisticsTableID)
-	statsTableSpan := roachpb.Span{
-		Key:    statsTablePrefix,
-		EndKey: statsTablePrefix.PrefixEnd(),
+	// The stat cache requires redundant callbacks as it is using gossip to
+	// signal the presence of new stats, not to actually propagate them.
+	if g, ok := gw.Optional(47925); ok {
+		g.RegisterCallback(
+			gossip.MakePrefixPattern(gossip.KeyTableStatAddedPrefix),
+			tableStatsCache.tableStatAddedGossipUpdate,
+			gossip.Redundant,
+		)
 	}
-
-	var lastTableID descpb.ID
-	var lastTS hlc.Timestamp
-
-	handleEvent := func(ctx context.Context, kv *roachpb.RangeFeedValue) {
-		tableID, err := decodeTableStatisticsKV(codec, kv, &tableStatsCache.datumAlloc)
-		if err != nil {
-			log.Warningf(ctx, "failed to decode table statistics row %v: %v", kv.Key, err)
-			return
-		}
-		ts := kv.Value.Timestamp
-		// A statistics collection inserts multiple rows in one transaction. We
-		// don't want to call refreshTableStats for each row since it has
-		// non-trivial overhead.
-		if tableID == lastTableID && ts == lastTS {
-			return
-		}
-		lastTableID = tableID
-		lastTS = ts
-		tableStatsCache.refreshTableStats(ctx, tableID, ts)
-	}
-
-	// Notes:
-	//  - the range feed automatically stops on server shutdown, we don't need to
-	//    call Close() ourselves.
-	//  - an error here only happens if the server is already shutting down; we
-	//    can safely ignore it.
-	_, _ = rangeFeedFactory.RangeFeed(
-		ctx,
-		"table-stats-cache",
-		statsTableSpan,
-		db.Clock().Now(),
-		handleEvent,
-	)
-
 	return tableStatsCache
 }
 
-// decodeTableStatisticsKV decodes the table ID from a range feed event on
-// system.table_statistics.
-func decodeTableStatisticsKV(
-	codec keys.SQLCodec, kv *roachpb.RangeFeedValue, da *rowenc.DatumAlloc,
-) (tableDesc descpb.ID, err error) {
-	tbl := systemschema.TableStatisticsTable
-	// The primary key of table_statistics is (tableID INT, statisticID INT).
-	types := []*types.T{types.Int, types.Int}
-	dirs := []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC}
-	keyVals := make([]rowenc.EncDatum, 2)
-	_, matches, _, err := rowenc.DecodeIndexKey(
-		codec, tbl, tbl.GetPrimaryIndex(), types, keyVals, dirs, kv.Key,
-	)
+// tableStatAddedGossipUpdate is the gossip callback that fires when a new
+// statistic is available for a table.
+func (sc *TableStatisticsCache) tableStatAddedGossipUpdate(key string, value roachpb.Value) {
+	tableID, err := gossip.TableIDFromTableStatAddedKey(key)
 	if err != nil {
-		return 0, err
+		log.Errorf(context.Background(), "tableStatAddedGossipUpdate(%s) error: %v", key, err)
+		return
 	}
-	if !matches {
-		return 0, errors.New("descriptor does not match")
-	}
-
-	if err := keyVals[0].EnsureDecoded(types[0], da); err != nil {
-		return 0, err
-	}
-
-	tableID, ok := keyVals[0].Datum.(*tree.DInt)
-	if !ok {
-		return 0, errors.New("invalid tableID value")
-	}
-	return descpb.ID(uint32(*tableID)), nil
+	sc.RefreshTableStats(context.Background(), descpb.ID(tableID))
 }
 
 // GetTableStats looks up statistics for the requested table ID in the cache,
@@ -231,7 +167,7 @@ func (sc *TableStatisticsCache) GetTableStats(
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	if found, e := sc.lookupStatsLocked(ctx, tableID, false /* stealthy */); found {
+	if found, e := sc.lookupStatsLocked(ctx, tableID); found {
 		return e.stats, e.err
 	}
 
@@ -245,20 +181,10 @@ func (sc *TableStatisticsCache) GetTableStats(
 //
 // Assumes that the caller holds sc.mu. Note that the mutex can be unlocked and
 // locked again if we need to wait (this can only happen when found=true).
-//
-// If stealthy=true, this is not considered an access with respect to the cache
-// eviction policy.
 func (sc *TableStatisticsCache) lookupStatsLocked(
-	ctx context.Context, tableID descpb.ID, stealthy bool,
+	ctx context.Context, tableID descpb.ID,
 ) (found bool, e *cacheEntry) {
-	var eUntyped interface{}
-	var ok bool
-
-	if !stealthy {
-		eUntyped, ok = sc.mu.cache.Get(tableID)
-	} else {
-		eUntyped, ok = sc.mu.cache.StealthyGet(tableID)
-	}
+	eUntyped, ok := sc.mu.cache.Get(tableID)
 	if !ok {
 		return false, nil
 	}
@@ -331,9 +257,7 @@ func (sc *TableStatisticsCache) addCacheEntryLocked(
 //  - stats are retrieved from database:
 //  - mutex is locked again and the entry is updated.
 //
-func (sc *TableStatisticsCache) refreshCacheEntry(
-	ctx context.Context, tableID descpb.ID, ts hlc.Timestamp,
-) {
+func (sc *TableStatisticsCache) refreshCacheEntry(ctx context.Context, tableID descpb.ID) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
@@ -341,20 +265,15 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 	// the refresh. If e.err is not nil, the stats are in the process of being
 	// removed from the cache (see addCacheEntryLocked), so don't refresh in this
 	// case either.
-	found, e := sc.lookupStatsLocked(ctx, tableID, true /* stealthy */)
+	found, e := sc.lookupStatsLocked(ctx, tableID)
 	if !found || e.err != nil {
 		return
 	}
-	if ts.LessEq(e.lastRefreshTimestamp) {
-		// We already refreshed at this (or a later) timestamp.
-		return
-	}
-	e.lastRefreshTimestamp = ts
 
-	// Don't perform a refresh if a refresh is already in progress; that goroutine
-	// will know it needs to refresh again because we changed the
-	// lastRefreshTimestamp.
+	// Don't perform a refresh if a refresh is already in progress, but let that
+	// goroutine know it needs to refresh again.
 	if e.refreshing {
+		e.mustRefreshAgain = true
 		return
 	}
 	e.refreshing = true
@@ -368,15 +287,13 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 			defer sc.mu.Lock()
 
 			log.VEventf(ctx, 1, "refreshing statistics for table %d", tableID)
-			// TODO(radu): pass the timestamp and use AS OF SYSTEM TIME.
 			stats, err = sc.getTableStatsFromDB(ctx, tableID)
 			log.VEventf(ctx, 1, "done refreshing statistics for table %d", tableID)
 		}()
-		if e.lastRefreshTimestamp.Equal(ts) {
+		if !e.mustRefreshAgain {
 			break
 		}
-		// The timestamp has changed; another refresh was requested.
-		ts = e.lastRefreshTimestamp
+		e.mustRefreshAgain = false
 	}
 
 	e.stats, e.err = stats, err
@@ -388,21 +305,23 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 	}
 }
 
-// refreshTableStats refreshes the cached statistics for the given table ID by
-// fetching the new stats from the database.
-func (sc *TableStatisticsCache) refreshTableStats(
-	ctx context.Context, tableID descpb.ID, ts hlc.Timestamp,
-) {
+// RefreshTableStats refreshes the cached statistics for the given table ID
+// by fetching the new stats from the database.
+func (sc *TableStatisticsCache) RefreshTableStats(ctx context.Context, tableID descpb.ID) {
 	log.VEventf(ctx, 1, "refreshing statistics for table %d", tableID)
-	ctx, span := tracing.ForkSpan(ctx, "refresh-table-stats")
+	ctx, span := tracing.ForkCtxSpan(ctx, "refresh-table-stats")
 	// Perform an asynchronous refresh of the cache.
 	go func() {
-		defer span.Finish()
-		sc.refreshCacheEntry(ctx, tableID, ts)
+		defer tracing.FinishSpan(span)
+		sc.refreshCacheEntry(ctx, tableID)
 	}()
 }
 
 // InvalidateTableStats invalidates the cached statistics for the given table ID.
+//
+// Note that RefreshTableStats should normally be used instead of this function.
+// This function is used only when we want to guarantee that the next query
+// uses updated stats.
 func (sc *TableStatisticsCache) InvalidateTableStats(ctx context.Context, tableID descpb.ID) {
 	log.VEventf(ctx, 1, "evicting statistics for table %d", tableID)
 	sc.mu.Lock()
@@ -490,6 +409,8 @@ func (sc *TableStatisticsCache) parseStats(
 			return nil, err
 		}
 
+		// Decode the histogram data so that it's usable by the opt catalog.
+		res.Histogram = make([]cat.HistogramBucket, len(res.HistogramData.Buckets))
 		// Hydrate the type in case any user defined types are present.
 		// There are cases where typ is nil, so don't do anything if so.
 		if typ := res.HistogramData.ColumnType; typ != nil && typ.UserDefined() {
@@ -503,12 +424,8 @@ func (sc *TableStatisticsCache) parseStats(
 			// will need to start writing a timestamp on the stats objects and request
 			// TypeDescriptor's with the timestamp that the stats were recorded with.
 			err := sc.ClientDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				collection := descs.NewCollection(
-					sc.Settings,
-					sc.LeaseMgr,
-					nil, // hydratedTables
-					nil, // virtualSchemas
-				)
+				collection := descs.NewCollection(ctx, sc.Settings, sc.LeaseMgr,
+					nil /* hydratedTables */)
 				defer collection.ReleaseAll(ctx)
 				resolver := descs.NewDistSQLTypeResolver(collection, txn)
 				var err error
@@ -519,30 +436,9 @@ func (sc *TableStatisticsCache) parseStats(
 				return nil, err
 			}
 		}
-
-		var offset int
-		if res.NullCount > 0 {
-			// A bucket for NULL is not persisted, but we create a fake one to
-			// make histograms easier to work with. The length of res.Histogram
-			// is therefore 1 greater than the length of the histogram data
-			// buckets.
-			res.Histogram = make([]cat.HistogramBucket, len(res.HistogramData.Buckets)+1)
-			res.Histogram[0] = cat.HistogramBucket{
-				NumEq:         float64(res.NullCount),
-				NumRange:      0,
-				DistinctRange: 0,
-				UpperBound:    tree.DNull,
-			}
-			offset = 1
-		} else {
-			res.Histogram = make([]cat.HistogramBucket, len(res.HistogramData.Buckets))
-			offset = 0
-		}
-
-		// Decode the histogram data so that it's usable by the opt catalog.
 		var a rowenc.DatumAlloc
-		for i := offset; i < len(res.Histogram); i++ {
-			bucket := &res.HistogramData.Buckets[i-offset]
+		for i := range res.Histogram {
+			bucket := &res.HistogramData.Buckets[i]
 			datum, _, err := rowenc.DecodeTableKey(&a, res.HistogramData.ColumnType, bucket.UpperBound, encoding.Ascending)
 			if err != nil {
 				return nil, err
@@ -582,7 +478,7 @@ FROM system.table_statistics
 WHERE "tableID" = $1
 ORDER BY "createdAt" DESC
 `
-	it, err := sc.SQLExecutor.QueryIterator(
+	rows, err := sc.SQLExecutor.Query(
 		ctx, "get-table-statistics", nil /* txn */, getTableStatisticsStmt, tableID,
 	)
 	if err != nil {
@@ -590,17 +486,13 @@ ORDER BY "createdAt" DESC
 	}
 
 	var statsList []*TableStatistic
-	var ok bool
-	for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-		stats, err := sc.parseStats(ctx, it.Cur())
+	for _, row := range rows {
+		stats, err := sc.parseStats(ctx, row)
 		if err != nil {
 			log.Warningf(ctx, "could not decode statistic for table %d: %v", tableID, err)
 			continue
 		}
 		statsList = append(statsList, stats)
-	}
-	if err != nil {
-		return nil, err
 	}
 
 	return statsList, nil

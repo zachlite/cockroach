@@ -33,7 +33,7 @@ func PrintKeyValue(kv storage.MVCCKeyValue) {
 	fmt.Println(SprintKeyValue(kv, true /* printKey */))
 }
 
-// SprintKey pretty-prints the specified MVCCKey.
+// SprintKey pretty-prings the specified MVCCKey.
 func SprintKey(key storage.MVCCKey) string {
 	return fmt.Sprintf("%s %s (%#x): ", key.Timestamp, key.Key, storage.EncodeKey(key))
 }
@@ -75,14 +75,6 @@ func SprintKeyValue(kv storage.MVCCKeyValue, printKey bool) string {
 	panic("unreachable")
 }
 
-// SprintIntent pretty-prints the specified intent value.
-func SprintIntent(value []byte) string {
-	if out, err := tryIntent(storage.MVCCKeyValue{Value: value}); err == nil {
-		return out
-	}
-	return fmt.Sprintf("%x", value)
-}
-
 func tryRangeDescriptor(kv storage.MVCCKeyValue) (string, error) {
 	if err := IsRangeDescriptorKey(kv.Key); err != nil {
 		return "", err
@@ -94,7 +86,6 @@ func tryRangeDescriptor(kv storage.MVCCKeyValue) (string, error) {
 	return descStr(desc), nil
 }
 
-// tryIntent does not look at the key.
 func tryIntent(kv storage.MVCCKeyValue) (string, error) {
 	if len(kv.Value) == 0 {
 		return "", errors.New("empty")
@@ -243,7 +234,7 @@ func tryTxn(kv storage.MVCCKeyValue) (string, error) {
 }
 
 func tryRangeIDKey(kv storage.MVCCKeyValue) (string, error) {
-	if !kv.Key.Timestamp.IsEmpty() {
+	if kv.Key.Timestamp != (hlc.Timestamp{}) {
 		return "", fmt.Errorf("range ID keys shouldn't have timestamps: %s", kv.Key)
 	}
 	_, _, suffix, _, err := keys.DecodeRangeIDKey(kv.Key.Key)
@@ -274,11 +265,8 @@ func tryRangeIDKey(kv storage.MVCCKeyValue) (string, error) {
 	case bytes.Equal(suffix, keys.LocalAbortSpanSuffix):
 		msg = &roachpb.AbortSpanEntry{}
 
-	case bytes.Equal(suffix, keys.LocalRangeGCThresholdSuffix):
+	case bytes.Equal(suffix, keys.LocalRangeLastGCSuffix):
 		msg = &hlc.Timestamp{}
-
-	case bytes.Equal(suffix, keys.LocalRangeVersionSuffix):
-		msg = &roachpb.Version{}
 
 	case bytes.Equal(suffix, keys.LocalRangeTombstoneSuffix):
 		msg = &roachpb.RangeTombstone{}
@@ -385,22 +373,4 @@ func (s *stringifyWriteBatch) String() string {
 		return wbStr
 	}
 	return fmt.Sprintf("failed to stringify write batch (%x): %s", s.Data, err)
-}
-
-// PrintEngineKeyValue attempts to print the given key-value pair.
-func PrintEngineKeyValue(k storage.EngineKey, v []byte) {
-	if k.IsMVCCKey() {
-		if key, err := k.ToMVCCKey(); err == nil {
-			PrintKeyValue(storage.MVCCKeyValue{Key: key, Value: v})
-			return
-		}
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s %x (%#x): ", k.Key, k.Version, k.Encode())
-	if out, err := tryIntent(storage.MVCCKeyValue{Value: v}); err == nil {
-		sb.WriteString(out)
-	} else {
-		fmt.Fprintf(&sb, "%x", v)
-	}
-	fmt.Println(sb.String())
 }

@@ -18,19 +18,14 @@ export const selectStatementByFingerprint = createSelector(
   (state: AdminUIState) => state.cachedData.statements.data?.statements,
   (_state: AdminUIState, statementFingerprint: string) => statementFingerprint,
   (statements, statementFingerprint) =>
-    (statements || []).find(
-      (statement) => statement.key.key_data.query === statementFingerprint,
-    ),
+    (statements || []).find(statement => statement.key.key_data.query === statementFingerprint),
 );
 
 export const selectDiagnosticsReportsByStatementFingerprint = createSelector(
-  (state: AdminUIState) =>
-    state.cachedData.statementDiagnosticsReports.data?.reports || [],
+  (state: AdminUIState) => state.cachedData.statementDiagnosticsReports.data?.reports || [],
   (_state: AdminUIState, statementFingerprint: string) => statementFingerprint,
   (requests, statementFingerprint) =>
-    (requests || []).filter(
-      (request) => request.statement_fingerprint === statementFingerprint,
-    ),
+    (requests || []).filter(request => request.statement_fingerprint === statementFingerprint),
 );
 
 export const selectDiagnosticsReportsCountByStatementFingerprint = createSelector(
@@ -39,15 +34,13 @@ export const selectDiagnosticsReportsCountByStatementFingerprint = createSelecto
 );
 
 export const selectStatementDiagnosticsReports = createSelector(
-  (state: AdminUIState) =>
-    state.cachedData.statementDiagnosticsReports.data?.reports,
-  (diagnosticsReports) => diagnosticsReports,
+  (state: AdminUIState) => state.cachedData.statementDiagnosticsReports.data?.reports,
+  diagnosticsReports => diagnosticsReports,
 );
 
 export const statementDiagnosticsReportsInFlight = createSelector(
-  (state: AdminUIState) =>
-    state.cachedData.statementDiagnosticsReports.inFlight,
-  (inFlight) => inFlight,
+  (state: AdminUIState) => state.cachedData.statementDiagnosticsReports.inFlight,
+  inFlight => inFlight,
 );
 
 type StatementDiagnosticsDictionary = {
@@ -56,15 +49,8 @@ type StatementDiagnosticsDictionary = {
 
 export const selectDiagnosticsReportsPerStatement = createSelector(
   selectStatementDiagnosticsReports,
-  (
-    diagnosticsReports: IStatementDiagnosticsReport[],
-  ): StatementDiagnosticsDictionary =>
-    chain(diagnosticsReports)
-      .groupBy((diagnosticsReport) => diagnosticsReport.statement_fingerprint)
-      .mapValues((diagnostics) =>
-        orderBy(diagnostics, (d) => d.requested_at.seconds.toNumber(), [
-          "desc",
-        ]),
-      )
-      .value(),
+  (diagnosticsReports: IStatementDiagnosticsReport[]): StatementDiagnosticsDictionary => chain(diagnosticsReports)
+    .groupBy(diagnosticsReport => diagnosticsReport.statement_fingerprint)
+    .mapValues(diagnostics => orderBy(diagnostics, d => d.requested_at.seconds.toNumber(), ["desc"]))
+    .value(),
 );

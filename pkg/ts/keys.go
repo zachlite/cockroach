@@ -76,8 +76,7 @@ func makeDataKeySeriesPrefix(name string, r Resolution) roachpb.Key {
 	return k
 }
 
-// DecodeDataKey decodes a time series key into its components:
-// name, source, resolution, timestamp.
+// DecodeDataKey decodes a time series key into its components.
 func DecodeDataKey(key roachpb.Key) (string, string, Resolution, int64, error) {
 	// Detect and remove prefix.
 	remainder := key

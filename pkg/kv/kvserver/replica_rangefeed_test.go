@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -36,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -91,7 +91,7 @@ func TestReplicaRangefeed(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	const numNodes = 5
+	const numNodes = 3
 	args := base.TestClusterArgs{
 		ReplicationMode:   base.ReplicationManual,
 		ServerArgsPerNode: make(map[int]base.TestServerArgs, numNodes),
@@ -100,8 +100,8 @@ func TestReplicaRangefeed(t *testing.T) {
 		// Disable closed timestamps as this test was designed assuming no closed
 		// timestamps would get propagated.
 		settings := cluster.MakeTestingClusterSettings()
-		closedts.TargetDuration.Override(ctx, &settings.SV, 24*time.Hour)
-		kvserver.RangefeedEnabled.Override(ctx, &settings.SV, true)
+		closedts.TargetDuration.Override(&settings.SV, 24*time.Hour)
+		kvserver.RangefeedEnabled.Override(&settings.SV, true)
 		args.ServerArgsPerNode[i] = base.TestServerArgs{Settings: settings}
 	}
 	tc := testcluster.StartTestCluster(t, numNodes, args)
@@ -118,8 +118,7 @@ func TestReplicaRangefeed(t *testing.T) {
 	// Split the range so that the RHS uses epoch-based leases.
 	startKey := []byte("a")
 	tc.SplitRangeOrFatal(t, startKey)
-	tc.AddVotersOrFatal(t, startKey, tc.Target(1), tc.Target(2))
-	tc.AddNonVotersOrFatal(t, startKey, tc.Target(3), tc.Target(4))
+	tc.AddReplicasOrFatal(t, startKey, tc.Target(1), tc.Target(2))
 	if pErr := tc.WaitForVoters(startKey, tc.Target(1), tc.Target(2)); pErr != nil {
 		t.Fatalf("Unexpected error waiting for replication: %v", pErr)
 	}
@@ -132,12 +131,13 @@ func TestReplicaRangefeed(t *testing.T) {
 	if _, pErr := kv.SendWrappedWith(ctx, db, roachpb.Header{Timestamp: ts1}, incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
-	tc.WaitForValues(t, roachpb.Key("b"), []int64{9, 9, 9, 9, 9})
+	tc.WaitForValues(t, roachpb.Key("b"), []int64{9, 9, 9})
 
-	streams := make([]*testStream, numNodes)
-	streamErrC := make(chan *roachpb.Error, numNodes)
+	replNum := 3
+	streams := make([]*testStream, replNum)
+	streamErrC := make(chan *roachpb.Error, replNum)
 	rangefeedSpan := roachpb.Span{Key: roachpb.Key("a"), EndKey: roachpb.Key("z")}
-	for i := 0; i < numNodes; i++ {
+	for i := 0; i < replNum; i++ {
 		stream := newTestStream()
 		streams[i] = stream
 		ts := tc.Servers[i]
@@ -161,7 +161,7 @@ func TestReplicaRangefeed(t *testing.T) {
 
 	checkForExpEvents := func(expEvents []*roachpb.RangeFeedEvent) {
 		t.Helper()
-		for _, stream := range streams {
+		for i, stream := range streams {
 			var events []*roachpb.RangeFeedEvent
 			testutils.SucceedsSoon(t, func() error {
 				if len(streamErrC) > 0 {
@@ -170,15 +170,6 @@ func TestReplicaRangefeed(t *testing.T) {
 				}
 
 				events = stream.Events()
-				// Filter out checkpoints. Those are not deterministic; they can come at any time.
-				var filteredEvents []*roachpb.RangeFeedEvent
-				for _, e := range events {
-					if e.Checkpoint != nil {
-						continue
-					}
-					filteredEvents = append(filteredEvents, e)
-				}
-				events = filteredEvents
 				if len(events) < len(expEvents) {
 					return errors.Errorf("too few events: %v", events)
 				}
@@ -188,7 +179,9 @@ func TestReplicaRangefeed(t *testing.T) {
 			if len(streamErrC) > 0 {
 				t.Fatalf("unexpected error from stream: %v", <-streamErrC)
 			}
-			require.Equal(t, expEvents, events)
+			if !reflect.DeepEqual(events, expEvents) {
+				t.Fatalf("incorrect events on stream %d, found %v, want %v", i, events, expEvents)
+			}
 		}
 	}
 
@@ -199,6 +192,10 @@ func TestReplicaRangefeed(t *testing.T) {
 	expEvents := []*roachpb.RangeFeedEvent{
 		{Val: &roachpb.RangeFeedValue{
 			Key: roachpb.Key("b"), Value: expVal1,
+		}},
+		{Checkpoint: &roachpb.RangeFeedCheckpoint{
+			Span:       rangefeedSpan,
+			ResolvedTS: hlc.Timestamp{},
 		}},
 	}
 	checkForExpEvents(expEvents)
@@ -311,7 +308,7 @@ func TestReplicaRangefeed(t *testing.T) {
 	}
 
 	testutils.SucceedsSoon(t, func() error {
-		for i := 0; i < numNodes; i++ {
+		for i := 0; i < replNum; i++ {
 			ts := tc.Servers[i]
 			store, pErr := ts.Stores().GetStore(ts.GetFirstStoreID())
 			if pErr != nil {
@@ -343,30 +340,24 @@ func TestReplicaRangefeedExpiringLeaseError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	s := serv.(*server.TestServer)
-	defer s.Stopper().Stop(ctx)
-	store, err := s.Stores().GetStore(s.GetFirstStoreID())
-	require.NoError(t, err)
-
-	_, rdesc, err := s.ScratchRangeWithExpirationLeaseEx()
-	require.NoError(t, err)
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.Background())
+	store, _ := createTestStore(t, stopper)
 
 	// Establish a rangefeed on the replica we plan to remove.
 	stream := newTestStream()
 	req := roachpb.RangeFeedRequest{
 		Header: roachpb.Header{
-			RangeID: store.LookupReplica(rdesc.StartKey).RangeID,
+			RangeID: store.LookupReplica(roachpb.RKey("a")).RangeID,
 		},
-		Span: roachpb.Span{Key: rdesc.StartKey.AsRawKey(), EndKey: rdesc.EndKey.AsRawKey()},
+		Span: roachpb.Span{Key: roachpb.Key("a"), EndKey: roachpb.Key("z")},
 	}
 
 	// Cancel the stream's context so that RangeFeed would return
 	// immediately even if it didn't return the correct error.
 	stream.Cancel()
 
-	kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, true)
+	kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, true)
 	pErr := store.RangeFeed(&req, stream)
 	const exp = "expiration-based leases are incompatible with rangefeeds"
 	if !testutils.IsPError(pErr, exp) {
@@ -397,7 +388,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 			t.Fatal(pErr)
 		}
 		tc.SplitRangeOrFatal(t, startKey)
-		tc.AddVotersOrFatal(t, startKey, tc.Target(1), tc.Target(2))
+		tc.AddReplicasOrFatal(t, startKey, tc.Target(1), tc.Target(2))
 		rangeID := store.LookupReplica(startKey).RangeID
 
 		// Write to the RHS of the split and wait for all replicas to process it.
@@ -504,7 +495,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 		waitForInitialCheckpointAcrossSpan(t, stream, streamErrC, rangefeedSpan)
 
 		// Remove the replica from the range.
-		tc.RemoveVotersOrFatal(t, startKey, tc.Target(removeStore))
+		tc.RemoveReplicasOrFatal(t, startKey, tc.Target(removeStore))
 
 		// Check the error.
 		pErr := <-streamErrC
@@ -751,7 +742,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 				},
 				Span: rangefeedSpan,
 			}
-			kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, true)
+			kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, true)
 			pErr := store.RangeFeed(&req, stream)
 			streamErrC <- pErr
 		}()
@@ -761,7 +752,7 @@ func TestReplicaRangefeedRetryErrors(t *testing.T) {
 
 		// Disable rangefeeds, which stops logical op logs from being provided
 		// with Raft commands.
-		kvserver.RangefeedEnabled.Override(ctx, &store.ClusterSettings().SV, false)
+		kvserver.RangefeedEnabled.Override(&store.ClusterSettings().SV, false)
 
 		// Perform a write on the range.
 		writeKey := encoding.EncodeStringAscending(keys.SystemSQLCodec.TablePrefix(55), "c")
@@ -784,10 +775,8 @@ func TestReplicaRangefeedPushesTransactions(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	tc, db, desc := setupClusterForClosedTSTesting(ctx, t, testingTargetDuration,
-		testingCloseFraction, aggressiveResolvedTimestampClusterArgs, "cttest", "kv")
+	tc, db, _, repls := setupClusterForClosedTimestampTesting(ctx, t, testingTargetDuration, testingCloseFraction, aggressiveResolvedTimestampClusterArgs)
 	defer tc.Stopper().Stop(ctx)
-	repls := replsForRange(ctx, t, tc, desc, numNodes)
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.rangefeed.enabled = true`)
@@ -898,10 +887,8 @@ func TestReplicaRangefeedNudgeSlowClosedTimestamp(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	tc, db, desc := setupClusterForClosedTSTesting(ctx, t, testingTargetDuration,
-		testingCloseFraction, aggressiveResolvedTimestampClusterArgs, "cttest", "kv")
+	tc, db, desc, repls := setupClusterForClosedTimestampTesting(ctx, t, testingTargetDuration, testingCloseFraction, aggressiveResolvedTimestampClusterArgs)
 	defer tc.Stopper().Stop(ctx)
-	repls := replsForRange(ctx, t, tc, desc, numNodes)
 
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.rangefeed.enabled = true`)
@@ -1058,19 +1045,21 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 			},
 		},
 	}
+
 	tci := serverutils.StartNewTestCluster(t, 2, cargs)
 	tc := tci.(*testcluster.TestCluster)
 	defer tc.Stopper().Stop(ctx)
 
 	scratchKey := tc.ScratchRange(t)
 	// Add a replica; we're going to move the lease to it below.
-	desc := tc.AddVotersOrFatal(t, scratchKey, tc.Target(1))
+	desc := tc.AddReplicasOrFatal(t, scratchKey, tc.Target(1))
 	atomic.StoreInt64(&scratchRangeID, int64(desc.RangeID))
 
 	sqlDB := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.rangefeed.enabled = true`)
-	// Drop the target closedts duration in order to speed up the rangefeed
-	// "nudging" once the range loses its lease.
+	// Drop the target closedts duration. This was set to testingTargetDuration
+	// above, but this is higher then it needs to be now that cluster and schema
+	// setup is complete.
 	sqlDB.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.target_duration = '10ms'`)
 
 	n1 := tc.Server(0)
@@ -1115,7 +1104,7 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 
 	// Move the lease from n1 to n2 in order for the Raft leadership to move with
 	// it.
-	tc.TransferRangeLeaseOrFatal(t, desc, n2Target)
+	require.NoError(t, tc.TransferRangeLease(desc, n2Target))
 	testutils.SucceedsSoon(t, func() error {
 		leader := tc.GetRaftLeader(t, desc.StartKey).NodeID()
 		if tc.Target(1).NodeID != leader {
@@ -1127,14 +1116,14 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 	// Expire the lease. Given that the Raft leadership is on n2, only n2 will be
 	// eligible to acquire a new lease.
 	log.Infof(ctx, "test expiring lease")
-	nl := n2.NodeLiveness().(*liveness.NodeLiveness)
+	nl := n2.NodeLiveness().(*kvserver.NodeLiveness)
 	resumeHeartbeats := nl.PauseAllHeartbeatsForTest()
-	n2Liveness, ok := nl.Self()
-	require.True(t, ok)
-	manualClock.Increment(n2Liveness.Expiration.ToTimestamp().Add(1, 0).WallTime - manualClock.UnixNano())
+	n2Liveness, err := nl.Self()
+	require.NoError(t, err)
+	manualClock.Increment(n2Liveness.Expiration.WallTime + 1 - manualClock.UnixNano())
 	atomic.StoreInt64(&rejectExtraneousRequests, 1)
 	// Ask another node to increment n2's liveness record.
-	require.NoError(t, n1.NodeLiveness().(*liveness.NodeLiveness).IncrementEpoch(ctx, n2Liveness))
+	require.NoError(t, n1.NodeLiveness().(*kvserver.NodeLiveness).IncrementEpoch(ctx, n2Liveness))
 	resumeHeartbeats()
 
 	// Wait for another RangeFeed checkpoint after the lease expired.
@@ -1145,10 +1134,10 @@ func TestRangefeedCheckpointsRecoverFromLeaseExpiration(t *testing.T) {
 	require.Equal(t, int64(1), nudged)
 
 	// Check that n2 renewed its lease, like the test intended.
-	li, _, err := tc.FindRangeLeaseEx(ctx, desc, &n2Target)
+	lease, _, err := tc.FindRangeLease(desc, &n2Target)
 	require.NoError(t, err)
-	require.True(t, li.Current().OwnedBy(n2.GetFirstStoreID()))
-	require.Equal(t, int64(2), li.Current().Epoch)
+	require.True(t, lease.OwnedBy(n2.GetFirstStoreID()))
+	require.Equal(t, int64(2), lease.Epoch)
 
 	// Make sure the RangeFeed hasn't errored.
 	select {

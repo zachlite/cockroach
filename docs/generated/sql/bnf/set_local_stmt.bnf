@@ -1,2 +1,0 @@
-set_local_stmt ::=
-	'SET' 'LOCAL' set_rest

@@ -33,7 +33,7 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ tree.AggType
 )
 

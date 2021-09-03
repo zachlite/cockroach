@@ -451,7 +451,6 @@ func (sr *StoreRebalancer) chooseLeaseToTransfer(
 			}
 
 			filteredStoreList := storeList.filter(zone.Constraints)
-			filteredStoreList = storeList.filter(zone.VoterConstraints)
 			if sr.rq.allocator.followTheWorkloadPrefersLocal(
 				ctx,
 				filteredStoreList,
@@ -525,7 +524,8 @@ func (sr *StoreRebalancer) chooseRangeToRebalance(
 		// just unnecessary churn with no benefit to move ranges responsible for,
 		// for example, 1 qps on a store with 5000 qps.
 		const minQPSFraction = .001
-		if replWithStats.qps < localDesc.Capacity.QueriesPerSecond*minQPSFraction {
+		if replWithStats.qps < localDesc.Capacity.QueriesPerSecond*minQPSFraction &&
+			float64(localDesc.Capacity.RangeCount) <= storeList.candidateRanges.mean {
 			log.VEventf(
 				ctx,
 				5,

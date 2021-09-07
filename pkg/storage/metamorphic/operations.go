@@ -138,7 +138,7 @@ func generateMVCCScan(
 }
 
 // Prints the key where an iterator is positioned, or valid = false if invalid.
-func printIterState(iter storage.MVCCIterator) string {
+func printIterState(iter storage.Iterator) string {
 	if ok, err := iter.Valid(); !ok || err != nil {
 		if err != nil {
 			return fmt.Sprintf("valid = %v, err = %s", ok, err.Error())
@@ -292,8 +292,7 @@ type mvccClearTimeRangeOp struct {
 
 func (m mvccClearTimeRangeOp) run(ctx context.Context) string {
 	writer := m.m.getReadWriter(m.writer)
-	span, err := storage.MVCCClearTimeRange(ctx, writer, &enginepb.MVCCStats{}, m.key, m.endKey,
-		m.startTime, m.endTime, math.MaxInt64, math.MaxInt64, true /* useTBI */)
+	span, err := storage.MVCCClearTimeRange(ctx, writer, nil, m.key, m.endKey, m.startTime, m.endTime, math.MaxInt64)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -465,7 +464,7 @@ type iterOpenOp struct {
 
 func (i iterOpenOp) run(ctx context.Context) string {
 	rw := i.m.getReadWriter(i.rw)
-	iter := rw.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
+	iter := rw.NewIterator(storage.IterOptions{
 		Prefix:     false,
 		LowerBound: i.key,
 		UpperBound: i.endKey.Next(),
@@ -588,9 +587,9 @@ type clearRangeOp struct {
 }
 
 func (c clearRangeOp) run(ctx context.Context) string {
-	// ClearRange calls in Cockroach usually happen with boundaries demarcated
-	// using unversioned keys, so mimic the same behavior here.
-	err := c.m.engine.ClearMVCCRangeAndIntents(c.key, c.endKey)
+	// All ClearRange calls in Cockroach usually happen with metadata keys, so
+	// mimic the same behavior here.
+	err := c.m.engine.ClearRange(storage.MakeMVCCMetadataKey(c.key), storage.MakeMVCCMetadataKey(c.endKey))
 	if err != nil {
 		return fmt.Sprintf("error: %s", err.Error())
 	}
@@ -1208,7 +1207,7 @@ var opGenerators = []opGenerator{
 				key := m.keyGenerator.parse(arg)
 				// Don't put anything at the 0 timestamp; the MVCC code expects
 				// MVCCMetadata at those values.
-				if key.Timestamp.IsEmpty() {
+				if key.Timestamp == (hlc.Timestamp{}) {
 					key.Timestamp = key.Timestamp.Next()
 				}
 				keys = append(keys, key)

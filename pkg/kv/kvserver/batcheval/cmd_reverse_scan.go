@@ -43,11 +43,9 @@ func ReverseScan(
 		Inconsistent:     h.ReadConsistency != roachpb.CONSISTENT,
 		Txn:              h.Txn,
 		MaxKeys:          h.MaxSpanRequestKeys,
-		MaxIntents:       storage.MaxIntentsPerWriteIntentError.Get(&cArgs.EvalCtx.ClusterSettings().SV),
 		TargetBytes:      h.TargetBytes,
 		FailOnMoreRecent: args.KeyLocking != lock.None,
 		Reverse:          true,
-		MemoryAccount:    cArgs.EvalCtx.GetResponseMemoryAccount(),
 	}
 
 	switch args.ScanFormat {

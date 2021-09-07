@@ -11,6 +11,7 @@
 package pgdate
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // numberChunk associates a value with a leading separator,
@@ -31,15 +31,11 @@ type numberChunk struct {
 	magnitude int
 }
 
-func (n numberChunk) String() string { return redact.StringWithoutMarkers(n) }
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (n numberChunk) SafeFormat(w redact.SafePrinter, _ rune) {
+func (n numberChunk) String() string {
 	if n.separator == utf8.RuneError {
-		w.Print(n.v)
-		return
+		return fmt.Sprintf("%d", n.v)
 	}
-	w.Printf("%c%d", n.separator, n.v)
+	return fmt.Sprintf("%v%d", n.separator, n.v)
 }
 
 // fieldExtract manages the state of a date/time parsing operation.
@@ -60,7 +56,7 @@ type fieldExtract struct {
 	// location is set to the timezone specified by the timestamp (if any).
 	location *time.Location
 
-	dateStyle DateStyle
+	mode ParseMode
 	// The fields that must be present to succeed.
 	required fieldSet
 	// Stores a reference to one of the sentinel values, to be returned
@@ -340,7 +336,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			return fe.SetChunk(fieldNanos, chunk)
 
 		default:
-			return fe.decorateError(inputErrorf("cannot interpret field: %s", chunk))
+			return inputErrorf("cannot interpret field: %s", chunk)
 		}
 
 	case chunk.magnitude == 3 &&
@@ -379,7 +375,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			chunk.v /= 100
 			return fe.SetChunk(fieldYear, chunk)
 
-		case chunk.magnitude >= 3 || fe.dateStyle.Order == Order_YMD:
+		case chunk.magnitude >= 3 || fe.mode == ParseModeYMD:
 			// Example: "YYYY MM DD"
 			//           ^^^^
 			// Example: "YYY MM DD"
@@ -387,7 +383,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			// Example: "YY MM DD"
 			//           ^^
 			// A three- or four-digit number must be a year.  If we are in a
-			// year-first order, we'll accept the first chunk and possibly
+			// year-first mode, we'll accept the first chunk and possibly
 			// adjust a two-digit value later on.  This means that
 			// 99 would get adjusted to 1999, but 0099 would not.
 			if chunk.separator == '-' {
@@ -396,15 +392,15 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 				fe.tweakYear = true
 			}
 			return fe.SetChunk(fieldYear, chunk)
-		case fe.dateStyle.Order == Order_DMY:
+		case fe.mode == ParseModeDMY:
 			// Example: "DD MM YY"
 			//           ^^
-			// The first value is ambiguous, so we rely on the order.
+			// The first value is ambiguous, so we rely on the mode.
 			return fe.SetChunk(fieldDay, chunk)
-		case fe.dateStyle.Order == Order_MDY:
+		case fe.mode == ParseModeMDY:
 			// Example: "MM DD YY"
 			//           ^^
-			// The first value is ambiguous, so we rely on the order.
+			// The first value is ambiguous, so we rely on the mode.
 			return fe.SetChunk(fieldMonth, chunk)
 		}
 
@@ -421,19 +417,19 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 		//           ^^^^
 		// Example: "YYY Month DD"
 		//           ^^^
-		// Example: "MM DD YY"; only in MDY order.
+		// Example: "MM DD YY"; only in MDY mode.
 		//              ^^
-		// Example: "Month DD YY"; only in MDY order
+		// Example: "Month DD YY"; only in MDY mode
 		//                 ^^
-		// Example: "DD Month YY"; only in DMY order
+		// Example: "DD Month YY"; only in DMY mode
 		//           ^^
-		// WARNING: "YY Month DD"; OK in YMD order. In other orders, we'll
+		// WARNING: "YY Month DD"; OK in YMD mode. In other modes, we'll
 		//           ^^            wind up storing the year in the day.
 		//                         This is fixed up below.
 		// The month has been set, but we don't yet have a year. If we know
 		// that the month was set in the first phase, we'll look for an
-		// obvious year or defer to the parsing order.
-		if textMonth && (chunk.magnitude >= 3 || fe.dateStyle.Order == Order_YMD) {
+		// obvious year or defer to the parsing mode.
+		if textMonth && (chunk.magnitude >= 3 || fe.mode == ParseModeYMD) {
 			if chunk.magnitude <= 2 {
 				fe.tweakYear = true
 			}
@@ -538,7 +534,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			return fe.SetChunk(fieldTZHour, chunk)
 
 		default:
-			return fe.decorateError(inputErrorf("unexpected number of digits for timezone in: %s", chunk))
+			return inputErrorf("unexpected number of digits for timezone in: %s", chunk)
 		}
 
 	case !fe.Wants(fieldTZHour) && fe.Wants(fieldTZMinute):
@@ -613,7 +609,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			return fe.SetChunk(fieldHour, chunk)
 
 		default:
-			return fe.decorateError(inputErrorf("unexpected number of digits for time in %v", chunk))
+			return inputErrorf("unexpected number of digits for time in %v", chunk)
 		}
 
 	case fe.Wants(fieldMinute):
@@ -630,7 +626,7 @@ func (fe *fieldExtract) interpretNumber(numbers []numberChunk, idx int, textMont
 			return fe.SetChunk(fieldSecond, chunk)
 		}
 	}
-	return fe.decorateError(inputErrorf("could not parse field: %v", chunk))
+	return inputErrorf("could not parse field: %v", chunk)
 }
 
 // MakeDate returns a time.Time containing only the date components
@@ -759,7 +755,7 @@ func (fe *fieldExtract) matchedSentinel(value time.Time, match string) error {
 // Reset replaces a value of an already-set field.
 func (fe *fieldExtract) Reset(field field, v int) error {
 	if !fe.has.Has(field) {
-		return errors.AssertionFailedf("field %s is not already set", field.SafePretty())
+		return errors.AssertionFailedf("field %s is not already set", errors.Safe(field.Pretty()))
 	}
 	fe.data[field] = v
 	return nil
@@ -769,21 +765,13 @@ func (fe *fieldExtract) Reset(field field, v int) error {
 // the field has already been set.
 func (fe *fieldExtract) Set(field field, v int) error {
 	if !fe.wanted.Has(field) {
-		return fe.decorateError(
-			inputErrorf("value %v for field %s already present or not wanted", v, field.SafePretty()),
-		)
+		return errors.AssertionFailedf("field %s is not wanted in %v", errors.Safe(field.Pretty()), errors.Safe(fe.wanted))
 	}
 	fe.data[field] = v
 	fe.has = fe.has.Add(field)
 	fe.wanted = fe.wanted.Clear(field)
 
 	return nil
-}
-
-// decorateError adds context to an error object.
-func (fe *fieldExtract) decorateError(err error) error {
-	return errors.WithDetailf(err,
-		"Wanted: %v\nAlready found in input: %v", &fe.wanted, &fe.has)
 }
 
 // SetChunk first validates that the separator in the chunk is appropriate
@@ -844,14 +832,14 @@ func (fe *fieldExtract) SetChunk(field field, chunk numberChunk) error {
 			return fe.Set(field, chunk.v)
 		}
 	}
-	return fe.decorateError(badFieldPrefixError(field, chunk.separator))
+	return badFieldPrefixError(field, chunk.separator)
 }
 
 // SetDayOfYear updates the month and day fields to reflect the
 // given day-of-year.  The year must have been previously set.
 func (fe *fieldExtract) SetDayOfYear(chunk numberChunk) error {
 	if chunk.separator != ' ' && chunk.separator != '.' {
-		return fe.decorateError(badFieldPrefixError(fieldMonth, chunk.separator))
+		return badFieldPrefixError(fieldMonth, chunk.separator)
 	}
 
 	y, ok := fe.Get(fieldYear)
@@ -868,18 +856,16 @@ func (fe *fieldExtract) SetDayOfYear(chunk numberChunk) error {
 	return fe.Set(fieldDay, d)
 }
 
-// SafeFormat implements the redact.SafeFormatter interface.
-func (fe *fieldExtract) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.SafeString("[ ")
+func (fe *fieldExtract) String() string {
+	ret := "[ "
 	for f := fieldMinimum; f <= fieldMaximum; f++ {
 		if v, ok := fe.Get(f); ok {
-			w.Printf("%s: %d ", f.SafePretty(), v)
+			ret += fmt.Sprintf("%s: %d ", f.Pretty(), v)
 		}
 	}
-	w.SafeRune(']')
+	ret += "]"
+	return ret
 }
-
-func (fe *fieldExtract) String() string { return redact.StringWithoutMarkers(fe) }
 
 // validate ensures that the data in the extract is reasonable. It also
 // performs some field fixups, such as converting two-digit years
@@ -887,14 +873,14 @@ func (fe *fieldExtract) String() string { return redact.StringWithoutMarkers(fe)
 func (fe *fieldExtract) validate() error {
 	// If we have any of the required fields, we must have all of the required fields.
 	if fe.has.HasAny(dateRequiredFields) && !fe.has.HasAll(dateRequiredFields) {
-		return fe.decorateError(inputErrorf("missing required date fields"))
+		return inputErrorf("missing required date fields")
 	}
 
 	if (fe.isDB2 && !fe.has.HasAll(db2TimeRequiredFields)) || (fe.has.HasAny(timeRequiredFields) && !fe.has.HasAll(timeRequiredFields)) {
-		return fe.decorateError(inputErrorf("missing required time fields"))
+		return inputErrorf("missing required time fields")
 	}
 	if !fe.has.HasAll(fe.required) {
-		return fe.decorateError(inputErrorf("missing required fields in input"))
+		return inputErrorf("missing required fields in input")
 	}
 
 	if year, ok := fe.Get(fieldYear); ok {
@@ -905,8 +891,7 @@ func (fe *fieldExtract) validate() error {
 
 		if era, ok := fe.Get(fieldEra); ok {
 			if year <= 0 {
-				return fe.decorateError(
-					inputErrorf("only positive years are permitted in AD/BC notation (%v)", year))
+				return inputErrorf("only positive years are permitted in AD/BC notation")
 			}
 			if era < 0 {
 				// Update for BC dates.
@@ -916,7 +901,7 @@ func (fe *fieldExtract) validate() error {
 			}
 		} else if fe.tweakYear {
 			if year < 0 {
-				return inputErrorf("negative year (%v) not allowed", year)
+				return inputErrorf("negative year not allowed")
 			}
 			if year < 70 {
 				year += 2000
@@ -930,7 +915,7 @@ func (fe *fieldExtract) validate() error {
 
 		if month, ok := fe.Get(fieldMonth); ok {
 			if month < 1 || month > 12 {
-				return fe.decorateError(outOfRangeError("month", month))
+				return outOfRangeError("month", month)
 			}
 
 			if day, ok := fe.Get(fieldDay); ok {
@@ -941,7 +926,7 @@ func (fe *fieldExtract) validate() error {
 					maxDay = daysInMonth[0][month]
 				}
 				if day < 1 || day > maxDay {
-					return fe.decorateError(outOfRangeError("day", day))
+					return outOfRangeError("day", day)
 				}
 			}
 		}
@@ -955,7 +940,7 @@ func (fe *fieldExtract) validate() error {
 		case fieldValueAM:
 			switch {
 			case hour < 0 || hour > 12:
-				return fe.decorateError(outOfRangeError("hour", hour))
+				return outOfRangeError("hour", hour)
 			case hour == 12:
 				if err := fe.Reset(fieldHour, 0); err != nil {
 					return err
@@ -965,7 +950,7 @@ func (fe *fieldExtract) validate() error {
 		case fieldValuePM:
 			switch {
 			case hour < 0 || hour > 12:
-				return fe.decorateError(outOfRangeError("hour", hour))
+				return outOfRangeError("hour", hour)
 			case hour == 12:
 				// 12 PM -> 12
 			default:
@@ -978,23 +963,23 @@ func (fe *fieldExtract) validate() error {
 		default:
 			// 24:00:00 is the maximum-allowed value
 			if hour < 0 || (hasDate && hour > 24) || (!hasDate && hour > 23) {
-				return fe.decorateError(outOfRangeError("hour", hour))
+				return outOfRangeError("hour", hour)
 			}
 		}
 
 		minute, _ := fe.Get(fieldMinute)
 		if minute < 0 || minute > 59 {
-			return fe.decorateError(outOfRangeError("minute", minute))
+			return outOfRangeError("minute", minute)
 		}
 
 		second, _ := fe.Get(fieldSecond)
 		if second < 0 || (hasDate && second > 60) || (!hasDate && second > 59) {
-			return fe.decorateError(outOfRangeError("second", second))
+			return outOfRangeError("second", second)
 		}
 
 		nanos, _ := fe.Get(fieldNanos)
 		if nanos < 0 {
-			return fe.decorateError(outOfRangeError("nanos", nanos))
+			return outOfRangeError("nanos", nanos)
 		}
 
 		x := time.Duration(hour)*time.Hour +
@@ -1002,7 +987,7 @@ func (fe *fieldExtract) validate() error {
 			time.Duration(second)*time.Second +
 			time.Duration(nanos)*time.Nanosecond
 		if x > 24*time.Hour {
-			return fe.decorateError(inputErrorf("time out of range: %d", x))
+			return inputErrorf("time out of range: %d", x)
 		}
 	}
 

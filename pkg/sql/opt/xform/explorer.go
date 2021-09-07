@@ -94,14 +94,10 @@ type explorer struct {
 
 // init initializes the explorer for use (or reuse).
 func (e *explorer) init(o *Optimizer) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*e = explorer{
-		evalCtx: o.evalCtx,
-		o:       o,
-		f:       o.Factory(),
-		mem:     o.mem,
-	}
+	e.evalCtx = o.evalCtx
+	e.o = o
+	e.f = o.Factory()
+	e.mem = o.mem
 	e.funcs.Init(e)
 }
 

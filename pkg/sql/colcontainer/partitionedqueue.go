@@ -14,7 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -26,9 +26,7 @@ type PartitionedQueue interface {
 	// Enqueue adds the batch to the end of the partitionIdx'th partition. If a
 	// partition at that index does not exist, a new one is created. Existing
 	// partitions may not be Enqueued to after calling
-	// CloseAllOpenWriteFileDescriptors. A zero-length batch must be enqueued as
-	// the last one.
-	// WARNING: Selection vectors are ignored.
+	// CloseAllOpenWriteFileDescriptors.
 	Enqueue(ctx context.Context, partitionIdx int, batch coldata.Batch) error
 	// Dequeue removes and returns the batch from the front of the
 	// partitionIdx'th partition. If the partition is empty, or no partition at
@@ -141,6 +139,12 @@ func NewPartitionedDiskQueue(
 	partitionerStrategy PartitionerStrategy,
 	diskAcc *mon.BoundAccount,
 ) *PartitionedDiskQueue {
+	if len(typs) == 0 {
+		// DiskQueues cannot serialize zero length schemas, so catch this error
+		// early.
+		// TODO(asubiotto): We could support this, but not sure we need to.
+		colexecerror.InternalError(errors.AssertionFailedf("zero length schema unsupported"))
+	}
 	return &PartitionedDiskQueue{
 		typs:                     typs,
 		strategy:                 partitionerStrategy,

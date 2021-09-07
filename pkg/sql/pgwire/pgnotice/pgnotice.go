@@ -16,21 +16,18 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// Notice is an wrapper around errors that are intended to be notices.
-type Notice error
-
 // Newf generates a Notice with a format string.
-func Newf(format string, args ...interface{}) Notice {
+func Newf(format string, args ...interface{}) error {
 	err := errors.NewWithDepthf(1, format, args...)
 	err = pgerror.WithCandidateCode(err, pgcode.SuccessfulCompletion)
 	err = pgerror.WithSeverity(err, "NOTICE")
-	return Notice(err)
+	return err
 }
 
 // NewWithSeverityf generates a Notice with a format string and severity.
-func NewWithSeverityf(severity string, format string, args ...interface{}) Notice {
+func NewWithSeverityf(severity string, format string, args ...interface{}) error {
 	err := errors.NewWithDepthf(1, format, args...)
 	err = pgerror.WithCandidateCode(err, pgcode.SuccessfulCompletion)
 	err = pgerror.WithSeverity(err, severity)
-	return Notice(err)
+	return err
 }

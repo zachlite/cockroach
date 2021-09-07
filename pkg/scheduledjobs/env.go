@@ -15,8 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -49,7 +47,7 @@ type JobExecutionConfig struct {
 	// be cast to that type in the sql package when it is used. Returns a cleanup
 	// function that must be called once the caller is done with the planner.
 	// This is the same mechanism used in jobs.Registry.
-	PlanHookMaker func(opName string, tnx *kv.Txn, user security.SQLUsername) (interface{}, func())
+	PlanHookMaker func(opName string, tnx *kv.Txn, user string) (interface{}, func())
 }
 
 // production JobSchedulerEnv implementation.
@@ -72,36 +70,4 @@ func (e *prodJobSchedulerEnvImpl) Now() time.Time {
 
 func (e *prodJobSchedulerEnvImpl) NowExpr() string {
 	return "current_timestamp()"
-}
-
-// ScheduleControllerEnv is an environment for controlling (DROP, PAUSE)
-// scheduled jobs.
-type ScheduleControllerEnv interface {
-	InternalExecutor() sqlutil.InternalExecutor
-	PTSProvider() protectedts.Provider
-}
-
-// ProdScheduleControllerEnvImpl is the production implementation of
-// ScheduleControllerEnv.
-type ProdScheduleControllerEnvImpl struct {
-	pts protectedts.Provider
-	ie  sqlutil.InternalExecutor
-}
-
-// MakeProdScheduleControllerEnv returns a ProdScheduleControllerEnvImpl
-// instance.
-func MakeProdScheduleControllerEnv(
-	pts protectedts.Provider, ie sqlutil.InternalExecutor,
-) *ProdScheduleControllerEnvImpl {
-	return &ProdScheduleControllerEnvImpl{pts: pts, ie: ie}
-}
-
-// InternalExecutor implements the ScheduleControllerEnv interface.
-func (c *ProdScheduleControllerEnvImpl) InternalExecutor() sqlutil.InternalExecutor {
-	return c.ie
-}
-
-// PTSProvider implements the ScheduleControllerEnv interface.
-func (c *ProdScheduleControllerEnvImpl) PTSProvider() protectedts.Provider {
-	return c.pts
 }

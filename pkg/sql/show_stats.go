@@ -14,9 +14,9 @@ import (
 	"context"
 	encjson "encoding/json"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -64,9 +64,7 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 			//  - convert column IDs to column names
 			//  - if the statistic has a histogram, we return the statistic ID as a
 			//    "handle" which can be used with SHOW HISTOGRAM.
-			// TODO(yuzefovich): refactor the code to use the iterator API
-			// (currently it is not possible due to a panic-catcher below).
-			rows, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryBuffered(
+			rows, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.Query(
 				ctx,
 				"read-table-stats",
 				p.txn,
@@ -81,7 +79,7 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 				 FROM system.table_statistics
 				 WHERE "tableID" = $1
 				 ORDER BY "createdAt"`,
-				desc.GetID(),
+				desc.ID,
 			)
 			if err != nil {
 				return nil, err
@@ -191,12 +189,12 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 	}, nil
 }
 
-func statColumnString(desc catalog.TableDescriptor, colID tree.Datum) string {
+func statColumnString(desc *tabledesc.Immutable, colID tree.Datum) string {
 	id := descpb.ColumnID(*colID.(*tree.DInt))
-	colDesc, err := desc.FindColumnWithID(id)
+	colDesc, err := desc.FindColumnByID(id)
 	if err != nil {
 		// This can happen if a column was removed.
 		return "<unknown>"
 	}
-	return colDesc.GetName()
+	return colDesc.Name
 }

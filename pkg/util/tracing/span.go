@@ -113,7 +113,7 @@ func (sp *Span) ImportRemoteSpans(remoteSpans []tracingpb.RecordedSpan) {
 // boundaries in order to derive child spans from this Span. This may return
 // nil, which is a valid input to `WithParentAndManualCollection`, if the Span
 // has been optimized out.
-func (sp *Span) Meta() SpanMeta {
+func (sp *Span) Meta() *SpanMeta {
 	// It shouldn't be done in practice, but it is allowed to call Meta on
 	// a finished span.
 	return sp.i.Meta()
@@ -250,17 +250,13 @@ type SpanMeta struct {
 	Baggage map[string]string
 }
 
-// Empty returns whether or not the SpanMeta is a zero value.
-func (sm SpanMeta) Empty() bool {
-	return sm.spanID == 0 && sm.traceID == 0
-}
-
 func (sm *SpanMeta) String() string {
 	return fmt.Sprintf("[spanID: %d, traceID: %d]", sm.spanID, sm.traceID)
 }
 
 // Structured is an opaque protobuf that can be attached to a trace via
-// `Span.RecordStructured`.
+// `Span.RecordStructured`. This is the only kind of data a Span carries when
+// `trace.mode = background`.
 type Structured interface {
 	protoutil.Message
 }

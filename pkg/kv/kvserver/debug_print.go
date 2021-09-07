@@ -274,7 +274,7 @@ func tryRangeIDKey(kv storage.MVCCKeyValue) (string, error) {
 	case bytes.Equal(suffix, keys.LocalAbortSpanSuffix):
 		msg = &roachpb.AbortSpanEntry{}
 
-	case bytes.Equal(suffix, keys.LocalRangeGCThresholdSuffix):
+	case bytes.Equal(suffix, keys.LocalRangeLastGCSuffix):
 		msg = &hlc.Timestamp{}
 
 	case bytes.Equal(suffix, keys.LocalRangeVersionSuffix):

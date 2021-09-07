@@ -254,8 +254,7 @@ func (th *testHelper) newRecordStream(
 
 	conv, err := row.NewDatumRowConverter(
 		context.Background(), th.schemaTable, nil, th.evalCtx.Copy(), nil,
-		nil /* seqChunkProvider */, nil, /* metrics */
-	)
+		nil /* seqChunkProvider */)
 	require.NoError(t, err)
 	return &testRecordStream{
 		producer: producer,
@@ -582,7 +581,7 @@ func benchmarkAvroImport(b *testing.B, avroOpts roachpb.AvroOptions, testData st
 	semaCtx := tree.MakeSemaContext()
 	evalCtx := tree.MakeTestingEvalContext(st)
 
-	tableDesc, err := MakeTestingSimpleTableDescriptor(ctx, &semaCtx, st, create, descpb.ID(100), keys.PublicSchemaID, descpb.ID(100), NoFKs, 1)
+	tableDesc, err := MakeSimpleTableDescriptor(ctx, &semaCtx, st, create, descpb.ID(100), keys.PublicSchemaID, descpb.ID(100), NoFKs, 1)
 	require.NoError(b, err)
 
 	kvCh := make(chan row.KVBatch)

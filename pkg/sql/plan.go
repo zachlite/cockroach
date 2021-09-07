@@ -47,7 +47,7 @@ func (r *runParams) EvalContext() *tree.EvalContext {
 
 // SessionData gives convenient access to the runParam's SessionData.
 func (r *runParams) SessionData() *sessiondata.SessionData {
-	return r.extendedEvalCtx.SessionData()
+	return r.extendedEvalCtx.SessionData
 }
 
 // ExecCfg gives convenient access to the runParam's ExecutorConfig.
@@ -101,16 +101,6 @@ type planNode interface {
 	// The node must not be used again after this method is called. Some nodes put
 	// themselves back into memory pools on Close.
 	Close(ctx context.Context)
-}
-
-// mutationPlanNode is a specification of planNode for mutations operations
-// (those that insert/update/detele/etc rows).
-type mutationPlanNode interface {
-	planNode
-
-	// rowsWritten returns the number of rows modified by this planNode. It
-	// should only be called once Next returns false.
-	rowsWritten() int64
 }
 
 // PlanNode is the exported name for planNode. Useful for CCL hooks.
@@ -277,10 +267,6 @@ var _ planNodeSpooled = &spoolNode{}
 type flowInfo struct {
 	typ     planComponentType
 	diagram execinfrapb.FlowDiagram
-	// explainVec and explainVecVerbose are only populated when collecting a
-	// statement bundle when the plan was vectorized.
-	explainVec        []string
-	explainVecVerbose []string
 	// flowsMetadata stores metadata from flows that will be used by
 	// execstats.TraceAnalyzer.
 	flowsMetadata *execstats.FlowsMetadata
@@ -309,6 +295,9 @@ type planTop struct {
 
 	// flags is populated during planning and execution.
 	flags planFlags
+
+	// execErr retains the last execution error, if any.
+	execErr error
 
 	// avoidBuffering, when set, causes the execution to avoid buffering
 	// results.
@@ -584,27 +573,12 @@ const (
 	planFlagTenant
 
 	// planFlagContainsFullTableScan is set if the plan involves an unconstrained
-	// scan on (the primary key of) a table. This could be an unconstrained scan
-	// of any cardinality.
+	// scan on (the primary key of) a table.
 	planFlagContainsFullTableScan
 
 	// planFlagContainsFullIndexScan is set if the plan involves an unconstrained
-	// secondary index scan. This could be an unconstrainted scan of any
-	// cardinality.
+	// secondary index scan.
 	planFlagContainsFullIndexScan
-
-	// planFlagContainsLargeFullTableScan is set if the plan involves an
-	// unconstrained scan on (the primary key of) a table estimated to read more
-	// than large_full_scan_rows (or without available stats).
-	planFlagContainsLargeFullTableScan
-
-	// planFlagContainsLargeFullIndexScan is set if the plan involves an
-	// unconstrained secondary index scan estimated to read more than
-	// large_full_scan_rows (or without available stats).
-	planFlagContainsLargeFullIndexScan
-
-	// planFlagContainsMutation is set if the plan has any mutations.
-	planFlagContainsMutation
 )
 
 func (pf planFlags) IsSet(flag planFlags) bool {

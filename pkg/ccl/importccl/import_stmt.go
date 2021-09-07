@@ -23,10 +23,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
@@ -43,7 +43,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -51,10 +50,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/gcjob"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -65,6 +65,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
@@ -237,7 +238,7 @@ func importJobDescription(
 	stmt.CreateDefs = defs
 	stmt.Files = nil
 	for _, file := range files {
-		clean, err := cloud.SanitizeExternalStorageURI(file, nil /* extraParams */)
+		clean, err := cloudimpl.SanitizeExternalStorageURI(file, nil /* extraParams */)
 		if err != nil {
 			return "", err
 		}
@@ -293,11 +294,6 @@ func importPlanHook(
 	importStmt, ok := stmt.(*tree.Import)
 	if !ok {
 		return nil, nil, nil, false, nil
-	}
-
-	if !importStmt.Bundle && !importStmt.Into {
-		p.BufferClientNotice(ctx, pgnotice.Newf("IMPORT TABLE has been deprecated in 21.2, and will be removed in a future version."+
-			" Instead, use CREATE TABLE with the desired schema, and IMPORT INTO the newly created table."))
 	}
 
 	addToFileFormatTelemetry(importStmt.FileFormat, "attempted")
@@ -359,18 +355,13 @@ func importPlanHook(
 		// Certain ExternalStorage URIs require super-user access. Check all the
 		// URIs passed to the IMPORT command.
 		for _, file := range filenamePatterns {
-			conf, err := cloud.ExternalStorageConfFromURI(file, p.User())
+			hasExplicitAuth, uriScheme, err := cloud.AccessIsWithExplicitAuth(file)
 			if err != nil {
-				// If it is a workload URI, it won't parse as a storage config, but it
-				// also doesn't have any auth concerns so just continue.
-				if _, workloadErr := parseWorkloadConfig(file); workloadErr == nil {
-					continue
-				}
 				return err
 			}
-			if !conf.AccessIsWithExplicitAuth() {
+			if !hasExplicitAuth {
 				err := p.RequireAdminRole(ctx,
-					fmt.Sprintf("IMPORT from the specified %s URI", conf.Provider.String()))
+					fmt.Sprintf("IMPORT from the specified %s URI", uriScheme))
 				if err != nil {
 					return err
 				}
@@ -382,35 +373,17 @@ func importPlanHook(
 			files = filenamePatterns
 		} else {
 			for _, file := range filenamePatterns {
-				uri, err := url.Parse(file)
-				if err != nil {
-					return err
-				}
-				if strings.Contains(uri.Scheme, "workload") || strings.HasPrefix(uri.Scheme, "http") {
-					files = append(files, file)
-					continue
-				}
-				prefix := cloud.GetPrefixBeforeWildcard(uri.Path)
-				if len(prefix) < len(uri.Path) {
-					pattern := uri.Path[len(prefix):]
-					uri.Path = prefix
-					s, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, uri.String(), p.User())
+				if cloudimpl.URINeedsGlobExpansion(file) {
+					s, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, file, p.User())
 					if err != nil {
 						return err
 					}
-					var expandedFiles []string
-					if err := s.List(ctx, "", "", func(s string) error {
-						ok, err := path.Match(pattern, s)
-						if ok {
-							uri.Path = prefix + s
-							expandedFiles = append(expandedFiles, uri.String())
-						}
-						return err
-					}); err != nil {
+					expandedFiles, err := s.ListFiles(ctx, "")
+					if err != nil {
 						return err
 					}
 					if len(expandedFiles) < 1 {
-						return errors.Errorf(`no files matched %q in prefix %q in uri provided: %q`, pattern, prefix, file)
+						return errors.Errorf(`no files matched uri provided: '%s'`, file)
 					}
 					files = append(files, expandedFiles...)
 				} else {
@@ -426,49 +399,47 @@ func importPlanHook(
 		}
 
 		table := importStmt.Table
-		var db catalog.DatabaseDescriptor
-		var sc catalog.SchemaDescriptor
+		var parentID, parentSchemaID descpb.ID
 		if table != nil {
 			// TODO: As part of work for #34240, we should be operating on
 			//  UnresolvedObjectNames here, rather than TableNames.
 			// We have a target table, so it might specify a DB in its name.
 			un := table.ToUnresolvedObjectName()
-			found, prefix, resPrefix, err := resolver.ResolveTarget(ctx,
+			found, prefix, resPrefixI, err := tree.ResolveTarget(ctx,
 				un, p, p.SessionData().Database, p.SessionData().SearchPath)
 			if err != nil {
 				return pgerror.Wrap(err, pgcode.UndefinedTable,
 					"resolving target import name")
 			}
+			table.ObjectNamePrefix = prefix
 			if !found {
 				// Check if database exists right now. It might not after the import is done,
 				// but it's better to fail fast than wait until restore.
 				return pgerror.Newf(pgcode.UndefinedObject,
 					"database does not exist: %q", table)
 			}
-			table.ObjectNamePrefix = prefix
-			db = resPrefix.Database
-			sc = resPrefix.Schema
+			resPrefix := resPrefixI.(*catalog.ResolvedObjectPrefix)
+			dbDesc := resPrefix.Database
+			schema := resPrefix.Schema
 			// If this is a non-INTO import that will thus be making a new table, we
 			// need the CREATE priv in the target DB.
 			if !importStmt.Into {
-				if err := p.CheckPrivilege(ctx, db, privilege.CREATE); err != nil {
+				if err := p.CheckPrivilege(ctx, dbDesc, privilege.CREATE); err != nil {
 					return err
 				}
 			}
-
-			switch sc.SchemaKind() {
+			parentID = dbDesc.GetID()
+			switch schema.Kind {
 			case catalog.SchemaVirtual:
 				return pgerror.Newf(pgcode.InvalidSchemaName,
 					"cannot import into schema %q", table.SchemaName)
+			case catalog.SchemaUserDefined, catalog.SchemaPublic, catalog.SchemaTemporary:
+				parentSchemaID = schema.ID
 			}
 		} else {
 			// No target table means we're importing whatever we find into the session
 			// database, so it must exist.
-			txn := p.ExtendedEvalContext().Txn
-			db, err = p.Accessor().GetDatabaseDesc(ctx, txn, p.SessionData().Database, tree.DatabaseLookupFlags{
-				AvoidCached: true,
-				Required:    true,
-			})
+			dbDesc, err := p.ResolveUncachedDatabaseByName(ctx, p.SessionData().Database, true /*required*/)
 			if err != nil {
 				return pgerror.Wrap(err, pgcode.UndefinedObject,
 					"could not resolve current database")
@@ -476,11 +447,12 @@ func importPlanHook(
 			// If this is a non-INTO import that will thus be making a new table, we
 			// need the CREATE priv in the target DB.
 			if !importStmt.Into {
-				if err := p.CheckPrivilege(ctx, db, privilege.CREATE); err != nil {
+				if err := p.CheckPrivilege(ctx, dbDesc, privilege.CREATE); err != nil {
 					return err
 				}
 			}
-			sc = schemadesc.GetPublicSchema()
+			parentID = dbDesc.GetID()
+			parentSchemaID = keys.PublicSchemaID
 		}
 
 		format := roachpb.IOFileFormat{}
@@ -771,7 +743,7 @@ func importPlanHook(
 					"%s file format is currently unsupported by IMPORT INTO",
 					importStmt.FileFormat)
 			}
-			_, found, err := p.ResolveMutableTableDescriptor(ctx, table, true, tree.ResolveRequireTableDesc)
+			found, err := p.ResolveMutableTableDescriptor(ctx, table, true, tree.ResolveRequireTableDesc)
 			if err != nil {
 				return err
 			}
@@ -817,6 +789,7 @@ func importPlanHook(
 					}
 				}
 			}
+			tableDescs = []*tabledesc.Mutable{found}
 			tableDetails = []jobspb.ImportDetails_Table{{Desc: &found.TableDescriptor, IsNew: false, TargetCols: intoCols}}
 		} else {
 			seqVals := make(map[descpb.ID]int64)
@@ -882,7 +855,8 @@ func importPlanHook(
 				// resolution.
 				semaCtxPtr := makeSemaCtxWithoutTypeResolver(p.SemaCtx())
 				tbl, err := MakeSimpleTableDescriptor(
-					ctx, semaCtxPtr, p.ExecCfg().Settings, create, db, sc, defaultCSVTableID, NoFKs, walltime)
+					ctx, semaCtxPtr, p.ExecCfg().Settings, create, parentID, parentSchemaID, defaultCSVTableID, NoFKs,
+					walltime)
 				if err != nil {
 					return err
 				}
@@ -915,7 +889,7 @@ func importPlanHook(
 
 			// Due to how we generate and rewrite descriptor ID's for import, we run
 			// into problems when using user defined schemas.
-			if sc.GetID() != keys.PublicSchemaID {
+			if parentSchemaID != keys.PublicSchemaID {
 				err := errors.New("cannot use IMPORT with a user defined schema")
 				hint := errors.WithHint(err, "create the table with CREATE TABLE and use IMPORT INTO instead")
 				return hint
@@ -943,24 +917,36 @@ func importPlanHook(
 			telemetry.Count("import.into")
 		}
 
-		// Here we create the job in a side transaction and then kick off the job.
-		// This is awful. Rather we should be disallowing this statement in an
-		// explicit transaction and then we should create the job in the user's
-		// transaction here and then in a post-commit hook we should kick of the
-		// StartableJob which we attached to the connExecutor somehow.
+		// Here we create the job and protected timestamp records in a side
+		// transaction and then kick off the job. This is awful. Rather we should be
+		// disallowing this statement in an explicit transaction and then we should
+		// create the job in the user's transaction here and then in a post-commit
+		// hook we should kick of the StartableJob which we attached to the
+		// connExecutor somehow.
 
 		importDetails := jobspb.ImportDetails{
 			URIs:              files,
 			Format:            format,
-			ParentID:          db.GetID(),
+			ParentID:          parentID,
 			Tables:            tableDetails,
 			SSTSize:           sstSize,
 			Oversample:        oversample,
 			SkipFKs:           skipFKs,
 			ParseBundleSchema: importStmt.Bundle,
-			DefaultIntSize:    p.SessionData().DefaultIntSize,
 		}
 
+		// Prepare the protected timestamp record.
+		var spansToProtect []roachpb.Span
+		codec := p.(sql.PlanHookState).ExecCfg().Codec
+		for i := range tableDetails {
+			if td := &tableDetails[i]; !td.IsNew {
+				spansToProtect = append(spansToProtect, tableDescs[i].TableSpan(codec))
+			}
+		}
+		if len(spansToProtect) > 0 {
+			protectedtsID := uuid.MakeV4()
+			importDetails.ProtectedTimestampRecord = &protectedtsID
+		}
 		jr := jobs.Record{
 			Description: jobDesc,
 			Username:    p.User(),
@@ -978,38 +964,43 @@ func importPlanHook(
 				return err
 			}
 
+			if err = protectTimestampForImport(ctx, p, p.ExtendedEvalContext().Txn, jobID, spansToProtect,
+				walltime, importDetails); err != nil {
+				return err
+			}
+
 			addToFileFormatTelemetry(format.Format.String(), "started")
 			resultsCh <- tree.Datums{tree.NewDInt(tree.DInt(jobID))}
 			return nil
 		}
 
-		// We create the job record in the planner's transaction to ensure that
-		// the job record creation happens transactionally.
-		plannerTxn := p.ExtendedEvalContext().Txn
+		// We're about to have side-effects not tied to this tranaction
+		// (creating the job record below). This is okay as long as the
+		// transaction eventually commits. To ensure that the transaction
+		// commits, we commit it here. This is allowed since we know we're in an
+		// implicit transaction.
+		// We know we're in an implicit transaction because we would have
+		// already returned if it were a detached job, and we check at the start
+		// of the plan hooks that the transaction is implicit if the detached
+		// option was not specified.
+		if err := p.ExtendedEvalContext().Txn.Commit(ctx); err != nil {
+			return err
+		}
 
-		// Construct the job and commit the transaction. Perform this work in a
-		// closure to ensure that the job is cleaned up if an error occurs.
 		var sj *jobs.StartableJob
-		if err := func() (err error) {
-			defer func() {
-				if err == nil || sj == nil {
-					return
-				}
-				if cleanupErr := sj.CleanupOnRollback(ctx); cleanupErr != nil {
-					log.Errorf(ctx, "failed to cleanup job: %v", cleanupErr)
-				}
-			}()
-			jobID := p.ExecCfg().JobRegistry.MakeJobID()
-			if err := p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, &sj, jobID, plannerTxn, jr); err != nil {
+		jobID := p.ExecCfg().JobRegistry.MakeJobID()
+		if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+			if err := p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, &sj, jobID, txn, jr); err != nil {
 				return err
 			}
 
-			// We commit the transaction here so that the job can be started. This
-			// is safe because we're in an implicit transaction. If we were in an
-			// explicit transaction the job would have to be run with the detached
-			// option and would have been handled above.
-			return plannerTxn.Commit(ctx)
-		}(); err != nil {
+			return protectTimestampForImport(ctx, p, txn, jobID, spansToProtect, walltime, importDetails)
+		}); err != nil {
+			if sj != nil {
+				if cleanupErr := sj.CleanupOnRollback(ctx); cleanupErr != nil {
+					log.Warningf(ctx, "failed to cleanup StartableJob: %v", cleanupErr)
+				}
+			}
 			return err
 		}
 
@@ -1117,22 +1108,40 @@ func parseAvroOptions(
 	return nil
 }
 
+func protectTimestampForImport(
+	ctx context.Context,
+	p sql.PlanHookState,
+	txn *kv.Txn,
+	jobID jobspb.JobID,
+	spansToProtect []roachpb.Span,
+	walltime int64,
+	importDetails jobspb.ImportDetails,
+) error {
+	if len(spansToProtect) > 0 {
+		// NB: We protect the timestamp preceding the import statement timestamp
+		// because that's the timestamp to which we want to revert.
+		tsToProtect := hlc.Timestamp{WallTime: walltime}.Prev()
+		rec := jobsprotectedts.MakeRecord(*importDetails.ProtectedTimestampRecord,
+			jobID, tsToProtect, spansToProtect)
+		err := p.ExecCfg().ProtectedTimestampProvider.Protect(ctx, txn, rec)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type importResumer struct {
 	job      *jobs.Job
 	settings *cluster.Settings
 	res      backupccl.RowCount
 
 	testingKnobs struct {
-		afterImport            func(summary backupccl.RowCount) error
-		alwaysFlushJobProgress bool
+		afterImport               func(summary backupccl.RowCount) error
+		alwaysFlushJobProgress    bool
+		ignoreProtectedTimestamps bool
 	}
 }
-
-func (r *importResumer) ForceRealSpan() bool {
-	return true
-}
-
-var _ jobs.TraceableJob = &importResumer{}
 
 // Prepares descriptors for newly created tables being imported into.
 func prepareNewTableDescsForIngestion(
@@ -1200,7 +1209,8 @@ func prepareNewTableDescsForIngestion(
 	// as tabledesc.TableDescriptor.
 	tableDescs := make([]catalog.TableDescriptor, len(newMutableTableDescriptors))
 	for i := range tableDescs {
-		newMutableTableDescriptors[i].SetOffline("importing")
+		newMutableTableDescriptors[i].State = descpb.DescriptorState_OFFLINE
+		newMutableTableDescriptors[i].OfflineReason = "importing"
 		tableDescs[i] = newMutableTableDescriptors[i]
 	}
 
@@ -1260,7 +1270,8 @@ func prepareExistingTableDescForIngestion(
 	// Take the table offline for import.
 	// TODO(dt): audit everywhere we get table descs (leases or otherwise) to
 	// ensure that filtering by state handles IMPORTING correctly.
-	importing.SetOffline("importing")
+	importing.State = descpb.DescriptorState_OFFLINE
+	importing.OfflineReason = "importing"
 
 	// TODO(dt): de-validate all the FKs.
 	if err := descsCol.WriteDesc(
@@ -1448,8 +1459,8 @@ func (r *importResumer) prepareSchemasForIngestion(
 
 	// Finally create the schemas on disk.
 	for i, mutDesc := range mutableSchemaDescs {
-		nameKey := catalogkeys.MakeSchemaNameKey(p.ExecCfg().Codec, dbDesc.ID, mutDesc.GetName())
-		err = createSchemaDescriptorWithID(ctx, nameKey, mutDesc.ID, mutDesc, p, descsCol, txn)
+		err = createSchemaDescriptorWithID(ctx, catalogkeys.NewSchemaKey(dbDesc.ID,
+			mutDesc.GetName()).Key(p.ExecCfg().Codec), mutDesc.ID, mutDesc, p, descsCol, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -1464,7 +1475,9 @@ func (r *importResumer) prepareSchemasForIngestion(
 func constructSchemaAndTableKey(
 	tableDesc *descpb.TableDescriptor, schemaIDToName map[descpb.ID]string,
 ) (schemaAndTableName, error) {
-	schemaName, ok := schemaIDToName[tableDesc.GetUnexposedParentSchemaID()]
+	var schemaName string
+	var ok bool
+	schemaName, ok = schemaIDToName[tableDesc.GetUnexposedParentSchemaID()]
 	if !ok && tableDesc.UnexposedParentSchemaID != keys.PublicSchemaID {
 		return schemaAndTableName{}, errors.Newf("invalid parent schema ID %d for table %s",
 			tableDesc.UnexposedParentSchemaID, tableDesc.GetName())
@@ -1666,7 +1679,7 @@ func (u *unsupportedStmtLogger) flush() error {
 		return nil
 	}
 
-	conf, err := cloud.ExternalStorageConfFromURI(u.ignoreUnsupportedLogDest, u.user)
+	conf, err := cloudimpl.ExternalStorageConfFromURI(u.ignoreUnsupportedLogDest, u.user)
 	if err != nil {
 		return errors.Wrap(err, "failed to log unsupported stmts during IMPORT PGDUMP")
 	}
@@ -1682,7 +1695,7 @@ func (u *unsupportedStmtLogger) flush() error {
 	} else {
 		logFileName = path.Join(logFileName, pgDumpUnsupportedSchemaStmtLog, fmt.Sprintf("%d.log", u.flushCount))
 	}
-	err = cloud.WriteFile(u.ctx, s, logFileName, bytes.NewReader(u.logBuffer.Bytes()))
+	err = s.WriteFile(u.ctx, logFileName, bytes.NewReader(u.logBuffer.Bytes()))
 	if err != nil {
 		return errors.Wrap(err, "failed to log unsupported stmts to log during IMPORT PGDUMP")
 	}
@@ -1700,7 +1713,7 @@ func parseAndCreateBundleTableDescs(
 	details jobspb.ImportDetails,
 	seqVals map[descpb.ID]int64,
 	skipFKs bool,
-	parentDB catalog.DatabaseDescriptor,
+	parentID descpb.ID,
 	files []string,
 	format roachpb.IOFileFormat,
 	walltime int64,
@@ -1743,10 +1756,7 @@ func parseAndCreateBundleTableDescs(
 	case roachpb.IOFileFormat_Mysqldump:
 		fks.resolver.format.Format = roachpb.IOFileFormat_Mysqldump
 		evalCtx := &p.ExtendedEvalContext().EvalContext
-		tableDescs, err = readMysqlCreateTable(
-			ctx, reader, evalCtx, p, defaultCSVTableID, parentDB, tableName, fks,
-			seqVals, owner, walltime,
-		)
+		tableDescs, err = readMysqlCreateTable(ctx, reader, evalCtx, p, defaultCSVTableID, parentID, tableName, fks, seqVals, owner, walltime)
 	case roachpb.IOFileFormat_PgDump:
 		fks.resolver.format.Format = roachpb.IOFileFormat_PgDump
 		evalCtx := &p.ExtendedEvalContext().EvalContext
@@ -1757,7 +1767,7 @@ func parseAndCreateBundleTableDescs(
 			p.ExecCfg().DistSQLSrv.ExternalStorage)
 
 		tableDescs, schemaDescs, err = readPostgresCreateTable(ctx, reader, evalCtx, p, tableName,
-			parentDB, walltime, fks, int(format.PgDump.MaxRowSize), owner, unsupportedStmtLogger)
+			parentID, walltime, fks, int(format.PgDump.MaxRowSize), owner, unsupportedStmtLogger)
 
 		logErr := unsupportedStmtLogger.flush()
 		if logErr != nil {
@@ -1791,32 +1801,11 @@ func (r *importResumer) parseBundleSchemaIfNeeded(ctx context.Context, phs inter
 
 	owner := r.job.Payload().UsernameProto.Decode()
 
-	p.ExtendedEvalContext().SessionMutatorIterator.SetSessionDefaultIntSize(details.DefaultIntSize)
-
 	if details.ParseBundleSchema {
-		var span *tracing.Span
-		ctx, span = tracing.ChildSpan(ctx, "import-parsing-bundle-schema")
-		defer span.Finish()
-
 		if err := r.job.RunningStatus(ctx, nil /* txn */, func(_ context.Context, _ jobspb.Details) (jobs.RunningStatus, error) {
 			return runningStatusImportBundleParseSchema, nil
 		}); err != nil {
 			return errors.Wrapf(err, "failed to update running status of job %d", errors.Safe(r.job.ID()))
-		}
-
-		var dbDesc catalog.DatabaseDescriptor
-		{
-			if err := sql.DescsTxn(ctx, p.ExecCfg(), func(
-				ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-			) (err error) {
-				_, dbDesc, err = descriptors.GetImmutableDatabaseByID(ctx, txn, parentID, tree.DatabaseLookupFlags{
-					Required:    true,
-					AvoidCached: true,
-				})
-				return err
-			}); err != nil {
-				return err
-			}
 		}
 
 		var schemaDescs []*schemadesc.Mutable
@@ -1825,7 +1814,7 @@ func (r *importResumer) parseBundleSchemaIfNeeded(ctx context.Context, phs inter
 		walltime := p.ExecCfg().Clock.Now().WallTime
 
 		if tableDescs, schemaDescs, err = parseAndCreateBundleTableDescs(
-			ctx, p, details, seqVals, skipFKs, dbDesc, files, format, walltime, owner,
+			ctx, p, details, seqVals, skipFKs, parentID, files, format, walltime, owner,
 			r.job.ID()); err != nil {
 			return err
 		}
@@ -1874,14 +1863,14 @@ type preparedSchemaMetadata struct {
 	queuedSchemaJobs      []jobspb.JobID
 }
 
-func emitImportJobEvent(
-	ctx context.Context, p sql.JobExecContext, status jobs.Status, job *jobs.Job,
+func (r *importResumer) emitImportJobEvent(
+	ctx context.Context, p sql.JobExecContext, status jobs.Status,
 ) {
 	// Emit to the event log now that we have completed the prepare step.
 	var importEvent eventpb.Import
 	if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return sql.LogEventForJobs(ctx, p.ExecCfg(), txn, &importEvent, int64(job.ID()),
-			job.Payload(), p.User(), status)
+		return sql.LogEventForJobs(ctx, p.ExecCfg(), txn, &importEvent, int64(r.job.ID()),
+			r.job.Payload(), p.User(), status)
 	}); err != nil {
 		log.Warningf(ctx, "failed to log event: %v", err)
 	}
@@ -1897,73 +1886,88 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 	details := r.job.Details().(jobspb.ImportDetails)
 	files := details.URIs
 	format := details.Format
+	ptsID := details.ProtectedTimestampRecord
+	if ptsID != nil && !r.testingKnobs.ignoreProtectedTimestamps {
+		if err := p.ExecCfg().ProtectedTimestampProvider.Verify(ctx, *ptsID); err != nil {
+			if errors.Is(err, protectedts.ErrNotExists) {
+				// No reason to return an error which might cause problems if it doesn't
+				// seem to exist.
+				log.Warningf(ctx, "failed to release protected which seems not to exist: %v", err)
+			} else {
+				return err
+			}
+		}
+	}
 
 	tables := make(map[string]*execinfrapb.ReadImportDataSpec_ImportTable, len(details.Tables))
 	if details.Tables != nil {
 		// Skip prepare stage on job resumption, if it has already been completed.
 		if !details.PrepareComplete {
 			var schemaMetadata *preparedSchemaMetadata
-			if err := sql.DescsTxn(ctx, p.ExecCfg(), func(
-				ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
-			) error {
-				var preparedDetails jobspb.ImportDetails
-				schemaMetadata = &preparedSchemaMetadata{
-					newSchemaIDToName: make(map[descpb.ID]string),
-					oldSchemaIDToName: make(map[descpb.ID]string),
-				}
-				var err error
-				curDetails := details
-				if len(details.Schemas) != 0 {
-					schemaMetadata, err = r.prepareSchemasForIngestion(ctx, p, curDetails, txn, descsCol)
-					if err != nil {
-						return err
-					}
-					curDetails = schemaMetadata.schemaPreparedDetails
-				}
-
-				preparedDetails, err = r.prepareTableDescsForIngestion(ctx, p, curDetails, txn, descsCol,
-					schemaMetadata)
-				if err != nil {
-					return err
-				}
-
-				// Telemetry for multi-region.
-				for _, table := range preparedDetails.Tables {
-					_, dbDesc, err := descsCol.GetImmutableDatabaseByID(
-						ctx, txn, table.Desc.GetParentID(), tree.DatabaseLookupFlags{Required: true})
-					if err != nil {
-						return err
-					}
-					if dbDesc.IsMultiRegion() {
-						telemetry.Inc(sqltelemetry.ImportIntoMultiRegionDatabaseCounter)
-					}
-				}
-
-				// Update the job details now that the schemas and table descs have
-				// been "prepared".
-				return r.job.Update(ctx, txn, func(
-					txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater,
+			if err := descs.Txn(
+				ctx, p.ExecCfg().Settings, p.ExecCfg().LeaseManager,
+				p.ExecCfg().InternalExecutor, p.ExecCfg().DB,
+				func(
+					ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
 				) error {
-					pl := md.Payload
-					*pl.GetImport() = preparedDetails
-
-					// Update the set of descriptors for later observability.
-					// TODO(ajwerner): Do we need this idempotence test?
-					prev := md.Payload.DescriptorIDs
-					if prev == nil {
-						var descriptorIDs []descpb.ID
-						for _, schema := range preparedDetails.Schemas {
-							descriptorIDs = append(descriptorIDs, schema.Desc.GetID())
-						}
-						for _, table := range preparedDetails.Tables {
-							descriptorIDs = append(descriptorIDs, table.Desc.GetID())
-						}
-						pl.DescriptorIDs = descriptorIDs
+					var preparedDetails jobspb.ImportDetails
+					schemaMetadata = &preparedSchemaMetadata{
+						newSchemaIDToName: make(map[descpb.ID]string),
+						oldSchemaIDToName: make(map[descpb.ID]string),
 					}
-					ju.UpdatePayload(pl)
-					return nil
-				})
-			}); err != nil {
+					var err error
+					curDetails := details
+					if len(details.Schemas) != 0 {
+						schemaMetadata, err = r.prepareSchemasForIngestion(ctx, p, curDetails, txn, descsCol)
+						if err != nil {
+							return err
+						}
+						curDetails = schemaMetadata.schemaPreparedDetails
+					}
+
+					preparedDetails, err = r.prepareTableDescsForIngestion(ctx, p, curDetails, txn, descsCol,
+						schemaMetadata)
+					if err != nil {
+						return err
+					}
+
+					// Telemetry for multi-region.
+					for _, table := range preparedDetails.Tables {
+						_, dbDesc, err := descsCol.GetImmutableDatabaseByID(
+							ctx, txn, table.Desc.GetParentID(), tree.DatabaseLookupFlags{Required: true})
+						if err != nil {
+							return err
+						}
+						if dbDesc.IsMultiRegion() {
+							telemetry.Inc(sqltelemetry.ImportIntoMultiRegionDatabaseCounter)
+						}
+					}
+
+					// Update the job details now that the schemas and table descs have
+					// been "prepared".
+					return r.job.Update(ctx, txn, func(
+						txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater,
+					) error {
+						pl := md.Payload
+						*pl.GetImport() = preparedDetails
+
+						// Update the set of descriptors for later observability.
+						// TODO(ajwerner): Do we need this idempotence test?
+						prev := md.Payload.DescriptorIDs
+						if prev == nil {
+							var descriptorIDs []descpb.ID
+							for _, schema := range preparedDetails.Schemas {
+								descriptorIDs = append(descriptorIDs, schema.Desc.GetID())
+							}
+							for _, table := range preparedDetails.Tables {
+								descriptorIDs = append(descriptorIDs, table.Desc.GetID())
+							}
+							pl.DescriptorIDs = descriptorIDs
+						}
+						ju.UpdatePayload(pl)
+						return nil
+					})
+				}); err != nil {
 				return err
 			}
 
@@ -1980,7 +1984,7 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 
 			// Re-initialize details after prepare step.
 			details = r.job.Details().(jobspb.ImportDetails)
-			emitImportJobEvent(ctx, p, jobs.StatusRunning, r.job)
+			r.emitImportJobEvent(ctx, p, jobs.StatusRunning)
 		}
 
 		// Create a mapping from schemaID to schemaName.
@@ -2022,6 +2026,15 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 	// to see the same version of the updated table descriptor, after which we
 	// shall chose a ts to import from.
 	if details.Walltime == 0 {
+		// TODO(dt): update job status to mention waiting for tables to go offline.
+		for _, i := range details.Tables {
+			if !i.IsNew {
+				if _, err := p.ExecCfg().LeaseManager.WaitForOneVersion(ctx, i.Desc.ID, retry.Options{}); err != nil {
+					return err
+				}
+			}
+		}
+
 		// Now that we know all the tables are offline, pick a walltime at which we
 		// will write.
 		details.Walltime = p.ExecCfg().Clock.Now().WallTime
@@ -2076,21 +2089,18 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 	if err := r.publishTables(ctx, p.ExecCfg()); err != nil {
 		return err
 	}
-
-	// As of 21.2 we do not write a protected timestamp record during IMPORT INTO.
-	// In case of a mixed version cluster with 21.1 and 21.2 nodes, it is possible
-	// that the job was planned on an older node and then resumed on a 21.2 node.
-	// Thus, we still need to clear the timestamp record that was written when the
-	// IMPORT INTO was planned on the older node.
-	//
-	// TODO(adityamaru): Remove in 22.1.
-	if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return r.releaseProtectedTimestamp(ctx, txn, p.ExecCfg().ProtectedTimestampProvider)
-	}); err != nil {
-		log.Errorf(ctx, "failed to release protected timestamp: %v", err)
+	// TODO(ajwerner): Should this actually return the error? At this point we've
+	// successfully finished the import but failed to drop the protected
+	// timestamp. The reconciliation loop ought to pick it up.
+	if ptsID != nil && !r.testingKnobs.ignoreProtectedTimestamps {
+		if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			return r.releaseProtectedTimestamp(ctx, txn, p.ExecCfg().ProtectedTimestampProvider)
+		}); err != nil {
+			log.Errorf(ctx, "failed to release protected timestamp: %v", err)
+		}
 	}
 
-	emitImportJobEvent(ctx, p, jobs.StatusSucceeded, r.job)
+	r.emitImportJobEvent(ctx, p, jobs.StatusSucceeded)
 
 	addToFileFormatTelemetry(details.Format.Format.String(), "succeeded")
 	telemetry.CountBucketed("import.rows", r.res.Rows)
@@ -2123,7 +2133,6 @@ func ingestWithRetry(
 	walltime int64,
 	alwaysFlushProgress bool,
 ) (roachpb.BulkOpSummary, error) {
-	resumerSpan := tracing.SpanFromContext(ctx)
 
 	// We retry on pretty generic failures -- any rpc error. If a worker node were
 	// to restart, it would produce this kind of error, but there may be other
@@ -2138,35 +2147,16 @@ func ingestWithRetry(
 	// import.
 	var res roachpb.BulkOpSummary
 	var err error
-	var retryCount int32
 	for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
-		retryCount++
-		resumerSpan.RecordStructured(&roachpb.RetryTracingEvent{
-			Operation:     "importResumer.ingestWithRetry",
-			AttemptNumber: retryCount,
-			RetryError:    tracing.RedactAndTruncateError(err),
-		})
 		res, err = sql.DistIngest(ctx, execCtx, job, tables, from, format, walltime, alwaysFlushProgress)
 		if err == nil {
 			break
 		}
 
 		if utilccl.IsPermanentBulkJobError(err) {
-			return res, err
+			return roachpb.BulkOpSummary{}, err
 		}
 
-		// Re-load the job in order to update our progress object, which may have
-		// been updated by the changeFrontier processor since the flow started.
-		reloadedJob, reloadErr := execCtx.ExecCfg().JobRegistry.LoadJob(ctx, job.ID())
-		if reloadErr != nil {
-			if ctx.Err() != nil {
-				return res, ctx.Err()
-			}
-			log.Warningf(ctx, `IMPORT job %d could not reload job progress when retrying: %+v`,
-				int64(job.ID()), reloadErr)
-		} else {
-			job = reloadedJob
-		}
 		log.Warningf(ctx, `encountered retryable error: %+v`, err)
 	}
 
@@ -2184,7 +2174,8 @@ func (r *importResumer) publishSchemas(ctx context.Context, execCfg *sql.Executo
 	}
 	log.Event(ctx, "making schemas live")
 
-	return sql.DescsTxn(ctx, execCfg, func(
+	lm, ie, db := execCfg.LeaseManager, execCfg.InternalExecutor, execCfg.DB
+	return descs.Txn(ctx, execCfg.Settings, lm, ie, db, func(
 		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
 	) error {
 		b := txn.NewBatch()
@@ -2228,7 +2219,8 @@ func (r *importResumer) publishTables(ctx context.Context, execCfg *sql.Executor
 	}
 	log.Event(ctx, "making tables live")
 
-	err := sql.DescsTxn(ctx, execCfg, func(
+	lm, ie, db := execCfg.LeaseManager, execCfg.InternalExecutor, execCfg.DB
+	err := descs.Txn(ctx, execCfg.Settings, lm, ie, db, func(
 		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
 	) error {
 		b := txn.NewBatch()
@@ -2237,7 +2229,8 @@ func (r *importResumer) publishTables(ctx context.Context, execCfg *sql.Executor
 			if err != nil {
 				return err
 			}
-			newTableDesc.SetPublic()
+			newTableDesc.State = descpb.DescriptorState_PUBLIC
+			newTableDesc.OfflineReason = ""
 
 			if !tbl.IsNew {
 				// NB: This is not using AllNonDropIndexes or directly mutating the
@@ -2284,12 +2277,19 @@ func (r *importResumer) publishTables(ctx context.Context, execCfg *sql.Executor
 		return err
 	}
 
+	// Wait for the table to be public before completing.
+	for _, tbl := range details.Tables {
+		_, err := lm.WaitForOneVersion(ctx, tbl.Desc.ID, retry.Options{})
+		if err != nil {
+			return errors.Wrap(err, "publishing tables waiting for one version")
+		}
+	}
+
 	// Initiate a run of CREATE STATISTICS. We don't know the actual number of
 	// rows affected per table, so we use a large number because we want to make
 	// sure that stats always get created/refreshed here.
 	for i := range details.Tables {
-		desc := tabledesc.NewBuilder(details.Tables[i].Desc).BuildImmutableTable()
-		execCfg.StatsRefresher.NotifyMutation(desc, math.MaxInt32 /* rowsAffected */)
+		execCfg.StatsRefresher.NotifyMutation(details.Tables[i].Desc.ID, math.MaxInt32 /* rowsAffected */)
 	}
 
 	return nil
@@ -2303,13 +2303,14 @@ func (r *importResumer) OnFailOrCancel(ctx context.Context, execCtx interface{})
 	p := execCtx.(sql.JobExecContext)
 
 	// Emit to the event log that the job has started reverting.
-	emitImportJobEvent(ctx, p, jobs.StatusReverting, r.job)
+	r.emitImportJobEvent(ctx, p, jobs.StatusReverting)
 
 	details := r.job.Details().(jobspb.ImportDetails)
 	addToFileFormatTelemetry(details.Format.Format.String(), "failed")
 	cfg := execCtx.(sql.JobExecContext).ExecCfg()
+	lm, ie, db := cfg.LeaseManager, cfg.InternalExecutor, cfg.DB
 	var jobsToRunAfterTxnCommit []jobspb.JobID
-	if err := sql.DescsTxn(ctx, cfg, func(
+	if err := descs.Txn(ctx, cfg.Settings, lm, ie, db, func(
 		ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
 	) error {
 		if err := r.dropTables(ctx, txn, descsCol, cfg); err != nil {
@@ -2326,11 +2327,19 @@ func (r *importResumer) OnFailOrCancel(ctx context.Context, execCtx interface{})
 		if err != nil {
 			return err
 		}
-		// TODO(adityamaru): Remove in 22.1 since we do not write PTS records during
-		// IMPORT INTO from 21.2+.
+
 		return r.releaseProtectedTimestamp(ctx, txn, cfg.ProtectedTimestampProvider)
 	}); err != nil {
 		return err
+	}
+	// Wait for the tables to become public before completing.
+	if details.PrepareComplete {
+		for _, tableDesc := range details.Tables {
+			_, err := cfg.LeaseManager.WaitForOneVersion(ctx, tableDesc.Desc.ID, retry.Options{})
+			if err != nil {
+				return errors.Wrap(err, "rolling back tables waiting for them to be public")
+			}
+		}
 	}
 
 	// Run any jobs which might have been queued when dropping the schemas.
@@ -2344,7 +2353,7 @@ func (r *importResumer) OnFailOrCancel(ctx context.Context, execCtx interface{})
 	}
 
 	// Emit to the event log that the job has completed reverting.
-	emitImportJobEvent(ctx, p, jobs.StatusFailed, r.job)
+	r.emitImportJobEvent(ctx, p, jobs.StatusFailed)
 
 	return nil
 }
@@ -2420,7 +2429,7 @@ func (r *importResumer) dropSchemas(
 			Dropped: true}
 
 		// Mark the descriptor as dropped and write it to the batch.
-		schemaDesc.SetDropped()
+		schemaDesc.State = descpb.DescriptorState_DROP
 		droppedSchemaIDs = append(droppedSchemaIDs, schemaDesc.GetID())
 
 		b := txn.NewBatch()
@@ -2528,9 +2537,7 @@ func (r *importResumer) dropTables(
 		// older-format (v1.1) descriptor. This enables ClearTableData to use a
 		// RangeClear for faster data removal, rather than removing by chunks.
 		empty[i].TableDesc().DropTime = dropTime
-		if err := gcjob.ClearTableData(
-			ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, &execCfg.Settings.SV, empty[i],
-		); err != nil {
+		if err := gcjob.ClearTableData(ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, empty[i]); err != nil {
 			return errors.Wrapf(err, "clearing data for table %d", empty[i].GetID())
 		}
 	}
@@ -2543,7 +2550,7 @@ func (r *importResumer) dropTables(
 			return err
 		}
 		if tbl.IsNew {
-			newTableDesc.SetDropped()
+			newTableDesc.State = descpb.DescriptorState_DROP
 			// If the DropTime if set, a table uses RangeClear for fast data removal. This
 			// operation starts at DropTime + the GC TTL. If we used now() here, it would
 			// not clean up data until the TTL from the time of the error. Instead, use 1
@@ -2551,12 +2558,19 @@ func (r *importResumer) dropTables(
 			// possible. This is safe since the table data was never visible to users,
 			// and so we don't need to preserve MVCC semantics.
 			newTableDesc.DropTime = dropTime
-			b.Del(catalogkeys.EncodeNameKey(execCfg.Codec, newTableDesc))
+			catalogkv.WriteObjectNamespaceEntryRemovalToBatch(
+				ctx,
+				b,
+				execCfg.Codec,
+				newTableDesc.ParentID,
+				newTableDesc.GetParentSchemaID(),
+				newTableDesc.Name,
+				false, /* kvTrace */
+			)
 			tablesToGC = append(tablesToGC, newTableDesc.ID)
-			descsCol.AddDeletedDescriptor(newTableDesc)
 		} else {
 			// IMPORT did not create this table, so we should not drop it.
-			newTableDesc.SetPublic()
+			newTableDesc.State = descpb.DescriptorState_PUBLIC
 		}
 		if err := descsCol.WriteDescToBatch(
 			ctx, false /* kvTrace */, newTableDesc, b,

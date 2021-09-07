@@ -71,9 +71,8 @@ func makeIntent(key string, txnID uuid.UUID, txnKey string, txnTS int64) storage
 }
 
 type testIterator struct {
-	kvs        []storage.MVCCKeyValue
-	cur        int
-	upperBound roachpb.Key
+	kvs []storage.MVCCKeyValue
+	cur int
 
 	closed bool
 	err    error
@@ -81,7 +80,7 @@ type testIterator struct {
 	done   chan struct{}
 }
 
-func newTestIterator(kvs []storage.MVCCKeyValue, upperBound roachpb.Key) *testIterator {
+func newTestIterator(kvs []storage.MVCCKeyValue) *testIterator {
 	// Ensure that the key-values are sorted.
 	if !sort.SliceIsSorted(kvs, func(i, j int) bool {
 		return kvs[i].Key.Less(kvs[j].Key)
@@ -116,10 +115,9 @@ func newTestIterator(kvs []storage.MVCCKeyValue, upperBound roachpb.Key) *testIt
 	}
 
 	return &testIterator{
-		kvs:        kvs,
-		cur:        -1,
-		done:       make(chan struct{}),
-		upperBound: upperBound,
+		kvs:  kvs,
+		cur:  -1,
+		done: make(chan struct{}),
 	}
 }
 
@@ -153,9 +151,6 @@ func (s *testIterator) Valid() (bool, error) {
 		return false, s.err
 	}
 	if s.cur == -1 || s.cur >= len(s.kvs) {
-		return false, nil
-	}
-	if s.upperBound != nil && !s.curKV().Key.Less(storage.MVCCKey{Key: s.upperBound}) {
 		return false, nil
 	}
 	return true, nil
@@ -228,7 +223,7 @@ func TestInitResolvedTSScan(t *testing.T) {
 		makeIntent("z", txn2, "txnKey2", 21),
 		makeProvisionalKV("z", "txnKey2", 21),
 		makeKV("z", "val11", 4),
-	}, nil)
+	})
 
 	initScan := newInitResolvedTSScan(&p, iter)
 	initScan.Run(context.Background())

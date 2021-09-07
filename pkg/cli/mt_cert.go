@@ -13,7 +13,6 @@ package cli
 import (
 	"strconv"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
@@ -32,15 +31,15 @@ If the CA key exists and --allow-ca-key-reuse is true, the key is used.
 If the CA certificate exists and --overwrite is true, the new CA certificate is prepended to it.
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(func(cmd *cobra.Command, args []string) error {
+	RunE: MaybeDecorateGRPCError(func(cmd *cobra.Command, args []string) error {
 		return errors.Wrap(
 			security.CreateTenantClientCAPair(
-				certCtx.certsDir,
-				certCtx.caKey,
-				certCtx.keySize,
-				certCtx.caCertificateLifetime,
-				certCtx.allowCAKeyReuse,
-				certCtx.overwriteFiles),
+				baseCfg.SSLCertsDir,
+				baseCfg.SSLCAKey,
+				keySize,
+				caCertificateLifetime,
+				allowCAKeyReuse,
+				overwriteFiles),
 			"failed to generate tenant client CA cert and key")
 	}),
 }
@@ -61,17 +60,17 @@ If "ca-client-tenant.crt" contains more than one certificate, the first is used.
 Creation fails if the CA expiration time is before the desired certificate expiration.
 `,
 	Args: cobra.ExactArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(
+	RunE: MaybeDecorateGRPCError(
 		func(cmd *cobra.Command, args []string) error {
 			tenantID, err := strconv.ParseUint(args[0], 10, 64)
 			if err != nil {
 				return errors.Wrapf(err, "%s is invalid uint64", args[0])
 			}
 			cp, err := security.CreateTenantClientPair(
-				certCtx.certsDir,
-				certCtx.caKey,
-				certCtx.keySize,
-				certCtx.certificateLifetime,
+				baseCfg.SSLCertsDir,
+				baseCfg.SSLCAKey,
+				keySize,
+				certificateLifetime,
 				tenantID,
 			)
 			if err != nil {
@@ -80,7 +79,7 @@ Creation fails if the CA expiration time is before the desired certificate expir
 					"failed to generate tenant client certificate and key")
 			}
 			return errors.Wrap(
-				security.WriteTenantClientPair(certCtx.certsDir, cp, certCtx.overwriteFiles),
+				security.WriteTenantClientPair(baseCfg.SSLCertsDir, cp, overwriteFiles),
 				"failed to write tenant client certificate and key")
 		}),
 }

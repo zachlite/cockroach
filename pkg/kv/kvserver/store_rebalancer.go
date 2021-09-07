@@ -18,6 +18,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -402,7 +403,7 @@ func (sr *StoreRebalancer) chooseLeaseToTransfer(
 			continue
 		}
 
-		desc, conf := replWithStats.repl.DescAndSpanConfig()
+		desc, zone := replWithStats.repl.DescAndZone()
 		log.VEventf(ctx, 3, "considering lease transfer for r%d with %.2f qps",
 			desc.RangeID, replWithStats.qps)
 
@@ -423,15 +424,7 @@ func (sr *StoreRebalancer) chooseLeaseToTransfer(
 
 		var raftStatus *raft.Status
 
-		preferred := sr.rq.allocator.preferredLeaseholders(conf, candidates)
-
-		// Filter both the list of preferred stores as well as the list of all
-		// candidate replicas to only consider live (non-suspect, non-draining)
-		// nodes.
-		const includeSuspectAndDrainingStores = false
-		preferred, _ = sr.rq.allocator.storePool.liveAndDeadReplicas(preferred, includeSuspectAndDrainingStores)
-		candidates, _ = sr.rq.allocator.storePool.liveAndDeadReplicas(candidates, includeSuspectAndDrainingStores)
-
+		preferred := sr.rq.allocator.preferredLeaseholders(zone, candidates)
 		for _, candidate := range candidates {
 			if candidate.StoreID == localDesc.StoreID {
 				continue
@@ -457,8 +450,7 @@ func (sr *StoreRebalancer) chooseLeaseToTransfer(
 				continue
 			}
 
-			filteredStoreList := storeList.filter(conf.Constraints)
-			filteredStoreList = storeList.filter(conf.VoterConstraints)
+			filteredStoreList := storeList.filter(zone.Constraints)
 			if sr.rq.allocator.followTheWorkloadPrefersLocal(
 				ctx,
 				filteredStoreList,
@@ -486,7 +478,7 @@ func (sr *StoreRebalancer) chooseLeaseToTransfer(
 type rangeRebalanceContext struct {
 	replWithStats                         replicaWithStats
 	rangeDesc                             *roachpb.RangeDescriptor
-	conf                                  roachpb.SpanConfig
+	zone                                  *zonepb.ZoneConfig
 	clusterNodes                          int
 	numDesiredVoters, numDesiredNonVoters int
 }
@@ -532,7 +524,8 @@ func (sr *StoreRebalancer) chooseRangeToRebalance(
 		// just unnecessary churn with no benefit to move ranges responsible for,
 		// for example, 1 qps on a store with 5000 qps.
 		const minQPSFraction = .001
-		if replWithStats.qps < localDesc.Capacity.QueriesPerSecond*minQPSFraction {
+		if replWithStats.qps < localDesc.Capacity.QueriesPerSecond*minQPSFraction &&
+			float64(localDesc.Capacity.RangeCount) <= storeList.candidateRanges.mean {
 			log.VEventf(
 				ctx,
 				5,
@@ -547,10 +540,10 @@ func (sr *StoreRebalancer) chooseRangeToRebalance(
 
 		log.VEventf(ctx, 3, "considering replica rebalance for r%d with %.2f qps",
 			replWithStats.repl.GetRangeID(), replWithStats.qps)
-		rangeDesc, conf := replWithStats.repl.DescAndSpanConfig()
+		rangeDesc, zone := replWithStats.repl.DescAndZone()
 		clusterNodes := sr.rq.allocator.storePool.ClusterNodeCount()
-		numDesiredVoters := GetNeededVoters(conf.GetNumVoters(), clusterNodes)
-		numDesiredNonVoters := GetNeededNonVoters(numDesiredVoters, int(conf.GetNumNonVoters()), clusterNodes)
+		numDesiredVoters := GetNeededVoters(zone.GetNumVoters(), clusterNodes)
+		numDesiredNonVoters := GetNeededNonVoters(numDesiredVoters, int(zone.GetNumNonVoters()), clusterNodes)
 		if rs := rangeDesc.Replicas(); numDesiredVoters != len(rs.VoterDescriptors()) ||
 			numDesiredNonVoters != len(rs.NonVoterDescriptors()) {
 			// If the StoreRebalancer is allowed past this point, it may accidentally
@@ -564,7 +557,7 @@ func (sr *StoreRebalancer) chooseRangeToRebalance(
 		rebalanceCtx := rangeRebalanceContext{
 			replWithStats:       replWithStats,
 			rangeDesc:           rangeDesc,
-			conf:                conf,
+			zone:                zone,
 			clusterNodes:        clusterNodes,
 			numDesiredVoters:    numDesiredVoters,
 			numDesiredNonVoters: numDesiredNonVoters,
@@ -789,7 +782,7 @@ func (sr *StoreRebalancer) pickRemainingRepls(
 		target, _ := sr.rq.allocator.allocateTargetFromList(
 			ctx,
 			storeList,
-			rebalanceCtx.conf,
+			rebalanceCtx.zone,
 			partialVoterTargets,
 			partialNonVoterTargets,
 			options,

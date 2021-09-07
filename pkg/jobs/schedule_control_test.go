@@ -12,22 +12,17 @@ package jobs
 
 import (
 	"context"
-	gosql "database/sql"
 	"fmt"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobstest"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,23 +71,6 @@ func TestScheduleControl(t *testing.T) {
 		require.True(t, th.loadSchedule(t, scheduleID).IsPaused())
 	})
 
-	t.Run("pause-active-schedule", func(t *testing.T) {
-		schedule := th.newScheduledJob(t, "test schedule", "select 42")
-		require.NoError(t, schedule.SetSchedule("@weekly"))
-		// Datums only store up until microseconds.
-		ms := time.Microsecond
-		firstRunTime := timeutil.Now().Add(10 * time.Second).Truncate(ms)
-		schedule.SetNextRun(firstRunTime)
-		require.NoError(t, schedule.Create(ctx, th.cfg.InternalExecutor, nil))
-		scheduleID := schedule.ScheduleID()
-		require.Equal(t, schedule.NextRun(), firstRunTime)
-		th.sqlDB.Exec(t, "RESUME SCHEDULE $1", scheduleID)
-
-		afterSchedule := th.loadSchedule(t, scheduleID)
-		require.False(t, afterSchedule.IsPaused())
-		require.Equal(t, afterSchedule.NextRun(), firstRunTime)
-	})
-
 	t.Run("cannot-resume-one-off-schedule", func(t *testing.T) {
 		schedule := th.newScheduledJob(t, "test schedule", "select 42")
 		require.NoError(t, schedule.Create(ctx, th.cfg.InternalExecutor, nil))
@@ -138,28 +116,11 @@ func TestScheduleControl(t *testing.T) {
 		th.sqlDB.Exec(t, "DROP SCHEDULES "+querySchedules)
 		require.Equal(t, 0, len(th.sqlDB.QueryStr(t, querySchedules)))
 	})
-
-	t.Run("pause-non-privileged-user", func(t *testing.T) {
-		scheduleID := makeSchedule("one-schedule", "@daily")
-
-		th.sqlDB.Exec(t, `CREATE USER testuser`)
-		pgURL, cleanupFunc := sqlutils.PGUrl(
-			t, th.server.ServingSQLAddr(), "NonPrivileged-testuser",
-			url.User("testuser"),
-		)
-		defer cleanupFunc()
-		testuser, err := gosql.Open("postgres", pgURL.String())
-		require.NoError(t, err)
-		defer testuser.Close()
-
-		_, err = testuser.Exec("PAUSE SCHEDULE $1", scheduleID)
-		require.EqualError(t, err, "pq: only users with the admin role are allowed to PAUSE SCHEDULES")
-	})
 }
 
 func TestJobsControlForSchedules(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	th, cleanup := newTestHelperForTables(t, jobstest.UseSystemTables, nil)
+	th, cleanup := newTestHelperForTables(t, jobstest.UseSystemTables)
 	defer cleanup()
 
 	registry := th.server.JobRegistry().(*Registry)
@@ -189,10 +150,7 @@ func TestJobsControlForSchedules(t *testing.T) {
 
 	// Create few jobs not started by any schedule.
 	for i := 0; i < numJobs; i++ {
-		_, err := registry.CreateAdoptableJobWithTxn(
-			context.Background(), record, registry.MakeJobID(), nil, /* txn */
-		)
-		require.NoError(t, err)
+		require.NoError(t, registry.NewJob(record, registry.MakeJobID()).Created(context.Background()))
 	}
 
 	var scheduleID int64 = 123
@@ -222,10 +180,8 @@ func TestJobsControlForSchedules(t *testing.T) {
 					ID:   scheduleID,
 				}
 				jobID := registry.MakeJobID()
-				_, err := registry.CreateAdoptableJobWithTxn(
-					context.Background(), record, jobID, nil, /* txn */
-				)
-				require.NoError(t, err)
+				newJob := registry.NewJob(record, jobID)
+				require.NoError(t, newJob.Created(context.Background()))
 
 				if tc.command == "resume" {
 					// Job has to be in paused state in order for it to be resumable;
@@ -268,14 +224,11 @@ func TestJobsControlForSchedules(t *testing.T) {
 func TestFilterJobsControlForSchedules(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer ResetConstructors()()
-
-	argsFn := func(args *base.TestServerArgs) {
-		// Prevent registry from changing job state while running this test.
-		interval := 24 * time.Hour
-		args.Knobs.JobsTestingKnobs = NewTestingKnobsWithIntervals(interval, interval, interval, interval)
-	}
-	th, cleanup := newTestHelperForTables(t, jobstest.UseSystemTables, argsFn)
+	th, cleanup := newTestHelperForTables(t, jobstest.UseSystemTables)
 	defer cleanup()
+
+	// Prevent registry from changing job state while running this test.
+	defer TestingSetAdoptAndCancelIntervals(24*time.Hour, 24*time.Hour)()
 
 	registry := th.server.JobRegistry().(*Registry)
 	blockResume := make(chan struct{})
@@ -318,8 +271,8 @@ func TestFilterJobsControlForSchedules(t *testing.T) {
 				ID:   scheduleID,
 			}
 			jobID := registry.MakeJobID()
-			_, err := registry.CreateAdoptableJobWithTxn(context.Background(), record, jobID, nil /* txn */)
-			require.NoError(t, err)
+			newJob := registry.NewJob(record, jobID)
+			require.NoError(t, newJob.Created(context.Background()))
 			th.sqlDB.Exec(t, "UPDATE system.jobs SET status=$1 WHERE id=$2", status, jobID)
 		}
 

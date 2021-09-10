@@ -349,7 +349,7 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 		// the formatter.
 		editedEntry.counter = atomic.AddUint64(&s.msgCount, 1)
 
-		// Process the redaction spec.
+		// Process the redation spec.
 		editedEntry.payload = maybeRedactEntry(editedEntry.payload, s.editor)
 
 		// Format the entry for this sink.

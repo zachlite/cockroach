@@ -23,10 +23,7 @@ import (
 	"strings"
 	"time"
 
-	apd "github.com/cockroachdb/apd/v2"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierror"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -36,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -73,14 +71,7 @@ tables are queried either from a live cluster or from an unzipped debug.zip.
 `,
 }
 
-type doctorFn = func(
-	descTable doctor.DescriptorTable,
-	namespaceTable doctor.NamespaceTable,
-	jobsTable doctor.JobsTable,
-	out io.Writer,
-) (err error)
-
-func makeZipDirCommand(fn doctorFn) *cobra.Command {
+func makeZipDirCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "zipdir <debug_zip_dir>",
 		Short: "run doctor tool on data from an unzipped debug.zip",
@@ -94,12 +85,12 @@ requires the path of the unzipped 'debug' directory as its argument.
 			if err != nil {
 				return err
 			}
-			return fn(descs, ns, jobs, os.Stdout)
+			return runDoctor(cmd.Parent().Name(), descs, ns, jobs, os.Stdout)
 		},
 	}
 }
 
-func makeClusterCommand(fn doctorFn) *cobra.Command {
+func makeClusterCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cluster --url=<cluster connection string>",
 		Short: "run doctor tool on live cockroach cluster",
@@ -107,18 +98,18 @@ func makeClusterCommand(fn doctorFn) *cobra.Command {
 Run the doctor tool system data from a live cluster specified by --url.
 `,
 		Args: cobra.NoArgs,
-		RunE: clierrorplus.MaybeDecorateError(
-			func(cmd *cobra.Command, args []string) (resErr error) {
+		RunE: MaybeDecorateGRPCError(
+			func(cmd *cobra.Command, args []string) error {
 				sqlConn, err := makeSQLClient("cockroach doctor", useSystemDb)
 				if err != nil {
 					return errors.Wrap(err, "could not establish connection to cluster")
 				}
-				defer func() { resErr = errors.CombineErrors(resErr, sqlConn.Close()) }()
+				defer sqlConn.Close()
 				descs, ns, jobs, err := fromCluster(sqlConn, cliCtx.cmdTimeout)
 				if err != nil {
 					return err
 				}
-				return fn(descs, ns, jobs, os.Stdout)
+				return runDoctor(cmd.Parent().Name(), descs, ns, jobs, os.Stdout)
 			}),
 	}
 }
@@ -129,45 +120,56 @@ func deprecateCommand(cmd *cobra.Command) *cobra.Command {
 	return cmd
 }
 
-var doctorExamineClusterCmd = makeClusterCommand(runDoctorExamine)
-var doctorExamineZipDirCmd = makeZipDirCommand(runDoctorExamine)
-var doctorExamineFallbackClusterCmd = deprecateCommand(makeClusterCommand(runDoctorExamine))
-var doctorExamineFallbackZipDirCmd = deprecateCommand(makeZipDirCommand(runDoctorExamine))
-var doctorRecreateClusterCmd = makeClusterCommand(runDoctorRecreate)
-var doctorRecreateZipDirCmd = makeZipDirCommand(runDoctorRecreate)
+var doctorExamineClusterCmd = makeClusterCommand()
+var doctorExamineZipDirCmd = makeZipDirCommand()
+var doctorExamineFallbackClusterCmd = deprecateCommand(makeClusterCommand())
+var doctorExamineFallbackZipDirCmd = deprecateCommand(makeZipDirCommand())
+var doctorRecreateClusterCmd = makeClusterCommand()
+var doctorRecreateZipDirCmd = makeZipDirCommand()
 
-func runDoctorRecreate(
+func runDoctor(
+	commandName string,
 	descTable doctor.DescriptorTable,
 	namespaceTable doctor.NamespaceTable,
 	jobsTable doctor.JobsTable,
 	out io.Writer,
 ) (err error) {
-	return doctor.DumpSQL(out, descTable, namespaceTable)
-}
-
-func runDoctorExamine(
-	descTable doctor.DescriptorTable,
-	namespaceTable doctor.NamespaceTable,
-	jobsTable doctor.JobsTable,
-	out io.Writer,
-) (err error) {
-	var valid bool
-	valid, err = doctor.Examine(
-		context.Background(), descTable, namespaceTable, jobsTable, debugCtx.verbose, out)
-	if err != nil {
-		return err
+	switch commandName {
+	case "recreate":
+		err = doctor.DumpSQL(out, descTable, namespaceTable)
+	case "doctor":
+		fallthrough // Default to "examine".
+	case "examine":
+		var valid bool
+		valid, err = doctor.Examine(
+			context.Background(), descTable, namespaceTable, jobsTable, debugCtx.verbose, out)
+		if err == nil {
+			if !valid {
+				return &cliError{
+					exitCode: exit.DoctorValidationFailed(),
+					cause:    errors.New("validation failed"),
+				}
+			}
+			fmt.Fprintln(out, "No problems found!")
+		}
+	default:
+		log.Fatalf(context.Background(), "Unexpected doctor command %q.", commandName)
 	}
-	if !valid {
-		return clierror.NewError(errors.New("validation failed"),
-			exit.DoctorValidationFailed())
+	if err == nil {
+		return nil
 	}
-	fmt.Fprintln(out, "No problems found!")
-	return nil
+	return &cliError{
+		// Note: we are using "unspecified" here because the error
+		// return does not distinguish errors like connection errors
+		// etc, from errors during extraction.
+		exitCode: exit.UnspecifiedError(),
+		cause:    errors.Wrapf(err, "doctor command %q failed", commandName),
+	}
 }
 
 // fromCluster collects system table data from a live cluster.
 func fromCluster(
-	sqlConn clisqlclient.Conn, timeout time.Duration,
+	sqlConn *sqlConn, timeout time.Duration,
 ) (
 	descTable doctor.DescriptorTable,
 	namespaceTable doctor.NamespaceTable,
@@ -189,8 +191,8 @@ func fromCluster(
 	stmt := `
 SELECT id, descriptor, crdb_internal_mvcc_timestamp AS mod_time_logical
 FROM system.descriptor ORDER BY id`
-	checkColumnExistsStmt := "SELECT crdb_internal_mvcc_timestamp FROM system.descriptor LIMIT 1"
-	_, err := sqlConn.QueryRow(maybePrint(checkColumnExistsStmt), nil)
+	checkColumnExistsStmt := "SELECT crdb_internal_mvcc_timestamp"
+	_, err := sqlConn.Query(maybePrint(checkColumnExistsStmt), nil)
 	// On versions before 20.2, the system.descriptor won't have the builtin
 	// crdb_internal_mvcc_timestamp. If we can't find it, use NULL instead.
 	if pqErr := (*pq.Error)(nil); errors.As(err, &pqErr) {
@@ -199,8 +201,6 @@ FROM system.descriptor ORDER BY id`
 SELECT id, descriptor, NULL AS mod_time_logical
 FROM system.descriptor ORDER BY id`
 		}
-	} else if err != nil {
-		return nil, nil, nil, err
 	}
 	descTable = make([]doctor.DescriptorTableRow, 0)
 
@@ -239,8 +239,8 @@ FROM system.descriptor ORDER BY id`
 
 	stmt = `SELECT "parentID", "parentSchemaID", name, id FROM system.namespace`
 
-	checkColumnExistsStmt = `SELECT "parentSchemaID" FROM system.namespace LIMIT 1`
-	_, err = sqlConn.QueryRow(maybePrint(checkColumnExistsStmt), nil)
+	checkColumnExistsStmt = `SELECT "parentSchemaID" FROM system.namespace LIMIT 0`
+	_, err = sqlConn.Query(maybePrint(checkColumnExistsStmt), nil)
 	// On versions before 20.1, table system.namespace does not have this column.
 	// In that case the ParentSchemaID for tables is 29 and for databases is 0.
 	if pqErr := (*pq.Error)(nil); errors.As(err, &pqErr) {
@@ -249,8 +249,6 @@ FROM system.descriptor ORDER BY id`
 SELECT "parentID", CASE WHEN "parentID" = 0 THEN 0 ELSE 29 END AS "parentSchemaID", name, id
 FROM system.namespace`
 		}
-	} else if err != nil {
-		return nil, nil, nil, err
 	}
 
 	namespaceTable = make([]doctor.NamespaceTableRow, 0)
@@ -357,13 +355,7 @@ func fromZipDir(
 		return nil, nil, nil, err
 	}
 
-	// Handle old debug zips where the namespace table dump is from namespace2.
-	namespaceFileName := "system.namespace2.txt"
-	if _, err := os.Stat(namespaceFileName); err != nil {
-		namespaceFileName = "system.namespace.txt"
-	}
-
-	namespaceFile, err := os.Open(maybePrint(namespaceFileName))
+	namespaceFile, err := os.Open(maybePrint("system.namespace2.txt"))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -465,7 +457,7 @@ func tableMap(in io.Reader, fn func(string) error) error {
 
 // selectRowsMap applies `fn` to all rows returned from a select statement.
 func selectRowsMap(
-	conn clisqlclient.Conn, stmt string, vals []driver.Value, fn func([]driver.Value) error,
+	conn *sqlConn, stmt string, vals []driver.Value, fn func([]driver.Value) error,
 ) error {
 	rows, err := conn.Query(stmt, nil)
 	if err != nil {

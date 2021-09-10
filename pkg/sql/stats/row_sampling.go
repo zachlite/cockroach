@@ -13,8 +13,9 @@ package stats
 import (
 	"container/heap"
 	"context"
+	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -23,6 +24,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 )
+
+const sizeOfDatum = int64(unsafe.Sizeof(tree.Datum(nil)))
 
 // SampledRow is a row that was sampled.
 type SampledRow struct {
@@ -219,7 +222,7 @@ func (sr *SampleReservoir) GetNonNullDatums(
 	err = sr.retryMaybeResize(ctx, func() error {
 		// Account for the memory we'll use copying the samples into values.
 		if memAcc != nil {
-			if err := memAcc.Grow(ctx, memsize.DatumOverhead*int64(len(sr.samples))); err != nil {
+			if err := memAcc.Grow(ctx, sizeOfDatum*int64(len(sr.samples))); err != nil {
 				return err
 			}
 		}
@@ -264,7 +267,8 @@ func (sr *SampleReservoir) copyRow(
 			dst[i].Datum = truncateDatum(evalCtx, dst[i].Datum, maxBytesPerSample)
 			afterSize = dst[i].Size()
 		} else {
-			if _, ok := src[i].Encoding(); ok {
+			if enc, ok := src[i].Encoding(); ok && enc != descpb.DatumEncoding_VALUE {
+				// Only datums that were key-encoded might reference the kv batch.
 				dst[i].Datum = deepCopyDatum(evalCtx, dst[i].Datum)
 			}
 		}

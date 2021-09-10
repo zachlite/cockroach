@@ -54,7 +54,7 @@ func (p *planner) DropType(ctx context.Context, n *tree.DropType) (planNode, err
 	}
 	for _, name := range n.Names {
 		// Resolve the desired type descriptor.
-		_, typeDesc, err := p.ResolveMutableTypeDescriptor(ctx, name, !n.IfExists)
+		typeDesc, err := p.ResolveMutableTypeDescriptor(ctx, name, !n.IfExists)
 		if err != nil {
 			return nil, err
 		}
@@ -171,20 +171,15 @@ func (p *planner) addTypeBackReference(
 	return p.writeTypeSchemaChange(ctx, mutDesc, jobDesc)
 }
 
-func (p *planner) removeTypeBackReferences(
-	ctx context.Context, typeIDs []descpb.ID, ref descpb.ID, jobDesc string,
+func (p *planner) removeTypeBackReference(
+	ctx context.Context, typeID, ref descpb.ID, jobDesc string,
 ) error {
-	for _, typeID := range typeIDs {
-		mutDesc, err := p.Descriptors().GetMutableTypeVersionByID(ctx, p.txn, typeID)
-		if err != nil {
-			return err
-		}
-		mutDesc.RemoveReferencingDescriptorID(ref)
-		if err := p.writeTypeSchemaChange(ctx, mutDesc, jobDesc); err != nil {
-			return err
-		}
+	mutDesc, err := p.Descriptors().GetMutableTypeVersionByID(ctx, p.txn, typeID)
+	if err != nil {
+		return err
 	}
-	return nil
+	mutDesc.RemoveReferencingDescriptorID(ref)
+	return p.writeTypeSchemaChange(ctx, mutDesc, jobDesc)
 }
 
 func (p *planner) addBackRefsFromAllTypesInTable(
@@ -195,7 +190,7 @@ func (p *planner) addBackRefsFromAllTypesInTable(
 	if err != nil {
 		return err
 	}
-	typeIDs, _, err := desc.GetAllReferencedTypeIDs(dbDesc, func(id descpb.ID) (catalog.TypeDescriptor, error) {
+	typeIDs, err := desc.GetAllReferencedTypeIDs(dbDesc, func(id descpb.ID) (catalog.TypeDescriptor, error) {
 		mutDesc, err := p.Descriptors().GetMutableTypeVersionByID(ctx, p.txn, id)
 		if err != nil {
 			return nil, err
@@ -222,7 +217,7 @@ func (p *planner) removeBackRefsFromAllTypesInTable(
 	if err != nil {
 		return err
 	}
-	typeIDs, _, err := desc.GetAllReferencedTypeIDs(dbDesc, func(id descpb.ID) (catalog.TypeDescriptor, error) {
+	typeIDs, err := desc.GetAllReferencedTypeIDs(dbDesc, func(id descpb.ID) (catalog.TypeDescriptor, error) {
 		mutDesc, err := p.Descriptors().GetMutableTypeVersionByID(ctx, p.txn, id)
 		if err != nil {
 			return nil, err
@@ -232,8 +227,13 @@ func (p *planner) removeBackRefsFromAllTypesInTable(
 	if err != nil {
 		return err
 	}
-	jobDesc := fmt.Sprintf("updating type back references %v for table %d", typeIDs, desc.ID)
-	return p.removeTypeBackReferences(ctx, typeIDs, desc.ID, jobDesc)
+	for _, id := range typeIDs {
+		jobDesc := fmt.Sprintf("updating type back reference %d for table %d", id, desc.ID)
+		if err := p.removeTypeBackReference(ctx, id, desc.ID, jobDesc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dropTypeImpl does the work of dropping a type and everything that depends on it.

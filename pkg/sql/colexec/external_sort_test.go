@@ -166,7 +166,7 @@ func TestExternalSortRandomized(t *testing.T) {
 	//    memory limit.
 	// memoryToSort is the total amount of memory that will be sorted in this
 	// test.
-	memoryToSort := (nTups / coldata.BatchSize()) * int(colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize()))
+	memoryToSort := (nTups / coldata.BatchSize()) * colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize())
 	// partitionSize will be the memory limit passed in to tests with a memory
 	// limit. With a maximum number of partitions of 2 this will result in
 	// repartitioning twice. To make this a total amount of memory, we also need
@@ -287,16 +287,13 @@ func TestExternalSortMemoryAccounting(t *testing.T) {
 	numFDs := colexecop.ExternalSorterMinPartitions + rng.Intn(3)
 	// The memory limit in the external sorter is divided as follows:
 	// - BufferSizeBytes for each of the disk queues is subtracted right away
-	// - the remaining part is divided evenly between the sorter and the merger
-	// - the sorter gives 80% of its half to the buffer.
-	bufferMemoryLimit := colmem.GetBatchMemSize(batch) * int64(numInMemoryBufferedBatches)
-	memoryLimit := int64(queueCfg.BufferSizeBytes*numFDs) + int64(float64(bufferMemoryLimit)/0.8*2)
+	// - the remaining part is divided evenly between the sorter and the merger.
+	memoryLimit := 2*colmem.GetBatchMemSize(batch)*int64(numInMemoryBufferedBatches) + int64(queueCfg.BufferSizeBytes*numFDs)
 	flowCtx.Cfg.TestingKnobs.MemoryLimitBytes = memoryLimit
 	input := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, numTotalBatches)
 
 	var spilled bool
-	// We multiply by 16 because the external sorter divides by this number.
-	sem := colexecop.NewTestingSemaphore(numFDs * 16)
+	sem := colexecop.NewTestingSemaphore(numFDs)
 	sorter, accounts, monitors, closers, err := createDiskBackedSorter(
 		ctx, flowCtx, []colexecop.Operator{input}, typs, ordCols,
 		0 /* matchLen */, 0 /* k */, func() { spilled = true },
@@ -306,11 +303,11 @@ func TestExternalSortMemoryAccounting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(closers))
 
-	sorter.Init(ctx)
-	for b := sorter.Next(); b.Length() > 0; b = sorter.Next() {
+	sorter.Init()
+	for b := sorter.Next(ctx); b.Length() > 0; b = sorter.Next(ctx) {
 	}
 	for _, c := range closers {
-		require.NoError(t, c.Close())
+		require.NoError(t, c.Close(ctx))
 	}
 
 	require.True(t, spilled)
@@ -325,12 +322,10 @@ func TestExternalSortMemoryAccounting(t *testing.T) {
 	// numInMemoryBufferedBatches (first merge = 2x, second merge = 3x, third
 	// merge 4x, etc, so we expect 2*numNewPartitions-1 partitions).
 	expMaxTotalPartitionsCreated := 2*numNewPartitions - 1
-	// Because of the fact that we are creating partitions slightly larger than
-	// memoryLimit in size and because of our "after the fact" memory
-	// accounting, we might create less partitions than maximum defined above
-	// (e.g., if numNewPartitions is 4, then we will create 3 partitions when
-	// batch size is 3).
-	expMinTotalPartitionsCreated := numNewPartitions - 1
+	// Because of our "after the fact" memory accounting, we might create less
+	// partitions than maximum defined above (e.g., if numNewPartitions is 5,
+	// then we will create 5 partitions when batch size is 3).
+	expMinTotalPartitionsCreated := numNewPartitions
 	require.GreaterOrEqualf(t, numPartitionsCreated, expMinTotalPartitionsCreated,
 		"didn't create enough partitions: actual %d, min expected %d",
 		numPartitionsCreated, expMinTotalPartitionsCreated,
@@ -349,13 +344,16 @@ func TestExternalSortMemoryAccounting(t *testing.T) {
 	// summed).
 	var totalMaxMemUsage int64
 	for i := range monitors {
-		if monitors[i].Resource() == mon.MemoryResource {
-			totalMaxMemUsage += monitors[i].MaximumBytes()
-		}
+		totalMaxMemUsage += monitors[i].MaximumBytes()
 	}
 	// We cannot guarantee a fixed value, so we use an allowed range.
-	expMin := memoryLimit
-	expMax := int64(float64(memoryLimit) * 1.6)
+	//
+	// In an ideal world the reported usage is very close to 2 x memoryLimit
+	// (the monitor for the in-memory sorter reports slightly below and the
+	// monitors for the external sorter report slightly above memoryLimit
+	// usage).
+	expMin := memoryLimit * 3 / 2
+	expMax := memoryLimit * 5 / 2
 	require.GreaterOrEqualf(t, totalMaxMemUsage, expMin, "minimum memory bound not satisfied: "+
 		"actual %d, expected min %d", totalMaxMemUsage, expMin)
 	require.GreaterOrEqualf(t, expMax, totalMaxMemUsage, "maximum memory bound not satisfied: "+
@@ -394,62 +392,50 @@ func BenchmarkExternalSort(b *testing.B) {
 
 	for _, nBatches := range []int{1 << 1, 1 << 4, 1 << 8} {
 		for _, nCols := range []int{1, 2, 4} {
-			for _, topK := range []bool{false, true} {
-				for _, spillForced := range []bool{false, true} {
-					flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
-					var topKSubstring string
-					if topK {
-						topKSubstring = "topK/"
+			for _, spillForced := range []bool{false, true} {
+				flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
+				name := fmt.Sprintf("rows=%d/cols=%d/spilled=%t", nBatches*coldata.BatchSize(), nCols, spillForced)
+				b.Run(name, func(b *testing.B) {
+					// 8 (bytes / int64) * nBatches (number of batches) * coldata.BatchSize() (rows /
+					// batch) * nCols (number of columns / row).
+					b.SetBytes(int64(8 * nBatches * coldata.BatchSize() * nCols))
+					typs := make([]*types.T, nCols)
+					for i := range typs {
+						typs[i] = types.Int
 					}
-					name := fmt.Sprintf("rows=%d/cols=%d/%sspilled=%t", nBatches*coldata.BatchSize(), nCols, topKSubstring, spillForced)
-					b.Run(name, func(b *testing.B) {
-						// 8 (bytes / int64) * nBatches (number of batches) * coldata.BatchSize() (rows /
-						// batch) * nCols (number of columns / row).
-						b.SetBytes(int64(8 * nBatches * coldata.BatchSize() * nCols))
-						typs := make([]*types.T, nCols)
-						for i := range typs {
-							typs[i] = types.Int
+					batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
+					batch.SetLength(coldata.BatchSize())
+					ordCols := make([]execinfrapb.Ordering_Column, nCols)
+					for i := range ordCols {
+						ordCols[i].ColIdx = uint32(i)
+						ordCols[i].Direction = execinfrapb.Ordering_Column_Direction(rng.Int() % 2)
+						col := batch.ColVec(i).Int64()
+						for j := 0; j < coldata.BatchSize(); j++ {
+							col[j] = rng.Int63() % int64((i*1024)+1)
 						}
-						batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
-						batch.SetLength(coldata.BatchSize())
-						ordCols := make([]execinfrapb.Ordering_Column, nCols)
-						for i := range ordCols {
-							ordCols[i].ColIdx = uint32(i)
-							ordCols[i].Direction = execinfrapb.Ordering_Column_Direction(rng.Int() % 2)
-							col := batch.ColVec(i).Int64()
-							for j := 0; j < coldata.BatchSize(); j++ {
-								col[j] = rng.Int63() % int64((i*1024)+1)
-							}
+					}
+					b.ResetTimer()
+					for n := 0; n < b.N; n++ {
+						source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
+						var spilled bool
+						sorter, accounts, monitors, _, err := createDiskBackedSorter(
+							ctx, flowCtx, []colexecop.Operator{source}, typs, ordCols,
+							0 /* matchLen */, 0 /* k */, func() { spilled = true },
+							0 /* numForcedRepartitions */, false /* delegateFDAcquisitions */, queueCfg, &colexecop.TestingSemaphore{},
+						)
+						memAccounts = append(memAccounts, accounts...)
+						memMonitors = append(memMonitors, monitors...)
+						if err != nil {
+							b.Fatal(err)
 						}
-						b.ResetTimer()
-						for n := 0; n < b.N; n++ {
-							source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
-							var spilled bool
-							k := uint64(0)
-							if topK {
-								// Pick the same value for K as we do in the
-								// in-memory top K sort benchmark.
-								k = 128
-							}
-							sorter, accounts, monitors, _, err := createDiskBackedSorter(
-								ctx, flowCtx, []colexecop.Operator{source}, typs, ordCols,
-								0 /* matchLen */, k, func() { spilled = true },
-								0 /* numForcedRepartitions */, false /* delegateFDAcquisitions */, queueCfg, &colexecop.TestingSemaphore{},
-							)
-							memAccounts = append(memAccounts, accounts...)
-							memMonitors = append(memMonitors, monitors...)
-							if err != nil {
-								b.Fatal(err)
-							}
-							sorter.Init(ctx)
-							for out := sorter.Next(); out.Length() != 0; out = sorter.Next() {
-							}
-							require.Equal(b, spillForced, spilled, fmt.Sprintf(
-								"expected: spilled=%t\tactual: spilled=%t", spillForced, spilled,
-							))
+						sorter.Init()
+						for out := sorter.Next(ctx); out.Length() != 0; out = sorter.Next(ctx) {
 						}
-					})
-				}
+						require.Equal(b, spillForced, spilled, fmt.Sprintf(
+							"expected: spilled=%t\tactual: spilled=%t", spillForced, spilled,
+						))
+					}
+				})
 			}
 		}
 	}
@@ -469,7 +455,7 @@ func BenchmarkExternalSort(b *testing.B) {
 func createDiskBackedSorter(
 	ctx context.Context,
 	flowCtx *execinfra.FlowCtx,
-	sources []colexecop.Operator,
+	input []colexecop.Operator,
 	typs []*types.T,
 	ordCols []execinfrapb.Ordering_Column,
 	matchLen int,
@@ -496,14 +482,17 @@ func createDiskBackedSorter(
 	}
 	args := &colexecargs.NewColOperatorArgs{
 		Spec:                spec,
-		Inputs:              colexectestutils.MakeInputs(sources),
+		Inputs:              input,
 		StreamingMemAccount: testMemAcc,
 		DiskQueueCfg:        diskQueueCfg,
 		FDSemaphore:         testingSemaphore,
 	}
+	// External sorter relies on different memory accounts to
+	// understand when to start a new partition, so we will not use
+	// the streaming memory account.
 	args.TestingKnobs.SpillingCallbackFn = spillingCallbackFn
 	args.TestingKnobs.NumForcedRepartitions = numForcedRepartitions
 	args.TestingKnobs.DelegateFDAcquisitions = delegateFDAcquisitions
 	result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
-	return result.Root, result.OpAccounts, result.OpMonitors, result.ToClose, err
+	return result.Op, result.OpAccounts, result.OpMonitors, result.ToClose, err
 }

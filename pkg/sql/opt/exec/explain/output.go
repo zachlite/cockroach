@@ -147,14 +147,12 @@ func (ob *OutputBuilder) Expr(key string, expr tree.TypedExpr, varColumns colinf
 	if ob.flags.HideValues {
 		flags |= tree.FmtHideConstants
 	}
-	f := tree.NewFmtCtx(
-		flags,
-		tree.FmtIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
-			// Ensure proper quoting.
-			n := tree.Name(varColumns[idx].Name)
-			ctx.WriteString(n.String())
-		}),
-	)
+	f := tree.NewFmtCtx(flags)
+	f.SetIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
+		// Ensure proper quoting.
+		n := tree.Name(varColumns[idx].Name)
+		ctx.WriteString(n.String())
+	})
 	f.FormatNode(expr)
 	ob.AddField(key, f.CloseAndGetString())
 }
@@ -398,19 +396,6 @@ func (ob *OutputBuilder) AddNetworkStats(messages, bytes int64) {
 		"network usage",
 		fmt.Sprintf("%s (%s messages)", humanizeutil.IBytes(bytes), humanizeutil.Count(uint64(messages))),
 	)
-}
-
-// AddMaxDiskUsage adds a top-level field for the sql temporary disk space used
-// by the query. If we're redacting leave this out to keep logic test output
-// independent of disk spilling. Disk spilling is controlled by a metamorphic
-// constant so it may or may not occur randomly so it makes sense to omit this
-// information entirely if we're redacting. Since disk spilling is rare we only
-// include this field is bytes is greater than zero.
-func (ob *OutputBuilder) AddMaxDiskUsage(bytes int64) {
-	if !ob.flags.Redact.Has(RedactVolatile) && bytes > 0 {
-		ob.AddTopLevelField("max sql temp disk usage",
-			humanizeutil.IBytes(bytes))
-	}
 }
 
 // AddRegionsStats adds a top-level field for regions executed on statistics.

@@ -216,7 +216,6 @@ func injectTimeIntoEvalCtx(ctx *tree.EvalContext, walltime int64) {
 
 func makeInputConverter(
 	ctx context.Context,
-	semaCtx *tree.SemaContext,
 	spec *execinfrapb.ReadImportDataSpec,
 	evalCtx *tree.EvalContext,
 	kvCh chan row.KVBatch,
@@ -276,24 +275,23 @@ func makeInputConverter(
 			return newWorkloadReader(kvCh, singleTable, evalCtx), nil
 		}
 		return newCSVInputReader(
-			semaCtx, kvCh, spec.Format.Csv, spec.WalltimeNanos, int(spec.ReaderParallelism),
+			kvCh, spec.Format.Csv, spec.WalltimeNanos, int(spec.ReaderParallelism),
 			singleTable, singleTableTargetCols, evalCtx, seqChunkProvider), nil
 	case roachpb.IOFileFormat_MysqlOutfile:
 		return newMysqloutfileReader(
-			semaCtx, spec.Format.MysqlOut, kvCh, spec.WalltimeNanos,
+			spec.Format.MysqlOut, kvCh, spec.WalltimeNanos,
 			int(spec.ReaderParallelism), singleTable, singleTableTargetCols, evalCtx)
 	case roachpb.IOFileFormat_Mysqldump:
-		return newMysqldumpReader(ctx, semaCtx, kvCh, spec.WalltimeNanos, spec.Tables, evalCtx,
-			spec.Format.MysqlDump)
+		return newMysqldumpReader(ctx, kvCh, spec.WalltimeNanos, spec.Tables, evalCtx, spec.Format.MysqlDump)
 	case roachpb.IOFileFormat_PgCopy:
-		return newPgCopyReader(semaCtx, spec.Format.PgCopy, kvCh, spec.WalltimeNanos,
+		return newPgCopyReader(spec.Format.PgCopy, kvCh, spec.WalltimeNanos,
 			int(spec.ReaderParallelism), singleTable, singleTableTargetCols, evalCtx)
 	case roachpb.IOFileFormat_PgDump:
-		return newPgDumpReader(ctx, semaCtx, int64(spec.Progress.JobID), kvCh, spec.Format.PgDump,
+		return newPgDumpReader(ctx, int64(spec.Progress.JobID), kvCh, spec.Format.PgDump,
 			spec.WalltimeNanos, spec.Tables, evalCtx)
 	case roachpb.IOFileFormat_Avro:
 		return newAvroInputReader(
-			semaCtx, kvCh, singleTable, spec.Format.Avro, spec.WalltimeNanos,
+			kvCh, singleTable, spec.Format.Avro, spec.WalltimeNanos,
 			int(spec.ReaderParallelism), evalCtx)
 	default:
 		return nil, errors.Errorf(

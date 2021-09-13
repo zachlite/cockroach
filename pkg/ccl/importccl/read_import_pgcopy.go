@@ -40,7 +40,6 @@ type pgCopyReader struct {
 var _ inputConverter = &pgCopyReader{}
 
 func newPgCopyReader(
-	semaCtx *tree.SemaContext,
 	opts roachpb.PgCopyOptions,
 	kvCh chan row.KVBatch,
 	walltime int64,
@@ -51,7 +50,6 @@ func newPgCopyReader(
 ) (*pgCopyReader, error) {
 	return &pgCopyReader{
 		importCtx: &parallelImportContext{
-			semaCtx:    semaCtx,
 			walltime:   walltime,
 			numWorkers: parallelism,
 			evalCtx:    evalCtx,

@@ -12,19 +12,16 @@ package kvnemesis
 
 import (
 	"context"
-	gosql "database/sql"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestApplier(t *testing.T) {
@@ -35,10 +32,8 @@ func TestApplier(t *testing.T) {
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 	db := tc.Server(0).DB()
-	sqlDB := tc.ServerConn(0)
-	env := &Env{sqlDBs: []*gosql.DB{sqlDB}}
 
-	a := MakeApplier(env, db, db)
+	a := MakeApplier(db, db)
 	check := func(t *testing.T, s Step, expected string) {
 		t.Helper()
 		require.NoError(t, a.Apply(ctx, &s))
@@ -73,48 +68,26 @@ func TestApplier(t *testing.T) {
 	check(t, step(get(`b`)), `db0.Get(ctx, "b") // ("2", nil)`)
 	check(t, step(scan(`a`, `c`)), `db1.Scan(ctx, "a", "c", 0) // (["a":"1", "b":"2"], nil)`)
 
-	check(t, step(reverseScan(`a`, `c`)), `db0.ReverseScan(ctx, "a", "c", 0) // (["b":"2", "a":"1"], nil)`)
-	check(t, step(reverseScanForUpdate(`a`, `b`)), `db1.ReverseScanForUpdate(ctx, "a", "b", 0) // (["a":"1"], nil)`)
-
-	check(t, step(del(`b`)), `db0.Del(ctx, "b") // nil`)
-	check(t, step(get(`b`)), `db1.Get(ctx, "b") // (nil, nil)`)
-
-	check(t, step(put(`c`, `3`)), `db0.Put(ctx, "c", 3) // nil`)
-	check(t, step(put(`d`, `4`)), `db1.Put(ctx, "d", 4) // nil`)
-
-	check(t, step(del(`c`)), `db0.Del(ctx, "c") // nil`)
-	check(t, step(scan(`a`, `e`)), `db1.Scan(ctx, "a", "e", 0) // (["a":"1", "d":"4"], nil)`)
-
 	checkErr(t, step(get(`a`)), `db0.Get(ctx, "a") // (nil, context canceled)`)
 	checkErr(t, step(put(`a`, `1`)), `db1.Put(ctx, "a", 1) // context canceled`)
 	checkErr(t, step(scanForUpdate(`a`, `c`)), `db0.ScanForUpdate(ctx, "a", "c", 0) // (nil, context canceled)`)
 
-	checkErr(t, step(reverseScan(`a`, `c`)), `db1.ReverseScan(ctx, "a", "c", 0) // (nil, context canceled)`)
-	checkErr(t, step(reverseScanForUpdate(`a`, `c`)), `db0.ReverseScanForUpdate(ctx, "a", "c", 0) // (nil, context canceled)`)
-
-	checkErr(t, step(del(`b`)), `db1.Del(ctx, "b") // context canceled`)
-	checkErr(t, step(del(`c`)), `db0.Del(ctx, "c") // context canceled`)
-
 	// Batch
-	check(t, step(batch(put(`b`, `2`), get(`a`), del(`b`), del(`c`), scan(`a`, `c`), reverseScanForUpdate(`a`, `e`))), `
+	check(t, step(batch(put(`b`, `2`), get(`a`), scan(`a`, `c`))), `
 {
   b := &Batch{}
   b.Put(ctx, "b", 2) // nil
   b.Get(ctx, "a") // ("1", nil)
-  b.Del(ctx, "b") // nil
-  b.Del(ctx, "c") // nil
-  b.Scan(ctx, "a", "c") // (["a":"1"], nil)
-  b.ReverseScanForUpdate(ctx, "a", "e") // (["d":"4", "a":"1"], nil)
+  b.Scan(ctx, "a", "c") // (["a":"1", "b":"2"], nil)
   db1.Run(ctx, b) // nil
 }
 `)
-	checkErr(t, step(batch(put(`b`, `2`), getForUpdate(`a`), scanForUpdate(`a`, `c`), reverseScan(`a`, `c`))), `
+	checkErr(t, step(batch(put(`b`, `2`), getForUpdate(`a`), scanForUpdate(`a`, `c`))), `
 {
   b := &Batch{}
   b.Put(ctx, "b", 2) // context canceled
   b.GetForUpdate(ctx, "a") // (nil, context canceled)
   b.ScanForUpdate(ctx, "a", "c") // (nil, context canceled)
-  b.ReverseScan(ctx, "a", "c") // (nil, context canceled)
   db0.Run(ctx, b) // context canceled
 }
 `)
@@ -173,45 +146,4 @@ db0.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		`db1.TransferLeaseOperation(ctx, "foo", 1) // nil`)
 	checkErr(t, step(transferLease(`foo`, 1)),
 		`db0.TransferLeaseOperation(ctx, "foo", 1) // context canceled`)
-
-	// Zone config changes
-	check(t, step(changeZone(ChangeZoneType_ToggleGlobalReads)),
-		`env.UpdateZoneConfig(ctx, ToggleGlobalReads) // nil`)
-	checkErr(t, step(changeZone(ChangeZoneType_ToggleGlobalReads)),
-		`env.UpdateZoneConfig(ctx, ToggleGlobalReads) // context canceled`)
-}
-
-func TestUpdateZoneConfig(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	tests := []struct {
-		before   zonepb.ZoneConfig
-		change   ChangeZoneType
-		expAfter zonepb.ZoneConfig
-	}{
-		{
-			before:   zonepb.ZoneConfig{NumReplicas: proto.Int32(3)},
-			change:   ChangeZoneType_ToggleGlobalReads,
-			expAfter: zonepb.ZoneConfig{NumReplicas: proto.Int32(3), GlobalReads: proto.Bool(true)},
-		},
-		{
-			before:   zonepb.ZoneConfig{NumReplicas: proto.Int32(3), GlobalReads: proto.Bool(false)},
-			change:   ChangeZoneType_ToggleGlobalReads,
-			expAfter: zonepb.ZoneConfig{NumReplicas: proto.Int32(3), GlobalReads: proto.Bool(true)},
-		},
-		{
-			before:   zonepb.ZoneConfig{NumReplicas: proto.Int32(3), GlobalReads: proto.Bool(true)},
-			change:   ChangeZoneType_ToggleGlobalReads,
-			expAfter: zonepb.ZoneConfig{NumReplicas: proto.Int32(3), GlobalReads: proto.Bool(false)},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run("", func(t *testing.T) {
-			zone := test.before
-			updateZoneConfig(&zone, test.change)
-			require.Equal(t, test.expAfter, zone)
-		})
-	}
 }

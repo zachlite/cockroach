@@ -53,7 +53,6 @@ func MakeFileInfo(details logpb.FileDetails, info os.FileInfo) logpb.FileInfo {
 		SizeBytes:    info.Size(),
 		ModTimeNanos: info.ModTime().UnixNano(),
 		Details:      details,
-		FileMode:     uint32(info.Mode()),
 	}
 }
 
@@ -288,17 +287,6 @@ func FetchEntriesFromFiles(
 	pattern *regexp.Regexp,
 	editMode EditSensitiveData,
 ) ([]logpb.Entry, error) {
-	return FetchEntriesFromFilesWithFormat(startTimestamp, endTimestamp, maxEntries, pattern, editMode, "" /*format*/)
-}
-
-// FetchEntriesFromFilesWithFormat is like FetchEntriesFromFiles but the caller can specify the format of the log file.
-func FetchEntriesFromFilesWithFormat(
-	startTimestamp, endTimestamp int64,
-	maxEntries int,
-	pattern *regexp.Regexp,
-	editMode EditSensitiveData,
-	format string,
-) ([]logpb.Entry, error) {
 	logGroups, err := listLogGroups()
 	if err != nil {
 		return nil, err
@@ -317,8 +305,7 @@ func FetchEntriesFromFilesWithFormat(
 				endTimestamp,
 				maxEntries-len(entries),
 				pattern,
-				editMode,
-				format)
+				editMode)
 			if err != nil {
 				return nil, err
 			}
@@ -371,18 +358,14 @@ func readAllEntriesFromFile(
 	maxEntries int,
 	pattern *regexp.Regexp,
 	editMode EditSensitiveData,
-	format string,
 ) ([]logpb.Entry, bool, error) {
 	reader, err := GetLogReader(file.Name, true /* restricted */)
-	if err != nil {
+	if reader == nil || err != nil {
 		return nil, false, err
 	}
 	defer reader.Close()
 	entries := []logpb.Entry{}
-	decoder, err := NewEntryDecoderWithFormat(reader, editMode, format)
-	if err != nil {
-		return nil, false, err
-	}
+	decoder := NewEntryDecoder(reader, editMode)
 	entryBeforeStart := false
 	for {
 		entry := logpb.Entry{}

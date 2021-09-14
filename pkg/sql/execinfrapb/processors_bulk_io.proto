@@ -140,10 +140,7 @@ message ReadImportDataSpec {
   // User who initiated the import. This is used to check access privileges
   // when using FileTable ExternalStorage.
   optional string user_proto = 15 [(gogoproto.nullable) = false, (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
-
-  repeated sqlbase.TypeDescriptor types = 16;
-
-  // NEXTID: 17
+  // NEXTID: 16
 }
 
 message StreamIngestionDataSpec {

@@ -128,7 +128,7 @@ func NodeLevelThrottler(sv *settings.Values) *Throttler {
 		}
 		nodeSinkThrottle.Throttler = NewThrottler("cf.node.throttle", getConfig())
 		// Update node throttler configs when settings change.
-		changefeedbase.NodeSinkThrottleConfig.SetOnChange(sv, func(ctx context.Context) {
+		changefeedbase.NodeSinkThrottleConfig.SetOnChange(sv, func() {
 			nodeSinkThrottle.Throttler.updateConfig(getConfig())
 		})
 	})

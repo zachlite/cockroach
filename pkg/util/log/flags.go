@@ -13,7 +13,6 @@ package log
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"math"
 	"strings"
 
@@ -121,16 +120,10 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		}
 	}
 
-	// Call the final value of cleanupFn immediately if returning with error.
-	defer func() {
-		if err != nil {
-			cleanupFn()
-		}
-	}()
-
 	// If capture of internal fd2 writes is enabled, set it up here.
 	if config.CaptureFd2.Enable {
 		if logging.testingFd2CaptureLogger != nil {
+			cleanupFn()
 			return nil, errors.New("fd2 capture already set up. Maybe use TestLogScope?")
 		}
 		// We use a secondary logger, even though no logging *event* will ever
@@ -146,29 +139,26 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		bt, bf := true, false
 		mf := logconfig.ByteSize(math.MaxInt64)
 		f := logconfig.DefaultFileFormat
-		fm := logconfig.FilePermissions(0o644)
 		fakeConfig := logconfig.FileSinkConfig{
-			FileDefaults: logconfig.FileDefaults{
-				CommonSinkConfig: logconfig.CommonSinkConfig{
-					Filter:      severity.INFO,
-					Criticality: &bt,
-					Format:      &f,
-					Redact:      &bf,
-					// Be careful about stripping the redaction markers from log
-					// entries. The captured fd2 writes are inherently unsafe, so
-					// we don't want the header entry to give a mistaken
-					// impression to the entry parser.
-					Redactable: &bf,
-				},
-				Dir:             config.CaptureFd2.Dir,
-				MaxGroupSize:    config.CaptureFd2.MaxGroupSize,
-				MaxFileSize:     &mf,
-				BufferedWrites:  &bf,
-				FilePermissions: &fm,
+			CommonSinkConfig: logconfig.CommonSinkConfig{
+				Filter:      severity.INFO,
+				Criticality: &bt,
+				Format:      &f,
+				Redact:      &bf,
+				// Be careful about stripping the redaction markers from log
+				// entries. The captured fd2 writes are inherently unsafe, so
+				// we don't want the header entry to give a mistaken
+				// impression to the entry parser.
+				Redactable: &bf,
 			},
+			Dir:            config.CaptureFd2.Dir,
+			MaxGroupSize:   config.CaptureFd2.MaxGroupSize,
+			MaxFileSize:    &mf,
+			BufferedWrites: &bf,
 		}
 		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig)
 		if err != nil {
+			cleanupFn()
 			return nil, err
 		}
 		sinkInfos = append(sinkInfos, fileSinkInfo)
@@ -198,6 +188,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		if err := fileSink.takeOverInternalStderr(secLogger); err != nil {
 			// Oof, it turns out we can't use this logger after all. Give up
 			// on everything we did.
+			cleanupFn()
 			return nil, err
 		}
 
@@ -225,6 +216,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 	// Apply the stderr sink configuration.
 	logging.stderrSink.noColor.Set(config.Sinks.Stderr.NoColor)
 	if err := logging.stderrSinkInfoTemplate.applyConfig(config.Sinks.Stderr.CommonSinkConfig); err != nil {
+		cleanupFn()
 		return nil, err
 	}
 
@@ -250,17 +242,6 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		l.sinkInfos = append(l.sinkInfos, &stderrSinkInfo)
 	}
 
-	attachSinkInfo := func(si *sinkInfo, chs []logpb.Channel) {
-		sinkInfos = append(sinkInfos, si)
-		allSinkInfos.put(si)
-
-		// Connect the channels for this sink.
-		for _, ch := range chs {
-			l := chans[ch]
-			l.sinkInfos = append(l.sinkInfos, si)
-		}
-	}
-
 	// Create the file sinks.
 	for prefix, fc := range config.Sinks.FileGroups {
 		if fc.Filter == severity.NONE || fc.Dir == nil {
@@ -271,9 +252,17 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		}
 		fileSinkInfo, fileSink, err := newFileSinkInfo(prefix, *fc)
 		if err != nil {
+			cleanupFn()
 			return nil, err
 		}
-		attachSinkInfo(fileSinkInfo, fc.Channels.Channels)
+		sinkInfos = append(sinkInfos, fileSinkInfo)
+		allSinkInfos.put(fileSinkInfo)
+
+		// Connect the channels for this sink.
+		for _, ch := range fc.Channels.Channels {
+			l := chans[ch]
+			l.sinkInfos = append(l.sinkInfos, fileSinkInfo)
+		}
 
 		// Start the GC process. This ensures that old capture files get
 		// erased as new files get created.
@@ -287,21 +276,17 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		}
 		fluentSinkInfo, err := newFluentSinkInfo(*fc)
 		if err != nil {
+			cleanupFn()
 			return nil, err
 		}
-		attachSinkInfo(fluentSinkInfo, fc.Channels.Channels)
-	}
+		sinkInfos = append(sinkInfos, fluentSinkInfo)
+		allSinkInfos.put(fluentSinkInfo)
 
-	// Create the HTTP sinks.
-	for _, fc := range config.Sinks.HTTPServers {
-		if fc.Filter == severity.NONE {
-			continue
+		// Connect the channels for this sink.
+		for _, ch := range fc.Channels.Channels {
+			l := chans[ch]
+			l.sinkInfos = append(l.sinkInfos, fluentSinkInfo)
 		}
-		httpSinkInfo, err := newHTTPSinkInfo(*fc)
-		if err != nil {
-			return nil, err
-		}
-		attachSinkInfo(httpSinkInfo, fc.Channels.Channels)
 	}
 
 	// Prepend the interceptor sink to all channels.
@@ -333,9 +318,7 @@ func newFileSinkInfo(
 		*c.BufferedWrites,
 		int64(*c.MaxFileSize),
 		int64(*c.MaxGroupSize),
-		info.getStartLines,
-		fs.FileMode(*c.FilePermissions),
-	)
+		info.getStartLines)
 	info.sink = fileSink
 	return info, fileSink, nil
 }
@@ -349,24 +332,6 @@ func newFluentSinkInfo(c logconfig.FluentSinkConfig) (*sinkInfo, error) {
 	}
 	fluentSink := newFluentSink(c.Net, c.Address)
 	info.sink = fluentSink
-	return info, nil
-}
-
-func newHTTPSinkInfo(c logconfig.HTTPSinkConfig) (*sinkInfo, error) {
-	info := &sinkInfo{}
-	if err := info.applyConfig(c.CommonSinkConfig); err != nil {
-		return nil, err
-	}
-	httpSink, err := newHTTPSink(*c.Address, httpSinkOptions{
-		method:            string(*c.Method),
-		unsafeTLS:         *c.UnsafeTLS,
-		timeout:           *c.Timeout,
-		disableKeepAlives: *c.DisableKeepAlives,
-	})
-	if err != nil {
-		return nil, err
-	}
-	info.sink = httpSink
 	return info, nil
 }
 

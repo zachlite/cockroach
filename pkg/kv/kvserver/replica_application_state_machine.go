@@ -73,7 +73,7 @@ type nonDeterministicFailure struct {
 
 // The provided format string should be safe for reporting.
 func makeNonDeterministicFailure(format string, args ...interface{}) error {
-	err := errors.AssertionFailedWithDepthf(1, format, args...)
+	err := errors.Newf(format, args...)
 	return &nonDeterministicFailure{
 		wrapped:  err,
 		safeExpl: err.Error(),
@@ -918,7 +918,7 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 
 	// If the range is now less than its RangeMaxBytes, clear the history of its
 	// largest previous max bytes.
-	if r.mu.largestPreviousMaxRangeSizeBytes > 0 && b.state.Stats.Total() < r.mu.conf.RangeMaxBytes {
+	if r.mu.largestPreviousMaxRangeSizeBytes > 0 && b.state.Stats.Total() < *r.mu.zone.RangeMaxBytes {
 		r.mu.largestPreviousMaxRangeSizeBytes = 0
 	}
 
@@ -929,7 +929,11 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 	tenantID := r.mu.tenantID
 	r.mu.Unlock()
 	if closedTimestampUpdated {
-		r.handleClosedTimestampUpdateRaftMuLocked(ctx, b.state.RaftClosedTimestamp)
+		// TODO(andrei): Pass in the new closed timestamp to
+		// r.handleClosedTimestampUpdateRaftMuLocked directly after the old closed
+		// ts tracker goes away. Until then we can't do it; we have to let the
+		// method consult r.maxClosed().
+		r.handleClosedTimestampUpdateRaftMuLocked(ctx)
 	}
 
 	// Record the stats delta in the StoreMetrics.
@@ -1202,7 +1206,7 @@ func (sm *replicaStateMachine) ApplySideEffects(
 	if cmd.IsLocal() {
 		// Handle the LocalResult.
 		if cmd.localResult != nil {
-			sm.r.handleReadWriteLocalEvalResult(ctx, *cmd.localResult, true /* raftMuHeld */)
+			sm.r.handleReadWriteLocalEvalResult(ctx, *cmd.localResult)
 		}
 
 		rejected := cmd.Rejected()

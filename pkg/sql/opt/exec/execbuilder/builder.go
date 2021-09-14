@@ -86,32 +86,13 @@ type Builder struct {
 	// IsDDL is set to true if the statement contains DDL.
 	IsDDL bool
 
-	// ContainsFullTableScan is set to true if the statement contains an
-	// unconstrained primary index scan. This could be a full scan of any
-	// cardinality.
+	// containsFullTableScan is set to true if the statement contains a primary
+	// index scan.
 	ContainsFullTableScan bool
 
-	// ContainsFullIndexScan is set to true if the statement contains an
-	// unconstrained secondary index scan. This could be a full scan of any
-	// cardinality.
+	// containsFullIndexScan is set to true if the statement contains a secondary
+	// index scan.
 	ContainsFullIndexScan bool
-
-	// ContainsLargeFullTableScan is set to true if the statement contains an
-	// unconstrained primary index scan estimated to read more than
-	// large_full_scan_rows (or without available stats).
-	ContainsLargeFullTableScan bool
-
-	// ContainsLargeFullIndexScan is set to true if the statement contains an
-	// unconstrained secondary index scan estimated to read more than
-	// large_full_scan_rows (or without without available stats).
-	ContainsLargeFullIndexScan bool
-
-	// containsBoundedStalenessScan is true if the query uses bounded
-	// staleness and contains a scan.
-	containsBoundedStalenessScan bool
-
-	// ContainsMutation is set to true if the whole plan contains any mutations.
-	ContainsMutation bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -144,7 +125,7 @@ func New(
 		initialAllowAutoCommit: allowAutoCommit,
 	}
 	if evalCtx != nil {
-		sd := evalCtx.SessionData()
+		sd := evalCtx.SessionData
 		if sd.SaveTablesPrefix != "" {
 			b.nameGen = memo.NewExprNameGenerator(sd.SaveTablesPrefix)
 		}
@@ -157,7 +138,8 @@ func New(
 		// in such a scenario tableWriterBase.finalize is responsible for making
 		// sure that the rows written limit is not reached before the auto
 		// commit.
-		b.allowAutoCommit = b.allowAutoCommit && (sd.TxnRowsReadErr == 0 && !sd.Internal)
+		prohibitAutoCommit := sd.TxnRowsReadErr != 0 && !sd.Internal
+		b.allowAutoCommit = b.allowAutoCommit && !prohibitAutoCommit
 		b.initialAllowAutoCommit = b.allowAutoCommit
 		b.allowInsertFastPath = sd.InsertFastPath
 	}
@@ -252,12 +234,6 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 		}
 	}
 	return nil
-}
-
-// boundedStaleness returns true if this query uses bounded staleness.
-func (b *Builder) boundedStaleness() bool {
-	return b.evalCtx != nil && b.evalCtx.AsOfSystemTime != nil &&
-		b.evalCtx.AsOfSystemTime.BoundedStaleness
 }
 
 // mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -

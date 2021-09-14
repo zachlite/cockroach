@@ -31,8 +31,10 @@ type BlobClient interface {
 	// read the contents.
 	ReadFile(ctx context.Context, file string, offset int64) (io.ReadCloser, int64, error)
 
-	// Writer opens the named payload on the requested node for writing.
-	Writer(ctx context.Context, file string) (io.WriteCloser, error)
+	// WriteFile sends the named payload to the requested node.
+	// This method will read entire content of file and send
+	// it over to another node, based on the nodeID.
+	WriteFile(ctx context.Context, file string, content io.ReadSeeker) error
 
 	// List lists the corresponding filenames from the requested node.
 	// The requested node can be the current node.
@@ -73,40 +75,22 @@ func (c *remoteClient) ReadFile(
 	return newGetStreamReader(stream), st.Filesize, errors.Wrap(err, "fetching file")
 }
 
-type streamWriter struct {
-	s   blobspb.Blob_PutStreamClient
-	buf blobspb.StreamChunk
-}
-
-func (w *streamWriter) Write(p []byte) (int, error) {
-	n := 0
-	for len(p) > 0 {
-		l := copy(w.buf.Payload[:cap(w.buf.Payload)], p)
-		w.buf.Payload = w.buf.Payload[:l]
-		p = p[l:]
-		if l > 0 {
-			if err := w.s.Send(&w.buf); err != nil {
-				return n, err
-			}
-		}
-		n += l
-	}
-	return n, nil
-}
-
-func (w *streamWriter) Close() error {
-	_, err := w.s.CloseAndRecv()
-	return err
-}
-
-func (c *remoteClient) Writer(ctx context.Context, file string) (io.WriteCloser, error) {
+func (c *remoteClient) WriteFile(
+	ctx context.Context, file string, content io.ReadSeeker,
+) (err error) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "filename", file)
 	stream, err := c.blobClient.PutStream(ctx)
 	if err != nil {
-		return nil, err
+		return
 	}
-	buf := make([]byte, 0, chunkSize)
-	return &streamWriter{s: stream, buf: blobspb.StreamChunk{Payload: buf}}, nil
+	defer func() {
+		_, closeErr := stream.CloseAndRecv()
+		if err == nil {
+			err = closeErr
+		}
+	}()
+	err = streamContent(stream, content)
+	return
 }
 
 func (c *remoteClient) List(ctx context.Context, pattern string) ([]string, error) {
@@ -144,8 +128,8 @@ type localClient struct {
 	localStorage *LocalStorage
 }
 
-// NewLocalClient instantiates a local blob service client.
-func NewLocalClient(externalIODir string) (BlobClient, error) {
+// newLocalClient instantiates a local blob service client.
+func newLocalClient(externalIODir string) (BlobClient, error) {
 	storage, err := NewLocalStorage(externalIODir)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating local client")
@@ -159,8 +143,8 @@ func (c *localClient) ReadFile(
 	return c.localStorage.ReadFile(file, offset)
 }
 
-func (c *localClient) Writer(ctx context.Context, file string) (io.WriteCloser, error) {
-	return c.localStorage.Writer(ctx, file)
+func (c *localClient) WriteFile(ctx context.Context, file string, content io.ReadSeeker) error {
+	return c.localStorage.WriteFile(file, content)
 }
 
 func (c *localClient) List(ctx context.Context, pattern string) ([]string, error) {
@@ -184,23 +168,12 @@ func NewBlobClientFactory(
 ) BlobClientFactory {
 	return func(ctx context.Context, dialing roachpb.NodeID) (BlobClient, error) {
 		if dialing == 0 || localNodeID == dialing {
-			return NewLocalClient(externalIODir)
+			return newLocalClient(externalIODir)
 		}
 		conn, err := dialer.Dial(ctx, dialing, rpc.DefaultClass)
 		if err != nil {
 			return nil, errors.Wrapf(err, "connecting to node %d", dialing)
 		}
 		return newRemoteClient(blobspb.NewBlobClient(conn)), nil
-	}
-}
-
-// NewLocalOnlyBlobClientFactory returns a BlobClientFactory that only
-// handles requests for the local node, identified by NodeID = 0.
-func NewLocalOnlyBlobClientFactory(externalIODir string) BlobClientFactory {
-	return func(ctx context.Context, dialing roachpb.NodeID) (BlobClient, error) {
-		if dialing == 0 {
-			return NewLocalClient(externalIODir)
-		}
-		return nil, errors.Errorf("connecting to remote node not supported")
 	}
 }

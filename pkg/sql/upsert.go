@@ -14,8 +14,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
@@ -37,13 +37,15 @@ type upsertNode struct {
 	run upsertRun
 }
 
+var _ mutationPlanNode = &upsertNode{}
+
 // upsertRun contains the run-time state of upsertNode during local execution.
 type upsertRun struct {
 	tw        optTableUpserter
 	checkOrds checkSet
 
 	// insertCols are the columns being inserted/upserted into.
-	insertCols []catalog.Column
+	insertCols []descpb.ColumnDescriptor
 
 	// done informs a new call to BatchedNext() that the previous call to
 	// BatchedNext() has completed the work already.
@@ -118,6 +120,7 @@ func (n *upsertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	if lastBatch {
+		n.run.tw.setRowsWrittenLimit(params.extendedEvalCtx.SessionData)
 		if err := n.run.tw.finalize(params.ctx); err != nil {
 			return false, err
 		}
@@ -126,7 +129,10 @@ func (n *upsertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.tw.tableDesc(), n.run.tw.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(
+		n.run.tw.tableDesc().GetID(),
+		n.run.tw.lastBatchSize,
+	)
 
 	return n.run.tw.lastBatchSize > 0, nil
 }
@@ -189,6 +195,10 @@ func (n *upsertNode) Close(ctx context.Context) {
 	n.run.tw.close(ctx)
 	*n = upsertNode{}
 	upsertNodePool.Put(n)
+}
+
+func (n *upsertNode) rowsWritten() int64 {
+	return n.run.tw.rowsWritten
 }
 
 func (n *upsertNode) enableAutoCommit() {

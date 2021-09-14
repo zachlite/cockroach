@@ -58,7 +58,7 @@ func newMockFlow(flowID uuid.UUID, waitCb func()) *mockFlow {
 
 func (m *mockFlow) Setup(
 	_ context.Context, _ *execinfrapb.FlowSpec, _ FuseOpt,
-) (context.Context, execinfra.OpChains, error) {
+) (context.Context, error) {
 	panic("not implemented")
 }
 
@@ -72,10 +72,11 @@ func (m *mockFlow) Start(_ context.Context, doneCb func()) error {
 	return nil
 }
 
-func (m *mockFlow) Run(_ context.Context, doneCb func()) {
+func (m *mockFlow) Run(_ context.Context, doneCb func()) error {
 	close(m.runCh)
 	<-m.doneCh
 	doneCb()
+	return nil
 }
 
 func (m *mockFlow) Wait() {
@@ -114,7 +115,6 @@ func (m *mockFlow) ConcurrentTxnUse() bool {
 
 func TestFlowScheduler(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	var (
 		ctx      = context.Background()
@@ -124,8 +124,7 @@ func TestFlowScheduler(t *testing.T) {
 	)
 	defer stopper.Stop(ctx)
 
-	scheduler := NewFlowScheduler(log.AmbientContext{}, stopper, settings)
-	scheduler.Init(&metrics)
+	scheduler := NewFlowScheduler(log.AmbientContext{}, stopper, settings, &metrics)
 	scheduler.Start()
 	getNumRunning := func() int {
 		return int(atomic.LoadInt32(&scheduler.atomics.numRunning))

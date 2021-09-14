@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -152,9 +151,8 @@ func assertExportedErrs(
 	useTBI bool,
 ) {
 	const big = 1 << 30
-	sstFile := &MemFile{}
-	_, _, _, err := e.ExportMVCCToSst(context.Background(), startKey, endKey, startTime, endTime, hlc.Timestamp{},
-		revisions, big, big, false, useTBI, sstFile)
+	_, _, _, err := e.ExportMVCCToSst(startKey, endKey, startTime, endTime, revisions, big, big,
+		useTBI)
 	require.Error(t, err)
 
 	if intentErr := (*roachpb.WriteIntentError)(nil); errors.As(err, &intentErr) {
@@ -181,11 +179,10 @@ func assertExportedKVs(
 	useTBI bool,
 ) {
 	const big = 1 << 30
-	sstFile := &MemFile{}
-	_, _, _, err := e.ExportMVCCToSst(context.Background(), startKey, endKey, startTime, endTime, hlc.Timestamp{},
-		revisions, big, big, false, useTBI, sstFile)
+	data, _, _, err := e.ExportMVCCToSst(startKey, endKey, startTime, endTime, revisions, big, big,
+		useTBI)
 	require.NoError(t, err)
-	data := sstFile.Data()
+
 	if data == nil {
 		require.Nil(t, expected)
 		return
@@ -912,8 +909,7 @@ func TestMVCCIncrementalIteratorIntentStraddlesSStables(t *testing.T) {
 	// regular MVCCPut operation to generate these keys, which we'll later be
 	// copying into manually created sstables.
 	ctx := context.Background()
-	db1, err := Open(ctx, InMemory(), ForTesting)
-	require.NoError(t, err)
+	db1 := NewInMemForTesting(ctx, roachpb.Attributes{}, 10<<20)
 	defer db1.Close()
 
 	put := func(key, value string, ts int64, txn *roachpb.Transaction) {
@@ -948,8 +944,7 @@ func TestMVCCIncrementalIteratorIntentStraddlesSStables(t *testing.T) {
 	//
 	//   SSTable 2:
 	//     b@2
-	db2, err := Open(ctx, InMemory(), ForTesting)
-	require.NoError(t, err)
+	db2 := NewInMemForTesting(ctx, roachpb.Attributes{}, 10<<20)
 	defer db2.Close()
 
 	// NB: If the original intent was separated, iterating using an interleaving
@@ -1093,64 +1088,6 @@ func TestMVCCIterateTimeBound(t *testing.T) {
 			}
 
 			assertEqualKVs(eng, keys.LocalMax, keys.MaxKey, testCase.start, testCase.end, latest, expectedKVs)(t)
-		})
-	}
-}
-
-func runIncrementalBenchmark(
-	b *testing.B, emk engineMaker, useTBI bool, ts hlc.Timestamp, opts benchDataOptions,
-) {
-	eng, _ := setupMVCCData(context.Background(), b, emk, opts)
-	{
-		// Pull all of the sstables into the cache.  This
-		// probably defeates a lot of the benefits of the
-		// time-based optimization.
-		iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
-		_, _ = iter.ComputeStats(keys.LocalMax, roachpb.KeyMax, 0)
-		iter.Close()
-	}
-	defer eng.Close()
-
-	startKey := roachpb.Key(encoding.EncodeUvarintAscending([]byte("key-"), uint64(0)))
-	endKey := roachpb.Key(encoding.EncodeUvarintAscending([]byte("key-"), uint64(opts.numKeys)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		it := NewMVCCIncrementalIterator(eng, MVCCIncrementalIterOptions{
-			EnableTimeBoundIteratorOptimization: useTBI,
-			EndKey:                              endKey,
-			StartTime:                           ts,
-			EndTime:                             hlc.MaxTimestamp,
-		})
-		it.SeekGE(MVCCKey{Key: startKey})
-		for {
-			if ok, err := it.Valid(); err != nil {
-				b.Fatalf("failed incremental iteration: %+v", err)
-			} else if !ok {
-				break
-			}
-			it.Next()
-		}
-	}
-}
-
-func BenchmarkMVCCIncrementalIterator(b *testing.B) {
-	numVersions := 100
-	numKeys := 1000
-	valueBytes := 64
-
-	for _, useTBI := range []bool{true, false} {
-		b.Run(fmt.Sprintf("useTBI=%v", useTBI), func(b *testing.B) {
-			for _, tsExcludePercent := range []float64{0, 0.95} {
-				wallTime := int64((5 * (float64(numVersions)*tsExcludePercent + 1)))
-				ts := hlc.Timestamp{WallTime: wallTime}
-				b.Run(fmt.Sprintf("ts=%d", ts.WallTime), func(b *testing.B) {
-					runIncrementalBenchmark(b, setupMVCCPebble, useTBI, ts, benchDataOptions{
-						numVersions: numVersions,
-						numKeys:     numKeys,
-						valueBytes:  valueBytes,
-					})
-				})
-			}
 		})
 	}
 }

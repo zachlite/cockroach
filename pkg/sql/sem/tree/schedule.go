@@ -74,11 +74,3 @@ func (node *ScheduledBackup) Format(ctx *FmtCtx) {
 		ctx.FormatNode(&node.ScheduleOptions)
 	}
 }
-
-// Coverage return the coverage (all vs requested).
-func (node ScheduledBackup) Coverage() DescriptorCoverage {
-	if node.Targets == nil {
-		return AllDescriptors
-	}
-	return RequestedDescriptors
-}

@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//pkg/util/humanizeutil",
         "//pkg/util/syncutil",
-        "@com_github_cockroachdb_redact//:redact",
     ],
 )
 

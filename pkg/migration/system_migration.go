@@ -16,16 +16,18 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/logtags"
 )
 
 // Cluster abstracts a physical KV cluster and can be utilized by a long-running
 // migration.
 type Cluster interface {
+
+	// DB returns access to the kv.
+	DB() *kv.DB
+
 	// ForEveryNode is a short hand to execute the given closure (named by the
 	// informational parameter op) against every node in the cluster at a given
 	// point in time. Given it's possible for nodes to join or leave the cluster
@@ -121,15 +123,6 @@ type Cluster interface {
 	) error
 }
 
-// SystemDeps are the dependencies of migrations which perform actions at the
-// KV layer on behalf of the system tenant.
-type SystemDeps struct {
-	Cluster    Cluster
-	DB         *kv.DB
-	DistSender *kvcoord.DistSender
-	Stopper    *stop.Stopper
-}
-
 // SystemMigration is an implementation of Migration for system-level
 // migrations. It is only to be run on the system tenant. These migrations
 // tend to touch the kv layer.
@@ -140,7 +133,7 @@ type SystemMigration struct {
 
 // SystemMigrationFunc is used to perform kv-level migrations. It should only be
 // run from the system tenant.
-type SystemMigrationFunc func(context.Context, clusterversion.ClusterVersion, SystemDeps) error
+type SystemMigrationFunc func(context.Context, clusterversion.ClusterVersion, Cluster) error
 
 // NewSystemMigration constructs a SystemMigration.
 func NewSystemMigration(
@@ -157,8 +150,8 @@ func NewSystemMigration(
 
 // Run kickstarts the actual migration process for system-level migrations.
 func (m *SystemMigration) Run(
-	ctx context.Context, cv clusterversion.ClusterVersion, d SystemDeps,
+	ctx context.Context, cv clusterversion.ClusterVersion, h Cluster,
 ) error {
 	ctx = logtags.AddTag(ctx, fmt.Sprintf("migration=%s", cv), nil)
-	return m.fn(ctx, cv, d)
+	return m.fn(ctx, cv, h)
 }

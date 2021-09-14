@@ -79,7 +79,7 @@ func newScrubTableReader(
 	}
 
 	tr.tableDesc = spec.BuildTableDescriptor()
-	tr.limitHint = row.RowLimit(execinfra.LimitHint(spec.LimitHint, post))
+	tr.limitHint = execinfra.LimitHint(spec.LimitHint, post)
 
 	if err := tr.Init(
 		tr,
@@ -113,13 +113,13 @@ func newScrubTableReader(
 		}
 	} else {
 		colIdxMap := catalog.ColumnIDToOrdinalMap(tr.tableDesc.PublicColumns())
-		idx := tr.tableDesc.PublicNonPrimaryIndexes()[spec.IndexIdx-1]
-		colIDs := idx.CollectKeyColumnIDs()
-		colIDs.UnionWith(idx.CollectSecondaryStoredColumnIDs())
-		colIDs.UnionWith(idx.CollectKeySuffixColumnIDs())
-		colIDs.ForEach(func(colID descpb.ColumnID) {
-			neededColumns.Add(colIdxMap.GetDefault(colID))
+		err := tr.tableDesc.PublicNonPrimaryIndexes()[spec.IndexIdx-1].ForEachColumnID(func(id descpb.ColumnID) error {
+			neededColumns.Add(colIdxMap.GetDefault(id))
+			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var fetcher row.Fetcher
@@ -196,7 +196,7 @@ func (tr *scrubTableReader) prettyPrimaryKeyValues(
 	}
 	var primaryKeyValues bytes.Buffer
 	primaryKeyValues.WriteByte('(')
-	for i, id := range table.PrimaryIndex.KeyColumnIDs {
+	for i, id := range table.PrimaryIndex.ColumnIDs {
 		if i > 0 {
 			primaryKeyValues.WriteByte(',')
 		}
@@ -218,7 +218,7 @@ func (tr *scrubTableReader) Start(ctx context.Context) {
 	log.VEventf(ctx, 1, "starting")
 
 	if err := tr.fetcher.StartScan(
-		ctx, tr.FlowCtx.Txn, tr.spans, row.DefaultBatchBytesLimit, tr.limitHint,
+		ctx, tr.FlowCtx.Txn, tr.spans, true /* limit batches */, tr.limitHint,
 		tr.FlowCtx.TraceKV, tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 	); err != nil {
 		tr.MoveToDraining(err)

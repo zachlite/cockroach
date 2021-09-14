@@ -17,13 +17,13 @@ import (
 	"strconv"
 	"unicode"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/errors"
 )
@@ -333,7 +333,7 @@ func (p *pgCopyConsumer) FillDatums(
 				col := conv.VisibleCols[i]
 				return newImportRowError(fmt.Errorf(
 					"encountered error %s when attempting to parse %q as %s",
-					err.Error(), col.GetName(), col.GetType().SQLString()), data.String(), rowNum)
+					err.Error(), col.Name, col.Type.SQLString()), data.String(), rowNum)
 			}
 		}
 	}

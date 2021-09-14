@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
@@ -626,15 +627,14 @@ func (r *Replica) handleClosedTimestampUpdateRaftMuLocked(ctx context.Context) {
 	// If the closed timestamp is sufficiently stale, signal that we want an
 	// update to the leaseholder so that it will eventually begin to progress
 	// again.
-	behind := r.Clock().PhysicalTime().Sub(closedTS.GoTime())
 	slowClosedTSThresh := 5 * closedts.TargetDuration.Get(&r.store.cfg.Settings.SV)
-	if behind > slowClosedTSThresh {
+	if d := timeutil.Since(closedTS.GoTime()); d > slowClosedTSThresh {
 		m := r.store.metrics.RangeFeedMetrics
 		if m.RangeFeedSlowClosedTimestampLogN.ShouldLog() {
 			if closedTS.IsEmpty() {
 				log.Infof(ctx, "RangeFeed closed timestamp is empty")
 			} else {
-				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, behind)
+				log.Infof(ctx, "RangeFeed closed timestamp %s is behind by %s", closedTS, d)
 			}
 		}
 
@@ -704,10 +704,10 @@ func (r *Replica) ensureClosedTimestampStarted(ctx context.Context) *roachpb.Err
 			})
 		if err != nil {
 			if errors.HasType(err, (*contextutil.TimeoutError)(nil)) {
-				if r.store.cfg.Settings.Version.IsActive(ctx, clusterversion.NewRetryableRangefeedErrors) {
-					err = &roachpb.RangeFeedRetryError{
-						Reason: roachpb.RangeFeedRetryError_REASON_NO_LEASEHOLDER,
-					}
+				err = &roachpb.RangeFeedRetryError{
+					// This is really RangeFeedRetryError_REASON_NO_LEASEHOLDER,
+					// but some 21.1 versions will crash on unrecognized reasons.
+					Reason: roachpb.RangeFeedRetryError_REASON_RANGE_SPLIT,
 				}
 			}
 			return roachpb.NewError(err)

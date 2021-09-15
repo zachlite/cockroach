@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"math"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -24,8 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
@@ -38,7 +37,7 @@ import (
 var hashAggregatorTestCases = []aggregatorTestCase{
 	{
 		name: "carryBetweenBatches",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 1},
 			{1, 5},
@@ -63,7 +62,7 @@ var hashAggregatorTestCases = []aggregatorTestCase{
 	},
 	{
 		name: "bucketCollision",
-		typs: types.TwoIntCols,
+		typs: rowenc.TwoIntCols,
 		input: colexectestutils.Tuples{
 			{0, 3},
 			{0, 4},
@@ -143,8 +142,6 @@ func TestHashAggregator(t *testing.T) {
 				OutputTypes:    outputTypes,
 			},
 				nil, /* newSpillingQueueArgs */
-				testAllocator,
-				math.MaxInt64,
 			)
 		})
 	}
@@ -176,7 +173,7 @@ func BenchmarkHashAggregatorInputTuplesTracking(b *testing.B) {
 			for _, agg := range []aggType{
 				{
 					new: func(args *colexecagg.NewAggregatorArgs) (colexecop.ResettableOperator, error) {
-						return NewHashAggregator(args, nil /* newSpillingQueueArgs */, testAllocator, math.MaxInt64)
+						return NewHashAggregator(args, nil /* newSpillingQueueArgs */)
 					},
 					name: "tracking=false",
 				},
@@ -187,11 +184,11 @@ func BenchmarkHashAggregatorInputTuplesTracking(b *testing.B) {
 						return NewHashAggregator(args, &colexecutils.NewSpillingQueueArgs{
 							UnlimitedAllocator: colmem.NewAllocator(ctx, &spillingQueueMemAcc, testColumnFactory),
 							Types:              args.InputTypes,
-							MemoryLimit:        execinfra.DefaultMemoryLimit,
+							MemoryLimit:        colexecop.DefaultMemoryLimit,
 							DiskQueueCfg:       queueCfg,
 							FDSemaphore:        &colexecop.TestingSemaphore{},
 							DiskAcc:            testDiskAcc,
-						}, testAllocator, math.MaxInt64)
+						})
 					},
 					name: "tracking=true",
 				},

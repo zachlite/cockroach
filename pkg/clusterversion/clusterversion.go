@@ -201,7 +201,7 @@ func (v *handleImpl) SetActiveVersion(ctx context.Context, cv ClusterVersion) er
 		return err
 	}
 
-	version.SetInternal(ctx, v.sv, encoded)
+	version.SetInternal(v.sv, encoded)
 	return nil
 }
 

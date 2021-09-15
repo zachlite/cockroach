@@ -16,16 +16,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
-// StmtFingerprintID is the type of a Statement's fingerprint ID.
-type StmtFingerprintID uint64
+// StmtID is the type of a Statement ID.
+type StmtID uint64
 
-// ConstructStatementFingerprintID constructs an ID by hashing an anonymized query, its database
+// ConstructStatementID constructs an ID by hashing an anonymized query, its database
 // and failure status, and if it was part of an implicit txn. At the time of writing,
 // these are the axis' we use to bucket queries for stats collection
 // (see stmtKey).
-func ConstructStatementFingerprintID(
+func ConstructStatementID(
 	anonymizedStmt string, failed bool, implicitTxn bool, database string,
-) StmtFingerprintID {
+) StmtID {
 	fnv := util.MakeFNV64()
 	for _, c := range anonymizedStmt {
 		fnv.Add(uint64(c))
@@ -43,16 +43,7 @@ func ConstructStatementFingerprintID(
 	} else {
 		fnv.Add('E')
 	}
-	return StmtFingerprintID(fnv.Sum())
-}
-
-// TransactionFingerprintID is the hashed string constructed using the
-// individual statement fingerprint IDs that comprise the transaction.
-type TransactionFingerprintID uint64
-
-// Size returns the size of the TransactionFingerprintID.
-func (t TransactionFingerprintID) Size() int64 {
-	return 8
+	return StmtID(fnv.Sum())
 }
 
 // GetVariance retrieves the variance of the values.

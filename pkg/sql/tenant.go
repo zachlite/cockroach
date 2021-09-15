@@ -157,8 +157,8 @@ func (p *planner) CreateTenant(ctx context.Context, tenID uint64) error {
 	// Initialize the tenant's keyspace.
 	schema := bootstrap.MakeMetadataSchema(
 		codec,
-		p.ExtendedEvalContext().ExecCfg.DefaultZoneConfig, /* defaultZoneConfig */
-		nil, /* defaultSystemZoneConfig */
+		nil, /* defaultZoneConfig */
+		nil, /* defaultZoneConfig */
 	)
 	kvs, splits := schema.GetInitialValues()
 
@@ -226,7 +226,7 @@ func generateTenantClusterSettingKV(
 	kvs, err := rowenc.EncodePrimaryIndex(
 		codec,
 		systemschema.SettingsTable,
-		systemschema.SettingsTable.GetPrimaryIndex(),
+		systemschema.SettingsTable.GetPrimaryIndex().IndexDesc(),
 		catalog.ColumnIDToOrdinalMap(systemschema.SettingsTable.PublicColumns()),
 		[]tree.Datum{
 			tree.NewDString(clusterversion.KeyVersionSetting),      // name
@@ -405,27 +405,4 @@ func (p *planner) GCTenant(ctx context.Context, tenID uint64) error {
 	}
 
 	return GCTenantJob(ctx, p.ExecCfg(), p.Txn(), p.User(), tenID)
-}
-
-// UpdateTenantResourceLimits implements the tree.TenantOperator interface.
-func (p *planner) UpdateTenantResourceLimits(
-	ctx context.Context,
-	tenantID uint64,
-	availableRU float64,
-	refillRate float64,
-	maxBurstRU float64,
-	asOf time.Time,
-	asOfConsumedRequestUnits float64,
-) error {
-	const op = "update-resource-limits"
-	if err := rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op); err != nil {
-		return err
-	}
-	if err := rejectIfSystemTenant(tenantID, op); err != nil {
-		return err
-	}
-	return p.ExecCfg().TenantUsageServer.ReconfigureTokenBucket(
-		ctx, p.Txn(), roachpb.MakeTenantID(tenantID),
-		availableRU, refillRate, maxBurstRU, asOf, asOfConsumedRequestUnits,
-	)
 }

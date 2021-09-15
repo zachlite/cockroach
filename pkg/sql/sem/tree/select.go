@@ -238,7 +238,6 @@ func (node *TableExprs) Format(ctx *FmtCtx) {
 type TableExpr interface {
 	NodeFormatter
 	tableExpr()
-	WalkTableExpr(Visitor) TableExpr
 }
 
 func (*AliasedTableExpr) tableExpr() {}
@@ -268,7 +267,6 @@ type IndexID uint32
 //  - FORCE_INDEX=<index_name|index_id>
 //  - ASC / DESC
 //  - NO_INDEX_JOIN
-//  - NO_ZIGZAG_JOIN
 //  - IGNORE_FOREIGN_KEYS
 // It is used optionally after a table name in SELECT statements.
 type IndexFlags struct {
@@ -279,8 +277,6 @@ type IndexFlags struct {
 	Direction Direction
 	// NoIndexJoin cannot be specified together with an index.
 	NoIndexJoin bool
-	// NoZigzagJoin indicates we should not plan a zigzag join for this scan.
-	NoZigzagJoin bool
 	// IgnoreForeignKeys disables optimizations based on outbound foreign key
 	// references from this table. This is useful in particular for scrub queries
 	// used to verify the consistency of foreign key relations.
@@ -302,9 +298,6 @@ func (ih *IndexFlags) CombineWith(other *IndexFlags) error {
 	if ih.NoIndexJoin && other.NoIndexJoin {
 		return errors.New("NO_INDEX_JOIN specified multiple times")
 	}
-	if ih.NoZigzagJoin && other.NoZigzagJoin {
-		return errors.New("NO_ZIGZAG_JOIN specified multiple times")
-	}
 	if ih.IgnoreForeignKeys && other.IgnoreForeignKeys {
 		return errors.New("IGNORE_FOREIGN_KEYS specified multiple times")
 	}
@@ -313,7 +306,6 @@ func (ih *IndexFlags) CombineWith(other *IndexFlags) error {
 	}
 	result := *ih
 	result.NoIndexJoin = ih.NoIndexJoin || other.NoIndexJoin
-	result.NoZigzagJoin = ih.NoZigzagJoin || other.NoZigzagJoin
 	result.IgnoreForeignKeys = ih.IgnoreForeignKeys || other.IgnoreForeignKeys
 	result.IgnoreUniqueWithoutIndexKeys = ih.IgnoreUniqueWithoutIndexKeys ||
 		other.IgnoreUniqueWithoutIndexKeys
@@ -355,8 +347,8 @@ func (ih *IndexFlags) Check() error {
 // Format implements the NodeFormatter interface.
 func (ih *IndexFlags) Format(ctx *FmtCtx) {
 	ctx.WriteByte('@')
-	if !ih.NoIndexJoin && !ih.NoZigzagJoin && !ih.IgnoreForeignKeys &&
-		!ih.IgnoreUniqueWithoutIndexKeys && ih.Direction == 0 {
+	if !ih.NoIndexJoin && !ih.IgnoreForeignKeys && !ih.IgnoreUniqueWithoutIndexKeys &&
+		ih.Direction == 0 {
 		if ih.Index != "" {
 			ctx.FormatNode(&ih.Index)
 		} else {
@@ -384,11 +376,6 @@ func (ih *IndexFlags) Format(ctx *FmtCtx) {
 		if ih.NoIndexJoin {
 			sep()
 			ctx.WriteString("NO_INDEX_JOIN")
-		}
-
-		if ih.NoZigzagJoin {
-			sep()
-			ctx.WriteString("NO_ZIGZAG_JOIN")
 		}
 
 		if ih.IgnoreForeignKeys {
@@ -826,32 +813,6 @@ const (
 	GROUPS
 )
 
-// Name returns a string representation of the window frame mode to be used in
-// struct names for generated code.
-func (m WindowFrameMode) Name() string {
-	switch m {
-	case RANGE:
-		return "Range"
-	case ROWS:
-		return "Rows"
-	case GROUPS:
-		return "Groups"
-	}
-	return ""
-}
-
-func (m WindowFrameMode) String() string {
-	switch m {
-	case RANGE:
-		return "RANGE"
-	case ROWS:
-		return "ROWS"
-	case GROUPS:
-		return "GROUPS"
-	}
-	return ""
-}
-
 // OverrideWindowDef implements the logic to have a base window definition which
 // then gets augmented by a different window definition.
 func OverrideWindowDef(base *WindowDef, override WindowDef) (WindowDef, error) {
@@ -897,40 +858,6 @@ func (ft WindowFrameBoundType) IsOffset() bool {
 	return ft == OffsetPreceding || ft == OffsetFollowing
 }
 
-// Name returns a string representation of the bound type to be used in struct
-// names for generated code.
-func (ft WindowFrameBoundType) Name() string {
-	switch ft {
-	case UnboundedPreceding:
-		return "UnboundedPreceding"
-	case OffsetPreceding:
-		return "OffsetPreceding"
-	case CurrentRow:
-		return "CurrentRow"
-	case OffsetFollowing:
-		return "OffsetFollowing"
-	case UnboundedFollowing:
-		return "UnboundedFollowing"
-	}
-	return ""
-}
-
-func (ft WindowFrameBoundType) String() string {
-	switch ft {
-	case UnboundedPreceding:
-		return "UNBOUNDED PRECEDING"
-	case OffsetPreceding:
-		return "OFFSET PRECEDING"
-	case CurrentRow:
-		return "CURRENT ROW"
-	case OffsetFollowing:
-		return "OFFSET FOLLOWING"
-	case UnboundedFollowing:
-		return "UNBOUNDED FOLLOWING"
-	}
-	return ""
-}
-
 // WindowFrameBound specifies the offset and the type of boundary.
 type WindowFrameBound struct {
 	BoundType  WindowFrameBoundType
@@ -967,36 +894,6 @@ const (
 	// ExcludeTies represents EXCLUDE TIES mode of frame exclusion.
 	ExcludeTies
 )
-
-func (node WindowFrameExclusion) String() string {
-	switch node {
-	case NoExclusion:
-		return "EXCLUDE NO ROWS"
-	case ExcludeCurrentRow:
-		return "EXCLUDE CURRENT ROW"
-	case ExcludeGroup:
-		return "EXCLUDE GROUP"
-	case ExcludeTies:
-		return "EXCLUDE TIES"
-	}
-	return ""
-}
-
-// Name returns a string representation of the exclusion type to be used in
-// struct names for generated code.
-func (node WindowFrameExclusion) Name() string {
-	switch node {
-	case NoExclusion:
-		return "NoExclusion"
-	case ExcludeCurrentRow:
-		return "ExcludeCurrentRow"
-	case ExcludeGroup:
-		return "ExcludeGroup"
-	case ExcludeTies:
-		return "ExcludeTies"
-	}
-	return ""
-}
 
 // WindowFrame represents static state of window frame over which calculations are made.
 type WindowFrame struct {

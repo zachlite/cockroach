@@ -115,8 +115,6 @@ type RestoreOptions struct {
 	SkipMissingSequenceOwners bool
 	SkipMissingViews          bool
 	Detached                  bool
-	SkipLocalitiesCheck       bool
-	DebugPauseOn              Expr
 }
 
 var _ NodeFormatter = &RestoreOptions{}
@@ -177,11 +175,7 @@ func (o *KVOptions) Format(ctx *FmtCtx) {
 		if i > 0 {
 			ctx.WriteString(", ")
 		}
-		// KVOption Key values never contain PII and should be distinguished
-		// for feature tracking purposes.
-		ctx.WithFlags(ctx.flags&^FmtMarkRedactionNode, func() {
-			ctx.FormatNode(&n.Key)
-		})
+		ctx.FormatNode(&n.Key)
 		if n.Value != nil {
 			ctx.WriteString(` = `)
 			ctx.FormatNode(n.Value)
@@ -321,12 +315,6 @@ func (o *RestoreOptions) Format(ctx *FmtCtx) {
 		ctx.FormatNode(o.IntoDB)
 	}
 
-	if o.DebugPauseOn != nil {
-		maybeAddSep()
-		ctx.WriteString("debug_pause_on = ")
-		ctx.FormatNode(o.DebugPauseOn)
-	}
-
 	if o.SkipMissingFKs {
 		maybeAddSep()
 		ctx.WriteString("skip_missing_foreign_keys")
@@ -350,11 +338,6 @@ func (o *RestoreOptions) Format(ctx *FmtCtx) {
 	if o.Detached {
 		maybeAddSep()
 		ctx.WriteString("detached")
-	}
-
-	if o.SkipLocalitiesCheck {
-		maybeAddSep()
-		ctx.WriteString("skip_localities_check")
 	}
 }
 
@@ -419,20 +402,6 @@ func (o *RestoreOptions) CombineWith(other *RestoreOptions) error {
 		o.Detached = other.Detached
 	}
 
-	if o.SkipLocalitiesCheck {
-		if other.SkipLocalitiesCheck {
-			return errors.New("skip_localities_check specified multiple times")
-		}
-	} else {
-		o.SkipLocalitiesCheck = other.SkipLocalitiesCheck
-	}
-
-	if o.DebugPauseOn == nil {
-		o.DebugPauseOn = other.DebugPauseOn
-	} else if other.DebugPauseOn != nil {
-		return errors.New("debug_pause_on specified multiple times")
-	}
-
 	return nil
 }
 
@@ -446,7 +415,5 @@ func (o RestoreOptions) IsDefault() bool {
 		cmp.Equal(o.DecryptionKMSURI, options.DecryptionKMSURI) &&
 		o.EncryptionPassphrase == options.EncryptionPassphrase &&
 		o.IntoDB == options.IntoDB &&
-		o.Detached == options.Detached &&
-		o.SkipLocalitiesCheck == options.SkipLocalitiesCheck &&
-		o.DebugPauseOn == options.DebugPauseOn
+		o.Detached == options.Detached
 }

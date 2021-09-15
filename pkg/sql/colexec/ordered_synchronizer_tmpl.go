@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
@@ -34,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -56,12 +55,9 @@ const _TYPE_WIDTH = 0
 // stream of rows, ordered according to a set of columns. The rows in each input
 // stream are assumed to be ordered according to the same set of columns.
 type OrderedSynchronizer struct {
-	colexecop.InitHelper
-	span *tracing.Span
-
-	accountingHelper      colmem.SetAccountingHelper
+	allocator             *colmem.Allocator
 	memoryLimit           int64
-	inputs                []colexecargs.OpWithMetaInfo
+	inputs                []SynchronizerInput
 	ordering              colinfo.ColumnOrdering
 	typs                  []*types.T
 	canonicalTypeFamilies []types.Family
@@ -77,10 +73,6 @@ type OrderedSynchronizer struct {
 	heap []int
 	// comparators stores one comparator per ordering column.
 	comparators []vecComparator
-	// maxCapacity if non-zero indicates the target capacity of the output
-	// batch. It is set when, after setting a row, we realize that the output
-	// batch has exceeded the memory limit.
-	maxCapacity int
 	output      coldata.Batch
 	outNulls    []*coldata.Nulls
 	// In order to reduce the number of interface conversions, we will get access
@@ -117,7 +109,7 @@ func (o *OrderedSynchronizer) ChildCount(verbose bool) int {
 
 // Child implements the execinfrapb.OpNode interface.
 func (o *OrderedSynchronizer) Child(nth int, verbose bool) execinfra.OpNode {
-	return o.inputs[nth].Root
+	return o.inputs[nth].Op
 }
 
 // NewOrderedSynchronizer creates a new OrderedSynchronizer.
@@ -125,28 +117,27 @@ func (o *OrderedSynchronizer) Child(nth int, verbose bool) execinfra.OpNode {
 func NewOrderedSynchronizer(
 	allocator *colmem.Allocator,
 	memoryLimit int64,
-	inputs []colexecargs.OpWithMetaInfo,
+	inputs []SynchronizerInput,
 	typs []*types.T,
 	ordering colinfo.ColumnOrdering,
-) *OrderedSynchronizer {
-	os := &OrderedSynchronizer{
+) (*OrderedSynchronizer, error) {
+	return &OrderedSynchronizer{
+		allocator:             allocator,
 		memoryLimit:           memoryLimit,
 		inputs:                inputs,
 		ordering:              ordering,
 		typs:                  typs,
 		canonicalTypeFamilies: typeconv.ToCanonicalTypeFamilies(typs),
-	}
-	os.accountingHelper.Init(allocator, typs, nil /* notNeededVecIdxs */)
-	return os
+	}, nil
 }
 
 // Next is part of the Operator interface.
-func (o *OrderedSynchronizer) Next() coldata.Batch {
+func (o *OrderedSynchronizer) Next(ctx context.Context) coldata.Batch {
 	if o.inputBatches == nil {
 		o.inputBatches = make([]coldata.Batch, len(o.inputs))
 		o.heap = make([]int, 0, len(o.inputs))
 		for i := range o.inputs {
-			o.inputBatches[i] = o.inputs[i].Root.Next()
+			o.inputBatches[i] = o.inputs[i].Op.Next(ctx)
 			o.updateComparators(i)
 			if o.inputBatches[i].Length() > 0 {
 				o.heap = append(o.heap, i)
@@ -156,64 +147,61 @@ func (o *OrderedSynchronizer) Next() coldata.Batch {
 	}
 	o.resetOutput()
 	outputIdx := 0
-	for outputIdx < o.output.Capacity() && (o.maxCapacity == 0 || outputIdx < o.maxCapacity) {
-		if o.Len() == 0 {
-			// All inputs exhausted.
-			break
-		}
+	o.allocator.PerformOperation(o.output.ColVecs(), func() {
+		for outputIdx < o.output.Capacity() {
+			if o.Len() == 0 {
+				// All inputs exhausted.
+				break
+			}
 
-		minBatch := o.heap[0]
-		// Copy the min row into the output.
-		batch := o.inputBatches[minBatch]
-		srcRowIdx := o.inputIndices[minBatch]
-		if sel := batch.Selection(); sel != nil {
-			srcRowIdx = sel[srcRowIdx]
-		}
-		for i := range o.typs {
-			vec := batch.ColVec(i)
-			if vec.Nulls().MaybeHasNulls() && vec.Nulls().NullAt(srcRowIdx) {
-				o.outNulls[i].SetNull(outputIdx)
-			} else {
-				switch o.canonicalTypeFamilies[i] {
-				// {{range .}}
-				case _CANONICAL_TYPE_FAMILY:
-					switch o.typs[i].Width() {
-					// {{range .WidthOverloads}}
-					case _TYPE_WIDTH:
-						srcCol := vec._TYPE()
-						outCol := o.out_TYPECols[o.outColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
+			minBatch := o.heap[0]
+			// Copy the min row into the output.
+			batch := o.inputBatches[minBatch]
+			srcRowIdx := o.inputIndices[minBatch]
+			if sel := batch.Selection(); sel != nil {
+				srcRowIdx = sel[srcRowIdx]
+			}
+			for i := range o.typs {
+				vec := batch.ColVec(i)
+				if vec.Nulls().MaybeHasNulls() && vec.Nulls().NullAt(srcRowIdx) {
+					o.outNulls[i].SetNull(outputIdx)
+				} else {
+					switch o.canonicalTypeFamilies[i] {
+					// {{range .}}
+					case _CANONICAL_TYPE_FAMILY:
+						switch o.typs[i].Width() {
+						// {{range .WidthOverloads}}
+						case _TYPE_WIDTH:
+							srcCol := vec._TYPE()
+							outCol := o.out_TYPECols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							execgen.SET(outCol, outputIdx, v)
+							// {{end}}
+						}
 						// {{end}}
+					default:
+						colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", o.typs[i].String()))
 					}
-					// {{end}}
-				default:
-					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", o.typs[i].String()))
 				}
 			}
-		}
 
-		// Advance the input batch, fetching a new batch if necessary.
-		if o.inputIndices[minBatch]+1 < o.inputBatches[minBatch].Length() {
-			o.inputIndices[minBatch]++
-		} else {
-			o.inputBatches[minBatch] = o.inputs[minBatch].Root.Next()
-			o.inputIndices[minBatch] = 0
-			o.updateComparators(minBatch)
-		}
-		if o.inputBatches[minBatch].Length() == 0 {
-			heap.Remove(o, 0)
-		} else {
-			heap.Fix(o, 0)
-		}
+			// Advance the input batch, fetching a new batch if necessary.
+			if o.inputIndices[minBatch]+1 < o.inputBatches[minBatch].Length() {
+				o.inputIndices[minBatch]++
+			} else {
+				o.inputBatches[minBatch] = o.inputs[minBatch].Op.Next(ctx)
+				o.inputIndices[minBatch] = 0
+				o.updateComparators(minBatch)
+			}
+			if o.inputBatches[minBatch].Length() == 0 {
+				heap.Remove(o, 0)
+			} else {
+				heap.Fix(o, 0)
+			}
 
-		// Account for the memory of the row we have just set.
-		o.accountingHelper.AccountForSet(outputIdx)
-		outputIdx++
-		if o.maxCapacity == 0 && o.accountingHelper.Allocator.Used() >= o.memoryLimit {
-			o.maxCapacity = outputIdx
+			outputIdx++
 		}
-	}
+	})
 
 	o.output.SetLength(outputIdx)
 	return o.output
@@ -221,8 +209,8 @@ func (o *OrderedSynchronizer) Next() coldata.Batch {
 
 func (o *OrderedSynchronizer) resetOutput() {
 	var reallocated bool
-	o.output, reallocated = o.accountingHelper.ResetMaybeReallocate(
-		o.typs, o.output, 1 /* minDesiredCapacity */, o.memoryLimit,
+	o.output, reallocated = o.allocator.ResetMaybeReallocate(
+		o.typs, o.output, 1 /* minCapacity */, o.memoryLimit,
 	)
 	if reallocated {
 		// {{range .}}
@@ -251,16 +239,12 @@ func (o *OrderedSynchronizer) resetOutput() {
 }
 
 // Init is part of the Operator interface.
-func (o *OrderedSynchronizer) Init(ctx context.Context) {
-	if !o.InitHelper.Init(ctx) {
-		return
-	}
-	o.Ctx, o.span = execinfra.ProcessorSpan(o.Ctx, "ordered sync")
+func (o *OrderedSynchronizer) Init() {
 	o.inputIndices = make([]int, len(o.inputs))
 	o.outNulls = make([]*coldata.Nulls, len(o.typs))
 	o.outColsMap = make([]int, len(o.typs))
 	for i := range o.inputs {
-		o.inputs[i].Root.Init(o.Ctx)
+		o.inputs[i].Op.Init()
 	}
 	o.comparators = make([]vecComparator, len(o.ordering))
 	for i := range o.ordering {
@@ -269,33 +253,18 @@ func (o *OrderedSynchronizer) Init(ctx context.Context) {
 	}
 }
 
-func (o *OrderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetadata {
+func (o *OrderedSynchronizer) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	var bufferedMeta []execinfrapb.ProducerMetadata
-	if o.span != nil {
-		for i := range o.inputs {
-			for _, stats := range o.inputs[i].StatsCollectors {
-				o.span.RecordStructured(stats.GetStats())
-			}
-		}
-		if meta := execinfra.GetTraceDataAsMetadata(o.span); meta != nil {
-			bufferedMeta = append(bufferedMeta, *meta)
-		}
-	}
 	for _, input := range o.inputs {
-		bufferedMeta = append(bufferedMeta, input.MetadataSources.DrainMeta()...)
+		bufferedMeta = append(bufferedMeta, input.MetadataSources.DrainMeta(ctx)...)
 	}
 	return bufferedMeta
 }
 
-func (o *OrderedSynchronizer) Close() error {
-	o.accountingHelper.Release()
+func (o *OrderedSynchronizer) Close(ctx context.Context) error {
 	for _, input := range o.inputs {
-		input.ToClose.CloseAndLogOnErr(o.EnsureCtx(), "ordered synchronizer")
+		input.ToClose.CloseAndLogOnErr(ctx, "ordered synchronizer")
 	}
-	if o.span != nil {
-		o.span.Finish()
-	}
-	*o = OrderedSynchronizer{}
 	return nil
 }
 

@@ -122,14 +122,6 @@ sinks:
     channels: [OPS, HEALTH, STORAGE, SQL_SCHEMA, USER_ADMIN, PRIVILEGES, SENSITIVE_ACCESS,
       SQL_EXEC, SQL_PERF, SQL_INTERNAL_PERF, TELEMETRY]
 
-# Verify that channels can be filtered separately.
-yaml
-sinks: {stderr: {channels: {INFO: 'DEV,HEALTH', WARNING: TELEMETRY}}}
-----
-sinks:
-  stderr:
-    channels: {INFO: [DEV, HEALTH], WARNING: [TELEMETRY]}
-
 # Try populating all the fields.
 yaml
 file-defaults:
@@ -156,7 +148,6 @@ sinks:
     default:
       address: 127.0.0.1:5170
     other:
-      channels: {WARNING: HEALTH}
       net: udp
       address: 127.0.0.1:5111
 
@@ -188,7 +179,6 @@ sinks:
     default:
       address: 127.0.0.1:5170
     other:
-      channels: {WARNING: [HEALTH]}
       net: udp
       address: 127.0.0.1:5111
   stderr:
@@ -251,3 +241,4 @@ file-defaults:
   file-permissions: 0454
 ----
 ERROR: file-permissions must not be executable: 0454
+

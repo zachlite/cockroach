@@ -802,97 +802,17 @@ var pgBuiltins = map[string]builtinDefinition{
 		makePGGetViewDef(tree.ArgTypes{{"view_oid", types.Oid}, {"pretty_bool", types.Bool}}),
 	),
 
-	"pg_get_serial_sequence": makeBuiltin(
-		tree.FunctionProperties{
-			Category: categorySequences,
-		},
-		tree.Overload{
-			Types:      tree.ArgTypes{{"table_name", types.String}, {"column_name", types.String}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				tableName := tree.MustBeDString(args[0])
-				columnName := tree.MustBeDString(args[1])
-				qualifiedName, err := parser.ParseQualifiedTableName(string(tableName))
-				if err != nil {
-					return nil, err
-				}
-				res, err := ctx.Sequence.GetSerialSequenceNameFromColumn(ctx.Ctx(), qualifiedName, tree.Name(columnName))
-				if err != nil {
-					return nil, err
-				}
-				if res == nil {
-					return tree.DNull, nil
-				}
-				res.ExplicitCatalog = false
-				return tree.NewDString(fmt.Sprintf(`%s.%s`, res.Schema(), res.Object())), nil
-			},
-			Info:       "Returns the name of the sequence used by the given column_name in the table table_name.",
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
 	// pg_my_temp_schema returns the OID of session's temporary schema, or 0 if
-	// none.
+	// none. CockroachDB doesn't support this, so it always returns 0.
 	// https://www.postgresql.org/docs/11/functions-info.html
 	"pg_my_temp_schema": makeBuiltin(defProps(),
 		tree.Overload{
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.Oid),
-			Fn: func(ctx *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
-				schema := ctx.SessionData().SearchPath.GetTemporarySchemaName()
-				if schema == "" {
-					// The session has not yet created a temporary schema.
-					return tree.NewDOid(0), nil
-				}
-				oid, err := ctx.Planner.ResolveOIDFromString(
-					ctx.Ctx(), types.RegNamespace, tree.NewDString(schema))
-				if err != nil {
-					// If the OID lookup returns an UndefinedObject error, return 0
-					// instead. We can hit this path if the session created a temporary
-					// schema in one database and then changed databases.
-					if pgerror.GetPGCode(err) == pgcode.UndefinedObject {
-						return tree.NewDOid(0), nil
-					}
-					return nil, err
-				}
-				return oid, nil
+			Fn: func(_ *tree.EvalContext, _ tree.Datums) (tree.Datum, error) {
+				return tree.NewDOid(0), nil
 			},
-			Info: "Returns the OID of the current session's temporary schema, " +
-				"or zero if it has none (because it has not created any temporary tables).",
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// pg_is_other_temp_schema returns true if the given OID is the OID of another
-	// session's temporary schema.
-	// https://www.postgresql.org/docs/11/functions-info.html
-	"pg_is_other_temp_schema": makeBuiltin(defProps(),
-		tree.Overload{
-			Types:      tree.ArgTypes{{"oid", types.Oid}},
-			ReturnType: tree.FixedReturnType(types.Bool),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				schemaArg := tree.UnwrapDatum(ctx, args[0])
-				schema, err := getNameForArg(ctx, schemaArg, "pg_namespace", "nspname")
-				if err != nil {
-					return nil, err
-				}
-				if schema == "" {
-					// OID does not exist.
-					return tree.DBoolFalse, nil
-				}
-				if !strings.HasPrefix(schema, catconstants.PgTempSchemaName) {
-					// OID is not a reference to a temporary schema.
-					//
-					// This string matching is what Postgres does too. See isAnyTempNamespace.
-					return tree.DBoolFalse, nil
-				}
-				if schema == ctx.SessionData().SearchPath.GetTemporarySchemaName() {
-					// OID is a reference to this session's temporary schema.
-					return tree.DBoolFalse, nil
-				}
-				return tree.DBoolTrue, nil
-			},
-			Info:       "Returns true if the given OID is the OID of another session's temporary schema. (This can be useful, for example, to exclude other sessions' temporary tables from a catalog display.)",
+			Info:       notUsableInfo,
 			Volatility: tree.VolatilityStable,
 		},
 	),
@@ -906,30 +826,6 @@ var pgBuiltins = map[string]builtinDefinition{
 				return tree.NewDString(args[0].ResolvedType().SQLStandardName()), nil
 			},
 			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
-
-	// https://www.postgresql.org/docs/10/functions-info.html#FUNCTIONS-INFO-CATALOG-TABLE
-	"pg_collation_for": makeBuiltin(
-		tree.FunctionProperties{Category: categoryString},
-		tree.Overload{
-			Types:      tree.ArgTypes{{"str", types.Any}},
-			ReturnType: tree.FixedReturnType(types.String),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				var collation string
-				switch t := args[0].(type) {
-				case *tree.DString:
-					collation = "default"
-				case *tree.DCollatedString:
-					collation = t.Locale
-				default:
-					return tree.DNull, pgerror.Newf(pgcode.DatatypeMismatch,
-						"collations are not supported by type: %s", t.ResolvedType())
-				}
-				return tree.NewDString(fmt.Sprintf(`"%s"`, collation)), nil
-			},
-			Info:       "Returns the collation of the argument",
 			Volatility: tree.VolatilityStable,
 		},
 	),
@@ -1004,7 +900,7 @@ var pgBuiltins = map[string]builtinDefinition{
 					return tree.DNull, nil
 				}
 				maybeTypmod := args[1]
-				oid := oid.Oid(oidArg.(*tree.DOid).DInt)
+				oid := oid.Oid(int(oidArg.(*tree.DOid).DInt))
 				typ, ok := types.OidToType[oid]
 				if !ok {
 					// If the type wasn't statically known, try looking it up as a user
@@ -2017,117 +1913,6 @@ SELECT description
 			Info:       "Return size in bytes of the column provided as an argument",
 			Volatility: tree.VolatilityImmutable,
 		}),
-
-	// NOTE: these two builtins could be defined as user-defined functions, like
-	// they are in Postgres:
-	// https://github.com/postgres/postgres/blob/master/src/backend/catalog/information_schema.sql
-	//
-	//  CREATE FUNCTION _pg_truetypid(pg_attribute, pg_type) RETURNS oid
-	//    LANGUAGE sql
-	//    IMMUTABLE
-	//    PARALLEL SAFE
-	//    RETURNS NULL ON NULL INPUT
-	//  RETURN CASE WHEN $2.typtype = 'd' THEN $2.typbasetype ELSE $1.atttypid END;
-	//
-	"information_schema._pg_truetypid": pgTrueTypImpl("atttypid", "typbasetype", types.Oid),
-	//
-	//  CREATE FUNCTION _pg_truetypmod(pg_attribute, pg_type) RETURNS int4
-	//    LANGUAGE sql
-	//    IMMUTABLE
-	//    PARALLEL SAFE
-	//    RETURNS NULL ON NULL INPUT
-	//  RETURN CASE WHEN $2.typtype = 'd' THEN $2.typtypmod ELSE $1.atttypmod END;
-	//
-	"information_schema._pg_truetypmod": pgTrueTypImpl("atttypmod", "typtypmod", types.Int4),
-
-	// NOTE: this could be defined as a user-defined function, like
-	// it is in Postgres:
-	// https://github.com/postgres/postgres/blob/master/src/backend/catalog/information_schema.sql
-	//
-	//  CREATE FUNCTION _pg_char_max_length(typid oid, typmod int4) RETURNS integer
-	//      LANGUAGE sql
-	//      IMMUTABLE
-	//      PARALLEL SAFE
-	//      RETURNS NULL ON NULL INPUT
-	//  RETURN
-	//    CASE WHEN $2 = -1 /* default typmod */
-	//         THEN null
-	//         WHEN $1 IN (1042, 1043) /* char, varchar */
-	//         THEN $2 - 4
-	//         WHEN $1 IN (1560, 1562) /* bit, varbit */
-	//         THEN $2
-	//         ELSE null
-	//    END;
-	//
-	"information_schema._pg_char_max_length": makeBuiltin(defProps(),
-		tree.Overload{
-			Types: tree.ArgTypes{
-				{"typid", types.Oid},
-				{"typmod", types.Int4},
-			},
-			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				typid := oid.Oid(args[0].(*tree.DOid).DInt)
-				typmod := *args[1].(*tree.DInt)
-				if typmod == -1 {
-					return tree.DNull, nil
-				} else if typid == oid.T_bpchar || typid == oid.T_varchar {
-					return tree.NewDInt(typmod - 4), nil
-				} else if typid == oid.T_bit || typid == oid.T_varbit {
-					return tree.NewDInt(typmod), nil
-				}
-				return tree.DNull, nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityImmutable,
-		},
-	),
-
-	// Given an index's OID and an underlying-table column number,
-	// _pg_index_position return the column's position in the index
-	// (or NULL if not there).
-	//
-	// NOTE: this could be defined as a user-defined function, like
-	// it is in Postgres:
-	// https://github.com/postgres/postgres/blob/master/src/backend/catalog/information_schema.sql
-	//
-	//  CREATE FUNCTION _pg_index_position(oid, smallint) RETURNS int
-	//      LANGUAGE sql STRICT STABLE
-	//  BEGIN ATOMIC
-	//  SELECT (ss.a).n FROM
-	//    (SELECT information_schema._pg_expandarray(indkey) AS a
-	//     FROM pg_catalog.pg_index WHERE indexrelid = $1) ss
-	//    WHERE (ss.a).x = $2;
-	//  END;
-	//
-	"information_schema._pg_index_position": makeBuiltin(defProps(),
-		tree.Overload{
-			Types: tree.ArgTypes{
-				{"oid", types.Oid},
-				{"col", types.Int2},
-			},
-			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				r, err := ctx.InternalExecutor.QueryRow(
-					ctx.Ctx(), "information_schema._pg_index_position",
-					ctx.Txn,
-					`SELECT (ss.a).n FROM
-					  (SELECT information_schema._pg_expandarray(indkey) AS a
-					   FROM pg_catalog.pg_index WHERE indexrelid = $1) ss
-            WHERE (ss.a).x = $2`,
-					args[0], args[1])
-				if err != nil {
-					return nil, err
-				}
-				if len(r) == 0 {
-					return tree.DNull, nil
-				}
-				return r[0], nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityStable,
-		},
-	),
 }
 
 func getSessionVar(ctx *tree.EvalContext, settingName string, missingOk bool) (tree.Datum, error) {
@@ -2245,53 +2030,4 @@ func tableHasPrivilegeSpecifier(tableArg tree.Datum) (tree.HasPrivilegeSpecifier
 		return specifier, errors.AssertionFailedf("unknown privilege specifier: %#v", tableArg)
 	}
 	return specifier, nil
-}
-
-func pgTrueTypImpl(attrField, typField string, retType *types.T) builtinDefinition {
-	return makeBuiltin(defProps(),
-		tree.Overload{
-			Types: tree.ArgTypes{
-				{"pg_attribute", types.AnyTuple},
-				{"pg_type", types.AnyTuple},
-			},
-			ReturnType: tree.FixedReturnType(retType),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				// In Postgres, this builtin is statically typed to accept a
-				// pg_attribute record and a pg_type record. This isn't currently
-				// possible in CockroachDB, so instead, we accept any tuple and then
-				// perform a bit of dynamic typing to pull out the desired fields from
-				// the records.
-				fieldIdx := func(t *tree.DTuple, field string) int {
-					for i, label := range t.ResolvedType().TupleLabels() {
-						if label == field {
-							return i
-						}
-					}
-					return -1
-				}
-
-				pgAttr, pgType := args[0].(*tree.DTuple), args[1].(*tree.DTuple)
-				pgAttrFieldIdx := fieldIdx(pgAttr, attrField)
-				pgTypeTypeIdx := fieldIdx(pgType, "typtype")
-				pgTypeFieldIdx := fieldIdx(pgType, typField)
-				if pgAttrFieldIdx == -1 || pgTypeTypeIdx == -1 || pgTypeFieldIdx == -1 {
-					return nil, pgerror.Newf(pgcode.UndefinedFunction,
-						"No function matches the given name and argument types.")
-				}
-
-				pgAttrField := pgAttr.D[pgAttrFieldIdx]
-				pgTypeType := pgType.D[pgTypeTypeIdx].(*tree.DString)
-				pgTypeField := pgType.D[pgTypeFieldIdx]
-
-				// If this is a domain type, return the field from pg_type, otherwise,
-				// return the field from pg_attribute.
-				if *pgTypeType == "d" {
-					return pgTypeField, nil
-				}
-				return pgAttrField, nil
-			},
-			Info:       notUsableInfo,
-			Volatility: tree.VolatilityImmutable,
-		},
-	)
 }

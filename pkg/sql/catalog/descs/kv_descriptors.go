@@ -267,13 +267,9 @@ func (kd *kvDescriptors) getSchemasForDatabase(
 	}
 	if _, ok := kd.allSchemasForDatabase[dbID]; !ok {
 		var err error
-		allSchemas, err := resolver.GetForDatabase(ctx, txn, kd.codec, dbID)
+		kd.allSchemasForDatabase[dbID], err = resolver.GetForDatabase(ctx, txn, kd.codec, dbID)
 		if err != nil {
 			return nil, err
-		}
-		kd.allSchemasForDatabase[dbID] = make(map[descpb.ID]string)
-		for id, entry := range allSchemas {
-			kd.allSchemasForDatabase[dbID][id] = entry.Name
 		}
 	}
 	return kd.allSchemasForDatabase[dbID], nil

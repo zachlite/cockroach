@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cloud"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -50,21 +51,29 @@ func runImport(
 	// Used to send ingested import rows to the KV layer.
 	kvCh := make(chan row.KVBatch, 10)
 
-	// Install type metadata in all of the import tables.
-	importResolver := newImportTypeResolver(spec.Types)
-	for _, table := range spec.Tables {
-		if err := typedesc.HydrateTypesInTableDescriptor(ctx, table.Desc, importResolver); err != nil {
+	// Install type metadata in all of the import tables. The DB is nil in some
+	// tests, so check first here.
+	if flowCtx.Cfg.DB != nil {
+		if err := flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			resolver := flowCtx.TypeResolverFactory.NewTypeResolver(txn)
+			for _, table := range spec.Tables {
+				if err := typedesc.HydrateTypesInTableDescriptor(ctx, table.Desc, resolver); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
+		// Release leases on any accessed types now that type metadata is installed.
+		flowCtx.TypeResolverFactory.Descriptors.ReleaseAll(ctx)
 	}
 
 	evalCtx := flowCtx.NewEvalCtx()
 	// TODO(adityamaru): Should we just plumb the flowCtx instead of this
 	// assignment.
 	evalCtx.DB = flowCtx.Cfg.DB
-	semaCtx := tree.MakeSemaContext()
-	semaCtx.TypeResolver = importResolver
-	conv, err := makeInputConverter(ctx, &semaCtx, spec, evalCtx, kvCh, seqChunkProvider)
+	conv, err := makeInputConverter(ctx, spec, evalCtx, kvCh, seqChunkProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +414,6 @@ type parallelImportContext struct {
 	walltime         int64                   // Import time stamp.
 	numWorkers       int                     // Parallelism.
 	batchSize        int                     // Number of records to batch.
-	semaCtx          *tree.SemaContext       // Semantic analysis context.
 	evalCtx          *tree.EvalContext       // Evaluation context.
 	tableDesc        catalog.TableDescriptor // Table descriptor we're importing into.
 	targetCols       tree.NameList           // List of columns to import.  nil if importing all columns.
@@ -438,8 +446,8 @@ func makeDatumConverter(
 	ctx context.Context, importCtx *parallelImportContext, fileCtx *importFileContext,
 ) (*row.DatumRowConverter, error) {
 	conv, err := row.NewDatumRowConverter(
-		ctx, importCtx.semaCtx, importCtx.tableDesc, importCtx.targetCols, importCtx.evalCtx,
-		importCtx.kvCh, importCtx.seqChunkProvider, nil /* metrics */)
+		ctx, importCtx.tableDesc, importCtx.targetCols, importCtx.evalCtx, importCtx.kvCh,
+		importCtx.seqChunkProvider, nil /* metrics */)
 	if err == nil {
 		conv.KvBatch.Source = fileCtx.source
 	}

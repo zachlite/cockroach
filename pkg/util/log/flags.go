@@ -31,10 +31,6 @@ type config struct {
 	// used for testing.
 	showLogs bool
 
-	// testingLogConfig reflects the use of -test-log-config on the
-	// command line and is used for testing.
-	testLogConfig string
-
 	// flushWrites can be set asynchronously to force all file output to
 	// be flushed to disk immediately. This is set via SetAlwaysFlush()
 	// and used e.g. in start.go upon encountering errors.
@@ -46,15 +42,16 @@ var debugLog *loggerT
 func init() {
 	logflags.InitFlags(
 		&logging.showLogs,
-		&logging.testLogConfig,
 		&logging.vmoduleConfig.mu.vmodule,
 	)
 
 	// By default, we use and apply the test configuration.
 	// This can be overridden to use output to file in tests
 	// using TestLogScope.
-	cfg := getTestConfig(nil /* output to files disabled */, true /* mostly inline */)
-
+	cfg, err := getTestConfig(nil /* output to files disabled */)
+	if err != nil {
+		panic(err)
+	}
 	if _, err := ApplyConfig(cfg); err != nil {
 		panic(err)
 	}
@@ -117,10 +114,10 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		fd2CaptureCleanupFn()
 		secLoggersCancel()
 		for _, l := range secLoggers {
-			logging.allLoggers.del(l)
+			allLoggers.del(l)
 		}
 		for _, l := range sinkInfos {
-			logging.allSinkInfos.del(l)
+			allSinkInfos.del(l)
 		}
 	}
 
@@ -130,11 +127,6 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 			cleanupFn()
 		}
 	}()
-
-	// We're going to re-define loggers and sinks, so start with a fresh
-	// registry.
-	logging.allLoggers.clear()
-	logging.allSinkInfos.clear()
 
 	// If capture of internal fd2 writes is enabled, set it up here.
 	if config.CaptureFd2.Enable {
@@ -146,7 +138,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		// file header at the beginning of the file (which will contain
 		// a timestamp, command-line arguments, etc.).
 		secLogger := &loggerT{}
-		logging.allLoggers.put(secLogger)
+		allLoggers.put(secLogger)
 		secLoggers = append(secLoggers, secLogger)
 
 		// A pseudo file sink. Again, for convenience, so we don't need
@@ -174,17 +166,13 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 				BufferedWrites:  &bf,
 				FilePermissions: &fm,
 			},
-			Channels: logconfig.SelectChannels(channel.DEV),
-		}
-		if err := fakeConfig.Channels.Validate(fakeConfig.CommonSinkConfig.Filter); err != nil {
-			return nil, errors.NewAssertionErrorWithWrappedErrf(err, "programming error: incorrect filter config")
 		}
 		fileSinkInfo, fileSink, err := newFileSinkInfo("stderr", fakeConfig)
 		if err != nil {
 			return nil, err
 		}
 		sinkInfos = append(sinkInfos, fileSinkInfo)
-		logging.allSinkInfos.put(fileSinkInfo)
+		allSinkInfos.put(fileSinkInfo)
 
 		if fileSink.logFilesCombinedMaxSize > 0 {
 			// Do a start round of GC, so clear up past accumulated files.
@@ -239,15 +227,11 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 	if err := logging.stderrSinkInfoTemplate.applyConfig(config.Sinks.Stderr.CommonSinkConfig); err != nil {
 		return nil, err
 	}
-	logging.stderrSinkInfoTemplate.applyFilters(config.Sinks.Stderr.Channels)
 
 	// Create the per-channel loggers.
-	chans := make(map[Channel]*loggerT, len(logpb.Channel_name)-1)
+	chans := make(map[Channel]*loggerT, len(logpb.Channel_name))
 	for chi := range logpb.Channel_name {
 		ch := Channel(chi)
-		if ch == logpb.Channel_CHANNEL_MAX {
-			continue
-		}
 		chans[ch] = &loggerT{}
 		if ch == channel.DEV {
 			debugLog = chans[ch]
@@ -259,19 +243,19 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 	stderrSinkInfo := logging.stderrSinkInfoTemplate
 
 	// Connect the stderr channels.
-	for _, ch := range config.Sinks.Stderr.Channels.AllChannels.Channels {
+	for _, ch := range config.Sinks.Stderr.Channels.Channels {
 		// Note: we connect stderr even if the severity is NONE
 		// so that tests can raise the severity after configuration.
 		l := chans[ch]
 		l.sinkInfos = append(l.sinkInfos, &stderrSinkInfo)
 	}
 
-	attachSinkInfo := func(si *sinkInfo, chs *logconfig.ChannelFilters) {
+	attachSinkInfo := func(si *sinkInfo, chs []logpb.Channel) {
 		sinkInfos = append(sinkInfos, si)
-		logging.allSinkInfos.put(si)
+		allSinkInfos.put(si)
 
 		// Connect the channels for this sink.
-		for _, ch := range chs.AllChannels.Channels {
+		for _, ch := range chs {
 			l := chans[ch]
 			l.sinkInfos = append(l.sinkInfos, si)
 		}
@@ -289,7 +273,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		if err != nil {
 			return nil, err
 		}
-		attachSinkInfo(fileSinkInfo, &fc.Channels)
+		attachSinkInfo(fileSinkInfo, fc.Channels.Channels)
 
 		// Start the GC process. This ensures that old capture files get
 		// erased as new files get created.
@@ -305,7 +289,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		if err != nil {
 			return nil, err
 		}
-		attachSinkInfo(fluentSinkInfo, &fc.Channels)
+		attachSinkInfo(fluentSinkInfo, fc.Channels.Channels)
 	}
 
 	// Create the HTTP sinks.
@@ -317,7 +301,7 @@ func ApplyConfig(config logconfig.Config) (cleanupFn func(), err error) {
 		if err != nil {
 			return nil, err
 		}
-		attachSinkInfo(httpSinkInfo, &fc.Channels)
+		attachSinkInfo(httpSinkInfo, fc.Channels.Channels)
 	}
 
 	// Prepend the interceptor sink to all channels.
@@ -343,7 +327,6 @@ func newFileSinkInfo(
 	if err := info.applyConfig(c.CommonSinkConfig); err != nil {
 		return nil, nil, err
 	}
-	info.applyFilters(c.Channels)
 	fileSink := newFileSink(
 		*c.Dir,
 		fileNamePrefix,
@@ -364,7 +347,6 @@ func newFluentSinkInfo(c logconfig.FluentSinkConfig) (*sinkInfo, error) {
 	if err := info.applyConfig(c.CommonSinkConfig); err != nil {
 		return nil, err
 	}
-	info.applyFilters(c.Channels)
 	fluentSink := newFluentSink(c.Net, c.Address)
 	info.sink = fluentSink
 	return info, nil
@@ -375,7 +357,6 @@ func newHTTPSinkInfo(c logconfig.HTTPSinkConfig) (*sinkInfo, error) {
 	if err := info.applyConfig(c.CommonSinkConfig); err != nil {
 		return nil, err
 	}
-	info.applyFilters(c.Channels)
 	httpSink, err := newHTTPSink(*c.Address, httpSinkOptions{
 		method:            string(*c.Method),
 		unsafeTLS:         *c.UnsafeTLS,
@@ -389,16 +370,9 @@ func newHTTPSinkInfo(c logconfig.HTTPSinkConfig) (*sinkInfo, error) {
 	return info, nil
 }
 
-// applyFilters applies the channel filters to a sinkInfo.
-func (l *sinkInfo) applyFilters(chs logconfig.ChannelFilters) {
-	for ch, threshold := range chs.ChannelFilters {
-		l.threshold.set(ch, threshold)
-	}
-}
-
 // applyConfig applies a common sink configuration to a sinkInfo.
 func (l *sinkInfo) applyConfig(c logconfig.CommonSinkConfig) error {
-	l.threshold.setAll(severity.NONE)
+	l.threshold = c.Filter
 	l.redact = *c.Redact
 	l.redactable = *c.Redactable
 	l.editor = getEditor(SelectEditMode(*c.Redact, *c.Redactable))
@@ -416,6 +390,7 @@ func (l *sinkInfo) applyConfig(c logconfig.CommonSinkConfig) error {
 // holds into the sinkInfo parameters by reference and thus should
 // not be reused if the configuration can change asynchronously.
 func (l *sinkInfo) describeAppliedConfig() (c logconfig.CommonSinkConfig) {
+	c.Filter = l.threshold
 	c.Redact = &l.redact
 	c.Redactable = &l.redactable
 	c.Criticality = &l.criticality
@@ -465,14 +440,13 @@ func DescribeAppliedConfig() string {
 	config.Sinks.Stderr.CommonSinkConfig = logging.stderrSinkInfoTemplate.describeAppliedConfig()
 
 	describeConnections := func(l *loggerT, ch Channel,
-		target *sinkInfo, filters *logconfig.ChannelFilters) {
+		target *sinkInfo, list *logconfig.ChannelList) {
 		for _, s := range l.sinkInfos {
 			if s == target {
-				sev := s.threshold.get(ch)
-				filters.AddChannel(ch, sev)
+				list.Channels = append(list.Channels, ch)
 			}
 		}
-		_ = filters.Validate(logpb.Severity_UNKNOWN)
+		list.Sort()
 	}
 
 	// Describe the connections to the stderr sink.
@@ -487,7 +461,7 @@ func DescribeAppliedConfig() string {
 
 	// Describe the file sinks.
 	config.Sinks.FileGroups = make(map[string]*logconfig.FileSinkConfig)
-	_ = logging.allSinkInfos.iter(func(l *sinkInfo) error {
+	_ = allSinkInfos.iter(func(l *sinkInfo) error {
 		if cl := logging.testingFd2CaptureLogger; cl != nil && cl.sinkInfos[0] == l {
 			// Not a real sink. Omit.
 			return nil
@@ -532,7 +506,7 @@ func DescribeAppliedConfig() string {
 	// Describe the fluent sinks.
 	config.Sinks.FluentServers = make(map[string]*logconfig.FluentSinkConfig)
 	sIdx := 1
-	_ = logging.allSinkInfos.iter(func(l *sinkInfo) error {
+	_ = allSinkInfos.iter(func(l *sinkInfo) error {
 		fluentSink, ok := l.sink.(*fluentSink)
 		if !ok {
 			return nil

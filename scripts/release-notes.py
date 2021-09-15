@@ -155,10 +155,8 @@ def lookup_person(name, email):
 # Section titles for release notes.
 relnotetitles = {
     'cli change': "Command-line changes",
-    'ops change': "Operational changes",
     'sql change': "SQL language changes",
-    'api change': "API endpoint changes",
-    'ui change': "DB Console changes",
+    'admin ui change': "Admin UI changes",
     'general change': "General changes",
     'build change': "Build changes",
     'enterprise change': "Enterprise edition changes",
@@ -175,10 +173,8 @@ relnote_sec_order = [
     'general change',
     'enterprise change',
     'sql change',
-    'ops change',
     'cli change',
-    'api change',
-    'ui change',
+    'admin ui change',
     'bug fix',
     'performance improvement',
     'build change',
@@ -192,11 +188,7 @@ cat_misspells = {
     'bugfix': 'bug fix',
     'performance change': 'performance improvement',
     'performance': 'performance improvement',
-    'ui': 'ui change',
-    'operational change': 'ops change',
-    'admin ui': 'ui change',
-    'api': 'api change',
-    'http': 'api change',
+    'ui': 'admin ui change',
     'backwards-incompatible change': 'backward-incompatible change',
     'enterprise': 'enterprise change',
     'security': 'security update',
@@ -273,8 +265,6 @@ parser.add_option("--exclude-until", dest="exclude_until_commit",
                   help="exclude history ending at COMMIT", metavar="COMMIT")
 parser.add_option("--one-line", dest="one_line", action="store_true", default=False,
                   help="unwrap release notes on a single line")
-parser.add_option("--prod-release", dest="prod_release", action="store_true", default=False,
-                  help="identify release as production (e.g., v20.2.x) and omit '-unstable' from docker pull command")
 
 (options, args) = parser.parse_args()
 
@@ -838,39 +828,38 @@ if not hideheader:
 
 # Print the release notes sign-up and Downloads section.
 
-if options.prod_release:
-    print("""DOCS WRITER: PLEASE UPDATE THE VERSIONS AND LINKS IN THIS INTRO: This page lists additions and changes in <current release> since <previous_version>.
-
-- For a comprehensive summary of features in v20.2, see the [v20.2 GA release notes](v20.2.0.html).
-- To upgrade to v20.2, see [Upgrade to CockroachDB v20.2](../v20.2/upgrade-cockroach-version.html).
-""")
-
 if not hidedownloads:
     print("""Get future release notes emailed to you:
 
-{% include marketo.html %}
-""")
+<div class="hubspot-install-form install-form-1 clearfix">
+    <script>
+        hbspt.forms.create({
+            css: '',
+            cssClass: 'install-form',
+            portalId: '1753393',
+            formId: '39686297-81d2-45e7-a73f-55a596a8d5ff',
+            formInstanceId: 1,
+            target: '.install-form-1'
+        });
+    </script>
+</div>""")
     print()
 
     print("""### Downloads
 
-<div id="os-tabs" class="filters clearfix">
-    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.linux-amd64.tgz"><button id="linux" class="filter-button" data-scope="linux" data-eventcategory="linux-binary-release-notes">Linux</button></a>
-    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.darwin-10.9-amd64.tgz"><button id="mac" class="filter-button" data-scope="mac" data-eventcategory="mac-binary-release-notes">Mac</button></a>
-    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.windows-6.2-amd64.zip"><button id="windows" class="filter-button" data-scope="windows" data-eventcategory="windows-binary-release-notes">Windows</button></a>
-    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.src.tgz"><button id="source" class="filter-button" data-scope="source" data-eventcategory="source-release-notes">Source</button></a>
+<div id="os-tabs" class="clearfix">
+    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.darwin-10.9-amd64.tgz"><button id="mac" data-eventcategory="mac-binary-release-notes">Mac</button></a>
+    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.linux-amd64.tgz"><button id="linux" data-eventcategory="linux-binary-release-notes">Linux</button></a>
+    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.windows-6.2-amd64.zip"><button id="windows" data-eventcategory="windows-binary-release-notes">Windows</button></a>
+    <a href="https://binaries.cockroachdb.com/cockroach-""" + current_version + """.src.tgz"><button id="source" data-eventcategory="source-release-notes">Source</button></a>
 </div>
-
-<section class="filter-content" data-scope="windows">
-{% include windows_warning.md %}
-</section>
 """)
 
     print("""### Docker image
 
 {% include copy-clipboard.html %}
 ~~~shell
-$ docker pull cockroachdb/cockroach""" + (":" if options.prod_release else "-unstable:") + current_version + """
+$ docker pull cockroachdb/cockroach""" + ("-unstable:" if "-" in current_version else ":") + current_version + """
 ~~~
 """)
     print()

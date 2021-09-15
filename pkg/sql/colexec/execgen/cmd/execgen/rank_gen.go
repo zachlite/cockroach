@@ -11,6 +11,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"text/template"
@@ -27,10 +28,14 @@ type rankTmplInfo struct {
 // is used by the template.
 func (r rankTmplInfo) UpdateRank() string {
 	if r.Dense {
-		return `r.rank++`
+		return fmt.Sprintf(
+			`r.rank++`,
+		)
 	}
-	return `r.rank += r.rankIncrement
-r.rankIncrement = 1`
+	return fmt.Sprintf(
+		`r.rank += r.rankIncrement
+r.rankIncrement = 1`,
+	)
 }
 
 // UpdateRankIncrement is used to encompass the different logic between
@@ -40,7 +45,9 @@ func (r rankTmplInfo) UpdateRankIncrement() string {
 	if r.Dense {
 		return ``
 	}
-	return `r.rankIncrement++`
+	return fmt.Sprintf(
+		`r.rankIncrement++`,
+	)
 }
 
 // Avoid unused warnings. These methods are used in the template.
@@ -49,13 +56,13 @@ var (
 	_ = rankTmplInfo{}.UpdateRankIncrement()
 )
 
-const rankTmpl = "pkg/sql/colexec/colexecwindow/rank_tmpl.go"
+const rankTmpl = "pkg/sql/colexec/rank_tmpl.go"
 
 func genRankOps(inputFileContents string, wr io.Writer) error {
 	s := strings.ReplaceAll(inputFileContents, "_RANK_STRING", "{{.String}}")
 
-	computeRankRe := makeFunctionRegex("_COMPUTE_RANK", 1)
-	s = computeRankRe.ReplaceAllString(s, `{{template "computeRank" buildDict "Global" . "HasPartition" .HasPartition "HasSel" $1}}`)
+	computeRankRe := makeFunctionRegex("_COMPUTE_RANK", 0)
+	s = computeRankRe.ReplaceAllString(s, `{{template "computeRank" buildDict "Global" . "HasPartition" .HasPartition}}`)
 	updateRankRe := makeFunctionRegex("_UPDATE_RANK", 0)
 	s = updateRankRe.ReplaceAllString(s, makeTemplateFunctionCall("Global.UpdateRank", 0))
 	updateRankIncrementRe := makeFunctionRegex("_UPDATE_RANK_INCREMENT", 0)

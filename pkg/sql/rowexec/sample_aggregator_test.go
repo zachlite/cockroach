@@ -13,7 +13,6 @@ package rowexec
 import (
 	"context"
 	gosql "database/sql"
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
@@ -119,17 +117,17 @@ func runSampleAggregator(
 
 	outputs := make([]*distsqlutils.RowBuffer, numSamplers)
 	for i := 0; i < numSamplers; i++ {
-		rows := randgen.GenEncDatumRowsInt(rowPartitions[i])
-		in := distsqlutils.NewRowBuffer(types.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
+		rows := rowenc.GenEncDatumRowsInt(rowPartitions[i])
+		in := distsqlutils.NewRowBuffer(rowenc.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
 		outputs[i] = distsqlutils.NewRowBuffer(samplerOutTypes, nil /* rows */, distsqlutils.RowBufferArgs{})
 
 		spec := &execinfrapb.SamplerSpec{
-			SampleSize:    childNumSamples,
-			MinSampleSize: childMinNumSamples,
-			Sketches:      sketchSpecs,
+			SampleSize: childNumSamples,
+			Sketches:   sketchSpecs,
 		}
 		p, err := newSamplerProcessor(
-			&flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{}, outputs[i],
+			&flowCtx, 0 /* processorID */, spec, int(childMinNumSamples), in,
+			&execinfrapb.PostProcessSpec{}, outputs[i],
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -156,14 +154,14 @@ func runSampleAggregator(
 	finalOut := distsqlutils.NewRowBuffer([]*types.T{}, nil /* rows*/, distsqlutils.RowBufferArgs{})
 	spec := &execinfrapb.SampleAggregatorSpec{
 		SampleSize:       aggNumSamples,
-		MinSampleSize:    aggMinNumSamples,
 		Sketches:         sketchSpecs,
 		SampledColumnIDs: []descpb.ColumnID{100, 101},
 		TableID:          13,
 	}
 
 	agg, err := newSampleAggregator(
-		&flowCtx, 0 /* processorID */, spec, samplerResults, &execinfrapb.PostProcessSpec{}, finalOut,
+		&flowCtx, 0 /* processorID */, spec, int(aggMinNumSamples), samplerResults,
+		&execinfrapb.PostProcessSpec{}, finalOut,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -244,12 +242,10 @@ func runSampleAggregator(
 				for _, bucket := range r.buckets {
 					count += bucket.numEq + bucket.numRange
 				}
-				targetCount := r.rowCount - r.nullCount
-				// Due to rounding errors, we may be within +/- 1 of the target.
-				if count < targetCount-1 && count > targetCount+1 {
+				if count != r.rowCount-r.nullCount {
 					t.Errorf(
 						"Expected %d rows counted in histogram, got %d:\n  %v",
-						targetCount, count, r,
+						r.rowCount-r.nullCount, count, r,
 					)
 				}
 				r.buckets = nil
@@ -357,7 +353,7 @@ func TestSampleAggregator(t *testing.T) {
 		},
 	}
 
-	for i, tc := range []sampAggTestCase{
+	for _, tc := range []sampAggTestCase{
 		// Sample all rows, check that stats match expected results exactly except
 		// with histograms disabled in cases when stats collection hits the memory
 		// limit.
@@ -371,23 +367,21 @@ func TestSampleAggregator(t *testing.T) {
 		// and the number of rows counted by the histogram. This also tests that
 		// sampleAggregator can dynamically shrink capacity if fed from a
 		// lower-capacity samplerProcessor.
-		{0, false, 2, 2, 2, 2, 2, 4, inputRowsA, expectedA},
-		{0, false, 2, 2, 2, 2, 4, 4, inputRowsA, expectedA},
-		{0, false, 100, 100, 2, 2, 4, 4, inputRowsA, expectedA},
-		{0, false, 2, 2, 100, 100, 4, 4, inputRowsA, expectedA},
+		{0, false, 2, 2, 2, 2, 2, 2, inputRowsA, expectedA},
+		{0, false, 2, 2, 2, 2, 4, 2, inputRowsA, expectedA},
+		{0, false, 100, 100, 2, 2, 4, 2, inputRowsA, expectedA},
+		{0, false, 2, 2, 100, 100, 4, 2, inputRowsA, expectedA},
 
 		// Sample some rows with dynamic shrinking due to memory limits. Check that
 		// stats match and that histograms have the right number of buckets and
 		// number of rows.
-		{1 << 15, false, 200, 20, 200, 20, 200, 52, inputRowsB, expectedB},
-		{1 << 16, false, 200, 20, 200, 20, 200, 202, inputRowsB, expectedB},
+		{1 << 15, false, 200, 20, 200, 20, 200, 50, inputRowsB, expectedB},
+		{1 << 16, false, 200, 20, 200, 20, 200, 200, inputRowsB, expectedB},
 	} {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			runSampleAggregator(
-				t, server, sqlDB, kvDB, st, &evalCtx, tc.memLimitBytes, tc.expectOutOfMemory,
-				tc.childNumSamples, tc.childMinNumSamples, tc.aggNumSamples, tc.aggMinNumSamples,
-				tc.maxBuckets, tc.expectedMaxBuckets, tc.inputRows, tc.expected,
-			)
-		})
+		runSampleAggregator(
+			t, server, sqlDB, kvDB, st, &evalCtx, tc.memLimitBytes, tc.expectOutOfMemory,
+			tc.childNumSamples, tc.childMinNumSamples, tc.aggNumSamples, tc.aggMinNumSamples,
+			tc.maxBuckets, tc.expectedMaxBuckets, tc.inputRows, tc.expected,
+		)
 	}
 }

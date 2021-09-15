@@ -11,37 +11,17 @@
 package tabledesc
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/errors"
 )
 
-func ValidatePartitioning(immI catalog.TableDescriptor) error {
-	imm, ok := immI.(*immutable)
-	if !ok {
-		return errors.Errorf("expected immutable descriptor")
-	}
-	return imm.validatePartitioning()
+func (desc *Immutable) ValidateCrossReferences(ctx context.Context, dg catalog.DescGetter) error {
+	return desc.validateCrossReferences(ctx, dg)
 }
 
-func GetPostDeserializationChanges(
-	immI catalog.TableDescriptor,
-) (PostDeserializationTableDescriptorChanges, error) {
-	imm, ok := immI.(*immutable)
-	if !ok {
-		return PostDeserializationTableDescriptorChanges{}, errors.Errorf("expected immutable descriptor")
-	}
-	return imm.GetPostDeserializationChanges(), nil
+func (desc *Immutable) ValidatePartitioning() error {
+	return desc.validatePartitioning()
 }
 
 var FitColumnToFamily = fitColumnToFamily
-
-func TestingMakeColumn(
-	direction descpb.DescriptorMutation_Direction, desc *descpb.ColumnDescriptor,
-) catalog.Column {
-	return &column{
-		maybeMutation: maybeMutation{mutationDirection: direction},
-		desc:          desc,
-		ordinal:       0,
-	}
-}

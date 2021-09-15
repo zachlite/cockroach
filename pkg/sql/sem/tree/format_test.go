@@ -17,9 +17,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/internal/rsg"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
@@ -37,6 +35,52 @@ func TestFormatStatement(t *testing.T) {
 		f        tree.FmtFlags
 		expected string
 	}{
+		{`CREATE USER foo WITH PASSWORD 'bar'`, tree.FmtSimple,
+			`CREATE USER 'foo' WITH PASSWORD '*****'`},
+		{`CREATE USER foo WITH PASSWORD 'bar'`, tree.FmtShowPasswords,
+			`CREATE USER 'foo' WITH PASSWORD 'bar'`},
+
+		{`CREATE TABLE foo (x INT8)`, tree.FmtAnonymize,
+			`CREATE TABLE _ (_ INT8)`},
+		{`INSERT INTO foo(x) TABLE bar`, tree.FmtAnonymize,
+			`INSERT INTO _(_) TABLE _`},
+		{`UPDATE foo SET x = y`, tree.FmtAnonymize,
+			`UPDATE _ SET _ = _`},
+		{`DELETE FROM foo`, tree.FmtAnonymize,
+			`DELETE FROM _`},
+		{`TRUNCATE foo`, tree.FmtAnonymize,
+			`TRUNCATE TABLE _`},
+		{`ALTER TABLE foo RENAME TO bar`, tree.FmtAnonymize,
+			`ALTER TABLE _ RENAME TO _`},
+		{`SHOW COLUMNS FROM foo`, tree.FmtAnonymize,
+			`SHOW COLUMNS FROM _`},
+		{`SHOW CREATE TABLE foo`, tree.FmtAnonymize,
+			`SHOW CREATE _`},
+		{`GRANT SELECT ON bar TO foo`, tree.FmtAnonymize,
+			`GRANT SELECT ON TABLE _ TO _`},
+
+		{`INSERT INTO a VALUES (-2, +3)`,
+			tree.FmtHideConstants,
+			`INSERT INTO a VALUES (_, _)`},
+
+		{`INSERT INTO a VALUES (0), (0), (0), (0), (0), (0)`,
+			tree.FmtHideConstants,
+			`INSERT INTO a VALUES (_), (__more5__)`},
+		{`INSERT INTO a VALUES (0, 0, 0, 0, 0, 0)`,
+			tree.FmtHideConstants,
+			`INSERT INTO a VALUES (_, _, __more4__)`},
+		{`INSERT INTO a VALUES (ARRAY[0, 0, 0, 0, 0, 0, 0])`,
+			tree.FmtHideConstants,
+			`INSERT INTO a VALUES (ARRAY[_, _, __more5__])`},
+		{`INSERT INTO a VALUES (ARRAY[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ` +
+			`0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ` +
+			`0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])`,
+			tree.FmtHideConstants,
+			`INSERT INTO a VALUES (ARRAY[_, _, __more30__])`},
+
+		{`SELECT 1+COALESCE(NULL, 'a', x)-ARRAY[3.14]`, tree.FmtHideConstants,
+			`SELECT (_ + COALESCE(_, _, x)) - ARRAY[_]`},
+
 		// This here checks encodeSQLString on non-tree.DString strings also
 		// calls encodeSQLString with the right formatter.
 		// See TestFormatExprs below for the test on DStrings.
@@ -55,6 +99,32 @@ func TestFormatStatement(t *testing.T) {
 			`SET time zone = utc`},
 		{`SET "time zone" = UTC`, tree.FmtBareStrings,
 			`SET "time zone" = utc`},
+
+		// Test schema anonymization.
+		{`CREATE SCHEMA s`, tree.FmtAnonymize,
+			`CREATE SCHEMA _`},
+		{`ALTER SCHEMA s1 RENAME TO s2`, tree.FmtAnonymize,
+			`ALTER SCHEMA _ RENAME TO _`},
+		{`DROP SCHEMA a, b`, tree.FmtAnonymize,
+			`DROP SCHEMA _, _`},
+		{`GRANT SELECT ON SCHEMA a TO b, c`, tree.FmtAnonymize,
+			`GRANT SELECT ON SCHEMA _ TO _, _`},
+		{`ALTER TYPE t SET SCHEMA s`, tree.FmtAnonymize,
+			`ALTER TYPE _ SET SCHEMA _`},
+
+		// Test owner anonymization.
+		{`ALTER DATABASE d OWNER TO o`, tree.FmtAnonymize,
+			`ALTER DATABASE _ OWNER TO _`},
+		{`ALTER SCHEMA s OWNER TO o`, tree.FmtAnonymize,
+			`ALTER SCHEMA _ OWNER TO _`},
+
+		// Test ENUM anonymization.
+		{`CREATE TYPE a AS ENUM ('a', 'b', 'c')`, tree.FmtAnonymize,
+			`CREATE TYPE _ AS ENUM (_, _, _)`},
+		{`ALTER TYPE a ADD VALUE 'hi' BEFORE 'hello'`, tree.FmtAnonymize,
+			`ALTER TYPE _ ADD VALUE _ BEFORE _`},
+		{`ALTER TYPE a RENAME VALUE 'value1' TO 'value2'`, tree.FmtAnonymize,
+			`ALTER TYPE _ RENAME VALUE _ TO _`},
 	}
 
 	for i, test := range testData {
@@ -101,12 +171,10 @@ func TestFormatTableName(t *testing.T) {
 		// `GRANT SELECT ON xoxoxo TO foo`},
 	}
 
-	f := tree.NewFmtCtx(
-		tree.FmtSimple,
-		tree.FmtReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
-			ctx.WriteString("xoxoxo")
-		}),
-	)
+	f := tree.NewFmtCtx(tree.FmtSimple)
+	f.SetReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
+		ctx.WriteString("xoxoxo")
+	})
 
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d %s", i, test.stmt), func(t *testing.T) {
@@ -293,16 +361,12 @@ func TestFormatExpr2(t *testing.T) {
 	}{
 		{tree.NewDOidWithName(tree.DInt(10), types.RegClass, "foo"),
 			tree.FmtParsable, `crdb_internal.create_regclass(10,'foo'):::REGCLASS`},
-		{tree.NewDOidWithName(tree.DInt(10), types.RegNamespace, "foo"),
-			tree.FmtParsable, `crdb_internal.create_regnamespace(10,'foo'):::REGNAMESPACE`},
 		{tree.NewDOidWithName(tree.DInt(10), types.RegProc, "foo"),
 			tree.FmtParsable, `crdb_internal.create_regproc(10,'foo'):::REGPROC`},
-		{tree.NewDOidWithName(tree.DInt(10), types.RegProcedure, "foo"),
-			tree.FmtParsable, `crdb_internal.create_regprocedure(10,'foo'):::REGPROCEDURE`},
-		{tree.NewDOidWithName(tree.DInt(10), types.RegRole, "foo"),
-			tree.FmtParsable, `crdb_internal.create_regrole(10,'foo'):::REGROLE`},
 		{tree.NewDOidWithName(tree.DInt(10), types.RegType, "foo"),
 			tree.FmtParsable, `crdb_internal.create_regtype(10,'foo'):::REGTYPE`},
+		{tree.NewDOidWithName(tree.DInt(10), types.RegNamespace, "foo"),
+			tree.FmtParsable, `crdb_internal.create_regnamespace(10,'foo'):::REGNAMESPACE`},
 
 		// Ensure that nulls get properly type annotated when printed in an
 		// enclosing tuple that has a type for their position within the tuple.
@@ -404,9 +468,7 @@ func TestFormatPgwireText(t *testing.T) {
 		{`ARRAY[e'\U00002001☃']`, `{ ☃}`},
 	}
 	ctx := context.Background()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
-	defer evalCtx.Stop(ctx)
+	var evalCtx tree.EvalContext
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d %s", i, test.expr), func(t *testing.T) {
 			expr, err := parser.ParseExpr(test.expr)
@@ -434,17 +496,7 @@ func TestFormatPgwireText(t *testing.T) {
 // 1000 random statements.
 func BenchmarkFormatRandomStatements(b *testing.B) {
 	// Generate a bunch of random statements.
-	var runfile string
-	if bazel.BuiltWithBazel() {
-		var err error
-		runfile, err = bazel.Runfile("pkg/sql/parser/sql.y")
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		runfile = filepath.Join("..", "..", "parser", "sql.y")
-	}
-	yBytes, err := ioutil.ReadFile(runfile)
+	yBytes, err := ioutil.ReadFile(filepath.Join("..", "..", "parser", "sql.y"))
 	if err != nil {
 		b.Fatalf("error reading grammar: %v", err)
 	}

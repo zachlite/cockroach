@@ -292,11 +292,7 @@ func (mf *memoFormatter) formatPrivate(e opt.Expr, physProps *physical.Required)
 		fmt.Fprintf(mf.buf, ",cols=%s", t.Cols)
 
 	case *memo.LookupJoinExpr:
-		if len(t.KeyCols) > 0 {
-			fmt.Fprintf(mf.buf, ",keyCols=%v,outCols=%s", t.KeyCols, t.Cols)
-		} else {
-			fmt.Fprintf(mf.buf, ",outCols=%s", t.Cols)
-		}
+		fmt.Fprintf(mf.buf, ",keyCols=%v,outCols=%s", t.KeyCols, t.Cols)
 
 	case *memo.ExplainExpr:
 		propsStr := t.Props.String()

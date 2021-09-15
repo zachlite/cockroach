@@ -229,12 +229,11 @@ func TestSplitAndScatterProcessor(t *testing.T) {
 
 			flowCtx := execinfra.FlowCtx{
 				Cfg: &execinfra.ServerConfig{
-					Settings: st,
-					DB:       kvDB,
-					Codec:    keys.SystemSQLCodec,
+					Settings:    st,
+					DB:          kvDB,
+					DiskMonitor: testDiskMonitor,
 				},
-				EvalCtx:     &evalCtx,
-				DiskMonitor: testDiskMonitor,
+				EvalCtx: &evalCtx,
 			}
 
 			colTypes := splitAndScatterOutputTypes
@@ -242,8 +241,7 @@ func TestSplitAndScatterProcessor(t *testing.T) {
 			out, err := rowflow.MakeTestRouter(ctx, &flowCtx, &routerSpec, recvs, colTypes, &wg)
 			require.NoError(t, err)
 
-			post := execinfrapb.PostProcessSpec{}
-			proc, err := newSplitAndScatterProcessor(&flowCtx, 0 /* processorID */, c.procSpec, &post, out)
+			proc, err := newSplitAndScatterProcessor(&flowCtx, 0 /* processorID */, c.procSpec, out)
 			require.NoError(t, err)
 			ssp, ok := proc.(*splitAndScatterProcessor)
 			if !ok {

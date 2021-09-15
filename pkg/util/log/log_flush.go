@@ -26,15 +26,18 @@ type flushSyncWriter interface {
 	io.Writer
 }
 
-// Flush explicitly flushes all pending log file I/O.
+// Flush explicitly flushes all pending log I/O.
 // See also flushDaemon() that manages background (asynchronous)
 // flushes, and signalFlusher() that manages flushes in reaction to a
 // user signal.
 func Flush() {
-	_ = allSinkInfos.iterFileSinks(func(l *fileSink) error {
-		l.lockAndFlushAndMaybeSync(true /*doSync*/)
-		return nil
-	})
+	mainLog.lockAndFlushAndMaybeSync(false /*doSync*/)
+	secondaryLogRegistry.mu.Lock()
+	defer secondaryLogRegistry.mu.Unlock()
+	for _, l := range secondaryLogRegistry.mu.loggers {
+		// Some loggers (e.g. the audit log) want to keep all the files.
+		l.logger.lockAndFlushAndMaybeSync(false /*doSync*/)
+	}
 }
 
 func init() {
@@ -49,14 +52,8 @@ const flushInterval = time.Second
 const syncInterval = 30
 
 // maxSyncDuration is set to a conservative value since this is a new mechanism.
-// In practice, even a fraction of that would indicate a problem. This metric's
-// default should ideally match its sister metric in the storage engine, set by
-// COCKROACH_ENGINE_MAX_SYNC_DURATION.
-var maxSyncDuration = envutil.EnvOrDefaultDuration("COCKROACH_LOG_MAX_SYNC_DURATION", 60*time.Second)
-
-// syncWarnDuration is the threshold after which a slow disk warning is written
-// to the log and to stderr.
-const syncWarnDuration = 10 * time.Second
+// In practice, even a fraction of that would indicate a problem.
+var maxSyncDuration = envutil.EnvOrDefaultDuration("COCKROACH_LOG_MAX_SYNC_DURATION", 30*time.Second)
 
 // flushDaemon periodically flushes and syncs the log file buffers.
 // This manages both the primary and secondary loggers.
@@ -81,12 +78,16 @@ func flushDaemon() {
 		disableDaemons := logging.mu.disableDaemons
 		logging.mu.Unlock()
 
+		// Flush the main log.
 		if !disableDaemons {
-			// Flush the loggers.
-			_ = allSinkInfos.iterFileSinks(func(l *fileSink) error {
-				l.lockAndFlushAndMaybeSync(doSync)
-				return nil
-			})
+			mainLog.lockAndFlushAndMaybeSync(doSync)
+
+			// Flush the secondary logs.
+			secondaryLogRegistry.mu.Lock()
+			for _, l := range secondaryLogRegistry.mu.loggers {
+				l.logger.lockAndFlushAndMaybeSync(doSync)
+			}
+			secondaryLogRegistry.mu.Unlock()
 		}
 	}
 }
@@ -96,18 +97,71 @@ func flushDaemon() {
 func signalFlusher() {
 	ch := sysutil.RefreshSignaledChan()
 	for sig := range ch {
-		Ops.Infof(context.Background(), "%s received, flushing logs", sig)
+		Infof(context.Background(), "%s received, flushing logs", sig)
 		Flush()
 	}
 }
 
-// StartAlwaysFlush configures all loggers to start flushing writes.
+// lockAndFlushAndMaybeSync is like flushAndMaybeSyncLocked but locks l.mu first.
+func (l *loggerT) lockAndFlushAndMaybeSync(doSync bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.flushAndMaybeSyncLocked(doSync)
+}
+
+// SetAlwaysFlush configures whether logging flushes all writes.
+// This overrides the flush setting for both primary
+// and secondary loggers.
 // This is used e.g. in `cockroach start` when an error occurs,
 // to ensure that all log writes from the point the error
 // occurs are flushed to logs (in case the error degenerates
 // into a panic / segfault on the way out).
-func StartAlwaysFlush() {
-	logging.flushWrites.Set(true)
-	// There may be something in the buffers already; flush it.
-	Flush()
+func SetAlwaysFlush(alwaysFlush bool) {
+	mainLog.lockAndSetFlush(alwaysFlush)
+	func() {
+		secondaryLogRegistry.mu.Lock()
+		defer secondaryLogRegistry.mu.Unlock()
+		for _, l := range secondaryLogRegistry.mu.loggers {
+			if !alwaysFlush && l.forceFlushWrites {
+				// We're not changing this.
+				continue
+			}
+			l.logger.lockAndSetFlush(alwaysFlush)
+		}
+	}()
+	if alwaysFlush {
+		// There may be something in the buffers already; flush it.
+		Flush()
+	}
+}
+
+// lockAndSetSync configures syncWrites.
+func (l *loggerT) lockAndSetFlush(alwaysFlush bool) {
+	l.mu.Lock()
+	l.mu.flushWrites = alwaysFlush
+	l.mu.Unlock()
+}
+
+// flushAndSync flushes the current log and, if doSync is set,
+// attempts to sync its data to disk.
+//
+// l.mu is held.
+func (l *loggerT) flushAndMaybeSyncLocked(doSync bool) {
+	if l.mu.file == nil {
+		return
+	}
+
+	// If we can't sync within this duration, exit the process.
+	t := time.AfterFunc(maxSyncDuration, func() {
+		// NB: the disk-stall-detected roachtest matches on this message.
+		Shoutf(context.Background(), Severity_FATAL,
+			"disk stall detected: unable to sync log files within %s", maxSyncDuration,
+		)
+	})
+	defer t.Stop()
+
+	_ = l.mu.file.Flush() // ignore error
+	if doSync {
+		_ = l.mu.file.Sync() // ignore error
+	}
 }

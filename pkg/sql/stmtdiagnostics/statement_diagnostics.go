@@ -38,7 +38,7 @@ var pollingInterval = settings.RegisterDurationSetting(
 	"rate at which the stmtdiagnostics.Registry polls for requests, set to zero to disable",
 	10*time.Second)
 
-var bundleChunkSize = settings.RegisterByteSizeSetting(
+var bundleChunkSize = settings.RegisterValidatedByteSizeSetting(
 	"sql.stmt_diagnostics.bundle_chunk_size",
 	"chunk size for statement diagnostic bundles",
 	1024*1024,
@@ -60,9 +60,9 @@ type Registry struct {
 		// internally; it'd deadlock.
 		syncutil.Mutex
 		// requests waiting for the right query to come along.
-		requestFingerprints map[RequestID]string
+		requestFingerprints map[requestID]string
 		// ids of requests that this node is in the process of servicing.
-		ongoing map[RequestID]struct{}
+		ongoing map[requestID]struct{}
 
 		// epoch is observed before reading system.statement_diagnostics_requests, and then
 		// checked again before loading the tables contents. If the value changed in
@@ -77,7 +77,7 @@ type Registry struct {
 	// gossipUpdateChan is used to notify the polling loop that a diagnostics
 	// request has been added. The gossip callback will not block sending on this
 	// channel.
-	gossipUpdateChan chan RequestID
+	gossipUpdateChan chan requestID
 }
 
 // NewRegistry constructs a new Registry.
@@ -88,7 +88,7 @@ func NewRegistry(
 		ie:               ie,
 		db:               db,
 		gossip:           gw,
-		gossipUpdateChan: make(chan RequestID, 1),
+		gossipUpdateChan: make(chan requestID, 1),
 		st:               st,
 	}
 	// Some tests pass a nil gossip, and gossip is not available on SQL tenant
@@ -136,7 +136,7 @@ func (r *Registry) poll(ctx context.Context) {
 			lastPoll = timeutil.Now()
 		}
 	)
-	pollingInterval.SetOnChange(&r.st.SV, func(ctx context.Context) {
+	pollingInterval.SetOnChange(&r.st.SV, func() {
 		select {
 		case pollIntervalChanged <- struct{}{}:
 		default:
@@ -161,37 +161,37 @@ func (r *Registry) poll(ctx context.Context) {
 	}
 }
 
-// RequestID is the ID of a diagnostics request, corresponding to the id
+// requestID is the ID of a diagnostics request, corresponding to the id
 // column in statement_diagnostics_requests.
 // A zero ID is invalid.
-type RequestID int
+type requestID int
 
-// CollectedInstanceID is the ID of an instance of collected diagnostics,
-// corresponding to the id column in statement_diagnostics.
-type CollectedInstanceID int
+// ID is the ID of an instance of collected diagnostics, corresponding
+// to the id column in statement_diagnostics.
+type stmtID int
 
 // addRequestInternalLocked adds a request to r.mu.requests. If the request is
 // already present, the call is a noop.
 func (r *Registry) addRequestInternalLocked(
-	ctx context.Context, id RequestID, queryFingerprint string,
+	ctx context.Context, id requestID, queryFingerprint string,
 ) {
 	if r.findRequestLocked(id) {
 		// Request already exists.
 		return
 	}
 	if r.mu.requestFingerprints == nil {
-		r.mu.requestFingerprints = make(map[RequestID]string)
+		r.mu.requestFingerprints = make(map[requestID]string)
 	}
 	r.mu.requestFingerprints[id] = queryFingerprint
 }
 
-func (r *Registry) findRequest(requestID RequestID) bool {
+func (r *Registry) findRequest(requestID requestID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.findRequestLocked(requestID)
 }
 
-func (r *Registry) findRequestLocked(requestID RequestID) bool {
+func (r *Registry) findRequestLocked(requestID requestID) bool {
 	_, ok := r.mu.requestFingerprints[requestID]
 	if ok {
 		return true
@@ -206,18 +206,18 @@ func (r *Registry) InsertRequest(ctx context.Context, fprint string) error {
 	return err
 }
 
-func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (RequestID, error) {
+func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (requestID, error) {
 	g, err := r.gossip.OptionalErr(48274)
 	if err != nil {
 		return 0, err
 	}
 
-	var reqID RequestID
+	var reqID requestID
 	err = r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		// Check if there's already a pending request for this fingerprint.
 		row, err := r.ie.QueryRowEx(ctx, "stmt-diag-check-pending", txn,
 			sessiondata.InternalExecutorOverride{
-				User: security.RootUserName(),
+				User: security.RootUser,
 			},
 			"SELECT count(1) FROM system.statement_diagnostics_requests "+
 				"WHERE completed = false AND statement_fingerprint = $1",
@@ -235,7 +235,7 @@ func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (Re
 
 		row, err = r.ie.QueryRowEx(ctx, "stmt-diag-insert-request", txn,
 			sessiondata.InternalExecutorOverride{
-				User: security.RootUserName(),
+				User: security.RootUser,
 			},
 			"INSERT INTO system.statement_diagnostics_requests (statement_fingerprint, requested_at) "+
 				"VALUES ($1, $2) RETURNING id",
@@ -246,7 +246,7 @@ func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (Re
 		if row == nil {
 			return errors.New("failed to insert statement diagnostics request")
 		}
-		reqID = RequestID(*row[0].(*tree.DInt))
+		reqID = requestID(*row[0].(*tree.DInt))
 		return nil
 	})
 	if err != nil {
@@ -271,7 +271,7 @@ func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (Re
 	return reqID, nil
 }
 
-func (r *Registry) removeOngoing(requestID RequestID) {
+func (r *Registry) removeOngoing(requestID requestID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Remove the request from r.mu.ongoing.
@@ -283,19 +283,21 @@ func (r *Registry) removeOngoing(requestID RequestID) {
 // statement's fingerprint; in this case ShouldCollectDiagnostics will not
 // return true again on this note for the same diagnostics request.
 //
-// If shouldCollect returns true, finishFn must always be called once the data
-// was collected and inserted (even if failures were encountered).
+// If data is to be collected, Finish() must always be called on the returned
+// stmtDiagnosticsHelper once the data was collected.
 func (r *Registry) ShouldCollectDiagnostics(
-	ctx context.Context, fingerprint string,
-) (shouldCollect bool, reqID RequestID, finishFn func()) {
+	ctx context.Context, ast tree.Statement,
+) (bool, func(ctx context.Context, traceJSON tree.Datum, bundle []byte, collectionErr error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Return quickly if we have no requests to trace.
 	if len(r.mu.requestFingerprints) == 0 {
-		return false, 0, nil
+		return false, nil
 	}
 
+	fingerprint := tree.AsStringWithFlags(ast, tree.FmtHideConstants)
+	var reqID requestID
 	for id, f := range r.mu.requestFingerprints {
 		if f == fingerprint {
 			reqID = id
@@ -303,44 +305,93 @@ func (r *Registry) ShouldCollectDiagnostics(
 		}
 	}
 	if reqID == 0 {
-		return false, 0, nil
+		return false, nil
 	}
 
 	// Remove the request.
 	delete(r.mu.requestFingerprints, reqID)
 	if r.mu.ongoing == nil {
-		r.mu.ongoing = make(map[RequestID]struct{})
+		r.mu.ongoing = make(map[requestID]struct{})
 	}
 
 	r.mu.ongoing[reqID] = struct{}{}
-	return true, reqID, func() {
-		r.removeOngoing(reqID)
+	return true, makeStmtDiagnosticsHelper(r, fingerprint, tree.AsString(ast), reqID).Finish
+}
+
+type stmtDiagnosticsHelper struct {
+	r            *Registry
+	fingerprint  string
+	statementStr string
+	requestID    requestID
+}
+
+func makeStmtDiagnosticsHelper(
+	r *Registry, fingerprint string, statementStr string, requestID requestID,
+) *stmtDiagnosticsHelper {
+	return &stmtDiagnosticsHelper{
+		r:            r,
+		fingerprint:  fingerprint,
+		statementStr: statementStr,
+		requestID:    requestID,
+	}
+}
+
+// Finish reports the trace and creates the support bundle, and inserts them in
+// the system tables.
+func (h *stmtDiagnosticsHelper) Finish(
+	ctx context.Context, traceJSON tree.Datum, bundle []byte, collectionErr error,
+) {
+	defer h.r.removeOngoing(h.requestID)
+
+	_, err := h.r.insertStatementDiagnostics(
+		ctx,
+		h.requestID,
+		h.fingerprint,
+		h.statementStr,
+		traceJSON,
+		bundle,
+		collectionErr,
+	)
+	if err != nil {
+		log.Warningf(ctx, "failed to report statement diagnostics: %s", err)
 	}
 }
 
 // InsertStatementDiagnostics inserts a trace into system.statement_diagnostics.
 //
 // traceJSON is either DNull (when collectionErr should not be nil) or a *DJSON.
+func (r *Registry) InsertStatementDiagnostics(
+	ctx context.Context, stmtFingerprint string, stmt string, traceJSON tree.Datum, bundle []byte,
+) (int64, error) {
+	id, err := r.insertStatementDiagnostics(ctx, 0, /* requestID */
+		stmtFingerprint, stmt, traceJSON, bundle, nil /* collectionErr */)
+	return int64(id), err
+}
+
+// insertStatementDiagnostics inserts a trace into system.statement_diagnostics.
 //
-// If requestID is not zero, it also marks the request as completed in
+// traceJSON is either DNull (when collectionErr should not be nil) or a *DJSON.
+//
+// It also marks the request as completed in
 // system.statement_diagnostics_requests. If requestID is zero, a new entry is
 // inserted.
 //
-// collectionErr should be any error generated during the collection or
-// generation of the bundle/trace.
-func (r *Registry) InsertStatementDiagnostics(
+// collectionErr should be any error generated during the serialization of the
+// collected trace.
+func (r *Registry) insertStatementDiagnostics(
 	ctx context.Context,
-	requestID RequestID,
+	requestID requestID,
 	stmtFingerprint string,
 	stmt string,
+	traceJSON tree.Datum,
 	bundle []byte,
 	collectionErr error,
-) (CollectedInstanceID, error) {
-	var diagID CollectedInstanceID
+) (stmtID, error) {
+	var diagID stmtID
 	err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		if requestID != 0 {
 			row, err := r.ie.QueryRowEx(ctx, "stmt-diag-check-completed", txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				"SELECT count(1) FROM system.statement_diagnostics_requests WHERE id = $1 AND completed = false",
 				requestID)
 			if err != nil {
@@ -376,7 +427,7 @@ func (r *Registry) InsertStatementDiagnostics(
 			// Insert the chunk into system.statement_bundle_chunks.
 			row, err := r.ie.QueryRowEx(
 				ctx, "stmt-bundle-chunks-insert", txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				"INSERT INTO system.statement_bundle_chunks(description, data) VALUES ($1, $2) RETURNING id",
 				"statement diagnostics bundle",
 				tree.NewDBytes(tree.DBytes(chunk)),
@@ -398,7 +449,7 @@ func (r *Registry) InsertStatementDiagnostics(
 		// Insert the trace into system.statement_diagnostics.
 		row, err := r.ie.QueryRowEx(
 			ctx, "stmt-diag-insert", txn,
-			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			"INSERT INTO system.statement_diagnostics "+
 				"(statement_fingerprint, statement, collected_at, bundle_chunks, error) "+
 				"VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -410,12 +461,12 @@ func (r *Registry) InsertStatementDiagnostics(
 		if row == nil {
 			return errors.New("failed to insert statement diagnostics")
 		}
-		diagID = CollectedInstanceID(*row[0].(*tree.DInt))
+		diagID = stmtID(*row[0].(*tree.DInt))
 
 		if requestID != 0 {
 			// Mark the request from system.statement_diagnostics_request as completed.
 			_, err := r.ie.ExecEx(ctx, "stmt-diag-mark-completed", txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				"UPDATE system.statement_diagnostics_requests "+
 					"SET completed = true, statement_diagnostics_id = $1 WHERE id = $2",
 				diagID, requestID)
@@ -427,7 +478,7 @@ func (r *Registry) InsertStatementDiagnostics(
 			// This is necessary because the UI uses this table to discover completed
 			// diagnostics.
 			_, err := r.ie.ExecEx(ctx, "stmt-diag-add-completed", txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				"INSERT INTO system.statement_diagnostics_requests"+
 					" (completed, statement_fingerprint, statement_diagnostics_id, requested_at)"+
 					" VALUES (true, $1, $2, $3)",
@@ -454,20 +505,13 @@ func (r *Registry) pollRequests(ctx context.Context) error {
 		epoch := r.mu.epoch
 		r.mu.Unlock()
 
-		it, err := r.ie.QueryIteratorEx(ctx, "stmt-diag-poll", nil, /* txn */
+		var err error
+		rows, err = r.ie.QueryEx(ctx, "stmt-diag-poll", nil, /* txn */
 			sessiondata.InternalExecutorOverride{
-				User: security.RootUserName(),
+				User: security.RootUser,
 			},
 			"SELECT id, statement_fingerprint FROM system.statement_diagnostics_requests "+
 				"WHERE completed = false")
-		if err != nil {
-			return err
-		}
-		rows = rows[:0]
-		var ok bool
-		for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-			rows = append(rows, it.Cur())
-		}
 		if err != nil {
 			return err
 		}
@@ -486,7 +530,7 @@ func (r *Registry) pollRequests(ctx context.Context) error {
 
 	var ids util.FastIntSet
 	for _, row := range rows {
-		id := RequestID(*row[0].(*tree.DInt))
+		id := requestID(*row[0].(*tree.DInt))
 		fprint := string(*row[1].(*tree.DString))
 
 		ids.Add(int(id))
@@ -511,7 +555,7 @@ func (r *Registry) gossipNotification(s string, value roachpb.Value) {
 		return
 	}
 	select {
-	case r.gossipUpdateChan <- RequestID(binary.LittleEndian.Uint64(value.RawBytes)):
+	case r.gossipUpdateChan <- requestID(binary.LittleEndian.Uint64(value.RawBytes)):
 	default:
 		// Don't pile up on these requests and don't block gossip.
 	}

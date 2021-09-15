@@ -17,7 +17,7 @@ func (d *delegator) delegateShowTypes() (tree.Statement, error) {
 	//  they should be added here.
 	return parse(`
 SELECT
-  schema, name, owner
+  schema, name, value AS description
 FROM
   [SHOW ENUMS]
 ORDER BY

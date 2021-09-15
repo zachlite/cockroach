@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 )
 
 // SpecializedVectorizedBuiltin is used to map overloads
@@ -86,10 +85,6 @@ type Overload struct {
 	// volatility against Postgres's volatility at test time.
 	// This should be used with caution.
 	IgnoreVolatilityCheck bool
-
-	// Oid is the cached oidHasher.BuiltinOid result for this Overload. It's
-	// populated at init-time.
-	Oid oid.Oid
 }
 
 // params implements the overloadImpl interface.
@@ -156,14 +151,13 @@ func (b Overload) Signature(simplify bool) string {
 type overloadImpl interface {
 	params() TypeList
 	returnType() ReturnTyper
-	// allows manually resolving preference between multiple compatible overloads.
+	// allows manually resolving preference between multiple compatible overloads
 	preferred() bool
 }
 
 var _ overloadImpl = &Overload{}
 var _ overloadImpl = &UnaryOp{}
 var _ overloadImpl = &BinOp{}
-var _ overloadImpl = &CmpOp{}
 
 // GetParamsAndReturnType gets the parameters and return type of an
 // overloadImpl.
@@ -583,8 +577,7 @@ func typeCheckOverloadedExprs(
 		return typedExprs, fns, err
 	}
 
-	// The first heuristic is to prefer candidates that return the desired type,
-	// if a desired type was provided.
+	// The first heuristic is to prefer candidates that return the desired type.
 	if desired.Family() != types.AnyFamily {
 		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
 			func(o overloadImpl) bool {
@@ -743,17 +736,7 @@ func typeCheckOverloadedExprs(
 		}
 	}
 
-	// The fifth heuristic is to defer to preferred candidates, if one has been
-	// specified in the overload list.
-	if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
-		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs, func(o overloadImpl) bool {
-			return o.preferred()
-		})
-	}); ok {
-		return typedExprs, fns, err
-	}
-
-	// The sixth heuristic is to prefer candidates where all placeholders can be
+	// The fifth heuristic is to prefer candidates where all placeholders can be
 	// given the same type as all constants and resolvable expressions. This is
 	// only possible if all constants and resolvable expressions were resolved
 	// homogeneously up to this point.
@@ -820,47 +803,13 @@ func typeCheckOverloadedExprs(
 		}
 	}
 
-	// After the previous heuristic, in a binary expression, in the case of one of the arguments being untyped
-	// NULL, we prefer overloads where we infer the type of the NULL to be a STRING. This is used
-	// to choose INT || NULL::STRING over INT || NULL::INT[].
-	if inBinOp && len(s.exprs) == 2 {
-		if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
-			var err error
-			left := s.typedExprs[0]
-			if left == nil {
-				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			right := s.typedExprs[1]
-			if right == nil {
-				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			leftType := left.ResolvedType()
-			rightType := right.ResolvedType()
-			leftIsNull := leftType.Family() == types.UnknownFamily
-			rightIsNull := rightType.Family() == types.UnknownFamily
-			oneIsNull := (leftIsNull || rightIsNull) && !(leftIsNull && rightIsNull)
-			if oneIsNull {
-				if leftIsNull {
-					leftType = types.String
-				}
-				if rightIsNull {
-					rightType = types.String
-				}
-				s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
-					func(o overloadImpl) bool {
-						return o.params().GetAt(0).Equivalent(leftType) &&
-							o.params().GetAt(1).Equivalent(rightType)
-					})
-			}
-		}); ok {
-			return typedExprs, fns, err
-		}
+	// The final heuristic is to defer to preferred candidates, if available.
+	if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
+		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs, func(o overloadImpl) bool {
+			return o.preferred()
+		})
+	}); ok {
+		return typedExprs, fns, err
 	}
 
 	if err := defaultTypeCheck(ctx, semaCtx, &s, len(s.overloads) > 0); err != nil {

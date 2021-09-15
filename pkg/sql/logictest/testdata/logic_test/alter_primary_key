@@ -372,7 +372,8 @@ t  CREATE TABLE public.t (
    UNIQUE INDEX i5 (w ASC) STORING (y),
    INVERTED INDEX i6 (v),
    INDEX i7 (z ASC) USING HASH WITH BUCKET_COUNT = 4,
-   FAMILY fam_0_x_y_z_w_v_crdb_internal_z_shard_4 (x, y, z, w, v, crdb_internal_z_shard_4)
+   FAMILY fam_0_x_y_z_w_v_crdb_internal_z_shard_4 (x, y, z, w, v, crdb_internal_z_shard_4),
+   CONSTRAINT check_crdb_internal_z_shard_4 CHECK (crdb_internal_z_shard_4 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8))
 )
 
 # Test that the indexes we expect got rewritten. All but i3 should have been rewritten,
@@ -521,7 +522,9 @@ t  CREATE TABLE public.t (
    CONSTRAINT "primary" PRIMARY KEY (y ASC) USING HASH WITH BUCKET_COUNT = 10,
    UNIQUE INDEX t_x_key (x ASC),
    INDEX i1 (z ASC) USING HASH WITH BUCKET_COUNT = 5,
-   FAMILY fam_0_x_y_z_crdb_internal_z_shard_5 (x, y, z, crdb_internal_z_shard_5, crdb_internal_y_shard_10)
+   FAMILY fam_0_x_y_z_crdb_internal_z_shard_5 (x, y, z, crdb_internal_z_shard_5, crdb_internal_y_shard_10),
+   CONSTRAINT check_crdb_internal_z_shard_5 CHECK (crdb_internal_z_shard_5 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8, 4:::INT8)),
+   CONSTRAINT check_crdb_internal_y_shard_10 CHECK (crdb_internal_y_shard_10 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8, 4:::INT8, 5:::INT8, 6:::INT8, 7:::INT8, 8:::INT8, 9:::INT8))
 )
 
 query T
@@ -585,7 +588,8 @@ t  CREATE TABLE public.t (
    CONSTRAINT "primary" PRIMARY KEY (y ASC),
    UNIQUE INDEX t_x_key (x ASC) USING HASH WITH BUCKET_COUNT = 5,
    INDEX i (z ASC),
-   FAMILY fam_0_x_y_z_crdb_internal_x_shard_5 (x, y, z, crdb_internal_x_shard_5)
+   FAMILY fam_0_x_y_z_crdb_internal_x_shard_5 (x, y, z, crdb_internal_x_shard_5),
+   CONSTRAINT check_crdb_internal_x_shard_5 CHECK (crdb_internal_x_shard_5 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8, 4:::INT8))
 )
 
 query III
@@ -725,16 +729,6 @@ CREATE TABLE t2 (x INT, y INT, PRIMARY KEY (x, y), FAMILY (x, y)) INTERLEAVE IN 
 ALTER TABLE t2 ALTER PRIMARY KEY USING COLUMNS (x, y);
 DROP TABLE t1
 
-query TT
-SHOW CREATE t2
-----
-t2  CREATE TABLE public.t2 (
-    x INT8 NOT NULL,
-    y INT8 NOT NULL,
-    CONSTRAINT "primary" PRIMARY KEY (x ASC, y ASC),
-    FAMILY fam_0_x_y (x, y)
-)
-
 statement ok
 DROP TABLE IF EXISTS t;
 CREATE TABLE t (x INT NOT NULL);
@@ -748,7 +742,8 @@ t  CREATE TABLE public.t (
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
    crdb_internal_x_shard_4 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(COALESCE(CAST(x AS STRING), '':::STRING)), 4:::INT8)) STORED,
    CONSTRAINT "primary" PRIMARY KEY (x ASC) USING HASH WITH BUCKET_COUNT = 4,
-   FAMILY "primary" (x, rowid, crdb_internal_x_shard_4)
+   FAMILY "primary" (x, rowid, crdb_internal_x_shard_4),
+   CONSTRAINT check_crdb_internal_x_shard_4 CHECK (crdb_internal_x_shard_4 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8))
 )
 
 statement ok
@@ -1205,7 +1200,9 @@ t  CREATE TABLE public.t (
    x INT8 NOT NULL,
    crdb_internal_x_shard_3 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(COALESCE(CAST(x AS STRING), '':::STRING)), 3:::INT8)) STORED,
    CONSTRAINT "primary" PRIMARY KEY (x ASC) USING HASH WITH BUCKET_COUNT = 3,
-   FAMILY "primary" (crdb_internal_x_shard_2, x, crdb_internal_x_shard_3)
+   FAMILY "primary" (crdb_internal_x_shard_2, x, crdb_internal_x_shard_3),
+   CONSTRAINT check_crdb_internal_x_shard_2 CHECK (crdb_internal_x_shard_2 IN (0:::INT8, 1:::INT8)),
+   CONSTRAINT check_crdb_internal_x_shard_3 CHECK (crdb_internal_x_shard_3 IN (0:::INT8, 1:::INT8, 2:::INT8))
 )
 
 # Changes on a hash sharded index that change the columns will cause the old
@@ -1225,7 +1222,9 @@ t  CREATE TABLE public.t (
    crdb_internal_y_shard_2 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(COALESCE(CAST(y AS STRING), '':::STRING)), 2:::INT8)) STORED,
    CONSTRAINT "primary" PRIMARY KEY (y ASC) USING HASH WITH BUCKET_COUNT = 2,
    UNIQUE INDEX t_x_key (x ASC) USING HASH WITH BUCKET_COUNT = 2,
-   FAMILY fam_0_x_y_crdb_internal_x_shard_2 (x, y, crdb_internal_x_shard_2, crdb_internal_y_shard_2)
+   FAMILY fam_0_x_y_crdb_internal_x_shard_2 (x, y, crdb_internal_x_shard_2, crdb_internal_y_shard_2),
+   CONSTRAINT check_crdb_internal_x_shard_2 CHECK (crdb_internal_x_shard_2 IN (0:::INT8, 1:::INT8)),
+   CONSTRAINT check_crdb_internal_y_shard_2 CHECK (crdb_internal_y_shard_2 IN (0:::INT8, 1:::INT8))
 )
 
 # Regression for #49079.
@@ -1259,9 +1258,6 @@ query TTT
 select index_name,column_name,direction from [show indexes from t1] where index_name like 'primary%';
 ----
 primary  rowid  ASC
-primary  id     N/A
-primary  id2    N/A
-primary  name   N/A
 
 statement ok
 alter table t1 alter primary key using columns(id, id2);
@@ -1270,10 +1266,8 @@ alter table t1 alter primary key using columns(id, id2);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary  id     ASC
-primary  id2    ASC
-primary  name   N/A
-primary  rowid  N/A
+primary  id  ASC
+primary  id2  ASC
 
 
 statement ok
@@ -1283,10 +1277,8 @@ alter table t1 alter primary key using columns(id, id2);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary  id     ASC
-primary  id2    ASC
-primary  name   N/A
-primary  rowid  N/A
+primary  id  ASC
+primary  id2  ASC
 
 # Validate drop and recreate
 statement ok
@@ -1296,10 +1288,8 @@ alter table t1 drop constraint "primary", alter primary key using columns(id, id
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary  id     ASC
-primary  id2    ASC
-primary  name   N/A
-primary  rowid  N/A
+primary  id  ASC
+primary  id2  ASC
 
 statement ok
 alter table t1 alter primary key using columns(id);
@@ -1308,12 +1298,9 @@ alter table t1 alter primary key using columns(id);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary        id     ASC
-primary        id2    N/A
-primary        name   N/A
-primary        rowid  N/A
-t1_id_id2_key  id     ASC
-t1_id_id2_key  id2    ASC
+primary  id  ASC
+t1_id_id2_key  id  ASC
+t1_id_id2_key  id2  ASC
 
 statement ok
 alter table t1 alter primary key using columns(id desc);
@@ -1322,13 +1309,10 @@ alter table t1 alter primary key using columns(id desc);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary        id     DESC
-primary        id2    N/A
-primary        name   N/A
-primary        rowid  N/A
-t1_id_id2_key  id     ASC
-t1_id_id2_key  id2    ASC
-t1_id_key      id     ASC
+primary        id   DESC
+t1_id_id2_key  id   ASC
+t1_id_id2_key  id2  ASC
+t1_id_key      id   ASC
 
 
 statement ok
@@ -1337,13 +1321,10 @@ alter table t1 alter primary key using columns(id desc);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary        id     DESC
-primary        id2    N/A
-primary        name   N/A
-primary        rowid  N/A
-t1_id_id2_key  id     ASC
-t1_id_id2_key  id2    ASC
-t1_id_key      id     ASC
+primary  id  DESC
+t1_id_id2_key  id  ASC
+t1_id_id2_key  id2  ASC
+t1_id_key id  ASC
 
 statement ok
 alter table t1 alter primary key using columns(id desc);
@@ -1351,13 +1332,10 @@ alter table t1 alter primary key using columns(id desc);
 query TTT
 select index_name,column_name,direction from [show indexes from t1];
 ----
-primary        id     DESC
-primary        id2    N/A
-primary        name   N/A
-primary        rowid  N/A
-t1_id_id2_key  id     ASC
-t1_id_id2_key  id2    ASC
-t1_id_key      id     ASC
+primary  id  DESC
+t1_id_id2_key  id  ASC
+t1_id_id2_key  id2  ASC
+t1_id_key id  ASC
 
 statement ok
 alter table t1 alter primary key using columns(id) USING HASH WITH BUCKET_COUNT = 10
@@ -1367,9 +1345,6 @@ select index_name,column_name,direction from [show indexes from t1];
 ----
 primary        crdb_internal_id_shard_10  ASC
 primary        id                         ASC
-primary        id2                        N/A
-primary        name                       N/A
-primary        rowid                      N/A
 t1_id_key1     id                         DESC
 t1_id_key1     crdb_internal_id_shard_10  ASC
 t1_id_id2_key  id                         ASC
@@ -1383,13 +1358,6 @@ CREATE TABLE parent3 (x INT, y INT, PRIMARY KEY (x, y), FAMILY (x, y));
 
 statement ok
 CREATE TABLE child3 (x INT PRIMARY KEY, y INT NOT NULL, z INT NOT NULL, FAMILY (x, y, z));
-
-query TTT
-select index_name,column_name,direction from [show indexes from child3];
-----
-primary  x  ASC
-primary  y  N/A
-primary  z  N/A
 
 statement ok
 INSERT INTO parent3 VALUES (1, 2), (4, 5);
@@ -1431,24 +1399,6 @@ select index_name,column_name,direction from [show indexes from child3];
 ----
 primary           x  ASC
 primary           y  ASC
-primary           z  N/A
-child3_x_key      x  ASC
-child3_x_key      y  ASC
-child3_x_y_z_key  x  ASC
-child3_x_y_z_key  y  ASC
-child3_x_y_z_key  z  ASC
-
-# De-interleave the table and show that the indexes are dropped.
-
-statement ok
-ALTER TABLE child3 ALTER PRIMARY KEY USING COLUMNS (x, y)
-
-query TTT
-select index_name,column_name,direction from [show indexes from child3];
-----
-primary           x  ASC
-primary           y  ASC
-primary           z  N/A
 child3_x_key      x  ASC
 child3_x_key      y  ASC
 child3_x_y_z_key  x  ASC
@@ -1484,67 +1434,3 @@ table_with_virtual_cols  CREATE TABLE public.table_with_virtual_cols (
                          UNIQUE INDEX table_with_virtual_cols_id_key (id ASC),
                          FAMILY fam_0_id_new_pk (id, new_pk)
 )
-
-# Test that we do not create new indexes for the old primary key when going
-# from sharded to non-sharded and back.
-subtest toggle_sharded_no_new_index
-
-statement ok
-DROP TABLE IF EXISTS t;
-CREATE TABLE t (i INT PRIMARY KEY)
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM t]
-----
-primary  i  ASC
-
-statement ok
-ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (i) USING HASH WITH BUCKET_COUNT = 2
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM t]
-----
-primary  crdb_internal_i_shard_2  ASC
-primary  i                        ASC
-
-statement ok
-ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (i);
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM t]
-----
-primary  i                        ASC
-primary  crdb_internal_i_shard_2  N/A
-
-# Test that we do not create new indexes for the old primary key when going
-# from interleaved to non-interleaved and back.
-subtest toggle_interleaved_no_new_index
-
-statement ok
-DROP TABLE IF EXISTS parent, child;
-CREATE TABLE parent (i INT PRIMARY KEY);
-CREATE TABLE child (i INT REFERENCES "parent" (i), j INT, PRIMARY KEY (i, j))
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM child]
-----
-primary  i  ASC
-primary  j  ASC
-
-statement ok
-ALTER TABLE child ALTER PRIMARY KEY USING COLUMNS (i, j) INTERLEAVE IN PARENT "parent" (i)
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM child]
-----
-primary  i  ASC
-primary  j  ASC
-
-statement ok
-ALTER TABLE child ALTER PRIMARY KEY USING COLUMNS (i, j);
-
-query TTT
-SELECT index_name,column_name,direction FROM [SHOW INDEXES FROM child]
-----
-primary  i  ASC
-primary  j  ASC

@@ -380,7 +380,7 @@ func NewDistSender(cfg DistSenderConfig) *DistSender {
 	ds.clusterID = &cfg.RPCContext.ClusterID
 	ds.asyncSenderSem = quotapool.NewIntPool("DistSender async concurrency",
 		uint64(senderConcurrencyLimit.Get(&cfg.Settings.SV)))
-	senderConcurrencyLimit.SetOnChange(&cfg.Settings.SV, func(ctx context.Context) {
+	senderConcurrencyLimit.SetOnChange(&cfg.Settings.SV, func() {
 		ds.asyncSenderSem.UpdateCapacity(uint64(senderConcurrencyLimit.Get(&cfg.Settings.SV)))
 	})
 	ds.rpcContext.Stopper.AddCloser(ds.asyncSenderSem.Closer("stopper"))
@@ -464,6 +464,11 @@ func (ds *DistSender) FirstRange() (*roachpb.RangeDescriptor, error) {
 		panic("with `nil` firstRangeProvider, DistSender must not use itself as RangeDescriptorDB")
 	}
 	return ds.firstRangeProvider.GetFirstRangeDescriptor()
+}
+
+// NodeDialer returns a Dialer.
+func (ds *DistSender) NodeDialer() *nodedialer.Dialer {
+	return ds.nodeDialer
 }
 
 // getNodeID attempts to return the local node ID. It returns 0 if the DistSender
@@ -609,7 +614,7 @@ func (ds *DistSender) initAndVerifyBatch(
 			case *roachpb.ReverseScanRequest:
 				// Accepted reverse range requests.
 
-			case *roachpb.QueryIntentRequest, *roachpb.EndTxnRequest, *roachpb.GetRequest:
+			case *roachpb.QueryIntentRequest, *roachpb.EndTxnRequest:
 				// Accepted point requests that can be in batches with limit.
 
 			default:
@@ -655,6 +660,17 @@ func splitBatchAndCheckForRefreshSpans(
 		}()
 		if hasRefreshSpans {
 			ba.CanForwardReadTimestamp = false
+
+			// If the final part contains an EndTxn request, unset its
+			// DeprecatedCanCommitAtHigherTimestamp flag as well.
+			lastPart := parts[len(parts)-1]
+			if et := lastPart[len(lastPart)-1].GetEndTxn(); et != nil {
+				etCopy := *et
+				etCopy.DeprecatedCanCommitAtHigherTimestamp = false
+				lastPart = append([]roachpb.RequestUnion(nil), lastPart...)
+				lastPart[len(lastPart)-1].MustSetInner(&etCopy)
+				parts[len(parts)-1] = lastPart
+			}
 		}
 	}
 	return parts
@@ -677,6 +693,19 @@ func unsetCanForwardReadTimestampFlag(ctx context.Context, ba *roachpb.BatchRequ
 		if roachpb.NeedsRefresh(req.GetInner()) {
 			// Unset the flag.
 			ba.CanForwardReadTimestamp = false
+
+			// We would need to also unset the DeprecatedCanCommitAtHigherTimestamp
+			// flag on any EndTxn request in the batch, but it turns out that
+			// because we call this function when a batch is split across
+			// ranges, we'd already have bailed if the EndTxn wasn't a parallel
+			// commit — and if it was a parallel commit then we must not have
+			// any requests that need to refresh (see
+			// txnCommitter.canCommitInParallel). Assert this for our own
+			// sanity.
+			if _, ok := ba.GetArg(roachpb.EndTxn); ok {
+				log.Fatalf(ctx, "batch unexpected contained requests "+
+					"that need to refresh and an EndTxn request: %s", ba.String())
+			}
 			return
 		}
 	}
@@ -705,6 +734,7 @@ func (ds *DistSender) Send(
 	ctx, sp := tracing.EnsureChildSpan(ctx, ds.AmbientContext.Tracer, "dist sender send")
 	defer sp.Finish()
 
+	var rplChunks []*roachpb.BatchResponse
 	splitET := false
 	var require1PC bool
 	lastReq := ba.Requests[len(ba.Requests)-1].GetInner()
@@ -724,8 +754,6 @@ func (ds *DistSender) Send(
 		log.Fatalf(ctx, "batch with MaxSpanRequestKeys=%d, TargetBytes=%d needs splitting",
 			log.Safe(ba.MaxSpanRequestKeys), log.Safe(ba.TargetBytes))
 	}
-	var singleRplChunk [1]*roachpb.BatchResponse
-	rplChunks := singleRplChunk[:0:1]
 
 	errIdxOffset := 0
 	for len(parts) > 0 {
@@ -1222,21 +1250,6 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 		canParallelize = canParallelize && !isExpensive
 	}
 
-	// Iterate over the ranges that the batch touches. The iteration is done in
-	// key order - the order of requests in the batch is not relevant for the
-	// iteration. Each iteration sends for evaluation one sub-batch to one range.
-	// The sub-batch is the union of requests in the batch overlapping the
-	// current range. The order of requests in a sub-batch is the same as the
-	// relative order of requests in the complete batch. On the server-side,
-	// requests in a sub-batch are executed in order. Depending on whether the
-	// sub-batches can be executed in parallel or not, each iteration either waits
-	// for the sub-batch results (in the no-parallelism case) or defers the
-	// results to a channel that will be processed in the defer above.
-	//
-	// After each sub-batch is executed, if ba has key or memory limits (which
-	// imply no parallelism), ba.MaxSpanRequestKeys and ba.TargetBytes are
-	// adjusted with the responses for the sub-batch. If a limit is exhausted, the
-	// loop breaks.
 	for ; ri.Valid(); ri.Seek(ctx, seekKey, scanDir) {
 		responseCh := make(chan response, 1)
 		responseChs = append(responseChs, responseCh)
@@ -1798,7 +1811,7 @@ func (ds *DistSender) sendToReplicas(
 			log.Eventf(ctx, "leaseholder %s missing from replicas", leaseholder)
 		}
 	} else {
-		log.VEvent(ctx, 2, "routing to nearest replica; leaseholder not required")
+		log.VEvent(ctx, 2, "routing to nearest replica")
 	}
 
 	opts := SendOptions{

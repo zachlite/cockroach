@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
@@ -65,7 +66,9 @@ func gcTables(
 		}
 
 		// First, delete all the table data.
-		if err := ClearTableData(ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, table); err != nil {
+		if err := ClearTableData(
+			ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, &execCfg.Settings.SV, table,
+		); err != nil {
 			return errors.Wrapf(err, "clearing data for table %d", table.GetID())
 		}
 
@@ -86,6 +89,7 @@ func ClearTableData(
 	db *kv.DB,
 	distSender *kvcoord.DistSender,
 	codec keys.SQLCodec,
+	sv *settings.Values,
 	table catalog.TableDescriptor,
 ) error {
 	// If DropTime isn't set, assume this drop request is from a version
@@ -95,18 +99,12 @@ func ClearTableData(
 	// cleaned up.
 	if table.GetDropTime() == 0 || table.IsInterleaved() {
 		log.Infof(ctx, "clearing data in chunks for table %d", table.GetID())
-		return sql.ClearTableDataInChunks(ctx, db, codec, table, false /* traceKV */)
+		return sql.ClearTableDataInChunks(ctx, db, codec, sv, table, false /* traceKV */)
 	}
 	log.Infof(ctx, "clearing data for table %d", table.GetID())
 
 	tableKey := roachpb.RKey(codec.TablePrefix(uint32(table.GetID())))
 	tableSpan := roachpb.RSpan{Key: tableKey, EndKey: tableKey.PrefixEnd()}
-	return clearSpanData(ctx, db, distSender, tableSpan)
-}
-
-func clearSpanData(
-	ctx context.Context, db *kv.DB, distSender *kvcoord.DistSender, span roachpb.RSpan,
-) error {
 
 	// ClearRange requests lays down RocksDB range deletion tombstones that have
 	// serious performance implications (#24029). The logic below attempts to
@@ -132,20 +130,20 @@ func clearSpanData(
 	const waitTime = 500 * time.Millisecond
 
 	var n int
-	lastKey := span.Key
+	lastKey := tableSpan.Key
 	ri := kvcoord.NewRangeIterator(distSender)
 	timer := timeutil.NewTimer()
 	defer timer.Stop()
 
-	for ri.Seek(ctx, span.Key, kvcoord.Ascending); ; ri.Next(ctx) {
+	for ri.Seek(ctx, tableSpan.Key, kvcoord.Ascending); ; ri.Next(ctx) {
 		if !ri.Valid() {
 			return ri.Error()
 		}
 
-		if n++; n >= batchSize || !ri.NeedAnother(span) {
+		if n++; n >= batchSize || !ri.NeedAnother(tableSpan) {
 			endKey := ri.Desc().EndKey
-			if span.EndKey.Less(endKey) {
-				endKey = span.EndKey
+			if tableSpan.EndKey.Less(endKey) {
+				endKey = tableSpan.EndKey
 			}
 			var b kv.Batch
 			b.AddRawRequest(&roachpb.ClearRangeRequest{
@@ -169,7 +167,7 @@ func clearSpanData(
 			}
 		}
 
-		if !ri.NeedAnother(span) {
+		if !ri.NeedAnother(tableSpan) {
 			break
 		}
 	}

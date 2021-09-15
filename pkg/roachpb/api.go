@@ -448,9 +448,37 @@ func (r *AdminScatterResponse) combine(c combinable) error {
 			return err
 		}
 
+		// Combined responses will always have only RangeInfo set, rather than
+		// DeprecatedRanges.
+		// TODO(pbardea): Remove in 21.1.
+		r.maybeUpgrade()
+		otherR.maybeUpgrade()
 		r.RangeInfos = append(r.RangeInfos, otherR.RangeInfos...)
 	}
 	return nil
+}
+
+// maybeUpgrade will upgrade responses from 20.1 clients to look like 20.2
+// responses.
+// It converts the DeprecatedRanges field of the response to the equivalent
+// RangeInfos and nils out DeprecatedRanges. Note that the converted RangeInfos
+// will have an empty lease and only have the start and end key of the range
+// descriptor populated.
+func (r *AdminScatterResponse) maybeUpgrade() {
+	if len(r.RangeInfos) == 0 {
+		r.RangeInfos = make([]RangeInfo, len(r.DeprecatedRanges))
+		for i, respRange := range r.DeprecatedRanges {
+			r.RangeInfos[i] = RangeInfo{
+				// respRange.Span's keys are not local keys. The keys were created with
+				// AsRawKey(), so converting back is safe.
+				Desc: RangeDescriptor{
+					StartKey: RKey(respRange.Span.Key),
+					EndKey:   RKey(respRange.Span.EndKey),
+				},
+			}
+		}
+	}
+	r.DeprecatedRanges = nil
 }
 
 var _ combinable = &AdminScatterResponse{}
@@ -647,7 +675,13 @@ func (*LeaseInfoRequest) Method() Method { return LeaseInfo }
 func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 
 // Method implements the Request interface.
+func (*WriteBatchRequest) Method() Method { return WriteBatch }
+
+// Method implements the Request interface.
 func (*ExportRequest) Method() Method { return Export }
+
+// Method implements the Request interface.
+func (*ImportRequest) Method() Method { return Import }
 
 // Method implements the Request interface.
 func (*AdminScatterRequest) Method() Method { return AdminScatter }
@@ -875,8 +909,20 @@ func (ccr *ComputeChecksumRequest) ShallowCopy() Request {
 }
 
 // ShallowCopy implements the Request interface.
+func (r *WriteBatchRequest) ShallowCopy() Request {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
 func (ekr *ExportRequest) ShallowCopy() Request {
 	shallowCopy := *ekr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
+func (r *ImportRequest) ShallowCopy() Request {
+	shallowCopy := *r
 	return &shallowCopy
 }
 
@@ -1211,11 +1257,8 @@ func (*AdminMergeRequest) flags() int          { return isAdmin | isAlone }
 func (*AdminTransferLeaseRequest) flags() int  { return isAdmin | isAlone }
 func (*AdminChangeReplicasRequest) flags() int { return isAdmin | isAlone }
 func (*AdminRelocateRangeRequest) flags() int  { return isAdmin | isAlone }
+func (*HeartbeatTxnRequest) flags() int        { return isWrite | isTxn }
 func (*GCRequest) flags() int                  { return isWrite | isRange }
-
-// HeartbeatTxn updates the timestamp cache with transaction records,
-// to avoid checking for them on disk when considering 1PC evaluation.
-func (*HeartbeatTxnRequest) flags() int { return isWrite | isTxn | updatesTSCache }
 
 // PushTxnRequest updates different marker keys in the timestamp cache when
 // pushing a transaction's timestamp and when aborting a transaction.
@@ -1258,7 +1301,9 @@ func (*TransferLeaseRequest) flags() int {
 func (*RecomputeStatsRequest) flags() int                { return isWrite | isAlone }
 func (*ComputeChecksumRequest) flags() int               { return isWrite }
 func (*CheckConsistencyRequest) flags() int              { return isAdmin | isRange }
+func (*WriteBatchRequest) flags() int                    { return isWrite | isRange }
 func (*ExportRequest) flags() int                        { return isRead | isRange | updatesTSCache }
+func (*ImportRequest) flags() int                        { return isAdmin | isAlone }
 func (*AdminScatterRequest) flags() int                  { return isAdmin | isRange | isAlone }
 func (*AdminVerifyProtectedTimestampRequest) flags() int { return isAdmin | isRange | isAlone }
 func (*AddSSTableRequest) flags() int {
@@ -1283,52 +1328,6 @@ func (*RangeStatsRequest) flags() int { return isRead }
 // parallel commits.
 func (etr *EndTxnRequest) IsParallelCommit() bool {
 	return etr.Commit && len(etr.InFlightWrites) > 0
-}
-
-const (
-	// ExternalStorageAuthImplicit is used by ExternalStorage instances to
-	// indicate access via a node's "implicit" authorization (e.g. machine acct).
-	ExternalStorageAuthImplicit = "implicit"
-
-	// ExternalStorageAuthSpecified is used by ExternalStorage instances to
-	// indicate access is via explicitly provided credentials.
-	ExternalStorageAuthSpecified = "specified"
-)
-
-// AccessIsWithExplicitAuth returns true if the external storage config carries
-// its own explicit credentials to use for access (or does not require them), as
-// opposed to using something about the node to gain implicit access, such as a
-// VM's machine account, network access, file system, etc.
-func (m *ExternalStorage) AccessIsWithExplicitAuth() bool {
-	switch m.Provider {
-	case ExternalStorageProvider_s3:
-		// custom endpoints could be a network resource only accessible via this
-		// node's network context and thus have an element of implicit auth.
-		if m.S3Config.Endpoint != "" {
-			return false
-		}
-		return m.S3Config.Auth != ExternalStorageAuthImplicit
-	case ExternalStorageProvider_gs:
-		return m.GoogleCloudConfig.Auth == ExternalStorageAuthSpecified
-	case ExternalStorageProvider_azure:
-		// Azure storage only uses explicitly supplied credentials.
-		return true
-	case ExternalStorageProvider_userfile:
-		// userfile always checks the user performing the action has grants on the
-		// table used.
-		return true
-	case ExternalStorageProvider_null:
-		return true
-	case ExternalStorageProvider_http:
-		// Arbitrary network endpoints may be accessible only via the node and thus
-		// make use of its implicit access to them.
-		return false
-	case ExternalStorageProvider_nodelocal:
-		// The node's local filesystem is obviously accessed implicitly as the node.
-		return false
-	default:
-		return false
-	}
 }
 
 // BulkOpSummaryID returns the key within a BulkOpSummary's EntryCounts map for
@@ -1515,7 +1514,7 @@ func (r *JoinNodeResponse) CreateStoreIdent() (StoreIdent, error) {
 
 // SafeFormat implements redact.SafeFormatter.
 func (c *ContentionEvent) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("conflicted with %s on %s for %.3fs", c.TxnMeta.ID, c.Key, c.Duration.Seconds())
+	w.Printf("conflicted with %s on %s for %.2fs", c.TxnMeta.ID, c.Key, c.Duration.Seconds())
 }
 
 // String implements fmt.Stringer.

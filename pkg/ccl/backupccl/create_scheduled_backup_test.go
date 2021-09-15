@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -152,9 +153,6 @@ func (h *testHelper) createBackupSchedule(
 		require.NoError(t, s.InitFromDatums(datums, cols))
 		schedules = append(schedules, s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 
 	return schedules, nil
 }
@@ -182,6 +180,7 @@ func (t userType) String() string {
 // itself with the actual scheduling and the execution of those backups.
 func TestSerializesScheduledBackupExecutionArgs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.UnderRaceWithIssue(t, 60718, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	th, cleanup := newTestHelper(t)
@@ -651,7 +650,6 @@ func TestCreateBackupScheduleInExplicitTxnRollback(t *testing.T) {
 
 	res := th.sqlDB.Query(t, "SELECT id FROM [SHOW SCHEDULES];")
 	require.False(t, res.Next())
-	require.NoError(t, res.Err())
 
 	th.sqlDB.Exec(t, "BEGIN;")
 	th.sqlDB.Exec(t, "CREATE SCHEDULE FOR BACKUP INTO 'nodelocal://1/collection' RECURRING '@daily';")
@@ -659,7 +657,6 @@ func TestCreateBackupScheduleInExplicitTxnRollback(t *testing.T) {
 
 	res = th.sqlDB.Query(t, "SELECT id FROM [SHOW SCHEDULES];")
 	require.False(t, res.Next())
-	require.NoError(t, res.Err())
 }
 
 // Normally, we issue backups with AOST set to be the scheduled nextRun.
@@ -779,7 +776,7 @@ INSERT INTO t values (1), (10), (100);
 	})
 
 	metrics := func() *jobs.ExecutorMetrics {
-		ex, _, err := jobs.GetScheduledJobExecutor(tree.ScheduledBackupExecutor.InternalName())
+		ex, err := jobs.GetScheduledJobExecutor(tree.ScheduledBackupExecutor.InternalName())
 		require.NoError(t, err)
 		require.NotNil(t, ex.Metrics())
 		return ex.Metrics().(*backupMetrics).ExecutorMetrics

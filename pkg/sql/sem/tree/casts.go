@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -294,6 +293,9 @@ var validCasts = []castInfo{
 	{from: types.IntFamily, to: types.OidFamily, volatility: VolatilityStable, ignoreVolatilityCheck: true},
 	{from: types.OidFamily, to: types.OidFamily, volatility: VolatilityStable},
 
+	// Casts to UnknownFamily.
+	{from: types.UnknownFamily, to: types.UnknownFamily, volatility: VolatilityImmutable},
+
 	// Casts to UuidFamily.
 	{from: types.UnknownFamily, to: types.UuidFamily, volatility: VolatilityImmutable},
 	{from: types.StringFamily, to: types.UuidFamily, volatility: VolatilityImmutable},
@@ -355,12 +357,12 @@ func lookupCast(from, to types.Family) *castInfo {
 }
 
 // LookupCastVolatility returns the volatility of a valid cast.
-func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Volatility, ok bool) {
+func LookupCastVolatility(from, to *types.T) (_ Volatility, ok bool) {
 	fromFamily := from.Family()
 	toFamily := to.Family()
 	// Special case for casting between arrays.
 	if fromFamily == types.ArrayFamily && toFamily == types.ArrayFamily {
-		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents(), sd)
+		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents())
 	}
 	// Special case for casting between tuples.
 	if fromFamily == types.TupleFamily && toFamily == types.TupleFamily {
@@ -375,7 +377,7 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 		}
 		maxVolatility := VolatilityLeakProof
 		for i := range fromTypes {
-			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i], sd)
+			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i])
 			if !ok {
 				return 0, false
 			}
@@ -384,24 +386,6 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 			}
 		}
 		return maxVolatility, true
-	}
-
-	// Special case for IntervalStyle.
-	switch fromFamily {
-	case types.StringFamily, types.CollatedStringFamily:
-		switch toFamily {
-		case types.IntervalFamily:
-			if sd != nil && sd.IntervalStyleEnabled {
-				return VolatilityStable, true
-			}
-		}
-	case types.IntervalFamily:
-		switch toFamily {
-		case types.StringFamily, types.CollatedStringFamily:
-			if sd != nil && sd.IntervalStyleEnabled {
-				return VolatilityStable, true
-			}
-		}
 	}
 	cast := lookupCast(fromFamily, toFamily)
 	if cast == nil {
@@ -451,7 +435,9 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 			sv = v.Contents
 		}
 
-		sv = adjustStringValueToType(typ, sv)
+		if typ.Oid() == oid.T_bpchar {
+			sv = strings.TrimRight(sv, " ")
+		}
 
 		if typ.Width() > 0 && utf8.RuneCountInString(sv) > int(typ.Width()) {
 			return nil, pgerror.Newf(pgcode.StringDataRightTruncation,
@@ -459,11 +445,11 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 				typ.SQLString())
 		}
 
-		if typ.Oid() == oid.T_bpchar || typ.Oid() == oid.T_char {
+		if typ.Oid() == oid.T_bpchar {
 			if _, ok := AsDString(inVal); ok {
-				return NewDString(sv), nil
+				return NewDString(strings.TrimRight(sv, " ")), nil
 			} else if _, ok := inVal.(*DCollatedString); ok {
-				return NewDCollatedString(sv, typ.Locale(), &CollationEnvironment{})
+				return NewDCollatedString(strings.TrimRight(sv, " "), typ.Locale(), &CollationEnvironment{})
 			}
 		}
 	case types.IntFamily:
@@ -476,7 +462,7 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 				// implementation of math.(Max|Min)(16|32) numbers that store
 				// the boundaries of the allowed range.
 				// NOTE: when updating the code below, make sure to update
-				// execgen/cast_gen_util.go as well.
+				// execgen/overloads_cast.go as well.
 				shifted := v >> width
 				if (v >= 0 && shifted > 0) || (v < 0 && shifted < -1) {
 					if typ.Width() == 16 {
@@ -594,20 +580,6 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 		}
 	}
 	return inVal, nil
-}
-
-// adjustStringToType checks that the width for strings fits the
-// specified column type.
-func adjustStringValueToType(typ *types.T, sv string) string {
-	switch typ.Oid() {
-	case oid.T_char:
-		// "char" is supposed to truncate long values
-		return util.TruncateString(sv, 1)
-	case oid.T_bpchar:
-		// bpchar types truncate trailing whitespace.
-		return strings.TrimRight(sv, " ")
-	}
-	return sv
 }
 
 // formatBitArrayToType formats bit arrays such that they fill the total width
@@ -908,26 +880,14 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 				FmtBareStrings,
 			)
 		case *DTuple:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DArray:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DInterval:
 			// When converting an interval to string, we need a string representation
 			// of the duration (e.g. "5s") and not of the interval itself (e.g.
 			// "INTERVAL '5s'").
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData.DataConversionConfig),
-			)
+			s = t.ValueAsString()
 		case *DUuid:
 			s = t.UUID.String()
 		case *DIPAddr:
@@ -1263,9 +1223,9 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		}
 		switch v := d.(type) {
 		case *DString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), string(*v), itm)
+			return ParseDIntervalWithTypeMetadata(string(*v), itm)
 		case *DCollatedString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), v.Contents, itm)
+			return ParseDIntervalWithTypeMetadata(v.Contents, itm)
 		case *DInt:
 			return NewDInterval(duration.FromInt64(int64(*v)), itm), nil
 		case *DFloat:
@@ -1365,11 +1325,7 @@ func performIntToOidCast(ctx *EvalContext, t *types.T, v DInt) (Datum, error) {
 		ret := &DOid{semanticType: t, DInt: v}
 		if typ, ok := types.OidToType[oid.Oid(v)]; ok {
 			ret.name = typ.PGName()
-		} else if types.IsOIDUserDefinedType(oid.Oid(v)) {
-			typ, err := ctx.Planner.ResolveTypeByOID(ctx.Context, oid.Oid(v))
-			if err != nil {
-				return nil, err
-			}
+		} else if typ, err := ctx.Planner.ResolveTypeByOID(ctx.Context, oid.Oid(v)); err == nil {
 			ret.name = typ.PGName()
 		}
 		return ret, nil
@@ -1385,7 +1341,7 @@ func performIntToOidCast(ctx *EvalContext, t *types.T, v DInt) (Datum, error) {
 		return ret, nil
 
 	default:
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, NewDOid(v))
+		oid, err := queryOid(ctx, t, NewDOid(v))
 		if err != nil {
 			oid = NewDOid(v)
 			oid.semanticType = t

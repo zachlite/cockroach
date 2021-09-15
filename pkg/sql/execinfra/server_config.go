@@ -27,21 +27,29 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
+	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 	"github.com/marusama/semaphore"
 )
+
+// SettingWorkMemBytes is a cluster setting that determines the maximum amount
+// of RAM that a processor can use.
+var SettingWorkMemBytes = settings.RegisterByteSizeSetting(
+	"sql.distsql.temp_storage.workmem",
+	"maximum amount of memory in bytes a processor can use before falling back to temp storage",
+	64*1024*1024, /* 64MB */
+).WithPublic()
 
 // ServerConfig encompasses the configuration required to create a
 // DistSQLServer.
@@ -105,7 +113,9 @@ type ServerConfig struct {
 	// because of RocksDB space amplification.
 	ParentDiskMonitor *mon.BytesMonitor
 
-	Metrics *DistSQLMetrics
+	Metrics            *DistSQLMetrics
+	RowMetrics         *row.Metrics
+	InternalRowMetrics *row.Metrics
 
 	// SQLLivenessReader provides access to reading the liveness of sessions.
 	SQLLivenessReader sqlliveness.Reader
@@ -149,13 +159,6 @@ type ServerConfig struct {
 	// SQLStatsResetter is an interface used to reset SQL stats without the need to
 	// introduce dependency on the sql package.
 	SQLStatsResetter tree.SQLStatsResetter
-
-	// VirtualSchemas hold the virtual table schemas.
-	VirtualSchemas catalog.VirtualSchemas
-
-	// SQLSQLResponseAdmissionQ is the admission queue to use for
-	// SQLSQLResponseWork.
-	SQLSQLResponseAdmissionQ *admission.WorkQueue
 }
 
 // RuntimeStats is an interface through which the rowexec layer can get
@@ -222,6 +225,10 @@ type TestingKnobs struct {
 	// checked by a test receiver on the gateway.
 	MetadataTestLevel MetadataTestLevel
 
+	// CheckVectorizedFlowIsClosedCorrectly checks that all components in a flow
+	// were closed explicitly in flow.Cleanup.
+	CheckVectorizedFlowIsClosedCorrectly bool
+
 	// Changefeed contains testing knobs specific to the changefeed system.
 	Changefeed base.ModuleTestingKnobs
 
@@ -255,33 +262,25 @@ const (
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
 func (*TestingKnobs) ModuleTestingKnobs() {}
 
-// DefaultMemoryLimit is the default value of
-// sql.distsql.temp_storage.workmem cluster setting.
-const DefaultMemoryLimit = 64 << 20 /* 64 MiB */
-
 // GetWorkMemLimit returns the number of bytes determining the amount of RAM
 // available to a single processor or operator.
-func GetWorkMemLimit(flowCtx *FlowCtx) int64 {
-	if flowCtx.Cfg.TestingKnobs.ForceDiskSpill && flowCtx.Cfg.TestingKnobs.MemoryLimitBytes != 0 {
+func GetWorkMemLimit(config *ServerConfig) int64 {
+	if config.TestingKnobs.ForceDiskSpill && config.TestingKnobs.MemoryLimitBytes != 0 {
 		panic(errors.AssertionFailedf("both ForceDiskSpill and MemoryLimitBytes set"))
 	}
-	if flowCtx.Cfg.TestingKnobs.ForceDiskSpill {
+	if config.TestingKnobs.ForceDiskSpill {
 		return 1
+	} else if config.TestingKnobs.MemoryLimitBytes != 0 {
+		return config.TestingKnobs.MemoryLimitBytes
 	}
-	return GetWorkMemLimitNoDiskSpill(flowCtx)
+	return SettingWorkMemBytes.Get(&config.Settings.SV)
 }
 
-// GetWorkMemLimitNoDiskSpill returns the number of bytes determining the amount
-// of RAM available to a single processor or operator. This function should be
-// used instead of GetWorkMemLimit if the processor cannot spill to disk,
-// since ServerConfig.TestingKnobs.ForceDiskSpill is ignored by this function.
-func GetWorkMemLimitNoDiskSpill(flowCtx *FlowCtx) int64 {
-	if flowCtx.Cfg.TestingKnobs.MemoryLimitBytes != 0 {
-		return flowCtx.Cfg.TestingKnobs.MemoryLimitBytes
+// GetRowMetrics returns the proper RowMetrics for either internal or user
+// queries.
+func (flowCtx *FlowCtx) GetRowMetrics() *row.Metrics {
+	if flowCtx.EvalCtx.SessionData.Internal {
+		return flowCtx.Cfg.InternalRowMetrics
 	}
-	if flowCtx.EvalCtx.SessionData.WorkMemLimit <= 0 {
-		// If for some reason workmem limit is not set, use the default value.
-		return DefaultMemoryLimit
-	}
-	return flowCtx.EvalCtx.SessionData.WorkMemLimit
+	return flowCtx.Cfg.RowMetrics
 }

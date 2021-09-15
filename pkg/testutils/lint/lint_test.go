@@ -25,7 +25,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/internal/codeowners"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	_ "github.com/cockroachdb/cockroach/pkg/testutils/buildutil"
@@ -38,26 +37,6 @@ import (
 )
 
 const cockroachDB = "github.com/cockroachdb/cockroach"
-
-func init() {
-	if bazel.BuiltWithBazel() {
-		// We need to explicitly include all the libraries in LDFLAGS.
-		runfiles, err := bazel.RunfilesPath()
-		if err != nil {
-			panic(err)
-		}
-		ldflags := ""
-		for _, dir := range []string{
-			"c-deps/libgeos/lib",
-			"c-deps/libproj/lib",
-			"external/com_github_knz_go_libedit/unix",
-		} {
-			ldflags = ldflags + " -L" + filepath.Join(runfiles, dir)
-		}
-		os.Setenv("CGO_LDFLAGS", ldflags)
-		os.Setenv("LDFLAGS", ldflags)
-	}
-}
 
 func dirCmd(
 	dir string, name string, args ...string,
@@ -444,12 +423,11 @@ func TestLint(t *testing.T) {
 				re: `\bos\.(Getenv|LookupEnv)\(`,
 				excludes: []string{
 					":!acceptance",
-					":!build/bazel",
 					":!ccl/acceptanceccl/backup_test.go",
 					":!ccl/backupccl/backup_cloud_test.go",
 					// KMS requires AWS credentials from environment variables.
 					":!ccl/backupccl/backup_test.go",
-					":!storage/cloud",
+					":!storage/cloudimpl",
 					":!ccl/workloadccl/fixture_test.go",
 					":!internal/reporoot/reporoot.go",
 					":!cmd",
@@ -457,7 +435,7 @@ func TestLint(t *testing.T) {
 					":!nightly",
 					":!testutils/lint",
 					":!util/envutil/env.go",
-					":!testutils/data_path.go",
+					":!testutils/bazel.go",
 					":!util/log/tracebacks.go",
 					":!util/sdnotify/sdnotify_unix.go",
 					":!util/grpcutil", // GRPC_GO_* variables
@@ -729,7 +707,6 @@ func TestLint(t *testing.T) {
 			":!util/tracing/span.go",
 			":!util/tracing/crdbspan.go",
 			":!util/tracing/tracer.go",
-			":!cmd/roachtest/tests/gorm_helpers.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -837,9 +814,9 @@ func TestLint(t *testing.T) {
 			":!rpc/context.go",
 			":!rpc/nodedialer/nodedialer_test.go",
 			":!util/grpcutil/grpc_util_test.go",
+			":!cli/systembench/network_test_server.go",
 			":!server/testserver.go",
 			":!util/tracing/*_test.go",
-			":!ccl/sqlproxyccl/tenantdirsvr/test_directory_svr.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1023,8 +1000,6 @@ func TestLint(t *testing.T) {
 			":!sql/*.pb.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
-			":!rpc/codec.go",
-			":!rpc/codec_test.go",
 			":!settings/settings_test.go",
 			":!sql/types/types_jsonpb.go",
 			":!sql/schemachanger/scbuild/builder_test.go",
@@ -1069,8 +1044,6 @@ func TestLint(t *testing.T) {
 			":!util/protoutil/marshaler.go",
 			":!util/encoding/encoding.go",
 			":!util/hlc/timestamp.go",
-			":!rpc/codec.go",
-			":!rpc/codec_test.go",
 			":!sql/types/types_jsonpb.go",
 		)
 		if err != nil {
@@ -1305,7 +1278,6 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`^sql/logictest/testdata/logic_test/pg_extension$`),
 			stream.GrepNot(`^sql/opt/testutils/opttester/testfixtures/.*`),
 			stream.GrepNot(`^util/timeutil/lowercase_timezones_generated.go$`),
-			stream.GrepNot(`^cmd/roachtest/tests/ruby_pg_blocklist.go$`),
 			stream.Map(func(s string) string {
 				return filepath.Join(pkgDir, s)
 			}),
@@ -1513,8 +1485,7 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`cockroach/pkg/util/log: github\.com/pkg/errors$`),
 			stream.GrepNot(`cockroach/pkg/(base|release|security|util/(log|randutil|stop)): log$`),
 			stream.GrepNot(`cockroach/pkg/(server/serverpb|ts/tspb): github\.com/golang/protobuf/proto$`),
-			stream.GrepNot(`cockroachdb/cockroach/pkg/rpc: github\.com/golang/protobuf/proto$`),
-			stream.GrepNot(`cockroachdb/cockroach/pkg/sql/lexbase/allkeywords: log$`),
+			stream.GrepNot(`cockroachdb/cockroach/pkg/sql/lex/allkeywords: log$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/util/timeutil/gen: log$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/roachpb/gen: log$`),
 			stream.GrepNot(`cockroachdb/cockroach/pkg/util/log/gen: log$`),
@@ -1625,7 +1596,6 @@ func TestLint(t *testing.T) {
 				stream.GrepNot("sql/.*exported func .* returns unexported type sql.planNode"),
 				stream.GrepNot("pkg/sql/types/types.go.* var Uuid should be UUID"),
 				stream.GrepNot("pkg/sql/oidext/oidext.go.*don't use underscores in Go names; const T_"),
-				stream.GrepNot("server/api_v2.go.*package comment should be of the form"),
 			), func(s string) {
 				t.Errorf("\n%s", s)
 			}); err != nil {
@@ -1642,16 +1612,12 @@ func TestLint(t *testing.T) {
 	t.Run("TestStaticCheck", func(t *testing.T) {
 		// staticcheck uses 2.4GB of ram (as of 2019-05-10), so don't parallelize it.
 		skip.UnderShort(t)
-		var args []string
-		if pkgSpecified {
-			args = []string{pkgScope}
-		} else {
-			args = []string{"-unused.whole-program", pkgScope}
-		}
 		cmd, stderr, filter, err := dirCmd(
 			crdb.Dir,
 			"staticcheck",
-			args...)
+			"-unused.whole-program",
+			pkgScope,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1665,9 +1631,6 @@ func TestLint(t *testing.T) {
 				filter,
 				// Skip .pb.go and .pb.gw.go generated files.
 				stream.GrepNot(`pkg/.*\.pb(\.gw|)\.go:`),
-				// This file is a conditionally-compiled stub implementation that
-				// will produce fake "func is unused" errors.
-				stream.GrepNot(`pkg/build/bazel/non_bazel.go`),
 				// Skip generated file.
 				stream.GrepNot(`pkg/ui/distoss/bindata.go`),
 				stream.GrepNot(`pkg/ui/distccl/bindata.go`),
@@ -1687,8 +1650,6 @@ func TestLint(t *testing.T) {
 				stream.GrepNot(`pkg/.*.go:.* func .*\.Cause is unused`),
 				// Using deprecated WireLength call.
 				stream.GrepNot(`pkg/rpc/stats_handler.go:.*v.WireLength is deprecated: This field is never set.*`),
-				// rpc/codec.go imports the same proto package that grpc-go imports (as of crdb@dd87d1145 and grpc-go@7b167fd6).
-				stream.GrepNot(`pkg/rpc/codec.go:.*package github.com/golang/protobuf/proto is deprecated: Use the "google.golang.org/protobuf/proto" package instead.`),
 				// goschedstats contains partial copies of go runtime structures, with
 				// many fields that we're not using.
 				stream.GrepNot(`pkg/util/goschedstats/runtime.*\.go:.*is unused`),
@@ -1725,7 +1686,6 @@ func TestLint(t *testing.T) {
 			// (see git help gitglossary) makes * behave like a normal, single dir
 			// glob, and exclude is the synonym of !.
 			":(glob,exclude)sql/colexec/execgen/*.go",
-			":!sql/colexec/execgen/testdata",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1874,11 +1834,10 @@ func TestLint(t *testing.T) {
 			"-nE",
 			// We prohibit usage of Vec.Append outside of the
 			// colexecutils.AppendOnlyBufferedBatch.
-			`\.(Append)\(`,
+			`(Append)\(`,
 			"--",
 			"sql/col*",
 			":!sql/colexec/colexecutils/utils.go",
-			":!sql/colmem/allocator_test.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1937,7 +1896,6 @@ func TestLint(t *testing.T) {
 
 	t.Run("TestGCAssert", func(t *testing.T) {
 		skip.UnderShort(t)
-		skip.UnderBazelWithIssue(t, 65485, "Doesn't work in Bazel -- not really sure why yet")
 
 		t.Parallel()
 		var buf strings.Builder
@@ -1946,15 +1904,7 @@ func TestLint(t *testing.T) {
 			"../../sql/colconv",
 			"../../sql/colexec",
 			"../../sql/colexec/colexecagg",
-			"../../sql/colexec/colexecbase",
-			"../../sql/colexec/colexechash",
-			"../../sql/colexec/colexecjoin",
-			"../../sql/colexec/colexecproj",
-			"../../sql/colexec/colexecsel",
-			"../../sql/colexec/colexecwindow",
 			"../../sql/colfetcher",
-			"../../sql/row",
-			"../../kv/kvclient/rangecache",
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -2000,7 +1950,6 @@ func TestLint(t *testing.T) {
 	// See pkg/cmd/roachvet.
 	t.Run("TestRoachVet", func(t *testing.T) {
 		skip.UnderShort(t)
-		skip.UnderBazelWithIssue(t, 65517, "Some weird linkage issue")
 		// The -printfuncs functionality is interesting and
 		// under-documented. It checks two things:
 		//
@@ -2056,26 +2005,6 @@ func TestLint(t *testing.T) {
 			"redact.Sprintf",
 		}, ",")
 
-		nakedGoroutineExceptions := `(` + strings.Join([]string{
-			`pkg/.*_test.go`,
-			`pkg/workload/`,
-			`pkg/cli/systembench/`,
-			`pkg/cmd/roachprod/`,
-			`pkg/cmd/roachtest/`,
-			`pkg/cmd/roachprod-stress/`,
-			`pkg/cmd/urlcheck/`,
-			`pkg/acceptance/`,
-			`pkg/cli/syncbench/`,
-			`pkg/workload/`,
-			`pkg/cmd/cmp-protocol/`,
-			`pkg/cmd/cr2pg/`,
-			`pkg/cmd/smithtest/`,
-			`pkg/cmd/reduce/`,
-			`pkg/cmd/zerosum/`,
-			`pkg/cmd/allocsim/`,
-			`pkg/testutils/`,
-		}, ")|(") + `)`
-
 		filters := []stream.Filter{
 			// Ignore generated files.
 			stream.GrepNot(`pkg/.*\.pb\.go:`),
@@ -2126,13 +2055,6 @@ func TestLint(t *testing.T) {
 			// roachtest is not collecting redactable logs so we don't care
 			// about printf hygiene there as much.
 			stream.GrepNot(`pkg/cmd/roachtest/log\.go:.*format argument is not a constant expression`),
-			// We purposefully produce nil dereferences in this file to test crash conditions
-			stream.GrepNot(`pkg/util/log/logcrash/crash_reporting_test\.go:.*nil dereference in type assertion`),
-			// Spawning naked goroutines is ok when it's not as part of the main CRDB
-			// binary. This is for now - if we use #58164 to introduce more aggressive
-			// pooling, etc, then test code needs to adhere as well.
-			stream.GrepNot(nakedGoroutineExceptions + `:.*Use of go keyword not allowed`),
-			stream.GrepNot(nakedGoroutineExceptions + `:.*Illegal call to Group\.Go\(\)`),
 		}
 
 		const vetTool = "roachvet"

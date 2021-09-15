@@ -76,13 +76,12 @@ import (
 	_ "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scjob" // register jobs declared outside of pkg/sql
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ui"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
-	"github.com/cockroachdb/cockroach/pkg/util/goschedstats"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -177,8 +176,6 @@ type Server struct {
 	// Created in NewServer but initialized (made usable) in `(*Server).Start`.
 	externalStorageBuilder *externalStorageBuilder
 
-	gcoord *admission.GrantCoordinator
-
 	// The following fields are populated at start time, i.e. in `(*Server).Start`.
 	startTime time.Time
 }
@@ -218,7 +215,7 @@ func (e *externalStorageBuilder) makeExternalStorage(
 	if !e.initCalled {
 		return nil, errors.New("cannot create external storage before init")
 	}
-	return cloud.MakeExternalStorage(ctx, dest, e.conf, e.settings, e.blobClientFactory, e.ie,
+	return cloudimpl.MakeExternalStorage(ctx, dest, e.conf, e.settings, e.blobClientFactory, e.ie,
 		e.db)
 }
 
@@ -228,7 +225,7 @@ func (e *externalStorageBuilder) makeExternalStorageFromURI(
 	if !e.initCalled {
 		return nil, errors.New("cannot create external storage before init")
 	}
-	return cloud.ExternalStorageFromURI(ctx, uri, e.conf, e.settings, e.blobClientFactory, user, e.ie, e.db)
+	return cloudimpl.ExternalStorageFromURI(ctx, uri, e.conf, e.settings, e.blobClientFactory, user, e.ie, e.db)
 }
 
 // NewServer creates a Server from a server.Config.
@@ -430,29 +427,10 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	tcsFactory := kvcoord.NewTxnCoordSenderFactory(txnCoordSenderFactoryCfg, distSender)
 
-	gcoord, metrics := admission.NewGrantCoordinator(admission.Options{
-		MinCPUSlots:                    1,
-		MaxCPUSlots:                    100000, /* TODO(sumeer): add cluster setting */
-		SQLKVResponseBurstTokens:       100000, /* TODO(sumeer): add cluster setting */
-		SQLSQLResponseBurstTokens:      100000, /* arbitrary, and unused */
-		SQLStatementLeafStartWorkSlots: 100,    /* arbitrary, and unused */
-		SQLStatementRootStartWorkSlots: 100,    /* arbitrary, and unused */
-		Settings:                       st,
-	})
-	for i := range metrics {
-		registry.AddMetricStruct(metrics[i])
-	}
-	cbID := goschedstats.RegisterRunnableCountCallback(gcoord.CPULoad)
-	stopper.AddCloser(stop.CloserFn(func() {
-		goschedstats.UnregisterRunnableCountCallback(cbID)
-	}))
-	stopper.AddCloser(gcoord)
-
 	dbCtx := kv.DefaultDBContext(stopper)
 	dbCtx.NodeID = idContainer
 	dbCtx.Stopper = stopper
 	db := kv.NewDBWithContext(cfg.AmbientCtx, tcsFactory, clock, dbCtx)
-	db.SQLKVResponseAdmissionQ = gcoord.GetWorkQueue(admission.SQLKVResponseWork)
 
 	nlActive, nlRenewal := cfg.NodeLivenessDurations()
 	if knobs := cfg.TestingKnobs.NodeLiveness; knobs != nil {
@@ -525,7 +503,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	// The InternalExecutor will be further initialized later, as we create more
 	// of the server's components. There's a circular dependency - many things
-	// need an InternalExecutor, but the InternalExecutor needs an xecutorConfig,
+	// need an InternalExecutor, but the InternalExecutor needs an ExecutorConfig,
 	// which in turn needs many things. That's why everybody that needs an
 	// InternalExecutor uses this one instance.
 	internalExecutor := &sql.InternalExecutor{}
@@ -629,13 +607,9 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		updates.TestingKnobs = &cfg.TestingKnobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs
 	}
 
-	tenantUsage := NewTenantUsageServer(db, internalExecutor)
 	node := NewNode(
 		storeCfg, recorder, registry, stopper,
-		txnMetrics, stores, nil /* execCfg */, &rpcContext.ClusterID,
-		gcoord.GetWorkQueue(admission.KVWork),
-		tenantUsage,
-	)
+		txnMetrics, stores, nil /* execCfg */, &rpcContext.ClusterID)
 	lateBoundNode = node
 	roachpb.RegisterInternalServer(grpcServer.Server, node)
 	kvserver.RegisterPerReplicaServer(grpcServer.Server, node.perReplicaServer)
@@ -709,15 +683,14 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	sqlServer, err := newSQLServer(ctx, sqlServerArgs{
 		sqlServerOptionalKVArgs: sqlServerOptionalKVArgs{
-			nodesStatusServer:        serverpb.MakeOptionalNodesStatusServer(sStatus),
-			nodeLiveness:             optionalnodeliveness.MakeContainer(nodeLiveness),
-			gossip:                   gossip.MakeOptionalGossip(g),
-			grpcServer:               grpcServer.Server,
-			nodeIDContainer:          idContainer,
-			externalStorage:          externalStorage,
-			externalStorageFromURI:   externalStorageFromURI,
-			isMeta1Leaseholder:       node.stores.IsMeta1Leaseholder,
-			sqlSQLResponseAdmissionQ: gcoord.GetWorkQueue(admission.SQLSQLResponseWork),
+			nodesStatusServer:      serverpb.MakeOptionalNodesStatusServer(sStatus),
+			nodeLiveness:           optionalnodeliveness.MakeContainer(nodeLiveness),
+			gossip:                 gossip.MakeOptionalGossip(g),
+			grpcServer:             grpcServer.Server,
+			nodeIDContainer:        idContainer,
+			externalStorage:        externalStorage,
+			externalStorageFromURI: externalStorageFromURI,
+			isMeta1Leaseholder:     node.stores.IsMeta1Leaseholder,
 		},
 		SQLConfig:                &cfg.SQLConfig,
 		BaseConfig:               &cfg.BaseConfig,
@@ -741,8 +714,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		protectedtsProvider:      protectedtsProvider,
 		rangeFeedFactory:         rangeFeedFactory,
 		sqlStatusServer:          sStatus,
-		regionsServer:            sStatus,
-		tenantUsageServer:        tenantUsage,
 	})
 	if err != nil {
 		return nil, err
@@ -788,7 +759,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		sqlServer:              sqlServer,
 		drainSleepFn:           drainSleepFn,
 		externalStorageBuilder: externalStorageBuilder,
-		gcoord:                 gcoord,
 	}
 	return lateBoundServer, err
 }
@@ -947,7 +917,7 @@ func (s *Server) startMonitoringForwardClockJumps(ctx context.Context) error {
 	forwardJumpCheckEnabled := make(chan bool, 1)
 	s.stopper.AddCloser(stop.CloserFn(func() { close(forwardJumpCheckEnabled) }))
 
-	forwardClockJumpCheckEnabled.SetOnChange(&s.st.SV, func(context.Context) {
+	forwardClockJumpCheckEnabled.SetOnChange(&s.st.SV, func() {
 		forwardJumpCheckEnabled <- forwardClockJumpCheckEnabled.Get(&s.st.SV)
 	})
 
@@ -1111,7 +1081,7 @@ func (s *Server) startPersistingHLCUpperBound(
 	tickerFn func(d time.Duration) *time.Ticker,
 ) error {
 	persistHLCUpperBoundIntervalCh := make(chan time.Duration, 1)
-	persistHLCUpperBoundInterval.SetOnChange(&s.st.SV, func(context.Context) {
+	persistHLCUpperBoundInterval.SetOnChange(&s.st.SV, func() {
 		persistHLCUpperBoundIntervalCh <- persistHLCUpperBoundInterval.Get(&s.st.SV)
 	})
 
@@ -1312,6 +1282,13 @@ func (s *Server) PreStart(ctx context.Context) error {
 	serverpb.RegisterMigrationServer(s.grpc.Server, migrationServer)
 	s.migrationServer = migrationServer // only for testing via TestServer
 
+	// Pebble does its own engine health checks, that call back into an event
+	// handler registered in storage/pebble.go when a slow disk event is
+	// detected. Starting a separate routine for Pebble is unnecessary.
+	if s.engines[0].Type() != enginepb.EngineTypePebble {
+		s.node.startAssertEngineHealth(ctx, s.engines, s.cfg.Settings)
+	}
+
 	// Start the RPC server. This opens the RPC/SQL listen socket,
 	// and dispatches the server worker for the RPC.
 	// The SQL listener is returned, to start the SQL server later
@@ -1453,7 +1430,7 @@ func (s *Server) PreStart(ctx context.Context) error {
 		if storeSpec.InMemory {
 			continue
 		}
-		if storeSpec.IsEncrypted() {
+		if len(storeSpec.ExtraOptions) > 0 {
 			encryptedStore = true
 		}
 
@@ -1649,8 +1626,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 	); err != nil {
 		return err
 	}
-	// Stores have been initialized, so Node can now provide Pebble metrics.
-	s.gcoord.SetPebbleMetricsProvider(s.node)
 
 	log.Event(ctx, "started node")
 	if err := s.startPersistingHLCUpperBound(
@@ -1697,8 +1672,13 @@ func (s *Server) PreStart(ctx context.Context) error {
 		return err
 	}
 
+	// Begin recording time series data collected by the status monitor.
+	s.tsDB.PollSource(
+		s.cfg.AmbientCtx, s.recorder, base.DefaultMetricsSampleInterval, ts.Resolution10s, s.stopper,
+	)
+
 	var graphiteOnce sync.Once
-	graphiteEndpoint.SetOnChange(&s.st.SV, func(context.Context) {
+	graphiteEndpoint.SetOnChange(&s.st.SV, func() {
 		if graphiteEndpoint.Get(&s.st.SV) != "" {
 			graphiteOnce.Do(func() {
 				s.node.startGraphiteStatsExporter(s.st)
@@ -1895,7 +1875,7 @@ func (s *Server) PreStart(ctx context.Context) error {
 	s.ctSender.Run(ctx, state.nodeID)
 
 	// Attempt to upgrade cluster version now that the sql server has been
-	// started. At this point we know that all startupmigrations have successfully
+	// started. At this point we know that all sqlmigrations have successfully
 	// been run so it is safe to upgrade to the binary's current version.
 	s.startAttemptUpgrade(ctx)
 
@@ -1904,13 +1884,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 	}
 
 	log.Event(ctx, "server initialized")
-
-	// Begin recording time series data collected by the status monitor.
-	// This will perform the first write synchronously, which is now
-	// acceptable.
-	s.tsDB.PollSource(
-		s.cfg.AmbientCtx, s.recorder, base.DefaultMetricsSampleInterval, ts.Resolution10s, s.stopper,
-	)
 
 	return maybeImportTS(ctx, s)
 }
@@ -1942,9 +1915,6 @@ func maybeImportTS(ctx context.Context, s *Server) error {
 	b := &kv.Batch{}
 	var n int
 	maybeFlush := func(force bool) error {
-		if n == 0 {
-			return nil
-		}
 		if n < 100 && !force {
 			return nil
 		}

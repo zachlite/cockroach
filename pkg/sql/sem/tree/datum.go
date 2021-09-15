@@ -25,14 +25,13 @@ import (
 	"unicode"
 	"unsafe"
 
-	apd "github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -158,6 +157,13 @@ type Datum interface {
 // Datums is a slice of Datum values.
 type Datums []Datum
 
+const (
+	// SizeOfDatum is the memory size of a Datum reference.
+	SizeOfDatum = int64(unsafe.Sizeof(Datum(nil)))
+	// SizeOfDatums is the memory size of a Datum slice.
+	SizeOfDatums = int64(unsafe.Sizeof(Datums(nil)))
+)
+
 // Len returns the number of Datum values.
 func (d Datums) Len() int { return len(d) }
 
@@ -262,10 +268,10 @@ func AsDBool(e Expr) (DBool, bool) {
 	return false, false
 }
 
-// MakeParseError returns a parse error using the provided string and type. An
+// makeParseError returns a parse error using the provided string and type. An
 // optional error can be provided, which will be appended to the end of the
 // error string.
-func MakeParseError(s string, typ *types.T, err error) error {
+func makeParseError(s string, typ *types.T, err error) error {
 	if err != nil {
 		return pgerror.Wrapf(err, pgcode.InvalidTextRepresentation,
 			"could not parse %q as type %s", s, typ)
@@ -286,64 +292,50 @@ func isCaseInsensitivePrefix(prefix, s string) bool {
 	return strings.EqualFold(prefix, s[:len(prefix)])
 }
 
-// ParseBool parses and returns the boolean value represented by the provided
+// ParseDBool parses and returns the *DBool Datum value represented by the provided
 // string, or an error if parsing is unsuccessful.
 // See https://github.com/postgres/postgres/blob/90627cf98a8e7d0531789391fd798c9bfcc3bc1a/src/backend/utils/adt/bool.c#L36
-func ParseBool(s string) (bool, error) {
+func ParseDBool(s string) (*DBool, error) {
 	s = strings.TrimSpace(s)
 	if len(s) >= 1 {
 		switch s[0] {
 		case 't', 'T':
 			if isCaseInsensitivePrefix(s, "true") {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case 'f', 'F':
 			if isCaseInsensitivePrefix(s, "false") {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case 'y', 'Y':
 			if isCaseInsensitivePrefix(s, "yes") {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case 'n', 'N':
 			if isCaseInsensitivePrefix(s, "no") {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case '1':
 			if s == "1" {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case '0':
 			if s == "0" {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case 'o', 'O':
 			// Just 'o' is ambiguous between 'on' and 'off'.
 			if len(s) > 1 {
 				if isCaseInsensitivePrefix(s, "on") {
-					return true, nil
+					return DBoolTrue, nil
 				}
 				if isCaseInsensitivePrefix(s, "off") {
-					return false, nil
+					return DBoolFalse, nil
 				}
 			}
 		}
 	}
-	return false, MakeParseError(s, types.Bool, pgerror.New(pgcode.InvalidTextRepresentation, "invalid bool value"))
-}
-
-// ParseDBool parses and returns the *DBool Datum value represented by the provided
-// string, or an error if parsing is unsuccessful.
-// See https://github.com/postgres/postgres/blob/90627cf98a8e7d0531789391fd798c9bfcc3bc1a/src/backend/utils/adt/bool.c#L36
-func ParseDBool(s string) (*DBool, error) {
-	v, err := ParseBool(s)
-	if err != nil {
-		return nil, err
-	}
-	if v {
-		return DBoolTrue, nil
-	}
-	return DBoolFalse, nil
+	return nil, makeParseError(s, types.Bool, pgerror.New(pgcode.InvalidTextRepresentation, "invalid bool value"))
 }
 
 // ParseDByte parses a string representation of hex encoded binary
@@ -354,7 +346,7 @@ func ParseDBool(s string) (*DBool, error) {
 func ParseDByte(s string) (*DBytes, error) {
 	res, err := lex.DecodeRawBytesToByteArrayAuto([]byte(s))
 	if err != nil {
-		return nil, MakeParseError(s, types.Bytes, err)
+		return nil, makeParseError(s, types.Bytes, err)
 	}
 	return NewDBytes(DBytes(res)), nil
 }
@@ -364,7 +356,7 @@ func ParseDByte(s string) (*DBytes, error) {
 func ParseDUuidFromString(s string) (*DUuid, error) {
 	uv, err := uuid.FromString(s)
 	if err != nil {
-		return nil, MakeParseError(s, types.Uuid, err)
+		return nil, makeParseError(s, types.Uuid, err)
 	}
 	return NewDUuid(DUuid{uv}), nil
 }
@@ -374,7 +366,7 @@ func ParseDUuidFromString(s string) (*DUuid, error) {
 func ParseDUuidFromBytes(b []byte) (*DUuid, error) {
 	uv, err := uuid.FromBytes(b)
 	if err != nil {
-		return nil, MakeParseError(string(b), types.Uuid, err)
+		return nil, makeParseError(string(b), types.Uuid, err)
 	}
 	return NewDUuid(DUuid{uv}), nil
 }
@@ -463,19 +455,14 @@ func (d *DBool) Max(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DBool) AmbiguousFormat() bool { return false }
 
-// PgwireFormatBool returns a single byte representing a boolean according to
-// pgwire encoding.
-func PgwireFormatBool(d bool) byte {
-	if d {
-		return 't'
-	}
-	return 'f'
-}
-
 // Format implements the NodeFormatter interface.
 func (d *DBool) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(fmtPgwireFormat) {
-		ctx.WriteByte(PgwireFormatBool(bool(*d)))
+		if bool(*d) {
+			ctx.WriteByte('t')
+		} else {
+			ctx.WriteByte('f')
+		}
 		return
 	}
 	ctx.WriteString(strconv.FormatBool(bool(*d)))
@@ -653,7 +640,7 @@ func NewDInt(d DInt) *DInt {
 func ParseDInt(s string) (*DInt, error) {
 	i, err := strconv.ParseInt(s, 0, 64)
 	if err != nil {
-		return nil, MakeParseError(s, types.Int, err)
+		return nil, makeParseError(s, types.Int, err)
 	}
 	return NewDInt(DInt(i)), nil
 }
@@ -799,7 +786,7 @@ func NewDFloat(d DFloat) *DFloat {
 func ParseDFloat(s string) (*DFloat, error) {
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return nil, MakeParseError(s, types.Float, err)
+		return nil, makeParseError(s, types.Float, err)
 	}
 	return NewDFloat(DFloat(f)), nil
 }
@@ -968,7 +955,7 @@ func (d *DDecimal) SetString(s string) error {
 	//_, res, err := HighPrecisionCtx.SetString(&d.Decimal, s)
 	_, res, err := ExactCtx.SetString(&d.Decimal, s)
 	if res != 0 || err != nil {
-		return MakeParseError(s, types.Decimal, nil)
+		return makeParseError(s, types.Decimal, nil)
 	}
 	switch d.Form {
 	case apd.NaNSignaling:
@@ -1216,7 +1203,7 @@ func (d *DString) Format(ctx *FmtCtx) {
 	if f.HasFlags(fmtRawStrings) {
 		buf.WriteString(string(*d))
 	} else {
-		lexbase.EncodeSQLStringWithFlags(buf, string(*d), f.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(buf, string(*d), f.EncodeFlags())
 	}
 }
 
@@ -1292,7 +1279,7 @@ func (*DCollatedString) AmbiguousFormat() bool { return false }
 
 // Format implements the NodeFormatter interface.
 func (d *DCollatedString) Format(ctx *FmtCtx) {
-	lexbase.EncodeSQLString(&ctx.Buffer, d.Contents)
+	lex.EncodeSQLString(&ctx.Buffer, d.Contents)
 	ctx.WriteString(" COLLATE ")
 	lex.EncodeLocaleName(&ctx.Buffer, d.Locale)
 }
@@ -1761,17 +1748,14 @@ func NewDDateFromTime(t time.Time) (*DDate, error) {
 }
 
 // ParseTimeContext provides the information necessary for
-// parsing dates, intervals times, and timestamps.
-// A nil value is generally acceptable and will result in
-// reasonable defaults being applied.
+// parsing dates, times, and timestamps. A nil value is generally
+// acceptable and will result in reasonable defaults being applied.
 type ParseTimeContext interface {
 	// GetRelativeParseTime returns the transaction time in the session's
 	// timezone (i.e. now()). This is used to calculate relative dates,
 	// like "tomorrow", and also provides a default time.Location for
 	// parsed times.
 	GetRelativeParseTime() time.Time
-	// GetIntervalStyle returns the interval style in the session.
-	GetIntervalStyle() duration.IntervalStyle
 }
 
 var _ ParseTimeContext = &EvalContext{}
@@ -1792,11 +1776,6 @@ type simpleParseTimeContext struct {
 // GetRelativeParseTime implements ParseTimeContext.
 func (ctx simpleParseTimeContext) GetRelativeParseTime() time.Time {
 	return ctx.RelativeParseTime
-}
-
-// GetIntervalStyle implements ParseTimeContext..
-func (ctx simpleParseTimeContext) GetIntervalStyle() duration.IntervalStyle {
-	return duration.IntervalStyle_POSTGRES
 }
 
 // relativeParseTime chooses a reasonable "now" value for
@@ -1908,22 +1887,17 @@ func (d *DDate) Min(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DDate) AmbiguousFormat() bool { return true }
 
-// FormatDate writes d into ctx according to the format flags.
-func FormatDate(d pgdate.Date, ctx *FmtCtx) {
+// Format implements the NodeFormatter interface.
+func (d *DDate) Format(ctx *FmtCtx) {
 	f := ctx.flags
 	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	d.Format(&ctx.Buffer)
+	d.Date.Format(&ctx.Buffer)
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-}
-
-// Format implements the NodeFormatter interface.
-func (d *DDate) Format(ctx *FmtCtx) {
-	FormatDate(d.Date, ctx)
 }
 
 // Size implements the Datum interface.
@@ -1961,7 +1935,7 @@ func ParseDTime(
 	t, dependsOnContext, err := pgdate.ParseTimeWithoutTimezone(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		// Build our own error message to avoid exposing the dummy date.
-		return nil, false, MakeParseError(s, types.Time, nil)
+		return nil, false, makeParseError(s, types.Time, nil)
 	}
 	return MakeDTime(timeofday.FromTime(t).Round(precision)), dependsOnContext, nil
 }
@@ -2218,7 +2192,7 @@ func ParseDTimestamp(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestamp, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, pgdate.ParseModeMDY, s)
+	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2492,7 +2466,7 @@ func ParseDTimestampTZ(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestampTZ, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeMDY, s)
+	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2653,8 +2627,8 @@ func NewDInterval(d duration.Duration, itm types.IntervalTypeMetadata) *DInterva
 
 // ParseDInterval parses and returns the *DInterval Datum value represented by the provided
 // string, or an error if parsing is unsuccessful.
-func ParseDInterval(style duration.IntervalStyle, s string) (*DInterval, error) {
-	return ParseDIntervalWithTypeMetadata(style, s, types.DefaultIntervalTypeMetadata)
+func ParseDInterval(s string) (*DInterval, error) {
+	return ParseDIntervalWithTypeMetadata(s, types.DefaultIntervalTypeMetadata)
 }
 
 // truncateDInterval truncates the input DInterval downward to the nearest
@@ -2686,10 +2660,8 @@ func truncateDInterval(d *DInterval, itm types.IntervalTypeMetadata) {
 // ParseDIntervalWithTypeMetadata is like ParseDInterval, but it also takes a
 // types.IntervalTypeMetadata that both specifies the units for unitless, numeric intervals
 // and also specifies the precision of the interval.
-func ParseDIntervalWithTypeMetadata(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (*DInterval, error) {
-	d, err := parseDInterval(style, s, itm)
+func ParseDIntervalWithTypeMetadata(s string, itm types.IntervalTypeMetadata) (*DInterval, error) {
+	d, err := parseDInterval(s, itm)
 	if err != nil {
 		return nil, err
 	}
@@ -2697,9 +2669,7 @@ func ParseDIntervalWithTypeMetadata(
 	return d, nil
 }
 
-func parseDInterval(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (*DInterval, error) {
+func parseDInterval(s string, itm types.IntervalTypeMetadata) (*DInterval, error) {
 	// At this time the only supported interval formats are:
 	// - SQL standard.
 	// - Postgres compatible.
@@ -2709,14 +2679,14 @@ func parseDInterval(
 
 	// If it's a blank string, exit early.
 	if len(s) == 0 {
-		return nil, MakeParseError(s, types.Interval, nil)
+		return nil, makeParseError(s, types.Interval, nil)
 	}
 	if s[0] == 'P' {
 		// If it has a leading P we're most likely working with an iso8601
 		// interval.
 		dur, err := iso8601ToDuration(s)
 		if err != nil {
-			return nil, MakeParseError(s, types.Interval, err)
+			return nil, makeParseError(s, types.Interval, err)
 		}
 		return &DInterval{Duration: dur}, nil
 	}
@@ -2725,16 +2695,16 @@ func parseDInterval(
 		// interval, as both postgres and golang have letter(s) and iso8601 has been tested.
 		dur, err := sqlStdToDuration(s, itm)
 		if err != nil {
-			return nil, MakeParseError(s, types.Interval, err)
+			return nil, makeParseError(s, types.Interval, err)
 		}
 		return &DInterval{Duration: dur}, nil
 	}
 
 	// We're either a postgres string or a Go duration.
 	// Our postgres syntax parser also supports golang, so just use that for both.
-	dur, err := parseDuration(style, s, itm)
+	dur, err := parseDuration(s, itm)
 	if err != nil {
-		return nil, MakeParseError(s, types.Interval, err)
+		return nil, makeParseError(s, types.Interval, err)
 	}
 	return &DInterval{Duration: dur}, nil
 }
@@ -2793,6 +2763,12 @@ func (d *DInterval) Min(_ *EvalContext) (Datum, bool) {
 	return dMinInterval, true
 }
 
+// ValueAsString returns the interval as a string (e.g. "1h2m").
+func (d *DInterval) ValueAsString() string {
+	return d.Duration.String()
+
+}
+
 // ValueAsISO8601String returns the interval as an ISO 8601 Duration string (e.g. "P1Y2MT6S").
 func (d *DInterval) ValueAsISO8601String() string {
 	return d.Duration.ISO8601String()
@@ -2801,22 +2777,17 @@ func (d *DInterval) ValueAsISO8601String() string {
 // AmbiguousFormat implements the Datum interface.
 func (*DInterval) AmbiguousFormat() bool { return true }
 
-// FormatDuration writes d into ctx according to the format flags.
-func FormatDuration(d duration.Duration, ctx *FmtCtx) {
+// Format implements the NodeFormatter interface.
+func (d *DInterval) Format(ctx *FmtCtx) {
 	f := ctx.flags
 	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	d.FormatWithStyle(&ctx.Buffer, ctx.dataConversionConfig.IntervalStyle)
+	d.Duration.Format(&ctx.Buffer)
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-}
-
-// Format implements the NodeFormatter interface.
-func (d *DInterval) Format(ctx *FmtCtx) {
-	FormatDuration(d.Duration, ctx)
 }
 
 // Size implements the Datum interface.
@@ -3209,9 +3180,7 @@ func MustBeDJSON(e Expr) DJSON {
 }
 
 // AsJSON converts a datum into our standard json representation.
-func AsJSON(
-	d Datum, dcc sessiondatapb.DataConversionConfig, loc *time.Location,
-) (json.JSON, error) {
+func AsJSON(d Datum, loc *time.Location) (json.JSON, error) {
 	d = UnwrapDatum(nil /* evalCtx */, d)
 	switch t := d.(type) {
 	case *DBool:
@@ -3233,7 +3202,7 @@ func AsJSON(
 	case *DArray:
 		builder := json.NewArrayBuilder(t.Len())
 		for _, e := range t.Array {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3248,7 +3217,7 @@ func AsJSON(
 		t.maybePopulateType()
 		labels := t.typ.TupleLabels()
 		for i, e := range t.D {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3271,7 +3240,7 @@ func AsJSON(
 		// This is RFC3339Nano, but without the TZ fields.
 		return json.FromString(t.UTC().Format("2006-01-02T15:04:05.999999999")), nil
 	case *DDate, *DUuid, *DOid, *DInterval, *DBytes, *DIPAddr, *DTime, *DTimeTZ, *DBitArray, *DBox2D:
-		return json.FromString(AsStringWithFlags(t, FmtBareStrings, FmtDataConversionConfig(dcc))), nil
+		return json.FromString(AsStringWithFlags(t, FmtBareStrings)), nil
 	case *DGeometry:
 		return json.FromSpatialObject(t.Geometry.SpatialObject(), geo.DefaultGeoJSONDecimalDigits)
 	case *DGeography:
@@ -3353,7 +3322,7 @@ func (d *DJSON) Format(ctx *FmtCtx) {
 	} else {
 		// TODO(knz): This seems incorrect,
 		// see https://github.com/cockroachdb/cockroach/issues/60673
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, s, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, s, ctx.flags.EncodeFlags())
 	}
 }
 
@@ -4319,7 +4288,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 	// If it is an integer in string form, convert it as an int.
 	if val, err := ParseDInt(strings.TrimSpace(s)); err == nil {
 		tmpOid := NewDOid(*val)
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, tmpOid)
+		oid, err := queryOid(ctx, t, tmpOid)
 		if err != nil {
 			oid = tmpOid
 			oid.semanticType = t
@@ -4390,7 +4359,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 		// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
 		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
 
-		dOid, missingTypeErr := ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(Name(s).Normalize()))
+		dOid, missingTypeErr := queryOid(ctx, t, NewDString(Name(s).Normalize()))
 		if missingTypeErr == nil {
 			return dOid, missingTypeErr
 		}
@@ -4429,7 +4398,7 @@ func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
 			name:         tn.ObjectName.String(),
 		}, nil
 	default:
-		return ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(s))
+		return queryOid(ctx, t, NewDString(s))
 	}
 }
 
@@ -4634,12 +4603,12 @@ func (d *DOid) Format(ctx *FmtCtx) {
 		ctx.WriteByte('(')
 		d.DInt.Format(ctx)
 		ctx.WriteByte(',')
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncNoFlags)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncNoFlags)
 		ctx.WriteByte(')')
 	} else {
 		// This is used to print the name of pseudo-procedures in e.g.
 		// pg_catalog.pg_type.typinput
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncBareStrings)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncBareStrings)
 	}
 }
 

@@ -290,7 +290,7 @@
 <table>
 <thead><tr><th>Function &rarr; Returns</th><th>Description</th></tr></thead>
 <tbody>
-<tr><td><a name="ilike_escape"></a><code>ilike_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches case insensetively <code>unescaped</code> with <code>pattern</code> using <code>escape</code> as an escape token.</p>
+<tr><td><a name="ilike_escape"></a><code>ilike_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches case insensetively <code>unescaped</code> with <code>pattern</code> using ‘escape’ as an escape token.</p>
 </span></td></tr>
 <tr><td><a name="inet_contained_by_or_equals"></a><code>inet_contained_by_or_equals(val: <a href="inet.html">inet</a>, container: <a href="inet.html">inet</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Test for subnet inclusion or equality, using only the network parts of the addresses. The host part of the addresses is ignored.</p>
 </span></td></tr>
@@ -298,13 +298,15 @@
 </span></td></tr>
 <tr><td><a name="inet_same_family"></a><code>inet_same_family(val: <a href="inet.html">inet</a>, val: <a href="inet.html">inet</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks if two IP addresses are of the same IP family.</p>
 </span></td></tr>
-<tr><td><a name="like_escape"></a><code>like_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches <code>unescaped</code> with <code>pattern</code> using <code>escape</code> as an escape token.</p>
+<tr><td><a name="like_escape"></a><code>like_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches <code>unescaped</code> with <code>pattern</code> using ‘escape’ as an escape token.</p>
 </span></td></tr>
-<tr><td><a name="not_ilike_escape"></a><code>not_ilike_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches case insensetively with <code>pattern</code> using <code>escape</code> as an escape token.</p>
+<tr><td><a name="not_ilike_escape"></a><code>not_ilike_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches case insensetively with <code>pattern</code> using ‘escape’ as an escape token.</p>
 </span></td></tr>
-<tr><td><a name="not_like_escape"></a><code>not_like_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches with <code>pattern</code> using <code>escape</code> as an escape token.</p>
+<tr><td><a name="not_like_escape"></a><code>not_like_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches with <code>pattern</code> using ‘escape’ as an escape token.</p>
 </span></td></tr>
-<tr><td><a name="not_similar_to_escape"></a><code>not_similar_to_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches with <code>pattern</code> using <code>escape</code> as an escape token.</p>
+<tr><td><a name="not_similar_to_escape"></a><code>not_similar_to_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Checks whether <code>unescaped</code> not matches with <code>pattern</code> using ‘escape’ as an escape token.</p>
+</span></td></tr>
+<tr><td><a name="similar_to_escape"></a><code>similar_to_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches <code>unescaped</code> with <code>pattern</code> using ‘escape’ as an escape token.</p>
 </span></td></tr></tbody>
 </table>
 
@@ -529,30 +531,6 @@ has no relationship with the commit order of concurrent transactions.</p>
 and which stays constant throughout the transaction. This timestamp
 has no relationship with the commit order of concurrent transactions.</p>
 <p>This function is the preferred overload and will be evaluated by default.</p>
-</span></td></tr>
-<tr><td><a name="with_max_staleness"></a><code>with_max_staleness(max_staleness: <a href="interval.html">interval</a>) &rarr; <a href="timestamp.html">timestamptz</a></code></td><td><span class="funcdesc"><p>When used in the AS OF SYSTEM TIME clause of an single-statement,
-read-only transaction, CockroachDB chooses the newest timestamp within the staleness
-bound that allows execution of the reads at the nearest available replica without blocking.</p>
-<p>Note this function requires an enterprise license on a CCL distribution.</p>
-</span></td></tr>
-<tr><td><a name="with_max_staleness"></a><code>with_max_staleness(max_staleness: <a href="interval.html">interval</a>, nearest_only: <a href="bool.html">bool</a>) &rarr; <a href="timestamp.html">timestamptz</a></code></td><td><span class="funcdesc"><p>When used in the AS OF SYSTEM TIME clause of an single-statement,
-read-only transaction, CockroachDB chooses the newest timestamp within the staleness
-bound that allows execution of the reads at the nearest available replica without blocking.</p>
-<p>If nearest_only is set to true, reads that cannot be served using the nearest
-available replica will error.</p>
-<p>Note this function requires an enterprise license on a CCL distribution.</p>
-</span></td></tr>
-<tr><td><a name="with_min_timestamp"></a><code>with_min_timestamp(min_timestamp: <a href="timestamp.html">timestamptz</a>) &rarr; <a href="timestamp.html">timestamptz</a></code></td><td><span class="funcdesc"><p>When used in the AS OF SYSTEM TIME clause of an single-statement,
-read-only transaction, CockroachDB chooses the newest timestamp before the min_timestamp
-that allows execution of the reads at the nearest available replica without blocking.</p>
-<p>Note this function requires an enterprise license on a CCL distribution.</p>
-</span></td></tr>
-<tr><td><a name="with_min_timestamp"></a><code>with_min_timestamp(min_timestamp: <a href="timestamp.html">timestamptz</a>, nearest_only: <a href="bool.html">bool</a>) &rarr; <a href="timestamp.html">timestamptz</a></code></td><td><span class="funcdesc"><p>When used in the AS OF SYSTEM TIME clause of an single-statement,
-read-only transaction, CockroachDB chooses the newest timestamp before the min_timestamp
-that allows execution of the reads at the nearest available replica without blocking.</p>
-<p>If nearest_only is set to true, reads that cannot be served using the nearest
-available replica will error.</p>
-<p>Note this function requires an enterprise license on a CCL distribution.</p>
 </span></td></tr></tbody>
 </table>
 
@@ -731,8 +709,6 @@ available replica will error.</p>
 <tbody>
 <tr><td><a name="experimental_uuid_v4"></a><code>experimental_uuid_v4() &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Returns a UUID.</p>
 </span></td></tr>
-<tr><td><a name="gen_random_ulid"></a><code>gen_random_ulid() &rarr; <a href="uuid.html">uuid</a></code></td><td><span class="funcdesc"><p>Generates a random ULID and returns it as a value of UUID type.</p>
-</span></td></tr>
 <tr><td><a name="gen_random_uuid"></a><code>gen_random_uuid() &rarr; <a href="uuid.html">uuid</a></code></td><td><span class="funcdesc"><p>Generates a random UUID and returns it as a value of UUID type.</p>
 </span></td></tr>
 <tr><td><a name="unique_rowid"></a><code>unique_rowid() &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Returns a unique ID used by CockroachDB to generate unique row IDs if a Primary Key isn’t defined for the table. The value is a combination of the insert timestamp and the ID of the node executing the statement, which guarantees this combination is globally unique. However, there can be gaps and the order is not completely guaranteed.</p>
@@ -831,10 +807,6 @@ available replica will error.</p>
 <tr><td><a name="crdb_internal.pb_to_json"></a><code>crdb_internal.pb_to_json(pbname: <a href="string.html">string</a>, data: <a href="bytes.html">bytes</a>) &rarr; jsonb</code></td><td><span class="funcdesc"><p>Converts protocol message to its JSONB representation.</p>
 </span></td></tr>
 <tr><td><a name="crdb_internal.pb_to_json"></a><code>crdb_internal.pb_to_json(pbname: <a href="string.html">string</a>, data: <a href="bytes.html">bytes</a>, emit_defaults: <a href="bool.html">bool</a>) &rarr; jsonb</code></td><td><span class="funcdesc"><p>Converts protocol message to its JSONB representation.</p>
-</span></td></tr>
-<tr><td><a name="crdb_internal.read_file"></a><code>crdb_internal.read_file(uri: <a href="string.html">string</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Read the content of the file at the supplied external storage URI</p>
-</span></td></tr>
-<tr><td><a name="crdb_internal.write_file"></a><code>crdb_internal.write_file(data: <a href="bytes.html">bytes</a>, uri: <a href="string.html">string</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Write the content passed to a file at the supplied external storage URI</p>
 </span></td></tr>
 <tr><td><a name="json_array_length"></a><code>json_array_length(json: jsonb) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Returns the number of elements in the outermost JSON or JSONB array.</p>
 </span></td></tr>
@@ -1054,8 +1026,6 @@ the locality flag on node startup. Returns an error if no region is set.</p>
 <tr><td><a name="generate_series"></a><code>generate_series(start: <a href="int.html">int</a>, end: <a href="int.html">int</a>, step: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Produces a virtual table containing the integer values from <code>start</code> to <code>end</code>, inclusive, by increment of <code>step</code>.</p>
 </span></td></tr>
 <tr><td><a name="generate_series"></a><code>generate_series(start: <a href="timestamp.html">timestamp</a>, end: <a href="timestamp.html">timestamp</a>, step: <a href="interval.html">interval</a>) &rarr; <a href="timestamp.html">timestamp</a></code></td><td><span class="funcdesc"><p>Produces a virtual table containing the timestamp values from <code>start</code> to <code>end</code>, inclusive, by increment of <code>step</code>.</p>
-</span></td></tr>
-<tr><td><a name="generate_series"></a><code>generate_series(start: <a href="timestamp.html">timestamptz</a>, end: <a href="timestamp.html">timestamptz</a>, step: <a href="interval.html">interval</a>) &rarr; <a href="timestamp.html">timestamptz</a></code></td><td><span class="funcdesc"><p>Produces a virtual table containing the timestampTZ values from <code>start</code> to <code>end</code>, inclusive, by increment of <code>step</code>.</p>
 </span></td></tr>
 <tr><td><a name="generate_subscripts"></a><code>generate_subscripts(array: anyelement[]) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Returns a series comprising the given array’s subscripts.</p>
 </span></td></tr>
@@ -1939,9 +1909,6 @@ calculated, the result is transformed back into a Geography with SRID 4326.</p>
 <p>For flags=1, validity considers self-intersecting rings forming holes as valid as per ESRI. This is not valid under OGC and CRDB spatial operations may not operate correctly.</p>
 <p>This function utilizes the GEOS module.</p>
 </span></td></tr>
-<tr><td><a name="st_isvalidtrajectory"></a><code>st_isvalidtrajectory(geometry: geometry) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Returns whether the geometry encodes a valid trajectory.</p>
-<p>Note the geometry must be a LineString with M coordinates.</p>
-</span></td></tr>
 <tr><td><a name="st_length"></a><code>st_length(geography: geography) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Returns the length of the given geography in meters. Uses a spheroid to perform the operation.</p>
 <p>This function utilizes the GeographicLib library for spheroid calculations.</p>
 </span></td></tr>
@@ -1961,16 +1928,6 @@ calculated, the result is transformed back into a Geography with SRID 4326.</p>
 <tr><td><a name="st_length2d"></a><code>st_length2d(geometry: geometry) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Returns the length of the given geometry.</p>
 <p>Note ST_Length is only valid for LineString - use ST_Perimeter for Polygon.</p>
 <p>This function utilizes the GEOS module.</p>
-</span></td></tr>
-<tr><td><a name="st_linecrossingdirection"></a><code>st_linecrossingdirection(linestring_a: geometry, linestring_b: geometry) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Returns an interger value defining behavior of crossing of lines:
-0: lines do not cross,
--1: linestring_b crosses linestring_a from right to left,
-1: linestring_b crosses linestring_a from left to right,
--2: linestring_b crosses linestring_a multiple times from right to left,
-2: linestring_b crosses linestring_a multiple times from left to right,
--3: linestring_b crosses linestring_a multiple times from left to left,
-3: linestring_b crosses linestring_a multiple times from right to right.</p>
-<p>Note that the top vertex of the segment touching another line does not count as a crossing, but the bottom vertex of segment touching another line is considered a crossing.</p>
 </span></td></tr>
 <tr><td><a name="st_linefromencodedpolyline"></a><code>st_linefromencodedpolyline(encoded_polyline: <a href="string.html">string</a>) &rarr; geometry</code></td><td><span class="funcdesc"><p>Creates a LineString from an Encoded Polyline string.</p>
 <p>Returns valid results only if the polyline was encoded with 5 decimal places.</p>
@@ -2435,8 +2392,6 @@ The swap_ordinate_string parameter is a 2-character string naming the ordinates 
 </span></td></tr>
 <tr><td><a name="chr"></a><code>chr(val: <a href="int.html">int</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Returns the character with the code given in <code>val</code>. Inverse function of <code>ascii()</code>.</p>
 </span></td></tr>
-<tr><td><a name="compress"></a><code>compress(data: <a href="bytes.html">bytes</a>, codec: <a href="string.html">string</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Compress <code>data</code> with the specified <code>codec</code> (<code>gzip</code>).</p>
-</span></td></tr>
 <tr><td><a name="concat"></a><code>concat(<a href="string.html">string</a>...) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Concatenates a comma-separated list of strings.</p>
 </span></td></tr>
 <tr><td><a name="concat_ws"></a><code>concat_ws(<a href="string.html">string</a>...) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Uses the first argument as a separator between the concatenation of the subsequent arguments.</p>
@@ -2456,8 +2411,6 @@ The output can be used to recreate a database.’</p>
 </span></td></tr>
 <tr><td><a name="decode"></a><code>decode(text: <a href="string.html">string</a>, format: <a href="string.html">string</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Decodes <code>data</code> using <code>format</code> (<code>hex</code> / <code>escape</code> / <code>base64</code>).</p>
 </span></td></tr>
-<tr><td><a name="decompress"></a><code>decompress(data: <a href="bytes.html">bytes</a>, codec: <a href="string.html">string</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Decompress <code>data</code> with the specified <code>codec</code> (<code>gzip</code>).</p>
-</span></td></tr>
 <tr><td><a name="difference"></a><code>difference(source: <a href="string.html">string</a>, target: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Convert two strings to their Soundex codes and then reports the number of matching code positions.</p>
 </span></td></tr>
 <tr><td><a name="encode"></a><code>encode(data: <a href="bytes.html">bytes</a>, format: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Encodes <code>data</code> using <code>format</code> (<code>hex</code> / <code>escape</code> / <code>base64</code>).</p>
@@ -2468,9 +2421,7 @@ The output can be used to recreate a database.’</p>
 </span></td></tr>
 <tr><td><a name="get_bit"></a><code>get_bit(bit_string: varbit, index: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Extracts a bit at given index in the bit array.</p>
 </span></td></tr>
-<tr><td><a name="get_bit"></a><code>get_bit(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Extracts a bit at the given index in the byte array.</p>
-</span></td></tr>
-<tr><td><a name="get_byte"></a><code>get_byte(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Extracts a byte at the given index in the byte array.</p>
+<tr><td><a name="get_bit"></a><code>get_bit(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Extracts a bit at given index in the byte array.</p>
 </span></td></tr>
 <tr><td><a name="initcap"></a><code>initcap(val: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Capitalizes the first letter of <code>val</code>.</p>
 </span></td></tr>
@@ -2622,9 +2573,7 @@ The output can be used to recreate a database.’</p>
 </span></td></tr>
 <tr><td><a name="set_bit"></a><code>set_bit(bit_string: varbit, index: <a href="int.html">int</a>, to_set: <a href="int.html">int</a>) &rarr; varbit</code></td><td><span class="funcdesc"><p>Updates a bit at given index in the bit array.</p>
 </span></td></tr>
-<tr><td><a name="set_bit"></a><code>set_bit(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>, to_set: <a href="int.html">int</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Updates a bit at the given index in the byte array.</p>
-</span></td></tr>
-<tr><td><a name="set_byte"></a><code>set_byte(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>, to_set: <a href="int.html">int</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Updates a byte at the given index in the byte array.</p>
+<tr><td><a name="set_bit"></a><code>set_bit(byte_string: <a href="bytes.html">bytes</a>, index: <a href="int.html">int</a>, to_set: <a href="int.html">int</a>) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Updates a bit at given index in the byte array.</p>
 </span></td></tr>
 <tr><td><a name="sha1"></a><code>sha1(<a href="bytes.html">bytes</a>...) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Calculates the SHA1 hash value of a set of values.</p>
 </span></td></tr>
@@ -2645,16 +2594,6 @@ The output can be used to recreate a database.’</p>
 <tr><td><a name="sha512"></a><code>sha512(<a href="bytes.html">bytes</a>...) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Calculates the SHA512 hash value of a set of values.</p>
 </span></td></tr>
 <tr><td><a name="sha512"></a><code>sha512(<a href="string.html">string</a>...) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Calculates the SHA512 hash value of a set of values.</p>
-</span></td></tr>
-<tr><td><a name="similar_escape"></a><code>similar_escape(pattern: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts a SQL regexp <code>pattern</code> to a POSIX regexp <code>pattern</code>.</p>
-</span></td></tr>
-<tr><td><a name="similar_escape"></a><code>similar_escape(pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts a SQL regexp <code>pattern</code> to a POSIX regexp <code>pattern</code> using <code>escape</code> as an escape token.</p>
-</span></td></tr>
-<tr><td><a name="similar_to_escape"></a><code>similar_to_escape(pattern: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts a SQL regexp <code>pattern</code> to a POSIX regexp <code>pattern</code>.</p>
-</span></td></tr>
-<tr><td><a name="similar_to_escape"></a><code>similar_to_escape(pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts a SQL regexp <code>pattern</code> to a POSIX regexp <code>pattern</code> using <code>escape</code> as an escape token.</p>
-</span></td></tr>
-<tr><td><a name="similar_to_escape"></a><code>similar_to_escape(unescaped: <a href="string.html">string</a>, pattern: <a href="string.html">string</a>, escape: <a href="string.html">string</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Matches <code>unescaped</code> with <code>pattern</code> using <code>escape</code> as an escape token.</p>
 </span></td></tr>
 <tr><td><a name="soundex"></a><code>soundex(source: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Convert a string to its Soundex code.</p>
 </span></td></tr>
@@ -2715,8 +2654,6 @@ The output can be used to recreate a database.’</p>
 <tr><td><a name="translate"></a><code>translate(input: <a href="string.html">string</a>, find: <a href="string.html">string</a>, replace: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>In <code>input</code>, replaces the first character from <code>find</code> with the first character in <code>replace</code>; repeat for each character in <code>find</code>.</p>
 <p>For example, <code>translate('doggie', 'dog', '123');</code> returns <code>1233ie</code>.</p>
 </span></td></tr>
-<tr><td><a name="ulid_to_uuid"></a><code>ulid_to_uuid(val: <a href="string.html">string</a>) &rarr; <a href="uuid.html">uuid</a></code></td><td><span class="funcdesc"><p>Converts a ULID string to its UUID-encoded representation.</p>
-</span></td></tr>
 <tr><td><a name="unaccent"></a><code>unaccent(val: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Removes accents (diacritic signs) from the text provided in <code>val</code>.</p>
 </span></td></tr>
 <tr><td><a name="upper"></a><code>upper(val: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts all characters in <code>val</code> to their to their upper-case equivalents.</p>
@@ -2745,8 +2682,6 @@ SELECT * FROM crdb_internal.check_consistency(true, ‘\x02’, ‘\x04’)</p>
 <tr><td><a name="crdb_internal.cluster_name"></a><code>crdb_internal.cluster_name() &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Returns the cluster name.</p>
 </span></td></tr>
 <tr><td><a name="crdb_internal.completed_migrations"></a><code>crdb_internal.completed_migrations() &rarr; <a href="string.html">string</a>[]</code></td><td><span class="funcdesc"><p>This function is used only by CockroachDB’s developers for testing purposes.</p>
-</span></td></tr>
-<tr><td><a name="crdb_internal.create_join_token"></a><code>crdb_internal.create_join_token() &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Creates a join token for use when adding a new node to a secure cluster.</p>
 </span></td></tr>
 <tr><td><a name="crdb_internal.encode_key"></a><code>crdb_internal.encode_key(table_id: <a href="int.html">int</a>, index_id: <a href="int.html">int</a>, row_tuple: anyelement) &rarr; <a href="bytes.html">bytes</a></code></td><td><span class="funcdesc"><p>Generate the key for a row on a particular table and index.</p>
 </span></td></tr>
@@ -2871,15 +2806,6 @@ SELECT * FROM crdb_internal.check_consistency(true, ‘\x02’, ‘\x04’)</p>
 <thead><tr><th>Function &rarr; Returns</th><th>Description</th></tr></thead>
 <tbody>
 <tr><td><a name="row_to_json"></a><code>row_to_json(row: tuple) &rarr; jsonb</code></td><td><span class="funcdesc"><p>Returns the row as a JSON object.</p>
-</span></td></tr></tbody>
-</table>
-
-### UUID functions
-
-<table>
-<thead><tr><th>Function &rarr; Returns</th><th>Description</th></tr></thead>
-<tbody>
-<tr><td><a name="uuid_to_ulid"></a><code>uuid_to_ulid(val: <a href="uuid.html">uuid</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Converts a UUID-encoded ULID to its string representation.</p>
 </span></td></tr></tbody>
 </table>
 
@@ -3050,11 +2976,7 @@ SELECT * FROM crdb_internal.check_consistency(true, ‘\x02’, ‘\x04’)</p>
 </span></td></tr>
 <tr><td><a name="oid"></a><code>oid(int: <a href="int.html">int</a>) &rarr; oid</code></td><td><span class="funcdesc"><p>Converts an integer to an OID.</p>
 </span></td></tr>
-<tr><td><a name="pg_column_is_updatable"></a><code>pg_column_is_updatable(reloid: oid, attnum: int2, include_triggers: <a href="bool.html">bool</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Returns whether the given column can be updated.</p>
-</span></td></tr>
 <tr><td><a name="pg_column_size"></a><code>pg_column_size(anyelement...) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Return size in bytes of the column provided as an argument</p>
-</span></td></tr>
-<tr><td><a name="pg_relation_is_updatable"></a><code>pg_relation_is_updatable(reloid: oid, include_triggers: <a href="bool.html">bool</a>) &rarr; int4</code></td><td><span class="funcdesc"><p>Returns the update events the relation supports.</p>
 </span></td></tr>
 <tr><td><a name="pg_sleep"></a><code>pg_sleep(seconds: <a href="float.html">float</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>pg_sleep makes the current session’s process sleep until seconds seconds have elapsed. seconds is a value of type double precision, so fractional-second delays can be specified.</p>
 </span></td></tr>

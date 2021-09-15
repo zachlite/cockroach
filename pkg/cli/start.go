@@ -27,7 +27,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierror"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/docs"
@@ -119,9 +118,7 @@ var serverCmds = append(StartCmds, mtStartSQLCmd)
 
 // customLoggingSetupCmds lists the commands that call setupLogging()
 // after other types of configuration.
-var customLoggingSetupCmds = append(
-	serverCmds, debugCheckLogConfigCmd, demoCmd, mtStartSQLProxyCmd, mtTestDirectorySvr, statementBundleRecreateCmd,
-)
+var customLoggingSetupCmds = append(serverCmds, debugCheckLogConfigCmd, demoCmd)
 
 func initBlockProfile() {
 	// Enable the block profile for a sample of mutex and channel operations.
@@ -178,6 +175,16 @@ func initTempStorageConfig(
 		recordPath = filepath.Join(useStore.Path, server.TempDirsRecordFilename)
 	}
 
+	var err error
+	// Need to first clean up any abandoned temporary directories from
+	// the temporary directory record file before creating any new
+	// temporary directories in case the disk is completely full.
+	if recordPath != "" {
+		if err = storage.CleanupTempDirs(recordPath); err != nil {
+			return base.TempStorageConfig{}, errors.Wrap(err, "could not cleanup temporary directories from record file")
+		}
+	}
+
 	// The temp store size can depend on the location of the first regular store
 	// (if it's expressed as a percentage), so we resolve that flag here.
 	var tempStorePercentageResolver percentResolverFunc
@@ -185,10 +192,9 @@ func initTempStorageConfig(
 		dir := useStore.Path
 		// Create the store dir, if it doesn't exist. The dir is required to exist
 		// by diskPercentResolverFactory.
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err = os.MkdirAll(dir, 0755); err != nil {
 			return base.TempStorageConfig{}, errors.Wrapf(err, "failed to create dir for first store: %s", dir)
 		}
-		var err error
 		tempStorePercentageResolver, err = diskPercentResolverFactory(dir)
 		if err != nil {
 			return base.TempStorageConfig{}, errors.Wrapf(err, "failed to create resolver for: %s", dir)
@@ -197,7 +203,7 @@ func initTempStorageConfig(
 		tempStorePercentageResolver = memoryPercentResolver
 	}
 	var tempStorageMaxSizeBytes int64
-	if err := diskTempStorageSizeValue.Resolve(
+	if err = diskTempStorageSizeValue.Resolve(
 		&tempStorageMaxSizeBytes, tempStorePercentageResolver,
 	); err != nil {
 		return base.TempStorageConfig{}, err
@@ -230,17 +236,14 @@ func initTempStorageConfig(
 		tempDir = useStore.Path
 	}
 	// Create the temporary subdirectory for the temp engine.
-	{
-		var err error
-		if tempStorageConfig.Path, err = storage.CreateTempDir(tempDir, server.TempDirPrefix, stopper); err != nil {
-			return base.TempStorageConfig{}, errors.Wrap(err, "could not create temporary directory for temp storage")
-		}
+	if tempStorageConfig.Path, err = storage.CreateTempDir(tempDir, server.TempDirPrefix, stopper); err != nil {
+		return base.TempStorageConfig{}, errors.Wrap(err, "could not create temporary directory for temp storage")
 	}
 
 	// We record the new temporary directory in the record file (if it
 	// exists) for cleanup in case the node crashes.
 	if recordPath != "" {
-		if err := storage.RecordTempDir(recordPath, tempStorageConfig.Path); err != nil {
+		if err = storage.RecordTempDir(recordPath, tempStorageConfig.Path); err != nil {
 			return base.TempStorageConfig{}, errors.Wrapf(
 				err,
 				"could not record temporary directory path to record file: %s",
@@ -368,7 +371,7 @@ func runStart(cmd *cobra.Command, args []string, startSingleNode bool) (returnEr
 	// If any store has something to say against a server start-up
 	// (e.g. previously detected corruption), listen to them now.
 	if err := serverCfg.Stores.PriorCriticalAlertError(); err != nil {
-		return clierror.NewError(err, exit.FatalError())
+		return &cliError{exitCode: exit.FatalError(), cause: err}
 	}
 
 	// We don't care about GRPCs fairly verbose logs in most client commands,
@@ -404,24 +407,10 @@ func runStart(cmd *cobra.Command, args []string, startSingleNode bool) (returnEr
 	// storage to be encrypted too. To achieve this, we use
 	// the first encrypted store as temp dir target, if any.
 	// If we can't find one, we use the first StoreSpec in the list.
-	//
-	// While we look, we also clean up any abandoned temporary directories. We
-	// don't know which store spec was used previously—and it may change if
-	// encryption gets enabled after the fact—so we check each store.
 	var specIdx = 0
-	for i, spec := range serverCfg.Stores.Specs {
-		if spec.IsEncrypted() {
-			// TODO(jackson): One store's EncryptionOptions may say to encrypt
-			// with a real key, while another store's say to use key=plain.
-			// This provides no guarantee that we'll use the encrypted one's.
+	for i := range serverCfg.Stores.Specs {
+		if serverCfg.Stores.Specs[i].ExtraOptions != nil {
 			specIdx = i
-		}
-		if spec.InMemory {
-			continue
-		}
-		recordPath := filepath.Join(spec.Path, server.TempDirsRecordFilename)
-		if err := storage.CleanupTempDirs(recordPath); err != nil {
-			return errors.Wrap(err, "could not cleanup temporary directories from record file")
 		}
 	}
 
@@ -487,7 +476,7 @@ func runStart(cmd *cobra.Command, args []string, startSingleNode bool) (returnEr
 				return
 			}
 
-			if err = ioutil.WriteFile(startCtx.listeningURLFile, []byte(fmt.Sprintf("%s\n", pgURL.ToPQ())), 0644); err != nil {
+			if err = ioutil.WriteFile(startCtx.listeningURLFile, []byte(fmt.Sprintf("%s\n", pgURL)), 0644); err != nil {
 				log.Ops.Errorf(ctx, "failed writing the URL: %v", err)
 			}
 		}
@@ -650,8 +639,7 @@ If problems persist, please see %s.`
 				log.Ops.Errorf(ctx, "failed computing the URL: %v", err)
 				return err
 			}
-			buf.Printf("sql:\t%s\n", pgURL.ToPQ())
-			buf.Printf("sql (JDBC):\t%s\n", pgURL.ToJDBC())
+			buf.Printf("sql:\t%s\n", pgURL)
 
 			buf.Printf("RPC client flags:\t%s\n", clientFlagsRPC())
 			if len(serverCfg.SocketFile) != 0 {
@@ -771,12 +759,12 @@ If problems persist, please see %s.`
 			// to terminate with a non-zero exit code; however SIGTERM is
 			// "legitimate" and should be acknowledged with a success exit
 			// code. So we keep the error state here for later.
-			returnErr = clierror.NewErrorWithSeverity(
-				errors.New("interrupted"),
-				exit.Interrupted(),
+			returnErr = &cliError{
+				exitCode: exit.Interrupted(),
 				// INFO because a single interrupt is rather innocuous.
-				severity.INFO,
-			)
+				severity: severity.INFO,
+				cause:    errors.New("interrupted"),
+			}
 			msgDouble := "Note: a second interrupt will skip graceful shutdown and terminate forcefully"
 			fmt.Fprintln(os.Stdout, msgDouble)
 		}

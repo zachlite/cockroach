@@ -159,20 +159,6 @@ RETURNING id;`).Scan(&secondID))
 	}()
 
 	testutils.SucceedsSoon(t, func() error {
-		// TODO(yuzefovich): this check is quite unfortunate since it relies on
-		// the assumption that all recordings from the child spans are imported
-		// into the tracer. However, this is not the case for the DistSQL
-		// processors where child spans are created with
-		// WithParentAndManualCollection option which requires explicitly
-		// importing the recordings from the children. This only happens when
-		// the execution flow is drained which cannot happen until we close
-		// the 'unblock' channel, and this we cannot do until we see the
-		// expected message in the trace.
-		//
-		// At the moment it works in a very fragile manner (by making sure that
-		// no processors actually create their own spans). Instead, a different
-		// way to observe the status of the migration manager should be
-		// introduced and should be used here.
 		if tracing.FindMsgInRecording(getRecording(), "found existing migration job") > 0 {
 			return nil
 		}
@@ -382,6 +368,10 @@ func TestPauseMigration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer jobs.TestingSetAdoptAndCancelIntervals(
+		10*time.Millisecond, 10*time.Millisecond,
+	)()
+
 	// We're going to be migrating from startCV to endCV.
 	startCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 41}}
 	endCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 42}}
@@ -397,7 +387,6 @@ func TestPauseMigration(t *testing.T) {
 		ServerArgs: base.TestServerArgs{
 			Settings: cluster.MakeTestingClusterSettingsWithVersions(endCV.Version, startCV.Version, false),
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				Server: &server.TestingKnobs{
 					BinaryVersionOverride:          startCV.Version,
 					DisableAutomaticVersionUpgrade: 1,
@@ -477,4 +466,65 @@ SELECT id
 	close(ev.unblock)
 	require.NoError(t, <-upgrade1Err)
 	require.NoError(t, <-upgrade2Err)
+}
+
+// Test21Dot1Dot8 tests that we can move in either direction between the 21.1
+// and 21.1-124 versions, the latter of which was introduced in a backport that
+// was released as 21.1.8.
+func Test21Dot1Dot8(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	defer jobs.TestingSetAdoptAndCancelIntervals(
+		10*time.Millisecond, 10*time.Millisecond,
+	)()
+
+	// We're going to be migrating between cv21Dot8 and cv21.
+	cv21 := clusterversion.ClusterVersion{Version: clusterversion.V21Dot1}
+	cv21Dot8 := clusterversion.ClusterVersion{Version: clusterversion.V21Dot1Dot8}
+
+	ctx := context.Background()
+	tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Settings: cluster.MakeTestingClusterSettingsWithVersions(cv21Dot8.Version, cv21.Version, false),
+			Knobs: base.TestingKnobs{
+				Server: &server.TestingKnobs{
+					BinaryVersionOverride:          cv21Dot8.Version,
+					DisableAutomaticVersionUpgrade: 1,
+				},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+
+	// Add a 21.1 node.
+	tc.AddAndStartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				BinaryVersionOverride:          cv21.Version,
+				DisableAutomaticVersionUpgrade: 1,
+			},
+		},
+	})
+
+	// Wait until all nodes have are considered live.
+	tc.WaitForNodeStatuses(t)
+	tc.WaitForNodeLiveness(t)
+
+	// Downgrade.
+	sqlDB := tc.ServerConn(0)
+	testutils.SucceedsSoon(t, func() error {
+		// Need to wait for n3 to start sometimes.
+		_, err := sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21.String())
+		return err
+	})
+
+	// Upgrade again.
+	_, err := sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21Dot8.String())
+	require.NoError(t, err)
+
+	// Downgrade again.
+	_, err = sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21.String())
+	require.NoError(t, err)
 }

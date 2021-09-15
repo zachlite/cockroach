@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/rsg"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
@@ -100,12 +99,10 @@ func TestFormatTableName(t *testing.T) {
 		// `GRANT SELECT ON xoxoxo TO foo`},
 	}
 
-	f := tree.NewFmtCtx(
-		tree.FmtSimple,
-		tree.FmtReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
-			ctx.WriteString("xoxoxo")
-		}),
-	)
+	f := tree.NewFmtCtx(tree.FmtSimple)
+	f.SetReformatTableNames(func(ctx *tree.FmtCtx, _ *tree.TableName) {
+		ctx.WriteString("xoxoxo")
+	})
 
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d %s", i, test.stmt), func(t *testing.T) {
@@ -399,9 +396,7 @@ func TestFormatPgwireText(t *testing.T) {
 		{`ARRAY[e'\U00002001☃']`, `{ ☃}`},
 	}
 	ctx := context.Background()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
-	defer evalCtx.Stop(ctx)
+	var evalCtx tree.EvalContext
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d %s", i, test.expr), func(t *testing.T) {
 			expr, err := parser.ParseExpr(test.expr)

@@ -14,6 +14,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
@@ -111,6 +112,7 @@ type cacheEntry struct {
 func NewTableStatisticsCache(
 	ctx context.Context,
 	cacheSize int,
+	gw gossip.OptionalGossip,
 	db *kv.DB,
 	sqlExecutor sqlutil.InternalExecutor,
 	codec keys.SQLCodec,
@@ -130,7 +132,21 @@ func NewTableStatisticsCache(
 		ShouldEvict: func(s int, key, value interface{}) bool { return s > cacheSize },
 	})
 
-	// Set up a range feed to watch for updates to system.table_statistics.
+	// When not using multi-tenant, use the legacy Gossip-based invalidation
+	// mechanism. This avoids introducing regressions in 21.1.x.
+	// The stat cache requires redundant callbacks as it is using gossip to
+	// signal the presence of new stats, not to actually propagate them.
+	if g, ok := gw.Optional(47925); ok {
+		g.RegisterCallback(
+			gossip.MakePrefixPattern(gossip.KeyTableStatAddedPrefix),
+			tableStatsCache.tableStatAddedGossipUpdate,
+			gossip.Redundant,
+		)
+		return tableStatsCache
+	}
+
+	// In multi-tenant, gossip is not available. Use the 21.2 method: set up a
+	// range feed to watch for updates to system.table_statistics.
 
 	statsTablePrefix := codec.TablePrefix(keys.TableStatisticsTableID)
 	statsTableSpan := roachpb.Span{
@@ -149,7 +165,7 @@ func NewTableStatisticsCache(
 		}
 		ts := kv.Value.Timestamp
 		// A statistics collection inserts multiple rows in one transaction. We
-		// don't want to call refreshTableStats for each row since it has
+		// don't want to call RefreshTableStats for each row since it has
 		// non-trivial overhead.
 		if tableID == lastTableID && ts == lastTS {
 			return
@@ -175,6 +191,17 @@ func NewTableStatisticsCache(
 	return tableStatsCache
 }
 
+// tableStatAddedGossipUpdate is the gossip callback that fires when a new
+// statistic is available for a table.
+func (sc *TableStatisticsCache) tableStatAddedGossipUpdate(key string, value roachpb.Value) {
+	tableID, err := gossip.TableIDFromTableStatAddedKey(key)
+	if err != nil {
+		log.Errorf(context.Background(), "tableStatAddedGossipUpdate(%s) error: %v", key, err)
+		return
+	}
+	sc.RefreshTableStats(context.Background(), descpb.ID(tableID))
+}
+
 // decodeTableStatisticsKV decodes the table ID from a range feed event on
 // system.table_statistics.
 func decodeTableStatisticsKV(
@@ -186,7 +213,7 @@ func decodeTableStatisticsKV(
 	dirs := []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC}
 	keyVals := make([]rowenc.EncDatum, 2)
 	_, matches, _, err := rowenc.DecodeIndexKey(
-		codec, tbl, tbl.GetPrimaryIndex(), types, keyVals, dirs, kv.Key,
+		codec, tbl, tbl.GetPrimaryIndex().IndexDesc(), types, keyVals, dirs, kv.Key,
 	)
 	if err != nil {
 		return 0, err
@@ -388,8 +415,12 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 	}
 }
 
-// refreshTableStats refreshes the cached statistics for the given table ID by
+// RefreshTableStats refreshes the cached statistics for the given table ID by
 // fetching the new stats from the database.
+func (sc *TableStatisticsCache) RefreshTableStats(ctx context.Context, tableID descpb.ID) {
+	sc.refreshTableStats(ctx, tableID, sc.ClientDB.Clock().Now())
+}
+
 func (sc *TableStatisticsCache) refreshTableStats(
 	ctx context.Context, tableID descpb.ID, ts hlc.Timestamp,
 ) {
@@ -503,12 +534,7 @@ func (sc *TableStatisticsCache) parseStats(
 			// will need to start writing a timestamp on the stats objects and request
 			// TypeDescriptor's with the timestamp that the stats were recorded with.
 			err := sc.ClientDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				collection := descs.NewCollection(
-					sc.Settings,
-					sc.LeaseMgr,
-					nil, // hydratedTables
-					nil, // virtualSchemas
-				)
+				collection := descs.NewCollection(sc.Settings, sc.LeaseMgr, nil /* hydratedTables */)
 				defer collection.ReleaseAll(ctx)
 				resolver := descs.NewDistSQLTypeResolver(collection, txn)
 				var err error

@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -107,14 +106,6 @@ func (s *SessionData) GetLocation() *time.Location {
 	return s.Location
 }
 
-// GetIntervalStyle returns the session interval style.
-func (s *SessionData) GetIntervalStyle() duration.IntervalStyle {
-	if s == nil {
-		return duration.IntervalStyle_POSTGRES
-	}
-	return s.DataConversionConfig.IntervalStyle
-}
-
 // LocalOnlySessionData contains session parameters that only influence the
 // execution on the gateway node and don't need to be propagated to the remote
 // nodes.
@@ -125,6 +116,9 @@ type LocalOnlySessionData struct {
 	SaveTablesPrefix string
 	// RemoteAddr is used to generate logging events.
 	RemoteAddr net.Addr
+	// VectorizeRowCountThreshold indicates the row count above which the
+	// vectorized execution engine will be used if possible.
+	VectorizeRowCountThreshold uint64
 	// ExperimentalDistSQLPlanningMode indicates whether the experimental
 	// DistSQL planning driven by the optimizer is enabled.
 	ExperimentalDistSQLPlanningMode ExperimentalDistSQLPlanningMode
@@ -184,6 +178,9 @@ type LocalOnlySessionData struct {
 	// OptimizerUseMultiColStats indicates whether we should use multi-column
 	// statistics for cardinality estimation in the optimizer.
 	OptimizerUseMultiColStats bool
+	// OptimizerImproveDisjunctionSelectivity indicates whether we try to
+	// calculate more accurate selectivities for filters with disjunctions.
+	OptimizerImproveDisjunctionSelectivity bool
 	// LocalityOptimizedSearch indicates that the optimizer will try to plan scans
 	// and lookup joins in which local nodes (i.e., nodes in the gateway region)
 	// are searched for matching rows before remote nodes, in the hope that the
@@ -239,10 +236,6 @@ type LocalOnlySessionData struct {
 	// EnableSeqScan is a dummy setting for the enable_seqscan var.
 	EnableSeqScan bool
 
-	// EnableExpressionIndexes indicates whether creating expression indexes is
-	// allowed.
-	EnableExpressionIndexes bool
-
 	// EnableUniqueWithoutIndexConstraints indicates whether creating unique
 	// constraints without an index is allowed.
 	// TODO(rytaft): remove this once unique without index constraints are fully
@@ -276,6 +269,25 @@ type LocalOnlySessionData struct {
 	// of that interleave should be applied to the new primary index.
 	CopyPartitioningWhenDeinterleavingTable bool
 
+	// TxnRowsWrittenLog is the threshold for the number of rows written by a SQL
+	// transaction which - once exceeded - will trigger a logging event to SQL_PERF
+	// (or SQL_INTERNAL_PERF for internal transactions); 0 means disabled.
+	TxnRowsWrittenLog int64
+	// TxnRowsWrittenErr is the limit for the number of rows written by a SQL
+	// transaction which - once exceeded - will fail the transaction (or will
+	// trigger a logging event to SQL_INTERNAL_PERF for internal transactions); 0
+	// means disabled.
+	TxnRowsWrittenErr int64
+	// TxnRowsReadLog is the threshold for the number of rows read by a SQL
+	// transaction which - once exceeded - will trigger a logging event to SQL_PERF
+	// (or SQL_INTERNAL_PERF for internal transactions); 0 means disabled.
+	TxnRowsReadLog int64
+	// TxnRowsReadErr is the limit for the number of rows read by a SQL
+	// transaction which - once exceeded - will fail the transaction (or will
+	// trigger a logging event to SQL_INTERNAL_PERF for internal transactions); 0
+	// means disabled.
+	TxnRowsReadErr int64
+
 	///////////////////////////////////////////////////////////////////////////
 	// WARNING: consider whether a session parameter you're adding needs to  //
 	// be propagated to the remote nodes. If so, that parameter should live  //
@@ -285,21 +297,13 @@ type LocalOnlySessionData struct {
 
 // IsTemporarySchemaID returns true if the given ID refers to any of the temp
 // schemas created by the session.
-func (s *SessionData) IsTemporarySchemaID(schemaID uint32) bool {
-	_, exists := s.MaybeGetDatabaseForTemporarySchemaID(schemaID)
-	return exists
-}
-
-// MaybeGetDatabaseForTemporarySchemaID returns the corresponding database and
-// true if the schemaID refers to any of the temp schemas created by this
-// session.
-func (s *SessionData) MaybeGetDatabaseForTemporarySchemaID(schemaID uint32) (uint32, bool) {
-	for dbID, tempSchemaID := range s.DatabaseIDToTempSchemaID {
-		if tempSchemaID == schemaID {
-			return dbID, true
+func (s *SessionData) IsTemporarySchemaID(ID uint32) bool {
+	for _, tempSchemaID := range s.DatabaseIDToTempSchemaID {
+		if tempSchemaID == ID {
+			return true
 		}
 	}
-	return 0, false
+	return false
 }
 
 // GetTemporarySchemaIDForDb returns the schemaID for the temporary schema if

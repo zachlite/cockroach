@@ -28,8 +28,6 @@ func TestGetSequenceFromFunc(t *testing.T) {
 		{`nextval('seq')`, &SeqIdentifier{SeqName: "seq"}},
 		{`nextval(123::REGCLASS)`, &SeqIdentifier{SeqID: 123}},
 		{`nextval(123)`, &SeqIdentifier{SeqID: 123}},
-		{`nextval(123::OID::REGCLASS)`, &SeqIdentifier{SeqID: 123}},
-		{`nextval(123::OID)`, &SeqIdentifier{SeqID: 123}},
 	}
 
 	ctx := context.Background()
@@ -129,8 +127,7 @@ func TestReplaceSequenceNamesWithIDs(t *testing.T) {
 	}{
 		{`nextval('seq')`, `nextval(123:::REGCLASS)`},
 		{`nextval('non_existent')`, `nextval('non_existent')`},
-		{`nextval(123::REGCLASS)`, `nextval(123::REGCLASS)`},
-		{`nextval(123)`, `nextval(123)`},
+		{`nextval(123::REGCLASS)`, `nextval(123)`},
 	}
 
 	ctx := context.Background()

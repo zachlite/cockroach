@@ -83,14 +83,14 @@ SELECT
    FROM %s J
    WHERE
       J.created_by_type = '%s' AND J.created_by_id = S.schedule_id AND
-      J.status NOT IN ('%s', '%s', '%s', '%s')
+      J.status NOT IN ('%s', '%s', '%s')
   ) AS num_running, S.*
 FROM %s S
 WHERE next_run < %s
 ORDER BY random()
 %s
 FOR UPDATE`, env.SystemJobsTableName(), CreatedByScheduledJobs,
-		StatusSucceeded, StatusCanceled, StatusFailed, StatusRevertFailed,
+		StatusSucceeded, StatusCanceled, StatusFailed,
 		env.ScheduledJobsTableName(), env.NowExpr(), limitClause)
 }
 
@@ -169,7 +169,7 @@ func (s *jobScheduler) processSchedule(
 		return err
 	}
 
-	executor, err := s.lookupExecutor(schedule.ExecutorType())
+	executor, err := GetScheduledJobExecutor(schedule.ExecutorType())
 	if err != nil {
 		return err
 	}
@@ -190,25 +190,14 @@ func (s *jobScheduler) processSchedule(
 	return schedule.Update(ctx, s.InternalExecutor, txn)
 }
 
-func (s *jobScheduler) lookupExecutor(name string) (ScheduledJobExecutor, error) {
-	ex, wasCreated, err := GetScheduledJobExecutor(name)
-	if err != nil {
-		return nil, err
-	}
-	if m := ex.Metrics(); wasCreated && m != nil {
-		s.registry.AddMetricStruct(m)
-	}
-	return ex, nil
-}
-
 // TODO(yevgeniy): Re-evaluate if we need to have per-loop execution statistics.
 func newLoopStats(
 	ctx context.Context, env scheduledjobs.JobSchedulerEnv, ex sqlutil.InternalExecutor, txn *kv.Txn,
 ) (*loopStats, error) {
 	numRunningJobsStmt := fmt.Sprintf(
-		"SELECT count(*) FROM %s WHERE created_by_type = '%s' AND status NOT IN ('%s', '%s', '%s', '%s')",
+		"SELECT count(*) FROM %s WHERE created_by_type = '%s' AND status NOT IN ('%s', '%s', '%s')",
 		env.SystemJobsTableName(), CreatedByScheduledJobs,
-		StatusSucceeded, StatusCanceled, StatusFailed, StatusRevertFailed)
+		StatusSucceeded, StatusCanceled, StatusFailed)
 	readyToRunStmt := fmt.Sprintf(
 		"SELECT count(*) FROM %s WHERE next_run < %s",
 		env.ScheduledJobsTableName(), env.NowExpr())
@@ -358,6 +347,10 @@ func (s *jobScheduler) runDaemon(ctx context.Context, stopper *stop.Stopper) {
 	_ = stopper.RunAsyncTask(ctx, "job-scheduler", func(ctx context.Context) {
 		initialDelay := getInitialScanDelay(s.TestingKnobs)
 		log.Infof(ctx, "waiting %v before scheduled jobs daemon start", initialDelay)
+
+		if err := RegisterExecutorsMetrics(s.registry); err != nil {
+			log.Errorf(ctx, "error registering executor metrics: %+v", err)
+		}
 
 		for timer := time.NewTimer(initialDelay); ; timer.Reset(
 			getWaitPeriod(&s.Settings.SV, s.TestingKnobs)) {

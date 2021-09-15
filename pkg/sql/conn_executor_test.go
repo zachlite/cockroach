@@ -44,7 +44,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -849,6 +848,36 @@ func TestTrimFlushedStatements(t *testing.T) {
 	require.NoError(t, tx.Commit())
 }
 
+// TestUnqualifiedIntSizeRace makes sure there is no data race using the
+// default_int_size session variable during statement parsing.
+// Regression test for https://github.com/cockroachdb/cockroach/issues/69451.
+func TestUnqualifiedIntSizeRace(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Insecure: true,
+	})
+	defer s.Stopper().Stop(ctx)
+
+	// Connect to the cluster via the PGWire client.
+	p, err := pgtest.NewPGTest(ctx, s.SQLAddr(), security.RootUser)
+	require.NoError(t, err)
+
+	require.NoError(t, p.SendOneLine(`Query {"String": "SET default_int_size = 8"}`))
+	require.NoError(t, p.SendOneLine(`Query {"String": "SET default_int_size = 4"}`))
+	require.NoError(t, p.SendOneLine(`Parse {"Query": "SELECT generate_series(1, 10)"}`))
+
+	// wait for ready
+	for i := 0; i < 2; i++ {
+		until := pgtest.ParseMessages("ReadyForQuery")
+		_, err = p.Until(false /* keepErrMsg */, until...)
+		require.NoError(t, err)
+	}
+}
+
 func TestTrimSuspendedPortals(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -922,6 +951,9 @@ func TestTrimSuspendedPortals(t *testing.T) {
 		}
 	}
 
+	// explicitly close portal
+	require.NoError(t, p.SendOneLine(fmt.Sprintf(`Close {"ObjectType": 80,"Name": "%s"}`, portalName)))
+
 	// send commit
 	require.NoError(t, p.SendOneLine(`Query {"String": "COMMIT"}`))
 
@@ -932,47 +964,8 @@ func TestTrimSuspendedPortals(t *testing.T) {
 
 }
 
-func TestShowLastQueryStatisticsUnknown(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	params := base.TestServerArgs{}
-	s, sqlConn, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(ctx)
-
-	_, err := sqlConn.Exec("SELECT 1")
-	require.NoError(t, err)
-
-	rows, err := sqlConn.Query("SHOW LAST QUERY STATISTICS RETURNING x, y")
-	require.NoError(t, err, "show last query statistics failed")
-	defer rows.Close()
-
-	resultColumns, err := rows.Columns()
-	require.NoError(t, err)
-
-	const expectedNumColumns = 2
-	if len(resultColumns) != expectedNumColumns {
-		t.Fatalf(
-			"unexpected number of columns in result; expected %d, found %d",
-			expectedNumColumns,
-			len(resultColumns),
-		)
-	}
-
-	var x, y gosql.NullString
-
-	rows.Next()
-	err = rows.Scan(&x, &y)
-	require.NoError(t, err, "unexpected error while reading last query statistics")
-
-	require.False(t, x.Valid)
-	require.False(t, y.Valid)
-}
-
 func TestShowLastQueryStatistics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	params := base.TestServerArgs{}
@@ -1013,7 +1006,7 @@ ALTER TABLE t1 ADD COLUMN b INT DEFAULT 1`,
 			require.NoError(t, err, "executing %s  ", tc.stmt)
 		}
 
-		rows, err := sqlConn.Query("SHOW LAST QUERY STATISTICS RETURNING parse_latency, plan_latency, exec_latency, service_latency, post_commit_jobs_latency")
+		rows, err := sqlConn.Query("SHOW LAST QUERY STATISTICS")
 		require.NoError(t, err, "show last query statistics failed")
 		defer rows.Close()
 
@@ -1041,19 +1034,19 @@ ALTER TABLE t1 ADD COLUMN b INT DEFAULT 1`,
 		)
 		require.NoError(t, err, "unexpected error while reading last query statistics")
 
-		parseInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, parseLatency)
+		parseInterval, err := tree.ParseDInterval(parseLatency)
 		require.NoError(t, err)
 
-		planInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, planLatency)
+		planInterval, err := tree.ParseDInterval(planLatency)
 		require.NoError(t, err)
 
-		execInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, execLatency)
+		execInterval, err := tree.ParseDInterval(execLatency)
 		require.NoError(t, err)
 
-		serviceInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, serviceLatency)
+		serviceInterval, err := tree.ParseDInterval(serviceLatency)
 		require.NoError(t, err)
 
-		postCommitJobsInterval, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, postCommitJobsLatency)
+		postCommitJobsInterval, err := tree.ParseDInterval(postCommitJobsLatency)
 		require.NoError(t, err)
 
 		if parseInterval.AsFloat64() <= 0 || parseInterval.AsFloat64() > 1 {

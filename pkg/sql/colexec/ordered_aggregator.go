@@ -83,7 +83,6 @@ const (
 // value is part of a new group).
 type orderedAggregator struct {
 	colexecop.OneInputNode
-	colexecop.InitHelper
 
 	state orderedAggregatorState
 
@@ -149,9 +148,7 @@ func NewOrderedAggregator(
 			return nil, errors.AssertionFailedf("filtering ordered aggregation is not supported")
 		}
 	}
-	op, groupCol, err := colexecbase.OrderedDistinctColsToOperators(
-		args.Input, args.Spec.GroupCols, args.InputTypes, false, /* nullsAreDistinct */
-	)
+	op, groupCol, err := colexecbase.OrderedDistinctColsToOperators(args.Input, args.Spec.GroupCols, args.InputTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -181,15 +178,12 @@ func NewOrderedAggregator(
 	return a, nil
 }
 
-func (a *orderedAggregator) Init(ctx context.Context) {
-	if !a.InitHelper.Init(ctx) {
-		return
-	}
-	a.Input.Init(a.Ctx)
+func (a *orderedAggregator) Init() {
+	a.Input.Init()
 	a.bucket.init(a.bucket.fns, a.aggHelper.makeSeenMaps(), a.groupCol)
 }
 
-func (a *orderedAggregator) Next() coldata.Batch {
+func (a *orderedAggregator) Next(ctx context.Context) coldata.Batch {
 	stateAfterOutputting := orderedAggregatorUnknown
 	for {
 		switch a.state {
@@ -207,7 +201,7 @@ func (a *orderedAggregator) Next() coldata.Batch {
 			batch := a.lastReadBatch
 			a.lastReadBatch = nil
 			if batch == nil {
-				batch = a.Input.Next()
+				batch = a.Input.Next(ctx)
 			}
 			batchLength := batch.Length()
 
@@ -247,7 +241,7 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				if batchLength > 0 {
 					a.inputArgsConverter.ConvertBatch(batch)
 					a.aggHelper.performAggregation(
-						a.Ctx, batch.ColVecs(), batchLength, batch.Selection(), &a.bucket, a.groupCol,
+						ctx, batch.ColVecs(), batchLength, batch.Selection(), &a.bucket, a.groupCol,
 					)
 				} else {
 					a.allocator.PerformOperation(a.scratch.ColVecs(), func() {
@@ -293,7 +287,8 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				// capacity, so we choose to instantiate the batch with fixed
 				// maximal capacity that can be needed by the aggregator.
 				a.allocator.ReleaseMemory(colmem.GetBatchMemSize(a.scratch.Batch))
-				a.scratch.Batch = a.allocator.NewMemBatchWithFixedCapacity(a.outputTypes, 2*coldata.BatchSize())
+				newMinCapacity = 2 * coldata.BatchSize()
+				a.scratch.Batch = a.allocator.NewMemBatchWithFixedCapacity(a.outputTypes, newMinCapacity)
 			} else {
 				a.scratch.Batch, _ = a.allocator.ResetMaybeReallocate(
 					a.outputTypes, a.scratch.Batch, newMinCapacity, maxBatchMemSize,
@@ -332,10 +327,12 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				a.allocator.PerformOperation(a.unsafeBatch.ColVecs(), func() {
 					for i := 0; i < len(a.outputTypes); i++ {
 						a.unsafeBatch.ColVec(i).Copy(
-							coldata.SliceArgs{
-								Src:         a.scratch.ColVec(i),
-								SrcStartIdx: 0,
-								SrcEndIdx:   coldata.BatchSize(),
+							coldata.CopySliceArgs{
+								SliceArgs: coldata.SliceArgs{
+									Src:         a.scratch.ColVec(i),
+									SrcStartIdx: 0,
+									SrcEndIdx:   coldata.BatchSize(),
+								},
 							},
 						)
 					}
@@ -357,10 +354,12 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				a.allocator.PerformOperation(a.scratch.tempBuffer.ColVecs(), func() {
 					for i := 0; i < len(a.outputTypes); i++ {
 						a.scratch.tempBuffer.ColVec(i).Copy(
-							coldata.SliceArgs{
-								Src:         a.scratch.ColVec(i),
-								SrcStartIdx: coldata.BatchSize(),
-								SrcEndIdx:   a.scratch.resumeIdx,
+							coldata.CopySliceArgs{
+								SliceArgs: coldata.SliceArgs{
+									Src:         a.scratch.ColVec(i),
+									SrcStartIdx: coldata.BatchSize(),
+									SrcEndIdx:   a.scratch.resumeIdx,
+								},
 							},
 						)
 					}
@@ -369,9 +368,11 @@ func (a *orderedAggregator) Next() coldata.Batch {
 				a.allocator.PerformOperation(a.scratch.ColVecs(), func() {
 					for i := 0; i < len(a.outputTypes); i++ {
 						a.scratch.ColVec(i).Copy(
-							coldata.SliceArgs{
-								Src:       a.scratch.tempBuffer.ColVec(i),
-								SrcEndIdx: newResumeIdx,
+							coldata.CopySliceArgs{
+								SliceArgs: coldata.SliceArgs{
+									Src:       a.scratch.tempBuffer.ColVec(i),
+									SrcEndIdx: newResumeIdx,
+								},
 							},
 						)
 					}
@@ -414,6 +415,6 @@ func (a *orderedAggregator) Reset(ctx context.Context) {
 	}
 }
 
-func (a *orderedAggregator) Close() error {
-	return a.toClose.Close()
+func (a *orderedAggregator) Close(ctx context.Context) error {
+	return a.toClose.Close(ctx)
 }

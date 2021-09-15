@@ -130,17 +130,6 @@ message NodesResponse {
   ];
 }
 
-// RegionsRequest requests all available regions.
-message RegionsRequest {}
-
-// RegionsResponse describes the available regions.
-message RegionsResponse {
-  message Region {
-    repeated string zones = 1;
-  }
-  map<string, Region> regions = 1;
-}
-
 message NodeRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
@@ -171,7 +160,6 @@ message RaftState {
   uint64 lead_transferee = 7;
 }
 
-// RangeProblems describes issues reported by a range. For internal use only.
 message RangeProblems {
   bool unavailable = 1;
   bool leader_not_lease_holder = 2;
@@ -190,15 +178,10 @@ message RangeProblems {
   bool raft_log_too_large = 7;
 }
 
-// RangeStatistics describes statistics reported by a range. For internal use
-// only.
 message RangeStatistics {
-  // Queries per second served by this range.
-  //
   // Note that queries per second will only be known by the leaseholder.
   // All other replicas will report it as 0.
   double queries_per_second = 1;
-  // Writes per second served by this range.
   double writes_per_second = 2;
 }
 
@@ -227,24 +210,11 @@ message RangeInfo {
   repeated roachpb.Lease lease_history = 8 [ (gogoproto.nullable) = false ];
   RangeProblems problems = 9 [ (gogoproto.nullable) = false ];
   RangeStatistics stats = 10 [ (gogoproto.nullable) = false ];
-  reserved 11, 12;
+  kv.kvserver.storagepb.LatchManagerInfo latches_local = 11 [ (gogoproto.nullable) = false ];
+  kv.kvserver.storagepb.LatchManagerInfo latches_global = 12 [ (gogoproto.nullable) = false ];
   kv.kvserver.storagepb.LeaseStatus lease_status = 13 [ (gogoproto.nullable) = false ];
   bool quiescent = 14;
   bool ticking = 15;
-  int64 read_latches = 16;
-  int64 write_latches = 17;
-  int64 locks = 18;
-  int64 locks_with_wait_queues = 19;
-  int64 lock_wait_queue_waiters = 20;
-  message LockInfo {
-    string pretty_key = 1;
-    bytes key = 2 [ (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key" ];
-    bool held = 3;
-    int64 waiters = 4;
-    int64 waiting_readers = 5;
-    int64 waiting_writers = 6;
-  }
-  repeated LockInfo top_k_locks_by_wait_queue_waiters = 21 [ (gogoproto.nullable) = false ];
 }
 
 message RangesRequest {
@@ -384,7 +354,7 @@ message LogFileRequest {
 
 enum StacksType {
   GOROUTINE_STACKS = 0;
-  reserved 1;
+  THREAD_STACKS = 1;
 }
 
 message StacksRequest {
@@ -561,8 +531,6 @@ message ActiveQuery {
   // phase stores the current phase of execution for this query.
   Phase phase = 5;
 
-  // progress is an estimate of the fraction of this query that has been
-  // processed.
   float progress = 6;
 
   // The SQL statement fingerprint, compatible with StatementStatisticsKey.
@@ -1010,7 +978,7 @@ message StatementsResponse {
   message CollectedStatementStatistics {
     ExtendedStatementStatisticsKey key = 1 [(gogoproto.nullable) = false];
     uint64 id = 3 [(gogoproto.customname) = "ID",
-                   (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtFingerprintID"];
+                   (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtID"];
     cockroach.sql.StatementStatistics stats = 2 [(gogoproto.nullable) = false];
   }
 
@@ -1119,9 +1087,6 @@ service Status {
       get : "/_status/details/{node_id}"
     };
   }
-
-  // RegionsRequest retrieves all available regions.
-  rpc Regions(RegionsRequest) returns (RegionsResponse) {}
 
   // Nodes returns status info for all commissioned nodes. Decommissioned nodes
   // are not included, except in rare cases where the node doing the

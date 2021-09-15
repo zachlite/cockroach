@@ -11,7 +11,6 @@ package backupccl
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/kv/bulk"
@@ -29,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	gogotypes "github.com/gogo/protobuf/types"
 )
@@ -45,7 +43,7 @@ type restoreDataProcessor struct {
 	input   execinfra.RowSource
 	output  execinfra.RowReceiver
 
-	kr *KeyRewriter
+	kr *storageccl.KeyRewriter
 
 	// concurrentWorkerLimit is a semaphore that can change capacity, which controls
 	// the number of active restore worker threads.
@@ -62,9 +60,6 @@ type restoreDataProcessor struct {
 	// progress updates are accumulated on this channel. It is populated by the
 	// concurrent workers and sent down the flow by the processor.
 	progCh chan RestoreProgress
-	// doneCh is a channel used to signal the background worker that the
-	// processor is done and it can be cleaned up.
-	doneCh chan struct{}
 }
 
 var _ execinfra.Processor = &restoreDataProcessor{}
@@ -81,7 +76,7 @@ const maxConcurrentRestoreWorkers = 32
 // The maximum is not enforced since if the maximum is reduced in the future that
 // may cause the cluster setting to fail.
 var numRestoreWorkers = settings.RegisterIntSetting(
-	"kv.bulk_io_write.restore_node_concurrency",
+	"kv.bulk_io_write.experimental_restore_node_concurrency",
 	fmt.Sprintf("the number of workers processing a restore per job per node; maximum %d",
 		maxConcurrentRestoreWorkers),
 	1, /* default */
@@ -105,15 +100,18 @@ func newRestoreDataProcessor(
 		output:  output,
 		progCh:  make(chan RestoreProgress, maxConcurrentRestoreWorkers),
 		metaCh:  make(chan *execinfrapb.ProducerMetadata, 1),
-		doneCh:  make(chan struct{}),
 		concurrentWorkerLimit: quotapool.NewIntPool(
 			"restore worker concurrency",
 			uint64(numRestoreWorkers.Get(sv)),
 		),
 	}
 
+	numRestoreWorkers.SetOnChange(sv, func() {
+		rd.concurrentWorkerLimit.UpdateCapacity(uint64(numRestoreWorkers.Get(sv)))
+	})
+
 	var err error
-	rd.kr, err = makeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
+	rd.kr, err = storageccl.MakeKeyRewriterFromRekeys(flowCtx.Codec(), rd.spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}
@@ -131,42 +129,12 @@ func newRestoreDataProcessor(
 	return rd, nil
 }
 
-// concurrencyWatcher is a background goroutine that polls the concurrency
-// factor to update the size of the quota pool as needed.
-func (rd *restoreDataProcessor) concurrencyWatcher(ctx context.Context) error {
-	timer := timeutil.NewTimer()
-	defer timer.Stop()
-
-	pollFrequency := 30 * time.Second
-
-	sv := &rd.flowCtx.Cfg.Settings.SV
-
-	ctxDone := ctx.Done()
-	for {
-		select {
-		case <-timer.C:
-			timer.Read = true
-			newConcurrency := uint64(numRestoreWorkers.Get(sv))
-			if rd.concurrentWorkerLimit.Capacity() != newConcurrency {
-				rd.concurrentWorkerLimit.UpdateCapacity(newConcurrency)
-			}
-			timer.Reset(pollFrequency)
-		case <-ctxDone:
-			return ctx.Err()
-		case <-rd.doneCh:
-			return nil
-		}
-	}
-}
-
 // Start is part of the RowSource interface.
 func (rd *restoreDataProcessor) Start(ctx context.Context) {
 	ctx = rd.StartInternal(ctx, restoreDataProcName)
 	rd.input.Start(ctx)
 
 	rd.phaseGroup = ctxgroup.WithContext(ctx)
-	rd.phaseGroup.GoCtx(rd.concurrencyWatcher)
-
 	entries := make(chan execinfrapb.RestoreSpanEntry, maxConcurrentRestoreWorkers)
 	rd.phaseGroup.GoCtx(func(ctx context.Context) error {
 		defer close(entries)
@@ -175,7 +143,6 @@ func (rd *restoreDataProcessor) Start(ctx context.Context) {
 
 	rd.phaseGroup.GoCtx(func(ctx context.Context) error {
 		defer close(rd.progCh)
-		defer close(rd.doneCh)
 		return rd.runRestoreWorkers(entries)
 	})
 }
@@ -229,7 +196,6 @@ func inputReader(
 		if !ok {
 			return errors.AssertionFailedf(`unexpected datum type %T: %+v`, datum, row)
 		}
-
 		var entry execinfrapb.RestoreSpanEntry
 		if err := protoutil.Unmarshal([]byte(*entryDatumBytes), &entry); err != nil {
 			return errors.Wrap(err, "un-marshaling restore span entry")
@@ -299,7 +265,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	log.VEventf(rd.Ctx, 1 /* level */, "ingesting span [%s-%s)", entry.Span.Key, entry.Span.EndKey)
 
 	for _, file := range entry.Files {
-		log.VEventf(ctx, 2, "import file %s which starts at %s", file.Path, entry.Span.Key)
+		log.VEventf(ctx, 2, "import file %s %s", file.Path, entry.Span.Key)
 
 		dir, err := rd.flowCtx.Cfg.ExternalStorage(ctx, file.Dir)
 		if err != nil {
@@ -319,7 +285,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	}
 
 	batcher, err := bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return storageccl.MaxIngestBatchSize(evalCtx.Settings) })
+		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
 	if err != nil {
 		return summary, err
 	}
@@ -371,7 +337,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		if !ok {
 			// If the key rewriter didn't match this key, it's not data for the
 			// table(s) we're interested in.
-			if log.V(5) {
+			if log.V(3) {
 				log.Infof(ctx, "skipping %s %s", key.Key, value.PrettyPrint())
 			}
 			continue
@@ -381,7 +347,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		value.ClearChecksum()
 		value.InitChecksum(key.Key)
 
-		if log.V(5) {
+		if log.V(3) {
 			log.Infof(ctx, "Put %s -> %s", key.Key, value.PrettyPrint())
 		}
 		if err := batcher.AddMVCCKey(ctx, key, value.RawBytes); err != nil {
@@ -392,6 +358,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	if err := batcher.Flush(ctx); err != nil {
 		return summary, err
 	}
+	log.Event(ctx, "done")
 
 	if restoreKnobs, ok := rd.flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
 		if restoreKnobs.RunAfterProcessingRestoreSpanEntry != nil {
@@ -449,9 +416,6 @@ func (rd *restoreDataProcessor) ConsumerClosed() {
 	if rd.InternalClose() {
 		if rd.metaCh != nil {
 			close(rd.metaCh)
-		}
-		if rd.concurrentWorkerLimit != nil {
-			rd.concurrentWorkerLimit.Close("")
 		}
 	}
 }

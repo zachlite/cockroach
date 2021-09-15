@@ -1159,8 +1159,8 @@ func synthesizeTargetsByChangeType(
 // maybeLeaveAtomicChangeReplicas transitions out of the joint configuration if
 // the descriptor indicates one. This involves running a distributed transaction
 // updating said descriptor, the result of which will be returned. The
-// descriptor returned from this method will contain replicas of type LEARNER,
-// NON_VOTER, and VOTER_FULL only.
+// descriptor returned from this method will contain replicas of type LEARNER
+// and VOTER_FULL only.
 func maybeLeaveAtomicChangeReplicas(
 	ctx context.Context, s *Store, desc *roachpb.RangeDescriptor,
 ) (*roachpb.RangeDescriptor, error) {
@@ -1190,7 +1190,7 @@ func maybeLeaveAtomicChangeReplicas(
 
 // maybeLeaveAtomicChangeReplicasAndRemoveLearners transitions out of the joint
 // config (if there is one), and then removes all learners. After this function
-// returns, all remaining replicas will be of type VOTER_FULL or NON_VOTER.
+// returns, all remaining replicas will be of type VOTER_FULL.
 func maybeLeaveAtomicChangeReplicasAndRemoveLearners(
 	ctx context.Context, store *Store, desc *roachpb.RangeDescriptor,
 ) (*roachpb.RangeDescriptor, error) {
@@ -2035,12 +2035,18 @@ type changeReplicasTxnArgs struct {
 	db *kv.DB
 
 	// liveAndDeadReplicas divides the provided repls slice into two slices: the
-	// first for live replicas, and the second for dead replicas. Replicas for
-	// which liveness or deadness cannot be ascertained are excluded from the
-	// returned slices. Replicas on decommissioning node/store are considered
-	// live.
+	// first for live replicas, and the second for dead replicas.
+	//
+	// - Replicas for  which liveness or deadness cannot be ascertained are
+	// excluded from the returned slices.
+	//
+	// - Replicas on decommissioning node/store are considered live.
+	//
+	// - If `includeSuspectStores` is true, stores that are marked suspect (i.e.
+	// stores that have failed a liveness heartbeat in the recent past) are
+	// considered live. Otherwise, they are excluded from the returned slices.
 	liveAndDeadReplicas func(
-		repls []roachpb.ReplicaDescriptor,
+		repls []roachpb.ReplicaDescriptor, includeSuspectStores bool,
 	) (liveReplicas, deadReplicas []roachpb.ReplicaDescriptor)
 
 	logChange                            logChangeFn
@@ -2127,7 +2133,15 @@ func execChangeReplicasTxn(
 			// See:
 			// https://github.com/cockroachdb/cockroach/issues/54444#issuecomment-707706553
 			replicas := crt.Desc.Replicas()
-			liveReplicas, _ := args.liveAndDeadReplicas(replicas.Descriptors())
+			// We consider stores marked as "suspect" to be alive for the purposes of
+			// determining whether the range can achieve quorum since these stores are
+			// known to be currently live but have failed a liveness heartbeat in the
+			// recent past.
+			//
+			// Note that the allocator will avoid rebalancing to stores that are
+			// currently marked suspect. See uses of StorePool.getStoreList() in
+			// allocator.go.
+			liveReplicas, _ := args.liveAndDeadReplicas(replicas.Descriptors(), true /* includeSuspectStores */)
 			if !replicas.CanMakeProgress(
 				func(rDesc roachpb.ReplicaDescriptor) bool {
 					for _, inner := range liveReplicas {
@@ -2759,6 +2773,9 @@ func (s *Store) relocateReplicas(
 				// Done.
 				return rangeDesc, ctx.Err()
 			}
+			if fn := s.cfg.TestingKnobs.BeforeRelocateOne; fn != nil {
+				fn(ops, leaseTarget, err)
+			}
 
 			opss := [][]roachpb.ReplicationChange{ops}
 			success := true
@@ -2778,10 +2795,6 @@ func (s *Store) relocateReplicas(
 				rangeDesc = *newDesc
 			}
 			if success {
-				if fn := s.cfg.TestingKnobs.OnRelocatedOne; fn != nil {
-					fn(ops, leaseTarget)
-				}
-
 				break
 			}
 		}
@@ -3172,7 +3185,7 @@ func (r *Replica) adminScatter(
 	// range. Note that we disable lease transfers until the final step as
 	// transferring the lease prevents any further action on this node.
 	var allowLeaseTransfer bool
-	canTransferLease := func(ctx context.Context, repl *Replica) bool { return allowLeaseTransfer }
+	canTransferLease := func() bool { return allowLeaseTransfer }
 	for re := retry.StartWithCtx(ctx, retryOpts); re.Next(); {
 		requeue, err := rq.processOneChange(ctx, r, canTransferLease, false /* dryRun */)
 		if err != nil {
@@ -3211,6 +3224,15 @@ func (r *Replica) adminScatter(
 
 	ri := r.GetRangeInfo(ctx)
 	return roachpb.AdminScatterResponse{
+		// TODO(pbardea): This is here for compatibility with 20.1, remove in 21.1.
+		DeprecatedRanges: []roachpb.AdminScatterResponse_Range{
+			{
+				Span: roachpb.Span{
+					Key:    ri.Desc.StartKey.AsRawKey(),
+					EndKey: ri.Desc.EndKey.AsRawKey(),
+				},
+			},
+		},
 		RangeInfos: []roachpb.RangeInfo{ri},
 	}, nil
 }
@@ -3231,11 +3253,10 @@ func (r *Replica) adminVerifyProtectedTimestamp(
 	// construct a more informative error to show to the user.
 	if doesNotApplyReason != "" {
 		if !resp.Verified {
-			desc := r.Desc()
 			failedRange := roachpb.AdminVerifyProtectedTimestampResponse_FailedRange{
-				RangeID:  int64(desc.GetRangeID()),
-				StartKey: desc.GetStartKey(),
-				EndKey:   desc.EndKey,
+				RangeID:  int64(r.Desc().GetRangeID()),
+				StartKey: r.Desc().GetStartKey(),
+				EndKey:   r.Desc().EndKey,
 				Reason:   doesNotApplyReason,
 			}
 			resp.VerificationFailedRanges = append(resp.VerificationFailedRanges, failedRange)

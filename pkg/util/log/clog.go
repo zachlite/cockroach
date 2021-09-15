@@ -105,9 +105,6 @@ type loggingT struct {
 		syncutil.RWMutex
 		idPayload
 	}
-
-	allSinkInfos sinkInfoRegistry
-	allLoggers   loggerRegistry
 }
 
 type idPayload struct {

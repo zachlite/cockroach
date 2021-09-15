@@ -780,7 +780,7 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 
 %token <str> FAILURE FALSE FAMILY FETCH FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH
 %token <str> FILES FILTER
-%token <str> FIRST FLOAT FLOAT4 FLOAT8 FLOORDIV FOLLOWING FOR FORCE FORCE_INDEX FORCE_ZIGZAG FOREIGN FROM FULL FUNCTION FUNCTIONS
+%token <str> FIRST FLOAT FLOAT4 FLOAT8 FLOORDIV FOLLOWING FOR FORCE FORCE_INDEX FOREIGN FROM FULL FUNCTION FUNCTIONS
 
 %token <str> GENERATED GEOGRAPHY GEOMETRY GEOMETRYM GEOMETRYZ GEOMETRYZM
 %token <str> GEOMETRYCOLLECTION GEOMETRYCOLLECTIONM GEOMETRYCOLLECTIONZ GEOMETRYCOLLECTIONZM
@@ -958,7 +958,6 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 %type <tree.Statement> cancel_jobs_stmt
 %type <tree.Statement> cancel_queries_stmt
 %type <tree.Statement> cancel_sessions_stmt
-%type <tree.Statement> cancel_all_jobs_stmt
 
 // SCRUB
 %type <tree.Statement> scrub_stmt
@@ -1018,13 +1017,13 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 %type <tree.Statement> grant_stmt
 %type <tree.Statement> insert_stmt
 %type <tree.Statement> import_stmt
-%type <tree.Statement> pause_stmt pause_jobs_stmt pause_schedules_stmt pause_all_jobs_stmt
+%type <tree.Statement> pause_stmt pause_jobs_stmt pause_schedules_stmt
 %type <*tree.Select>   for_schedules_clause
 %type <tree.Statement> reassign_owned_by_stmt
 %type <tree.Statement> drop_owned_by_stmt
 %type <tree.Statement> release_stmt
 %type <tree.Statement> reset_stmt reset_session_stmt reset_csetting_stmt
-%type <tree.Statement> resume_stmt resume_jobs_stmt resume_schedules_stmt resume_all_jobs_stmt
+%type <tree.Statement> resume_stmt resume_jobs_stmt resume_schedules_stmt
 %type <tree.Statement> drop_schedule_stmt
 %type <tree.Statement> restore_stmt
 %type <tree.StringOrPlaceholderOptList> string_or_placeholder_opt_list
@@ -3285,11 +3284,10 @@ copy_options:
 // %Category: Group
 // %Text: CANCEL JOBS, CANCEL QUERIES, CANCEL SESSIONS
 cancel_stmt:
-  cancel_jobs_stmt      // EXTEND WITH HELP: CANCEL JOBS
-| cancel_queries_stmt   // EXTEND WITH HELP: CANCEL QUERIES
-| cancel_sessions_stmt  // EXTEND WITH HELP: CANCEL SESSIONS
-| cancel_all_jobs_stmt  // EXTEND WITH HELP: CANCEL ALL JOBS
-| CANCEL error          // SHOW HELP: CANCEL
+  cancel_jobs_stmt     // EXTEND WITH HELP: CANCEL JOBS
+| cancel_queries_stmt  // EXTEND WITH HELP: CANCEL QUERIES
+| cancel_sessions_stmt // EXTEND WITH HELP: CANCEL SESSIONS
+| CANCEL error         // SHOW HELP: CANCEL
 
 // %Help: CANCEL JOBS - cancel background jobs
 // %Category: Misc
@@ -3389,17 +3387,6 @@ cancel_sessions_stmt:
     $$.val = &tree.CancelSessions{Sessions: $5.slct(), IfExists: true}
   }
 | CANCEL SESSIONS error // SHOW HELP: CANCEL SESSIONS
-
-// %Help: CANCEL ALL JOBS
-// %Category: Misc
-// %Text:
-// CANCEL ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-cancel_all_jobs_stmt:
-  CANCEL ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.CancelJob}
-  }
-| CANCEL ALL error // SHOW HELP: CANCEL ALL JOBS
 
 comment_stmt:
   COMMENT ON DATABASE database_name IS comment_text
@@ -6110,7 +6097,6 @@ for_grantee_clause:
 pause_stmt:
   pause_jobs_stmt       // EXTEND WITH HELP: PAUSE JOBS
 | pause_schedules_stmt  // EXTEND WITH HELP: PAUSE SCHEDULES
-| pause_all_jobs_stmt  // EXTEND WITH HELP: PAUSE ALL JOBS
 | PAUSE error           // SHOW HELP: PAUSE
 
 // %Help: RESUME
@@ -6119,23 +6105,11 @@ pause_stmt:
 //
 // Resume various background tasks and activities.
 //
-// RESUME JOBS, RESUME SCHEDULES, RESUME ALL BACKUP JOBS
+// RESUME JOBS, RESUME SCHEDULES
 resume_stmt:
   resume_jobs_stmt       // EXTEND WITH HELP: RESUME JOBS
 | resume_schedules_stmt  // EXTEND WITH HELP: RESUME SCHEDULES
-| resume_all_jobs_stmt  // EXTEND WITH HELP: RESUME ALL JOBS
 | RESUME error           // SHOW HELP: RESUME
-
-// %Help: RESUME ALL JOBS
-// %Category: Misc
-// %Text:
-// RESUME ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-resume_all_jobs_stmt:
-  RESUME ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.ResumeJob}
-  }
-| RESUME ALL error // SHOW HELP: RESUME ALL JOBS
 
 // %Help: PAUSE JOBS - pause background jobs
 // %Category: Misc
@@ -6217,18 +6191,6 @@ pause_schedules_stmt:
     }
   }
 | PAUSE SCHEDULES error // SHOW HELP: PAUSE SCHEDULES
-
-// %Help: PAUSE ALL JOBS
-// %Category: Misc
-// %Text:
-// PAUSE ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-pause_all_jobs_stmt:
-  PAUSE ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.PauseJob}
-  }
-| PAUSE ALL error // SHOW HELP: PAUSE ALL JOBS
-
 
 // %Help: CREATE SCHEMA - create a new schema
 // %Category: DDL
@@ -9767,22 +9729,6 @@ index_flags_param:
     /* SKIP DOC */
     $$.val = &tree.IndexFlags{IgnoreForeignKeys: true}
   }
-|
-  FORCE_ZIGZAG
-  {
-     $$.val = &tree.IndexFlags{ForceZigzag: true}
-  }
-|
-  FORCE_ZIGZAG '=' index_name
-  {
-     $$.val = &tree.IndexFlags{ZigzagIndexes: []tree.UnrestrictedName{tree.UnrestrictedName($3)}}
-  }
-|
-  FORCE_ZIGZAG '=' '[' iconst64 ']'
-  {
-    /* SKIP DOC */
-     $$.val = &tree.IndexFlags{ZigzagIndexIDs: []tree.IndexID{tree.IndexID($4.int64())}}
-  }
 
 index_flags_param_list:
   index_flags_param
@@ -9843,7 +9789,6 @@ opt_index_flags:
 //   '{' NO_INDEX_JOIN [, ...] '}'
 //   '{' NO_ZIGZAG_JOIN [, ...] '}'
 //   '{' IGNORE_FOREIGN_KEYS [, ...] '}'
-//   '{' FORCE_ZIGZAG = <idxname> [, ...]  '}'
 //
 // Join types:
 //   { INNER | { LEFT | RIGHT | FULL } [OUTER] } [ { HASH | MERGE | LOOKUP | INVERTED } ]
@@ -13204,7 +13149,6 @@ unreserved_keyword:
 | FOLLOWING
 | FORCE
 | FORCE_INDEX
-| FORCE_ZIGZAG
 | FUNCTION
 | FUNCTIONS
 | GENERATED

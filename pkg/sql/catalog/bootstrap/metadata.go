@@ -331,9 +331,6 @@ func InitialZoneConfigKVs(
 	replicationStatsZoneConf := &zonepb.ZoneConfig{
 		GC: &zonepb.GCPolicy{TTLSeconds: int32(systemschema.ReplicationStatsTableTTL.Seconds())},
 	}
-	tenantUsageZoneConf := &zonepb.ZoneConfig{
-		GC: &zonepb.GCPolicy{TTLSeconds: int32(systemschema.TenantUsageTableTTL.Seconds())},
-	}
 
 	// Liveness zone config entry with a shorter GC time.
 	livenessZoneConf.GC.TTLSeconds = 10 * 60 // 10m
@@ -347,8 +344,6 @@ func InitialZoneConfigKVs(
 		createZoneConfigKV(keys.ReplicationConstraintStatsTableID, codec, replicationConstraintStatsZoneConf))
 	ret = append(ret,
 		createZoneConfigKV(keys.ReplicationStatsTableID, codec, replicationStatsZoneConf))
-	ret = append(ret,
-		createZoneConfigKV(keys.TenantUsageTableID, codec, tenantUsageZoneConf))
 
 	return ret
 }

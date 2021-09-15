@@ -2,10 +2,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "spanconfigkvaccessor",
-    srcs = [
-        "disabled.go",
-        "kvaccessor.go",
-    ],
+    srcs = ["kvaccessor.go"],
     importpath = "github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigkvaccessor",
     visibility = ["//visibility:public"],
     deps = [

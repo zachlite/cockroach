@@ -14,7 +14,6 @@ import {
   SortedTable,
   ISortedTablePagination,
   longListWithTooltip,
-  ColumnDescriptor,
 } from "../sortedtable";
 import {
   transactionsCountBarChart,
@@ -48,9 +47,16 @@ interface TransactionsTable {
   transactions: TransactionInfo[];
   sortSetting: SortSetting;
   onChangeSortSetting: (ss: SortSetting) => void;
+  handleDetails: (
+    statementFingerprintIds: Long[] | null,
+    transactionStats: TransactionStats,
+  ) => void;
   pagination: ISortedTablePagination;
+  statements: Statement[];
+  nodeRegions: { [key: string]: string };
+  isTenant: boolean;
+  search?: string;
   renderNoResult?: React.ReactNode;
-  columns: ColumnDescriptor<TransactionInfo>[];
 }
 
 export interface TransactionInfo extends Transaction {
@@ -61,16 +67,7 @@ const { latencyClasses } = tableClasses;
 
 const cx = classNames.bind(statsTablePageStyles);
 
-export function makeTransactionsColumns(
-  transactions: TransactionInfo[],
-  statements: Statement[],
-  isTenant: boolean,
-  handleDetails: (
-    statementFingerprintIds: Long[] | null,
-    transactionStats: TransactionStats,
-  ) => void,
-  search?: string,
-): ColumnDescriptor<TransactionInfo>[] {
+export const TransactionsTable: React.FC<TransactionsTable> = props => {
   const defaultBarChartOptions = {
     classes: {
       root: cx("statements-table__col--bar-chart"),
@@ -84,6 +81,7 @@ export function makeTransactionsColumns(
     },
   };
 
+  const { transactions, handleDetails, statements, search, isTenant } = props;
   const countBar = transactionsCountBarChart(transactions);
   const rowsReadBar = transactionsRowsReadBarChart(
     transactions,
@@ -110,12 +108,10 @@ export function makeTransactionsColumns(
     sampledExecStatsBarChartOptions,
   );
   const retryBar = transactionsRetryBarChart(transactions);
-
-  const statType = "transaction";
-  return [
+  const columns = [
     {
       name: "transactions",
-      title: statisticsTableTitles.transactions(statType),
+      title: <>Transactions</>,
       cell: (item: TransactionInfo) =>
         textCell({
           transactionText: statementFingerprintIdsToText(
@@ -134,57 +130,56 @@ export function makeTransactionsColumns(
             statements,
           ),
         ),
-      alwaysShow: true,
     },
     {
-      name: "executionCount",
-      title: statisticsTableTitles.executionCount(statType),
+      name: "execution count",
+      title: statisticsTableTitles.executionCount("transaction"),
       cell: countBar,
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.count)),
     },
     {
-      name: "rowsRead",
-      title: statisticsTableTitles.rowsRead(statType),
+      name: "rows read",
+      title: statisticsTableTitles.rowsRead("transaction"),
       cell: rowsReadBar,
       className: cx("statements-table__col-rows-read"),
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.rows_read.mean)),
     },
     {
-      name: "bytesRead",
-      title: statisticsTableTitles.bytesRead(statType),
+      name: "bytes read",
+      title: statisticsTableTitles.bytesRead("transaction"),
       cell: bytesReadBar,
       className: cx("statements-table__col-bytes-read"),
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.bytes_read.mean)),
     },
     {
-      name: "time",
-      title: statisticsTableTitles.time(statType),
+      name: "latency",
+      title: statisticsTableTitles.time("transaction"),
       cell: latencyBar,
       className: latencyClasses.column,
       sort: (item: TransactionInfo) => item.stats_data.stats.service_lat.mean,
     },
     {
       name: "contention",
-      title: statisticsTableTitles.contention(statType),
+      title: statisticsTableTitles.contention("transaction"),
       cell: contentionBar,
       className: cx("statements-table__col-contention"),
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.exec_stats.contention_time?.mean)),
     },
     {
-      name: "maxMemUsage",
-      title: statisticsTableTitles.maxMemUsage(statType),
+      name: "max memory",
+      title: statisticsTableTitles.maxMemUsage("transaction"),
       cell: maxMemUsageBar,
       className: cx("statements-table__col-max-mem-usage"),
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.exec_stats.max_mem_usage?.mean)),
     },
     {
-      name: "networkBytes",
-      title: statisticsTableTitles.networkBytes(statType),
+      name: "network",
+      title: statisticsTableTitles.networkBytes("transaction"),
       cell: networkBytesBar,
       className: cx("statements-table__col-network-bytes"),
       sort: (item: TransactionInfo) =>
@@ -192,14 +187,14 @@ export function makeTransactionsColumns(
     },
     {
       name: "retries",
-      title: statisticsTableTitles.retries(statType),
+      title: statisticsTableTitles.retries("transaction"),
       cell: retryBar,
       sort: (item: TransactionInfo) =>
         longToInt(Number(item.stats_data.stats.max_retries)),
     },
     {
       name: "regionNodes",
-      title: statisticsTableTitles.regionNodes(statType),
+      title: statisticsTableTitles.regionNodes("transaction"),
       className: cx("statements-table__col-regions"),
       cell: (item: TransactionInfo) => {
         return longListWithTooltip(item.regionNodes.sort().join(", "), 50);
@@ -208,18 +203,14 @@ export function makeTransactionsColumns(
       hideIfTenant: true,
     },
     {
-      name: "statementsCount",
-      title: statisticsTableTitles.statementsCount(statType),
+      name: "statements",
+      title: <>Statements</>,
       cell: (item: TransactionInfo) =>
         item.stats_data.statement_fingerprint_ids.length,
       sort: (item: TransactionInfo) =>
         item.stats_data.statement_fingerprint_ids.length,
     },
   ].filter(c => !(isTenant && c.hideIfTenant));
-}
-
-export const TransactionsTable: React.FC<TransactionsTable> = props => {
-  const { transactions, columns } = props;
 
   return (
     <SortedTable

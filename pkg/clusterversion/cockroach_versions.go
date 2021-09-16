@@ -155,8 +155,36 @@ const (
 	_ Key = iota - 1 // want first named one to start at zero
 
 	// v21.1 versions.
+	//
+	// Start21_1 demarcates work towards CockroachDB v21.1.
+	Start21_1
+	// replacedTruncatedAndRangeAppliedStateMigration stands in for
+	// TruncatedAndRangeAppliedStateMigration which was	re-introduced after the
+	// migration job was introduced. This is necessary because the jobs
+	// infrastructure used to run this migration in v21.1 and its later alphas
+	// was introduced after this version was first introduced. Later code in the
+	// release relies on the job to run the migration but the job relies on
+	// its startup migrations having been run. Versions associated with long
+	// running migrations must follow deletedLongRunningMigrations.
+	replacedTruncatedAndRangeAppliedStateMigration
+	// replacedPostTruncatedAndRangeAppliedStateMigration is like the above
+	// version. See its comment.
+	replacedPostTruncatedAndRangeAppliedStateMigration
+	// TruncatedAndRangeAppliedStateMigration is part of the migration to stop
+	// using the legacy truncated state within KV. After the migration, we'll be
+	// using the unreplicated truncated state and the RangeAppliedState on all
+	// ranges. Callers that wish to assert on there no longer being any legacy
+	// will be able to do so after PostTruncatedAndRangeAppliedStateMigration is
+	// active. This lets remove any holdover code handling the possibility of
+	// replicated truncated state in 21.2.
+	//
+	// TODO(irfansharif): Do the above in 21.2.
+	TruncatedAndRangeAppliedStateMigration
+	// PostTruncatedAndRangeAppliedStateMigration is used to purge all replicas
+	// using the replicated legacy TruncatedState. It's also used in asserting
+	// that no replicated truncated state representation is found.
+	PostTruncatedAndRangeAppliedStateMigration
 	// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
-	// TODO(irfansharif): This can be removed as part of once #69828 lands (bumping the min cluster version.
 	V21_1
 
 	// v21.1PLUS release. This is a special v21.1.x release with extra changes,
@@ -249,7 +277,6 @@ const (
 	// PebbleFormatVersioned ratchets Pebble's format major version to
 	// the version FormatVersioned.
 	PebbleFormatVersioned
-
 	// *************************************************
 	// Step (1): Add new versions here.
 	// Do not add new versions to a patch release.
@@ -274,14 +301,33 @@ const (
 // minor version until we are absolutely sure that no new migrations will need
 // to be added (i.e., when cutting the final release candidate).
 var versionsSingleton = keyedVersions{
-	// v21.1 versions.
+
+	// v21.1 versions. Internal versions defined here-on-forth must be even.
+	{
+		Key:     Start21_1,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 2},
+	},
+	{
+		Key:     replacedTruncatedAndRangeAppliedStateMigration,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 14},
+	},
+	{
+		Key:     replacedPostTruncatedAndRangeAppliedStateMigration,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 16},
+	},
+	{
+		Key:     TruncatedAndRangeAppliedStateMigration,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 22},
+	},
+	{
+		Key:     PostTruncatedAndRangeAppliedStateMigration,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 24},
+	},
 	{
 		// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
 		Key:     V21_1,
 		Version: roachpb.Version{Major: 21, Minor: 1},
 	},
-
-	// Internal versions must be even.
 
 	// v21.1PLUS version. This is a special v21.1.x release with extra changes,
 	// used internally for the 2021 Serverless offering.
@@ -432,8 +478,7 @@ var (
 	// binaryMinSupportedVersion is the earliest version of data supported by
 	// this binary. If this binary is started using a store marked with an older
 	// version than binaryMinSupportedVersion, then the binary will exit with
-	// an error. This typically trails the current release by one (see top-level
-	// comment).
+	// an error.
 	binaryMinSupportedVersion = ByKey(V21_1)
 
 	// binaryVersion is the version of this binary.

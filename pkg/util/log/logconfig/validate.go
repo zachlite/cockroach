@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"time"
 
@@ -85,10 +84,10 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 	// Validate and fill in defaults for file sinks.
 	for prefix, fc := range c.Sinks.FileGroups {
 		if fc == nil {
-			fc = c.newFileSinkConfig(prefix)
-		} else {
-			fc.prefix = prefix
+			fc = &FileSinkConfig{}
+			c.Sinks.FileGroups[prefix] = fc
 		}
+		fc.prefix = prefix
 		if err := c.validateFileSinkConfig(fc, defaultLogDir); err != nil {
 			fmt.Fprintf(&errBuf, "file group %q: %v\n", prefix, err)
 		}
@@ -97,7 +96,7 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 	// Validate and defaults for fluent.
 	for serverName, fc := range c.Sinks.FluentServers {
 		if fc == nil {
-			fc = &FluentSinkConfig{Channels: SelectChannels()}
+			fc = &FluentSinkConfig{}
 			c.Sinks.FluentServers[serverName] = fc
 		}
 		fc.serverName = serverName
@@ -108,7 +107,7 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 
 	for sinkName, fc := range c.Sinks.HTTPServers {
 		if fc == nil {
-			fc = &HTTPSinkConfig{Channels: SelectChannels()}
+			fc = &HTTPSinkConfig{}
 			c.Sinks.HTTPServers[sinkName] = fc
 		}
 		fc.sinkName = sinkName
@@ -131,63 +130,62 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 	}
 	c.Sinks.Stderr.Auditable = nil
 
-	// Propagate the sink-wide default filter to all channels that don't
-	// have a filter yet.
-	if err := c.Sinks.Stderr.Channels.Validate(c.Sinks.Stderr.Filter); err != nil {
-		fmt.Fprintf(&errBuf, "stderr sink: %v\n", err)
-	}
+	c.Sinks.Stderr.Channels.Sort()
 
-	fileSinks := make(map[logpb.Channel][]*FileSinkConfig)
-	// remember the file sink names for deterministic traversals.
-	fileNames := make([]string, 0, len(c.Sinks.FileGroups))
+	fileSinks := make(map[logpb.Channel]*FileSinkConfig)
+	fluentSinks := make(map[logpb.Channel]*FluentSinkConfig)
+	httpSinks := make(map[logpb.Channel]*HTTPSinkConfig)
 
-	// Check that every file has at least one channel.
-	for fname, fc := range c.Sinks.FileGroups {
-		if len(fc.Channels.Filters) == 0 {
+	// Check that no channel is listed by more than one file sink,
+	// and every file has at least one channel.
+	for _, fc := range c.Sinks.FileGroups {
+		if len(fc.Channels.Channels) == 0 {
 			fmt.Fprintf(&errBuf, "file group %q: no channel selected\n", fc.prefix)
-			continue
 		}
-		// Propagate the sink-wide default filter to all channels that don't
-		// have a filter yet.
-		if err := fc.Channels.Validate(fc.Filter); err != nil {
-			fmt.Fprintf(&errBuf, "file group %q: %v\n", fc.prefix, err)
-			continue
-		}
-
-		fileNames = append(fileNames, fname)
-	}
-	sort.Strings(fileNames)
-	for _, fname := range fileNames {
-		fc := c.Sinks.FileGroups[fname]
-		for _, ch := range fc.Channels.AllChannels.Channels {
-			// Remember which file sink captures which channel.
-			fileSinks[ch] = append(fileSinks[ch], fc)
+		fc.Channels.Sort()
+		for _, ch := range fc.Channels.Channels {
+			if prev := fileSinks[ch]; prev != nil {
+				prevPrefix := prev.prefix
+				if prevPrefix == "" {
+					prevPrefix = "debug"
+				}
+				fmt.Fprintf(&errBuf, "file group %q: channel %s already captured by group %q\n",
+					fc.prefix, ch, prevPrefix)
+			} else {
+				fileSinks[ch] = fc
+			}
 		}
 	}
 
-	// Check that every sink has at least one channel.
+	// Check that no channel is listed by more than one fluent sink, and
+	// every sink has at least one channel.
 	for serverName, fc := range c.Sinks.FluentServers {
-		if len(fc.Channels.Filters) == 0 {
+		if len(fc.Channels.Channels) == 0 {
 			fmt.Fprintf(&errBuf, "fluent server %q: no channel selected\n", serverName)
-			continue
 		}
-		// Propagate the sink-wide default filter to all channels that don't
-		// have a filter yet.
-		if err := fc.Channels.Validate(fc.Filter); err != nil {
-			fmt.Fprintf(&errBuf, "fluent server %q: %v\n", serverName, err)
-			continue
+		fc.Channels.Sort()
+		for _, ch := range fc.Channels.Channels {
+			if prev := fluentSinks[ch]; prev != nil {
+				fmt.Fprintf(&errBuf, "fluent server %q: channel %s already captured by server %q\n",
+					serverName, ch, prev.serverName)
+			} else {
+				fluentSinks[ch] = fc
+			}
 		}
 	}
 
 	for sinkName, fc := range c.Sinks.HTTPServers {
-		if len(fc.Channels.Filters) == 0 {
+		if len(fc.Channels.Channels) == 0 {
 			fmt.Fprintf(&errBuf, "http server %q: no channel selected\n", sinkName)
 		}
-		// Propagate the sink-wide default filter to all channels that don't
-		// have a filter yet.
-		if err := fc.Channels.Validate(fc.Filter); err != nil {
-			fmt.Fprintf(&errBuf, "http server %q: %v\n", sinkName, err)
-			continue
+		fc.Channels.Sort()
+		for _, ch := range fc.Channels.Channels {
+			if prev := httpSinks[ch]; prev != nil {
+				fmt.Fprintf(&errBuf, "http server %q: channel %s already captured by server %q\n",
+					sinkName, ch, prev.sinkName)
+			} else {
+				httpSinks[ch] = fc
+			}
 		}
 	}
 
@@ -222,93 +220,49 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 	}
 
 	// If there is no file group for DEV yet, create one.
-	// We'll target the "default" group.
-	// If the "default" group already exists, we'll use that. Otherwise, we create it.
 	devch := logpb.Channel_DEV
-	if def := fileSinks[devch]; len(def) == 0 {
-		// If there is a default group already, use it.
-		var fc *FileSinkConfig
-		if def, ok := c.Sinks.FileGroups["default"]; ok {
-			fc = def
-		} else {
-			// "default" did not exist yet. Create it.
-			fc = c.newFileSinkConfig("default")
-			if err := c.validateFileSinkConfig(fc, defaultLogDir); err != nil {
-				fmt.Fprintln(&errBuf, err)
-			}
+	if def := fileSinks[devch]; def == nil {
+		fc := &FileSinkConfig{
+			Channels: ChannelList{Channels: []logpb.Channel{devch}},
 		}
-		// Add the DEV channel to the sink.
-		// The call to Update() below fills in the default severity.
-		fc.Channels.AddChannel(devch, logpb.Severity_UNKNOWN)
-		if err := fc.Channels.Validate(fc.Filter); err != nil {
-			// Should never happen.
-			return errors.NewAssertionErrorWithWrappedErrf(err, "programming error: invalid extension of DEV sink")
+		fc.prefix = "default"
+		propagateFileDefaults(&fc.FileDefaults, c.FileDefaults)
+		if err := c.validateFileSinkConfig(fc, defaultLogDir); err != nil {
+			fmt.Fprintln(&errBuf, err)
 		}
-		// Remember this new sink as a sink that captures DEV.
-		fileSinks[devch] = append(fileSinks[devch], fc)
+		if c.Sinks.FileGroups == nil {
+			c.Sinks.FileGroups = make(map[string]*FileSinkConfig)
+		}
+		c.Sinks.FileGroups[fc.prefix] = fc
+		fileSinks[devch] = fc
 	}
 
-	// For every remaining channel without a sink, add it to the first DEV
-	// sink at its default filter.
-	//
-	// The "first" DEV sink is the "default" sink if that exists and
-	// captures DEV; otherwise the first file sink that's a DEV sink in
-	// lexicographic order.
-	var devFile *FileSinkConfig
-	if fc, ok := c.Sinks.FileGroups["default"]; ok && fc.Channels.AllChannels.HasChannel(devch) {
-		// There's a "default" sink and it captures DEV. Use that.
-		devFile = fc
-	} else {
-		// Use the first DEV sink. We know there is one because we've created at least one above.
-		devFile = fileSinks[devch][0]
-	}
+	// For every remaining channel without a sink, add it to the DEV sink.
+	devFile := fileSinks[devch]
 	for _, ch := range channelValues {
 		if fileSinks[ch] == nil {
-			devFile.Channels.AddChannel(ch, logpb.Severity_UNKNOWN)
+			devFile.Channels.Channels = append(devFile.Channels.Channels, ch)
 		}
 	}
-	if err := devFile.Channels.Validate(devFile.Filter); err != nil {
-		// Should never happen.
-		return errors.NewAssertionErrorWithWrappedErrf(err, "programming error: invalid extension of DEV sink")
-	}
+	devFile.Channels.Sort()
 
-	// Elide all the file sinks without a directory or where all
-	// channels have severity set to NONE.
+	// Elide all the file sinks without a directory or with severity set
+	// to NONE.
 	for prefix, fc := range c.Sinks.FileGroups {
-		if fc.Dir == nil || fc.Channels.noChannelsSelected() {
+		if fc.Dir == nil || fc.Filter == logpb.Severity_NONE {
 			delete(c.Sinks.FileGroups, prefix)
 		}
 	}
 
-	// Elide all the fluent sinks where all channels have
-	// severity set to NONE.
+	// Elide all the file sinks without a directory or with severity set
+	// to NONE.
 	for serverName, fc := range c.Sinks.FluentServers {
-		if fc.Channels.noChannelsSelected() {
+		if fc.Filter == logpb.Severity_NONE {
 			delete(c.Sinks.FluentServers, serverName)
 		}
 	}
 
-	// Elide all the HTTP sinks where all channels have
-	// severity set to NONE.
-	for serverName, fc := range c.Sinks.HTTPServers {
-		if fc.Channels.noChannelsSelected() {
-			delete(c.Sinks.HTTPServers, serverName)
-		}
-	}
-
 	return nil
-}
-
-func (c *Config) newFileSinkConfig(groupName string) *FileSinkConfig {
-	fc := &FileSinkConfig{
-		Channels: SelectChannels(),
-		prefix:   groupName,
-	}
-	if c.Sinks.FileGroups == nil {
-		c.Sinks.FileGroups = make(map[string]*FileSinkConfig)
-	}
-	c.Sinks.FileGroups[groupName] = fc
-	return fc
 }
 
 func (c *Config) validateFileSinkConfig(fc *FileSinkConfig, defaultLogDir *string) error {

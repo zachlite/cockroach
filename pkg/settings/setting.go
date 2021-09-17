@@ -11,7 +11,6 @@
 package settings
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -21,7 +20,7 @@ import (
 
 // MaxSettings is the maximum number of settings that the system supports.
 // Exported for tests.
-const MaxSettings = 512
+const MaxSettings = 256
 
 // Values is a container that stores values for all registered settings.
 // Each setting is assigned a unique slot (up to MaxSettings).
@@ -43,7 +42,7 @@ type Values struct {
 		syncutil.Mutex
 		// NB: any in place modification to individual slices must also hold the
 		// lock, e.g. if we ever add RemoveOnChange or something.
-		onChange [MaxSettings][]func(ctx context.Context)
+		onChange [MaxSettings][]func()
 	}
 	// opaque is an arbitrary object that can be set by a higher layer to make it
 	// accessible from certain callbacks (like state machine transformers).
@@ -93,10 +92,10 @@ var TestOpaque interface{} = testOpaqueType{}
 // variables to their defaults.
 //
 // The opaque argument can be retrieved later via Opaque().
-func (sv *Values) Init(ctx context.Context, opaque interface{}) {
+func (sv *Values) Init(opaque interface{}) {
 	sv.opaque = opaque
 	for _, s := range registry {
-		s.setToDefault(ctx, sv)
+		s.setToDefault(sv)
 	}
 }
 
@@ -105,12 +104,12 @@ func (sv *Values) Opaque() interface{} {
 	return sv.opaque
 }
 
-func (sv *Values) settingChanged(ctx context.Context, slotIdx int) {
+func (sv *Values) settingChanged(slotIdx int) {
 	sv.changeMu.Lock()
 	funcs := sv.changeMu.onChange[slotIdx-1]
 	sv.changeMu.Unlock()
 	for _, fn := range funcs {
-		fn(ctx)
+		fn()
 	}
 }
 
@@ -122,9 +121,9 @@ func (c *valuesContainer) getGeneric(slotIdx int) interface{} {
 	return c.genericVals[slotIdx-1].Load()
 }
 
-func (sv *Values) setInt64(ctx context.Context, slotIdx int, newVal int64) {
+func (sv *Values) setInt64(slotIdx int, newVal int64) {
 	if sv.container.setInt64Val(slotIdx-1, newVal) {
-		sv.settingChanged(ctx, slotIdx)
+		sv.settingChanged(slotIdx)
 	}
 }
 
@@ -162,9 +161,9 @@ func (sv *Values) getDefaultOverride(slotIdx int) (bool, int64, *atomic.Value) {
 		&sv.overridesMu.defaultOverrides.genericVals[slotIdx]
 }
 
-func (sv *Values) setGeneric(ctx context.Context, slotIdx int, newVal interface{}) {
+func (sv *Values) setGeneric(slotIdx int, newVal interface{}) {
 	sv.container.setGenericVal(slotIdx-1, newVal)
-	sv.settingChanged(ctx, slotIdx)
+	sv.settingChanged(slotIdx)
 }
 
 func (sv *Values) getInt64(slotIdx int) int64 {
@@ -178,7 +177,7 @@ func (sv *Values) getGeneric(slotIdx int) interface{} {
 // setOnChange installs a callback to be called when a setting's value changes.
 // `fn` should avoid doing long-running or blocking work as it is called on the
 // goroutine which handles all settings updates.
-func (sv *Values) setOnChange(slotIdx int, fn func(ctx context.Context)) {
+func (sv *Values) setOnChange(slotIdx int, fn func()) {
 	sv.changeMu.Lock()
 	sv.changeMu.onChange[slotIdx-1] = append(sv.changeMu.onChange[slotIdx-1], fn)
 	sv.changeMu.Unlock()
@@ -191,38 +190,19 @@ func (sv *Values) setOnChange(slotIdx int, fn func(ctx context.Context)) {
 type Setting interface {
 	// Typ returns the short (1 char) string denoting the type of setting.
 	Typ() string
-	// String returns the string representation of the setting's current value.
-	// It's used when materializing results for `SHOW CLUSTER SETTINGS` or `SHOW
-	// CLUSTER SETTING <setting-name>`.
 	String(sv *Values) string
-	// Description contains a helpful text explaining what the specific cluster
-	// setting is for.
 	Description() string
-	// Visibility controls whether or not the setting is made publicly visible.
-	// Reserved settings are still accessible to users, but they don't get
-	// listed out when retrieving all settings.
 	Visibility() Visibility
-
-	// SystemOnly indicates if a setting is only applicable to the system tenant.
-	SystemOnly() bool
 }
 
 // WritableSetting is the exported interface of non-masked settings.
 type WritableSetting interface {
 	Setting
 
-	// Encoded returns the encoded representation of the current value of the
-	// setting.
+	// Encoded returns the encoded value of the current value of the setting.
 	Encoded(sv *Values) string
-	// EncodedDefault returns the encoded representation of the default value of
-	// the setting.
 	EncodedDefault() string
-	// SetOnChange installs a callback to be called when a setting's value
-	// changes. `fn` should avoid doing long-running or blocking work as it is
-	// called on the goroutine which handles all settings updates.
-	SetOnChange(sv *Values, fn func(ctx context.Context))
-	// ErrorHint returns a hint message to be displayed to the user when there's
-	// an error.
+	SetOnChange(sv *Values, fn func())
 	ErrorHint() (bool, string)
 }
 
@@ -230,7 +210,7 @@ type extendedSetting interface {
 	WritableSetting
 
 	isRetired() bool
-	setToDefault(ctx context.Context, sv *Values)
+	setToDefault(sv *Values)
 	setDescription(desc string)
 	setSlotIdx(slotIdx int)
 	getSlotIdx() int
@@ -267,7 +247,6 @@ const (
 type common struct {
 	description string
 	visibility  Visibility
-	systemOnly  bool
 	// Each setting has a slotIdx which is used as a handle with Values.
 	slotIdx       int
 	nonReportable bool
@@ -283,7 +262,7 @@ func (i *common) setSlotIdx(slotIdx int) {
 		panic(fmt.Sprintf("Invalid slot index %d", slotIdx))
 	}
 	if slotIdx > MaxSettings {
-		panic("too many settings; increase MaxSettings")
+		panic(fmt.Sprintf("too many settings; increase MaxSettings"))
 	}
 	i.slotIdx = slotIdx
 }
@@ -301,10 +280,6 @@ func (i common) Description() string {
 
 func (i common) Visibility() Visibility {
 	return i.visibility
-}
-
-func (i common) SystemOnly() bool {
-	return i.systemOnly
 }
 
 func (i common) isReportable() bool {
@@ -344,14 +319,14 @@ func (i *common) SetRetired() {
 // SetOnChange installs a callback to be called when a setting's value changes.
 // `fn` should avoid doing long-running or blocking work as it is called on the
 // goroutine which handles all settings updates.
-func (i *common) SetOnChange(sv *Values, fn func(ctx context.Context)) {
+func (i *common) SetOnChange(sv *Values, fn func()) {
 	sv.setOnChange(i.slotIdx, fn)
 }
 
 type numericSetting interface {
 	Setting
 	Validate(i int64) error
-	set(ctx context.Context, sv *Values, i int64) error
+	set(sv *Values, i int64) error
 }
 
 // TestingIsReportable is used in testing for reportability.

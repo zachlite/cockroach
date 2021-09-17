@@ -54,7 +54,7 @@ func NewMetadataTestSender(
 		nil, /* memMonitor */
 		ProcStateOpts{
 			InputsToDrain: []RowSource{mts.input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				mts.InternalClose()
 				// Send a final record with LastMsg set.
 				meta := execinfrapb.ProducerMetadata{
@@ -74,9 +74,9 @@ func NewMetadataTestSender(
 }
 
 // Start is part of the RowSource interface.
-func (mts *MetadataTestSender) Start(ctx context.Context) {
-	ctx = mts.StartInternal(ctx, metadataTestSenderProcName)
+func (mts *MetadataTestSender) Start(ctx context.Context) context.Context {
 	mts.input.Start(ctx)
+	return mts.StartInternal(ctx, metadataTestSenderProcName)
 }
 
 // Next is part of the RowSource interface.
@@ -113,4 +113,10 @@ func (mts *MetadataTestSender) Next() (rowenc.EncDatumRow, *execinfrapb.Producer
 		}
 	}
 	return nil, mts.DrainHelper()
+}
+
+// ConsumerClosed is part of the RowSource interface.
+func (mts *MetadataTestSender) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	mts.InternalClose()
 }

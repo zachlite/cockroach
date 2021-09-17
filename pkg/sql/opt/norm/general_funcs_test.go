@@ -29,11 +29,6 @@ func TestCommuteJoinFlags(t *testing.T) {
 		},
 
 		{
-			memo.DisallowInvertedJoinIntoLeft,
-			memo.DisallowInvertedJoinIntoRight,
-		},
-
-		{
 			memo.PreferLookupJoinIntoLeft,
 			memo.PreferLookupJoinIntoRight,
 		},
@@ -44,22 +39,18 @@ func TestCommuteJoinFlags(t *testing.T) {
 		},
 
 		{
-			memo.DisallowHashJoinStoreLeft | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft | memo.DisallowLookupJoinIntoRight |
-				memo.DisallowInvertedJoinIntoLeft | memo.DisallowInvertedJoinIntoRight,
-			memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft | memo.DisallowLookupJoinIntoRight |
-				memo.DisallowInvertedJoinIntoLeft | memo.DisallowInvertedJoinIntoRight,
+			memo.DisallowHashJoinStoreLeft | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft | memo.DisallowLookupJoinIntoRight,
+			memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft | memo.DisallowLookupJoinIntoRight,
 		},
 
 		{
-			memo.DisallowHashJoinStoreLeft | memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft |
-				memo.DisallowInvertedJoinIntoLeft | memo.DisallowInvertedJoinIntoRight,
-			memo.DisallowHashJoinStoreLeft | memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoRight |
-				memo.DisallowInvertedJoinIntoLeft | memo.DisallowInvertedJoinIntoRight,
+			memo.DisallowHashJoinStoreLeft | memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoLeft,
+			memo.DisallowHashJoinStoreLeft | memo.DisallowHashJoinStoreRight | memo.DisallowMergeJoin | memo.DisallowLookupJoinIntoRight,
 		},
 
 		{
-			memo.DisallowMergeJoin | memo.DisallowHashJoinStoreLeft | memo.DisallowLookupJoinIntoRight | memo.DisallowInvertedJoinIntoRight,
-			memo.DisallowMergeJoin | memo.DisallowHashJoinStoreRight | memo.DisallowLookupJoinIntoLeft | memo.DisallowInvertedJoinIntoLeft,
+			memo.DisallowMergeJoin | memo.DisallowHashJoinStoreLeft | memo.DisallowLookupJoinIntoRight,
+			memo.DisallowMergeJoin | memo.DisallowHashJoinStoreRight | memo.DisallowLookupJoinIntoLeft,
 		},
 	}
 

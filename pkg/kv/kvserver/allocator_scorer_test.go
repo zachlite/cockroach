@@ -315,9 +315,9 @@ func TestBetterThan(t *testing.T) {
 }
 
 // TestBestRebalanceTarget constructs a hypothetical output of
-// rankedCandidateListForRebalancing and verifies that bestRebalanceTarget
-// properly returns the candidates in the ideal order of preference and omits
-// any that aren't desirable.
+// rebalanceCandidates and verifies that bestRebalanceTarget properly returns
+// the candidates in the ideal order of preference and omits any that aren't
+// desirable.
 func TestBestRebalanceTarget(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -418,8 +418,7 @@ func TestStoreHasReplica(t *testing.T) {
 		existing = append(existing, roachpb.ReplicaDescriptor{StoreID: roachpb.StoreID(i)})
 	}
 	for i := 1; i < 10; i++ {
-		if e, a := i%2 == 0,
-			storeHasReplica(roachpb.StoreID(i), roachpb.MakeReplicaSet(existing).ReplicationTargets()); e != a {
+		if e, a := i%2 == 0, storeHasReplica(roachpb.StoreID(i), existing); e != a {
 			t.Errorf("StoreID %d expected to be %t, got %t", i, e, a)
 		}
 	}
@@ -919,8 +918,7 @@ func TestAllocateConstraintsCheck(t *testing.T) {
 				NumReplicas: proto.Int32(tc.zoneNumReplicas),
 			}
 			analyzed := constraint.AnalyzeConstraints(
-				context.Background(), getTestStoreDesc, testStoreReplicas(tc.existing),
-				*zone.NumReplicas, zone.Constraints)
+				context.Background(), getTestStoreDesc, testStoreReplicas(tc.existing), zone)
 			for _, s := range testStores {
 				valid, necessary := allocateConstraintsCheck(s, analyzed)
 				if e, a := tc.expectedValid[s.StoreID], valid; e != a {
@@ -1054,7 +1052,7 @@ func TestRemoveConstraintsCheck(t *testing.T) {
 				NumReplicas: proto.Int32(tc.zoneNumReplicas),
 			}
 			analyzed := constraint.AnalyzeConstraints(
-				context.Background(), getTestStoreDesc, existing, *zone.NumReplicas, zone.Constraints)
+				context.Background(), getTestStoreDesc, existing, zone)
 			for storeID, expected := range tc.expected {
 				valid, necessary := removeConstraintsCheck(testStores[storeID], analyzed)
 				if e, a := expected.valid, valid; e != a {
@@ -1209,35 +1207,17 @@ func TestShouldRebalanceDiversity(t *testing.T) {
 			}
 		}
 
-		removalConstraintsChecker := voterConstraintsCheckerForRemoval(
-			constraint.EmptyAnalyzedConstraints,
-			constraint.EmptyAnalyzedConstraints,
-		)
-		rebalanceConstraintsChecker := voterConstraintsCheckerForRebalance(
-			constraint.EmptyAnalyzedConstraints,
-			constraint.EmptyAnalyzedConstraints,
-		)
-		targets := rankedCandidateListForRebalancing(
+		targets := rebalanceCandidates(
 			context.Background(),
 			filteredSL,
-			removalConstraintsChecker,
-			rebalanceConstraintsChecker,
+			constraint.AnalyzedConstraints{},
 			replicas,
-			nil,
 			existingStoreLocalities,
-			func(context.Context, roachpb.StoreID) bool { return true },
-			options,
-		)
+			options)
 		actual := len(targets) > 0
 		if actual != tc.expected {
-			t.Errorf(
-				"%d: shouldRebalanceBasedOnRangeCount on s%d with replicas on %v got %t, expected %t",
-				i,
-				tc.s.StoreID,
-				tc.existingNodeIDs,
-				actual,
-				tc.expected,
-			)
+			t.Errorf("%d: shouldRebalance on s%d with replicas on %v got %t, expected %t",
+				i, tc.s.StoreID, tc.existingNodeIDs, actual, tc.expected)
 		}
 	}
 }

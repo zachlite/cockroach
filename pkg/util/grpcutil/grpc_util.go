@@ -16,7 +16,6 @@ import (
 	"io"
 	"strings"
 
-	circuit "github.com/cockroachdb/circuitbreaker"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/grpc"
@@ -91,31 +90,11 @@ func IsClosedConnection(err error) bool {
 	return netutil.IsClosedConnection(err)
 }
 
-// IsConnectionRejected returns true if err's cause is an error produced by
-// gRPC due to remote node being unavailable and retrying immediately would
-// not fix the problem. It happens when either remote node is decommissioned
-// or caller is not authorized to talk to the node.
-// This check is helpful if caller doesn't want to distinguish between
-// authentication and decommissioning errors in specific ways and just want
-// to abort operations.
-func IsConnectionRejected(err error) bool {
+// IsAuthenticationError returns true if err's Cause is an error produced by
+// gRPC due to invalid authentication credentials for the operation.
+func IsAuthenticationError(err error) bool {
 	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
-		switch s.Code() {
-		case codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition:
-			return true
-		}
-	}
-	return false
-}
-
-// IsAuthError returns true if err's Cause is an error produced by
-// gRPC due to an authentication or authorization error for the operation.
-func IsAuthError(err error) bool {
-	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
-		switch s.Code() {
-		case codes.Unauthenticated, codes.PermissionDenied:
-			return true
-		}
+		return s.Code() == codes.Unauthenticated
 	}
 	return false
 }
@@ -132,9 +111,7 @@ func IsAuthError(err error) bool {
 // https://github.com/grpc/grpc-go/issues/1443 is resolved.
 func RequestDidNotStart(err error) bool {
 	if errors.HasType(err, connectionNotReadyError{}) ||
-		errors.HasType(err, (*netutil.InitialHeartbeatFailedError)(nil)) ||
-		errors.Is(err, circuit.ErrBreakerOpen) ||
-		IsConnectionRejected(err) {
+		errors.HasType(err, (*netutil.InitialHeartbeatFailedError)(nil)) {
 		return true
 	}
 	s, ok := status.FromError(errors.Cause(err))

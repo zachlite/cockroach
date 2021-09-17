@@ -149,7 +149,7 @@ func (s *SystemConfig) getSystemTenantDesc(key roachpb.Key) *roachpb.Value {
 		// configs through proper channels.
 		//
 		// Getting here outside tests is impossible.
-		desc := tabledesc.NewBuilder(&descpb.TableDescriptor{}).BuildImmutable().DescriptorProto()
+		desc := tabledesc.NewImmutable(descpb.TableDescriptor{}).DescriptorProto()
 		var val roachpb.Value
 		if err := val.SetProto(desc); err != nil {
 			panic(err)
@@ -537,7 +537,7 @@ func (s *SystemConfig) systemTenantTableBoundarySplitKey(
 				return nil
 			}
 
-			zoneVal := s.GetValue(MakeZoneKey(keys.SystemSQLCodec, descpb.ID(id)))
+			zoneVal := s.GetValue(MakeZoneKey(id))
 			if zoneVal == nil {
 				continue
 			}

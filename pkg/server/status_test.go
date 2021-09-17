@@ -39,15 +39,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
-	"github.com/cockroachdb/cockroach/pkg/server/diagnostics/diagnosticspb"
+	"github.com/cockroachdb/cockroach/pkg/server/diagnosticspb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -58,13 +56,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -402,7 +399,7 @@ func TestStatusGetFiles(t *testing.T) {
 	ts := tsI.(*TestServer)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
+	rootConfig := testutils.NewTestBaseContext(security.RootUser)
 	rpcContext := newRPCTestContext(ts, rootConfig)
 
 	url := ts.ServingRPCAddr()
@@ -563,7 +560,7 @@ func TestStatusLocalLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, entry := range wrapper.Entries {
-			switch strings.TrimSpace(entry.Message) {
+			switch entry.Message {
 			case "TestStatusLocalLogFile test message-Error":
 				foundError = true
 			case "TestStatusLocalLogFile test message-Warning":
@@ -642,7 +639,7 @@ func TestStatusLocalLogs(t *testing.T) {
 			for _, entry := range wrapper.Entries {
 				fmt.Fprintln(&logsBuf, entry.Message)
 
-				switch strings.TrimSpace(entry.Message) {
+				switch entry.Message {
 				case "TestStatusLocalLogFile test message-Error":
 					actual.Error = true
 				case "TestStatusLocalLogFile test message-Warning":
@@ -667,24 +664,39 @@ func TestStatusLogRedaction(t *testing.T) {
 	testData := []struct {
 		redactableLogs     bool // logging flag
 		redact             bool // RPC request flag
+		keepRedactable     bool // RPC request flag
 		expectedMessage    string
 		expectedRedactable bool // redactable bit in result entries
 	}{
-		// Note: all combinations of (redactableLogs, redact) must be tested below.
+		// Note: all 2^3 combinations of (redactableLogs, redact,
+		// keepRedactable) must be tested below.
 
-		// If there were no markers to start with (redactableLogs=false), we
-		// introduce markers around the entire message to indicate it's not known to
-		// be safe.
-		{false, false, `‹THISISSAFE THISISUNSAFE›`, true},
+		// redact=false, keepredactable=false results in an unsafe "flat"
+		// format regardless of whether there were markers in the log
+		// file.
+		{false, false, false, `THISISSAFE THISISUNSAFE`, false},
+		// keepredactable=true, if there were no markers to start with
+		// (redactableLogs=false), introduces markers around the entire
+		// message to indicate it's not known to be safe.
+		{false, false, true, `‹THISISSAFE THISISUNSAFE›`, true},
 		// redact=true must be conservative and redact everything out if
 		// there were no markers to start with (redactableLogs=false).
-		{false, true, `‹×›`, false},
-		// redact=false keeps whatever was in the log file.
-		{true, false, `THISISSAFE ‹THISISUNSAFE›`, true},
+		{false, true, false, `‹×›`, false},
+		{false, true, true, `‹×›`, false},
+		// redact=false, keepredactable=false results in an unsafe "flat"
+		// format regardless of whether there were markers in the log
+		// file.
+		{true, false, false, `THISISSAFE THISISUNSAFE`, false},
+		// keepredactable=true, redact=false, keeps whatever was in the
+		// log file.
+		{true, false, true, `THISISSAFE ‹THISISUNSAFE›`, true},
+		// if there were markers in the log to start with, redact=true
+		// removes only the unsafe information.
+		{true, true, false, `THISISSAFE ‹×›`, false},
 		// Whether or not to keep the redactable markers has no influence
 		// on the output of redaction, just on the presence of the
 		// "redactable" marker. In any case no information is leaked.
-		{true, true, `THISISSAFE ‹×›`, true},
+		{true, true, true, `THISISSAFE ‹×›`, true},
 	}
 
 	testutils.RunTrueAndFalse(t, "redactableLogs",
@@ -720,11 +732,11 @@ func TestStatusLogRedaction(t *testing.T) {
 				if tc.redactableLogs != redactableLogs {
 					continue
 				}
-				t.Run(fmt.Sprintf("redact=%v", tc.redact),
+				t.Run(fmt.Sprintf("redact=%v,keepredactable=%v", tc.redact, tc.keepRedactable),
 					func(t *testing.T) {
 						// checkEntries asserts that the redaction results are
 						// those expected in tc.
-						checkEntries := func(entries []logpb.Entry) {
+						checkEntries := func(entries []log.Entry) {
 							foundMessage := false
 							for _, entry := range entries {
 								if !strings.HasSuffix(entry.File, "status_test.go") {
@@ -741,7 +753,8 @@ func TestStatusLogRedaction(t *testing.T) {
 
 						// Retrieve the log entries with the configured flags using
 						// the LogFiles() RPC.
-						logFilesURL := fmt.Sprintf("logfiles/local/%s?redact=%v", file.Name, tc.redact)
+						logFilesURL := fmt.Sprintf("logfiles/local/%s?redact=%v&keep_redactable=%v",
+							file.Name, tc.redact, tc.keepRedactable)
 						var wrapper serverpb.LogEntriesResponse
 						if err := getStatusJSONProto(ts, logFilesURL, &wrapper); err != nil {
 							t.Fatal(err)
@@ -758,7 +771,8 @@ func TestStatusLogRedaction(t *testing.T) {
 						}
 
 						// Retrieve the log entries using the Logs() RPC.
-						logsURL := fmt.Sprintf("logs/local?redact=%v", tc.redact)
+						logsURL := fmt.Sprintf("logs/local?redact=%v&keep_redactable=%v",
+							tc.redact, tc.keepRedactable)
 						var wrapper2 serverpb.LogEntriesResponse
 						if err := getStatusJSONProto(ts, logsURL, &wrapper2); err != nil {
 							t.Fatal(err)
@@ -802,7 +816,7 @@ func TestNodeStatusResponse(t *testing.T) {
 	if len(nodeStatuses) != 1 {
 		t.Errorf("too many node statuses returned - expected:1 actual:%d", len(nodeStatuses))
 	}
-	if !s.node.Descriptor.Equal(&nodeStatuses[0].Desc) {
+	if !proto.Equal(&s.node.Descriptor, &nodeStatuses[0].Desc) {
 		t.Errorf("node status descriptors are not equal\nexpected:%+v\nactual:%+v\n", s.node.Descriptor, nodeStatuses[0].Desc)
 	}
 
@@ -820,7 +834,7 @@ func TestNodeStatusResponse(t *testing.T) {
 		if err := getStatusJSONProto(s, nodeURL, &nodeStatus); err != nil {
 			t.Fatal(err)
 		}
-		if !s.node.Descriptor.Equal(&nodeStatus.Desc) {
+		if !proto.Equal(&s.node.Descriptor, &nodeStatus.Desc) {
 			t.Errorf("node status descriptors are not equal\nexpected:%+v\nactual:%+v\n", s.node.Descriptor, nodeStatus.Desc)
 		}
 	}
@@ -1286,7 +1300,7 @@ func TestNodesGRPCResponse(t *testing.T) {
 	ts := startServer(t)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
+	rootConfig := testutils.NewTestBaseContext(security.RootUser)
 	rpcContext := newRPCTestContext(ts, rootConfig)
 	var request serverpb.NodesRequest
 
@@ -1436,6 +1450,157 @@ func TestRangeResponse(t *testing.T) {
 	}
 }
 
+func TestRemoteDebugModeSetting(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
+		StoreSpecs: []base.StoreSpec{
+			base.DefaultTestStoreSpec,
+			base.DefaultTestStoreSpec,
+			base.DefaultTestStoreSpec,
+		},
+	})
+	ts := s.(*TestServer)
+	defer ts.Stopper().Stop(context.Background())
+
+	if _, err := db.Exec(`SET CLUSTER SETTING server.remote_debugging.mode = 'off'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a split so that there's some records in the system.rangelog table.
+	// The test needs them.
+	if _, err := db.Exec(
+		`create table t(x int primary key);
+		alter table t split at values(1);`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify that the remote debugging mode is respected for HTTP requests.
+	// This needs to be wrapped in SucceedsSoon because settings changes have to
+	// propagate through gossip and thus don't always take effect immediately.
+	testutils.SucceedsSoon(t, func() error {
+		for _, tc := range []struct {
+			path     string
+			response protoutil.Message
+		}{
+			{"gossip/local", &gossip.InfoStatus{}},
+			{"allocator/node/local", &serverpb.AllocatorResponse{}},
+			{"allocator/range/1", &serverpb.AllocatorResponse{}},
+			{"logs/local", &serverpb.LogEntriesResponse{}},
+			{"logfiles/local/cockroach.log", &serverpb.LogEntriesResponse{}},
+		} {
+			err := getStatusJSONProto(ts, tc.path, tc.response)
+			if !testutils.IsError(err, "403 Forbidden") {
+				return fmt.Errorf("expected '403 Forbidden' error, but %q returned %+v: %v",
+					tc.path, tc.response, err)
+			}
+		}
+		return nil
+	})
+
+	// But not for grpc requests. The fact that the above gets an error but these
+	// don't indicate that the grpc gateway is correctly adding the necessary
+	// metadata for differentiating between the two (and that we're correctly
+	// interpreting said metadata).
+	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rpcContext := newRPCTestContext(ts, rootConfig)
+	url := ts.ServingRPCAddr()
+	nodeID := ts.NodeID()
+	conn, err := rpcContext.GRPCDialNode(url, nodeID, rpc.DefaultClass).Connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := serverpb.NewStatusClient(conn)
+	if _, err := client.Gossip(ctx, &serverpb.GossipRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.Allocator(ctx, &serverpb.AllocatorRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.Allocator(ctx, &serverpb.AllocatorRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.AllocatorRange(ctx, &serverpb.AllocatorRangeRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.Logs(ctx, &serverpb.LogsRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.ListLocalSessions(ctx, &serverpb.ListSessionsRequest{}); err != nil {
+		t.Error(err)
+	}
+	if _, err := client.ListSessions(ctx, &serverpb.ListSessionsRequest{}); err != nil {
+		t.Error(err)
+	}
+
+	// Check that keys are properly omitted from the Ranges, HotRanges, and
+	// RangeLog endpoints.
+	var rangesResp serverpb.RangesResponse
+	if err := getStatusJSONProto(ts, "ranges/local", &rangesResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(rangesResp.Ranges) == 0 {
+		t.Errorf("didn't get any ranges")
+	}
+	for _, ri := range rangesResp.Ranges {
+		if ri.Span.StartKey != omittedKeyStr || ri.Span.EndKey != omittedKeyStr ||
+			ri.State.ReplicaState.Desc.StartKey != nil || ri.State.ReplicaState.Desc.EndKey != nil {
+			t.Errorf("unexpected key value found in RangeInfo: %+v", ri)
+		}
+	}
+
+	var hotRangesResp serverpb.HotRangesResponse
+	if err := getStatusJSONProto(ts, "hotranges", &hotRangesResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(hotRangesResp.HotRangesByNodeID) == 0 {
+		t.Errorf("didn't get hot range responses from any nodes")
+	}
+	for nodeID, nodeResp := range hotRangesResp.HotRangesByNodeID {
+		if len(nodeResp.Stores) == 0 {
+			t.Errorf("didn't get any stores in hot range response from n%d: %v",
+				nodeID, nodeResp.ErrorMessage)
+		}
+		for _, storeResp := range nodeResp.Stores {
+			// Only the first store will actually have any ranges on it.
+			if storeResp.StoreID != roachpb.StoreID(1) {
+				continue
+			}
+			if len(storeResp.HotRanges) == 0 {
+				t.Errorf("didn't get any hot ranges in response from n%d,s%d: %v",
+					nodeID, storeResp.StoreID, nodeResp.ErrorMessage)
+			}
+			for _, r := range storeResp.HotRanges {
+				if r.Desc.StartKey != nil || r.Desc.EndKey != nil {
+					t.Errorf("unexpected key value found in hot ranges range descriptor: %+v", r.Desc)
+				}
+			}
+		}
+	}
+
+	var rangelogResp serverpb.RangeLogResponse
+	if err := getAdminJSONProto(ts, "rangelog", &rangelogResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(rangelogResp.Events) == 0 {
+		t.Errorf("didn't get any Events")
+	}
+	for _, event := range rangelogResp.Events {
+		if event.Event.Info.NewDesc != nil {
+			if event.Event.Info.NewDesc.StartKey != nil || event.Event.Info.NewDesc.EndKey != nil ||
+				event.Event.Info.UpdatedDesc.StartKey != nil || event.Event.Info.UpdatedDesc.EndKey != nil {
+				t.Errorf("unexpected key value found in rangelog event: %+v", event)
+			}
+		}
+		if strings.Contains(event.PrettyInfo.NewDesc, "Min-System") ||
+			strings.Contains(event.PrettyInfo.UpdatedDesc, "Min-System") {
+			t.Errorf("unexpected key value found in rangelog event info: %+v", event.PrettyInfo)
+		}
+	}
+}
+
 func TestStatusAPITransactions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1517,10 +1682,10 @@ func TestStatusAPITransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Construct a map of all the statement fingerprint IDs.
-	statementFingerprintIDs := make(map[roachpb.StmtFingerprintID]bool, len(resp.Statements))
+	// Construct a map of all the statement IDs.
+	statementIDs := make(map[roachpb.StmtID]bool, len(resp.Statements))
 	for _, respStatement := range resp.Statements {
-		statementFingerprintIDs[respStatement.ID] = true
+		statementIDs[respStatement.ID] = true
 	}
 
 	respAppNames := make(map[string]bool)
@@ -1532,11 +1697,11 @@ func TestStatusAPITransactions(t *testing.T) {
 			continue
 		}
 		respAppNames[appName] = true
-		// Ensure all statementFingerprintIDs comprised by the Transaction Response can be
-		// linked to StatementFingerprintIDs for statements in the response.
-		for _, stmtFingerprintID := range respTransaction.StatsData.StatementFingerprintIDs {
-			if _, found := statementFingerprintIDs[stmtFingerprintID]; !found {
-				t.Fatalf("app: %s, expected stmtFingerprintID: %d not found in StatementResponse.", appName, stmtFingerprintID)
+		// Ensure all statementIDs comprised by the Transaction Response can be
+		// linked to StatementIDs for statements in the response.
+		for _, stmtID := range respTransaction.StatsData.StatementIDs {
+			if _, found := statementIDs[stmtID]; !found {
+				t.Fatalf("app: %s, expected stmtID: %d not found in StatementResponse.", appName, stmtID)
 			}
 		}
 		stats := respTransaction.StatsData.Stats
@@ -1571,7 +1736,7 @@ func TestStatusAPITransactions(t *testing.T) {
 	}
 }
 
-func TestStatusAPITransactionStatementFingerprintIDsTruncation(t *testing.T) {
+func TestStatusAPITransactionStatementIDsTruncation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -1585,16 +1750,15 @@ func TestStatusAPITransactionStatementFingerprintIDsTruncation(t *testing.T) {
 	thirdServerSQL.Exec(t, `CREATE DATABASE db; CREATE TABLE db.t();`)
 	thirdServerSQL.Exec(t, fmt.Sprintf(`SET application_name = "%s"`, testingApp))
 
-	maxStmtFingerprintIDsLen := int(sqlstats.TxnStatsNumStmtFingerprintIDsToRecord.Get(
+	maxStmtIDsLen := int(sql.TxnStatsNumStmtIDsToRecord.Get(
 		&firstServerProto.ExecutorConfig().(sql.ExecutorConfig).Settings.SV))
 
 	// Construct 2 transaction queries that include an absurd number of statements.
 	// These two queries have the same first 1000 statements, but should still have
-	// different fingerprints, as fingerprints take into account all
-	// statementFingerprintIDs (unlike the statementFingerprintIDs stored on the
-	// proto response, which are capped).
+	// different fingerprints, as fingerprints take into account all statementIDs
+	// (unlike the statementIDs stored on the proto response, which are capped).
 	testQuery1 := "BEGIN;"
-	for i := 0; i < maxStmtFingerprintIDsLen+1; i++ {
+	for i := 0; i < maxStmtIDsLen+1; i++ {
 		testQuery1 += "SELECT * FROM db.t;"
 	}
 	testQuery2 := testQuery1 + "SELECT * FROM db.t; COMMIT;"
@@ -1618,9 +1782,9 @@ func TestStatusAPITransactionStatementFingerprintIDsTruncation(t *testing.T) {
 		}
 
 		txnsFound++
-		if len(respTransaction.StatsData.StatementFingerprintIDs) != maxStmtFingerprintIDsLen {
-			t.Fatalf("unexpected length of StatementFingerprintIDs. expected:%d, got:%d",
-				maxStmtFingerprintIDsLen, len(respTransaction.StatsData.StatementFingerprintIDs))
+		if len(respTransaction.StatsData.StatementIDs) != maxStmtIDsLen {
+			t.Fatalf("unexpected length of StatementIDs. expected:%d, got:%d",
+				maxStmtIDsLen, len(respTransaction.StatsData.StatementIDs))
 		}
 	}
 	if txnsFound != 2 {
@@ -1648,7 +1812,7 @@ func TestStatusAPIStatements(t *testing.T) {
 		{stmt: `CREATE TABLE posts (id INT8 PRIMARY KEY, body STRING)`},
 		{
 			stmt:          `INSERT INTO posts VALUES (1, 'foo')`,
-			fingerprinted: `INSERT INTO posts VALUES (_, '_')`,
+			fingerprinted: `INSERT INTO posts VALUES (_, _)`,
 		},
 		{stmt: `SELECT * FROM posts`},
 	}
@@ -1665,7 +1829,7 @@ func TestStatusAPIStatements(t *testing.T) {
 	}
 
 	// Grant VIEWACTIVITY.
-	thirdServerSQL.Exec(t, "ALTER USER $1 VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized())
+	thirdServerSQL.Exec(t, "ALTER USER $1 VIEWACTIVITY", authenticatedUserNameNoAdmin)
 
 	// Hit query endpoint.
 	if err := getStatusJSONProtoWithAdminOption(firstServerProto, "statements", &resp, false); err != nil {
@@ -1721,10 +1885,10 @@ func TestListSessionsSecurity(t *testing.T) {
 
 	for _, requestWithAdmin := range []bool{true, false} {
 		t.Run(fmt.Sprintf("admin=%v", requestWithAdmin), func(t *testing.T) {
-			myUser := authenticatedUserNameNoAdmin()
+			myUser := authenticatedUserNameNoAdmin
 			expectedErrOnListingRootSessions := "does not have permission to view sessions from user"
 			if requestWithAdmin {
-				myUser = authenticatedUserName()
+				myUser = authenticatedUserName
 				expectedErrOnListingRootSessions = ""
 			}
 
@@ -1735,10 +1899,10 @@ func TestListSessionsSecurity(t *testing.T) {
 			}{
 				{"local_sessions", ""},
 				{"sessions", ""},
-				{fmt.Sprintf("local_sessions?username=%s", myUser.Normalized()), ""},
-				{fmt.Sprintf("sessions?username=%s", myUser.Normalized()), ""},
-				{"local_sessions?username=" + security.RootUser, expectedErrOnListingRootSessions},
-				{"sessions?username=" + security.RootUser, expectedErrOnListingRootSessions},
+				{fmt.Sprintf("local_sessions?username=%s", myUser), ""},
+				{fmt.Sprintf("sessions?username=%s", myUser), ""},
+				{"local_sessions?username=root", expectedErrOnListingRootSessions},
+				{"sessions?username=root", expectedErrOnListingRootSessions},
 			}
 			for _, tc := range testCases {
 				var response serverpb.ListSessionsResponse
@@ -1764,7 +1928,7 @@ func TestListSessionsSecurity(t *testing.T) {
 	}
 
 	// gRPC requests behave as root and thus are always allowed.
-	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
+	rootConfig := testutils.NewTestBaseContext(security.RootUser)
 	rpcContext := newRPCTestContext(ts, rootConfig)
 	url := ts.ServingRPCAddr()
 	nodeID := ts.NodeID()
@@ -1774,7 +1938,7 @@ func TestListSessionsSecurity(t *testing.T) {
 	}
 	client := serverpb.NewStatusClient(conn)
 
-	for _, user := range []string{"", authenticatedUser, security.RootUser} {
+	for _, user := range []string{"", authenticatedUserName, "root"} {
 		request := &serverpb.ListSessionsRequest{Username: user}
 		if resp, err := client.ListLocalSessions(ctx, request); err != nil || len(resp.Errors) > 0 {
 			t.Errorf("unexpected failure listing local sessions for %q; error: %v; response errors: %v",
@@ -1784,297 +1948,6 @@ func TestListSessionsSecurity(t *testing.T) {
 			t.Errorf("unexpected failure listing sessions for %q; error: %v; response errors: %v",
 				user, err, resp.Errors)
 		}
-	}
-}
-
-func TestListActivitySecurity(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	ts := s.(*TestServer)
-	defer ts.Stopper().Stop(ctx)
-
-	expectedErrNoPermission := "does not have permission to view the activity"
-	contentionMsg := &serverpb.ListContentionEventsResponse{}
-	flowsMsg := &serverpb.ListDistSQLFlowsResponse{}
-	getErrors := func(msg protoutil.Message) []serverpb.ListActivityError {
-		switch r := msg.(type) {
-		case *serverpb.ListContentionEventsResponse:
-			return r.Errors
-		case *serverpb.ListDistSQLFlowsResponse:
-			return r.Errors
-		default:
-			t.Fatal("unexpected message type")
-			return nil
-		}
-	}
-
-	// HTTP requests respect the authenticated username from the HTTP session.
-	testCases := []struct {
-		endpoint                       string
-		expectedErr                    string
-		requestWithAdmin               bool
-		requestWithViewActivityGranted bool
-		response                       protoutil.Message
-	}{
-		{"local_contention_events", expectedErrNoPermission, false, false, contentionMsg},
-		{"contention_events", expectedErrNoPermission, false, false, contentionMsg},
-		{"local_contention_events", "", true, false, contentionMsg},
-		{"contention_events", "", true, false, contentionMsg},
-		{"local_contention_events", "", false, true, contentionMsg},
-		{"contention_events", "", false, true, contentionMsg},
-		{"local_distsql_flows", expectedErrNoPermission, false, false, flowsMsg},
-		{"distsql_flows", expectedErrNoPermission, false, false, flowsMsg},
-		{"local_distsql_flows", "", true, false, flowsMsg},
-		{"distsql_flows", "", true, false, flowsMsg},
-		{"local_distsql_flows", "", false, true, flowsMsg},
-		{"distsql_flows", "", false, true, flowsMsg},
-	}
-	myUser := authenticatedUserNameNoAdmin().Normalized()
-	for _, tc := range testCases {
-		if tc.requestWithViewActivityGranted {
-			// Note that for this query to work, it is crucial that
-			// getStatusJSONProtoWithAdminOption below is called at least once,
-			// on the previous test case, so that the user exists.
-			_, err := db.Exec("ALTER USER $1 VIEWACTIVITY", myUser)
-			require.NoError(t, err)
-		}
-		err := getStatusJSONProtoWithAdminOption(s, tc.endpoint, tc.response, tc.requestWithAdmin)
-		responseErrors := getErrors(tc.response)
-		if tc.expectedErr == "" {
-			if err != nil || len(responseErrors) > 0 {
-				t.Errorf("unexpected failure listing the activity; error: %v; response errors: %v",
-					err, responseErrors)
-			}
-		} else {
-			respErr := "<no error>"
-			if len(responseErrors) > 0 {
-				respErr = responseErrors[0].Message
-			}
-			if !testutils.IsError(err, tc.expectedErr) &&
-				!strings.Contains(respErr, tc.expectedErr) {
-				t.Errorf("did not get expected error %q when listing the activity from %s: %v",
-					tc.expectedErr, tc.endpoint, err)
-			}
-		}
-		if tc.requestWithViewActivityGranted {
-			_, err := db.Exec("ALTER USER $1 NOVIEWACTIVITY", myUser)
-			require.NoError(t, err)
-		}
-	}
-
-	// gRPC requests behave as root and thus are always allowed.
-	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
-	rpcContext := newRPCTestContext(ts, rootConfig)
-	url := ts.ServingRPCAddr()
-	nodeID := ts.NodeID()
-	conn, err := rpcContext.GRPCDialNode(url, nodeID, rpc.DefaultClass).Connect(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := serverpb.NewStatusClient(conn)
-	{
-		request := &serverpb.ListContentionEventsRequest{}
-		if resp, err := client.ListLocalContentionEvents(ctx, request); err != nil || len(resp.Errors) > 0 {
-			t.Errorf("unexpected failure listing local contention events; error: %v; response errors: %v",
-				err, resp.Errors)
-		}
-		if resp, err := client.ListContentionEvents(ctx, request); err != nil || len(resp.Errors) > 0 {
-			t.Errorf("unexpected failure listing contention events; error: %v; response errors: %v",
-				err, resp.Errors)
-		}
-	}
-	{
-		request := &serverpb.ListDistSQLFlowsRequest{}
-		if resp, err := client.ListLocalDistSQLFlows(ctx, request); err != nil || len(resp.Errors) > 0 {
-			t.Errorf("unexpected failure listing local distsql flows; error: %v; response errors: %v",
-				err, resp.Errors)
-		}
-		if resp, err := client.ListDistSQLFlows(ctx, request); err != nil || len(resp.Errors) > 0 {
-			t.Errorf("unexpected failure listing distsql flows; error: %v; response errors: %v",
-				err, resp.Errors)
-		}
-	}
-}
-
-func TestMergeDistSQLRemoteFlows(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	flowIDs := make([]execinfrapb.FlowID, 4)
-	for i := range flowIDs {
-		flowIDs[i].UUID = uuid.FastMakeV4()
-	}
-	sort.Slice(flowIDs, func(i, j int) bool {
-		return bytes.Compare(flowIDs[i].GetBytes(), flowIDs[j].GetBytes()) < 0
-	})
-	ts := make([]time.Time, 4)
-	for i := range ts {
-		ts[i] = timeutil.Now()
-	}
-
-	for _, tc := range []struct {
-		a        []serverpb.DistSQLRemoteFlows
-		b        []serverpb.DistSQLRemoteFlows
-		expected []serverpb.DistSQLRemoteFlows
-	}{
-		// a is empty
-		{
-			a: []serverpb.DistSQLRemoteFlows{},
-			b: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-			},
-			expected: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-			},
-		},
-		// b is empty
-		{
-			a: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-			},
-			b: []serverpb.DistSQLRemoteFlows{},
-			expected: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-			},
-		},
-		// both non-empty with some intersections
-		{
-			a: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[2],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[3],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-			},
-			b: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-				{
-					FlowID: flowIDs[3],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-			},
-			expected: []serverpb.DistSQLRemoteFlows{
-				{
-					FlowID: flowIDs[0],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[1],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-				{
-					FlowID: flowIDs[2],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 3, Timestamp: ts[3], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-					},
-				},
-				{
-					FlowID: flowIDs[3],
-					Infos: []serverpb.DistSQLRemoteFlows_Info{
-						{NodeID: 0, Timestamp: ts[0], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-						{NodeID: 1, Timestamp: ts[1], Status: serverpb.DistSQLRemoteFlows_RUNNING},
-						{NodeID: 2, Timestamp: ts[2], Status: serverpb.DistSQLRemoteFlows_QUEUED},
-					},
-				},
-			},
-		},
-	} {
-		require.Equal(t, tc.expected, mergeDistSQLRemoteFlows(tc.a, tc.b))
 	}
 }
 
@@ -2150,7 +2023,7 @@ func TestJobStatusResponse(t *testing.T) {
 	ts := startServer(t)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
+	rootConfig := testutils.NewTestBaseContext(security.RootUser)
 	rpcContext := newRPCTestContext(ts, rootConfig)
 
 	url := ts.ServingRPCAddr()
@@ -2167,13 +2040,12 @@ func TestJobStatusResponse(t *testing.T) {
 	require.Nil(t, response)
 
 	ctx := context.Background()
-	jr := ts.JobRegistry().(*jobs.Registry)
-	job, err := jr.CreateJobWithTxn(
+	job, err := ts.JobRegistry().(*jobs.Registry).CreateJobWithTxn(
 		ctx,
 		jobs.Record{
 			Description: "testing",
-			Statements:  []string{"SELECT 1"},
-			Username:    security.RootUserName(),
+			Statement:   "SELECT 1",
+			Username:    "root",
 			Details: jobspb.ImportDetails{
 				Tables: []jobspb.ImportDetails_Table{
 					{
@@ -2192,106 +2064,18 @@ func TestJobStatusResponse(t *testing.T) {
 			Progress:      jobspb.ImportProgress{},
 			DescriptorIDs: []descpb.ID{1, 2, 3},
 		},
-		jr.MakeJobID(),
 		nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.JobId = int64(job.ID())
+	request.JobId = *job.ID()
 	response, err = client.JobStatus(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	require.Equal(t, job.ID(), response.Job.Id)
+	require.Equal(t, *job.ID(), response.Job.Id)
 	require.Equal(t, job.Payload(), *response.Job.Payload)
 	require.Equal(t, job.Progress(), *response.Job.Progress)
-}
-
-func TestRegionsResponseFromNodesResponse(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	makeNodeResponseWithLocalities := func(tiers [][]roachpb.Tier) *serverpb.NodesResponse {
-		ret := &serverpb.NodesResponse{}
-		for _, l := range tiers {
-			ret.Nodes = append(
-				ret.Nodes,
-				statuspb.NodeStatus{
-					Desc: roachpb.NodeDescriptor{
-						Locality: roachpb.Locality{Tiers: l},
-					},
-				},
-			)
-		}
-		return ret
-	}
-
-	makeTiers := func(region, zone string) []roachpb.Tier {
-		return []roachpb.Tier{
-			{Key: "region", Value: region},
-			{Key: "zone", Value: zone},
-		}
-	}
-
-	testCases := []struct {
-		desc     string
-		resp     *serverpb.NodesResponse
-		expected *serverpb.RegionsResponse
-	}{
-		{
-			desc: "no nodes with regions",
-			resp: makeNodeResponseWithLocalities([][]roachpb.Tier{
-				{{Key: "a", Value: "a"}},
-				{},
-			}),
-			expected: &serverpb.RegionsResponse{
-				Regions: map[string]*serverpb.RegionsResponse_Region{},
-			},
-		},
-		{
-			desc: "nodes, some with AZs",
-			resp: makeNodeResponseWithLocalities([][]roachpb.Tier{
-				makeTiers("us-east1", "us-east1-a"),
-				makeTiers("us-east1", "us-east1-a"),
-				makeTiers("us-east1", "us-east1-a"),
-				makeTiers("us-east1", "us-east1-b"),
-
-				makeTiers("us-east2", "us-east2-a"),
-				makeTiers("us-east2", "us-east2-a"),
-				makeTiers("us-east2", "us-east2-a"),
-
-				makeTiers("us-east3", "us-east3-a"),
-				makeTiers("us-east3", "us-east3-b"),
-				makeTiers("us-east3", "us-east3-b"),
-				{{Key: "region", Value: "us-east3"}},
-
-				{{Key: "region", Value: "us-east4"}},
-			}),
-			expected: &serverpb.RegionsResponse{
-				Regions: map[string]*serverpb.RegionsResponse_Region{
-					"us-east1": {
-						Zones: []string{"us-east1-a", "us-east1-b"},
-					},
-					"us-east2": {
-						Zones: []string{"us-east2-a"},
-					},
-					"us-east3": {
-						Zones: []string{"us-east3-a", "us-east3-b"},
-					},
-					"us-east4": {
-						Zones: []string{},
-					},
-				},
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.desc, func(t *testing.T) {
-			ret := regionsResponseFromNodesResponse(tc.resp)
-			require.Equal(t, tc.expected, ret)
-		})
-	}
 }
 
 func TestLicenseExpiryMetricNoLicense(t *testing.T) {

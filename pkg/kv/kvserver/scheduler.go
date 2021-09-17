@@ -17,10 +17,8 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const rangeIDChunkSize = 1000
@@ -145,23 +143,17 @@ type raftProcessor interface {
 	processTick(context.Context, roachpb.RangeID) bool
 }
 
-type raftScheduleFlags int
+type raftScheduleState int
 
 const (
-	stateQueued raftScheduleFlags = 1 << iota
+	stateQueued raftScheduleState = 1 << iota
 	stateRaftReady
 	stateRaftRequest
 	stateRaftTick
 )
 
-type raftScheduleState struct {
-	flags raftScheduleFlags
-	begin int64 // nanoseconds
-}
-
 type raftScheduler struct {
 	processor  raftProcessor
-	latency    *metric.Histogram
 	numWorkers int
 
 	mu struct {
@@ -180,7 +172,6 @@ func newRaftScheduler(
 ) *raftScheduler {
 	s := &raftScheduler{
 		processor:  processor,
-		latency:    metrics.RaftSchedulerLatency,
 		numWorkers: numWorkers,
 	}
 	s.mu.cond = sync.NewCond(&s.mu.Mutex)
@@ -189,22 +180,19 @@ func newRaftScheduler(
 }
 
 func (s *raftScheduler) Start(ctx context.Context, stopper *stop.Stopper) {
-	waitQuiesce := func(context.Context) {
-		<-stopper.ShouldQuiesce()
+	stopper.RunWorker(ctx, func(ctx context.Context) {
+		<-stopper.ShouldStop()
 		s.mu.Lock()
 		s.mu.stopped = true
 		s.mu.Unlock()
 		s.mu.cond.Broadcast()
-	}
-	if err := stopper.RunAsyncTask(ctx, "raftsched-wait-quiesce", waitQuiesce); err != nil {
-		waitQuiesce(ctx)
-	}
+	})
 
 	s.done.Add(s.numWorkers)
 	for i := 0; i < s.numWorkers; i++ {
-		if err := stopper.RunAsyncTask(ctx, "raft-worker", s.worker); err != nil {
-			s.done.Done()
-		}
+		stopper.RunWorker(ctx, func(ctx context.Context) {
+			s.worker(ctx)
+		})
 	}
 }
 
@@ -255,98 +243,70 @@ func (s *raftScheduler) worker(ctx context.Context) {
 		// the range ID marked as "queued" so that a concurrent Enqueue* will not
 		// queue the range ID again.
 		state := s.mu.state[id]
-		s.mu.state[id] = raftScheduleState{flags: stateQueued}
+		s.mu.state[id] = stateQueued
 		s.mu.Unlock()
-
-		// Record the scheduling latency for the range.
-		lat := nowNanos() - state.begin
-		s.latency.RecordValue(lat)
 
 		// Process requests first. This avoids a scenario where a tick and a
 		// "quiesce" message are processed in the same iteration and intervening
 		// raft ready processing unquiesces the replica because the tick triggers
 		// an election.
-		if state.flags&stateRaftRequest != 0 {
+		if state&stateRaftRequest != 0 {
 			// processRequestQueue returns true if the range should perform ready
 			// processing. Do not reorder this below the call to processReady.
 			if s.processor.processRequestQueue(ctx, id) {
-				state.flags |= stateRaftReady
+				state |= stateRaftReady
 			}
 		}
-		if state.flags&stateRaftTick != 0 {
+		if state&stateRaftTick != 0 {
 			// processRaftTick returns true if the range should perform ready
 			// processing. Do not reorder this below the call to processReady.
 			if s.processor.processTick(ctx, id) {
-				state.flags |= stateRaftReady
+				state |= stateRaftReady
 			}
 		}
-		if state.flags&stateRaftReady != 0 {
+		if state&stateRaftReady != 0 {
 			s.processor.processReady(ctx, id)
 		}
 
 		s.mu.Lock()
 		state = s.mu.state[id]
-		if state.flags == stateQueued {
+		if state == stateQueued {
 			// No further processing required by the range ID, clear it from the
 			// state map.
 			delete(s.mu.state, id)
 		} else {
-			// There was a concurrent call to one of the Enqueue* methods. Queue
-			// the range ID for further processing.
-			//
-			// Even though the Enqueue* method did not signal after detecting
-			// that the range was being processed, there also is no need for us
-			// to signal the condition variable. This is because this worker
-			// goroutine will loop back around and continue working without ever
-			// going back to sleep.
-			//
-			// We can prove this out through a short derivation.
-			// - For optimal concurrency, we want:
-			//     awake_workers = min(max_workers, num_ranges)
-			// - The condition variable / mutex structure ensures that:
-			//     awake_workers = cur_awake_workers + num_signals
-			// - So we need the following number of signals for optimal concurrency:
-			//     num_signals = min(max_workers, num_ranges) - cur_awake_workers
-			// - If we re-enqueue a range that's currently being processed, the
-			//   num_ranges does not change once the current iteration completes
-			//   and the worker does not go back to sleep between the current
-			//   iteration and the next iteration, so no change to num_signals
-			//   is needed.
+			// There was a concurrent call to one of the Enqueue* methods. Queue the
+			// range ID for further processing.
 			s.mu.queue.Push(id)
+			s.mu.cond.Signal()
 		}
 	}
 }
 
-func (s *raftScheduler) enqueue1Locked(
-	addFlags raftScheduleFlags, id roachpb.RangeID, now int64,
-) int {
+func (s *raftScheduler) enqueue1Locked(addState raftScheduleState, id roachpb.RangeID) int {
 	prevState := s.mu.state[id]
-	if prevState.flags&addFlags == addFlags {
+	if prevState&addState == addState {
 		return 0
 	}
 	var queued int
-	newState := prevState
-	newState.flags = newState.flags | addFlags
-	if newState.flags&stateQueued == 0 {
-		newState.flags |= stateQueued
+	newState := prevState | addState
+	if newState&stateQueued == 0 {
+		newState |= stateQueued
 		queued++
 		s.mu.queue.Push(id)
-	}
-	if newState.begin == 0 {
-		newState.begin = now
 	}
 	s.mu.state[id] = newState
 	return queued
 }
 
-func (s *raftScheduler) enqueue1(addFlags raftScheduleFlags, id roachpb.RangeID) int {
-	now := nowNanos()
+func (s *raftScheduler) enqueue1(addState raftScheduleState, id roachpb.RangeID) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.enqueue1Locked(addFlags, id, now)
+	count := s.enqueue1Locked(addState, id)
+	s.mu.Unlock()
+	return count
 }
 
-func (s *raftScheduler) enqueueN(addFlags raftScheduleFlags, ids ...roachpb.RangeID) int {
+func (s *raftScheduler) enqueueN(addState raftScheduleState, ids ...roachpb.RangeID) int {
 	// Enqueue the ids in chunks to avoid hold raftScheduler.mu for too long.
 	const enqueueChunkSize = 128
 
@@ -355,14 +315,12 @@ func (s *raftScheduler) enqueueN(addFlags raftScheduleFlags, ids ...roachpb.Rang
 		return 0
 	}
 
-	now := nowNanos()
 	s.mu.Lock()
 	var count int
 	for i, id := range ids {
-		count += s.enqueue1Locked(addFlags, id, now)
+		count += s.enqueue1Locked(addState, id)
 		if (i+1)%enqueueChunkSize == 0 {
 			s.mu.Unlock()
-			now = nowNanos()
 			s.mu.Lock()
 		}
 	}
@@ -394,8 +352,4 @@ func (s *raftScheduler) EnqueueRaftRequests(ids ...roachpb.RangeID) {
 
 func (s *raftScheduler) EnqueueRaftTicks(ids ...roachpb.RangeID) {
 	s.signal(s.enqueueN(stateRaftTick, ids...))
-}
-
-func nowNanos() int64 {
-	return timeutil.Now().UnixNano()
 }

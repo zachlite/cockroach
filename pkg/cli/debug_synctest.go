@@ -133,18 +133,18 @@ func runSyncer(
 		return encoding.EncodeUvarintAscending(buf[:0:0], uint64(seq))
 	}
 
-	check := func(kv storage.MVCCKeyValue) error {
+	check := func(kv storage.MVCCKeyValue) (bool, error) {
 		expKey := key()
 		if !bytes.Equal(kv.Key.Key, expKey) {
-			return errors.Errorf(
+			return false, errors.Errorf(
 				"found unexpected key %q (expected %q)", kv.Key.Key, expKey,
 			)
 		}
-		return nil // want more
+		return false, nil // want more
 	}
 
 	fmt.Fprintf(stderr, "verifying existing sequence numbers...")
-	if err := db.MVCCIterate(roachpb.KeyMin, roachpb.KeyMax, storage.MVCCKeyAndIntentsIterKind, check); err != nil {
+	if err := db.Iterate(roachpb.KeyMin, roachpb.KeyMax, check); err != nil {
 		return 0, err
 	}
 	// We must not lose writes, but sometimes we get extra ones (i.e. we caught an
@@ -156,7 +156,7 @@ func runSyncer(
 
 	waitFailure := time.After(time.Duration(rand.Int63n(5 * time.Second.Nanoseconds())))
 
-	if err := stopper.RunAsyncTask(ctx, "syncer", func(ctx context.Context) {
+	stopper.RunWorker(ctx, func(ctx context.Context) {
 		<-waitFailure
 		if err := nemesis.On(); err != nil {
 			panic(err)
@@ -167,9 +167,7 @@ func runSyncer(
 			}
 		}()
 		<-stopper.ShouldQuiesce()
-	}); err != nil {
-		return 0, err
-	}
+	})
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, drainSignals...)
@@ -186,10 +184,10 @@ func runSyncer(
 			}
 		}()
 
-		k, v := key(), []byte("payload")
+		k, v := storage.MakeMVCCMetadataKey(key()), []byte("payload")
 		switch seq % 2 {
 		case 0:
-			if err := db.PutUnversioned(k, v); err != nil {
+			if err := db.Put(k, v); err != nil {
 				seq--
 				return seq, err
 			}
@@ -199,7 +197,7 @@ func runSyncer(
 			}
 		default:
 			b := db.NewBatch()
-			if err := b.PutUnversioned(k, v); err != nil {
+			if err := b.Put(k, v); err != nil {
 				seq--
 				return seq, err
 			}

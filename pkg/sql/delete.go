@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 var deleteNodePool = sync.Pool{
@@ -90,6 +91,8 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 		return false, nil
 	}
 
+	tracing.AnnotateTrace()
+
 	// Advance one batch. First, clear the last batch.
 	d.run.td.clearLastBatch(params.ctx)
 	// Now consume/accumulate the rows for this batch.
@@ -140,7 +143,10 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(d.run.td.tableDesc(), d.run.td.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(
+		d.run.td.tableDesc().GetID(),
+		d.run.td.lastBatchSize,
+	)
 
 	return d.run.td.lastBatchSize > 0, nil
 }
@@ -153,7 +159,7 @@ func (d *deleteNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 	// satisfy the predicate and therefore do not exist in the partial index.
 	// This set is passed as a argument to tableDeleter.row below.
 	var pm row.PartialIndexUpdateHelper
-	if n := len(d.run.td.tableDesc().PartialIndexes()); n > 0 {
+	if n := d.run.td.tableDesc().PartialIndexOrds().Len(); n > 0 {
 		offset := d.run.partialIndexDelValsOffset
 		partialIndexDelVals := sourceVals[offset : offset+n]
 

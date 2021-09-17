@@ -16,9 +16,9 @@ import (
 	"github.com/cockroachdb/redact"
 )
 
-// SafeMessage makes immutable a SafeMessager.
-func (desc *immutable) SafeMessage() string {
-	return formatSafeTableDesc("tabledesc.immutable", desc)
+// SafeMessage makes Immutable a SafeMessager.
+func (desc *Immutable) SafeMessage() string {
+	return formatSafeTableDesc("tabledesc.Immutable", desc)
 }
 
 // SafeMessage makes Mutable a SafeMessager.
@@ -107,16 +107,15 @@ func formatSafeColumn(
 }
 
 func formatSafeTableIndexes(w *redact.StringBuilder, desc catalog.TableDescriptor) {
-	w.Printf(", PrimaryIndex: %d", desc.GetPrimaryIndexID())
-	w.Printf(", NextIndexID: %d", desc.GetNextIndexID())
+	td := desc.TableDesc()
+	w.Printf(", PrimaryIndex: %d", td.PrimaryIndex.ID)
+	w.Printf(", NextIndexID: %d", td.NextIndexID)
 	w.Printf(", Indexes: [")
-	_ = catalog.ForEachActiveIndex(desc, func(idx catalog.Index) error {
-		if !idx.Primary() {
-			w.Printf(", ")
-		}
-		formatSafeIndex(w, idx.IndexDesc(), nil)
-		return nil
-	})
+	formatSafeIndex(w, &td.PrimaryIndex, nil)
+	for i := range td.Indexes {
+		w.Printf(", ")
+		formatSafeIndex(w, &td.Indexes[i], nil)
+	}
 	w.Printf("]")
 }
 
@@ -151,17 +150,17 @@ func formatSafeIndex(
 		}
 		w.Printf("]")
 	}
-	w.Printf(", KeyColumns: [")
-	for i := range idx.KeyColumnIDs {
+	w.Printf(", Columns: [")
+	for i := range idx.ColumnIDs {
 		if i > 0 {
 			w.Printf(", ")
 		}
-		w.Printf("{ID: %d, Dir: %s}", idx.KeyColumnIDs[i], idx.KeyColumnDirections[i])
+		w.Printf("{ID: %d, Dir: %s}", idx.ColumnIDs[i], idx.ColumnDirections[i])
 	}
 	w.Printf("]")
-	if len(idx.KeySuffixColumnIDs) > 0 {
-		w.Printf(", KeySuffixColumns: ")
-		formatSafeColumnIDs(w, idx.KeySuffixColumnIDs)
+	if len(idx.ExtraColumnIDs) > 0 {
+		w.Printf(", ExtraColumns: ")
+		formatSafeColumnIDs(w, idx.ExtraColumnIDs)
 	}
 	if len(idx.StoreColumnIDs) > 0 {
 		w.Printf(", StoreColumns: ")
@@ -176,7 +175,6 @@ func formatSafeIndex(
 func formatSafeTableConstraints(w *redact.StringBuilder, desc catalog.TableDescriptor) {
 	td := desc.TableDesc()
 	formatSafeTableChecks(w, td.Checks)
-	formatSafeTableUniqueWithoutIndexConstraints(w, td.UniqueWithoutIndexConstraints)
 	formatSafeTableFKs(w, "InboundFKs", td.InboundFKs)
 	formatSafeTableFKs(w, "OutboundFKs", td.OutboundFKs)
 }
@@ -226,23 +224,6 @@ func formatSafeTableChecks(
 		formatSafeCheck(w, c, nil)
 	}
 	if len(checks) > 0 {
-		w.Printf("]")
-	}
-}
-
-func formatSafeTableUniqueWithoutIndexConstraints(
-	w *redact.StringBuilder, constraints []descpb.UniqueWithoutIndexConstraint,
-) {
-	for i := range constraints {
-		c := &constraints[i]
-		if i == 0 {
-			w.Printf(", Unique Without Index Constraints: [")
-		} else {
-			w.Printf(", ")
-		}
-		formatSafeUniqueWithoutIndexConstraint(w, c, nil)
-	}
-	if len(constraints) > 0 {
 		w.Printf("]")
 	}
 }
@@ -329,7 +310,7 @@ func formatSafeMutation(w *redact.StringBuilder, m *descpb.DescriptorMutation) {
 		w.Printf("OldPrimaryIndexID: %d", md.PrimaryKeySwap.OldPrimaryIndexId)
 		w.Printf(", OldIndexes: ")
 		formatSafeIndexIDs(w, md.PrimaryKeySwap.NewIndexes)
-		w.Printf(", NewPrimaryIndexID: %d", md.PrimaryKeySwap.NewPrimaryIndexId)
+		w.Printf("NewPrimaryIndexID: %d", md.PrimaryKeySwap.NewPrimaryIndexId)
 		w.Printf(", NewIndexes: ")
 		formatSafeIndexIDs(w, md.PrimaryKeySwap.NewIndexes)
 		w.Printf("}")
@@ -366,21 +347,6 @@ func formatSafeCheck(
 	if c.Hidden {
 		w.Printf(", Hidden: true")
 	}
-	if m != nil {
-		w.Printf(", State: %s, MutationID: %d", m.Direction, m.MutationID)
-	}
-	w.Printf("}")
-}
-
-func formatSafeUniqueWithoutIndexConstraint(
-	w *redact.StringBuilder, c *descpb.UniqueWithoutIndexConstraint, m *descpb.DescriptorMutation,
-) {
-	// TODO(ajwerner): expose OID hashing to get the OID for the
-	// constraint.
-	w.Printf("{TableID: %d", c.TableID)
-	w.Printf(", Columns: ")
-	formatSafeColumnIDs(w, c.ColumnIDs)
-	w.Printf(", Validity: %s", c.Validity.String())
 	if m != nil {
 		w.Printf(", State: %s, MutationID: %d", m.Direction, m.MutationID)
 	}

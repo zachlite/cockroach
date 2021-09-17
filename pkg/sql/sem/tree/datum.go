@@ -25,14 +25,12 @@ import (
 	"unicode"
 	"unsafe"
 
-	apd "github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -158,6 +156,13 @@ type Datum interface {
 // Datums is a slice of Datum values.
 type Datums []Datum
 
+const (
+	// SizeOfDatum is the memory size of a Datum reference.
+	SizeOfDatum = int64(unsafe.Sizeof(Datum(nil)))
+	// SizeOfDatums is the memory size of a Datum slice.
+	SizeOfDatums = int64(unsafe.Sizeof(Datums(nil)))
+)
+
 // Len returns the number of Datum values.
 func (d Datums) Len() int { return len(d) }
 
@@ -262,10 +267,10 @@ func AsDBool(e Expr) (DBool, bool) {
 	return false, false
 }
 
-// MakeParseError returns a parse error using the provided string and type. An
+// makeParseError returns a parse error using the provided string and type. An
 // optional error can be provided, which will be appended to the end of the
 // error string.
-func MakeParseError(s string, typ *types.T, err error) error {
+func makeParseError(s string, typ *types.T, err error) error {
 	if err != nil {
 		return pgerror.Wrapf(err, pgcode.InvalidTextRepresentation,
 			"could not parse %q as type %s", s, typ)
@@ -286,64 +291,50 @@ func isCaseInsensitivePrefix(prefix, s string) bool {
 	return strings.EqualFold(prefix, s[:len(prefix)])
 }
 
-// ParseBool parses and returns the boolean value represented by the provided
+// ParseDBool parses and returns the *DBool Datum value represented by the provided
 // string, or an error if parsing is unsuccessful.
 // See https://github.com/postgres/postgres/blob/90627cf98a8e7d0531789391fd798c9bfcc3bc1a/src/backend/utils/adt/bool.c#L36
-func ParseBool(s string) (bool, error) {
+func ParseDBool(s string) (*DBool, error) {
 	s = strings.TrimSpace(s)
 	if len(s) >= 1 {
 		switch s[0] {
 		case 't', 'T':
 			if isCaseInsensitivePrefix(s, "true") {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case 'f', 'F':
 			if isCaseInsensitivePrefix(s, "false") {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case 'y', 'Y':
 			if isCaseInsensitivePrefix(s, "yes") {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case 'n', 'N':
 			if isCaseInsensitivePrefix(s, "no") {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case '1':
 			if s == "1" {
-				return true, nil
+				return DBoolTrue, nil
 			}
 		case '0':
 			if s == "0" {
-				return false, nil
+				return DBoolFalse, nil
 			}
 		case 'o', 'O':
 			// Just 'o' is ambiguous between 'on' and 'off'.
 			if len(s) > 1 {
 				if isCaseInsensitivePrefix(s, "on") {
-					return true, nil
+					return DBoolTrue, nil
 				}
 				if isCaseInsensitivePrefix(s, "off") {
-					return false, nil
+					return DBoolFalse, nil
 				}
 			}
 		}
 	}
-	return false, MakeParseError(s, types.Bool, pgerror.New(pgcode.InvalidTextRepresentation, "invalid bool value"))
-}
-
-// ParseDBool parses and returns the *DBool Datum value represented by the provided
-// string, or an error if parsing is unsuccessful.
-// See https://github.com/postgres/postgres/blob/90627cf98a8e7d0531789391fd798c9bfcc3bc1a/src/backend/utils/adt/bool.c#L36
-func ParseDBool(s string) (*DBool, error) {
-	v, err := ParseBool(s)
-	if err != nil {
-		return nil, err
-	}
-	if v {
-		return DBoolTrue, nil
-	}
-	return DBoolFalse, nil
+	return nil, makeParseError(s, types.Bool, pgerror.New(pgcode.InvalidTextRepresentation, "invalid bool value"))
 }
 
 // ParseDByte parses a string representation of hex encoded binary
@@ -354,7 +345,7 @@ func ParseDBool(s string) (*DBool, error) {
 func ParseDByte(s string) (*DBytes, error) {
 	res, err := lex.DecodeRawBytesToByteArrayAuto([]byte(s))
 	if err != nil {
-		return nil, MakeParseError(s, types.Bytes, err)
+		return nil, makeParseError(s, types.Bytes, err)
 	}
 	return NewDBytes(DBytes(res)), nil
 }
@@ -364,7 +355,7 @@ func ParseDByte(s string) (*DBytes, error) {
 func ParseDUuidFromString(s string) (*DUuid, error) {
 	uv, err := uuid.FromString(s)
 	if err != nil {
-		return nil, MakeParseError(s, types.Uuid, err)
+		return nil, makeParseError(s, types.Uuid, err)
 	}
 	return NewDUuid(DUuid{uv}), nil
 }
@@ -374,7 +365,7 @@ func ParseDUuidFromString(s string) (*DUuid, error) {
 func ParseDUuidFromBytes(b []byte) (*DUuid, error) {
 	uv, err := uuid.FromBytes(b)
 	if err != nil {
-		return nil, MakeParseError(string(b), types.Uuid, err)
+		return nil, makeParseError(string(b), types.Uuid, err)
 	}
 	return NewDUuid(DUuid{uv}), nil
 }
@@ -463,19 +454,14 @@ func (d *DBool) Max(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DBool) AmbiguousFormat() bool { return false }
 
-// PgwireFormatBool returns a single byte representing a boolean according to
-// pgwire encoding.
-func PgwireFormatBool(d bool) byte {
-	if d {
-		return 't'
-	}
-	return 'f'
-}
-
 // Format implements the NodeFormatter interface.
 func (d *DBool) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(fmtPgwireFormat) {
-		ctx.WriteByte(PgwireFormatBool(bool(*d)))
+		if bool(*d) {
+			ctx.WriteByte('t')
+		} else {
+			ctx.WriteByte('f')
+		}
 		return
 	}
 	ctx.WriteString(strconv.FormatBool(bool(*d)))
@@ -624,7 +610,7 @@ func (d *DBitArray) Format(ctx *FmtCtx) {
 	if f.HasFlags(fmtPgwireFormat) {
 		d.BitArray.Format(&ctx.Buffer)
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
 		if withQuotes {
 			ctx.WriteString("B'")
 		}
@@ -653,7 +639,7 @@ func NewDInt(d DInt) *DInt {
 func ParseDInt(s string) (*DInt, error) {
 	i, err := strconv.ParseInt(s, 0, 64)
 	if err != nil {
-		return nil, MakeParseError(s, types.Int, err)
+		return nil, makeParseError(s, types.Int, err)
 	}
 	return NewDInt(DInt(i)), nil
 }
@@ -799,7 +785,7 @@ func NewDFloat(d DFloat) *DFloat {
 func ParseDFloat(s string) (*DFloat, error) {
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return nil, MakeParseError(s, types.Float, err)
+		return nil, makeParseError(s, types.Float, err)
 	}
 	return NewDFloat(DFloat(f)), nil
 }
@@ -968,7 +954,7 @@ func (d *DDecimal) SetString(s string) error {
 	//_, res, err := HighPrecisionCtx.SetString(&d.Decimal, s)
 	_, res, err := ExactCtx.SetString(&d.Decimal, s)
 	if res != 0 || err != nil {
-		return MakeParseError(s, types.Decimal, nil)
+		return makeParseError(s, types.Decimal, nil)
 	}
 	switch d.Form {
 	case apd.NaNSignaling:
@@ -1216,7 +1202,7 @@ func (d *DString) Format(ctx *FmtCtx) {
 	if f.HasFlags(fmtRawStrings) {
 		buf.WriteString(string(*d))
 	} else {
-		lexbase.EncodeSQLStringWithFlags(buf, string(*d), f.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(buf, string(*d), f.EncodeFlags())
 	}
 }
 
@@ -1292,7 +1278,7 @@ func (*DCollatedString) AmbiguousFormat() bool { return false }
 
 // Format implements the NodeFormatter interface.
 func (d *DCollatedString) Format(ctx *FmtCtx) {
-	lexbase.EncodeSQLString(&ctx.Buffer, d.Contents)
+	lex.EncodeSQLString(&ctx.Buffer, d.Contents)
 	ctx.WriteString(" COLLATE ")
 	lex.EncodeLocaleName(&ctx.Buffer, d.Locale)
 }
@@ -1309,7 +1295,7 @@ func (d *DCollatedString) Compare(ctx *EvalContext, other Datum) int {
 		return 1
 	}
 	v, ok := UnwrapDatum(ctx, other).(*DCollatedString)
-	if !ok || !d.ResolvedType().Equivalent(other.ResolvedType()) {
+	if !ok || d.Locale != v.Locale {
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
 	return bytes.Compare(d.Key, v.Key)
@@ -1463,7 +1449,7 @@ func (d *DBytes) Format(ctx *FmtCtx) {
 		_, _ = hex.NewEncoder(ctx).Write([]byte(*d))
 		ctx.WriteByte('\'')
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
 		if withQuotes {
 			ctx.WriteByte('\'')
 		}
@@ -1560,7 +1546,7 @@ func (*DUuid) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DUuid) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1722,7 +1708,7 @@ func (*DIPAddr) AmbiguousFormat() bool {
 // Format implements the NodeFormatter interface.
 func (d *DIPAddr) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1761,67 +1747,34 @@ func NewDDateFromTime(t time.Time) (*DDate, error) {
 }
 
 // ParseTimeContext provides the information necessary for
-// parsing dates, intervals times, and timestamps.
-// A nil value is generally acceptable and will result in
-// reasonable defaults being applied.
+// parsing dates, times, and timestamps. A nil value is generally
+// acceptable and will result in reasonable defaults being applied.
 type ParseTimeContext interface {
 	// GetRelativeParseTime returns the transaction time in the session's
 	// timezone (i.e. now()). This is used to calculate relative dates,
 	// like "tomorrow", and also provides a default time.Location for
 	// parsed times.
 	GetRelativeParseTime() time.Time
-	// GetIntervalStyle returns the interval style in the session.
-	GetIntervalStyle() duration.IntervalStyle
-	// GetDateStyle returns the date style in the session.
-	GetDateStyle() pgdate.DateStyle
 }
 
 var _ ParseTimeContext = &EvalContext{}
 var _ ParseTimeContext = &simpleParseTimeContext{}
 
-// NewParseTimeContextOption is an option to NewParseTimeContext.
-type NewParseTimeContextOption func(ret *simpleParseTimeContext)
-
-// NewParseTimeContextOptionDateStyle sets the DateStyle for the context.
-func NewParseTimeContextOptionDateStyle(dateStyle pgdate.DateStyle) NewParseTimeContextOption {
-	return func(ret *simpleParseTimeContext) {
-		ret.DateStyle = dateStyle
-	}
-}
-
 // NewParseTimeContext constructs a ParseTimeContext that returns
 // the given values.
-func NewParseTimeContext(
-	relativeParseTime time.Time, opts ...NewParseTimeContextOption,
-) ParseTimeContext {
-	ret := &simpleParseTimeContext{
+func NewParseTimeContext(relativeParseTime time.Time) ParseTimeContext {
+	return &simpleParseTimeContext{
 		RelativeParseTime: relativeParseTime,
 	}
-	for _, opt := range opts {
-		opt(ret)
-	}
-	return ret
 }
 
 type simpleParseTimeContext struct {
 	RelativeParseTime time.Time
-	DateStyle         pgdate.DateStyle
-	IntervalStyle     duration.IntervalStyle
 }
 
 // GetRelativeParseTime implements ParseTimeContext.
 func (ctx simpleParseTimeContext) GetRelativeParseTime() time.Time {
 	return ctx.RelativeParseTime
-}
-
-// GetIntervalStyle implements ParseTimeContext.
-func (ctx simpleParseTimeContext) GetIntervalStyle() duration.IntervalStyle {
-	return ctx.IntervalStyle
-}
-
-// GetDateStyle implements ParseTimeContext.
-func (ctx simpleParseTimeContext) GetDateStyle() pgdate.DateStyle {
-	return ctx.DateStyle
 }
 
 // relativeParseTime chooses a reasonable "now" value for
@@ -1833,20 +1786,6 @@ func relativeParseTime(ctx ParseTimeContext) time.Time {
 	return ctx.GetRelativeParseTime()
 }
 
-func dateStyle(ctx ParseTimeContext) pgdate.DateStyle {
-	if ctx == nil {
-		return pgdate.DefaultDateStyle()
-	}
-	return ctx.GetDateStyle()
-}
-
-func intervalStyle(ctx ParseTimeContext) duration.IntervalStyle {
-	if ctx == nil {
-		return duration.IntervalStyle_POSTGRES
-	}
-	return ctx.GetIntervalStyle()
-}
-
 // ParseDDate parses and returns the *DDate Datum value represented by the provided
 // string in the provided location, or an error if parsing is unsuccessful.
 //
@@ -1854,32 +1793,8 @@ func intervalStyle(ctx ParseTimeContext) duration.IntervalStyle {
 // ParseTimeContext (either for the time or the local timezone).
 func ParseDDate(ctx ParseTimeContext, s string) (_ *DDate, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseDate(now, dateStyle(ctx), s)
+	t, dependsOnContext, err := pgdate.ParseDate(now, 0 /* mode */, s)
 	return NewDDate(t), dependsOnContext, err
-}
-
-// AsDDate attempts to retrieve a DDate from an Expr, returning a DDate and
-// a flag signifying whether the assertion was successful. The function should
-// be used instead of direct type assertions wherever a *DDate wrapped by a
-// *DOidWrapper is possible.
-func AsDDate(e Expr) (DDate, bool) {
-	switch t := e.(type) {
-	case *DDate:
-		return *t, true
-	case *DOidWrapper:
-		return AsDDate(t.Wrapped)
-	}
-	return DDate{}, false
-}
-
-// MustBeDDate attempts to retrieve a DDate from an Expr, panicking if the
-// assertion fails.
-func MustBeDDate(e Expr) DDate {
-	t, ok := AsDDate(e)
-	if !ok {
-		panic(errors.AssertionFailedf("expected *DDate, found %T", e))
-	}
-	return t
 }
 
 // ResolvedType implements the TypedExpr interface.
@@ -1971,22 +1886,17 @@ func (d *DDate) Min(_ *EvalContext) (Datum, bool) {
 // AmbiguousFormat implements the Datum interface.
 func (*DDate) AmbiguousFormat() bool { return true }
 
-// FormatDate writes d into ctx according to the format flags.
-func FormatDate(d pgdate.Date, ctx *FmtCtx) {
-	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
-	if !bareStrings {
-		ctx.WriteByte('\'')
-	}
-	d.Format(&ctx.Buffer)
-	if !bareStrings {
-		ctx.WriteByte('\'')
-	}
-}
-
 // Format implements the NodeFormatter interface.
 func (d *DDate) Format(ctx *FmtCtx) {
-	FormatDate(d.Date, ctx)
+	f := ctx.flags
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
+	d.Date.Format(&ctx.Buffer)
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
 }
 
 // Size implements the Datum interface.
@@ -2021,10 +1931,10 @@ func ParseDTime(
 
 	s = timeutil.ReplaceLibPQTimePrefix(s)
 
-	t, dependsOnContext, err := pgdate.ParseTimeWithoutTimezone(now, dateStyle(ctx), s)
+	t, dependsOnContext, err := pgdate.ParseTimeWithoutTimezone(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		// Build our own error message to avoid exposing the dummy date.
-		return nil, false, MakeParseError(s, types.Time, nil)
+		return nil, false, makeParseError(s, types.Time, nil)
 	}
 	return MakeDTime(timeofday.FromTime(t).Round(precision)), dependsOnContext, nil
 }
@@ -2095,7 +2005,7 @@ func (*DTime) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTime) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2152,7 +2062,7 @@ func ParseDTimeTZ(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimeTZ, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	d, dependsOnContext, err := timetz.ParseTimeTZ(now, dateStyle(ctx), s, precision)
+	d, dependsOnContext, err := timetz.ParseTimeTZ(now, s, precision)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2220,7 +2130,7 @@ func (*DTimeTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimeTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2264,12 +2174,10 @@ var dZeroTimestamp = &DTimestamp{}
 
 // time.Time formats.
 const (
-	// timestampTZOutputFormat is used to output all TimestampTZs.
-	// Note the second offset is missing here -- this is to maintain
-	// backward compatibility with casting timestamptz to strings.
-	timestampTZOutputFormat = "2006-01-02 15:04:05.999999-07:00"
-	// timestampOutputFormat is used to output all Timestamps.
-	timestampOutputFormat = "2006-01-02 15:04:05.999999"
+	// TimestampTZOutputFormat is used to output all TimestampTZs.
+	TimestampTZOutputFormat = "2006-01-02 15:04:05.999999-07:00"
+	// TimestampOutputFormat is used to output all Timestamps.
+	TimestampOutputFormat = "2006-01-02 15:04:05.999999"
 )
 
 // ParseDTimestamp parses and returns the *DTimestamp Datum value represented by
@@ -2281,7 +2189,7 @@ func ParseDTimestamp(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestamp, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, dateStyle(ctx), s)
+	t, dependsOnContext, err := pgdate.ParseTimestampWithoutTimezone(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2325,31 +2233,31 @@ func (*DTimestamp) ResolvedType() *types.T {
 
 // timeFromDatumForComparison gets the time from a datum object to use
 // strictly for comparison usage.
-func timeFromDatumForComparison(ctx *EvalContext, d Datum) (time.Time, error) {
+func timeFromDatumForComparison(ctx *EvalContext, d Datum) (time.Time, bool) {
 	d = UnwrapDatum(ctx, d)
 	switch t := d.(type) {
 	case *DDate:
 		ts, err := MakeDTimestampTZFromDate(ctx.GetLocation(), t)
 		if err != nil {
-			return time.Time{}, err
+			return time.Time{}, false
 		}
-		return ts.Time, nil
+		return ts.Time, true
 	case *DTimestampTZ:
-		return t.Time, nil
+		return t.Time, true
 	case *DTimestamp:
 		// Normalize to the timezone of the context.
 		_, zoneOffset := t.Time.In(ctx.GetLocation()).Zone()
 		ts := t.Time.In(ctx.GetLocation()).Add(-time.Duration(zoneOffset) * time.Second)
-		return ts, nil
+		return ts, true
 	case *DTime:
 		// Normalize to the timezone of the context.
 		toTime := timeofday.TimeOfDay(*t).ToTime()
 		_, zoneOffsetSecs := toTime.In(ctx.GetLocation()).Zone()
-		return toTime.In(ctx.GetLocation()).Add(-time.Duration(zoneOffsetSecs) * time.Second), nil
+		return toTime.In(ctx.GetLocation()).Add(-time.Duration(zoneOffsetSecs) * time.Second), true
 	case *DTimeTZ:
-		return t.ToTime(), nil
+		return t.ToTime(), true
 	default:
-		return time.Time{}, errors.AssertionFailedf("unexpected type: %v", t.ResolvedType())
+		return time.Time{}, false
 	}
 }
 
@@ -2396,9 +2304,9 @@ func compareTimestamps(ctx *EvalContext, l Datum, r Datum) int {
 		// values to get the desired result for comparison.
 		return int(leftInf - rightInf)
 	}
-	lTime, lErr := timeFromDatumForComparison(ctx, l)
-	rTime, rErr := timeFromDatumForComparison(ctx, r)
-	if lErr != nil || rErr != nil {
+	lTime, lOk := timeFromDatumForComparison(ctx, l)
+	rTime, rOk := timeFromDatumForComparison(ctx, r)
+	if !lOk || !rOk {
 		panic(makeUnsupportedComparisonMessage(l, r))
 	}
 	if lTime.Before(rTime) {
@@ -2494,11 +2402,11 @@ func (*DTimestamp) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestamp) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.UTC().Format(timestampOutputFormat))
+	ctx.WriteString(d.UTC().Format(TimestampOutputFormat))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2555,7 +2463,7 @@ func ParseDTimestampTZ(
 	ctx ParseTimeContext, s string, precision time.Duration,
 ) (_ *DTimestampTZ, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
-	t, dependsOnContext, err := pgdate.ParseTimestamp(now, dateStyle(ctx), s)
+	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2651,22 +2559,11 @@ func (*DTimestampTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestampTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.Time.Format(timestampTZOutputFormat))
-	_, offsetSecs := d.Time.Zone()
-	// Only output remaining seconds offsets if it is available.
-	// This is to maintain backward compatibility with older CRDB versions,
-	// where we only output HH:MM.
-	if secondOffset := offsetSecs % 60; secondOffset != 0 {
-		if secondOffset < 0 {
-			secondOffset = 60 + secondOffset
-		}
-		ctx.WriteByte(':')
-		ctx.WriteString(fmt.Sprintf("%02d", secondOffset))
-	}
+	ctx.WriteString(d.Time.Format(TimestampTZOutputFormat))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2716,8 +2613,8 @@ func NewDInterval(d duration.Duration, itm types.IntervalTypeMetadata) *DInterva
 
 // ParseDInterval parses and returns the *DInterval Datum value represented by the provided
 // string, or an error if parsing is unsuccessful.
-func ParseDInterval(style duration.IntervalStyle, s string) (*DInterval, error) {
-	return ParseDIntervalWithTypeMetadata(style, s, types.DefaultIntervalTypeMetadata)
+func ParseDInterval(s string) (*DInterval, error) {
+	return ParseDIntervalWithTypeMetadata(s, types.DefaultIntervalTypeMetadata)
 }
 
 // truncateDInterval truncates the input DInterval downward to the nearest
@@ -2749,10 +2646,8 @@ func truncateDInterval(d *DInterval, itm types.IntervalTypeMetadata) {
 // ParseDIntervalWithTypeMetadata is like ParseDInterval, but it also takes a
 // types.IntervalTypeMetadata that both specifies the units for unitless, numeric intervals
 // and also specifies the precision of the interval.
-func ParseDIntervalWithTypeMetadata(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (*DInterval, error) {
-	d, err := parseDInterval(style, s, itm)
+func ParseDIntervalWithTypeMetadata(s string, itm types.IntervalTypeMetadata) (*DInterval, error) {
+	d, err := parseDInterval(s, itm)
 	if err != nil {
 		return nil, err
 	}
@@ -2760,9 +2655,7 @@ func ParseDIntervalWithTypeMetadata(
 	return d, nil
 }
 
-func parseDInterval(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (*DInterval, error) {
+func parseDInterval(s string, itm types.IntervalTypeMetadata) (*DInterval, error) {
 	// At this time the only supported interval formats are:
 	// - SQL standard.
 	// - Postgres compatible.
@@ -2772,14 +2665,14 @@ func parseDInterval(
 
 	// If it's a blank string, exit early.
 	if len(s) == 0 {
-		return nil, MakeParseError(s, types.Interval, nil)
+		return nil, makeParseError(s, types.Interval, nil)
 	}
 	if s[0] == 'P' {
 		// If it has a leading P we're most likely working with an iso8601
 		// interval.
 		dur, err := iso8601ToDuration(s)
 		if err != nil {
-			return nil, MakeParseError(s, types.Interval, err)
+			return nil, makeParseError(s, types.Interval, err)
 		}
 		return &DInterval{Duration: dur}, nil
 	}
@@ -2788,16 +2681,16 @@ func parseDInterval(
 		// interval, as both postgres and golang have letter(s) and iso8601 has been tested.
 		dur, err := sqlStdToDuration(s, itm)
 		if err != nil {
-			return nil, MakeParseError(s, types.Interval, err)
+			return nil, makeParseError(s, types.Interval, err)
 		}
 		return &DInterval{Duration: dur}, nil
 	}
 
 	// We're either a postgres string or a Go duration.
 	// Our postgres syntax parser also supports golang, so just use that for both.
-	dur, err := parseDuration(style, s, itm)
+	dur, err := parseDuration(s, itm)
 	if err != nil {
-		return nil, MakeParseError(s, types.Interval, err)
+		return nil, makeParseError(s, types.Interval, err)
 	}
 	return &DInterval{Duration: dur}, nil
 }
@@ -2856,30 +2749,25 @@ func (d *DInterval) Min(_ *EvalContext) (Datum, bool) {
 	return dMinInterval, true
 }
 
-// ValueAsISO8601String returns the interval as an ISO 8601 Duration string (e.g. "P1Y2MT6S").
-func (d *DInterval) ValueAsISO8601String() string {
-	return d.Duration.ISO8601String()
+// ValueAsString returns the interval as a string (e.g. "1h2m").
+func (d *DInterval) ValueAsString() string {
+	return d.Duration.String()
 }
 
 // AmbiguousFormat implements the Datum interface.
 func (*DInterval) AmbiguousFormat() bool { return true }
 
-// FormatDuration writes d into ctx according to the format flags.
-func FormatDuration(d duration.Duration, ctx *FmtCtx) {
-	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
-	if !bareStrings {
-		ctx.WriteByte('\'')
-	}
-	d.FormatWithStyle(&ctx.Buffer, ctx.dataConversionConfig.IntervalStyle)
-	if !bareStrings {
-		ctx.WriteByte('\'')
-	}
-}
-
 // Format implements the NodeFormatter interface.
 func (d *DInterval) Format(ctx *FmtCtx) {
-	FormatDuration(d.Duration, ctx)
+	f := ctx.flags
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
+	d.Duration.Format(&ctx.Buffer)
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
 }
 
 // Size implements the Datum interface.
@@ -2980,7 +2868,7 @@ func (*DGeography) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeography) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -3088,7 +2976,7 @@ func (*DGeometry) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeometry) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -3197,7 +3085,7 @@ func (*DBox2D) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DBox2D) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -3272,9 +3160,7 @@ func MustBeDJSON(e Expr) DJSON {
 }
 
 // AsJSON converts a datum into our standard json representation.
-func AsJSON(
-	d Datum, dcc sessiondatapb.DataConversionConfig, loc *time.Location,
-) (json.JSON, error) {
+func AsJSON(d Datum, loc *time.Location) (json.JSON, error) {
 	d = UnwrapDatum(nil /* evalCtx */, d)
 	switch t := d.(type) {
 	case *DBool:
@@ -3296,7 +3182,7 @@ func AsJSON(
 	case *DArray:
 		builder := json.NewArrayBuilder(t.Len())
 		for _, e := range t.Array {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3311,7 +3197,7 @@ func AsJSON(
 		t.maybePopulateType()
 		labels := t.typ.TupleLabels()
 		for i, e := range t.D {
-			j, err := AsJSON(e, dcc, loc)
+			j, err := AsJSON(e, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -3334,7 +3220,7 @@ func AsJSON(
 		// This is RFC3339Nano, but without the TZ fields.
 		return json.FromString(t.UTC().Format("2006-01-02T15:04:05.999999999")), nil
 	case *DDate, *DUuid, *DOid, *DInterval, *DBytes, *DIPAddr, *DTime, *DTimeTZ, *DBitArray, *DBox2D:
-		return json.FromString(AsStringWithFlags(t, FmtBareStrings, FmtDataConversionConfig(dcc))), nil
+		return json.FromString(AsStringWithFlags(t, FmtBareStrings)), nil
 	case *DGeometry:
 		return json.FromSpatialObject(t.Geometry.SpatialObject(), geo.DefaultGeoJSONDecimalDigits)
 	case *DGeography:
@@ -3414,9 +3300,7 @@ func (d *DJSON) Format(ctx *FmtCtx) {
 	if ctx.flags.HasFlags(fmtRawStrings) {
 		ctx.WriteString(s)
 	} else {
-		// TODO(knz): This seems incorrect,
-		// see https://github.com/cockroachdb/cockroach/issues/60673
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, s, ctx.flags.EncodeFlags())
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, s, ctx.flags.EncodeFlags())
 	}
 }
 
@@ -4009,7 +3893,7 @@ func (d *DArray) AmbiguousFormat() bool {
 
 // Format implements the NodeFormatter interface.
 func (d *DArray) Format(ctx *FmtCtx) {
-	if ctx.flags.HasAnyFlags(fmtPgwireFormat | FmtPGCatalog) {
+	if ctx.HasFlags(fmtPgwireFormat) {
 		d.pgwireFormat(ctx)
 		return
 	}
@@ -4167,7 +4051,7 @@ func MakeDEnumFromLogicalRepresentation(typ *types.T, rep string) (*DEnum, error
 	// representation. This is to ensure that it will not be written until all
 	// nodes in the cluster are able to decode the physical representation.
 	if typ.TypeMeta.EnumData.IsMemberReadOnly[idx] {
-		return nil, errors.Newf("enum value %q is not yet public", rep)
+		return nil, errors.Newf("enum label %q is not yet public", rep)
 	}
 	return &DEnum{
 		EnumTyp:     typ,
@@ -4377,238 +4261,6 @@ func NewDOid(d DInt) *DOid {
 	return &oid
 }
 
-// ParseDOid parses and returns an Oid family datum.
-func ParseDOid(ctx *EvalContext, s string, t *types.T) (*DOid, error) {
-	// If it is an integer in string form, convert it as an int.
-	if val, err := ParseDInt(strings.TrimSpace(s)); err == nil {
-		tmpOid := NewDOid(*val)
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, tmpOid)
-		if err != nil {
-			oid = tmpOid
-			oid.semanticType = t
-		}
-		return oid, nil
-	}
-
-	switch t.Oid() {
-	case oid.T_regproc, oid.T_regprocedure:
-		// Trim procedure type parameters, e.g. `max(int)` becomes `max`.
-		// Postgres only does this when the cast is ::regprocedure, but we're
-		// going to always do it.
-		// We additionally do not yet implement disambiguation based on type
-		// parameters: we return the match iff there is exactly one.
-		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
-
-		substrs, err := splitIdentifierList(s)
-		if err != nil {
-			return nil, err
-		}
-		if len(substrs) > 3 {
-			// A fully qualified function name in pg's dialect can contain
-			// at most 3 parts: db.schema.funname.
-			// For example mydb.pg_catalog.max().
-			// Anything longer is always invalid.
-			return nil, pgerror.Newf(pgcode.Syntax,
-				"invalid function name: %s", s)
-		}
-		name := UnresolvedName{NumParts: len(substrs)}
-		for i := 0; i < len(substrs); i++ {
-			name.Parts[i] = substrs[len(substrs)-1-i]
-		}
-		funcDef, err := name.ResolveFunction(ctx.SessionData().SearchPath)
-		if err != nil {
-			return nil, err
-		}
-		if len(funcDef.Definition) > 1 {
-			return nil, pgerror.Newf(pgcode.AmbiguousAlias,
-				"more than one function named '%s'", funcDef.Name)
-		}
-		def := funcDef.Definition[0]
-		overload, ok := def.(*Overload)
-		if !ok {
-			return nil, errors.AssertionFailedf("invalid non-overload regproc %s", funcDef.Name)
-		}
-		return &DOid{semanticType: t, DInt: DInt(overload.Oid), name: funcDef.Name}, nil
-	case oid.T_regtype:
-		parsedTyp, err := ctx.Planner.GetTypeFromValidSQLSyntax(s)
-		if err == nil {
-			return &DOid{
-				semanticType: t,
-				DInt:         DInt(parsedTyp.Oid()),
-				name:         parsedTyp.SQLStandardName(),
-			}, nil
-		}
-
-		// Fall back to searching pg_type, since we don't provide syntax for
-		// every postgres type that we understand OIDs for.
-		// Note this section does *not* work if there is a schema in front of the
-		// type, e.g. "pg_catalog"."int4" (if int4 was not defined).
-
-		// Trim whitespace and unwrap outer quotes if necessary.
-		// This is required to mimic postgres.
-		s = strings.TrimSpace(s)
-		if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
-			s = s[1 : len(s)-1]
-		}
-		// Trim type modifiers, e.g. `numeric(10,3)` becomes `numeric`.
-		s = pgSignatureRegexp.ReplaceAllString(s, "$1")
-
-		dOid, missingTypeErr := ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(Name(s).Normalize()))
-		if missingTypeErr == nil {
-			return dOid, missingTypeErr
-		}
-		// Fall back to some special cases that we support for compatibility
-		// only. Client use syntax like 'sometype'::regtype to produce the oid
-		// for a type that they want to search a catalog table for. Since we
-		// don't support that type, we return an artificial OID that will never
-		// match anything.
-		switch s {
-		// We don't support triggers, but some tools search for them
-		// specifically.
-		case "trigger":
-		default:
-			return nil, missingTypeErr
-		}
-		return &DOid{
-			semanticType: t,
-			// Types we don't support get OID -1, so they won't match anything
-			// in catalogs.
-			DInt: -1,
-			name: s,
-		}, nil
-
-	case oid.T_regclass:
-		tn, err := castStringToRegClassTableName(s)
-		if err != nil {
-			return nil, err
-		}
-		id, err := ctx.Planner.ResolveTableName(ctx.Ctx(), &tn)
-		if err != nil {
-			return nil, err
-		}
-		return &DOid{
-			semanticType: t,
-			DInt:         DInt(id),
-			name:         tn.ObjectName.String(),
-		}, nil
-	default:
-		return ctx.Planner.ResolveOIDFromString(ctx.Ctx(), t, NewDString(s))
-	}
-}
-
-// castStringToRegClassTableName normalizes a TableName from a string.
-func castStringToRegClassTableName(s string) (TableName, error) {
-	components, err := splitIdentifierList(s)
-	if err != nil {
-		return TableName{}, err
-	}
-
-	if len(components) > 3 {
-		return TableName{}, pgerror.Newf(
-			pgcode.InvalidName,
-			"too many components: %s",
-			s,
-		)
-	}
-	var retComponents [3]string
-	for i := 0; i < len(components); i++ {
-		retComponents[len(components)-1-i] = components[i]
-	}
-	u, err := NewUnresolvedObjectName(
-		len(components),
-		retComponents,
-		0,
-	)
-	if err != nil {
-		return TableName{}, err
-	}
-	return u.ToTableName(), nil
-}
-
-// splitIdentifierList splits identifiers to individual components, lower
-// casing non-quoted identifiers and escaping quoted identifiers as appropriate.
-// It is based on PostgreSQL's SplitIdentifier.
-func splitIdentifierList(in string) ([]string, error) {
-	var pos int
-	var ret []string
-	const separator = '.'
-
-	for pos < len(in) {
-		if isWhitespace(in[pos]) {
-			pos++
-			continue
-		}
-		if in[pos] == '"' {
-			var b strings.Builder
-			// Attempt to find the ending quote. If the quote is double "",
-			// fold it into a " character for the str (e.g. "a""" means a").
-			for {
-				pos++
-				endIdx := strings.IndexByte(in[pos:], '"')
-				if endIdx == -1 {
-					return nil, pgerror.Newf(
-						pgcode.InvalidName,
-						`invalid name: unclosed ": %s`,
-						in,
-					)
-				}
-				b.WriteString(in[pos : pos+endIdx])
-				pos += endIdx + 1
-				// If we reached the end, or the following character is not ",
-				// we can break and assume this is one identifier.
-				// There are checks below to ensure EOF or whitespace comes
-				// afterward.
-				if pos == len(in) || in[pos] != '"' {
-					break
-				}
-				b.WriteByte('"')
-			}
-			ret = append(ret, b.String())
-		} else {
-			var b strings.Builder
-			for pos < len(in) && in[pos] != separator && !isWhitespace(in[pos]) {
-				b.WriteByte(in[pos])
-				pos++
-			}
-			// Anything with no quotations should be lowered.
-			ret = append(ret, strings.ToLower(b.String()))
-		}
-
-		// Further ignore all white space.
-		for pos < len(in) && isWhitespace(in[pos]) {
-			pos++
-		}
-
-		// At this stage, we expect separator or end of string.
-		if pos == len(in) {
-			break
-		}
-
-		if in[pos] != separator {
-			return nil, pgerror.Newf(
-				pgcode.InvalidName,
-				"invalid name: expected separator %c: %s",
-				separator,
-				in,
-			)
-		}
-
-		pos++
-	}
-
-	return ret, nil
-}
-
-// isWhitespace returns true if the given character is a space.
-// This must match parser.SkipWhitespace above.
-func isWhitespace(ch byte) bool {
-	switch ch {
-	case ' ', '\t', '\r', '\f', '\n':
-		return true
-	}
-	return false
-}
-
 // AsDOid attempts to retrieve a DOid from an Expr, returning a DOid and
 // a flag signifying whether the assertion was successful. The function should
 // be used instead of direct type assertions wherever a *DOid wrapped by a
@@ -4697,12 +4349,12 @@ func (d *DOid) Format(ctx *FmtCtx) {
 		ctx.WriteByte('(')
 		d.DInt.Format(ctx)
 		ctx.WriteByte(',')
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncNoFlags)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncNoFlags)
 		ctx.WriteByte(')')
 	} else {
 		// This is used to print the name of pseudo-procedures in e.g.
 		// pg_catalog.pg_type.typinput
-		lexbase.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncBareStrings)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncBareStrings)
 	}
 }
 

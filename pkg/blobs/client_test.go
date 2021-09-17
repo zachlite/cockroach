@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net"
 	"os"
@@ -179,7 +178,7 @@ func TestBlobClientReadFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reader, _, err := blobClient.ReadFile(ctx, tc.filename, 0)
+			reader, err := blobClient.ReadFile(ctx, tc.filename)
 			if err != nil {
 				if testutils.IsError(err, tc.err) {
 					// correct error was returned
@@ -251,17 +250,7 @@ func TestBlobClientWriteFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			byteContent := []byte(tc.fileContent)
-
-			err = func() error {
-				w, err := blobClient.Writer(ctx, tc.filename)
-				if err != nil {
-					return err
-				}
-				if _, err := io.Copy(w, bytes.NewReader(byteContent)); err != nil {
-					return errors.CombineErrors(w.Close(), err)
-				}
-				return w.Close()
-			}()
+			err = blobClient.WriteFile(ctx, tc.filename, bytes.NewReader(byteContent))
 			if err != nil {
 				if testutils.IsError(err, tc.err) {
 					// correct error was returned

@@ -41,11 +41,11 @@ func ColTypeInfoFromColTypes(colTypes []*types.T) ColTypeInfo {
 	return ColTypeInfo{colTypes: colTypes}
 }
 
-// ColTypeInfoFromColumns creates a ColTypeInfo from []catalog.Column.
-func ColTypeInfoFromColumns(columns []catalog.Column) ColTypeInfo {
-	colTypes := make([]*types.T, len(columns))
-	for i, col := range columns {
-		colTypes[i] = col.GetType()
+// ColTypeInfoFromColDescs creates a ColTypeInfo from []ColumnDescriptor.
+func ColTypeInfoFromColDescs(colDescs []descpb.ColumnDescriptor) ColTypeInfo {
+	colTypes := make([]*types.T, len(colDescs))
+	for i, colDesc := range colDescs {
+		colTypes[i] = colDesc.Type
 	}
 	return ColTypeInfoFromColTypes(colTypes)
 }
@@ -113,9 +113,6 @@ func ValidateColumnDefType(t *types.T) error {
 
 // ColumnTypeIsIndexable returns whether the type t is valid as an indexed column.
 func ColumnTypeIsIndexable(t *types.T) bool {
-	if t.IsAmbiguous() || t.Family() == types.TupleFamily {
-		return false
-	}
 	// Some inverted index types also have a key encoding, but we don't
 	// want to support those yet. See #50659.
 	return !MustBeValueEncoded(t) && !ColumnTypeIsInvertedIndexable(t)
@@ -124,9 +121,6 @@ func ColumnTypeIsIndexable(t *types.T) bool {
 // ColumnTypeIsInvertedIndexable returns whether the type t is valid to be indexed
 // using an inverted index.
 func ColumnTypeIsInvertedIndexable(t *types.T) bool {
-	if t.IsAmbiguous() || t.Family() == types.TupleFamily {
-		return false
-	}
 	family := t.Family()
 	return family == types.JsonFamily || family == types.ArrayFamily ||
 		family == types.GeographyFamily || family == types.GeometryFamily
@@ -149,48 +143,15 @@ func MustBeValueEncoded(semanticType *types.T) bool {
 	return false
 }
 
-// GetColumnTypes populates the types of the columns with the given IDs into the
-// outTypes slice, returning it. You must use the returned slice, as this
-// function might allocate a new slice.
-func GetColumnTypes(
-	desc catalog.TableDescriptor, columnIDs []descpb.ColumnID, outTypes []*types.T,
-) ([]*types.T, error) {
-	if cap(outTypes) < len(columnIDs) {
-		outTypes = make([]*types.T, len(columnIDs))
-	} else {
-		outTypes = outTypes[:len(columnIDs)]
-	}
+// GetColumnTypes returns the types of the columns with the given IDs.
+func GetColumnTypes(desc catalog.TableDescriptor, columnIDs []descpb.ColumnID) ([]*types.T, error) {
+	types := make([]*types.T, len(columnIDs))
 	for i, id := range columnIDs {
-		col, err := desc.FindColumnWithID(id)
+		col, err := desc.FindActiveColumnByID(id)
 		if err != nil {
 			return nil, err
 		}
-		if !col.Public() {
-			return nil, fmt.Errorf("column-id \"%d\" does not exist", id)
-		}
-		outTypes[i] = col.GetType()
+		types[i] = col.Type
 	}
-	return outTypes, nil
-}
-
-// GetColumnTypesFromColDescs populates the types of the columns with the given
-// IDs into the outTypes slice, returning it. You must use the returned slice,
-// as this function might allocate a new slice.
-func GetColumnTypesFromColDescs(
-	cols []catalog.Column, columnIDs []descpb.ColumnID, outTypes []*types.T,
-) []*types.T {
-	if cap(outTypes) < len(columnIDs) {
-		outTypes = make([]*types.T, len(columnIDs))
-	} else {
-		outTypes = outTypes[:len(columnIDs)]
-	}
-	for i, id := range columnIDs {
-		for j := range cols {
-			if id == cols[j].GetID() {
-				outTypes[i] = cols[j].GetType()
-				break
-			}
-		}
-	}
-	return outTypes
+	return types, nil
 }

@@ -15,10 +15,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/cloud/amazon"
-	"github.com/cockroachdb/cockroach/pkg/cloud/azure"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -26,14 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-// InitManualReplication calls tc.ToggleReplicateQueues(false).
-//
-// Note that the test harnesses that use this typically call
-// tc.WaitForFullReplication before calling this method,
-// so up-replication has usually already taken place.
-func InitManualReplication(tc *testcluster.TestCluster) {
-	tc.ToggleReplicateQueues(false)
-}
+func InitNone(_ *testcluster.TestCluster) {}
 
 // The tests in this file talk to remote APIs which require credentials.
 // To run these tests, you need to supply credentials via env vars (the tests
@@ -60,13 +51,13 @@ func TestCloudBackupRestoreS3(t *testing.T) {
 	defer lease.TestingDisableTableLeases()()
 	const numAccounts = 1000
 
-	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitManualReplication)
+	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitNone)
 	defer cleanupFn()
 	prefix := fmt.Sprintf("TestBackupRestoreS3-%d", timeutil.Now().UnixNano())
 	uri := url.URL{Scheme: "s3", Host: bucket, Path: prefix}
 	values := uri.Query()
-	values.Add(amazon.AWSAccessKeyParam, creds.AccessKeyID)
-	values.Add(amazon.AWSSecretParam, creds.SecretAccessKey)
+	values.Add(cloudimpl.AWSAccessKeyParam, creds.AccessKeyID)
+	values.Add(cloudimpl.AWSSecretParam, creds.SecretAccessKey)
 	uri.RawQuery = values.Encode()
 
 	backupAndRestore(ctx, t, tc, []string{uri.String()}, []string{uri.String()}, numAccounts)
@@ -86,13 +77,10 @@ func TestCloudBackupRestoreGoogleCloudStorage(t *testing.T) {
 	defer lease.TestingDisableTableLeases()()
 	const numAccounts = 1000
 
-	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitManualReplication)
+	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitNone)
 	defer cleanupFn()
 	prefix := fmt.Sprintf("TestBackupRestoreGoogleCloudStorage-%d", timeutil.Now().UnixNano())
 	uri := url.URL{Scheme: "gs", Host: bucket, Path: prefix}
-	values := uri.Query()
-	values.Add(cloud.AuthParam, cloud.AuthParamImplicit)
-	uri.RawQuery = values.Encode()
 	backupAndRestore(ctx, t, tc, []string{uri.String()}, []string{uri.String()}, numAccounts)
 }
 
@@ -116,13 +104,13 @@ func TestCloudBackupRestoreAzure(t *testing.T) {
 	defer lease.TestingDisableTableLeases()()
 	const numAccounts = 1000
 
-	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitManualReplication)
+	ctx, tc, _, _, cleanupFn := BackupRestoreTestSetup(t, 1, numAccounts, InitNone)
 	defer cleanupFn()
 	prefix := fmt.Sprintf("TestBackupRestoreAzure-%d", timeutil.Now().UnixNano())
 	uri := url.URL{Scheme: "azure", Host: bucket, Path: prefix}
 	values := uri.Query()
-	values.Add(azure.AzureAccountNameParam, accountName)
-	values.Add(azure.AzureAccountKeyParam, accountKey)
+	values.Add(cloudimpl.AzureAccountNameParam, accountName)
+	values.Add(cloudimpl.AzureAccountKeyParam, accountKey)
 	uri.RawQuery = values.Encode()
 
 	backupAndRestore(ctx, t, tc, []string{uri.String()}, []string{uri.String()}, numAccounts)

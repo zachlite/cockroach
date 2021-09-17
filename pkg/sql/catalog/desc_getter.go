@@ -12,27 +12,30 @@ package catalog
 
 import (
 	"context"
-	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 )
 
-// DescGetter is an interface to retrieve descriptors and namespace entries.
-// In general the interface is used to look up other descriptors during
-// validation.
-// Lookups are performed on a best-effort basis. When a descriptor or namespace
-// entry cannot be found, the zero-value is returned, with no error.
+// DescGetter is an interface to retrieve descriptors. In general the interface
+// is used to look up other descriptors during validation.
 type DescGetter interface {
 	GetDesc(ctx context.Context, id descpb.ID) (Descriptor, error)
-	GetNamespaceEntry(ctx context.Context, parentID, parentSchemaID descpb.ID, name string) (descpb.ID, error)
+	GetDescs(ctx context.Context, reqs []descpb.ID) ([]Descriptor, error)
 }
 
-// BatchDescGetter is like DescGetter but retrieves batches of descriptors,
-// which for some implementations may make more sense performance-wise.
-type BatchDescGetter interface {
-	DescGetter
-	GetDescs(ctx context.Context, reqs []descpb.ID) ([]Descriptor, error)
-	GetNamespaceEntries(ctx context.Context, requests []descpb.NameInfo) ([]descpb.ID, error)
+// GetTypeDescFromID retrieves the type descriptor for the type ID passed
+// in using an existing descGetter. It returns an error if the descriptor
+// doesn't exist or if it exists and is not a type descriptor.
+func GetTypeDescFromID(ctx context.Context, dg DescGetter, id descpb.ID) (TypeDescriptor, error) {
+	desc, err := dg.GetDesc(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	typ, ok := desc.(TypeDescriptor)
+	if !ok {
+		return nil, ErrDescriptorNotFound
+	}
+	return typ, nil
 }
 
 // GetTableDescFromID retrieves the table descriptor for the table
@@ -45,49 +48,26 @@ func GetTableDescFromID(ctx context.Context, dg DescGetter, id descpb.ID) (Table
 	}
 	table, ok := desc.(TableDescriptor)
 	if !ok {
-		return nil, WrapTableDescRefErr(id, ErrDescriptorNotFound)
+		return nil, ErrDescriptorNotFound
 	}
 	return table, nil
 }
 
-// MapDescGetter is an in-memory DescGetter implementation.
-type MapDescGetter struct {
-	Descriptors map[descpb.ID]Descriptor
-	Namespace   map[descpb.NameInfo]descpb.ID
-}
+// MapDescGetter is a protoGetter that has a hard-coded map of keys to proto
+// messages.
+type MapDescGetter map[descpb.ID]Descriptor
 
-// MakeMapDescGetter returns an initialized MapDescGetter.
-func MakeMapDescGetter() MapDescGetter {
-	return MapDescGetter{
-		Descriptors: make(map[descpb.ID]Descriptor),
-		Namespace:   make(map[descpb.NameInfo]descpb.ID),
-	}
-}
-
-// OrderedDescriptors returns the descriptors ordered by ID.
-func (m MapDescGetter) OrderedDescriptors() []Descriptor {
-	ret := make([]Descriptor, 0, len(m.Descriptors))
-	for _, d := range m.Descriptors {
-		ret = append(ret, d)
-	}
-	sort.Sort(Descriptors(ret))
-	return ret
-}
-
-// GetDesc implements the DescGetter interface.
-func (m MapDescGetter) GetDesc(_ context.Context, id descpb.ID) (Descriptor, error) {
-	desc := m.Descriptors[id]
+// GetDesc implements the catalog.DescGetter interface.
+func (m MapDescGetter) GetDesc(ctx context.Context, id descpb.ID) (Descriptor, error) {
+	desc := m[id]
 	return desc, nil
 }
 
-// GetNamespaceEntry implements the DescGetter interface.
-func (m MapDescGetter) GetNamespaceEntry(
-	_ context.Context, parentID, parentSchemaID descpb.ID, name string,
-) (descpb.ID, error) {
-	id := m.Namespace[descpb.NameInfo{
-		ParentID:       parentID,
-		ParentSchemaID: parentSchemaID,
-		Name:           name,
-	}]
-	return id, nil
+// GetDescs implements the catalog.DescGetter interface.
+func (m MapDescGetter) GetDescs(ctx context.Context, ids []descpb.ID) ([]Descriptor, error) {
+	ret := make([]Descriptor, len(ids))
+	for i, id := range ids {
+		ret[i], _ = m.GetDesc(ctx, id)
+	}
+	return ret, nil
 }

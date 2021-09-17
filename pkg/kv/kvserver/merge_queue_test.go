@@ -38,7 +38,7 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 	testCtx.Start(t, stopper)
 
 	mq := newMergeQueue(testCtx.store, testCtx.store.DB(), testCtx.gossip)
-	kvserverbase.MergeQueueEnabled.Override(ctx, &testCtx.store.ClusterSettings().SV, true)
+	kvserverbase.MergeQueueEnabled.Override(&testCtx.store.ClusterSettings().SV, true)
 
 	tableKey := func(i uint32) []byte {
 		return keys.SystemSQLCodec.TablePrefix(keys.MaxReservedDescID + i)
@@ -155,7 +155,7 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 			zoneConfig := zonepb.DefaultZoneConfigRef()
 			zoneConfig.RangeMinBytes = proto.Int64(tc.minBytes)
 			repl.SetZoneConfig(zoneConfig)
-			shouldQ, priority := mq.shouldQueue(ctx, hlc.ClockTimestamp{}, repl, config.NewSystemConfig(zoneConfig))
+			shouldQ, priority := mq.shouldQueue(ctx, hlc.Timestamp{}, repl, config.NewSystemConfig(zoneConfig))
 			if tc.expShouldQ != shouldQ {
 				t.Errorf("incorrect shouldQ: expected %v but got %v", tc.expShouldQ, shouldQ)
 			}

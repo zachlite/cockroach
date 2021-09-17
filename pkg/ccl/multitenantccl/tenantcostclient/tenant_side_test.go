@@ -30,13 +30,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
-	"gopkg.in/yaml.v2"
 )
 
 // TestDataDriven tests the tenant-side cost controller in an isolated setting.
@@ -83,13 +81,6 @@ type event struct {
 
 var _ tenantcostclient.TestInstrumentation = (*testState)(nil)
 
-var eventTypeStr = map[tenantcostclient.TestEventType]string{
-	tenantcostclient.TickProcessed:                "tick",
-	tenantcostclient.LowRUNotification:            "low-ru",
-	tenantcostclient.TokenBucketResponseProcessed: "token-bucket-response",
-	tenantcostclient.WaitingRUAccountedInCallback: "waiting-ru-accounted",
-}
-
 // Event is part of tenantcostclient.TestInstrumentation.
 func (ts *testState) Event(now time.Time, typ tenantcostclient.TestEventType) {
 	ev := event{
@@ -98,9 +89,6 @@ func (ts *testState) Event(now time.Time, typ tenantcostclient.TestEventType) {
 	}
 	select {
 	case ts.eventsCh <- ev:
-		if testing.Verbose() {
-			log.Infof(context.Background(), "event %s at %s\n", eventTypeStr[typ], now.Format(timeFormat))
-		}
 	default:
 		panic("events channel full")
 	}
@@ -192,7 +180,7 @@ var testStateCommands = map[string]func(
 	"timers":         (*testState).timers,
 	"cpu":            (*testState).cpu,
 	"usage":          (*testState).usage,
-	"configure":      (*testState).configure,
+	"throttle":       (*testState).throttle,
 }
 
 func (ts *testState) fireRequest(
@@ -322,9 +310,10 @@ func (ts *testState) advance(t *testing.T, d *datadriven.TestData, args cmdArgs)
 // waitForEvent waits until the tenant controller reports the given event type,
 // at the current time.
 func (ts *testState) waitForEvent(t *testing.T, d *datadriven.TestData, args cmdArgs) string {
-	typs := make(map[string]tenantcostclient.TestEventType)
-	for ev, evStr := range eventTypeStr {
-		typs[evStr] = ev
+	typs := map[string]tenantcostclient.TestEventType{
+		"tick":                  tenantcostclient.TickProcessed,
+		"low-ru":                tenantcostclient.LowRUNotification,
+		"token-bucket-response": tenantcostclient.TokenBucketResponseProcessed,
 	}
 	typ, ok := typs[d.Input]
 	if !ok {
@@ -382,13 +371,18 @@ func timesToStrings(times []time.Time) []string {
 	return strs
 }
 
-// configure the test provider.
-func (ts *testState) configure(t *testing.T, d *datadriven.TestData, args cmdArgs) string {
-	var cfg testProviderConfig
-	if err := yaml.UnmarshalStrict([]byte(d.Input), &cfg); err != nil {
-		d.Fatalf(t, "failed to parse request yaml: %v", err)
+func (ts *testState) throttle(t *testing.T, d *datadriven.TestData, args cmdArgs) string {
+	var rate float64
+	if d.Input != "disable" {
+		var err error
+		rate, err = strconv.ParseFloat(d.Input, 64)
+		if err != nil {
+			d.Fatalf(t, "expected float rate or 'disable'")
+		}
 	}
-	ts.provider.configure(cfg)
+	ts.provider.mu.Lock()
+	defer ts.provider.mu.Unlock()
+	ts.provider.mu.throttlingRate = rate
 	return ""
 }
 
@@ -441,20 +435,11 @@ type testProvider struct {
 		syncutil.Mutex
 		consumption roachpb.TenantConsumption
 
-		cfg testProviderConfig
+		// If zero, the provider always grants RUs immediately. If non-zero, the
+		// provider grants RUs at this rate.
+		throttlingRate float64
 	}
 	recvOnRequest chan struct{}
-}
-
-type testProviderConfig struct {
-	// If zero, the provider always grants RUs immediately. If non-zero, the
-	// provider grants RUs at this rate.
-	Throttle float64 `yaml:"throttle"`
-
-	// If set, the provider always errors out.
-	Error bool `yaml:"error"`
-
-	FallbackRate float64 `yaml:"fallback_rate"`
 }
 
 var _ kvtenant.TokenBucketProvider = (*testProvider)(nil)
@@ -463,12 +448,6 @@ func newTestProvider() *testProvider {
 	return &testProvider{
 		recvOnRequest: make(chan struct{}),
 	}
-}
-
-func (tp *testProvider) configure(cfg testProviderConfig) {
-	tp.mu.Lock()
-	defer tp.mu.Unlock()
-	tp.mu.cfg = cfg
 }
 
 // waitForRequest waits until the next TokenBucket request.
@@ -506,22 +485,17 @@ func (tp *testProvider) TokenBucket(
 	case <-tp.recvOnRequest:
 	default:
 	}
-
-	if tp.mu.cfg.Error {
-		return nil, errors.New("injected error")
-	}
 	tp.mu.consumption.Add(&in.ConsumptionSinceLastRequest)
 	res := &roachpb.TokenBucketResponse{}
 
 	res.GrantedRU = in.RequestedRU
-	if rate := tp.mu.cfg.Throttle; rate > 0 {
+	if rate := tp.mu.throttlingRate; rate > 0 {
 		res.TrickleDuration = time.Duration(in.RequestedRU / rate * float64(time.Second))
 		if res.TrickleDuration > in.TargetRequestPeriod {
 			res.GrantedRU *= in.TargetRequestPeriod.Seconds() / res.TrickleDuration.Seconds()
 			res.TrickleDuration = in.TargetRequestPeriod
 		}
 	}
-	res.FallbackRate = tp.mu.cfg.FallbackRate
 
 	return res, nil
 }

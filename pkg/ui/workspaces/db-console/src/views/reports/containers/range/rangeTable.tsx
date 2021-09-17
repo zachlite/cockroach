@@ -682,9 +682,7 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
           `${info.span.start_key} to ${info.span.end_key}`,
         ),
         problems: this.contentProblems(info.problems, awaitingGC),
-        replicaType: awaitingGC
-          ? this.createContent("") // `problems` above will report "Awaiting GC" in this case
-          : this.createContent(contentReplicaType(localReplica.type)),
+        replicaType: this.createContent(contentReplicaType(localReplica.type)),
         raftState: raftState,
         quiescent: info.quiescent
           ? rangeTableQuiescent

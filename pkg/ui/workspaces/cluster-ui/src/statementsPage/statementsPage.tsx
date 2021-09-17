@@ -60,7 +60,7 @@ type IStatementDiagnosticsReport = cockroach.server.serverpb.IStatementDiagnosti
 import sortableTableStyles from "src/sortedtable/sortedtable.module.scss";
 import ColumnsSelector from "../columnsSelector/columnsSelector";
 import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
-import { UIConfigState } from "../store";
+import { UIConfigState } from "../store/uiConfig";
 import { StatementsRequest } from "src/api/statementsApi";
 import Long from "long";
 
@@ -195,7 +195,7 @@ export class StatementsPage extends React.Component<
     history.replace(history.location);
   };
 
-  changeSortSetting = (ss: SortSetting): void => {
+  changeSortSetting = (ss: SortSetting) => {
     this.setState({
       sortSetting: ss,
     });
@@ -223,7 +223,7 @@ export class StatementsPage extends React.Component<
     );
   };
 
-  selectApp = (value: string): void => {
+  selectApp = (value: string) => {
     if (value == "All") value = "";
     const { history, onFilterChange } = this.props;
     history.location.pathname = `/statements/${encodeURIComponent(value)}`;
@@ -234,7 +234,7 @@ export class StatementsPage extends React.Component<
     }
   };
 
-  resetPagination = (): void => {
+  resetPagination = () => {
     this.setState(prevState => {
       return {
         pagination: {
@@ -245,12 +245,12 @@ export class StatementsPage extends React.Component<
     });
   };
 
-  refreshStatements = (): void => {
+  refreshStatements = () => {
     const req = statementsRequestFromProps(this.props);
     this.props.refreshStatements(req);
   };
 
-  componentDidMount(): void {
+  componentDidMount() {
     this.refreshStatements();
     if (!this.props.isTenant) {
       this.props.refreshStatementDiagnosticsRequests();
@@ -260,7 +260,7 @@ export class StatementsPage extends React.Component<
   componentDidUpdate = (
     __: StatementsPageProps,
     prevState: StatementsPageState,
-  ): void => {
+  ) => {
     if (this.state.search && this.state.search !== prevState.search) {
       this.props.onSearchComplete(this.filteredStatementsData());
     }
@@ -270,17 +270,17 @@ export class StatementsPage extends React.Component<
     }
   };
 
-  componentWillUnmount(): void {
+  componentWillUnmount() {
     this.props.dismissAlertMessage();
   }
 
-  onChangePage = (current: number): void => {
+  onChangePage = (current: number) => {
     const { pagination } = this.state;
     this.setState({ pagination: { ...pagination, current } });
     this.props.onPageChanged(current);
   };
 
-  onSubmitSearchField = (search: string): void => {
+  onSubmitSearchField = (search: string) => {
     this.setState({ search });
     this.resetPagination();
     this.syncHistory({
@@ -288,7 +288,7 @@ export class StatementsPage extends React.Component<
     });
   };
 
-  onSubmitFilters = (filters: Filters): void => {
+  onSubmitFilters = (filters: Filters) => {
     this.setState({
       filters: {
         ...this.state.filters,
@@ -310,14 +310,14 @@ export class StatementsPage extends React.Component<
     this.selectApp(filters.app);
   };
 
-  onClearSearchField = (): void => {
+  onClearSearchField = () => {
     this.setState({ search: "" });
     this.syncHistory({
       q: undefined,
     });
   };
 
-  onClearFilters = (): void => {
+  onClearFilters = () => {
     this.setState({
       filters: {
         ...defaultFilters,
@@ -337,7 +337,7 @@ export class StatementsPage extends React.Component<
     this.selectApp("");
   };
 
-  filteredStatementsData = (): AggregateStatistics[] => {
+  filteredStatementsData = () => {
     const { search, filters } = this.state;
     const { statements, nodeRegions, isTenant } = this.props;
     const timeValue = getTimeValueInSeconds(filters);
@@ -452,9 +452,7 @@ export class StatementsPage extends React.Component<
       : unique(nodes.map(node => nodeRegions[node.toString()])).sort();
     populateRegionNodeForStatements(statements, nodeRegions, isTenant);
 
-    // Creates a list of all possible columns,
-    // hiding nodeRegions if is not multi-region and
-    // hiding columns that won't be displayed for tenants.
+    // Creates a list of all possible columns
     const columns = makeStatementsColumns(
       statements,
       selectedApp,
@@ -466,9 +464,13 @@ export class StatementsPage extends React.Component<
       this.activateDiagnosticsRef,
       onDiagnosticsReportDownload,
       onStatementClick,
-    )
-      .filter(c => !(c.name === "regionNodes" && regions.length < 2))
-      .filter(c => !(isTenant && c.hideIfTenant));
+    ).filter(c => !(isTenant && c.hideIfTenant));
+
+    // If it's multi-region, we want to show the Regions/Nodes column by default
+    // and hide otherwise.
+    if (regions.length > 1) {
+      columns.filter(c => c.name === "regionNodes")[0].showByDefault = true;
+    }
 
     const isColumnSelected = (c: ColumnDescriptor<AggregateStatistics>) => {
       return (

@@ -84,7 +84,7 @@ const customStyles = {
   option: (provided: any, state: any) => ({
     ...provided,
     backgroundColor: "white",
-    color: "#475872",
+    color: "#394455",
     cursor: "pointer",
     padding: "4px 10px",
   }),

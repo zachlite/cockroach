@@ -56,7 +56,7 @@ func unregister(s *Stopper) {
 	sl := trackedStoppers.stoppers
 	for i, tracked := range sl {
 		if tracked.s == s {
-			trackedStoppers.stoppers = append(sl[:i], sl[i+1:]...)
+			trackedStoppers.stoppers = sl[:i+copy(sl[i:], sl[i+1:])]
 			return
 		}
 	}
@@ -266,6 +266,10 @@ func (s *Stopper) AddCloser(c Closer) {
 // Canceling this context releases resources associated with it, so code should
 // call cancel as soon as the operations running in this Context complete.
 func (s *Stopper) WithCancelOnQuiesce(ctx context.Context) (context.Context, func()) {
+	return s.withCancel(ctx)
+}
+
+func (s *Stopper) withCancel(ctx context.Context) (context.Context, func()) {
 	var cancel func()
 	ctx, cancel = context.WithCancel(ctx)
 	s.mu.RLock()

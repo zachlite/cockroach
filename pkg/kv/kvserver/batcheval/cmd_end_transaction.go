@@ -202,12 +202,11 @@ func EndTxn(
 
 	// Fetch existing transaction.
 	var existingTxn roachpb.Transaction
-	recordAlreadyExisted, err := storage.MVCCGetProto(
+	if ok, err := storage.MVCCGetProto(
 		ctx, readWriter, key, hlc.Timestamp{}, &existingTxn, storage.MVCCGetOptions{},
-	)
-	if err != nil {
+	); err != nil {
 		return result.Result{}, err
-	} else if !recordAlreadyExisted {
+	} else if !ok {
 		// No existing transaction record was found - create one by writing it
 		// below in updateFinalizedTxn.
 		reply.Txn = h.Txn.Clone()
@@ -252,7 +251,7 @@ func EndTxn(
 					return result.Result{}, err
 				}
 				if err := updateFinalizedTxn(
-					ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
+					ctx, readWriter, ms, key, args, reply.Txn, externalLocks,
 				); err != nil {
 					return result.Result{}, err
 				}
@@ -331,9 +330,7 @@ func EndTxn(
 	if err != nil {
 		return result.Result{}, err
 	}
-	if err := updateFinalizedTxn(
-		ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
-	); err != nil {
+	if err := updateFinalizedTxn(ctx, readWriter, ms, key, args, reply.Txn, externalLocks); err != nil {
 		return result.Result{}, err
 	}
 
@@ -456,13 +453,6 @@ func resolveLocalLocks(
 		// These transactions rely on having their locks resolved synchronously.
 		resolveAllowance = math.MaxInt64
 	}
-	onlySeparatedIntents := false
-	st := evalCtx.ClusterSettings()
-	// Some tests have st == nil.
-	if st != nil {
-		onlySeparatedIntents = st.Version.ActiveVersionOrEmpty(ctx).IsActive(
-			clusterversion.PostSeparatedIntentsMigration)
-	}
 	for _, span := range args.LockSpans {
 		if err := func() error {
 			if resolveAllowance == 0 {
@@ -503,7 +493,7 @@ func resolveLocalLocks(
 			if inSpan != nil {
 				update.Span = *inSpan
 				num, resumeSpan, err := storage.MVCCResolveWriteIntentRange(
-					ctx, readWriter, ms, update, resolveAllowance, onlySeparatedIntents)
+					ctx, readWriter, ms, update, resolveAllowance)
 				if err != nil {
 					return err
 				}
@@ -565,18 +555,11 @@ func updateFinalizedTxn(
 	key []byte,
 	args *roachpb.EndTxnRequest,
 	txn *roachpb.Transaction,
-	recordAlreadyExisted bool,
 	externalLocks []roachpb.Span,
 ) error {
 	if txnAutoGC && len(externalLocks) == 0 {
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d locks)", txn.Short(), len(args.LockSpans))
-		}
-		if !recordAlreadyExisted {
-			// Nothing to delete, so there's no use writing a deletion tombstone. This
-			// can help avoid sending a proposal through Raft, if nothing else in the
-			// BatchRequest writes.
-			return nil
 		}
 		return storage.MVCCDelete(ctx, readWriter, ms, key, hlc.Timestamp{}, nil /* txn */)
 	}
@@ -931,6 +914,15 @@ func splitTriggerHelper(
 		return enginepb.MVCCStats{}, result.Result{}, err
 	}
 
+	if !rec.ClusterSettings().Version.IsActive(ctx, clusterversion.AbortSpanBytes) {
+		// Since the stats here is used to seed the initial state for the RHS
+		// replicas, we need to be careful about zero-ing out the abort span
+		// bytes if the cluster version introducing it is not yet active. Not
+		// doing so can result in inconsistencies in MVCCStats across replicas
+		// in a mixed-version cluster.
+		h.AbsPostSplitRight().AbortSpanBytes = 0
+	}
+
 	// Note: we don't copy the queue last processed times. This means
 	// we'll process the RHS range in consistency and time series
 	// maintenance queues again possibly sooner than if we copied. The
@@ -957,8 +949,11 @@ func splitTriggerHelper(
 		// - node two becomes the lease holder for [c,e). Its timestamp cache does
 		//   not know about the read at 'd' which happened at the beginning.
 		// - node two can illegally propose a write to 'd' at a lower timestamp.
+		//
+		// TODO(tschottdorf): why would this use r.store.Engine() and not the
+		// batch? We do the same thing for other usages of the state loader.
 		sl := MakeStateLoader(rec)
-		leftLease, err := sl.LoadLease(ctx, batch)
+		leftLease, err := sl.LoadLease(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load lease")
 		}
@@ -975,12 +970,40 @@ func splitTriggerHelper(
 		}
 		rightLease := leftLease
 		rightLease.Replica = replica
-		gcThreshold, err := sl.LoadGCThreshold(ctx, batch)
+		gcThreshold, err := sl.LoadGCThreshold(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}
 		if gcThreshold.IsEmpty() {
 			log.VEventf(ctx, 1, "LHS's GCThreshold of split is not set")
+		}
+
+		// We're about to write the initial state for the replica. We migrated
+		// the formerly replicated truncated state into unreplicated keyspace
+		// in 19.1, but this range may still be using the replicated version
+		// and we need to make a decision about what to use for the RHS that
+		// is consistent across the followers: do for the RHS what the LHS
+		// does: if the LHS has the legacy key, initialize the RHS with a
+		// legacy key as well.
+		//
+		// See VersionUnreplicatedRaftTruncatedState.
+		truncStateType := stateloader.TruncatedStateUnreplicated
+		if found, err := storage.MVCCGetProto(
+			ctx,
+			batch,
+			keys.RaftTruncatedStateLegacyKey(rec.GetRangeID()),
+			hlc.Timestamp{},
+			nil,
+			storage.MVCCGetOptions{},
+		); err != nil {
+			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load legacy truncated state")
+		} else if found {
+			truncStateType = stateloader.TruncatedStateLegacyReplicated
+		}
+
+		replicaVersion, err := sl.LoadVersion(ctx, rec.Engine())
+		if err != nil {
+			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}
 
 		// Writing the initial state is subtle since this also seeds the Raft
@@ -1012,13 +1035,10 @@ func splitTriggerHelper(
 		// HardState via a call to synthesizeRaftState. Here, we only call
 		// writeInitialReplicaState which essentially writes a ReplicaState
 		// only.
-		replicaVersion, err := sl.LoadVersion(ctx, batch)
-		if err != nil {
-			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load replica version")
-		}
+
 		*h.AbsPostSplitRight(), err = stateloader.WriteInitialReplicaState(
 			ctx, batch, *h.AbsPostSplitRight(), split.RightDesc, rightLease,
-			*gcThreshold, replicaVersion,
+			*gcThreshold, truncStateType, replicaVersion,
 		)
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to write initial Replica state")
@@ -1083,7 +1103,8 @@ func mergeTrigger(
 	// directly in this method. The primary reason why these are different is
 	// because the RHS's persistent read summary may not be up-to-date, as it is
 	// not updated by the SubsumeRequest.
-	if merge.RightReadSummary != nil {
+	readSumActive := rec.ClusterSettings().Version.IsActive(ctx, clusterversion.PriorReadSummaries)
+	if merge.RightReadSummary != nil && readSumActive {
 		mergedSum := merge.RightReadSummary.Clone()
 		if priorSum, err := readsummary.Load(ctx, batch, rec.GetRangeID()); err != nil {
 			return result.Result{}, err

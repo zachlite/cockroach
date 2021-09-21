@@ -11,7 +11,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -23,7 +22,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/docgen/extract"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -51,8 +49,7 @@ func init() {
 
 	// BNF vars.
 	var (
-		addr          string
-		bnfAPITimeout time.Duration
+		addr string
 	)
 
 	cmdBNF := &cobra.Command{
@@ -61,7 +58,7 @@ func init() {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			bnfDir := args[0]
-			bnf, err := runBNF(addr, bnfAPITimeout)
+			bnf, err := runBNF(addr)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -83,18 +80,17 @@ func init() {
 				write(filepath.Join(bnfDir, name+".bnf"), g)
 			}
 
-			stmtSpecs, err := getAllStmtSpecs(addr, bnfAPITimeout)
-			if err != nil {
-				log.Fatal(err)
-			}
-			for _, s := range stmtSpecs {
+			for _, s := range specs {
 				if filterRE.MatchString(s.name) == invertMatch {
 					continue
 				}
 				if !quiet {
 					fmt.Println("processing", s.name)
 				}
-				g, err := runParse(br(), s.inline, s.GetStatement(), false, s.nosplit, s.match, s.exclude)
+				if s.stmt == "" {
+					s.stmt = s.name
+				}
+				g, err := runParse(br(), s.inline, s.stmt, false, s.nosplit, s.match, s.exclude)
 				if err != nil {
 					log.Fatalf("%s: %+v", s.name, err)
 				}
@@ -133,14 +129,11 @@ func init() {
 	}
 
 	cmdBNF.Flags().StringVar(&addr, "addr", "./pkg/sql/parser/sql.y", "Location of sql.y file. Can also specify an http address.")
-	cmdBNF.Flags().DurationVar(&bnfAPITimeout, "timeout", time.Second*120, "Timeout in seconds for bnf HTTP Api, "+
-		"only relevant when the web api is used; default 120s.")
 
 	// SVG vars.
 	var (
-		maxWorkers         int
-		railroadJar        string
-		railroadAPITimeout time.Duration
+		maxWorkers  int
+		railroadJar string
 	)
 
 	cmdSVG := &cobra.Command{
@@ -172,14 +165,10 @@ func init() {
 			}
 
 			specMap := make(map[string]stmtSpec)
-			stmtSpecs, err := getAllStmtSpecs(addr, bnfAPITimeout)
-			if err != nil {
-				log.Fatal(err)
-			}
-			for _, s := range stmtSpecs {
+			for _, s := range specs {
 				specMap[s.name] = s
 			}
-			if len(stmtSpecs) != len(specMap) {
+			if len(specs) != len(specMap) {
 				log.Fatal("duplicate spec name")
 			}
 
@@ -206,7 +195,7 @@ func init() {
 					}
 					defer f.Close()
 
-					rr, err := runRR(f, railroadJar, railroadAPITimeout)
+					rr, err := runRR(f, railroadJar)
 					if err != nil {
 						log.Fatalf("%s: %s\n", m, err)
 					}
@@ -257,8 +246,6 @@ func init() {
 
 	cmdSVG.Flags().IntVar(&maxWorkers, "max-workers", 1, "maximum number of concurrent workers")
 	cmdSVG.Flags().StringVar(&railroadJar, "railroad", "", "Location of Railroad.jar; empty to use website")
-	cmdSVG.Flags().DurationVar(&railroadAPITimeout, "timeout", time.Second*120, "Timeout in seconds for railroad HTTP Api, "+
-		"only relevant when the web api is used; default 120s.")
 
 	diagramCmd := &cobra.Command{
 		Use:   "grammar",
@@ -287,17 +274,8 @@ type stmtSpec struct {
 	nosplit        bool
 }
 
-// GetStatement returns the sql statement of a stmtSpec.
-func (s stmtSpec) GetStatement() string {
-	if s.stmt == "" {
-		return s.name
-	}
-
-	return s.stmt
-}
-
-func runBNF(addr string, bnfAPITimeout time.Duration) ([]byte, error) {
-	return extract.GenerateBNF(addr, bnfAPITimeout)
+func runBNF(addr string) ([]byte, error) {
+	return extract.GenerateBNF(addr)
 }
 
 func runParse(
@@ -320,14 +298,14 @@ func runParse(
 	return b, err
 }
 
-func runRR(r io.Reader, railroadJar string, railroadAPITimeout time.Duration) ([]byte, error) {
+func runRR(r io.Reader, railroadJar string) ([]byte, error) {
 	b, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
 	var html []byte
 	if railroadJar == "" {
-		html, err = extract.GenerateRRNet(b, railroadAPITimeout)
+		html, err = extract.GenerateRRNet(b)
 	} else {
 		html, err = extract.GenerateRRJar(railroadJar, b)
 	}
@@ -373,15 +351,6 @@ var specs = []stmtSpec{
 		unlink:  []string{"table_name"},
 	},
 	{
-		name:   "alter_database_primary_region",
-		stmt:   "alter_database_primary_region_stmt",
-		inline: []string{"primary_region_clause", "opt_equal"},
-	},
-	{
-		name: "alter_database_drop_region",
-		stmt: "alter_database_drop_region_stmt",
-	},
-	{
 		name:   "alter_primary_key",
 		stmt:   "alter_onetable_stmt",
 		inline: []string{"alter_table_cmds", "alter_table_cmd", "opt_hash_sharded"},
@@ -406,15 +375,8 @@ var specs = []stmtSpec{
 		unlink: []string{"name", "password"},
 	},
 	{
-		name:    "alter_schema",
-		stmt:    "alter_schema_stmt",
-		inline:  []string{"qualifiable_schema_name"},
-		nosplit: true,
-	},
-	{
-		name:    "alter_sequence",
-		stmt:    "alter_sequence_stmt",
-		inline:  []string{"alter_rename_sequence_stmt", "alter_sequence_options_stmt", "alter_sequence_set_schema_stmt", "alter_sequence_owner_stmt", "sequence_option_list", "sequence_option_elem"},
+		name:    "alter_sequence_options_stmt",
+		inline:  []string{"sequence_option_list", "sequence_option_elem"},
 		replace: map[string]string{"relation_expr": "sequence_name", "signed_iconst64": "integer", "column_path": "column_name"},
 		unlink:  []string{"integer", "sequence_name", "column_path"},
 		nosplit: true,
@@ -439,8 +401,8 @@ var specs = []stmtSpec{
 	},
 	{
 		name:    "alter_view",
-		stmt:    "alter_view_stmt",
-		inline:  []string{"alter_rename_view_stmt", "alter_view_set_schema_stmt", "alter_view_owner_stmt", "opt_transaction"},
+		stmt:    "alter_rename_view_stmt",
+		inline:  []string{"opt_transaction"},
 		replace: map[string]string{"relation_expr": "view_name", "qualified_name": "name"}, unlink: []string{"view_name", "name"},
 	},
 	{
@@ -479,20 +441,25 @@ var specs = []stmtSpec{
 	{
 		name:   "backup",
 		stmt:   "backup_stmt",
-		inline: []string{"opt_backup_targets", "opt_with_backup_options", "opt_as_of_clause", "as_of_clause", "backup_options_list"},
-		match:  []*regexp.Regexp{regexp.MustCompile("'BACKUP' targets 'INTO'")},
+		inline: []string{"table_pattern_list", "name_list", "opt_as_of_clause", "opt_incremental", "opt_with_options", "as_of_clause", "opt_with_backup_options"},
+		match:  []*regexp.Regexp{regexp.MustCompile("'BACKUP'")},
 		replace: map[string]string{
-			"targets":                        "( | 'TABLE' table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
-			"string_or_placeholder_opt_list": "( destination | '(' partitioned_backup_location ( ',' partitioned_backup_location )* ')' )",
-			"'INTO'":                         "'INTO' ( | subdirectory 'IN' | 'LATEST' 'IN')",
+			"opt_backup_":                                     "",
+			"non_reserved_word_or_sconst":                     "destination",
+			"'AS' 'OF' 'SYSTEM' 'TIME' a_expr":                "'AS OF SYSTEM TIME' timestamp",
+			"'INCREMENTAL' 'FROM' string_or_placeholder_list": "'INCREMENTAL FROM' full_backup_location ( | ',' incremental_backup_location ( ',' incremental_backup_location )* )",
+			"'WITH' 'OPTIONS' '(' kv_option_list ')'":         "",
+			"targets":                        "( ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
+			"string_or_placeholder_opt_list": "destination",
+			"scont_or_placeholder":           "destination",
 			"sconst_or_placeholder":          "subdirectory",
-			"a_expr":                         "timestamp",
 		},
-		unlink:  []string{"targets", "subdirectory", "destination", "timestamp", "partitioned_backup_location"},
-		exclude: []*regexp.Regexp{regexp.MustCompile("'IN'")},
+		unlink:  []string{"destination", "timestamp", "full_backup_location", "incremental_backup_location", "destination"},
+		exclude: []*regexp.Regexp{regexp.MustCompile("'INTO'")},
 	},
 	{
-		name: "begin_stmt",
+		name: "begin_transaction",
+		stmt: "begin_stmt",
 		inline: []string{
 			"opt_transaction",
 			"begin_transaction",
@@ -535,7 +502,7 @@ var specs = []stmtSpec{
 	{
 		name:   "col_qualification",
 		stmt:   "col_qualification",
-		inline: []string{"col_qualification_elem", "opt_hash_sharded", "generated_always_as", "generated_by_default_as"},
+		inline: []string{"col_qualification_elem", "opt_hash_sharded", "generated_as"},
 		replace: map[string]string{
 			"'=' a_expr": "'=' n_buckets",
 		},
@@ -552,11 +519,6 @@ var specs = []stmtSpec{
 		stmt:   "commit_stmt",
 		inline: []string{"opt_transaction"},
 		match:  []*regexp.Regexp{regexp.MustCompile("'COMMIT'|'END'")},
-	},
-	{
-		name:    "copy_from_stmt",
-		inline:  []string{"opt_with_copy_options", "copy_options_list", "opt_with", "opt_where_clause", "where_clause"},
-		exclude: []*regexp.Regexp{regexp.MustCompile("'WHERE'")},
 	},
 	{
 		name:    "cancel_job",
@@ -585,13 +547,10 @@ var specs = []stmtSpec{
 		unlink:  []string{"session_id"},
 	},
 	{
-		name:   "create_database_stmt",
-		inline: []string{"opt_with", "opt_encoding_clause", "opt_connection_limit", "opt_equal", "opt_primary_region_clause", "primary_region_clause", "opt_regions_list", "region_or_regions", "opt_survival_goal_clause", "survival_goal_clause", "opt_equal"},
-		replace: map[string]string{
-			"non_reserved_word_or_sconst": "encoding",
-			"signed_iconst":               "limit"},
-		unlink:  []string{"non_reserved_word_or_sconst", "signed_iconst", "encoding", "limit"},
-		nosplit: true,
+		name:    "create_database_stmt",
+		inline:  []string{"opt_encoding_clause", "opt_connection_limit", "opt_equal"},
+		replace: map[string]string{"'SCONST'": "encoding"},
+		unlink:  []string{"name", "encoding"},
 	},
 	{
 		name:   "create_changefeed_stmt",
@@ -660,11 +619,6 @@ var specs = []stmtSpec{
 			"targets":                           "( | ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )"},
 	},
 	{
-		name:    "create_schema_stmt",
-		inline:  []string{"qualifiable_schema_name", "opt_schema_name", "opt_name"},
-		nosplit: true,
-	},
-	{
 		name:    "create_sequence_stmt",
 		inline:  []string{"opt_sequence_option_list", "sequence_option_list", "sequence_option_elem"},
 		replace: map[string]string{"signed_iconst64": "integer", "any_name": "sequence_name", "column_path": "column_name"},
@@ -684,12 +638,6 @@ var specs = []stmtSpec{
 		name:    "create_table_stmt",
 		inline:  []string{"opt_table_elem_list", "table_elem_list", "table_elem", "opt_table_with", "opt_create_table_on_commit"},
 		nosplit: true,
-	},
-	{
-		name:    "opt_locality",
-		inline:  []string{"locality"},
-		replace: map[string]string{" name": "column_name"},
-		unlink:  []string{"column_name"},
 	},
 	{
 		name: "create_type",
@@ -788,12 +736,6 @@ var specs = []stmtSpec{
 		unlink: []string{"sequence_name"},
 	},
 	{
-		name:    "drop_schema",
-		stmt:    "drop_schema_stmt",
-		inline:  []string{"opt_drop_behavior", "qualifiable_schema_name"},
-		nosplit: true,
-	},
-	{
 		name:   "drop_stmt",
 		inline: []string{"table_name_list", "drop_ddl_stmt"},
 	},
@@ -869,7 +811,7 @@ var specs = []stmtSpec{
 		stmt:   "explain_stmt",
 		inline: []string{"explain_option_list"},
 		replace: map[string]string{
-			"explain_option_name": "( 'PLAN' | 'DISTSQL' | 'DEBUG' )",
+			"explain_option_name": "( 'DISTSQL' | 'DEBUG' )",
 		},
 		unlink: []string{"'DISTSQL'"},
 	},
@@ -887,13 +829,31 @@ var specs = []stmtSpec{
 		inline: []string{"name_list"},
 	},
 	{
-		name:   "grant_stmt",
-		inline: []string{"privileges", "opt_privileges_clause"},
-		exclude: []*regexp.Regexp{
-			regexp.MustCompile("'TYPE' target_types"),
-			regexp.MustCompile("'SCHEMA' schema_name_list"),
+		name:   "grant_privileges",
+		stmt:   "grant_stmt",
+		inline: []string{"privileges", "privilege_list", "privilege", "table_pattern_list", "name_list"},
+		replace: map[string]string{
+			"( name | 'CREATE' | 'GRANT' | 'SELECT' )": "( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' )",
+			"table_pattern":                     "table_name",
+			"'TO' ( ( name ) ( ( ',' name ) )*": "'TO' ( ( user_name ) ( ( ',' user_name ) )*",
+			"| 'GRANT' ( ( ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) ( ( ',' ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) )* ) 'TO' ( ( user_name ) ( ( ',' user_name ) )* )": "",
+			"'WITH' 'ADMIN' 'OPTION'": "",
+			"targets":                 "( ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
 		},
-		unlink: []string{"targets"},
+		unlink:  []string{"table_name", "database_name", "user_name"},
+		nosplit: true,
+	},
+	{
+		name: "grant_roles",
+		stmt: "grant_stmt",
+		exclude: []*regexp.Regexp{
+			// Ignore other grant statements that are granting privileges.
+			regexp.MustCompile("'GRANT' privileges"),
+		}, replace: map[string]string{
+			"'GRANT' privilege_list 'TO' name_list 'WITH' 'ADMIN' 'OPTION'": "'GRANT' ( role_name ) ( ( ',' role_name ) )* 'TO' ( user_name ) ( ( ',' user_name ) )* 'WITH' 'ADMIN' 'OPTION'",
+			"| 'GRANT' privilege_list 'TO' name_list":                       "'GRANT' ( role_name ) ( ( ',' role_name ) )* 'TO' ( user_name ) ( ( ',' user_name ) )*",
+		},
+		unlink: []string{"role_name", "user_name"},
 	},
 	{
 		name: "foreign_key_column_level",
@@ -936,7 +896,7 @@ var specs = []stmtSpec{
 		replace: map[string]string{
 			"table_option":          "table_name",
 			"insert_column_item":    "column_name",
-			"import_format":         "( 'CSV' | 'AVRO' | 'DELIMITED' )",
+			"import_format":         "'CSV'",
 			"string_or_placeholder": "file_location",
 			"kv_option":             "option '=' value"},
 		unlink: []string{"table_name", "column_name", "file_location", "option", "value"},
@@ -1074,18 +1034,14 @@ var specs = []stmtSpec{
 		name:   "restore",
 		stmt:   "restore_stmt",
 		inline: []string{"opt_as_of_clause", "as_of_clause", "opt_with_restore_options"},
-		match:  []*regexp.Regexp{regexp.MustCompile("'FROM'")},
 		replace: map[string]string{
 			"a_expr": "timestamp",
 			"'WITH' 'OPTIONS' '(' kv_option_list ')'": "",
-			"targets":                                "( 'TABLE' table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
+			"targets":                                "( ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
 			"string_or_placeholder":                  "subdirectory",
-			"list_of_string_or_placeholder_opt_list": "( destination | '(' partitioned_backup_location ( ',' partitioned_backup_location )* ')' )",
+			"list_of_string_or_placeholder_opt_list": "full_backup_location ( | partitioned_backup_location ( ',' partitioned_backup_location )*)",
 		},
-		unlink: []string{"subdirectory", "timestamp", "destination", "partitioned_backup_location"},
-		exclude: []*regexp.Regexp{
-			regexp.MustCompile("'REPLICATION' 'STREAM' 'FROM'"),
-		},
+		unlink: []string{"timestamp", "full_backup_location", "incremental_backup_location"},
 	},
 	{
 		name:    "resume_job",
@@ -1100,13 +1056,33 @@ var specs = []stmtSpec{
 		unlink:  []string{"schedule_id"},
 	},
 	{
-		name:   "revoke_stmt",
-		inline: []string{"privileges", "opt_privileges_clause"},
-		exclude: []*regexp.Regexp{
-			regexp.MustCompile("'TYPE' target_types"),
-			regexp.MustCompile("'SCHEMA' schema_name_list"),
+		name:   "revoke_privileges",
+		stmt:   "revoke_stmt",
+		inline: []string{"privileges", "privilege_list", "privilege", "name_list"},
+		replace: map[string]string{
+			"( name | 'CREATE' | 'GRANT' | 'SELECT' )": "( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' )",
+			"targets":                             "( ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
+			"'FROM' ( ( name ) ( ( ',' name ) )*": "'FROM' ( ( user_name ) ( ( ',' user_name ) )*",
+			"| 'REVOKE' ( ( ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) ( ( ',' ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) )* ) 'FROM' ( ( user_name ) ( ( ',' user_name ) )* )":  "",
+			"| 'REVOKE'  ( ( ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) ( ( ',' ( 'CREATE' | 'GRANT' | 'SELECT' | 'DROP' | 'INSERT' | 'DELETE' | 'UPDATE' ) ) )* ) 'FROM' ( ( user_name ) ( ( ',' user_name ) )* )": "",
+			"'ADMIN' 'OPTION' 'FOR'": "",
 		},
-		unlink: []string{"targets"},
+		unlink:  []string{"table_name", "database_name", "user_name"},
+		nosplit: true,
+	},
+	{
+		name: "revoke_roles",
+		stmt: "revoke_stmt",
+		exclude: []*regexp.Regexp{
+			// Ignore other grant statements that are granting privileges.
+			regexp.MustCompile("'REVOKE' privileges"),
+		},
+		replace: map[string]string{
+			"'REVOKE' privileges 'ON' targets 'FROM' name_list":               "",
+			"'REVOKE' 'ADMIN' 'OPTION' 'FOR' privilege_list 'FROM' name_list": "'REVOKE' 'ADMIN' 'OPTION' 'FOR' ( role_name ) ( ( ',' role_name ) )* 'FROM' ( user_name ) ( ( ',' user_name ) )*",
+			"| 'REVOKE' privilege_list 'FROM' name_list":                      "'REVOKE' ( role_name ) ( ( ',' role_name ) )* 'FROM' ( user_name ) ( ( ',' user_name ) )*",
+		},
+		unlink: []string{"role_name", "user_name"},
 	},
 	{
 		name:    "rollback_transaction",
@@ -1287,20 +1263,13 @@ var specs = []stmtSpec{
 		unlink:  []string{"job_id"},
 	},
 	{
-		name: "show_grants_stmt",
-		inline: []string{
-			"opt_on_targets_roles",
-			"for_grantee_clause",
-			"targets_roles",
-			"name_list",
-			"schema_name_list",
-			"type_name_list",
-		},
+		name:   "show_grants_stmt",
+		inline: []string{"name_list", "opt_on_targets_roles", "for_grantee_clause", "name_list"},
 		replace: map[string]string{
-			"targets":                 "( | 'TABLE' table_name ( ( ',' table_name ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
-			"qualifiable_schema_name": "schema_name",
+			"targets_roles":                "( 'ROLE' | 'ROLE' name ( ',' name ) )* | ( 'TABLE' | ) table_pattern ( ( ',' table_pattern ) )* | 'DATABASE' database_name ( ( ',' database_name ) )* )",
+			"'FOR' name ( ( ',' name ) )*": "'FOR' user_name ( ( ',' user_name ) )*",
 		},
-		unlink: []string{"table_name", "database_name", "schema_name", "name"},
+		unlink: []string{"role_name", "table_name", "database_name", "user_name"},
 	},
 	{
 		name:   "show_indexes",
@@ -1327,10 +1296,6 @@ var specs = []stmtSpec{
 	},
 	{
 		name: "show_partitions_stmt",
-	},
-	{
-		name: "show_regions",
-		stmt: "show_regions_stmt",
 	},
 	{
 		name:   "show_statements",
@@ -1401,7 +1366,7 @@ var specs = []stmtSpec{
 	},
 	{
 		name:   "show_zone_stmt",
-		inline: []string{"opt_partition", "table_index_name", "partition", "from_with_implicit_for_alias"},
+		inline: []string{"opt_partition", "table_index_name", "partition"},
 	},
 	{
 		name:   "sort_clause",
@@ -1518,73 +1483,6 @@ var specs = []stmtSpec{
 		name:   "opt_frame_clause",
 		inline: []string{"frame_extent"},
 	},
-}
-
-// getAllStmtSpecs returns a slice of stmtSpecs for all sql.y statements that
-// should have a diagram generated for.
-// getAllStmtSpecs appends to the "specs" slice any sql.y statements that do
-// not have an entry in specs but are not specified to be skipped.
-func getAllStmtSpecs(sqlGrammarFile string, bnfAPITimeout time.Duration) ([]stmtSpec, error) {
-	sqlStmts := make(map[string]struct{})
-	// Map all the sql stmts that are defined in specs.
-	for _, s := range specs {
-		sqlStmts[s.GetStatement()] = struct{}{}
-	}
-
-	file, err := os.Open(sqlGrammarFile)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	bnf, err := runBNF(sqlGrammarFile, bnfAPITimeout)
-	if err != nil {
-		return nil, err
-	}
-
-	br := func() io.Reader {
-		return bytes.NewReader(bnf)
-	}
-
-	grammar, err := extract.ParseGrammar(br())
-	if err != nil {
-		return nil, err
-	}
-
-	stmtRegex := regexp.MustCompile(`%type\s*<tree.Statement>\s*(.*)$`)
-
-	scanner := bufio.NewScanner(file)
-	if err != nil {
-		return nil, err
-	}
-	for scanner.Scan() {
-		text := scanner.Text()
-		if matches := stmtRegex.FindAllStringSubmatch(text, -1); len(matches) > 0 {
-			for _, match := range matches {
-				// The second submatch does not include <tree.Statement>.
-				// We want to get only the stmt names.
-				stmts := strings.Split(match[1], " ")
-				for _, stmt := range stmts {
-					// If the statement does not appear in grammar, the statement
-					// has no branches that are required to be documented, we can
-					// skip it.
-					if _, ok := grammar[stmt]; !ok {
-						continue
-					}
-
-					// If the statement is not defined in specs, create an entry.
-					if _, found := sqlStmts[stmt]; !found {
-						specs = append(specs, stmtSpec{
-							name: stmt,
-						})
-						sqlStmts[stmt] = struct{}{}
-					}
-				}
-			}
-		}
-	}
-
-	return specs, nil
 }
 
 // regList is a common regex used when removing loops from alter and drop

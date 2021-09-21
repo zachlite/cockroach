@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -96,17 +95,17 @@ func TestMergeJoinCrossProduct(t *testing.T) {
 	leftHJSource := colexectestutils.NewChunkingBatchSource(testAllocator, typs, colsLeft, nTuples)
 	rightHJSource := colexectestutils.NewChunkingBatchSource(testAllocator, typs, colsRight, nTuples)
 	mj, err := NewMergeJoinOp(
-		testAllocator, execinfra.DefaultMemoryLimit, queueCfg,
+		testAllocator, colexecop.DefaultMemoryLimit, queueCfg,
 		colexecop.NewTestingSemaphore(mjFDLimit), descpb.InnerJoin,
 		leftMJSource, rightMJSource, typs, typs,
 		[]execinfrapb.Ordering_Column{{ColIdx: 0, Direction: execinfrapb.Ordering_Column_ASC}},
 		[]execinfrapb.Ordering_Column{{ColIdx: 0, Direction: execinfrapb.Ordering_Column_ASC}},
-		testDiskAcc, evalCtx,
+		testDiskAcc,
 	)
 	if err != nil {
 		t.Fatal("error in merge join op constructor", err)
 	}
-	mj.Init(ctx)
+	mj.Init()
 	hj := NewHashJoiner(
 		testAllocator, testAllocator, HashJoinerSpec{
 			JoinType: descpb.InnerJoin,
@@ -116,17 +115,17 @@ func TestMergeJoinCrossProduct(t *testing.T) {
 			Right: hashJoinerSourceSpec{
 				EqCols: []uint32{0}, SourceTypes: typs,
 			},
-		}, leftHJSource, rightHJSource, HashJoinerInitialNumBuckets,
+		}, leftHJSource, rightHJSource, HashJoinerInitialNumBuckets, colexecop.DefaultMemoryLimit,
 	)
-	hj.Init(ctx)
+	hj.Init()
 
 	var mjOutputTuples, hjOutputTuples colexectestutils.Tuples
-	for b := mj.Next(); b.Length() != 0; b = mj.Next() {
+	for b := mj.Next(ctx); b.Length() != 0; b = mj.Next(ctx) {
 		for i := 0; i < b.Length(); i++ {
 			mjOutputTuples = append(mjOutputTuples, colexectestutils.GetTupleFromBatch(b, i))
 		}
 	}
-	for b := hj.Next(); b.Length() != 0; b = hj.Next() {
+	for b := hj.Next(ctx); b.Length() != 0; b = hj.Next(ctx) {
 		for i := 0; i < b.Length(); i++ {
 			hjOutputTuples = append(hjOutputTuples, colexectestutils.GetTupleFromBatch(b, i))
 		}
@@ -189,7 +188,7 @@ func BenchmarkMergeJoiner(b *testing.B) {
 	getNewMergeJoiner := func(leftSource, rightSource colexecop.Operator) colexecop.Operator {
 		benchMemAccount.Clear(ctx)
 		base, err := newMergeJoinBase(
-			colmem.NewAllocator(ctx, &benchMemAccount, testColumnFactory), execinfra.DefaultMemoryLimit, queueCfg, colexecop.NewTestingSemaphore(mjFDLimit),
+			colmem.NewAllocator(ctx, &benchMemAccount, testColumnFactory), colexecop.DefaultMemoryLimit, queueCfg, colexecop.NewTestingSemaphore(mjFDLimit),
 			descpb.InnerJoin, leftSource, rightSource, sourceTypes, sourceTypes,
 			[]execinfrapb.Ordering_Column{{ColIdx: 0, Direction: execinfrapb.Ordering_Column_ASC}},
 			[]execinfrapb.Ordering_Column{{ColIdx: 0, Direction: execinfrapb.Ordering_Column_ASC}},
@@ -263,10 +262,10 @@ func BenchmarkMergeJoiner(b *testing.B) {
 					leftSource := colexectestutils.NewFiniteChunksSource(testAllocator, leftBatch, sourceTypes, nBatches, 1)
 					rightSource := colexectestutils.NewFiniteChunksSource(testAllocator, rightBatch, sourceTypes, nBatches, 1)
 					s := getNewMergeJoiner(leftSource, rightSource)
-					s.Init(ctx)
+					s.Init()
 
 					b.StartTimer()
-					for b := s.Next(); b.Length() != 0; b = s.Next() {
+					for b := s.Next(ctx); b.Length() != 0; b = s.Next(ctx) {
 					}
 					b.StopTimer()
 				}

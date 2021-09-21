@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -979,10 +980,14 @@ func TestServeIndexHTML(t *testing.T) {
 `
 
 	linkInFakeUI := func() {
-		ui.HaveUI = true
+		ui.Asset = func(string) (_ []byte, _ error) { return }
+		ui.AssetDir = func(name string) (_ []string, _ error) { return }
+		ui.AssetInfo = func(name string) (_ os.FileInfo, _ error) { return }
 	}
 	unlinkFakeUI := func() {
-		ui.HaveUI = false
+		ui.Asset = nil
+		ui.AssetDir = nil
+		ui.AssetInfo = nil
 	}
 
 	t.Run("Insecure mode", func(t *testing.T) {
@@ -1120,8 +1125,6 @@ func TestGWRuntimeMarshalProto(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	r, err := http.NewRequest(http.MethodGet, "nope://unused", strings.NewReader(""))
-	require.NoError(t, err)
 	// Regression test against:
 	// https://github.com/cockroachdb/cockroach/issues/49842
 	runtime.DefaultHTTPError(
@@ -1129,7 +1132,7 @@ func TestGWRuntimeMarshalProto(t *testing.T) {
 		runtime.NewServeMux(),
 		&protoutil.ProtoPb{}, // calls XXX_size
 		&httptest.ResponseRecorder{},
-		r,
+		nil, /* request */
 		errors.New("boom"),
 	)
 }
@@ -1225,29 +1228,4 @@ func TestSQLDecommissioned(t *testing.T) {
 		_, err = sqlClient.Query("SELECT * FROM crdb_internal.tables")
 		return err != nil
 	}, 10*time.Second, 100*time.Millisecond, "timed out waiting for queries to error")
-}
-
-func TestAssertEnginesEmpty(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	eng, err := storage.Open(ctx, storage.InMemory())
-	require.NoError(t, err)
-	defer eng.Close()
-
-	require.NoError(t, assertEnginesEmpty([]storage.Engine{eng}))
-
-	require.NoError(t, storage.MVCCPutProto(ctx, eng, nil, keys.StoreClusterVersionKey(),
-		hlc.Timestamp{}, nil, &roachpb.Version{Major: 21, Minor: 1, Internal: 122}))
-	require.NoError(t, assertEnginesEmpty([]storage.Engine{eng}))
-
-	batch := eng.NewBatch()
-	key := storage.MVCCKey{
-		Key:       []byte{0xde, 0xad, 0xbe, 0xef},
-		Timestamp: hlc.Timestamp{WallTime: 100},
-	}
-	require.NoError(t, batch.PutMVCC(key, []byte("foo")))
-	require.NoError(t, batch.Commit(false))
-	require.Error(t, assertEnginesEmpty([]storage.Engine{eng}))
 }

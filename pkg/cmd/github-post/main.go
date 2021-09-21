@@ -65,7 +65,7 @@ func defaultFormatter(ctx context.Context, f failure) (issues.IssueFormatter, is
 		Message:             f.testMessage,
 		Artifacts:           "/", // best we can do for unit tests
 		AuthorEmail:         authorEmail,
-		ReproductionCommand: issues.ReproductionCommandFromString(repro),
+		ReproductionCommand: repro,
 		Mention:             mentions,
 		ProjectColumnID:     projColID,
 	}
@@ -575,7 +575,7 @@ func formatPebbleMetamorphicIssue(
 		PackageName:         f.packageName,
 		Message:             f.testMessage,
 		Artifacts:           "meta",
-		ReproductionCommand: issues.ReproductionCommandFromString(repro),
+		ReproductionCommand: repro,
 		ExtraLabels:         []string{"metamorphic-failure"},
 	}
 }

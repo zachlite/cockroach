@@ -104,10 +104,6 @@ func (ib *indexBackfiller) OutputTypes() []*types.T {
 	return nil
 }
 
-func (ib *indexBackfiller) MustBeStreaming() bool {
-	return false
-}
-
 // indexEntryBatch represents a "batch" of index entries which are constructed
 // and sent for ingestion. Breaking up the index entries into these batches
 // serves for better progress reporting as explained in the ingestIndexEntries
@@ -215,7 +211,7 @@ func (ib *indexBackfiller) ingestIndexEntries(
 	// When the bulk adder flushes, the spans which were previously marked as
 	// "added" can now be considered "completed", and be sent back to the
 	// coordinator node as part of the next progress report.
-	adder.SetOnFlush(func(_ roachpb.BulkOpSummary) {
+	adder.SetOnFlush(func() {
 		mu.Lock()
 		defer mu.Unlock()
 		mu.completedSpans = append(mu.completedSpans, mu.addedSpans...)
@@ -358,7 +354,8 @@ func (ib *indexBackfiller) Run(ctx context.Context) {
 	progCh := make(chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress)
 
 	semaCtx := tree.MakeSemaContext()
-	if err := ib.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, ib.flowCtx.NewEvalCtx()); err != nil {
+	if err := ib.out.Init(&execinfrapb.PostProcessSpec{}, nil, &semaCtx, ib.flowCtx.NewEvalCtx(),
+		ib.output); err != nil {
 		ib.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}
@@ -432,9 +429,7 @@ func (ib *indexBackfiller) buildIndexEntryBatch(
 	start := timeutil.Now()
 	var entries []rowenc.IndexEntry
 	if err := ib.flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetFixedTimestamp(ctx, readAsOf); err != nil {
-			return err
-		}
+		txn.SetFixedTimestamp(ctx, readAsOf)
 
 		// TODO(knz): do KV tracing in DistSQL processors.
 		var err error

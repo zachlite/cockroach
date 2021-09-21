@@ -59,7 +59,7 @@ func (p *planner) RenameTable(ctx context.Context, n *tree.RenameTable) (planNod
 		toRequire = tree.ResolveRequireSequenceDesc
 	}
 
-	_, tableDesc, err := p.ResolveMutableTableDescriptor(ctx, &oldTn, !n.IfExists, toRequire)
+	tableDesc, err := p.ResolveMutableTableDescriptor(ctx, &oldTn, !n.IfExists, toRequire)
 	if err != nil {
 		return nil, err
 	}
@@ -107,24 +107,20 @@ func (n *renameTableNode) startExec(params runParams) error {
 	prevDBID := tableDesc.ParentID
 
 	var targetDbDesc catalog.DatabaseDescriptor
-	var targetSchemaDesc catalog.SchemaDescriptor
+	var targetSchemaDesc catalog.ResolvedSchema
 	// If the target new name has no qualifications, then assume that the table
 	// is intended to be renamed into the same database and schema.
 	newTn := n.newTn
 	if !newTn.ExplicitSchema && !newTn.ExplicitCatalog {
 		newTn.ObjectNamePrefix = oldTn.ObjectNamePrefix
 		var err error
-		targetDbDesc, err = p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+		_, targetDbDesc, err = p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
 			string(oldTn.CatalogName), tree.DatabaseLookupFlags{Required: true})
 		if err != nil {
 			return err
 		}
 
-		targetSchemaDesc, err = p.Descriptors().GetMutableSchemaByName(
-			ctx, p.txn, targetDbDesc, oldTn.Schema(), tree.SchemaLookupFlags{
-				Required:       true,
-				RequireMutable: true,
-			})
+		_, targetSchemaDesc, err = p.ResolveUncachedSchemaDescriptor(ctx, targetDbDesc.GetID(), oldTn.Schema(), true)
 		if err != nil {
 			return err
 		}
@@ -214,7 +210,7 @@ func (n *renameTableNode) startExec(params runParams) error {
 		params.p.txn,
 		p.ExecCfg().Codec,
 		targetDbDesc.GetID(),
-		targetSchemaDesc.GetID(),
+		targetSchemaDesc.ID,
 		newTn,
 	)
 	if err != nil {
@@ -247,7 +243,8 @@ func (n *renameTableNode) startExec(params runParams) error {
 		return err
 	}
 
-	newTbKey := catalogkeys.NewNameKeyComponents(targetDbDesc.GetID(), tableDesc.GetParentSchemaID(), newTn.Table())
+	newTbKey := catalogkv.MakeObjectNameKey(ctx, params.ExecCfg().Settings,
+		targetDbDesc.GetID(), tableDesc.GetParentSchemaID(), newTn.Table())
 
 	if err := p.writeNameKey(ctx, newTbKey, descID); err != nil {
 		return err
@@ -394,30 +391,6 @@ func (n *renameTableNode) checkForCrossDbReferences(
 		return nil
 	}
 
-	checkTypeDepForCrossDbRef := func(depID descpb.ID) error {
-		dependentObject, err := p.Descriptors().GetImmutableTypeByID(ctx, p.txn, depID,
-			tree.ObjectLookupFlags{
-				CommonLookupFlags: tree.CommonLookupFlags{
-					Required:    true,
-					AvoidCached: true,
-				}})
-		if err != nil {
-			return err
-		}
-		// No cross DB reference detected
-		if dependentObject.GetParentID() == targetDbDesc.GetID() {
-			return nil
-		}
-		return errors.WithHintf(
-			pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-				"this view will reference a type %q in another databases after rename "+
-					"(see the '%s' cluster setting)",
-				dependentObject.GetName(),
-				allowCrossDatabaseViewsSetting),
-			crossDBReferenceDeprecationHint(),
-		)
-	}
-
 	// For tables check if any outbound or inbound foreign key references would
 	// be impacted.
 	if tableDesc.IsTable() {
@@ -471,14 +444,6 @@ func (n *renameTableNode) checkForCrossDbReferences(
 				return err
 			}
 		}
-		// Check if we depend on types in a different database.
-		dependsOnTypes := tableDesc.GetDependsOnTypes()
-		for _, dependency := range dependsOnTypes {
-			err := checkTypeDepForCrossDbRef(dependency)
-			if err != nil {
-				return err
-			}
-		}
 	} else if tableDesc.IsSequence() &&
 		!allowCrossDatabaseSeqOwner.Get(&p.execCfg.Settings.SV) {
 		// For sequences check if the sequence is owned by
@@ -495,8 +460,10 @@ func (n *renameTableNode) checkForCrossDbReferences(
 }
 
 // writeNameKey writes a name key to a batch and runs the batch.
-func (p *planner) writeNameKey(ctx context.Context, nameKey catalog.NameKey, ID descpb.ID) error {
-	marshalledKey := catalogkeys.EncodeNameKey(p.ExecCfg().Codec, nameKey)
+func (p *planner) writeNameKey(
+	ctx context.Context, key catalogkeys.DescriptorKey, ID descpb.ID,
+) error {
+	marshalledKey := key.Key(p.ExecCfg().Codec)
 	b := &kv.Batch{}
 	if p.extendedEvalCtx.Tracing.KVTracingEnabled() {
 		log.VEventf(ctx, 2, "CPut %s -> %d", marshalledKey, ID)

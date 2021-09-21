@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
+	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
@@ -98,9 +98,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 		if err := os.Unsetenv("COCKROACH_EXPERIMENTAL_LINEARIZABLE"); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Unsetenv("COCKROACH_EXPERIMENTAL_SPAN_CONFIGS"); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.Unsetenv("COCKROACH_SCAN_INTERVAL"); err != nil {
 			t.Fatal(err)
 		}
@@ -128,10 +125,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 
 	// Set all the environment variables to valid values and ensure they are set
 	// correctly.
-	if err := os.Setenv("COCKROACH_EXPERIMENTAL_SPAN_CONFIGS", "true"); err != nil {
-		t.Fatal(err)
-	}
-	cfgExpected.SpanConfigsEnabled = true
 	if err := os.Setenv("COCKROACH_EXPERIMENTAL_LINEARIZABLE", "true"); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +149,6 @@ func TestReadEnvironmentVariables(t *testing.T) {
 	}
 
 	for _, envVar := range []string{
-		"COCKROACH_EXPERIMENTAL_SPAN_CONFIGS",
 		"COCKROACH_EXPERIMENTAL_LINEARIZABLE",
 		"COCKROACH_SCAN_INTERVAL",
 		"COCKROACH_SCAN_MIN_IDLE_TIME",
@@ -229,7 +221,7 @@ func TestParseBootstrapResolvers(t *testing.T) {
 		if len(resolvers) != 1 {
 			t.Fatalf("expected 1 resolver, got %# v", pretty.Formatter(resolvers))
 		}
-		host, port, err := addr.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
+		host, port, err := netutil.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -256,7 +248,7 @@ func TestParseBootstrapResolvers(t *testing.T) {
 		if len(resolvers) != 1 {
 			t.Fatalf("expected 1 resolver, got %# v", pretty.Formatter(resolvers))
 		}
-		host, port, err := addr.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
+		host, port, err := netutil.SplitHostPort(resolvers[0].Addr(), "UNKNOWN")
 		if err != nil {
 			t.Fatal(err)
 		}

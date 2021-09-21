@@ -613,6 +613,9 @@ func TestReplicaContains(t *testing.T) {
 	r.mu.state.Desc = desc
 	r.rangeStr.store(0, desc)
 
+	if statsKey := keys.RangeStatsLegacyKey(desc.RangeID); !r.ContainsKey(statsKey) {
+		t.Errorf("expected range to contain range stats key %q", statsKey)
+	}
 	if !r.ContainsKey(roachpb.Key("aa")) {
 		t.Errorf("expected range to contain key \"aa\"")
 	}
@@ -8458,8 +8461,8 @@ func TestReplicaReproposalWithNewLeaseIndexError(t *testing.T) {
 	tc.repl.mu.Lock()
 	tc.repl.mu.proposalBuf.testing.leaseIndexFilter = func(p *ProposalData) (indexOverride uint64) {
 		if v := p.ctx.Value(magicKey{}); v != nil {
-			flushAttempts := atomic.AddInt32(&curFlushAttempt, 1)
-			switch flushAttempts {
+			curFlushAttempt := atomic.AddInt32(&curFlushAttempt, 1)
+			switch curFlushAttempt {
 			case 1:
 				// This is the first time the command is being given a max lease
 				// applied index. Set the index to that of the recently applied
@@ -12186,7 +12189,7 @@ func TestTxnRecordLifecycleTransitions(t *testing.T) {
 				et.Require1PC = true
 				return sendWrappedWithErr(etH, &et)
 			},
-			expError: "could not commit in one phase as requested",
+			expError: "TransactionStatusError: could not commit in one phase as requested",
 			expTxn:   txnWithoutChanges,
 		},
 		{

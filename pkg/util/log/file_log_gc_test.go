@@ -39,7 +39,9 @@ func TestGC(t *testing.T) {
 		t.Fatal("no file sink")
 	}
 
-	testLogGC(t, fs, Info)
+	testLogGC(t, fs, func(ctx context.Context, msg string) {
+		Infof(ctx, msg)
+	})
 }
 
 func TestSecondaryGC(t *testing.T) {
@@ -61,7 +63,7 @@ func TestSecondaryGC(t *testing.T) {
 			MaxGroupSize:   &m,
 			BufferedWrites: &bf,
 		},
-		Channels: logconfig.SelectChannels(channel.OPS),
+		Channels: logconfig.ChannelList{Channels: []Channel{channel.OPS}},
 	}
 
 	// Validate and apply the config
@@ -73,7 +75,7 @@ func TestSecondaryGC(t *testing.T) {
 
 	// Find our "gctest" file sink
 	var fs *fileSink
-	require.NoError(t, logging.allSinkInfos.iterFileSinks(
+	require.NoError(t, allSinkInfos.iterFileSinks(
 		func(p *fileSink) error {
 			if strings.HasSuffix(p.prefix, "gctest") {
 				fs = p

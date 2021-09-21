@@ -105,8 +105,6 @@ func (v *encryptValue) Type() string {
 	return "string"
 }
 
-var errBinaryOrLibraryNotFound = errors.New("binary or library not found")
-
 func filepathAbs(path string) (string, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -180,7 +178,7 @@ func findBinaryOrLibrary(binOrLib string, name string) (string, error) {
 				return filepathAbs(path)
 			}
 		}
-		return "", errBinaryOrLibraryNotFound
+		return "", fmt.Errorf("failed to find %q in $PATH or any of %s", name, dirs)
 	}
 	return filepathAbs(path)
 }
@@ -207,9 +205,7 @@ func initBinariesAndLibraries() {
 	}
 
 	workload, err = findBinary(workload, "workload")
-	if errors.Is(err, errBinaryOrLibraryNotFound) {
-		fmt.Fprintln(os.Stderr, "workload binary not provided, proceeding anyway")
-	} else if err != nil {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%+v\n", err)
 		os.Exit(1)
 	}

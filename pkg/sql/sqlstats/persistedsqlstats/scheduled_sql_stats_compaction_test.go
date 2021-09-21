@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
@@ -65,8 +64,7 @@ WHERE
 
 func newTestHelper(t *testing.T) (helper *testHelper, cleanup func()) {
 	helper = &testHelper{
-		env: jobstest.NewJobSchedulerTestEnv(
-			jobstest.UseSystemTables, timeutil.Now(), tree.ScheduledSQLStatsCompactionExecutor),
+		env: jobstest.NewJobSchedulerTestEnv(jobstest.UseSystemTables, timeutil.Now()),
 	}
 
 	knobs := jobs.NewTestingKnobsWithShortIntervals()
@@ -170,27 +168,27 @@ func TestSQLStatsScheduleOperations(t *testing.T) {
 	helper, helperCleanup := newTestHelper(t)
 	defer helperCleanup()
 
-	schedID := getSQLStatsCompactionSchedule(t, helper).ScheduleID()
+	sj := getSQLStatsCompactionSchedule(t, helper)
 
 	t.Run("schedule_cannot_be_dropped", func(t *testing.T) {
-		_, err := helper.sqlDB.DB.ExecContext(ctx, "DROP SCHEDULE $1", schedID)
+		_, err := helper.sqlDB.DB.ExecContext(ctx, "DROP SCHEDULE $1", sj.ScheduleID())
 		require.True(t,
 			strings.Contains(err.Error(), persistedsqlstats.ErrScheduleUndroppable.Error()),
 			"expected to found ErrScheduleUndroppable, but found %+v", err)
 	})
 
 	t.Run("warn_schedule_paused", func(t *testing.T) {
-		helper.sqlDB.Exec(t, "PAUSE SCHEDULE $1", schedID)
-		defer helper.sqlDB.Exec(t, "RESUME SCHEDULE $1", schedID)
+		helper.sqlDB.Exec(t, "PAUSE SCHEDULE $1", sj.ScheduleID())
+		defer helper.sqlDB.Exec(t, "RESUME SCHEDULE $1", sj.ScheduleID())
 
 		helper.sqlDB.CheckQueryResults(
 			t,
-			fmt.Sprintf("SELECT schedule_status FROM [SHOW SCHEDULE %d]", schedID),
+			fmt.Sprintf("SELECT schedule_status FROM [SHOW SCHEDULE %d]", sj.ScheduleID()),
 			[][]string{{"PAUSED"}},
 		)
 
 		// Reload schedule from DB.
-		sj := getSQLStatsCompactionSchedule(t, helper)
+		sj = getSQLStatsCompactionSchedule(t, helper)
 		err := persistedsqlstats.CheckScheduleAnomaly(sj)
 		require.True(t, errors.Is(err, persistedsqlstats.ErrSchedulePaused),
 			"expected ErrSchedulePaused, but found %+v", err)
@@ -219,7 +217,7 @@ func TestSQLStatsScheduleOperations(t *testing.T) {
 			helper.sqlDB.CheckQueryResultsRetry(t,
 				fmt.Sprintf(`
 SELECT schedule_expr
-FROM system.scheduled_jobs WHERE schedule_id = %d`, schedID),
+FROM system.scheduled_jobs WHERE schedule_id = %d`, sj.ScheduleID()),
 				[][]string{{"@hourly"}},
 			)
 		})

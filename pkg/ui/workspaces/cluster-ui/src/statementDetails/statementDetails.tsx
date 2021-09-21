@@ -76,6 +76,7 @@ interface SingleStatementStatistics {
   database: string;
   distSQL: Fraction;
   vec: Fraction;
+  opt: Fraction;
   implicit_txn: Fraction;
   failed: Fraction;
   node_id: number[];
@@ -145,7 +146,7 @@ export interface StatementDetailsDispatchProps {
 export interface StatementDetailsStateProps {
   statement: SingleStatementStatistics;
   statementsError: Error | null;
-  dateRange: [Moment, Moment];
+  dateRange?: [Moment, Moment];
   nodeNames: { [nodeId: string]: string };
   nodeRegions: { [nodeId: string]: string };
   diagnosticsReports: cockroach.server.serverpb.IStatementDiagnosticsReport[];
@@ -162,7 +163,8 @@ const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 
 function statementsRequestFromProps(
   props: StatementDetailsProps,
-): cockroach.server.serverpb.StatementsRequest {
+): cockroach.server.serverpb.StatementsRequest | null {
+  if (props.isTenant || props.dateRange == null) return null;
   return new cockroach.server.serverpb.StatementsRequest({
     combined: true,
     start: Long.fromNumber(props.dateRange[0].unix()),
@@ -437,6 +439,7 @@ export class StatementDetails extends React.Component<
       app,
       distSQL,
       vec,
+      opt,
       failed,
       implicit_txn,
       database,
@@ -638,6 +641,10 @@ export class StatementDetails extends React.Component<
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Failed?</Text>
                   <Text>{renderBools(failed)}</Text>
+                </div>
+                <div className={summaryCardStylesCx("summary--card__item")}>
+                  <Text>Used cost-based optimizer?</Text>
+                  <Text>{renderBools(opt)}</Text>
                 </div>
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Distributed execution?</Text>

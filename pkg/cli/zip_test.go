@@ -159,11 +159,7 @@ func TestConcurrentZip(t *testing.T) {
 	skip.UnderShort(t)
 	skip.UnderRace(t)
 
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
+	defer log.ScopeWithoutShowLogs(t).Close(t)
 
 	ctx := context.Background()
 
@@ -250,16 +246,12 @@ create table defaultdb."../system"(x int);
 func TestUnavailableZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	skip.WithIssue(t, 53306, "flaky test")
+	defer log.Scope(t).Close(t)
 
 	skip.UnderShort(t)
 	// Race builds make the servers so slow that they report spurious
 	// unavailability.
 	skip.UnderRace(t)
-
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
 
 	// unavailableCh is used by the replica command filter
 	// to conditionally block requests and simulate unavailability.
@@ -360,16 +352,12 @@ func eraseNonDeterministicZipOutput(out string) string {
 // need the SSL certs dir to run a CLI test securely.
 func TestPartialZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.ScopeWithoutShowLogs(t).Close(t)
 
 	// We want a low timeout so that the test doesn't take forever;
 	// however low timeouts make race runs flaky with false positives.
 	skip.UnderShort(t)
 	skip.UnderRace(t)
-
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
 
 	ctx := context.Background()
 

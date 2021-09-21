@@ -339,7 +339,7 @@ var varGen = map[string]sessionVar{
 		Set: func(ctx context.Context, m sessionDataMutator, val string) error {
 			i, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "default_int_size", val)
+				return wrapSetVarError("default_int_size", val, "%v", err)
 			}
 			if i != 4 && i != 8 {
 				return pgerror.New(pgcode.InvalidParameterValue,
@@ -813,7 +813,7 @@ var varGen = map[string]sessionVar{
 		) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "extra_float_digits", s)
+				return wrapSetVarError("extra_float_digits", s, "%v", err)
 			}
 			// Note: this is the range allowed by PostgreSQL.
 			// See also the documentation around (DataConversionConfig).GetFloatPrec()
@@ -1113,7 +1113,7 @@ var varGen = map[string]sessionVar{
 		Set: func(_ context.Context, _ sessionDataMutator, s string) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "ssl_renegotiation_limit", s)
+				return wrapSetVarError("ssl_renegotiation_limit", s, "%v", err)
 			}
 			if i != 0 {
 				// See pg src/backend/utils/misc/guc.c: non-zero values are not to be supported.

@@ -101,11 +101,11 @@ func ValidateSchemaExists(
 	for _, stmt := range stmts {
 		_, err := sqlDB.Exec(stmt)
 		if expectExists {
-			require.NoErrorf(
+			require.NoError(
 				t, err, "expected schema to exist, but unable to query it, using statement: %s", stmt,
 			)
 		} else {
-			require.Errorf(
+			require.Error(
 				t, err, "expected schema to not exist, but queried it successfully, using statement: %s", stmt,
 			)
 		}

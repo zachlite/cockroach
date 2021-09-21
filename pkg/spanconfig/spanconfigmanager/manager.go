@@ -31,8 +31,7 @@ import (
 // checkReconciliationJobInterval is a cluster setting to control how often we
 // check if the span config reconciliation job exists. If it's not found, it
 // will be started. It has no effect unless
-// spanconfig.experimental_reconciliation.enabled is configured. For host
-// tenants, COCKROACH_EXPERIMENTAL_SPAN_CONFIGS needs to be additionally set.
+// spanconfig.experimental_reconciliation.enabled is configured.
 var checkReconciliationJobInterval = settings.RegisterDurationSetting(
 	"spanconfig.experimental_reconciliation_job.check_interval",
 	"the frequency at which to check if the span config reconciliation job exists (and to start it if not)",
@@ -41,9 +40,6 @@ var checkReconciliationJobInterval = settings.RegisterDurationSetting(
 )
 
 // jobEnabledSetting gates the activation of the span config reconciliation job.
-//
-// For the host tenant it has no effect unless
-// COCKROACH_EXPERIMENTAL_SPAN_CONFIGS is also set.
 var jobEnabledSetting = settings.RegisterBoolSetting(
 	"spanconfig.experimental_reconciliation_job.enabled",
 	"enable the use of the kv accessor", false)
@@ -154,12 +150,9 @@ func (m *Manager) run(ctx context.Context) {
 		timer.Reset(checkReconciliationJobInterval.Get(&m.settings.SV))
 		select {
 		case <-jobCheckCh:
-			timer.Read = true
-
 			checkJob()
 		case <-timer.C:
 			timer.Read = true
-
 			checkJob()
 		case <-m.stopper.ShouldQuiesce():
 			return

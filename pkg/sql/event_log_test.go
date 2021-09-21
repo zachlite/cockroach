@@ -660,7 +660,9 @@ func TestPerfLogging(t *testing.T) {
 			FileDefaults: logconfig.FileDefaults{
 				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &auditable},
 			},
-			Channels: logconfig.SelectChannels(channel.SQL_PERF, channel.SQL_INTERNAL_PERF),
+			Channels: logconfig.ChannelList{
+				Channels: []log.Channel{channel.SQL_PERF, channel.SQL_INTERNAL_PERF},
+			},
 		},
 	}
 	dir := sc.GetDirectory()

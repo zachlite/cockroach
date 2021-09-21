@@ -168,7 +168,6 @@ func (d *datadrivenTestState) addServer(
 		}
 		settings := cluster.MakeTestingClusterSettings()
 		sql.TempObjectCleanupInterval.Override(context.Background(), &settings.SV, duration)
-		sql.TempObjectWaitInterval.Override(context.Background(), &settings.SV, time.Millisecond)
 		params.ServerArgs.Settings = settings
 	}
 
@@ -318,12 +317,12 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 				ret := ds.noticeBuffer
 				if err != nil {
 					ret = append(ds.noticeBuffer, err.Error())
-					if pqErr := (*pq.Error)(nil); errors.As(err, &pqErr) {
-						if pqErr.Detail != "" {
-							ret = append(ret, "DETAIL: "+pqErr.Detail)
+					if err, ok := err.(*pq.Error); ok {
+						if err.Detail != "" {
+							ret = append(ret, "DETAIL: "+err.Detail)
 						}
-						if pqErr.Hint != "" {
-							ret = append(ret, "HINT: "+pqErr.Hint)
+						if err.Hint != "" {
+							ret = append(ret, "HINT: "+err.Hint)
 						}
 					}
 				}
@@ -6632,7 +6631,7 @@ type exportResumePoint struct {
 	timestamp   hlc.Timestamp
 }
 
-var withTS = hlc.Timestamp{WallTime: 1}
+var withTS = hlc.Timestamp{1, 0, false}
 var withoutTS = hlc.Timestamp{}
 
 func TestPaginatedBackupTenant(t *testing.T) {
@@ -6734,7 +6733,7 @@ func TestPaginatedBackupTenant(t *testing.T) {
 		{[]byte("/Tenant/10/Table/53/1/410/0"), []byte("/Tenant/10/Table/53/2"), withoutTS},
 		{[]byte("/Tenant/10/Table/53/1/510/0"), []byte("/Tenant/10/Table/53/2"), withoutTS},
 	} {
-		expected = append(expected, requestSpanStr(roachpb.Span{Key: resume.key, EndKey: resume.endKey}, resume.timestamp))
+		expected = append(expected, requestSpanStr(roachpb.Span{resume.key, resume.endKey}, resume.timestamp))
 	}
 	require.Equal(t, expected, exportRequestSpans)
 	resetStateVars()
@@ -6761,7 +6760,7 @@ func TestPaginatedBackupTenant(t *testing.T) {
 		{[]byte("/Tenant/10/Table/57/1/410/0"), []byte("/Tenant/10/Table/57/2"), withoutTS},
 		{[]byte("/Tenant/10/Table/57/1/510/0"), []byte("/Tenant/10/Table/57/2"), withoutTS},
 	} {
-		expected = append(expected, requestSpanStr(roachpb.Span{Key: resume.key, EndKey: resume.endKey}, resume.timestamp))
+		expected = append(expected, requestSpanStr(roachpb.Span{resume.key, resume.endKey}, resume.timestamp))
 	}
 	require.Equal(t, expected, exportRequestSpans)
 	resetStateVars()
@@ -8040,14 +8039,11 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 
 	numNodes := 4
 	// Start a new server that shares the data directory.
-	settings := cluster.MakeTestingClusterSettings()
-	sql.TempObjectWaitInterval.Override(context.Background(), &settings.SV, time.Microsecond*0)
 	dir, dirCleanupFn := testutils.TempDir(t)
 	defer dirCleanupFn()
 	params := base.TestClusterArgs{}
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.UseDatabase = "defaultdb"
-	params.ServerArgs.Settings = settings
 	knobs := base.TestingKnobs{
 		SQLExecutor: &sql.ExecutorTestingKnobs{
 			DisableTempObjectsCleanupOnSessionExit: true,
@@ -8101,7 +8097,6 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 		},
 	}
 	params.ServerArgs.Knobs = knobs
-	params.ServerArgs.Settings = settings
 	_, _, sqlDBRestore, cleanupRestore := backupRestoreTestSetupEmpty(t, singleNode, dir, InitManualReplication,
 		params)
 	defer cleanupRestore()

@@ -98,7 +98,7 @@ func testBase(
 		go func() {
 			defer func() { close(serverErrCh) }()
 			err := s.Serve(l)
-			if !errors.Is(err, http.ErrServerClosed) {
+			if err != http.ErrServerClosed {
 				select {
 				case serverErrCh <- err:
 				case <-cancelCh:
@@ -123,7 +123,7 @@ func testBase(
 	cfg.Sinks.HTTPServers = map[string]*logconfig.HTTPSinkConfig{
 		"ops": {
 			HTTPDefaults: defaults,
-			Channels:     logconfig.SelectChannels(channel.OPS)},
+			Channels:     logconfig.ChannelList{Channels: []Channel{channel.OPS}}},
 	}
 	// Derive a full config using the same directory as the
 	// TestLogScope.

@@ -13,9 +13,9 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -29,9 +29,8 @@ import (
 )
 
 type alterTypeNode struct {
-	n      *tree.AlterType
-	prefix catalog.ResolvedObjectPrefix
-	desc   *typedesc.Mutable
+	n    *tree.AlterType
+	desc *typedesc.Mutable
 }
 
 // alterTypeNode implements planNode. We set n here to satisfy the linter.
@@ -47,7 +46,7 @@ func (p *planner) AlterType(ctx context.Context, n *tree.AlterType) (planNode, e
 	}
 
 	// Resolve the type.
-	prefix, desc, err := p.ResolveMutableTypeDescriptor(ctx, n.Type, true /* required */)
+	desc, err := p.ResolveMutableTypeDescriptor(ctx, n.Type, true /* required */)
 	if err != nil {
 		return nil, err
 	}
@@ -80,9 +79,8 @@ func (p *planner) AlterType(ctx context.Context, n *tree.AlterType) (planNode, e
 	}
 
 	return &alterTypeNode{
-		n:      n,
-		prefix: prefix,
-		desc:   desc,
+		n:    n,
+		desc: desc,
 	}, nil
 }
 
@@ -116,6 +114,18 @@ func (n *alterTypeNode) startExec(params runParams) error {
 		}
 		eventLogDone = true // done inside alterTypeOwner().
 	case *tree.AlterTypeDropValue:
+		if !params.p.SessionData().DropEnumValueEnabled {
+			return pgerror.WithCandidateCode(
+				errors.WithHint(
+					errors.WithIssueLink(
+						errors.New("ALTER TYPE ... DROP VALUE ... is only supported as an alpha feature "+
+							"since view, default, or computed expressions will stop working if they reference the "+
+							"ENUM value"),
+						errors.IssueLink{IssueURL: build.MakeIssueURL(61594)}),
+					"you can enable alter type drop value by running "+
+						"`SET enable_drop_enum_value = true`"),
+				pgcode.FeatureNotSupported)
+		}
 		err = params.p.dropEnumValue(params.ctx, n.desc, t.Val)
 	default:
 		err = errors.AssertionFailedf("unknown alter type cmd %s", t)
@@ -211,7 +221,7 @@ func (p *planner) renameType(ctx context.Context, n *alterTypeNode, newName stri
 		p.ExecCfg().Codec,
 		n.desc.ParentID,
 		n.desc.ParentSchemaID,
-		tree.NewUnqualifiedTypeName(newName),
+		tree.NewUnqualifiedTypeName(tree.Name(newName)),
 	)
 	if err != nil {
 		return err
@@ -280,8 +290,16 @@ func (p *planner) performRenameTypeDesc(
 	if err := p.writeTypeSchemaChange(ctx, desc, jobDesc); err != nil {
 		return err
 	}
-	// Write the new namespace key.
-	return p.writeNameKey(ctx, desc, desc.ID)
+	// Construct the new namespace key.
+	key := catalogkv.MakeObjectNameKey(
+		ctx,
+		p.ExecCfg().Settings,
+		desc.ParentID,
+		desc.ParentSchemaID,
+		newName,
+	)
+
+	return p.writeNameKey(ctx, key, desc.ID)
 }
 
 func (p *planner) renameTypeValue(
@@ -335,7 +353,7 @@ func (p *planner) setTypeSchema(ctx context.Context, n *alterTypeNode, schema st
 		return err
 	}
 
-	desiredSchemaID, err := p.prepareSetSchema(ctx, n.prefix.Database, typeDesc, schema)
+	desiredSchemaID, err := p.prepareSetSchema(ctx, typeDesc, schema)
 	if err != nil {
 		return err
 	}
@@ -393,22 +411,7 @@ func (p *planner) alterTypeOwner(
 		return err
 	}
 
-	if err := p.checkCanAlterToNewOwner(ctx, typeDesc, newOwner); err != nil {
-		return err
-	}
-
-	// Ensure the new owner has CREATE privilege on the type's schema.
-	if err := p.canCreateOnSchema(
-		ctx, typeDesc.GetParentSchemaID(), typeDesc.ParentID, newOwner, checkPublicSchema); err != nil {
-		return err
-	}
-
-	typeNameWithPrefix := tree.MakeTypeNameWithPrefix(n.prefix.NamePrefix(), typeDesc.GetName())
-
-	arrayTypeNameWithPrefix := tree.MakeTypeNameWithPrefix(n.prefix.NamePrefix(), arrayDesc.GetName())
-
-	if err := p.setNewTypeOwner(ctx, typeDesc, arrayDesc, typeNameWithPrefix,
-		arrayTypeNameWithPrefix, newOwner); err != nil {
+	if err := p.checkCanAlterTypeAndSetNewOwner(ctx, typeDesc, arrayDesc, newOwner); err != nil {
 		return err
 	}
 
@@ -428,16 +431,24 @@ func (p *planner) alterTypeOwner(
 	)
 }
 
-// setNewTypeOwner handles setting a new type owner.
+// checkCanAlterTypeAndSetNewOwner handles privilege checking and setting new owner.
 // Called in ALTER TYPE and REASSIGN OWNED BY.
-func (p *planner) setNewTypeOwner(
+func (p *planner) checkCanAlterTypeAndSetNewOwner(
 	ctx context.Context,
 	typeDesc *typedesc.Mutable,
 	arrayTypeDesc *typedesc.Mutable,
-	typeName tree.TypeName,
-	arrayTypeName tree.TypeName,
 	newOwner security.SQLUsername,
 ) error {
+	if err := p.checkCanAlterToNewOwner(ctx, typeDesc, newOwner); err != nil {
+		return err
+	}
+
+	// Ensure the new owner has CREATE privilege on the type's schema.
+	if err := p.canCreateOnSchema(
+		ctx, typeDesc.GetParentSchemaID(), typeDesc.ParentID, newOwner, checkPublicSchema); err != nil {
+		return err
+	}
+
 	privs := typeDesc.GetPrivileges()
 	privs.SetOwner(newOwner)
 
@@ -447,7 +458,9 @@ func (p *planner) setNewTypeOwner(
 	if err := p.logEvent(ctx,
 		typeDesc.GetID(),
 		&eventpb.AlterTypeOwner{
-			TypeName: typeName.FQString(),
+			// TODO(knz): This name is insufficiently qualified.
+			// See: https://github.com/cockroachdb/cockroach/issues/57734
+			TypeName: typeDesc.GetName(),
 			Owner:    newOwner.Normalized(),
 		}); err != nil {
 		return err
@@ -455,7 +468,9 @@ func (p *planner) setNewTypeOwner(
 	return p.logEvent(ctx,
 		arrayTypeDesc.GetID(),
 		&eventpb.AlterTypeOwner{
-			TypeName: arrayTypeName.FQString(),
+			// TODO(knz): This name is insufficiently qualified.
+			// See: https://github.com/cockroachdb/cockroach/issues/57734
+			TypeName: arrayTypeDesc.GetName(),
 			Owner:    newOwner.Normalized(),
 		})
 }

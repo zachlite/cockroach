@@ -310,45 +310,6 @@ func TestListLogFiles(t *testing.T) {
 	}
 }
 
-func TestFilePermissions(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer ScopeWithoutShowLogs(t).Close(t)
-
-	fileMode := os.FileMode(0o400) // not the default 0o644
-
-	fs := debugLog.getFileSink()
-	defer func(p os.FileMode) { fs.filePermissions = p }(fs.filePermissions)
-	fs.filePermissions = fileMode
-
-	Info(context.Background(), "x")
-
-	sb, ok := debugLog.getFileSink().mu.file.(*syncBuffer)
-	if !ok {
-		t.Fatalf("buffer wasn't created")
-	}
-
-	results, err := ListLogFiles()
-	if err != nil {
-		t.Fatalf("error in ListLogFiles: %v", err)
-	}
-
-	expectedName := filepath.Base(sb.file.Name())
-	foundExpected := false
-	for _, r := range results {
-		if r.Name != expectedName {
-			continue
-		}
-		foundExpected = true
-		if os.FileMode(r.FileMode) != fileMode {
-			t.Errorf("Logfile %v has file mode %v, expected %v",
-				expectedName, os.FileMode(r.FileMode), fileMode)
-		}
-	}
-	if !foundExpected {
-		t.Fatalf("unexpected results: %q", results)
-	}
-}
-
 func TestGetLogReader(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer ScopeWithoutShowLogs(t).Close(t)
@@ -562,7 +523,7 @@ func TestFileSeverityFilter(t *testing.T) {
 
 	var debugFileSinkInfo *sinkInfo
 	for _, si := range debugLog.sinkInfos {
-		si.threshold.set(channel.DEV, severity.ERROR)
+		si.threshold = severity.ERROR
 		if _, ok := si.sink.(*fileSink); ok {
 			debugFileSinkInfo = si
 		}
@@ -672,7 +633,7 @@ func TestLogEntryPropagation(t *testing.T) {
 	l := logging.getLogger(channel.DEV)
 	for _, si := range l.sinkInfos {
 		if si.sink == &logging.stderrSink {
-			si.threshold.set(channel.DEV, severity.INFO)
+			si.threshold.SetValue(severity.INFO)
 
 			// Make stderr non-critical.
 			defer func(prevCriticality bool, si *sinkInfo) { si.criticality = prevCriticality }(si.criticality, si)

@@ -17,6 +17,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
@@ -173,13 +174,13 @@ func LivenessStatus(
 		}
 		return livenesspb.NodeLivenessStatus_DEAD
 	}
+	if !l.Membership.Active() {
+		return livenesspb.NodeLivenessStatus_DECOMMISSIONING
+	}
+	if l.Draining {
+		return livenesspb.NodeLivenessStatus_DRAINING
+	}
 	if l.IsLive(now) {
-		if !l.Membership.Active() {
-			return livenesspb.NodeLivenessStatus_DECOMMISSIONING
-		}
-		if l.Draining {
-			return livenesspb.NodeLivenessStatus_DRAINING
-		}
 		return livenesspb.NodeLivenessStatus_LIVE
 	}
 	return livenesspb.NodeLivenessStatus_UNAVAILABLE
@@ -236,14 +237,8 @@ const (
 	storeStatusAvailable
 	// The store is decommissioning.
 	storeStatusDecommissioning
-	// The store failed it's liveness heartbeat recently and is considered
-	// suspect. Consequently, stores always move from `storeStatusUnknown`
-	// (indicating a node that has a non-live node liveness record) to
-	// `storeStatusSuspect`.
+	// The store failed it's liveness heartbeat recently and is considered suspect.
 	storeStatusSuspect
-	// The store is alive but is currently marked as draining, so it is not a
-	// candidate for lease transfers or replica rebalancing.
-	storeStatusDraining
 )
 
 func (sd *storeDetail) status(
@@ -288,9 +283,6 @@ func (sd *storeDetail) status(
 
 	// Even if the store has been updated via gossip, we still rely on
 	// the node liveness to determine whether it is considered live.
-	//
-	// Store statuses checked in the following order:
-	// dead -> decommissioning -> unknown -> draining -> suspect -> available.
 	switch nl(sd.desc.Node.NodeID, now, threshold) {
 	case livenesspb.NodeLivenessStatus_DEAD, livenesspb.NodeLivenessStatus_DECOMMISSIONED:
 		return storeStatusDead
@@ -311,7 +303,7 @@ func (sd *storeDetail) status(
 		// and we may not see a store in this state. To help with that we perform
 		// a similar clear of lastAvailable on a DEAD store.
 		sd.lastAvailable = time.Time{}
-		return storeStatusDraining
+		return storeStatusUnknown
 	}
 
 	if sd.isThrottled(now) {
@@ -603,34 +595,6 @@ func (sp *StorePool) ClusterNodeCount() int {
 	return sp.nodeCountFn()
 }
 
-// IsDead determines if a store is dead. It will return an error if the store is
-// not found in the store pool or the status is unknown. If the store is not dead,
-// it returns the time to death.
-func (sp *StorePool) IsDead(storeID roachpb.StoreID) (bool, time.Duration, error) {
-	sp.detailsMu.Lock()
-	defer sp.detailsMu.Unlock()
-
-	sd, ok := sp.detailsMu.storeDetails[storeID]
-	if !ok {
-		return false, 0, errors.Errorf("store %d was not found", storeID)
-	}
-	// NB: We use clock.Now().GoTime() instead of clock.PhysicalTime() is order to
-	// take clock signals from remote nodes into consideration.
-	now := sp.clock.Now().GoTime()
-	timeUntilStoreDead := TimeUntilStoreDead.Get(&sp.st.SV)
-
-	deadAsOf := sd.lastUpdatedTime.Add(timeUntilStoreDead)
-	if now.After(deadAsOf) {
-		return true, 0, nil
-	}
-	// If there's no descriptor (meaning no gossip ever arrived for this
-	// store), return unavailable.
-	if sd.desc == nil {
-		return false, 0, errors.Errorf("store %d status unknown, cant tell if it's dead or alive", storeID)
-	}
-	return false, deadAsOf.Sub(now), nil
-}
-
 // IsUnknown returns true if the given store's status is `storeStatusUnknown`
 // (i.e. it just failed a liveness heartbeat and we cannot ascertain its
 // liveness or deadness at the moment) or an error if the store is not found in
@@ -677,12 +641,11 @@ func (sp *StorePool) storeStatus(storeID roachpb.StoreID) (storeStatus, error) {
 //
 // - Replicas on decommissioning node/store are considered live.
 //
-// - If `includeSuspectAndDrainingStores` is true, stores that are marked
-// suspect (i.e. stores that have failed a liveness heartbeat in the recent
-// past), and stores that are marked as draining are considered live. Otherwise,
-// they are excluded from the returned slices.
+// - If `includeSuspectStores` is true, stores that are marked suspect (i.e.
+// stores that have failed a liveness heartbeat in the recent past) are
+// considered live. Otherwise, they are excluded from the returned slices.
 func (sp *StorePool) liveAndDeadReplicas(
-	repls []roachpb.ReplicaDescriptor, includeSuspectAndDrainingStores bool,
+	repls []roachpb.ReplicaDescriptor, includeSuspectStores bool,
 ) (liveReplicas, deadReplicas []roachpb.ReplicaDescriptor) {
 	sp.detailsMu.Lock()
 	defer sp.detailsMu.Unlock()
@@ -706,8 +669,8 @@ func (sp *StorePool) liveAndDeadReplicas(
 			liveReplicas = append(liveReplicas, repl)
 		case storeStatusUnknown:
 		// No-op.
-		case storeStatusSuspect, storeStatusDraining:
-			if includeSuspectAndDrainingStores {
+		case storeStatusSuspect:
+			if includeSuspectStores {
 				liveReplicas = append(liveReplicas, repl)
 			}
 		default:
@@ -793,16 +756,15 @@ func (sl StoreList) String() string {
 	return buf.String()
 }
 
-// excludeInvalid takes a store list and removes stores that would be explicitly invalid
-// under the given set of constraints. It maintains the original order of the
-// passed in store list.
-func (sl StoreList) excludeInvalid(constraints []roachpb.ConstraintsConjunction) StoreList {
+// filter takes a store list and filters it using the passed in constraints. It
+// maintains the original order of the passed in store list.
+func (sl StoreList) filter(constraints []zonepb.ConstraintsConjunction) StoreList {
 	if len(constraints) == 0 {
 		return sl
 	}
 	var filteredDescs []roachpb.StoreDescriptor
 	for _, store := range sl.stores {
-		if ok := isStoreValid(store, constraints); ok {
+		if ok := constraintsCheck(store, constraints); ok {
 			filteredDescs = append(filteredDescs, store)
 		}
 	}
@@ -835,8 +797,7 @@ type throttledStoreReasons []string
 // getStoreList returns a storeList that contains all active stores that contain
 // the required attributes and their associated stats. The storeList is filtered
 // according to the provided storeFilter. It also returns the total number of
-// alive stores and a list of throttled stores with a reason for why they're
-// throttled.
+// alive and throttled stores.
 func (sp *StorePool) getStoreList(filter storeFilter) (StoreList, int, throttledStoreReasons) {
 	sp.detailsMu.Lock()
 	defer sp.detailsMu.Unlock()
@@ -893,11 +854,9 @@ func (sp *StorePool) getStoreListFromIDsLocked(
 		case storeStatusAvailable:
 			aliveStoreCount++
 			storeDescriptors = append(storeDescriptors, *detail.desc)
-		case storeStatusDraining:
-			throttled = append(throttled, fmt.Sprintf("s%d: draining", storeID))
 		case storeStatusSuspect:
 			aliveStoreCount++
-			throttled = append(throttled, fmt.Sprintf("s%d: suspect", storeID))
+			throttled = append(throttled, "throttled because the node is considered suspect")
 			if filter != storeFilterThrottled && filter != storeFilterSuspect {
 				storeDescriptors = append(storeDescriptors, *detail.desc)
 			}
@@ -1020,7 +979,7 @@ func (sp *StorePool) isStoreReadyForRoutineReplicaTransferInternal(
 		log.VEventf(ctx, 3,
 			"s%d is a live target, candidate for rebalancing", targetStoreID)
 		return true
-	case storeStatusDead, storeStatusUnknown, storeStatusDecommissioning, storeStatusSuspect, storeStatusDraining:
+	case storeStatusDead, storeStatusUnknown, storeStatusDecommissioning, storeStatusSuspect:
 		log.VEventf(ctx, 3,
 			"not considering non-live store s%d (%v)", targetStoreID, status)
 		return false

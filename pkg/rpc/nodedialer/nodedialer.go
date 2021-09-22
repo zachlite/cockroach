@@ -18,7 +18,8 @@ import (
 	"unsafe"
 
 	circuit "github.com/cockroachdb/circuitbreaker"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
@@ -125,7 +126,7 @@ func (n *Dialer) DialInternalClient(
 		return nil, nil, err
 	}
 	if localClient := n.rpcContext.GetLocalInternalClientForAddr(addr.String(), nodeID); localClient != nil {
-		log.VEvent(ctx, 2, kvbase.RoutingRequestLocallyMsg)
+		log.VEvent(ctx, 2, "sending request to local client")
 
 		// Create a new context from the existing one with the "local request" field set.
 		// This tells the handler that this is an in-process request, bypassing ctx.Peer checks.
@@ -162,7 +163,7 @@ func (n *Dialer) dial(
 	defer func() {
 		// Enforce a minimum interval between warnings for failed connections.
 		if err != nil && ctx.Err() == nil && breaker != nil && breaker.ShouldLog() {
-			log.Health.Warningf(ctx, "unable to connect to n%d: %s", nodeID, err)
+			log.Health.Infof(ctx, "unable to connect to n%d: %s", nodeID, err)
 		}
 	}()
 	conn, err := n.rpcContext.GRPCDialNode(addr.String(), nodeID, class).Connect(ctx)
@@ -201,45 +202,27 @@ func (n *Dialer) dial(
 }
 
 // ConnHealth returns nil if we have an open connection of the request
-// class to the given node that succeeded on its most recent heartbeat.
-// Returns circuit.ErrBreakerOpen if the breaker is tripped, otherwise
-// ErrNoConnection if no connection to the node currently exists.
+// class to the given node that succeeded on its most recent heartbeat. See the
+// method of the same name on rpc.Context for more details.
 func (n *Dialer) ConnHealth(nodeID roachpb.NodeID, class rpc.ConnectionClass) error {
 	if n == nil || n.resolver == nil {
 		return errors.New("no node dialer configured")
 	}
-	// NB: Don't call Ready(). The breaker protocol would require us to follow
-	// that up with a dial, which we won't do as this is called in hot paths.
-	if n.getBreaker(nodeID, class).Tripped() {
+	if !n.getBreaker(nodeID, class).Ready() {
 		return circuit.ErrBreakerOpen
 	}
 	addr, err := n.resolver(nodeID)
 	if err != nil {
 		return err
 	}
-	return n.rpcContext.ConnHealth(addr.String(), nodeID, class)
-}
-
-// ConnHealthTryDial returns nil if we have an open connection of the request
-// class to the given node that succeeded on its most recent heartbeat. If no
-// healthy connection is found, it will attempt to dial the node.
-//
-// This exists for components that do not themselves actively maintain RPC
-// connections to remote nodes, e.g. DistSQL. However, it can cause significant
-// latency if the remote node is unresponsive (e.g. if the server/VM is shut
-// down), and should be avoided in latency-sensitive code paths. Preferably,
-// this should be replaced by some other mechanism to maintain RPC connections.
-// See also: https://github.com/cockroachdb/cockroach/issues/70111
-func (n *Dialer) ConnHealthTryDial(nodeID roachpb.NodeID, class rpc.ConnectionClass) error {
-	err := n.ConnHealth(nodeID, class)
-	if err == nil || !n.getBreaker(nodeID, class).Ready() {
-		return err
+	// TODO(bdarnell): GRPCDialNode should detect local addresses and return
+	// a dummy connection instead of requiring callers to do this check.
+	if n.rpcContext.GetLocalInternalClientForAddr(addr.String(), nodeID) != nil {
+		// The local client is always considered healthy.
+		return nil
 	}
-	addr, err := n.resolver(nodeID)
-	if err != nil {
-		return err
-	}
-	return n.rpcContext.GRPCDialNode(addr.String(), nodeID, class).Health()
+	conn := n.rpcContext.GRPCDialNode(addr.String(), nodeID, class)
+	return conn.Health()
 }
 
 // GetCircuitBreaker retrieves the circuit breaker for connections to the
@@ -279,4 +262,25 @@ func (n *Dialer) Latency(nodeID roachpb.NodeID) (time.Duration, error) {
 		latency = 0
 	}
 	return latency, nil
+}
+
+type dialerAdapter Dialer
+
+func (da *dialerAdapter) Ready(nodeID roachpb.NodeID) bool {
+	return (*Dialer)(da).GetCircuitBreaker(nodeID, rpc.DefaultClass).Ready()
+}
+
+func (da *dialerAdapter) Dial(ctx context.Context, nodeID roachpb.NodeID) (ctpb.Client, error) {
+	c, err := (*Dialer)(da).Dial(ctx, nodeID, rpc.DefaultClass)
+	if err != nil {
+		return nil, err
+	}
+	return ctpb.NewClosedTimestampClient(c).Get(ctx)
+}
+
+var _ closedts.Dialer = (*Dialer)(nil).CTDialer()
+
+// CTDialer wraps the NodeDialer into a closedts.Dialer.
+func (n *Dialer) CTDialer() closedts.Dialer {
+	return (*dialerAdapter)(n)
 }

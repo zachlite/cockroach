@@ -95,7 +95,7 @@ func NewFlowScheduler(
 	maxRunningFlows := settingMaxRunningFlows.Get(&settings.SV)
 	fs.mu.runningFlows = make(map[execinfrapb.FlowID]time.Time, maxRunningFlows)
 	fs.atomics.maxRunningFlows = int32(maxRunningFlows)
-	settingMaxRunningFlows.SetOnChange(&settings.SV, func(ctx context.Context) {
+	settingMaxRunningFlows.SetOnChange(&settings.SV, func() {
 		atomic.StoreInt32(&fs.atomics.maxRunningFlows, int32(settingMaxRunningFlows.Get(&settings.SV)))
 	})
 	return fs
@@ -185,18 +185,6 @@ func (fs *FlowScheduler) NumFlowsInQueue() int {
 	return fs.mu.queue.Len()
 }
 
-// NumRunningFlows returns the number of flows scheduled via fs that are
-// currently running.
-func (fs *FlowScheduler) NumRunningFlows() int {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	// Note that we choose not to use fs.atomics.numRunning here because that
-	// could be imprecise in an edge (when we optimistically increase that value
-	// by 1 in canRunFlow only to decrement it later and NumRunningFlows is
-	// called in between those two events).
-	return len(fs.mu.runningFlows)
-}
-
 // CancelDeadFlows cancels all flows mentioned in the request that haven't been
 // started yet (meaning they have been queued up).
 func (fs *FlowScheduler) CancelDeadFlows(req *execinfrapb.CancelDeadFlowsRequest) {
@@ -242,6 +230,18 @@ func (fs *FlowScheduler) CancelDeadFlows(req *execinfrapb.CancelDeadFlowsRequest
 			numCanceled++
 		}
 	}
+}
+
+// NumRunningFlows returns the number of flows scheduled via fs that are
+// currently running.
+func (fs *FlowScheduler) NumRunningFlows() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	// Note that we choose not to use fs.atomics.numRunning here because that
+	// could be imprecise in an edge (when we optimistically increase that value
+	// by 1 in canRunFlow only to decrement it later and NumRunningFlows is
+	// called in between those two events).
+	return len(fs.mu.runningFlows)
 }
 
 // Start launches the main loop of the scheduler.

@@ -148,7 +148,7 @@ func (ts *testState) tokenBucketRequest(t *testing.T, d *datadriven.TestData) st
 		d.Fatalf(t, "failed to parse duration: %v", args.Period)
 	}
 	req := roachpb.TokenBucketRequest{
-		TenantID:   tenantID,
+		TenantID:   uint64(tenantID),
 		InstanceID: args.InstanceID,
 		ConsumptionSinceLastRequest: roachpb.TenantConsumption{
 			RU:                args.Consumption.RU,
@@ -173,14 +173,10 @@ func (ts *testState) tokenBucketRequest(t *testing.T, d *datadriven.TestData) st
 		}
 		return ""
 	}
-	trickleStr := "immediately"
-	if res.TrickleDuration != 0 {
-		trickleStr = fmt.Sprintf("over %s", res.TrickleDuration)
+	if res.TrickleDuration == 0 {
+		return fmt.Sprintf("%.10g RUs granted immediately.\n", res.GrantedRU)
 	}
-	return fmt.Sprintf(
-		"%.10g RUs granted %s. Fallback rate: %.10g RU/s\n",
-		res.GrantedRU, trickleStr, res.FallbackRate,
-	)
+	return fmt.Sprintf("%.10g RUs granted over %s.\n", res.GrantedRU, res.TrickleDuration)
 }
 
 // metrics outputs all metrics that match the regex in the input.

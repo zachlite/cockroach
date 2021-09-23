@@ -95,6 +95,7 @@ func (s *stmtStatsMetadata) jsonFields() jsonFields {
 		{"db", (*jsonString)(&s.Key.Database)},
 		{"distsql", (*jsonBool)(&s.Key.DistSQL)},
 		{"failed", (*jsonBool)(&s.Key.Failed)},
+		{"opt", (*jsonBool)(&s.Key.Opt)},
 		{"implicitTxn", (*jsonBool)(&s.Key.ImplicitTxn)},
 		{"vec", (*jsonBool)(&s.Key.Vec)},
 		{"fullScan", (*jsonBool)(&s.Key.FullScan)},
@@ -233,7 +234,6 @@ func (s *innerStmtStats) jsonFields() jsonFields {
 		{"ovhLat", (*numericStats)(&s.OverheadLat)},
 		{"bytesRead", (*numericStats)(&s.BytesRead)},
 		{"rowsRead", (*numericStats)(&s.RowsRead)},
-		{"rowsWritten", (*numericStats)(&s.RowsWritten)},
 		{"nodes", (*int64Array)(&s.Nodes)},
 	}
 }

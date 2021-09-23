@@ -34,7 +34,6 @@ import {
   formatNumberForDisplay,
   calculateTotalWorkload,
   unique,
-  summarize,
 } from "src/util";
 import { Loading } from "src/loading";
 import { Button } from "src/button";
@@ -77,6 +76,7 @@ interface SingleStatementStatistics {
   database: string;
   distSQL: Fraction;
   vec: Fraction;
+  opt: Fraction;
   implicit_txn: Fraction;
   failed: Fraction;
   node_id: number[];
@@ -146,7 +146,7 @@ export interface StatementDetailsDispatchProps {
 export interface StatementDetailsStateProps {
   statement: SingleStatementStatistics;
   statementsError: Error | null;
-  dateRange: [Moment, Moment];
+  dateRange?: [Moment, Moment];
   nodeNames: { [nodeId: string]: string };
   nodeRegions: { [nodeId: string]: string };
   diagnosticsReports: cockroach.server.serverpb.IStatementDiagnosticsReport[];
@@ -163,7 +163,8 @@ const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 
 function statementsRequestFromProps(
   props: StatementDetailsProps,
-): cockroach.server.serverpb.StatementsRequest {
+): cockroach.server.serverpb.StatementsRequest | null {
+  if (props.isTenant || props.dateRange == null) return null;
   return new cockroach.server.serverpb.StatementsRequest({
     combined: true,
     start: Long.fromNumber(props.dateRange[0].unix()),
@@ -438,6 +439,7 @@ export class StatementDetails extends React.Component<
       app,
       distSQL,
       vec,
+      opt,
       failed,
       implicit_txn,
       database,
@@ -516,10 +518,6 @@ export class StatementDetails extends React.Component<
         <span className={cx("tooltip-info")}>unavailable</span>
       </Tooltip>
     );
-    const summary = summarize(statement);
-    const showRowsWritten =
-      stats.sql_type === "TypeDML" && summary.statement !== "select";
-
     return (
       <Tabs
         defaultActiveKey="1"
@@ -588,19 +586,6 @@ export class StatementDetails extends React.Component<
                       )}
                       {unavailableTooltip}
                     </div>
-                    {showRowsWritten && (
-                      <div
-                        className={summaryCardStylesCx("summary--card__item")}
-                      >
-                        <Text>Mean rows written</Text>
-                        <Text>
-                          {formatNumberForDisplay(
-                            stats.rows_written?.mean,
-                            formatTwoPlaces,
-                          )}
-                        </Text>
-                      </div>
-                    )}
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Max memory usage</Text>
                       {statementSampled && (
@@ -683,6 +668,10 @@ export class StatementDetails extends React.Component<
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Failed?</Text>
                   <Text>{renderBools(failed)}</Text>
+                </div>
+                <div className={summaryCardStylesCx("summary--card__item")}>
+                  <Text>Used cost-based optimizer?</Text>
+                  <Text>{renderBools(opt)}</Text>
                 </div>
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Distributed execution?</Text>
@@ -850,11 +839,6 @@ export class StatementDetails extends React.Component<
                   format: Bytes,
                 },
                 {
-                  name: "Rows Written",
-                  value: stats.rows_written,
-                  bar: genericBarChart(stats.rows_written, stats.count),
-                },
-                {
                   name: "Network Bytes Sent",
                   value: stats.exec_stats.network_bytes,
                   bar: genericBarChart(
@@ -866,10 +850,9 @@ export class StatementDetails extends React.Component<
                 },
               ].filter(function(r) {
                 if (
-                  (r.name === "Network Bytes Sent" &&
-                    r.value &&
-                    r.value.mean === 0) ||
-                  (r.name === "Rows Written" && !showRowsWritten)
+                  r.name === "Network Bytes Sent" &&
+                  r.value &&
+                  r.value.mean === 0
                 ) {
                   // Omit if empty.
                   return false;

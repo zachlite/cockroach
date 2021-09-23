@@ -101,15 +101,9 @@ type flowWithNode struct {
 
 // ExplainVec converts the flows (that are assumed to be vectorizable) into the
 // corresponding string representation.
-//
 // It also supports printing of already constructed operator chains which takes
 // priority if non-nil (flows are ignored). All operators in opChains are
 // assumed to be planned on the gateway.
-//
-// As the second return parameter it returns a non-nil cleanup function which
-// can be called only **after** closing the planNode tree containing the
-// explainVecNode (if ExplainVec is used by another caller, then it can be
-// called at any time).
 func ExplainVec(
 	ctx context.Context,
 	flowCtx *execinfra.FlowCtx,
@@ -119,25 +113,14 @@ func ExplainVec(
 	gatewayNodeID roachpb.NodeID,
 	verbose bool,
 	distributed bool,
-) (_ []string, cleanup func(), _ error) {
+) ([]string, error) {
 	tp := treeprinter.NewWithStyle(treeprinter.CompactStyle)
 	root := tp.Child("│")
-	var (
-		cleanups      []func()
-		err           error
-		conversionErr error
-	)
-	defer func() {
-		cleanup = func() {
-			for _, c := range cleanups {
-				c()
-			}
-		}
-	}()
+	var conversionErr error
 	// It is possible that when iterating over execinfra.OpNodes we will hit a
 	// panic (an input that doesn't implement OpNode interface), so we're
 	// catching such errors.
-	if err = colexecerror.CatchVectorizedRuntimeError(func() {
+	if err := colexecerror.CatchVectorizedRuntimeError(func() {
 		if opChains != nil {
 			formatChains(root, gatewayNodeID, opChains, verbose)
 		} else {
@@ -149,8 +132,8 @@ func ExplainVec(
 			// last.
 			sort.Slice(sortedFlows, func(i, j int) bool { return sortedFlows[i].nodeID < sortedFlows[j].nodeID })
 			for _, flow := range sortedFlows {
-				opChains, cleanup, err = convertToVecTree(ctx, flowCtx, flow.flow, localProcessors, !distributed)
-				cleanups = append(cleanups, cleanup)
+				opChains, cleanup, err := convertToVecTree(ctx, flowCtx, flow.flow, localProcessors, !distributed)
+				defer cleanup()
 				if err != nil {
 					conversionErr = err
 					return
@@ -159,12 +142,12 @@ func ExplainVec(
 			}
 		}
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if conversionErr != nil {
-		return nil, nil, conversionErr
+		return nil, conversionErr
 	}
-	return tp.FormattedRows(), nil, nil
+	return tp.FormattedRows(), nil
 }
 
 func formatChains(

@@ -12,12 +12,7 @@ import React from "react";
 import { storiesOf } from "@storybook/react";
 import { MemoryRouter } from "react-router-dom";
 import { cloneDeep, noop, extend } from "lodash";
-import {
-  data,
-  nodeRegions,
-  routeProps,
-  dateRange,
-} from "./transactions.fixture";
+import { data, nodeRegions, routeProps } from "./transactions.fixture";
 
 import { TransactionsPage } from ".";
 import { RequestError } from "../util";
@@ -34,7 +29,6 @@ storiesOf("Transactions Page", module)
     <TransactionsPage
       {...routeProps}
       data={data}
-      dateRange={dateRange}
       nodeRegions={nodeRegions}
       refreshData={noop}
       resetSQLStats={noop}
@@ -45,7 +39,6 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={getEmptyData()}
-        dateRange={dateRange}
         nodeRegions={nodeRegions}
         refreshData={noop}
         resetSQLStats={noop}
@@ -63,7 +56,6 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={getEmptyData()}
-        dateRange={dateRange}
         nodeRegions={nodeRegions}
         refreshData={noop}
         history={history}
@@ -76,7 +68,6 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={undefined}
-        dateRange={dateRange}
         nodeRegions={nodeRegions}
         refreshData={noop}
         resetSQLStats={noop}
@@ -88,7 +79,6 @@ storiesOf("Transactions Page", module)
       <TransactionsPage
         {...routeProps}
         data={undefined}
-        dateRange={dateRange}
         nodeRegions={nodeRegions}
         error={
           new RequestError(

@@ -8,20 +8,18 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package main
+//go:generate sh generate.sh
 
-import (
-	"fmt"
-	"io"
-)
+package wkt
 
-const sortTopKTmpl = "pkg/sql/colexec/sorttopk_tmpl.go"
+import "github.com/twpayne/go-geom"
 
-func genSortTopK(inputFileContents string, wr io.Writer) error {
-	_, err := fmt.Fprint(wr, inputFileContents)
-	return err
-}
-
-func init() {
-	registerGenerator(genSortTopK, "sorttopk.eg.go", sortTopKTmpl)
+// Unmarshal accepts a string and parses it to a geom.T.
+func Unmarshal(wkt string) (geom.T, error) {
+	wktlex := newWKTLex(wkt)
+	wktParse(wktlex)
+	if wktlex.lastErr != nil {
+		return nil, wktlex.lastErr
+	}
+	return wktlex.ret, nil
 }

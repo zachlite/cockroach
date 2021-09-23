@@ -98,60 +98,10 @@ func newTenantStatusServer(
 	}
 }
 
-// dialCallback used to dial specific pods when
-// iterating nodes.
-func (t *tenantStatusServer) dialCallback(
-	ctx context.Context, instanceID base.SQLInstanceID, addr string,
-) (interface{}, error) {
-	client, err := t.dialPod(ctx, instanceID, addr)
-	return client, err
-}
-
 func (t *tenantStatusServer) ListSessions(
-	ctx context.Context, req *serverpb.ListSessionsRequest,
+	ctx context.Context, request *serverpb.ListSessionsRequest,
 ) (*serverpb.ListSessionsResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = t.AnnotateCtx(ctx)
-
-	if _, err := t.privilegeChecker.requireViewActivityPermission(ctx); err != nil {
-		return nil, err
-	}
-	if t.sqlServer.SQLInstanceID() == 0 {
-		return nil, status.Errorf(codes.Unavailable, "instanceID not set")
-	}
-
-	response := &serverpb.ListSessionsResponse{}
-	nodeStatement := func(ctx context.Context, client interface{}, instanceID base.SQLInstanceID) (interface{}, error) {
-		statusClient := client.(serverpb.StatusClient)
-		localResponse, err := statusClient.ListLocalSessions(ctx, req)
-		if localResponse == nil {
-			log.Errorf(ctx, "listing local sessions on %d produced a nil result with error %v",
-				instanceID,
-				err)
-		}
-		return localResponse, err
-	}
-	if err := t.iteratePods(ctx, "sessions for nodes",
-		t.dialCallback,
-		nodeStatement,
-		func(instanceID base.SQLInstanceID, resp interface{}) {
-			sessionResp := resp.(*serverpb.ListSessionsResponse)
-			response.Sessions = append(response.Sessions, sessionResp.Sessions...)
-			response.Errors = append(response.Errors, sessionResp.Errors...)
-		},
-		func(instanceID base.SQLInstanceID, err error) {
-			// Log any errors related to the failures.
-			log.Warningf(ctx, "fan out statements request recorded error from node %d: %v", instanceID, err)
-			response.Errors = append(response.Errors,
-				serverpb.ListSessionsError{
-					Message: err.Error(),
-					NodeID:  roachpb.NodeID(instanceID),
-				})
-		},
-	); err != nil {
-		return nil, err
-	}
-	return response, nil
+	return t.ListLocalSessions(ctx, request)
 }
 
 func (t *tenantStatusServer) ListLocalSessions(
@@ -277,19 +227,17 @@ func (t *tenantStatusServer) Statements(
 		return statusClient.Statements(ctx, localReq)
 	}
 
-	nodeStatement := func(ctx context.Context, client interface{}, instanceID base.SQLInstanceID) (interface{}, error) {
+	dialFn := func(ctx context.Context, instanceID base.SQLInstanceID, addr string) (interface{}, error) {
+		client, err := t.dialPod(ctx, instanceID, addr)
+		return client, err
+	}
+	nodeStatement := func(ctx context.Context, client interface{}, _ base.SQLInstanceID) (interface{}, error) {
 		statusClient := client.(serverpb.StatusClient)
-		localResponse, err := statusClient.Statements(ctx, localReq)
-		if localResponse == nil {
-			log.Errorf(ctx, "listing statements on %d produced a nil result with err: %v",
-				instanceID,
-				err)
-		}
-		return localResponse, err
+		return statusClient.Statements(ctx, localReq)
 	}
 
 	if err := t.iteratePods(ctx, fmt.Sprintf("statement statistics for node %s", req.NodeID),
-		t.dialCallback,
+		dialFn,
 		nodeStatement,
 		func(instanceID base.SQLInstanceID, resp interface{}) {
 			statementsResp := resp.(*serverpb.StatementsResponse)
@@ -438,22 +386,6 @@ func (t *tenantStatusServer) ListDistSQLFlows(
 	ctx context.Context, request *serverpb.ListDistSQLFlowsRequest,
 ) (*serverpb.ListDistSQLFlowsResponse, error) {
 	return t.ListLocalDistSQLFlows(ctx, request)
-}
-
-// Profile implements the profiling endpoint by delegating the request
-// to the local handler. No facility for requesting profiles from
-// remote nodes is facilitated at this time. Requests for nodes other
-// than "local" will return an error.
-func (t *tenantStatusServer) Profile(
-	ctx context.Context, request *serverpb.ProfileRequest,
-) (*serverpb.JSONResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = t.AnnotateCtx(ctx)
-
-	if request.NodeId != "local" {
-		return nil, status.Errorf(codes.Unimplemented, "profiling arbitrary tenants is unsupported")
-	}
-	return profileLocal(ctx, request, t.st)
 }
 
 func (t *tenantStatusServer) IndexUsageStatistics(

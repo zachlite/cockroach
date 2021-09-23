@@ -77,9 +77,7 @@ func TestDebugJobTrace(t *testing.T) {
 	c.omitArgs = true
 
 	registry := c.TestServer.JobRegistry().(*jobs.Registry)
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+	jobCtx, _ := context.WithCancel(ctx)
 	completeResumerCh := make(chan struct{})
 	recordedSpanCh := make(chan struct{})
 	defer close(completeResumerCh)

@@ -1045,7 +1045,7 @@ Binary built without web UI.
 				fmt.Sprintf(
 					`{"ExperimentalUseLogin":false,"LoginEnabled":false,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d","OIDCAutoLogin":false,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
-					build.BinaryVersionPrefix(),
+					build.VersionPrefix(),
 					1,
 				),
 			)
@@ -1080,7 +1080,7 @@ Binary built without web UI.
 				fmt.Sprintf(
 					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":"authentic_user","Tag":"%s","Version":"%s","NodeID":"%d","OIDCAutoLogin":false,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
-					build.BinaryVersionPrefix(),
+					build.VersionPrefix(),
 					1,
 				),
 			},
@@ -1089,7 +1089,7 @@ Binary built without web UI.
 				fmt.Sprintf(
 					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d","OIDCAutoLogin":false,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
-					build.BinaryVersionPrefix(),
+					build.VersionPrefix(),
 					1,
 				),
 			},
@@ -1243,10 +1243,7 @@ func TestAssertEnginesEmpty(t *testing.T) {
 	require.NoError(t, assertEnginesEmpty([]storage.Engine{eng}))
 
 	batch := eng.NewBatch()
-	key := storage.MVCCKey{
-		Key:       []byte{0xde, 0xad, 0xbe, 0xef},
-		Timestamp: hlc.Timestamp{WallTime: 100},
-	}
+	key := storage.MVCCKey{[]byte{0xde, 0xad, 0xbe, 0xef}, hlc.Timestamp{WallTime: 100}}
 	require.NoError(t, batch.PutMVCC(key, []byte("foo")))
 	require.NoError(t, batch.Commit(false))
 	require.Error(t, assertEnginesEmpty([]storage.Engine{eng}))

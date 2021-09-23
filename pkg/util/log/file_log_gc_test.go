@@ -39,7 +39,9 @@ func TestGC(t *testing.T) {
 		t.Fatal("no file sink")
 	}
 
-	testLogGC(t, fs, Info)
+	testLogGC(t, fs, func(ctx context.Context, msg string) {
+		Infof(ctx, msg)
+	})
 }
 
 func TestSecondaryGC(t *testing.T) {

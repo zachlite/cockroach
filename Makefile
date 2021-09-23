@@ -779,6 +779,9 @@ SQLPARSER_TARGETS = \
 	pkg/sql/lexbase/keywords.go \
 	pkg/sql/lexbase/reserved_keywords.go
 
+WKTPARSER_TARGETS = \
+	pkg/geo/wkt/wkt.go
+
 PROTOBUF_TARGETS := bin/.go_protobuf_sources bin/.gw_protobuf_sources
 
 SWAGGER_TARGETS := \
@@ -806,7 +809,6 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/rowstovec.eg.go \
   pkg/sql/colexec/select_in.eg.go \
   pkg/sql/colexec/sort.eg.go \
-  pkg/sql/colexec/sorttopk.eg.go \
   pkg/sql/colexec/sort_partitioner.eg.go \
   pkg/sql/colexec/substring.eg.go \
   pkg/sql/colexec/values_differ.eg.go \
@@ -892,24 +894,6 @@ OPTGEN_TARGETS = \
 	pkg/sql/opt/exec/factory.og.go \
 	pkg/sql/opt/exec/explain/explain_factory.og.go
 
-# removed-files is a list of files that used to exist in the
-# repository that need to be explicitly cleaned up to prevent build
-# failures.
-removed-files = pkg/ui/distccl/bindata.go
-
-removed-files-to-remove = $(strip $(foreach f,$(removed-files),$(wildcard $(f))))
-
-CLEANUP_TARGETS =
-ifneq ($(removed-files-to-remove),)
-CLEANUP_TARGETS = clean-removed-files
-endif
-
-.PHONY: clean-removed-files
-clean-removed-files:
-ifneq ($(removed-files-to-remove),)
-	rm -f $(removed-files-to-remove)
-endif
-
 test-targets := \
 	check test testshort testslow testrace testraceslow testbuild \
 	stress stressrace \
@@ -962,7 +946,7 @@ BUILD_TAGGED_RELEASE =
 ## Override for .buildinfo/tag
 BUILDINFO_TAG :=
 
-$(go-targets): bin/.bootstrap $(BUILDINFO) $(CGO_FLAGS_FILES) $(PROTOBUF_TARGETS) $(LIBPROJ) $(CLEANUP_TARGETS)
+$(go-targets): bin/.bootstrap $(BUILDINFO) $(CGO_FLAGS_FILES) $(PROTOBUF_TARGETS) $(LIBPROJ)
 $(go-targets): $(LOG_TARGETS) $(SQLPARSER_TARGETS) $(OPTGEN_TARGETS)
 $(go-targets): override LINKFLAGS += \
 	-X "github.com/cockroachdb/cockroach/pkg/build.tag=$(if $(BUILDINFO_TAG),$(BUILDINFO_TAG),$(shell cat .buildinfo/tag))" \
@@ -1146,7 +1130,7 @@ dupl: bin/.bootstrap
 
 .PHONY: generate
 generate: ## Regenerate generated code.
-generate: protobuf $(DOCGEN_TARGETS) $(OPTGEN_TARGETS) $(LOG_TARGETS) $(SQLPARSER_TARGETS) $(SETTINGS_DOC_PAGES) $(SWAGGER_TARGETS) bin/langgen bin/terraformgen
+generate: protobuf $(DOCGEN_TARGETS) $(OPTGEN_TARGETS) $(LOG_TARGETS) $(SQLPARSER_TARGETS) $(WKTPARSER_TARGETS) $(SETTINGS_DOC_PAGES) $(SWAGGER_TARGETS) bin/langgen bin/terraformgen
 	$(GO) generate $(GOFLAGS) $(GOMODVENDORFLAGS) -tags '$(TAGS)' -ldflags '$(LINKFLAGS)' $(PKG)
 	$(MAKE) execgen
 

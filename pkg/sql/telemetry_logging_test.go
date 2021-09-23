@@ -79,8 +79,8 @@ func TestTelemetryLogging(t *testing.T) {
 	cleanup := installTelemetryLogFileSink(sc, t)
 	defer cleanup()
 
-	st := stubTime{}
-	st.setTime(timeutil.Now())
+	stubTime := stubTime{}
+	stubTime.setTime(timeutil.Now())
 	stubInterval := fakeInterval{}
 	stubInterval.setInterval(1)
 
@@ -88,7 +88,7 @@ func TestTelemetryLogging(t *testing.T) {
 		Knobs: base.TestingKnobs{
 			TelemetryLoggingKnobs: &TelemetryLoggingTestingKnobs{
 				getRollingIntervalLength: stubInterval.getInterval,
-				getTimeNow:               st.TimeNow,
+				getTimeNow:               stubTime.TimeNow,
 			},
 		},
 	})
@@ -193,13 +193,13 @@ func TestTelemetryLogging(t *testing.T) {
 	for _, tc := range testData {
 		telemetryQPSThreshold.Override(context.Background(), &s.ClusterSettings().SV, tc.stubQPSThreshold)
 		telemetrySampleRate.Override(context.Background(), &s.ClusterSettings().SV, tc.stubSamplingRate)
-		st.setTime(st.TimeNow().Add(time.Second))
+		stubTime.setTime(stubTime.TimeNow().Add(time.Second))
 		stubInterval.setInterval(tc.intervalLength)
 		for _, numExec := range tc.numExec {
 			for i := 0; i < numExec; i++ {
 				db.Exec(t, tc.query)
 			}
-			st.setTime(st.TimeNow().Add(time.Second))
+			stubTime.setTime(stubTime.TimeNow().Add(time.Second))
 		}
 	}
 

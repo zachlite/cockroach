@@ -98,7 +98,7 @@ func testBase(
 		go func() {
 			defer func() { close(serverErrCh) }()
 			err := s.Serve(l)
-			if !errors.Is(err, http.ErrServerClosed) {
+			if err != http.ErrServerClosed {
 				select {
 				case serverErrCh <- err:
 				case <-cancelCh:

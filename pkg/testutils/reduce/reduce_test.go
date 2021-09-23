@@ -53,7 +53,7 @@ var (
 
 func isInterestingGo(contains string) reduce.InterestingFn {
 	return func(ctx context.Context, f string) bool {
-		_, err := parser.ParseExpr(f)
+		_, err := parser.ParseExpr(string(f))
 		if err == nil {
 			return false
 		}

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -36,9 +35,9 @@ func runSampler(
 ) []int {
 	rows := make([]rowenc.EncDatumRow, numRows)
 	for i := range rows {
-		rows[i] = rowenc.EncDatumRow{randgen.IntEncDatum(i)}
+		rows[i] = rowenc.EncDatumRow{rowenc.IntEncDatum(i)}
 	}
-	in := distsqlutils.NewRowBuffer(types.OneIntCol, rows, distsqlutils.RowBufferArgs{})
+	in := distsqlutils.NewRowBuffer(rowenc.OneIntCol, rows, distsqlutils.RowBufferArgs{})
 	outTypes := []*types.T{
 		types.Int, // original column
 		types.Int, // rank
@@ -76,11 +75,10 @@ func runSampler(
 				GenerateHistogram: true,
 			},
 		},
-		SampleSize:    uint32(numSamples),
-		MinSampleSize: uint32(minNumSamples),
+		SampleSize: uint32(numSamples),
 	}
 	p, err := newSamplerProcessor(
-		&flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{}, out,
+		&flowCtx, 0 /* processorID */, spec, minNumSamples, in, &execinfrapb.PostProcessSpec{}, out,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -257,8 +255,8 @@ func TestSamplerSketch(t *testing.T) {
 	cardinalities := []int{3, 9, 12}
 	numNulls := []int{4, 2, 1}
 
-	rows := randgen.GenEncDatumRowsInt(inputRows)
-	in := distsqlutils.NewRowBuffer(types.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
+	rows := rowenc.GenEncDatumRowsInt(inputRows)
+	in := distsqlutils.NewRowBuffer(rowenc.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
 	outTypes := []*types.T{
 		types.Int,   // original column
 		types.Int,   // original column
@@ -304,7 +302,10 @@ func TestSamplerSketch(t *testing.T) {
 			},
 		},
 	}
-	p, err := newSamplerProcessor(&flowCtx, 0 /* processorID */, spec, in, &execinfrapb.PostProcessSpec{}, out)
+	p, err := newSamplerProcessor(
+		&flowCtx, 0 /* processorID */, spec, defaultMinSampleSize, in, &execinfrapb.PostProcessSpec{},
+		out,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

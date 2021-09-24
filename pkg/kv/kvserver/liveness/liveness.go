@@ -21,6 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -62,6 +64,8 @@ var (
 	// someone else has already incremented the epoch to the desired
 	// value.
 	ErrEpochAlreadyIncremented = errors.New("epoch already incremented")
+
+	errLiveClockNotLive = errors.New("not live")
 )
 
 type errRetryLiveness struct {
@@ -1213,7 +1217,8 @@ func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 // on commit.
 //
 // updateLiveness terminates certain errors that are expected to occur
-// sporadically, such as ambiguous results.
+// sporadically, such as TransactionStatusError (due to the 1PC requirement of
+// the liveness txn, and ambiguous results).
 //
 // If the CPut is successful (i.e. no error is returned and handleCondFailed is
 // not called), the value that has been written is returned as a Record.
@@ -1319,12 +1324,8 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 				return Record{}, errors.Wrapf(err, "couldn't update node liveness from CPut actual value")
 			}
 			return Record{}, handleCondFailed(Record{Liveness: actualLiveness, raw: tErr.ActualValue.TagAndDataBytes()})
-		} else if errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
-			return Record{}, &errRetryLiveness{err}
-		} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) {
-			// 21.2 nodes can return a TransactionStatusError when they should have
-			// returned an AmbiguousResultError.
-			// TODO(andrei): Remove this in 22.2.
+		} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) ||
+			errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
 			return Record{}, &errRetryLiveness{err}
 		}
 		return Record{}, err
@@ -1455,6 +1456,23 @@ func (nl *NodeLiveness) numLiveNodes() int64 {
 		}
 	}
 	return liveNodes
+}
+
+// AsLiveClock returns a closedts.LiveClockFn that takes a current timestamp off
+// the clock and returns it only if node liveness indicates that the node is live
+// at that timestamp and the returned epoch.
+func (nl *NodeLiveness) AsLiveClock() closedts.LiveClockFn {
+	return func(nodeID roachpb.NodeID) (hlc.Timestamp, ctpb.Epoch, error) {
+		now := nl.clock.Now()
+		liveness, ok := nl.GetLiveness(nodeID)
+		if !ok {
+			return hlc.Timestamp{}, 0, ErrRecordCacheMiss
+		}
+		if !liveness.IsLive(now.GoTime()) {
+			return hlc.Timestamp{}, 0, errLiveClockNotLive
+		}
+		return now, ctpb.Epoch(liveness.Epoch), nil
+	}
 }
 
 // GetNodeCount returns a count of the number of nodes in the cluster,

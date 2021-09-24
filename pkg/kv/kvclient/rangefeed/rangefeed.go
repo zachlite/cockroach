@@ -105,7 +105,7 @@ func newFactory(stopper *stop.Stopper, client kvDB, knobs *TestingKnobs) *Factor
 func (f *Factory) RangeFeed(
 	ctx context.Context,
 	name string,
-	sp roachpb.Span,
+	span roachpb.Span,
 	initialTimestamp hlc.Timestamp,
 	onValue func(ctx context.Context, value *roachpb.RangeFeedValue),
 	options ...Option,
@@ -116,30 +116,15 @@ func (f *Factory) RangeFeed(
 		knobs:   f.knobs,
 
 		initialTimestamp: initialTimestamp,
-		span:             sp,
+		span:             span,
 		onValue:          onValue,
 
 		stopped: make(chan struct{}),
 	}
 	initConfig(&r.config, options)
-
-	// Maintain a frontier in order to resume at a reasonable timestamp.
-	// TODO(ajwerner): Consider exposing the frontier through a RangeFeed method.
-	// Doing so would require some synchronization.
-	frontier, err := span.MakeFrontier(sp)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := frontier.Forward(sp, initialTimestamp); err != nil {
-		return nil, err
-	}
-	runWithFrontier := func(ctx context.Context) {
-		r.run(ctx, frontier)
-	}
-
 	ctx = logtags.AddTag(ctx, "rangefeed", name)
 	ctx, r.cancel = f.stopper.WithCancelOnQuiesce(ctx)
-	if err := f.stopper.RunAsyncTask(ctx, "rangefeed", runWithFrontier); err != nil {
+	if err := f.stopper.RunAsyncTask(ctx, "rangefeed", r.run); err != nil {
 		r.cancel()
 		return nil, err
 	}
@@ -182,7 +167,7 @@ const resetThreshold = 30 * time.Second
 
 // run will run the RangeFeed until the context is canceled or if the client
 // indicates that an initial scan error is non-recoverable.
-func (f *RangeFeed) run(ctx context.Context, frontier *span.Frontier) {
+func (f *RangeFeed) run(ctx context.Context) {
 	defer close(f.stopped)
 	r := retry.StartWithCtx(ctx, f.retryOptions)
 	restartLogEvery := log.Every(10 * time.Second)
@@ -200,6 +185,11 @@ func (f *RangeFeed) run(ctx context.Context, frontier *span.Frontier) {
 	eventCh := make(chan *roachpb.RangeFeedEvent)
 	errCh := make(chan error)
 
+	// Maintain a frontier in order to resume at a reasonable timestamp.
+	// TODO(ajwerner): Consider exposing the frontier through a RangeFeed method.
+	// Doing so would require some synchronization.
+	frontier := span.MakeFrontier(f.span)
+	frontier.Forward(f.span, f.initialTimestamp)
 	for i := 0; r.Next(); i++ {
 
 		// TODO(ajwerner): Figure out what to do if the rangefeed falls behind to
@@ -318,12 +308,7 @@ func (f *RangeFeed) processEvents(
 			case ev.Val != nil:
 				f.onValue(ctx, ev.Val)
 			case ev.Checkpoint != nil:
-				if _, err := frontier.Forward(ev.Checkpoint.Span, ev.Checkpoint.ResolvedTS); err != nil {
-					return err
-				}
-				if f.onCheckpoint != nil {
-					f.onCheckpoint(ctx, ev.Checkpoint)
-				}
+				frontier.Forward(ev.Checkpoint.Span, ev.Checkpoint.ResolvedTS)
 			case ev.Error != nil:
 				// Intentionally do nothing, we'll get an error returned from the
 				// call to RangeFeed.

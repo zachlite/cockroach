@@ -81,6 +81,7 @@ sql.defaults.datestyle.enabled	boolean	false	default value for datestyle_enabled
 sql.defaults.default_int_size	integer	8	the size, in bytes, of an INT type
 sql.defaults.disallow_full_table_scans.enabled	boolean	false	setting to true rejects queries that have planned a full table scan
 sql.defaults.distsql	enumeration	auto	default distributed SQL execution mode [off = 0, auto = 1, on = 2]
+sql.defaults.drop_enum_value.enabled	boolean	false	default value for enable_drop_enum_value; allows for dropping enum values
 sql.defaults.experimental_alter_column_type.enabled	boolean	false	default value for experimental_alter_column_type session setting; enables the use of ALTER COLUMN TYPE for general conversions
 sql.defaults.experimental_auto_rehoming.enabled	boolean	false	default value for experimental_enable_auto_rehoming; allows for rows in REGIONAL BY ROW tables to be auto-rehomed on UPDATE
 sql.defaults.experimental_distsql_planning	enumeration	off	default experimental_distsql_planning mode; enables experimental opt-driven DistSQL planning [off = 0, on = 1]
@@ -109,7 +110,7 @@ sql.defaults.prefer_lookup_joins_for_fks.enabled	boolean	false	default value for
 sql.defaults.primary_region	string		if not empty, all databases created without a PRIMARY REGION will implicitly have the given PRIMARY REGION
 sql.defaults.require_explicit_primary_keys.enabled	boolean	false	default value for requiring explicit primary keys in CREATE TABLE statements
 sql.defaults.results_buffer.size	byte size	16 KiB	default size of the buffer that accumulates results for a statement or a batch of statements before they are sent to the client. This can be overridden on an individual connection with the 'results_buffer_size' parameter. Note that auto-retries generally only happen while no results have been delivered to the client, so reducing this size can increase the number of retriable errors a client receives. On the other hand, increasing the buffer size can increase the delay until the client receives the first result row. Updating the setting only affects new connections. Setting to 0 disables any buffering.
-sql.defaults.serial_normalization	enumeration	rowid	default handling of SERIAL in table definitions [rowid = 0, unordered_rowid = 1, virtual_sequence = 2, sql_sequence = 3, sql_sequence_cached = 4]
+sql.defaults.serial_normalization	enumeration	rowid	default handling of SERIAL in table definitions [rowid = 0, virtual_sequence = 1, sql_sequence = 2, sql_sequence_cached = 3]
 sql.defaults.statement_timeout	duration	0s	default value for the statement_timeout; default value for the statement_timeout session setting; controls the duration a query is permitted to run before it is canceled; if set to 0, there is no timeout
 sql.defaults.stub_catalog_tables.enabled	boolean	true	default value for stub_catalog_tables session setting
 sql.defaults.transaction_rows_read_err	integer	0	the limit for the number of rows read by a SQL transaction which - once exceeded - will fail the transaction (or will trigger a logging event to SQL_INTERNAL_PERF for internal transactions); use 0 to disable
@@ -152,7 +153,6 @@ sql.stats.persisted_rows.max	integer	1000000	maximum number of rows of statement
 sql.stats.post_events.enabled	boolean	false	if set, an event is logged for every CREATE STATISTICS job
 sql.telemetry.query_sampling.enabled	boolean	false	when set to true, executed queries will emit an event on the telemetry logging channel
 sql.temp_object_cleaner.cleanup_interval	duration	30m0s	how often to clean up orphaned temporary objects
-sql.temp_object_cleaner.wait_interval	duration	30m0s	how long after creation a temporary object will be cleaned up
 sql.trace.log_statement_execute	boolean	false	set to true to enable logging of executed statements
 sql.trace.session_eventlog.enabled	boolean	false	set to true to enable session tracing. Note that enabling this may have a non-trivial negative performance impact.
 sql.trace.stmt.enable_threshold	duration	0s	duration beyond which all statements are traced (set to 0 to disable). This applies to individual statements within a transaction and is therefore finer-grained than sql.trace.txn.enable_threshold.

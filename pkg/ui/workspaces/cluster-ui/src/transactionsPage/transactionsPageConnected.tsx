@@ -44,7 +44,7 @@ export const TransactionsPageConnected = withRouter(
       nodeRegions: nodeRegionsByIDSelector(state),
       error: selectTransactionsLastError(state),
       isTenant: selectIsTenant(state),
-      dateRange: selectDateRange(state),
+      dateRange: selectIsTenant(state) ? null : selectDateRange(state),
       columns: selectTxnColumns(state),
     }),
     (dispatch: Dispatch) => ({

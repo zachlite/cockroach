@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -82,16 +81,6 @@ func (b *buildContext) alterTableAddColumn(
 	toType, err := tree.ResolveType(ctx, d.Type, b.SemaCtx.GetTypeResolver())
 	if err != nil {
 		panic(err)
-	}
-
-	version := b.EvalCtx.Settings.Version.ActiveVersionOrEmpty(ctx)
-	supported := types.IsTypeSupportedInVersion(version, toType)
-	if !supported {
-		panic(pgerror.Newf(
-			pgcode.FeatureNotSupported,
-			"type %s is not supported until version upgrade is finalized",
-			toType.SQLString(),
-		))
 	}
 
 	// User defined columns are not supported, since we don't
@@ -655,7 +644,7 @@ func (b *buildContext) maybeCleanTableFKs(
 	ctx context.Context, table catalog.TableDescriptor, behavior tree.DropBehavior,
 ) { // Loop through and update inbound and outbound
 	// foreign key references.
-	_ = table.ForeachInboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	for _, fk := range table.GetInboundFKs() {
 		dependentTable, err := b.Descs.GetImmutableTableByID(ctx, b.EvalCtx.Txn, fk.OriginTableID, tree.ObjectLookupFlagsWithRequired())
 		if err != nil {
 			panic(err)
@@ -691,10 +680,9 @@ func (b *buildContext) maybeCleanTableFKs(
 			b.addNode(scpb.Target_DROP,
 				inFkNode)
 		}
-		return nil
-	})
+	}
 
-	_ = table.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	for _, fk := range table.GetOutboundFKs() {
 		outFkNode := &scpb.OutboundForeignKey{
 			OriginID:         fk.OriginTableID,
 			OriginColumns:    fk.OriginColumnIDs,
@@ -717,8 +705,7 @@ func (b *buildContext) maybeCleanTableFKs(
 			b.addNode(scpb.Target_DROP,
 				inFkNode)
 		}
-		return nil
-	})
+	}
 }
 
 func (b *buildContext) dropTableDesc(

@@ -11,7 +11,6 @@
 import { createMemoryHistory } from "history";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import Long from "long";
-import moment from "moment";
 
 const history = createMemoryHistory({ initialEntries: ["/transactions"] });
 
@@ -38,11 +37,6 @@ export const nodeRegions: { [nodeId: string]: string } = {
   "4": "gcp-europe-west1",
 };
 
-export const dateRange: [moment.Moment, moment.Moment] = [
-  moment.utc("2021.08.08"),
-  moment.utc("2021.08.12"),
-];
-
 export const data: cockroach.server.serverpb.IStatementsResponse = {
   statements: [
     {
@@ -53,6 +47,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-update-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -130,6 +125,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-fetch-single-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -194,6 +190,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read orphaned leases",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -249,6 +246,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-expire-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -345,6 +343,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-insert-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -394,6 +393,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-show-version",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -432,6 +432,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read-setting",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -481,6 +482,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-protectedts-GetMetadata",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -568,6 +570,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-delete-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -679,6 +682,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-log-event",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },

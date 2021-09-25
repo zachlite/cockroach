@@ -49,10 +49,6 @@ func (p *planner) addColumnImpl(
 		)
 	}
 
-	if err := checkTypeIsSupported(params.ctx, params.ExecCfg().Settings, toType); err != nil {
-		return err
-	}
-
 	newDef, seqPrefix, seqName, seqOpts, err := params.p.processSerialLikeInColumnDef(params.ctx, d, tn)
 	if err != nil {
 		return err

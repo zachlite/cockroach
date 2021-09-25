@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlinstance/instanceprovider"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slinstance"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slstorage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -62,20 +61,18 @@ func TestInstanceProvider(t *testing.T) {
 		defer stopper.Stop(ctx)
 		instanceProvider := instanceprovider.NewTestInstanceProvider(stopper, slInstance, addr)
 		slInstance.Start(ctx)
-		instanceID, sessionID, err := instanceProvider.Instance(ctx)
+		instanceID, err := instanceProvider.Instance(ctx)
 		require.NoError(t, err)
 		require.Equal(t, expectedInstanceID, instanceID)
-		require.NotEqual(t, sqlliveness.SessionID(""), sessionID)
 
 		// Verify an additional call to Instance(), returns the same instance
-		instanceID, sessionID2, err := instanceProvider.Instance(ctx)
+		instanceID, err = instanceProvider.Instance(ctx)
 		require.NoError(t, err)
 		require.Equal(t, expectedInstanceID, instanceID)
-		require.Equal(t, sessionID, sessionID2)
-
 		session, err := slInstance.Session(ctx)
-		require.NoError(t, err)
-		require.Equal(t, session.ID(), sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Update clock time to move ahead of session expiry to ensure session expiry callback is invoked.
 		newTime := session.Expiration().Add(1, 0).UnsafeToClockTimestamp()
@@ -84,7 +81,7 @@ func TestInstanceProvider(t *testing.T) {
 		slInstance.ClearSessionForTest(ctx)
 		// Verify that the SQL instance is shutdown on session expiry.
 		testutils.SucceedsSoon(t, func() error {
-			if _, _, err = instanceProvider.Instance(ctx); !errors.Is(err, stop.ErrUnavailable) {
+			if _, err = instanceProvider.Instance(ctx); !errors.Is(err, stop.ErrUnavailable) {
 				return errors.Errorf("sql instance is not shutdown on session expiry")
 			}
 			return nil
@@ -97,7 +94,7 @@ func TestInstanceProvider(t *testing.T) {
 		instanceProvider := instanceprovider.NewTestInstanceProvider(stopper, slInstance, "addr")
 		slInstance.Start(ctx)
 		instanceProvider.ShutdownSQLInstanceForTest(ctx)
-		_, _, err := instanceProvider.Instance(ctx)
+		_, err := instanceProvider.Instance(ctx)
 		require.Error(t, err)
 		require.Equal(t, "instance never initialized", err.Error())
 	})

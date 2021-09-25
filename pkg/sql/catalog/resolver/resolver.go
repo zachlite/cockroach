@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -298,24 +297,16 @@ func ResolveSchemaNameByID(
 		return "", err
 	}
 	if schema, ok := schemas[schemaID]; ok {
-		return schema.Name, nil
+		return schema, nil
 	}
 	return "", errors.Newf("unable to resolve schema id %d for db %d", schemaID, dbID)
 }
 
-// SchemaEntryForDB entry for an individual schema,
-// which includes the name and modification timestamp.
-type SchemaEntryForDB struct {
-	Name      string
-	Timestamp hlc.Timestamp
-}
-
 // GetForDatabase looks up and returns all available
-// schema ids to SchemaEntryForDB structures for a
-//given database.
+// schema ids to names for a given database.
 func GetForDatabase(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID,
-) (map[descpb.ID]SchemaEntryForDB, error) {
+) (map[descpb.ID]string, error) {
 	log.Eventf(ctx, "fetching all schema descriptor IDs for %d", dbID)
 
 	nameKey := catalogkeys.MakeSchemaNameKey(codec, dbID, "" /* name */)
@@ -327,12 +318,9 @@ func GetForDatabase(
 	// Always add public schema ID.
 	// TODO(solon): This can be removed in 20.2, when this is always written.
 	// In 20.1, in a migrating state, it may be not included yet.
-	ret := make(map[descpb.ID]SchemaEntryForDB, len(kvs)+1)
-	ret[descpb.ID(keys.PublicSchemaID)] =
-		SchemaEntryForDB{
-			Name:      tree.PublicSchema,
-			Timestamp: txn.ReadTimestamp(),
-		}
+	ret := make(map[descpb.ID]string, len(kvs)+1)
+	ret[descpb.ID(keys.PublicSchemaID)] = tree.PublicSchema
+
 	for _, kv := range kvs {
 		id := descpb.ID(kv.ValueInt())
 		if _, ok := ret[id]; ok {
@@ -342,10 +330,7 @@ func GetForDatabase(
 		if err != nil {
 			return nil, err
 		}
-		ret[id] = SchemaEntryForDB{
-			Name:      k.GetName(),
-			Timestamp: kv.Value.Timestamp,
-		}
+		ret[id] = k.GetName()
 	}
 	return ret, nil
 }

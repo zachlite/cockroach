@@ -113,34 +113,17 @@
   .warn {
     color: $colors--functional-orange-4;
     text-transform: uppercase;
-  }
-
-  .underline-tooltip {
     border-bottom: 1px dashed $adminui-white;
-
-    a {
-      text-decoration: underline;
-      font-size: inherit;
-      color: $chip-grey;
-    }
   }
 
-  .node-attribute {
-    div {
-      display: inline-block;
-    }
-  }
-
-  .node-details {
+  .nodeDetails {
     position: relative;
     padding: 6px 0;
     border: 1px solid transparent;
 
     b {
-      div {
-        display: inline-block;
-      }
       font-family: $font-family--monospace;
+      border-bottom: 1px dashed $adminui-white;
       font-size: 14px;
       font-weight: 500;
       line-height: 1.67;
@@ -149,20 +132,24 @@
     }
 
     &:only-child {
-      .node-attributes {
+      .nodeAttributes {
         border-left: 1px solid transparent;
       }
     }
   }
 
-  .node-attributes.global-attributes {
+  .nodeAttributes.globalAttributes {
     margin-bottom: 40px;
     padding: 0 0 40px 0;
     border-left: none;
     border-bottom: 1px solid $colors--neutral-5;
+
+    .nodeAttributeKey {
+      border-bottom: 1px dashed $adminui-white;
+    }
   }
 
-  .node-attributes {
+  .nodeAttributes {
     color: $chip-grey;
     padding: 3px 14px 12px 8px;
     margin-left: 2px;
@@ -172,11 +159,7 @@
     font-weight: 500;
     line-height: 1.83;
 
-    .node-attribute-key {
-      div {
-        display: inline-block;
-      }
-      position: relative;
+    .nodeAttributeKey {
       color: $colors--primary-blue-6;
     }
   }

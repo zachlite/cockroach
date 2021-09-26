@@ -116,8 +116,3 @@ func (r *Renderer) Collapsed(title string, inner func()) {
 	})
 	r.nl()
 }
-
-// String prints the buffer.
-func (r *Renderer) String() string {
-	return r.buf.String()
-}

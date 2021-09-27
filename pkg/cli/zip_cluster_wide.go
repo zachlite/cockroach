@@ -79,12 +79,11 @@ var debugZipTablesPerCluster = []string{
 	"crdb_internal.cluster_settings",
 	"crdb_internal.cluster_transactions",
 
-	"crdb_internal.default_privileges",
-
 	"crdb_internal.jobs",
 	"system.jobs",       // get the raw, restorable jobs records too.
 	"system.descriptor", // descriptors also contain job-like mutation state.
 	"system.namespace",
+	"system.namespace2", // TODO(sqlexec): consider removing in 20.2 or later.
 	"system.scheduled_jobs",
 
 	// The synthetic SQL CREATE statements for all tables.
@@ -97,13 +96,10 @@ var debugZipTablesPerCluster = []string{
 	"crdb_internal.kv_node_status",
 	"crdb_internal.kv_store_status",
 
-	"crdb_internal.regions",
 	"crdb_internal.schema_changes",
 	"crdb_internal.partitions",
 	"crdb_internal.zones",
 	"crdb_internal.invalid_objects",
-	"crdb_internal.index_usage_statistics",
-	"crdb_internal.table_indexes",
 }
 
 // collectClusterData runs the data collection that only needs to

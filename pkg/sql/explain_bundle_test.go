@@ -60,7 +60,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM abc WHERE c=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
 	})
 
@@ -69,7 +69,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT EXISTS (SELECT * FROM abc WHERE c=1)")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql-2-main-query.html distsql-1-subquery.html vec-1-subquery-v.txt vec-1-subquery.txt vec-2-main-query-v.txt vec-2-main-query.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql-2-main-query.html distsql-1-subquery.html",
 		)
 	})
 
@@ -77,7 +77,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM s.a WHERE a=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "s.a",
-			base, plans, "stats-defaultdb.s.a.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.s.a.sql", "distsql.html",
 		)
 	})
 
@@ -116,29 +116,8 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		}
 		checkBundle(
 			t, rowsBuf.String(), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
-	})
-
-	// This is a regression test for the situation where wrapped into the
-	// vectorized flow planNodes in the postqueries were messed up because the
-	// generation of EXPLAIN (VEC) diagrams modified planNodeToRowSources in
-	// place (#62261).
-	t.Run("insert with postquery", func(t *testing.T) {
-		// We need to disable the insert fast path so that postqueries are
-		// planned.
-		r.Exec(t, `SET enable_insert_fast_path = false;
-CREATE TABLE promos(id SERIAL PRIMARY KEY);
-INSERT INTO promos VALUES (642606224929619969);
-CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT REFERENCES promos(id));
-`)
-		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) INSERT INTO users (promo_id) VALUES (642606224929619969);")
-		checkBundle(
-			t, fmt.Sprint(rows), "public.users", base, plans,
-			"stats-defaultdb.public.users.sql", "stats-defaultdb.public.promos.sql",
-			"distsql-1-main-query.html distsql-2-postquery.html vec-1-main-query-v.txt vec-1-main-query.txt vec-2-postquery-v.txt vec-2-postquery.txt",
-		)
-		r.Exec(t, `RESET enable_insert_fast_path;`)
 	})
 
 	t.Run("basic when tracing already enabled", func(t *testing.T) {
@@ -147,7 +126,7 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM abc WHERE c=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
 	})
 }

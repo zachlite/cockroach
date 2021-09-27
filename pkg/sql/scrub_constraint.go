@@ -15,7 +15,6 @@ import (
 	"go/constant"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -28,13 +27,13 @@ import (
 // CHECK constraint on a table.
 type sqlCheckConstraintCheckOperation struct {
 	tableName *tree.TableName
-	tableDesc catalog.TableDescriptor
+	tableDesc *tabledesc.Immutable
 	checkDesc *descpb.TableDescriptor_CheckConstraint
 	asOf      hlc.Timestamp
 
 	// columns is a list of the columns returned in the query result
 	// tree.Datums.
-	columns []catalog.Column
+	columns []*descpb.ColumnDescriptor
 	// primaryColIdxs maps PrimaryIndex.Columns to the row
 	// indexes in the query result tree.Datums.
 	primaryColIdxs []int
@@ -52,7 +51,7 @@ type sqlCheckConstraintCheckRun struct {
 
 func newSQLCheckConstraintCheckOperation(
 	tableName *tree.TableName,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	checkDesc *descpb.TableDescriptor_CheckConstraint,
 	asOf hlc.Timestamp,
 ) *sqlCheckConstraintCheckOperation {
@@ -80,7 +79,7 @@ func (o *sqlCheckConstraintCheckOperation) Start(params runParams) error {
 	tn.ExplicitCatalog = true
 	tn.ExplicitSchema = true
 	sel := &tree.SelectClause{
-		Exprs: tabledesc.ColumnsSelectors(o.tableDesc.PublicColumns()),
+		Exprs: tabledesc.ColumnsSelectors(o.tableDesc.Columns),
 		From: tree.From{
 			Tables: tree.TableExprs{&tn},
 		},
@@ -98,7 +97,7 @@ func (o *sqlCheckConstraintCheckOperation) Start(params runParams) error {
 		}
 	}
 
-	rows, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.QueryBuffered(
+	rows, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.Query(
 		ctx, "check-constraint", params.p.txn, tree.AsStringWithFlags(sel, tree.FmtParsable),
 	)
 	if err != nil {
@@ -107,8 +106,11 @@ func (o *sqlCheckConstraintCheckOperation) Start(params runParams) error {
 
 	o.run.started = true
 	o.run.rows = rows
+
 	// Collect all the columns.
-	o.columns = o.tableDesc.PublicColumns()
+	for i := range o.tableDesc.Columns {
+		o.columns = append(o.columns, &o.tableDesc.Columns[i])
+	}
 	// Find the row indexes for all of the primary index columns.
 	o.primaryColIdxs, err = getPrimaryColIdxs(o.tableDesc, o.columns)
 	return err
@@ -137,7 +139,7 @@ func (o *sqlCheckConstraintCheckOperation) Next(params runParams) (tree.Datums, 
 	details["constraint_name"] = o.checkDesc.Name
 	for rowIdx, col := range o.columns {
 		// TODO(joey): We should maybe try to get the underlying type.
-		rowDetails[col.GetName()] = row[rowIdx].String()
+		rowDetails[col.Name] = row[rowIdx].String()
 	}
 	detailsJSON, err := tree.MakeDJSON(details)
 	if err != nil {

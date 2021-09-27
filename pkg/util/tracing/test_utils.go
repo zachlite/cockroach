@@ -10,14 +10,10 @@
 
 package tracing
 
-import (
-	"strings"
+import "strings"
 
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
-)
-
-// FindMsgInRecording returns the index of the first Span containing msg in its
-// logs, or -1 if no Span is found.
+// FindMsgInRecording returns the index of the first span containing msg in its
+// logs, or -1 if no span is found.
 func FindMsgInRecording(recording Recording, msg string) int {
 	for i, sp := range recording {
 		if LogsContainMsg(sp, msg) {
@@ -27,10 +23,10 @@ func FindMsgInRecording(recording Recording, msg string) int {
 	return -1
 }
 
-// LogsContainMsg returns true if a Span's logs contain the given message.
-func LogsContainMsg(sp tracingpb.RecordedSpan, msg string) bool {
+// LogsContainMsg returns true if a span's logs contain the given message.
+func LogsContainMsg(sp RecordedSpan, msg string) bool {
 	for _, l := range sp.Logs {
-		// NOTE: With our logs, each LogRecord has a single field ("event") and
+		// NOTE: With out logs, each LogRecord has a single field ("event") and
 		// value.
 		for _, f := range l.Fields {
 			if strings.Contains(f.Value, msg) {
@@ -39,19 +35,4 @@ func LogsContainMsg(sp tracingpb.RecordedSpan, msg string) bool {
 		}
 	}
 	return false
-}
-
-// CountLogMessages counts the messages containing msg.
-func CountLogMessages(sp tracingpb.RecordedSpan, msg string) int {
-	res := 0
-	for _, l := range sp.Logs {
-		// NOTE: With our logs, each LogRecord has a single field ("event") and
-		// value.
-		for _, f := range l.Fields {
-			if strings.Contains(f.Value, msg) {
-				res++
-			}
-		}
-	}
-	return res
 }

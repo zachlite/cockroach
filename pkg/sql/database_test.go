@@ -15,11 +15,13 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/database"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -39,7 +41,10 @@ func TestDatabaseAccessors(t *testing.T) {
 		if _, err := catalogkv.MustGetDatabaseDescByID(ctx, txn, keys.SystemSQLCodec, keys.SystemDatabaseID); err != nil {
 			return err
 		}
-		return nil
+
+		databaseCache := database.NewCache(keys.SystemSQLCodec, config.NewSystemConfig(zonepb.DefaultZoneConfigRef()))
+		_, err := databaseCache.GetDatabaseDescByID(ctx, txn, keys.SystemDatabaseID)
+		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,8 +67,8 @@ CREATE SCHEMA sc;
 		t.Fatal(err)
 	}
 
-	getDB := func() catalog.DatabaseDescriptor {
-		var db catalog.DatabaseDescriptor
+	getDB := func() *dbdesc.Immutable {
+		var db *dbdesc.Immutable
 		if err := kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			dbID, err := catalogkv.GetDatabaseID(ctx, txn, keys.SystemSQLCodec, "d", true /* required */)
 			if err != nil {
@@ -79,7 +84,7 @@ CREATE SCHEMA sc;
 
 	// Now get the database descriptor from disk.
 	db := getDB()
-	if db.GetSchemaID("sc") == descpb.InvalidID {
+	if _, ok := db.Schemas["sc"]; !ok {
 		t.Fatal("expected to find child schema sc in db")
 	}
 
@@ -89,10 +94,10 @@ CREATE SCHEMA sc;
 	}
 
 	db = getDB()
-	if db.GetSchemaID("sc2") == descpb.InvalidID {
+	if _, ok := db.Schemas["sc2"]; !ok {
 		t.Fatal("expected to find child schema sc2 in db")
 	}
-	if db.GetSchemaID("sc") != descpb.InvalidID {
+	if _, ok := db.Schemas["sc"]; ok {
 		t.Fatal("expected to not find schema sc in db")
 	}
 }

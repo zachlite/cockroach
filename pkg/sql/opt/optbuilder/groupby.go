@@ -581,19 +581,19 @@ func (b *Builder) buildGrouping(
 				return
 			}
 			// Case 1 above.
-			targetName := tree.Name(name.Parts[0])
+			targetName := name.Parts[0]
 
 			// We must prefer a match against a FROM-clause column (but ignore upper
 			// scopes); in this case we let the general case below handle the reference.
 			for i := range fromScope.cols {
-				if fromScope.cols[i].name.MatchesReferenceName(targetName) {
+				if string(fromScope.cols[i].name) == targetName {
 					return
 				}
 			}
 			// See if it matches exactly one of the target lists.
 			var match *scopeColumn
 			for i := range projectionsScope.cols {
-				if col := &projectionsScope.cols[i]; col.name.MatchesReferenceName(targetName) {
+				if col := &projectionsScope.cols[i]; string(col.name) == targetName {
 					if match != nil {
 						// Multiple matches are only allowed if they refer to identical
 						// expressions.
@@ -605,7 +605,7 @@ func (b *Builder) buildGrouping(
 				}
 			}
 			if match != nil {
-				groupBy, alias = match.expr, string(targetName)
+				groupBy, alias = match.expr, targetName
 			}
 		}
 	}()
@@ -634,7 +634,7 @@ func (b *Builder) buildGrouping(
 		// Save a representation of the GROUP BY expression for validation of the
 		// SELECT and HAVING expressions. This enables queries such as:
 		//   SELECT x+y FROM t GROUP BY x+y
-		col := aggInScope.addColumn(scopeColName(tree.Name(alias)), e)
+		col := b.addColumn(aggInScope, alias, e)
 		b.buildScalar(e, fromScope, aggInScope, col, nil)
 		fromScope.groupby.groupStrs[exprStr] = col
 	}
@@ -648,7 +648,7 @@ func (b *Builder) buildAggArg(
 ) opt.ScalarExpr {
 	// This synthesizes a new tempScope column, unless the argument is a
 	// simple VariableOp.
-	col := tempScope.addColumn(scopeColName(""), e)
+	col := b.addColumn(tempScope, "" /* alias */, e)
 	b.buildScalar(e, fromScope, tempScope, col, &info.colRefs)
 	if col.scalar != nil {
 		return col.scalar
@@ -735,7 +735,7 @@ func (b *Builder) buildAggregateFunction(
 
 		// Use 0 as the group for now; it will be filled in later by the
 		// buildAggregation method.
-		info.col = b.synthesizeColumn(g.aggOutScope, scopeColName(tree.Name(funcName)), f.ResolvedType(), f, nil /* scalar */)
+		info.col = b.synthesizeColumn(g.aggOutScope, funcName, f.ResolvedType(), f, nil /* scalar */)
 
 		// Move the columns for the aggregate input expressions to the correct scope.
 		if g.aggInScope != tempScope {
@@ -806,28 +806,6 @@ func (b *Builder) constructAggregate(name string, args []opt.ScalarExpr) opt.Sca
 		return b.factory.ConstructCount(args[0])
 	case "count_rows":
 		return b.factory.ConstructCountRows()
-	case "covar_pop":
-		return b.factory.ConstructCovarPop(args[0], args[1])
-	case "covar_samp":
-		return b.factory.ConstructCovarSamp(args[0], args[1])
-	case "regr_avgx":
-		return b.factory.ConstructRegressionAvgX(args[0], args[1])
-	case "regr_avgy":
-		return b.factory.ConstructRegressionAvgY(args[0], args[1])
-	case "regr_intercept":
-		return b.factory.ConstructRegressionIntercept(args[0], args[1])
-	case "regr_r2":
-		return b.factory.ConstructRegressionR2(args[0], args[1])
-	case "regr_slope":
-		return b.factory.ConstructRegressionSlope(args[0], args[1])
-	case "regr_sxx":
-		return b.factory.ConstructRegressionSXX(args[0], args[1])
-	case "regr_sxy":
-		return b.factory.ConstructRegressionSXY(args[0], args[1])
-	case "regr_syy":
-		return b.factory.ConstructRegressionSYY(args[0], args[1])
-	case "regr_count":
-		return b.factory.ConstructRegressionCount(args[0], args[1])
 	case "max":
 		return b.factory.ConstructMax(args[0])
 	case "min":
@@ -891,10 +869,10 @@ func isSQLFn(def *tree.FunctionDefinition) bool {
 	return def.Class == tree.SQLClass
 }
 
-func newGroupingError(name tree.Name) error {
+func newGroupingError(name *tree.Name) error {
 	return pgerror.Newf(pgcode.Grouping,
 		"column \"%s\" must appear in the GROUP BY clause or be used in an aggregate function",
-		tree.ErrString(&name),
+		tree.ErrString(name),
 	)
 }
 

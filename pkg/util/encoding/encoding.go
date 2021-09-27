@@ -25,10 +25,10 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/encoding/encodingtype"
 	"github.com/cockroachdb/cockroach/pkg/util/ipaddr"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
@@ -99,8 +99,6 @@ const (
 
 	box2DMarker            = arrayKeyDescendingMarker + 1
 	geoInvertedIndexMarker = box2DMarker + 1
-
-	emptyArray = geoInvertedIndexMarker + 1
 
 	arrayKeyTerminator           byte = 0x00
 	arrayKeyDescendingTerminator byte = 0xFF
@@ -312,17 +310,17 @@ func getVarintLen(b []byte) (int, error) {
 	return length, nil
 }
 
-// DecodeVarintAscending decodes a value encoded by EncodeVarintAscending.
+// DecodeVarintAscending decodes a value encoded by EncodeVaringAscending.
 func DecodeVarintAscending(b []byte) ([]byte, int64, error) {
 	if len(b) == 0 {
-		return nil, 0, errors.Errorf("insufficient bytes to decode varint value")
+		return nil, 0, errors.Errorf("insufficient bytes to decode uvarint value")
 	}
 	length := int(b[0]) - intZero
 	if length < 0 {
 		length = -length
 		remB := b[1:]
 		if len(remB) < length {
-			return nil, 0, errors.Errorf("insufficient bytes to decode varint value: %q", remB)
+			return nil, 0, errors.Errorf("insufficient bytes to decode uvarint value: %q", remB)
 		}
 		var v int64
 		// Use the ones-complement of each encoded byte in order to build
@@ -344,7 +342,7 @@ func DecodeVarintAscending(b []byte) ([]byte, int64, error) {
 	return remB, int64(v), nil
 }
 
-// DecodeVarintDescending decodes a int64 value which was encoded
+// DecodeVarintDescending decodes a uint64 value which was encoded
 // using EncodeVarintDescending.
 func DecodeVarintDescending(b []byte) ([]byte, int64, error) {
 	leftover, v, err := DecodeVarintAscending(b)
@@ -455,7 +453,7 @@ func EncLenUvarintDescending(v uint64) int {
 	return 2 + highestByteIndex(v)
 }
 
-// DecodeUvarintAscending decodes a uint64 encoded uint64 from the input
+// DecodeUvarintAscending decodes a varint encoded uint64 from the input
 // buffer. The remainder of the input buffer and the decoded uint64
 // are returned.
 func DecodeUvarintAscending(b []byte) ([]byte, uint64, error) {
@@ -772,11 +770,6 @@ func EncodeJSONEmptyObject(b []byte) []byte {
 	return append(b, escape, escapedTerm, jsonEmptyObject)
 }
 
-// EncodeEmptyArray returns a byte array b with a byte to signify an empty array.
-func EncodeEmptyArray(b []byte) []byte {
-	return append(b, emptyArray)
-}
-
 // EncodeStringDescending is the descending version of EncodeStringAscending.
 func EncodeStringDescending(b []byte, s string) []byte {
 	if len(s) == 0 {
@@ -941,14 +934,6 @@ func EncodeNotNullAscending(b []byte) []byte {
 	return append(b, encodedNotNull)
 }
 
-// EncodeJSONObjectSpanStartAscending encodes the first possible value for JSON
-// objects, which is \x00\xff. Non-objects (i.e., scalars and arrays) will
-// start with \x00\x01 or \x00\x03 (see AddJSONPathTerminator and
-// EncodeArrayAscending), so all objects will be ordered after them.
-func EncodeJSONObjectSpanStartAscending(b []byte) []byte {
-	return append(b, escape, escaped00)
-}
-
 // EncodeArrayAscending encodes a value used to signify membership of an array for JSON objects.
 func EncodeArrayAscending(b []byte) []byte {
 	return append(b, escape, escapedJSONArray)
@@ -1092,7 +1077,7 @@ func decodeTime(b []byte) (r []byte, sec int64, nsec int64, err error) {
 }
 
 // EncodeBox2DAscending encodes a bounding box in ascending order.
-func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DAscending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatAscending(b, box.LoX)
 	b = EncodeFloatAscending(b, box.HiX)
@@ -1102,7 +1087,7 @@ func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // EncodeBox2DDescending encodes a bounding box in descending order.
-func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DDescending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatDescending(b, box.LoX)
 	b = EncodeFloatDescending(b, box.HiX)
@@ -1112,8 +1097,8 @@ func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // DecodeBox2DAscending decodes a box2D object in ascending order.
-func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DAscending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1140,8 +1125,8 @@ func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
 }
 
 // DecodeBox2DDescending decodes a box2D object in descending order.
-func DecodeBox2DDescending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DDescending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1545,7 +1530,7 @@ func DecodeBitArrayDescending(b []byte) ([]byte, bitarray.BitArray, error) {
 // Type represents the type of a value encoded by
 // Encode{Null,NotNull,Varint,Uvarint,Float,Bytes}.
 //go:generate stringer -type=Type
-type Type encodingtype.T
+type Type int
 
 // Type values.
 // TODO(dan, arjun): Make this into a proto enum.
@@ -1737,8 +1722,7 @@ func PeekLength(b []byte) (int, error) {
 	m := b[0]
 	switch m {
 	case encodedNull, encodedNullDesc, encodedNotNull, encodedNotNullDesc,
-		floatNaN, floatNaNDesc, floatZero, decimalZero, byte(True), byte(False),
-		emptyArray:
+		floatNaN, floatNaNDesc, floatZero, decimalZero, byte(True), byte(False):
 		// interleavedSentinel also falls into this path. Since it
 		// contains the same byte value as encodedNotNullDesc, it
 		// cannot be included explicitly in the case statement.
@@ -2089,8 +2073,6 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 				return b[1:], "[]", nil
 			case jsonEmptyObject:
 				return b[1:], "{}", nil
-			case emptyArray:
-				return b[1:], "[]", nil
 			}
 		}
 		// This shouldn't ever happen, but if it does, return an empty slice.
@@ -2367,16 +2349,16 @@ func EncodeUntaggedTimeTZValue(appendTo []byte, t timetz.TimeTZ) []byte {
 	return EncodeNonsortingStdlibVarint(appendTo, int64(t.OffsetSecs))
 }
 
-// EncodeBox2DValue encodes a geopb.BoundingBox with its value tag, appends it to
+// EncodeBox2DValue encodes a geo.CartesianBoundingBox with its value tag, appends it to
 // the supplied buffer and returns the final buffer.
-func EncodeBox2DValue(appendTo []byte, colID uint32, b geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DValue(appendTo []byte, colID uint32, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeValueTag(appendTo, colID, Box2D)
 	return EncodeUntaggedBox2DValue(appendTo, b)
 }
 
-// EncodeUntaggedBox2DValue encodes a geopb.BoundingBox value, appends it to the supplied buffer,
+// EncodeUntaggedBox2DValue encodes a geo.CartesianBoundingBox value, appends it to the supplied buffer,
 // and returns the final buffer.
-func EncodeUntaggedBox2DValue(appendTo []byte, b geopb.BoundingBox) ([]byte, error) {
+func EncodeUntaggedBox2DValue(appendTo []byte, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeFloatAscending(appendTo, b.LoX)
 	appendTo = EncodeFloatAscending(appendTo, b.HiX)
 	appendTo = EncodeFloatAscending(appendTo, b.LoY)
@@ -2669,8 +2651,10 @@ func DecodeDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err error) {
 }
 
 // DecodeUntaggedBox2DValue decodes a value encoded by EncodeUntaggedBox2DValue.
-func DecodeUntaggedBox2DValue(b []byte) (remaining []byte, box geopb.BoundingBox, err error) {
-	box = geopb.BoundingBox{}
+func DecodeUntaggedBox2DValue(
+	b []byte,
+) (remaining []byte, box geo.CartesianBoundingBox, err error) {
+	box = geo.CartesianBoundingBox{}
 	remaining = b
 
 	remaining, box.LoX, err = DecodeFloatAscending(remaining)

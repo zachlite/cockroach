@@ -13,8 +13,8 @@ package sql
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -74,11 +74,16 @@ type joinPredicate struct {
 func getJoinResultColumns(
 	joinType descpb.JoinType, left, right colinfo.ResultColumns,
 ) colinfo.ResultColumns {
+	// For anti and semi joins, the right columns are omitted from the output (but
+	// they must be available internally for the ON condition evaluation).
+	omitRightColumns := joinType == descpb.LeftSemiJoin || joinType == descpb.LeftAntiJoin
+
+	// The structure of the join data source results is like this:
+	// - all the left columns,
+	// - then all the right columns (except for anti/semi join).
 	columns := make(colinfo.ResultColumns, 0, len(left)+len(right))
-	if joinType.ShouldIncludeLeftColsInOutput() {
-		columns = append(columns, left...)
-	}
-	if joinType.ShouldIncludeRightColsInOutput() {
+	columns = append(columns, left...)
+	if !omitRightColumns {
 		columns = append(columns, right...)
 	}
 	return columns
@@ -135,7 +140,7 @@ func (p *joinPredicate) eval(ctx *tree.EvalContext, leftRow, rightRow tree.Datum
 		copy(p.curRow[:len(leftRow)], leftRow)
 		copy(p.curRow[len(leftRow):], rightRow)
 		ctx.PushIVarContainer(p.iVarHelper.Container())
-		pred, err := execinfrapb.RunFilter(p.onCond, ctx)
+		pred, err := schemaexpr.RunFilter(p.onCond, ctx)
 		ctx.PopIVarContainer()
 		return pred, err
 	}

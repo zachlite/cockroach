@@ -20,9 +20,6 @@ import (
 func TestLoadTeams(t *testing.T) {
 	yamlFile := []byte(`
 sql:
-  aliases:
-    sql-alias: other
-    sql-roachtest: roachtest
   email: otan@cockroachlabs.com
   slack: otan
   triage_column_id: 1
@@ -33,46 +30,17 @@ test-infra-team:
 `)
 	ret, err := LoadTeams(bytes.NewReader(yamlFile))
 	require.NoError(t, err)
-	sqlTeam := Team{
-		TeamName: "sql",
-		Aliases: map[Alias]Purpose{
-			"sql-alias":     PurposeOther,
-			"sql-roachtest": PurposeRoachtest,
-		},
-		Email:          "otan@cockroachlabs.com",
-		Slack:          "otan",
-		TriageColumnID: 1,
-	}
-	require.Equal(t, sqlTeam.TeamName, sqlTeam.Name())
-
-	{
-		_, ok := ret.GetAliasesForPurpose("not-a-team", PurposeRoachtest)
-		require.False(t, ok)
-	}
-	{
-		sl, ok := ret.GetAliasesForPurpose("sql-alias", PurposeRoachtest)
-		require.True(t, ok)
-		require.Equal(t, []Alias{"sql-roachtest"}, sl)
-	}
-	{
-		sl, ok := ret.GetAliasesForPurpose("sql-alias", PurposeOther)
-		require.True(t, ok)
-		require.Equal(t, []Alias{"sql-alias"}, sl)
-	}
-	{
-		sl, ok := ret.GetAliasesForPurpose("test-infra-team", PurposeRoachtest)
-		require.True(t, ok)
-		require.Equal(t, []Alias{"test-infra-team"}, sl)
-	}
-
 	require.Equal(
 		t,
-		Map{
-			"sql":           sqlTeam,
-			"sql-alias":     sqlTeam,
-			"sql-roachtest": sqlTeam,
+		map[Alias]Team{
+			"sql": {
+				Alias:          "sql",
+				Email:          "otan@cockroachlabs.com",
+				Slack:          "otan",
+				TriageColumnID: 1,
+			},
 			"test-infra-team": {
-				TeamName:       "test-infra-team",
+				Alias:          "test-infra-team",
 				Email:          "jlinder@cockroachlabs.com",
 				Slack:          "jlinder",
 				TriageColumnID: 2,

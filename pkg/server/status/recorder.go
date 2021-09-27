@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
@@ -41,9 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/system"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
 )
@@ -100,7 +98,7 @@ var childMetricsEnabled = settings.RegisterBoolSetting("server.child_metrics.ena
 type MetricsRecorder struct {
 	*HealthChecker
 	gossip       *gossip.Gossip
-	nodeLiveness *liveness.NodeLiveness
+	nodeLiveness *kvserver.NodeLiveness
 	rpcContext   *rpc.Context
 	settings     *cluster.Settings
 	clock        *hlc.Clock
@@ -149,7 +147,7 @@ type MetricsRecorder struct {
 // given clock.
 func NewMetricsRecorder(
 	clock *hlc.Clock,
-	nodeLiveness *liveness.NodeLiveness,
+	nodeLiveness *kvserver.NodeLiveness,
 	rpcContext *rpc.Context,
 	gossip *gossip.Gossip,
 	settings *cluster.Settings,
@@ -446,9 +444,9 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 		StoreStatuses:     make([]statuspb.StoreStatus, 0, lastSummaryCount),
 		Metrics:           make(map[string]float64, lastNodeMetricCount),
 		Args:              os.Args,
-		Env:               flattenStrings(envutil.GetEnvVarsUsed()),
+		Env:               envutil.GetEnvVarsUsed(),
 		Activity:          activity,
-		NumCpus:           int32(system.NumCPU()),
+		NumCpus:           int32(runtime.NumCPU()),
 		TotalSystemMemory: systemMemory,
 	}
 
@@ -488,50 +486,21 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 	return nodeStat
 }
 
-func flattenStrings(s []redact.RedactableString) []string {
-	res := make([]string, len(s))
-	for i, v := range s {
-		res[i] = v.StripMarkers()
-	}
-	return res
-}
-
-// WriteNodeStatus writes the supplied summary to the given client. If mustExist
-// is true, the key must already exist and must not change while being updated,
-// otherwise an error is returned -- if false, the status is always written.
+// WriteNodeStatus writes the supplied summary to the given client.
 func (mr *MetricsRecorder) WriteNodeStatus(
-	ctx context.Context, db *kv.DB, nodeStatus statuspb.NodeStatus, mustExist bool,
+	ctx context.Context, db *kv.DB, nodeStatus statuspb.NodeStatus,
 ) error {
 	mr.writeSummaryMu.Lock()
 	defer mr.writeSummaryMu.Unlock()
 	key := keys.NodeStatusKey(nodeStatus.Desc.NodeID)
-	// We use an inline value to store only a single version of the node status.
+	// We use PutInline to store only a single version of the node status.
 	// There's not much point in keeping the historical versions as we keep
 	// all of the constituent data as timeseries. Further, due to the size
 	// of the build info in the node status, writing one of these every 10s
 	// will generate more versions than will easily fit into a range over
 	// the course of a day.
-	if mustExist {
-		entry, err := db.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		if entry.Value == nil {
-			return errors.New("status entry not found, node may have been decommissioned")
-		}
-		err = db.CPutInline(ctx, key, &nodeStatus, entry.Value.TagAndDataBytes())
-		if detail := (*roachpb.ConditionFailedError)(nil); errors.As(err, &detail) {
-			if detail.ActualValue == nil {
-				return errors.New("status entry not found, node may have been decommissioned")
-			}
-			return errors.New("status entry unexpectedly changed during update")
-		} else if err != nil {
-			return err
-		}
-	} else {
-		if err := db.PutInline(ctx, key, &nodeStatus); err != nil {
-			return err
-		}
+	if err := db.PutInline(ctx, key, &nodeStatus); err != nil {
+		return err
 	}
 	if log.V(2) {
 		statusJSON, err := json.Marshal(&nodeStatus)
@@ -599,7 +568,6 @@ func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
 			for _, pt := range recordHistogramQuantiles {
 				fn(name+pt.suffix, float64(curr.ValueAtQuantile(pt.quantile)))
 			}
-			fn(name+"-count", float64(curr.TotalCount()))
 		} else {
 			val, err := extractValue(mtr)
 			if err != nil {

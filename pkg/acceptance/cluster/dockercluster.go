@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"io/ioutil"
 	"net"
@@ -38,8 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
-	"github.com/containerd/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
@@ -47,11 +46,10 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
-	defaultImage  = "docker.io/library/ubuntu:focal-20210119"
+	defaultImage  = "docker.io/library/ubuntu:xenial-20170214"
 	networkPrefix = "cockroachdb_acceptance"
 )
 
@@ -69,10 +67,18 @@ var waitOnStop = flag.Bool("w", false, "wait for the user to interrupt before te
 var maxRangeBytes = *zonepb.DefaultZoneConfig().RangeMaxBytes
 
 // CockroachBinary is the path to the host-side binary to use.
-var CockroachBinary = flag.String("b", "", "the host-side binary to run")
+var CockroachBinary = flag.String("b", func() string {
+	rootPkg, err := build.Import("github.com/cockroachdb/cockroach", "", build.FindOnly)
+	if err != nil {
+		panic(err)
+	}
+	// NB: This is the binary produced by our linux-gnu build target. Changes
+	// to the Makefile must be reflected here.
+	return filepath.Join(rootPkg.Dir, "cockroach-linux-2.6.32-gnu-amd64")
+}(), "the host-side binary to run")
 
 func exists(path string) bool {
-	if _, err := os.Stat(path); oserror.IsNotExist(err) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return false
 	}
 	return true
@@ -143,7 +149,7 @@ func CreateDocker(
 	ctx context.Context, cfg TestConfig, volumesDir string, stopper *stop.Stopper,
 ) *DockerCluster {
 	select {
-	case <-stopper.ShouldQuiesce():
+	case <-stopper.ShouldStop():
 		// The stopper was already closed, exit early.
 		os.Exit(1)
 	default:
@@ -213,14 +219,13 @@ func (l *DockerCluster) OneShot(
 	ipo types.ImagePullOptions,
 	containerConfig container.Config,
 	hostConfig container.HostConfig,
-	platformSpec specs.Platform,
 	name string,
 ) error {
 	if err := pullImage(ctx, l, ref, ipo); err != nil {
 		return err
 	}
 	hostConfig.VolumesFrom = []string{l.vols.id}
-	c, err := createContainer(ctx, l, containerConfig, hostConfig, platformSpec, name)
+	c, err := createContainer(ctx, l, containerConfig, hostConfig, name)
 	if err != nil {
 		return err
 	}
@@ -235,7 +240,7 @@ func (l *DockerCluster) OneShot(
 	if err := l.oneshot.Start(ctx); err != nil {
 		return err
 	}
-	return l.oneshot.Wait(ctx, container.WaitConditionNextExit)
+	return l.oneshot.Wait(ctx, container.WaitConditionNotRunning)
 }
 
 // stopOnPanic is invoked as a deferred function in Start in order to attempt
@@ -363,7 +368,6 @@ func (l *DockerCluster) initCluster(ctx context.Context) {
 			Binds:           binds,
 			PublishAllPorts: true,
 		},
-		platforms.DefaultSpec(),
 		fmt.Sprintf("volumes-%s", l.clusterID),
 	)
 	maybePanic(err)
@@ -372,7 +376,7 @@ func (l *DockerCluster) initCluster(ctx context.Context) {
 	// and it'll get in the way of future runs.
 	l.vols = c
 	maybePanic(c.Start(ctx))
-	maybePanic(c.Wait(ctx, container.WaitConditionNextExit))
+	maybePanic(c.Wait(ctx, container.WaitConditionNotRunning))
 }
 
 // cockroachEntryPoint returns the value to be used as
@@ -432,7 +436,6 @@ func (l *DockerCluster) createRoach(
 			},
 		},
 		hostConfig,
-		platforms.DefaultSpec(),
 		node.nodeStr,
 	)
 	maybePanic(err)
@@ -519,14 +522,13 @@ func (l *DockerCluster) RunInitCommand(ctx context.Context, nodeIdx int) {
 			"init",
 			"--certs-dir=/certs/",
 			"--host=" + l.Nodes[nodeIdx].nodeStr,
-			"--log-dir=/logs/init-command",
-			"--logtostderr=NONE",
+			"--logtostderr",
 		},
 	}
 
 	log.Infof(ctx, "trying to initialize via %v", containerConfig.Cmd)
 	maybePanic(l.OneShot(ctx, defaultImage, types.ImagePullOptions{},
-		containerConfig, container.HostConfig{}, platforms.DefaultSpec(), "init-command"))
+		containerConfig, container.HostConfig{}, "init-command"))
 	log.Info(ctx, "cluster successfully initialized")
 }
 
@@ -534,10 +536,6 @@ func (l *DockerCluster) RunInitCommand(ctx context.Context, nodeIdx int) {
 func (l *DockerCluster) processEvent(ctx context.Context, event events.Message) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	// Logging everything we get from Docker in service of finding the root
-	// cause of #58955.
-	log.Infof(ctx, "processing event from Docker: %+v", event)
 
 	// If there's currently a oneshot container, ignore any die messages from
 	// it because those are expected.
@@ -564,7 +562,7 @@ func (l *DockerCluster) processEvent(ctx context.Context, event events.Message) 
 
 	// An event on any other container is unexpected. Die.
 	select {
-	case <-l.stopper.ShouldQuiesce():
+	case <-l.stopper.ShouldStop():
 	case <-l.monitorCtx.Done():
 	default:
 		// There is a very tiny race here: the signal handler might be closing the
@@ -636,15 +634,14 @@ func (l *DockerCluster) Start(ctx context.Context) {
 	log.Infof(ctx, "creating node certs (%dbit) in: %s", keyLen, certsDir)
 	l.createNodeCerts()
 
-	log.Infof(ctx, "starting %d nodes", len(l.Nodes))
 	l.monitorCtx, l.monitorCtxCancelFunc = context.WithCancel(context.Background())
 	go l.monitor(ctx)
 	var wg sync.WaitGroup
 	wg.Add(len(l.Nodes))
 	for _, node := range l.Nodes {
 		go func(node *testNode) {
-			defer wg.Done()
 			l.startNode(ctx, node)
+			wg.Done()
 		}(node)
 	}
 	wg.Wait()
@@ -700,7 +697,7 @@ func (l *DockerCluster) AssertAndStop(ctx context.Context, t testing.TB) {
 func (l *DockerCluster) stop(ctx context.Context) {
 	if *waitOnStop {
 		log.Infof(ctx, "waiting for interrupt")
-		<-l.stopper.ShouldQuiesce()
+		<-l.stopper.ShouldStop()
 	}
 
 	log.Infof(ctx, "stopping")

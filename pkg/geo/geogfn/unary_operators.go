@@ -172,7 +172,7 @@ func length(
 			if useSphereOrSpheroid == UseSpheroid {
 				totalLength += spheroid.InverseBatch((*region))
 			} else {
-				for edgeIdx, regionNumEdges := 0, region.NumEdges(); edgeIdx < regionNumEdges; edgeIdx++ {
+				for edgeIdx := 0; edgeIdx < region.NumEdges(); edgeIdx++ {
 					edge := region.Edge(edgeIdx)
 					totalLength += s2.ChordAngleBetweenPoints(edge.V0, edge.V1).Angle().Radians()
 				}
@@ -182,7 +182,7 @@ func length(
 				if useSphereOrSpheroid == UseSpheroid {
 					totalLength += spheroid.InverseBatch(loop.Vertices())
 				} else {
-					for edgeIdx, loopNumEdges := 0, loop.NumEdges(); edgeIdx < loopNumEdges; edgeIdx++ {
+					for edgeIdx := 0; edgeIdx < loop.NumEdges(); edgeIdx++ {
 						edge := loop.Edge(edgeIdx)
 						totalLength += s2.ChordAngleBetweenPoints(edge.V0, edge.V1).Angle().Radians()
 					}

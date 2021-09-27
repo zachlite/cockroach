@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 )
 
 type metadataForwarder interface {
@@ -29,7 +28,7 @@ type metadataForwarder interface {
 type planNodeToRowSource struct {
 	execinfra.ProcessorBase
 
-	input execinfra.RowSource
+	started bool
 
 	fastPath bool
 
@@ -42,8 +41,6 @@ type planNodeToRowSource struct {
 	// run time state machine values
 	row rowenc.EncDatumRow
 }
-
-var _ execinfra.OpNode = &planNodeToRowSource{}
 
 func makePlanNodeToRowSource(
 	source planNode, params runParams, fastPath bool,
@@ -70,14 +67,6 @@ func makePlanNodeToRowSource(
 
 var _ execinfra.LocalProcessor = &planNodeToRowSource{}
 
-// MustBeStreaming implements the execinfra.Processor interface.
-func (p *planNodeToRowSource) MustBeStreaming() bool {
-	// hookFnNode is special because it might be blocked forever if we decide to
-	// buffer its output.
-	_, isHookFnNode := p.node.(*hookFnNode)
-	return isHookFnNode
-}
-
 // InitWithOutput implements the LocalProcessor interface.
 func (p *planNodeToRowSource) InitWithOutput(
 	flowCtx *execinfra.FlowCtx, post *execinfrapb.PostProcessSpec, output execinfra.RowReceiver,
@@ -92,18 +81,9 @@ func (p *planNodeToRowSource) InitWithOutput(
 		output,
 		nil, /* memMonitor */
 		execinfra.ProcStateOpts{
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				var meta []execinfrapb.ProducerMetadata
-				if p.InternalClose() {
-					// Check if we're wrapping a mutation and emit the rows
-					// written metric if so.
-					if m, ok := p.node.(mutationPlanNode); ok {
-						metrics := execinfrapb.GetMetricsMeta()
-						metrics.RowsWritten = m.rowsWritten()
-						meta = []execinfrapb.ProducerMetadata{{Metrics: metrics}}
-					}
-				}
-				return meta
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
+				p.InternalClose()
+				return nil
 			},
 		},
 	)
@@ -120,7 +100,6 @@ func (p *planNodeToRowSource) SetInput(ctx context.Context, input execinfra.RowS
 		// tree had no DistSQL-plannable subtrees.
 		return nil
 	}
-	p.input = input
 	p.AddInputToDrain(input)
 	// Search the plan we're wrapping for firstNotWrapped, which is the planNode
 	// that DistSQL planning resumed in. Replace that planNode with input,
@@ -135,13 +114,23 @@ func (p *planNodeToRowSource) SetInput(ctx context.Context, input execinfra.RowS
 	})
 }
 
-func (p *planNodeToRowSource) Start(ctx context.Context) {
+func (p *planNodeToRowSource) Start(ctx context.Context) context.Context {
 	ctx = p.StartInternalNoSpan(ctx)
 	p.params.ctx = ctx
-	// This starts all of the nodes below this node.
-	if err := startExec(p.params, p.node); err != nil {
-		p.MoveToDraining(err)
+	if !p.started {
+		p.started = true
+		// This starts all of the nodes below this node.
+		if err := startExec(p.params, p.node); err != nil {
+			p.MoveToDraining(err)
+			return ctx
+		}
 	}
+	return ctx
+}
+
+func (p *planNodeToRowSource) InternalClose() bool {
+	p.started = true
+	return p.ProcessorBase.InternalClose()
 }
 
 func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
@@ -204,31 +193,29 @@ func (p *planNodeToRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerM
 	return nil, p.DrainHelper()
 }
 
+func (p *planNodeToRowSource) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	p.InternalClose()
+}
+
+// IsException implements the VectorizeAlwaysException interface.
+func (p *planNodeToRowSource) IsException() bool {
+	if _, ok := p.node.(*setVarNode); ok {
+		// We need to make an exception for changing a session variable.
+		return true
+	}
+	if d, ok := p.node.(*delayedNode); ok {
+		// We want to make an exception for retrieving the current database
+		// name (which is done via a scan of 'session_variables' virtual table.
+		return d.name == "session_variables@primary"
+	}
+	return false
+}
+
 // forwardMetadata will be called by any upstream rowSourceToPlanNode processors
 // that need to forward metadata to the end of the flow. They can't pass
 // metadata through local processors, so they instead add the metadata to our
 // trailing metadata and expect us to forward it further.
 func (p *planNodeToRowSource) forwardMetadata(metadata *execinfrapb.ProducerMetadata) {
 	p.ProcessorBase.AppendTrailingMeta(*metadata)
-}
-
-// ChildCount is part of the execinfra.OpNode interface.
-func (p *planNodeToRowSource) ChildCount(verbose bool) int {
-	if _, ok := p.input.(execinfra.OpNode); ok {
-		return 1
-	}
-	return 0
-}
-
-// Child is part of the execinfra.OpNode interface.
-func (p *planNodeToRowSource) Child(nth int, verbose bool) execinfra.OpNode {
-	switch nth {
-	case 0:
-		if n, ok := p.input.(execinfra.OpNode); ok {
-			return n
-		}
-		panic("input to planNodeToRowSource is not an execinfra.OpNode")
-	default:
-		panic(errors.AssertionFailedf("invalid index %d", nth))
-	}
 }

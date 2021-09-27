@@ -69,16 +69,15 @@ func makeTestCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Comm
 // TODO(irfansharif): Add tests for the various bazel commands that get
 // generated from the set of provided user flags.
 
-func (d *dev) test(cmd *cobra.Command, args []string) error {
+func (d *dev) test(cmd *cobra.Command, pkgs []string) error {
 	if logicTest := mustGetFlagBool(cmd, logicFlag); logicTest {
 		return d.runLogicTest(cmd)
 	}
 
-	return d.runUnitTest(cmd, args)
+	return d.runUnitTest(cmd, pkgs)
 }
 
-func (d *dev) runUnitTest(cmd *cobra.Command, commandLine []string) error {
-	pkgs, additionalBazelArgs := splitArgsAtDash(cmd, commandLine)
+func (d *dev) runUnitTest(cmd *cobra.Command, pkgs []string) error {
 	ctx := cmd.Context()
 	stress := mustGetFlagBool(cmd, stressFlag)
 	stressArgs := mustGetFlagString(cmd, stressArgsFlag)
@@ -94,16 +93,15 @@ func (d *dev) runUnitTest(cmd *cobra.Command, commandLine []string) error {
 
 	var args []string
 	args = append(args, "test")
+	args = append(args, "--color=yes")
+	args = append(args, "--experimental_convenience_symlinks=ignore")
 	args = append(args, getConfigFlags()...)
-	args = append(args, additionalBazelArgs...)
 	args = append(args, mustGetRemoteCacheArgs(remoteCacheAddr)...)
 	if numCPUs != 0 {
 		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))
 	}
 	if race {
 		args = append(args, "--config=race")
-	} else if stress {
-		args = append(args, "--test_sharding_strategy=disabled")
 	}
 
 	for _, pkg := range pkgs {
@@ -180,7 +178,6 @@ func (d *dev) runUnitTest(cmd *cobra.Command, commandLine []string) error {
 		args = append(args, "--test_output", "errors")
 	}
 
-	logCommand("bazel", args...)
 	return d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...)
 }
 

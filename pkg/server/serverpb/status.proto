@@ -437,18 +437,12 @@ message ProfileRequest {
 
   enum Type {
       HEAP = 0;
-      CPU = 1; // with labels on by default
-      GOROUTINE = 2;
-      THREADCREATE = 3;
-      ALLOCS = 4;
-      BLOCK = 5;
-      MUTEX = 6;
+      CPU = 1; // with labels on
   }
   // The type of profile to retrieve.
   Type type = 5;
 
   int32 seconds = 6; // applies only to Type=CPU, defaults to 30
-  bool labels = 7; // applies only to Type=CPU, defaults to false
 }
 
 message MetricsRequest {
@@ -1124,9 +1118,6 @@ message JobStatusResponse {
 // Request object for issuing a SQL stats reset request.
 message ResetSQLStatsRequest {
   string node_id = 1 [(gogoproto.customname) = "NodeID"];
-  // reset_persisted_stats specifies if the persisted SQL Stats will be reset
-  // along with the in-memory SQL stats.
-  bool reset_persisted_stats = 2;
 }
 
 // Response object returned by ResetSQLStats.

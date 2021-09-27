@@ -76,8 +76,7 @@ var buildTargetMapping = map[string]string{
 	"roachtest":        "//pkg/cmd/roachtest",
 }
 
-func (d *dev) build(cmd *cobra.Command, commandLine []string) error {
-	targets, additionalBazelArgs := splitArgsAtDash(cmd, commandLine)
+func (d *dev) build(cmd *cobra.Command, targets []string) error {
 	ctx := cmd.Context()
 	cross := mustGetFlagString(cmd, crossFlag)
 	hoistGeneratedCode := mustGetFlagBool(cmd, hoistGeneratedCodeFlag)
@@ -86,11 +85,9 @@ func (d *dev) build(cmd *cobra.Command, commandLine []string) error {
 	if err != nil {
 		return err
 	}
-	args = append(args, additionalBazelArgs...)
 
 	if cross == "" {
 		args = append(args, getConfigFlags()...)
-		logCommand("bazel", args...)
 		if err := d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...); err != nil {
 			return err
 		}
@@ -266,6 +263,10 @@ func getBasicBuildArgs(targets []string) (args, fullTargets []string, err error)
 	}
 
 	args = append(args, "build")
+	args = append(args, "--color=yes")
+	// Don't let bazel generate any convenience symlinks, we'll create them
+	// ourself.
+	args = append(args, "--experimental_convenience_symlinks=ignore")
 	args = append(args, mustGetRemoteCacheArgs(remoteCacheAddr)...)
 	if numCPUs != 0 {
 		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))

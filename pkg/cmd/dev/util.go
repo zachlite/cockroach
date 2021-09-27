@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alessio/shellescape"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -194,23 +193,4 @@ func setupPathReal(dev *dev) error {
 		return nil
 	}
 	return nil
-}
-
-func splitArgsAtDash(cmd *cobra.Command, args []string) (before, after []string) {
-	argsLenAtDash := cmd.ArgsLenAtDash()
-	if argsLenAtDash < 0 {
-		// If there's no dash, the value of this is -1.
-		before = args
-	} else {
-		before = args[0:argsLenAtDash]
-		after = args[argsLenAtDash:]
-	}
-	return
-}
-
-func logCommand(cmd string, args ...string) {
-	var fullArgs []string
-	fullArgs = append(fullArgs, cmd)
-	fullArgs = append(fullArgs, args...)
-	log.Printf("$ %s", shellescape.QuoteCommand(fullArgs))
 }

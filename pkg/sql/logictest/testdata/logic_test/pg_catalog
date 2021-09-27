@@ -3524,8 +3524,8 @@ ORDER BY rolname
 ----
 oid         rolname   rolsuper  rolinherit  rolcreaterole  rolcreatedb  rolcatupdate  rolcanlogin  rolreplication
 2310524507  admin     true      true        true           true         false         true         false
-1546506610  root      true      true        true           true         false         true         false
-2264919399  testuser  false     true        false          false        false         true         false
+1546506610  root      true      false       true           true         false         true         false
+2264919399  testuser  false     false       false          false        false         true         false
 
 query OTITTBT colnames
 SELECT oid, rolname, rolconnlimit, rolpassword, rolvaliduntil, rolbypassrls, rolconfig
@@ -3926,6 +3926,7 @@ disallow_full_table_scans                              off                 NULL 
 distsql                                                off                 NULL      NULL        NULL        string
 distsql_workmem                                        64 MiB              NULL      NULL        NULL        string
 enable_copying_partitioning_when_deinterleaving_table  off                 NULL      NULL        NULL        string
+enable_drop_enum_value                                 off                 NULL      NULL        NULL        string
 enable_experimental_alter_column_type_general          off                 NULL      NULL        NULL        string
 enable_experimental_stream_replication                 off                 NULL      NULL        NULL        string
 enable_implicit_select_for_update                      on                  NULL      NULL        NULL        string
@@ -4021,6 +4022,7 @@ disallow_full_table_scans                              off                 NULL 
 distsql                                                off                 NULL  user     NULL      off                 off
 distsql_workmem                                        64 MiB              NULL  user     NULL      64 MiB              64 MiB
 enable_copying_partitioning_when_deinterleaving_table  off                 NULL  user     NULL      off                 off
+enable_drop_enum_value                                 off                 NULL  user     NULL      off                 off
 enable_experimental_alter_column_type_general          off                 NULL  user     NULL      off                 off
 enable_experimental_stream_replication                 off                 NULL  user     NULL      off                 off
 enable_implicit_select_for_update                      on                  NULL  user     NULL      on                  on
@@ -4112,6 +4114,7 @@ disallow_full_table_scans                              NULL    NULL     NULL    
 distsql                                                NULL    NULL     NULL     NULL        NULL
 distsql_workmem                                        NULL    NULL     NULL     NULL        NULL
 enable_copying_partitioning_when_deinterleaving_table  NULL    NULL     NULL     NULL        NULL
+enable_drop_enum_value                                 NULL    NULL     NULL     NULL        NULL
 enable_experimental_alter_column_type_general          NULL    NULL     NULL     NULL        NULL
 enable_experimental_stream_replication                 NULL    NULL     NULL     NULL        NULL
 enable_implicit_select_for_update                      NULL    NULL     NULL     NULL        NULL
@@ -4942,20 +4945,20 @@ CREATE TEMPORARY TABLE test_temp (id UUID PRIMARY KEY);
 CREATE UNLOGGED TABLE test_unlogged (id UUID PRIMARY KEY);
 CREATE TABLE test_persistent (id UUID PRIMARY KEY);
 
-# We don't store UNLOGGED beyond the parser at the moment so we expect 'p' for test_unlogged.
-query TTB
+# we don't store UNLOGGED beyond the parser at the moment so we expect 'p' for test_unlogged
+query T
 SELECT
-  relname, relpersistence, relistemp
+  relpersistence
 FROM
   pg_catalog.pg_class
 WHERE
   relname IN ('test_temp', 'test_unlogged', 'test_persistent')
 ORDER BY
-  relname
+  relpersistence
 ----
-test_persistent  p  false
-test_temp        t  true
-test_unlogged    p  false
+p
+p
+t
 
 # Issue 44793
 statement ok
@@ -5232,109 +5235,3 @@ datname     rolname   deptype
 sh_db       sh_owner  o
 sh_db       sh_role   a
 sh_db_root  sh_role   a
-
-# Testing settings and createDB from forEachRoles
-statement ok
-CREATE USER testuser1;
-CREATE USER testuser2;
-CREATE ROLE testrole1;
-CREATE DATABASE foreachroles;
-ALTER USER testuser1 WITH CREATEDB;
-ALTER USER testuser1 SET TimeZone = 'America/Los_Angeles';
-ALTER USER testuser1 SET application_name = 'a';
-ALTER USER testuser1 IN DATABASE foreachroles SET application_name = 'b';
-ALTER USER testuser2 WITH CREATEROLE PASSWORD '123' VALID UNTIL '3022-01-01';
-
-query TBT colnames
-SELECT usename, usecreatedb, useconfig
-FROM pg_user
-WHERE usename IN ('testuser1', 'testuser2')
-ORDER BY usename
-----
-usename    usecreatedb  useconfig
-testuser1  true         {timezone=America/Los_Angeles,application_name=a}
-testuser2  false        NULL
-
-query TBTBBT colnames
-SELECT rolname, rolcreatedb, rolconfig, rolinherit, rolcanlogin, rolvaliduntil
-FROM pg_roles
-WHERE rolname IN ('testuser1', 'testuser2', 'testrole1')
-ORDER BY rolname
-----
-rolname    rolcreatedb  rolconfig                                          rolinherit  rolcanlogin  rolvaliduntil
-testrole1  false        NULL                                               true        false        NULL
-testuser1  true         {timezone=America/Los_Angeles,application_name=a}  true        true         NULL
-testuser2  false        NULL                                               true        true         3022-01-01 00:00:00 +0000 UTC
-
-query TBBBBT colnames
-SELECT rolname, rolcreatedb, rolcreaterole, rolinherit, rolcanlogin, rolvaliduntil
-FROM pg_authid
-WHERE rolname IN ('testuser1', 'testuser2', 'testrole1', 'root')
-ORDER BY rolname
-----
-rolname    rolcreatedb  rolcreaterole  rolinherit  rolcanlogin  rolvaliduntil
-root       true         true           true        true         NULL
-testrole1  false        false          true        false        NULL
-testuser1  true         false          true        true         NULL
-testuser2  false        true           true        true         3022-01-01 00:00:00 +0000 UTC
-
-# Testing users that have admin role
-
-statement ok;
-CREATE USER super_user;
-GRANT admin TO super_user;
-CREATE USER regular_user;
-CREATE ROLE super_role;
-GRANT admin TO super_role;
-CREATE ROLE regular_role;
-
-query TB colnames
-SELECT rolname, rolsuper
-FROM pg_authid
-WHERE rolname IN ('super_user', 'super_role', 'regular_user', 'regular_role', 'root', 'admin')
-ORDER BY rolname
-----
-rolname       rolsuper
-admin         true
-regular_role  false
-regular_user  false
-root          true
-super_role    true
-super_user    true
-
-query TB colnames
-SELECT rolname, rolsuper
-FROM pg_roles
-WHERE rolname IN ('super_user', 'super_role', 'regular_user', 'regular_role', 'root', 'admin')
-ORDER BY rolname
-----
-rolname       rolsuper
-admin         true
-regular_role  false
-regular_user  false
-root          true
-super_role    true
-super_user    true
-
-query TB colnames
-SELECT usename, usesuper
-FROM pg_user
-WHERE usename IN ('super_user', 'regular_user', 'root')
-ORDER BY usename
-----
-usename       usesuper
-regular_user  false
-root          true
-super_user    true
-
-# Testing null valid until roles
-statement ok
-CREATE USER regression_70180 WITH password '123' VALID UNTIL null;
-
-query TT colnames
-SELECT usename, valuntil
-FROM pg_user
-WHERE usename = 'regression_70180'
-----
-usename           valuntil
-regression_70180  NULL

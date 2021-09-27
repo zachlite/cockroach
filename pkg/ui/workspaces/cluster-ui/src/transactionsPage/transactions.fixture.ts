@@ -11,7 +11,6 @@
 import { createMemoryHistory } from "history";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import Long from "long";
-import moment from "moment";
 
 const history = createMemoryHistory({ initialEntries: ["/transactions"] });
 
@@ -38,11 +37,6 @@ export const nodeRegions: { [nodeId: string]: string } = {
   "4": "gcp-europe-west1",
 };
 
-export const dateRange: [moment.Moment, moment.Moment] = [
-  moment.utc("2021.08.08"),
-  moment.utc("2021.08.12"),
-];
-
 export const data: cockroach.server.serverpb.IStatementsResponse = {
   statements: [
     {
@@ -53,6 +47,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-update-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -120,7 +115,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           squared_diffs: 47.74147217235174,
         },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.99 },
       },
       id: Long.fromInt(100),
     },
@@ -131,6 +125,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-fetch-single-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -184,7 +179,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           squared_diffs: 31.085714285714225,
         },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(101),
     },
@@ -196,6 +190,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read orphaned leases",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -240,7 +235,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 40, squared_diffs: 0 },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(102),
     },
@@ -252,6 +246,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-expire-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -338,10 +333,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           mean: 15.789285714285711,
           squared_diffs: 652.5678571428576,
         },
-        rows_written: {
-          mean: 1.4444499999,
-          squared_diffs: 0.99999999,
-        },
       },
       id: Long.fromInt(103),
     },
@@ -352,6 +343,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-insert-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -391,7 +383,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(104),
     },
@@ -402,6 +393,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-show-version",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -430,7 +422,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(105),
     },
@@ -441,6 +432,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read-setting",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -479,7 +471,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 62, squared_diffs: 0 },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(106),
     },
@@ -491,6 +482,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-protectedts-GetMetadata",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -567,7 +559,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(107),
     },
@@ -579,6 +570,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-delete-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
@@ -679,7 +671,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(108),
     },
@@ -691,6 +682,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-log-event",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
@@ -739,7 +731,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(109),
     },

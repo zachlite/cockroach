@@ -369,12 +369,13 @@ func (so *importSequenceOperators) IsTypeVisible(
 	return false, false, errors.WithStack(errSequenceOperators)
 }
 
-// HasPrivilege is part of the tree.EvalDatabase interface.
+// HasTablePrivilege is part of the tree.EvalDatabase interface.
 func (so *importSequenceOperators) HasPrivilege(
 	ctx context.Context,
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	return false, errors.WithStack(errSequenceOperators)
 }

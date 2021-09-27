@@ -2907,58 +2907,6 @@ INSERT INTO d.t2 VALUES (ARRAY['hello']);
 		}
 	})
 
-	// Test cases where we attempt to remap types in the backup to types that
-	// already exist in the cluster with user defined schema.
-	t.Run("backup-remap-uds", func(t *testing.T) {
-		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
-		defer cleanupFn()
-		sqlDB.Exec(t, `
-CREATE DATABASE d;
-CREATE SCHEMA d.s;
-CREATE TYPE d.s.greeting AS ENUM ('hello', 'howdy', 'hi');
-CREATE TABLE d.s.t (x d.s.greeting);
-INSERT INTO d.s.t VALUES ('hello'), ('howdy');
-CREATE TYPE d.s.farewell AS ENUM ('bye', 'cya');
-CREATE TABLE d.s.t2 (x d.s.greeting[]);
-INSERT INTO d.s.t2 VALUES (ARRAY['hello']);
-`)
-		{
-			// Backup and restore t.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t TO $1`, LocalFoo+"/1")
-			sqlDB.Exec(t, `DROP TABLE d.s.t`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1`, LocalFoo+"/1")
-
-			// Check that the table data is restored correctly and the types aren't touched.
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t ORDER BY x`, [][]string{{"hello"}, {"howdy"}})
-
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d.s.greeting`)
-		}
-
-		{
-			// Test that backing up and restoring a table with just the array type
-			// will remap types appropriately.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t2 TO $1`, LocalFoo+"/2")
-			sqlDB.Exec(t, `DROP TABLE d.s.t2`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t2 FROM $1`, LocalFoo+"/2")
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t2 ORDER BY x`, [][]string{{"{hello}"}})
-		}
-
-		{
-			// Create another database with compatible types.
-			sqlDB.Exec(t, `CREATE DATABASE d2`)
-			sqlDB.Exec(t, `CREATE SCHEMA d2.s`)
-			sqlDB.Exec(t, `CREATE TYPE d2.s.greeting AS ENUM ('hello', 'howdy', 'hi')`)
-
-			// Now restore t into this database. It should remap d.greeting to d2.greeting.
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1 WITH into_db = 'd2'`, LocalFoo+"/1")
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d2.s.greeting`)
-		}
-	})
-
 	t.Run("incremental", func(t *testing.T) {
 		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 		defer cleanupFn()
@@ -3099,6 +3047,8 @@ func TestBackupRestoreDuringUserDefinedTypeChange(t *testing.T) {
 
 			// Create a database with a type.
 			sqlDB.Exec(t, `
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 CREATE TYPE d.greeting AS ENUM ('hello', 'howdy', 'hi');
 `)
@@ -7427,7 +7377,8 @@ func TestBackupExportRequestTimeout(t *testing.T) {
 	// should hang. The timeout should save us in this case.
 	_, err := sqlSessions[1].DB.ExecContext(ctx, "BACKUP data.bank TO 'nodelocal://0/timeout'")
 	require.True(t, testutils.IsError(err,
-		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s"))
+		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s: context"+
+			" deadline exceeded"))
 }
 
 func TestBackupDoesNotHangOnIntent(t *testing.T) {

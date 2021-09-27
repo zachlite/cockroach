@@ -76,8 +76,7 @@ var buildTargetMapping = map[string]string{
 	"roachtest":        "//pkg/cmd/roachtest",
 }
 
-func (d *dev) build(cmd *cobra.Command, commandLine []string) error {
-	targets, additionalBazelArgs := splitArgsAtDash(cmd, commandLine)
+func (d *dev) build(cmd *cobra.Command, targets []string) error {
 	ctx := cmd.Context()
 	cross := mustGetFlagString(cmd, crossFlag)
 	hoistGeneratedCode := mustGetFlagBool(cmd, hoistGeneratedCodeFlag)
@@ -86,7 +85,6 @@ func (d *dev) build(cmd *cobra.Command, commandLine []string) error {
 	if err != nil {
 		return err
 	}
-	args = append(args, additionalBazelArgs...)
 
 	if cross == "" {
 		args = append(args, getConfigFlags()...)

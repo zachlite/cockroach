@@ -10,7 +10,6 @@ package tenanttokenbucket
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -96,18 +95,7 @@ func (ts *testState) request(t *testing.T, d *datadriven.TestData) string {
 	}
 	resp := ts.State.Request(&req)
 	return fmt.Sprintf(
-		strings.Join(
-			[]string{
-				"Granted: %.10g RU",
-				"Trickle duration: %s",
-				"Fallback rate: %.10g RU/s",
-				"%s",
-			},
-			"\n",
-		),
-		resp.GrantedRU,
-		resp.TrickleDuration,
-		resp.FallbackRate,
-		ts.String(),
+		"Granted RUs: %.10g\nTrickle duration: %s\n%s",
+		resp.GrantedRU, resp.TrickleDuration, ts.String(),
 	)
 }

@@ -1068,6 +1068,9 @@ func NewConditionalPut(key Key, value Value, expValue []byte, allowNotExist bool
 // The callee takes ownership of value's underlying bytes and it will mutate
 // them. The caller retains ownership of expVal; NewConditionalPut will copy it
 // into the request.
+//
+// Callers should check the version gate clusterversion.CPutInline to make
+// sure this is supported.
 func NewConditionalPutInline(key Key, value Value, expValue []byte, allowNotExist bool) Request {
 	value.InitChecksum(key)
 	// Compatibility with 20.1 servers.
@@ -1624,15 +1627,4 @@ func (c *TenantConsumption) Sub(other *TenantConsumption) {
 	} else {
 		c.SQLPodsCPUSeconds -= other.SQLPodsCPUSeconds
 	}
-}
-
-// SafeFormat implements redact.SafeFormatter.
-func (s *ScanStats) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("scan stats: stepped %d times (%d internal); seeked %d times (%d internal)",
-		s.NumInterfaceSteps, s.NumInternalSteps, s.NumInterfaceSeeks, s.NumInternalSeeks)
-}
-
-// String implements fmt.Stringer.
-func (s *ScanStats) String() string {
-	return redact.StringWithoutMarkers(s)
 }

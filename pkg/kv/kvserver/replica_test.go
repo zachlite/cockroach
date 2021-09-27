@@ -12189,7 +12189,7 @@ func TestTxnRecordLifecycleTransitions(t *testing.T) {
 				et.Require1PC = true
 				return sendWrappedWithErr(etH, &et)
 			},
-			expError: "could not commit in one phase as requested",
+			expError: "TransactionStatusError: could not commit in one phase as requested",
 			expTxn:   txnWithoutChanges,
 		},
 		{

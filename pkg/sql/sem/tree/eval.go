@@ -284,13 +284,12 @@ type TwoArgFn func(*EvalContext, Datum, Datum) (Datum, error)
 
 // BinOp is a binary operator.
 type BinOp struct {
-	LeftType          *types.T
-	RightType         *types.T
-	ReturnType        *types.T
-	NullableArgs      bool
-	Fn                TwoArgFn
-	Volatility        Volatility
-	PreferredOverload bool
+	LeftType     *types.T
+	RightType    *types.T
+	ReturnType   *types.T
+	NullableArgs bool
+	Fn           TwoArgFn
+	Volatility   Volatility
 
 	types   TypeList
 	retType ReturnTyper
@@ -312,8 +311,8 @@ func (op *BinOp) returnType() ReturnTyper {
 	return op.retType
 }
 
-func (op *BinOp) preferred() bool {
-	return op.PreferredOverload
+func (*BinOp) preferred() bool {
+	return false
 }
 
 // AppendToMaybeNullArray appends an element to an array. If the first
@@ -1892,8 +1891,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return &DJSON{j}, nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -1954,8 +1952,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return NewDString(*text), nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -2029,7 +2026,7 @@ type CmpOp struct {
 
 	Volatility Volatility
 
-	PreferredOverload bool
+	isPreferred bool
 }
 
 func (op *CmpOp) params() TypeList {
@@ -2047,7 +2044,7 @@ func (op *CmpOp) returnType() ReturnTyper {
 }
 
 func (op *CmpOp) preferred() bool {
-	return op.PreferredOverload
+	return op.isPreferred
 }
 
 func cmpOpFixups(
@@ -2322,9 +2319,9 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			RightType:    types.Unknown,
 			Fn:           cmpOpScalarIsFn,
 			NullableArgs: true,
-			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL.
-			PreferredOverload: true,
-			Volatility:        VolatilityLeakProof,
+			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL>
+			isPreferred: true,
+			Volatility:  VolatilityLeakProof,
 		},
 		&CmpOp{
 			LeftType:     types.AnyArray,
@@ -3111,6 +3108,7 @@ type EvalDatabase interface {
 		specifier HasPrivilegeSpecifier,
 		user security.SQLUsername,
 		kind privilege.Kind,
+		withGrantOpt bool,
 	) (bool, error)
 }
 
@@ -3201,13 +3199,6 @@ type EvalPlanner interface {
 		descID int64,
 		force bool,
 	) error
-
-	// UserHasAdminRole returns tuple of bool and error:
-	// (true, nil) means that the user has an admin role (i.e. root or node)
-	// (false, nil) means that the user has NO admin role
-	// (false, err) means that there was an error running the query on
-	// the `system.users` table
-	UserHasAdminRole(ctx context.Context, user security.SQLUsername) (bool, error)
 
 	// MemberOfWithAdminOption is used to collect a list of roles (direct and
 	// indirect) that the member is part of. See the comment on the planner
@@ -4156,9 +4147,6 @@ func EvalComparisonExprWithSubOperator(
 func (expr *FuncExpr) EvalArgsAndGetGenerator(ctx *EvalContext) (ValueGenerator, error) {
 	if expr.fn == nil || expr.fnProps.Class != GeneratorClass {
 		return nil, errors.AssertionFailedf("cannot call EvalArgsAndGetGenerator() on non-aggregate function: %q", ErrString(expr))
-	}
-	if expr.fn.GeneratorWithExprs != nil {
-		return expr.fn.GeneratorWithExprs(ctx, expr.Exprs)
 	}
 	nullArg, args, err := expr.evalArgs(ctx)
 	if err != nil || nullArg {

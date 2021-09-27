@@ -98,6 +98,7 @@ func (s *ColBatchScan) Init(ctx context.Context) {
 		limitBatches,
 		s.batchBytesLimit,
 		s.limitHint,
+		s.flowCtx.TraceKV,
 		s.flowCtx.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 	); err != nil {
 		colexecerror.InternalError(err)
@@ -166,11 +167,6 @@ func (s *ColBatchScan) GetRowsRead() int64 {
 // GetCumulativeContentionTime is part of the colexecop.KVReader interface.
 func (s *ColBatchScan) GetCumulativeContentionTime() time.Duration {
 	return execinfra.GetCumulativeContentionTime(s.Ctx)
-}
-
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *ColBatchScan) GetScanStats() execinfra.ScanStats {
-	return execinfra.GetScanStats(s.Ctx)
 }
 
 var colBatchScanPool = sync.Pool{

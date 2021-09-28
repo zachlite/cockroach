@@ -72,38 +72,20 @@ const (
 // Metric names.
 var (
 	metaExecLatency = metric.Metadata{
-		Name: "exec.latency",
-		Help: `Latency of batch KV requests (including errors) executed on this node.
-
-This measures requests already addressed to a single replica, from the moment
-at which they arrive at the internal gRPC endpoint to the moment at which the
-response (or an error) is returned.
-
-This latency includes in particular commit waits, conflict resolution and replication,
-and end-users can easily produce high measurements via long-running transactions that
-conflict with foreground traffic. This metric thus does not provide a good signal for
-understanding the health of the KV layer.
-`,
+		Name:        "exec.latency",
+		Help:        "Latency of batch KV requests executed on this node",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 	metaExecSuccess = metric.Metadata{
-		Name: "exec.success",
-		Help: `Number of batch KV requests executed successfully on this node.
-
-A request is considered to have executed 'successfully' if it either returns a result
-or a transaction restart/abort error.
-`,
+		Name:        "exec.success",
+		Help:        "Number of batch KV requests executed successfully on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaExecError = metric.Metadata{
-		Name: "exec.error",
-		Help: `Number of batch KV requests that failed to execute on this node.
-
-This count excludes transaction restart/abort errors. However, it will include
-other errors expected during normal operation, such as ConditionFailedError.
-This metric is thus not an indicator of KV health.`,
+		Name:        "exec.error",
+		Help:        "Number of batch KV requests that failed to execute on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -906,7 +888,7 @@ func checkNoUnknownRequest(reqs []roachpb.RequestUnion) *roachpb.UnsupportedRequ
 }
 
 func (n *Node) batchInternal(
-	ctx context.Context, args *roachpb.BatchRequest,
+	ctx context.Context, tenID roachpb.TenantID, args *roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, error) {
 	if detail := checkNoUnknownRequest(args.Requests); detail != nil {
 		var br roachpb.BatchResponse
@@ -918,7 +900,7 @@ func (n *Node) batchInternal(
 	if err := n.stopper.RunTaskWithErr(ctx, "node.Node: batch", func(ctx context.Context) error {
 		var finishSpan func(*roachpb.BatchResponse)
 		// Shadow ctx from the outer function. Written like this to pass the linter.
-		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, grpcutil.IsLocalRequestContext(ctx))
+		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, tenID)
 		// NB: wrapped to delay br evaluation to its value when returning.
 		defer func() { finishSpan(br) }()
 		if log.HasSpanOrEvent(ctx) {
@@ -1022,7 +1004,7 @@ func (n *Node) Batch(
 			}
 		}
 	}
-	br, err := n.batchInternal(ctx, args)
+	br, err := n.batchInternal(ctx, tenantID, args)
 	if callAdmittedWorkDoneOnKVAdmissionQ {
 		n.kvAdmissionQ.AdmittedWorkDone(tenantID)
 	}
@@ -1061,14 +1043,14 @@ func (n *Node) Batch(
 // in which the response is to serialized. The BatchResponse can
 // be nil in case no response is to be returned to the rpc caller.
 func (n *Node) setupSpanForIncomingRPC(
-	ctx context.Context, isLocalRequest bool,
+	ctx context.Context, tenID roachpb.TenantID,
 ) (context.Context, func(*roachpb.BatchResponse)) {
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
 	tr := n.storeCfg.AmbientCtx.Tracer
 	var newSpan, grpcSpan *tracing.Span
-	if isLocalRequest {
+	if isLocalRequest := grpcutil.IsLocalRequestContext(ctx) && tenID == roachpb.SystemTenantID; isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
 		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName)
 		// Set the same span.kind tag as the gRPC interceptor.
@@ -1096,7 +1078,11 @@ func (n *Node) setupSpanForIncomingRPC(
 			// If our local span descends from a parent on the other
 			// end of the RPC (i.e. the !isLocalRequest) case,
 			// attach the span recording to the batch response.
+			// Tenants get a redacted recording, i.e. with anything
+			// sensitive stripped out of the verbose messages. However,
+			// structured payloads stay untouched.
 			if rec := grpcSpan.GetRecording(); rec != nil {
+				maybeRedactRecording(tenID, rec)
 				br.CollectedSpans = append(br.CollectedSpans, rec...)
 			}
 		}

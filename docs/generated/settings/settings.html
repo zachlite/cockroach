@@ -86,6 +86,7 @@
 <tr><td><code>sql.defaults.default_int_size</code></td><td>integer</td><td><code>8</code></td><td>the size, in bytes, of an INT type</td></tr>
 <tr><td><code>sql.defaults.disallow_full_table_scans.enabled</code></td><td>boolean</td><td><code>false</code></td><td>setting to true rejects queries that have planned a full table scan</td></tr>
 <tr><td><code>sql.defaults.distsql</code></td><td>enumeration</td><td><code>auto</code></td><td>default distributed SQL execution mode [off = 0, auto = 1, on = 2]</td></tr>
+<tr><td><code>sql.defaults.drop_enum_value.enabled</code></td><td>boolean</td><td><code>false</code></td><td>default value for enable_drop_enum_value; allows for dropping enum values</td></tr>
 <tr><td><code>sql.defaults.experimental_alter_column_type.enabled</code></td><td>boolean</td><td><code>false</code></td><td>default value for experimental_alter_column_type session setting; enables the use of ALTER COLUMN TYPE for general conversions</td></tr>
 <tr><td><code>sql.defaults.experimental_auto_rehoming.enabled</code></td><td>boolean</td><td><code>false</code></td><td>default value for experimental_enable_auto_rehoming; allows for rows in REGIONAL BY ROW tables to be auto-rehomed on UPDATE</td></tr>
 <tr><td><code>sql.defaults.experimental_distsql_planning</code></td><td>enumeration</td><td><code>off</code></td><td>default experimental_distsql_planning mode; enables experimental opt-driven DistSQL planning [off = 0, on = 1]</td></tr>
@@ -170,6 +171,6 @@
 <tr><td><code>trace.debug.enable</code></td><td>boolean</td><td><code>false</code></td><td>if set, traces for recent requests can be seen at https://<ui>/debug/requests</td></tr>
 <tr><td><code>trace.lightstep.token</code></td><td>string</td><td><code></code></td><td>if set, traces go to Lightstep using this token</td></tr>
 <tr><td><code>trace.zipkin.collector</code></td><td>string</td><td><code></code></td><td>if set, traces go to the given Zipkin instance (example: '127.0.0.1:9411'). Only one tracer can be configured at a time.</td></tr>
-<tr><td><code>version</code></td><td>version</td><td><code>21.1-1164</code></td><td>set the active cluster version in the format '<major>.<minor>'</td></tr>
+<tr><td><code>version</code></td><td>version</td><td><code>21.1-1166</code></td><td>set the active cluster version in the format '<major>.<minor>'</td></tr>
 </tbody>
 </table>

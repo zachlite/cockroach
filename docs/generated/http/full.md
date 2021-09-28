@@ -2011,7 +2011,6 @@ Support status: [reserved](#support-status)
 | node_id | [string](#cockroach.server.serverpb.ProfileRequest-string) |  | node_id is a string so that "local" can be used to specify that no forwarding is necessary. | [reserved](#support-status) |
 | type | [ProfileRequest.Type](#cockroach.server.serverpb.ProfileRequest-cockroach.server.serverpb.ProfileRequest.Type) |  | The type of profile to retrieve. | [reserved](#support-status) |
 | seconds | [int32](#cockroach.server.serverpb.ProfileRequest-int32) |  | applies only to Type=CPU, defaults to 30 | [reserved](#support-status) |
-| labels | [bool](#cockroach.server.serverpb.ProfileRequest-bool) |  | applies only to Type=CPU, defaults to false | [reserved](#support-status) |
 
 
 
@@ -3276,6 +3275,7 @@ Request object for issuing a SQL stats reset request.
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
 | node_id | [string](#cockroach.server.serverpb.ResetSQLStatsRequest-string) |  |  | [reserved](#support-status) |
+| reset_persisted_stats | [bool](#cockroach.server.serverpb.ResetSQLStatsRequest-bool) |  | reset_persisted_stats specifies if the persisted SQL Stats will be reset along with the in-memory SQL stats. | [reserved](#support-status) |
 
 
 

@@ -163,9 +163,6 @@ func (v *planVisitor) visitInternal(plan planNode, name string) {
 	case *sortNode:
 		n.plan = v.visit(n.plan)
 
-	case *topKNode:
-		n.plan = v.visit(n.plan)
-
 	case *groupNode:
 		n.plan = v.visit(n.plan)
 
@@ -429,7 +426,6 @@ var planNodeNames = map[reflect.Type]string{
 	reflect.TypeOf(&showTraceReplicaNode{}):           "replica trace",
 	reflect.TypeOf(&sortNode{}):                       "sort",
 	reflect.TypeOf(&splitNode{}):                      "split",
-	reflect.TypeOf(&topKNode{}):                       "top-k",
 	reflect.TypeOf(&unsplitNode{}):                    "unsplit",
 	reflect.TypeOf(&unsplitAllNode{}):                 "unsplit all",
 	reflect.TypeOf(&spoolNode{}):                      "spool",

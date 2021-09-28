@@ -37,7 +37,6 @@ go_test(
     srcs = [
         "connector_test.go",
         "main_test.go",
-        "tenant_trace_test.go",
         "tenant_upgrade_test.go",
     ],
     embed = [":kvtenantccl"],
@@ -49,8 +48,6 @@ go_test(
         "//pkg/gossip",
         "//pkg/jobs",
         "//pkg/kv/kvclient/kvtenant",
-        "//pkg/kv/kvserver",
-        "//pkg/kv/kvserver/kvserverbase",
         "//pkg/migration",
         "//pkg/migration/migrations",
         "//pkg/roachpb:with-mocks",

@@ -269,12 +269,12 @@ func runDebugKeys(cmd *cobra.Command, args []string) error {
 			}
 			return strings.Join(pairs, ", "), nil
 		}
-		kvserver.DebugSprintMVCCKeyValueDecoders = append(kvserver.DebugSprintMVCCKeyValueDecoders, fn)
+		kvserver.DebugSprintKeyValueDecoders = append(kvserver.DebugSprintKeyValueDecoders, fn)
 	}
 	printer := printKey
 	if debugCtx.values {
 		printer = func(kv storage.MVCCKeyValue) (bool, error) {
-			kvserver.PrintMVCCKeyValue(kv)
+			kvserver.PrintKeyValue(kv)
 			return false, nil
 		}
 	}
@@ -512,7 +512,7 @@ func runDebugRangeDescriptors(cmd *cobra.Command, args []string) error {
 		if kvserver.IsRangeDescriptorKey(kv.Key) != nil {
 			return nil
 		}
-		kvserver.PrintMVCCKeyValue(kv)
+		kvserver.PrintKeyValue(kv)
 		return nil
 	})
 }
@@ -583,7 +583,7 @@ Decode and print a hexadecimal-encoded key-value pair.
 			}
 		}
 
-		kvserver.PrintMVCCKeyValue(storage.MVCCKeyValue{
+		kvserver.PrintKeyValue(storage.MVCCKeyValue{
 			Key:   k,
 			Value: bs[1],
 		})
@@ -646,7 +646,7 @@ func runDebugRaftLog(cmd *cobra.Command, args []string) error {
 
 	// NB: raft log does not have intents.
 	return db.MVCCIterate(start, end, storage.MVCCKeyIterKind, func(kv storage.MVCCKeyValue) error {
-		kvserver.PrintMVCCKeyValue(kv)
+		kvserver.PrintKeyValue(kv)
 		return nil
 	})
 }
@@ -1497,7 +1497,7 @@ func (m mvccValueFormatter) Format(f fmt.State, c rune) {
 		errors.FormatError(m.err, f, c)
 		return
 	}
-	fmt.Fprint(f, kvserver.SprintMVCCKeyValue(m.kv, false /* printKey */))
+	fmt.Fprint(f, kvserver.SprintKeyValue(m.kv, false /* printKey */))
 }
 
 // lockValueFormatter is a fmt.Formatter for lock values.

@@ -261,8 +261,7 @@ func (ex *connExecutor) execStmtInOpenState(
 	// Update the deadline on the transaction based on the collections.
 	err := ex.extraTxnState.descCollection.MaybeUpdateDeadline(ctx, ex.state.mu.txn)
 	if err != nil {
-		ev, pl := ex.makeErrEvent(err, ast)
-		return ev, pl, nil
+		return nil, nil, err
 	}
 
 	if prepared != nil {
@@ -1955,7 +1954,6 @@ func (ex *connExecutor) recordTransaction(
 		CollectedExecStats:      ex.extraTxnState.shouldCollectTxnExecutionStats,
 		ExecStats:               ex.extraTxnState.accumulatedStats,
 		RowsRead:                ex.extraTxnState.rowsRead,
-		RowsWritten:             ex.extraTxnState.rowsWritten,
 		BytesRead:               ex.extraTxnState.bytesRead,
 	}
 

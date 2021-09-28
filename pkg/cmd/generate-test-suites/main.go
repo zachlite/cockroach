@@ -11,7 +11,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -25,12 +24,7 @@ func main() {
 	buf, err := exec.Command("bazel", "query", "kind(go_test, //pkg/...)", "--output=label").Output()
 	if err != nil {
 		log.Printf("Could not query Bazel tests: got error %v", err)
-		var cmderr *exec.ExitError
-		if errors.As(err, &cmderr) {
-			log.Printf("Got error output: %s", string(cmderr.Stderr))
-		} else {
-			log.Println("Run `bazel query 'kind(go_test, //pkg/...)'` to reproduce the failure")
-		}
+		log.Println("Run `bazel query 'kind(go_test, //pkg/...)'` to reproduce the failure")
 		os.Exit(1)
 	}
 	labels := strings.Split(string(buf[:]), "\n")

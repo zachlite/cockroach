@@ -77,10 +77,6 @@ const statementStats: any = {
     mean: 7,
     squared_diffs: 1000000,
   },
-  rows_written: {
-    mean: 1,
-    squared_diffs: 10,
-  },
   last_exec_timestamp: {
     seconds: Long.fromInt(1599670292),
     nanos: 111613000,
@@ -183,6 +179,10 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       denominator: 36958,
     },
     vec: {
+      numerator: 36958,
+      denominator: 36958,
+    },
+    opt: {
       numerator: 36958,
       denominator: 36958,
     },

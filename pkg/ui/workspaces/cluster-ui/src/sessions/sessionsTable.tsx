@@ -24,6 +24,8 @@ type ISession = cockroach.server.serverpb.Session;
 
 import { TerminateSessionModalRef } from "./terminateSessionModal";
 import { TerminateQueryModalRef } from "./terminateQueryModal";
+
+import { StatementLink } from "src/statementsTable/statementsTableContent";
 import { ColumnDescriptor, SortedTable } from "src/sortedtable/sortedtable";
 
 import { Icon } from "antd";
@@ -33,8 +35,6 @@ import {
 } from "src/dropdown/dropdown";
 import { Button } from "src/button/button";
 import { Tooltip } from "@cockroachlabs/ui-components";
-import { summarize } from "../util";
-import { shortStatement } from "../statementsTable";
 
 const cx = classNames.bind(styles);
 
@@ -44,7 +44,7 @@ export interface SessionInfo {
 
 export class SessionsSortedTable extends SortedTable<SessionInfo> {}
 
-export function byteArrayToUuid(array: Uint8Array): string {
+export function byteArrayToUuid(array: Uint8Array) {
   const hexDigits: string[] = [];
   array.forEach(t => hexDigits.push(t.toString(16).padStart(2, "0")));
   return [
@@ -164,8 +164,17 @@ export function makeSessionsColumns(
           return "N/A";
         }
         const stmt = session.session.active_queries[0].sql;
-        const summary = summarize(stmt);
-        return shortStatement(summary, stmt);
+        const stmtNoConstants =
+          session.session.active_queries[0].sql_no_constants;
+        return (
+          <StatementLink
+            statement={stmt}
+            statementNoConstants={stmtNoConstants}
+            implicitTxn={session.session.active_txn?.implicit}
+            search={""}
+            app={""}
+          />
+        );
       },
     },
     {

@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/logtags"
 	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/trace"
 	"google.golang.org/grpc/metadata"
 )
@@ -291,14 +290,14 @@ func TestSpanRecordLimit(t *testing.T) {
 	msg := func(i int) string { return fmt.Sprintf("msg: %10d", i) }
 
 	// Determine the size of a log record by actually recording once.
-	sp.Recordf("%s", msg(42))
+	sp.Record(msg(42))
 	logSize := sp.GetRecording()[0].Logs[0].Size()
 	sp.ResetRecording()
 
 	numLogs := maxLogBytesPerSpan / logSize
 	const extra = 10
 	for i := 1; i <= numLogs+extra; i++ {
-		sp.Recordf("%s", msg(i))
+		sp.Record(msg(i))
 	}
 
 	rec := sp.GetRecording()
@@ -309,8 +308,8 @@ func TestSpanRecordLimit(t *testing.T) {
 	first := rec[0].Logs[0]
 	last := rec[0].Logs[len(rec[0].Logs)-1]
 
-	require.Equal(t, first.Fields[0].Value.StripMarkers(), msg(extra+1))
-	require.Equal(t, last.Fields[0].Value.StripMarkers(), msg(numLogs+extra))
+	require.Equal(t, first.Fields[0].Value, msg(extra+1))
+	require.Equal(t, last.Fields[0].Value, msg(numLogs+extra))
 }
 
 // testStructuredImpl is a testing implementation of Structured event.
@@ -346,7 +345,7 @@ func TestSpanReset(t *testing.T) {
 		if i%2 == 0 {
 			sp.RecordStructured(newTestStructured(i))
 		} else {
-			sp.Recordf("%d", i)
+			sp.Record(fmt.Sprintf("%d", i))
 		}
 	}
 
@@ -510,7 +509,6 @@ func TestSpanTagsInRecordings(t *testing.T) {
 	tr := NewTracer()
 	var counter countingStringer
 	logTags := logtags.SingleTagBuffer("tagfoo", "tagbar")
-	logTags = logTags.Add("foo1", &counter)
 	sp := tr.StartSpan("root",
 		WithForceRealSpan(),
 		WithLogTags(logTags),
@@ -518,28 +516,23 @@ func TestSpanTagsInRecordings(t *testing.T) {
 	defer sp.Finish()
 
 	require.False(t, sp.IsVerbose())
-	sp.SetTag("foo2", attribute.StringValue("bar2"))
+	sp.SetTag("foo1", &counter)
 	sp.Record("dummy recording")
 	rec := sp.GetRecording()
 	require.Len(t, rec, 0)
-	// We didn't stringify the log tag.
 	require.Zero(t, int(counter))
 
 	// Verify that we didn't hold onto anything underneath.
 	sp.SetVerbose(true)
 	rec = sp.GetRecording()
 	require.Len(t, rec, 1)
-	require.Len(t, rec[0].Tags, 4) // _unfinished:1 _verbose:1 tagfoo:tagbar foo1:1
-	_, ok := rec[0].Tags["foo2"]
-	require.False(t, ok)
-	require.Equal(t, 1, int(counter))
+	require.Len(t, rec[0].Tags, 3) // _unfinished:1 _verbose:1 tagfoo:tagbar
+	require.Zero(t, int(counter))
 
 	// Verify that subsequent tags are captured.
-	sp.SetTag("foo3", attribute.StringValue("bar3"))
+	sp.SetTag("foo2", &counter)
 	rec = sp.GetRecording()
 	require.Len(t, rec, 1)
-	require.Len(t, rec[0].Tags, 5)
-	_, ok = rec[0].Tags["foo3"]
-	require.True(t, ok)
-	require.Equal(t, 2, int(counter))
+	require.Len(t, rec[0].Tags, 4)
+	require.Equal(t, 1, int(counter))
 }

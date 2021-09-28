@@ -22,9 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/logtags"
-	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/types"
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/opentracing/opentracing-go"
 )
 
 // crdbSpan is a span for internal crdb usage. This is used to power SQL session
@@ -96,7 +95,7 @@ type crdbSpanMu struct {
 	// this Span.
 	// TODO(radu): perhaps we want a recording to capture all the tags (even
 	// those that were set before recording started)?
-	tags map[string]attribute.Value
+	tags opentracing.Tags
 
 	// The Span's associated baggage.
 	baggage map[string]string
@@ -279,19 +278,19 @@ func (s *crdbSpan) importRemoteSpans(remoteSpans []tracingpb.RecordedSpan) {
 	s.mu.recording.remoteSpans = append(s.mu.recording.remoteSpans, remoteSpans...)
 }
 
-func (s *crdbSpan) setTagLocked(key string, value attribute.Value) {
+func (s *crdbSpan) setTagLocked(key string, value interface{}) {
 	if s.recordingType() != RecordingVerbose {
 		// Don't bother storing tags if we're unlikely to retrieve them.
 		return
 	}
 
 	if s.mu.tags == nil {
-		s.mu.tags = make(map[string]attribute.Value)
+		s.mu.tags = make(opentracing.Tags)
 	}
 	s.mu.tags[key] = value
 }
 
-func (s *crdbSpan) record(msg redact.RedactableString) {
+func (s *crdbSpan) record(msg string) {
 	if s.recordingType() != RecordingVerbose {
 		return
 	}
@@ -376,7 +375,7 @@ func (s *crdbSpan) setBaggageItemAndTag(restrictedKey, value string) {
 	// span verbosity, as it is named nondescriptly and the recording knows
 	// how to display its verbosity independently.
 	if restrictedKey != verboseTracingBaggageKey {
-		s.setTagLocked(restrictedKey, attribute.StringValue(value))
+		s.setTagLocked(restrictedKey, value)
 	}
 }
 
@@ -398,14 +397,13 @@ func (s *crdbSpan) setBaggageItemLocked(restrictedKey, value string) {
 // optimization as stringifying the tag values can be expensive.
 func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 	rs := tracingpb.RecordedSpan{
-		TraceID:        s.traceID,
-		SpanID:         s.spanID,
-		ParentSpanID:   s.parentSpanID,
-		GoroutineID:    s.goroutineID,
-		Operation:      s.mu.operation,
-		StartTime:      s.startTime,
-		Duration:       s.mu.duration,
-		RedactableLogs: true,
+		TraceID:      s.traceID,
+		SpanID:       s.spanID,
+		ParentSpanID: s.parentSpanID,
+		GoroutineID:  s.goroutineID,
+		Operation:    s.mu.operation,
+		StartTime:    s.startTime,
+		Duration:     s.mu.duration,
 	}
 
 	if rs.Duration == -1 {
@@ -466,7 +464,7 @@ func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 		if len(s.mu.tags) > 0 {
 			for k, v := range s.mu.tags {
 				// We encode the tag values as strings.
-				addTag(k, v.Emit())
+				addTag(k, fmt.Sprint(v))
 			}
 		}
 	}

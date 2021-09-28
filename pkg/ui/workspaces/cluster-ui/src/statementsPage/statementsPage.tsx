@@ -36,7 +36,6 @@ import {
   calculateTotalWorkload,
   unique,
   containAny,
-  queryByName,
 } from "src/util";
 import {
   AggregateStatistics,
@@ -434,7 +433,7 @@ export class StatementsPage extends React.Component<
     } = this.props;
     const appAttrValue = getMatchParamByName(match, appAttr);
     const selectedApp = appAttrValue || "";
-    const appOptions = [{ value: "all", label: "All" }];
+    const appOptions = [{ value: "All", label: "All" }];
     this.props.apps.forEach(app => appOptions.push({ value: app, label: app }));
     const data = this.filteredStatementsData();
     const totalWorkload = calculateTotalWorkload(data);
@@ -578,12 +577,12 @@ export class StatementsPage extends React.Component<
 
   render() {
     const {
-      location,
+      match,
       refreshStatementDiagnosticsRequests,
       onActivateStatementDiagnostics,
       onDiagnosticsModalOpen,
     } = this.props;
-    const app = queryByName(location, appAttr);
+    const app = getMatchParamByName(match, appAttr);
     return (
       <div className={cx("root", "table-area")}>
         <Helmet title={app ? `${app} App | Statements` : "Statements"} />

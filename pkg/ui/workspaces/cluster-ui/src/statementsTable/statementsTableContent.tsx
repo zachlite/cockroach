@@ -22,13 +22,7 @@ import { Dropdown } from "src/dropdown";
 import { Button } from "src/button";
 
 import { Tooltip } from "@cockroachlabs/ui-components";
-import {
-  appAttr,
-  databaseAttr,
-  propsToQueryString,
-  summarize,
-  TimestampToMoment,
-} from "src/util";
+import { summarize, TimestampToMoment } from "src/util";
 import { shortStatement } from "./statementsTable";
 import styles from "./statementsTableContent.module.scss";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
@@ -127,30 +121,6 @@ export const StatementTableCell = {
   ),
 };
 
-type StatementLinkTargetProps = {
-  statement: string;
-  app: string;
-  implicitTxn: boolean;
-  statementNoConstants?: string;
-  database?: string;
-};
-
-// StatementLinkTarget returns the link to the relevant statement page, given
-// the input statement details.
-export const StatementLinkTarget = (
-  props: StatementLinkTargetProps,
-): string => {
-  const base = `/statement/${props.implicitTxn}`;
-  const linkStatement = props.statementNoConstants || props.statement;
-
-  const searchParams = propsToQueryString({
-    [databaseAttr]: props.database,
-    [appAttr]: props.app,
-  });
-
-  return `${base}/${encodeURIComponent(linkStatement)}?${searchParams}`;
-};
-
 interface StatementLinkProps {
   statement: string;
   app: string;
@@ -161,9 +131,29 @@ interface StatementLinkProps {
   onClick?: (statement: string) => void;
 }
 
-export const StatementLink = (
-  props: StatementLinkProps,
-): React.ReactElement => {
+// StatementLinkTarget returns the link to the relevant statement page, given
+// the input statement details.
+export const StatementLinkTarget = (props: StatementLinkProps) => {
+  let base: string;
+  if (props.app && props.app.length > 0) {
+    base = `/statements/${props.app}`;
+  } else {
+    base = `/statement`;
+  }
+  if (props.database && props.database.length > 0) {
+    base = base + `/${props.database}/${props.implicitTxn}`;
+  } else {
+    base = base + `/${props.implicitTxn}`;
+  }
+
+  let linkStatement = props.statement;
+  if (props.statementNoConstants) {
+    linkStatement = props.statementNoConstants;
+  }
+  return `${base}/${encodeURIComponent(linkStatement)}`;
+};
+
+export const StatementLink = (props: StatementLinkProps) => {
   const summary = summarize(props.statement);
   const { onClick, statement } = props;
   const onStatementClick = React.useCallback(() => {
@@ -172,16 +162,8 @@ export const StatementLink = (
     }
   }, [onClick, statement]);
 
-  const linkProps = {
-    statement: props.statement,
-    app: props.app,
-    implicitTxn: props.implicitTxn,
-    statementNoConstants: props.statementNoConstants,
-    database: props.database,
-  };
-
   return (
-    <Link to={StatementLinkTarget(linkProps)} onClick={onStatementClick}>
+    <Link to={StatementLinkTarget(props)} onClick={onStatementClick}>
       <div>
         <Tooltip
           placement="bottom"

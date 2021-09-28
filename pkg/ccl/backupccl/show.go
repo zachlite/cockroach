@@ -480,7 +480,7 @@ func backupShowerDefault(
 					}
 					rows = append(rows, row)
 				}
-				for _, t := range manifest.GetTenants() {
+				for _, t := range manifest.Tenants {
 					row := tree.Datums{
 						tree.DNull, // Database
 						tree.DNull, // Schema

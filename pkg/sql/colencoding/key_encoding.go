@@ -146,20 +146,20 @@ func DecodeIndexKeyToCols(
 }
 
 // DecodeKeyValsToCols decodes the values that are part of the key, writing the
-// result to the idx'th slot of the input slice of coldata.Vecs.
-//
+// result to the idx'th slot of the input slice of colexec.Vecs. If the
+// directions slice is nil, the direction used will default to
+// encoding.Ascending.
 // If the unseen int set is non-nil, upon decoding the column with ordinal i,
 // i will be removed from the set to facilitate tracking whether or not columns
 // have been observed during decoding.
+// See the analog in sqlbase/index_encoding.go.
+// DecodeKeyValsToCols additionally returns whether a NULL was encountered when decoding.
 //
-// See the analog in rowenc/index_encoding.go.
-//
-// DecodeKeyValsToCols additionally returns whether a NULL was encountered when
-// decoding. Sometimes it is necessary to determine if the value of a column is
-// NULL even though the value itself is not needed. If checkAllColsForNull is
-// true, then foundNull=true will be returned if any columns in the key are
-// NULL, regardless of whether or not indexColIdx indicates that the column
-// should be decoded.
+// Sometimes it is necessary to determine if the value of a column is NULL even
+// though the value itself is not needed. If checkAllColsForNull is true, then
+// foundNull=true will be returned if any columns in the key are NULL,
+// regardless of whether or not indexColIdx indicates that the column should be
+// decoded.
 func DecodeKeyValsToCols(
 	da *rowenc.DatumAlloc,
 	vecs []coldata.Vec,
@@ -173,6 +173,10 @@ func DecodeKeyValsToCols(
 	invertedColIdx int,
 ) (remainingKey []byte, foundNull bool, _ error) {
 	for j := range types {
+		enc := descpb.IndexDescriptor_ASC
+		if directions != nil {
+			enc = directions[j]
+		}
 		var err error
 		i := indexColIdx[j]
 		if i == -1 {
@@ -188,7 +192,7 @@ func DecodeKeyValsToCols(
 			}
 			var isNull bool
 			isInverted := invertedColIdx == i
-			key, isNull, err = decodeTableKeyToCol(da, vecs[i], idx, types[j], key, directions[j], isInverted)
+			key, isNull, err = decodeTableKeyToCol(da, vecs[i], idx, types[j], key, enc, isInverted)
 			foundNull = isNull || foundNull
 		}
 		if err != nil {
@@ -280,8 +284,6 @@ func decodeTableKeyToCol(
 	case types.BytesFamily, types.StringFamily, types.UuidFamily:
 		var r []byte
 		if dir == descpb.IndexDescriptor_ASC {
-			// No need to perform the deep copy since Set() below will do that
-			// for us.
 			rkey, r, err = encoding.DecodeBytesAscending(key, nil)
 		} else {
 			rkey, r, err = encoding.DecodeBytesDescending(key, nil)

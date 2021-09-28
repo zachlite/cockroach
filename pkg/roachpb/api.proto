@@ -223,6 +223,9 @@ message ConditionalPutRequest {
   // Specify as true to put the value without a corresponding
   // timestamp. This option should be used with care as it precludes
   // the use of this value with transactions.
+  //
+  // Callers should check the version gate clusterversion.CPutInline to make
+  // sure this is supported.
   bool inline = 7;
 }
 
@@ -2477,33 +2480,9 @@ message TokenBucketRequest {
   // originates.
   uint32 instance_id = 3 [(gogoproto.customname) = "InstanceID"];
 
-  // NextLiveInstanceID is the ID of the next live SQL instance for this tenant,
-  // in circular order by ID.
-  //
-  // In other words:
-  //  - if this instance has the largest ID, NextLiveInstanceID is the smallest
-  //    ID of a live instance.
-  //  - otherwise, NextLiveInstanceID is the smallest ID of a live instance that
-  //    is greater than InstanceID.
-  //
-  // In particular, if this is the only live instance, then NextLiveInstanceID
-  // will equal InstanceID.
-  //
-  // The information in this field is used by the server to trigger checking for
-  // dead instances; it is acceptable for the information to be stale.
-  //
-  // Can be zero if this information is not currently available.
-  uint32 next_live_instance_id = 8 [(gogoproto.customname) = "NextLiveInstanceID"];
-
   // InstanceLease uniquely identifies the SQL pod instance from where the
   // request originates, in light of ID reuse.
   bytes instance_lease = 4;
-
-  // SeqNum is a strictly positive, monotonically increasing sequence number,
-  // used to detect duplicate requests on the server side (to avoid
-  // double-charging). The consumption reported in a request with a lower
-  // sequence number than the last request is ignored.
-  int64 seq_num = 7;
 
   // RequestedRU is the number of requested tokens (RUs).
   double requested_r_u = 5;
@@ -2512,6 +2491,8 @@ message TokenBucketRequest {
   // TrickleDuration in the response.
   google.protobuf.Duration target_request_period = 6 [(gogoproto.nullable) = false,
                                                       (gogoproto.stdduration) = true];
+
+  // TODO(radu): add remaining fields.
 }
 
 message TokenBucketResponse {
@@ -2537,12 +2518,8 @@ message TokenBucketResponse {
   // TrickleDuration is at most the given TargetRequestPeriod.
   google.protobuf.Duration trickle_duration = 3 [(gogoproto.nullable) = false,
                                                  (gogoproto.stdduration) = true];
-
-  // FallbackRate indicates a rate (in RU/s) that the instance will use once it
-  // runs out of tokens and a problem prevents TokenBucket requests from
-  // completing.
-  double fallback_rate = 4;
 }
+
 
 // JoinNodeRequest is used to specify to the server node what the client's
 // binary version is. If it's not compatible with the rest of the cluster, the
@@ -2599,15 +2576,4 @@ message ContentionEvent {
   // Duration spent contending against the other transaction.
   google.protobuf.Duration duration = 3 [(gogoproto.nullable) = false,
                                          (gogoproto.stdduration) = true];
-}
-
-// ScanStats is a message that will be attached to BatchResponses containing
-// information about what happened during each scan and get in the request.
-message ScanStats {
-  option (gogoproto.goproto_stringer) = false;
-
-  uint64 num_interface_seeks = 1;
-  uint64 num_internal_seeks = 2;
-  uint64 num_interface_steps = 3;
-  uint64 num_internal_steps = 4;
 }

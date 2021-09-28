@@ -9,8 +9,7 @@
 // licenses/APL.txt.
 
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
-import { fetchData } from "src/api";
-import { propsToQueryString } from "src/util";
+import { fetchData, propsToQueryString } from "src/api";
 
 const STATEMENTS_PATH = "/_status/statements";
 
@@ -29,7 +28,7 @@ export const getCombinedStatements = (
   const queryStr = propsToQueryString({
     start: req.start.toInt(),
     end: req.end.toInt(),
-    combined: req.combined,
+    combined: true,
   });
   return fetchData(
     cockroach.server.serverpb.StatementsResponse,

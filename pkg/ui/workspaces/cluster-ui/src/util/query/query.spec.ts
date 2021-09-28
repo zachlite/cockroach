@@ -9,7 +9,7 @@
 // licenses/APL.txt.
 
 import { assert } from "chai";
-import { propsToQueryString, queryByName } from "./query";
+import { queryToString, queryByName } from "./query";
 import { Location } from "history";
 
 const location: Location = {
@@ -22,29 +22,11 @@ const location: Location = {
 };
 
 describe("Query utils", () => {
-  describe("propsToQueryString", () => {
-    it("creates query string from object", () => {
-      const obj = {
-        start: 100,
-        end: 200,
-        strParam: "hello",
-        bool: false,
-      };
-      const expected = "start=100&end=200&strParam=hello&bool=false";
-      const res = propsToQueryString(obj);
-      expect(res).toEqual(expected);
-    });
-
-    it("skips entries with nullish values", () => {
-      const obj = {
-        start: 100,
-        end: 200,
-        strParam: null as any,
-        hello: undefined as any,
-      };
-      const expected = "start=100&end=200";
-      const res = propsToQueryString(obj);
-      expect(res).toEqual(expected);
+  describe("queryToString", () => {
+    it("make query to string", () => {
+      assert.equal(queryToString({ a: "test" }), "a=test");
+      assert.equal(queryToString({ a: "test", b: "test" }), "a=test&b=test");
+      assert.equal(queryToString({ a: undefined }), "a=undefined");
     });
   });
   describe("queryByName", () => {

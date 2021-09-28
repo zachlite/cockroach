@@ -4574,25 +4574,25 @@ CREATE TABLE pg_catalog.pg_settings (
    pending_restart BOOL NULL
 )  {}  {}
 CREATE TABLE pg_catalog.pg_shadow (
-   usename NAME NULL,
-   usesysid OID NULL,
+   useconfig STRING[] NULL,
    usecreatedb BOOL NULL,
-   usesuper BOOL NULL,
    userepl BOOL NULL,
-   usebypassrls BOOL NULL,
-   passwd STRING NULL,
+   usesuper BOOL NULL,
+   usesysid OID NULL,
    valuntil TIMESTAMPTZ NULL,
-   useconfig STRING[] NULL
+   passwd STRING NULL,
+   usename NAME NULL,
+   usebypassrls BOOL NULL
 )  CREATE TABLE pg_catalog.pg_shadow (
-   usename NAME NULL,
-   usesysid OID NULL,
+   useconfig STRING[] NULL,
    usecreatedb BOOL NULL,
-   usesuper BOOL NULL,
    userepl BOOL NULL,
-   usebypassrls BOOL NULL,
-   passwd STRING NULL,
+   usesuper BOOL NULL,
+   usesysid OID NULL,
    valuntil TIMESTAMPTZ NULL,
-   useconfig STRING[] NULL
+   passwd STRING NULL,
+   usename NAME NULL,
+   usebypassrls BOOL NULL
 )  {}  {}
 CREATE TABLE pg_catalog.pg_shdepend (
    dbid OID NULL,
@@ -5545,23 +5545,23 @@ CREATE TABLE pg_catalog.pg_statio_user_tables (
    tidx_blks_hit INT8 NULL
 )  {}  {}
 CREATE TABLE pg_catalog.pg_statistic_ext (
-   oid OID NULL,
    stxrelid OID NULL,
+   stxstattarget INT4 NULL,
+   oid OID NULL,
+   stxkeys INT2VECTOR NULL,
+   stxkind "char"[] NULL,
    stxname NAME NULL,
    stxnamespace OID NULL,
-   stxowner OID NULL,
-   stxstattarget INT4 NULL,
-   stxkeys INT2VECTOR NULL,
-   stxkind "char"[] NULL
+   stxowner OID NULL
 )  CREATE TABLE pg_catalog.pg_statistic_ext (
-   oid OID NULL,
    stxrelid OID NULL,
+   stxstattarget INT4 NULL,
+   oid OID NULL,
+   stxkeys INT2VECTOR NULL,
+   stxkind "char"[] NULL,
    stxname NAME NULL,
    stxnamespace OID NULL,
-   stxowner OID NULL,
-   stxstattarget INT4 NULL,
-   stxkeys INT2VECTOR NULL,
-   stxkind "char"[] NULL
+   stxowner OID NULL
 )  {}  {}
 CREATE TABLE pg_catalog.pg_subscription (
    subname NAME NULL,
@@ -5849,7 +5849,7 @@ CREATE TABLE pg_catalog.pg_user (
    userepl BOOL NULL,
    usebypassrls BOOL NULL,
    passwd STRING NULL,
-   valuntil TIMESTAMPTZ NULL,
+   valuntil TIMESTAMP NULL,
    useconfig STRING[] NULL
 )  CREATE TABLE pg_catalog.pg_user (
    usename NAME NULL,
@@ -5859,7 +5859,7 @@ CREATE TABLE pg_catalog.pg_user (
    userepl BOOL NULL,
    usebypassrls BOOL NULL,
    passwd STRING NULL,
-   valuntil TIMESTAMPTZ NULL,
+   valuntil TIMESTAMP NULL,
    useconfig STRING[] NULL
 )  {}  {}
 CREATE TABLE pg_catalog.pg_user_mapping (

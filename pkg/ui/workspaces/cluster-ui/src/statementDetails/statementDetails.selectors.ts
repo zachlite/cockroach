@@ -10,7 +10,6 @@
 
 import { createSelector } from "@reduxjs/toolkit";
 import { RouteComponentProps, match as Match } from "react-router-dom";
-import { Location } from "history";
 import _ from "lodash";
 import { AppState } from "../store";
 import {
@@ -25,7 +24,6 @@ import {
   databaseAttr,
   StatementStatistics,
   statementKey,
-  queryByName,
 } from "../util";
 import { AggregateStatistics } from "../statementsTable";
 import { Fraction } from "./statementDetails";
@@ -89,13 +87,12 @@ function fractionMatching(
 
 function filterByRouterParamsPredicate(
   match: Match<any>,
-  location: Location,
   internalAppNamePrefix: string,
 ): (stat: ExecutionStatistics) => boolean {
   const statement = getMatchParamByName(match, statementAttr);
   const implicitTxn = getMatchParamByName(match, implicitTxnAttr) === "true";
-  const database = queryByName(location, databaseAttr);
-  let app = queryByName(location, appAttr);
+  const database = getMatchParamByName(match, databaseAttr);
+  let app = getMatchParamByName(match, appAttr);
 
   const filterByKeys = (stmt: ExecutionStatistics) =>
     stmt.statement === statement &&
@@ -132,11 +129,7 @@ export const selectStatement = createSelector(
     const flattened = flattenStatementStats(statements);
     const results = _.filter(
       flattened,
-      filterByRouterParamsPredicate(
-        props.match,
-        props.location,
-        internalAppNamePrefix,
-      ),
+      filterByRouterParamsPredicate(props.match, internalAppNamePrefix),
     );
     const statement = getMatchParamByName(props.match, statementAttr);
     return {
@@ -144,9 +137,10 @@ export const selectStatement = createSelector(
       stats: combineStatementStats(results.map(s => s.stats)),
       byNode: coalesceNodeStats(results),
       app: _.uniq(results.map(s => s.app)),
-      database: queryByName(props.location, databaseAttr),
+      database: getMatchParamByName(props.match, databaseAttr),
       distSQL: fractionMatching(results, s => s.distSQL),
       vec: fractionMatching(results, s => s.vec),
+      opt: fractionMatching(results, s => s.opt),
       implicit_txn: fractionMatching(results, s => s.implicit_txn),
       full_scan: fractionMatching(results, s => s.full_scan),
       failed: fractionMatching(results, s => s.failed),

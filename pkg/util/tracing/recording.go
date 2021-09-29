@@ -21,7 +21,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/types"
 	jaegerjson "github.com/jaegertracing/jaeger/model/json"
 	"github.com/opentracing/opentracing-go"
 	otlog "github.com/opentracing/opentracing-go/log"
@@ -43,8 +42,6 @@ const (
 )
 
 type traceLogData struct {
-	// TODO(andrei): Remove the opentracing dependency. We generally don't use
-	// opentracing any more and this little dependency here pulls a large package.
 	opentracing.LogRecord
 	depth int
 	// timeSincePrev represents the duration since the previous log line (previous in the
@@ -210,31 +207,10 @@ func (r Recording) visitSpan(sp tracingpb.RecordedSpan, depth int) []traceLogDat
 			Fields:    make([]otlog.Field, len(l.Fields)),
 		}
 		for i, f := range l.Fields {
-			// TODO(obs-inf): the use of opentracing data structures here seems
-			// like detritus and prevents good redactability of the result.
-			// It looks like this is only used for Recording.String() though.
-			lr.Fields[i] = otlog.String(f.Key, f.Value.StripMarkers())
+			lr.Fields[i] = otlog.String(f.Key, f.Value)
 		}
 		lastLog := ownLogs[len(ownLogs)-1]
 		ownLogs = append(ownLogs, conv(lr, lastLog.Timestamp))
-	}
-
-	// If the span was verbose then the Structured events would have been
-	// stringified and included in the Logs above. If the span was not verbose
-	// we should add the Structured events now.
-	if !isVerbose(sp) {
-		sp.Structured(func(sr *types.Any, t time.Time) {
-			lr := opentracing.LogRecord{
-				Timestamp: t,
-			}
-			str, err := MessageToJSONString(sr, true /* emitDefaults */)
-			if err != nil {
-				return
-			}
-			lr.Fields = append(lr.Fields, otlog.String("structured", str))
-			lastLog := ownLogs[len(ownLogs)-1]
-			ownLogs = append(ownLogs, conv(lr, lastLog.Timestamp))
-		})
 	}
 
 	childSpans := make([][]traceLogData, 0)
@@ -285,7 +261,7 @@ func (r Recording) visitSpan(sp tracingpb.RecordedSpan, depth int) []traceLogDat
 // The format is described here: https://github.com/jaegertracing/jaeger-ui/issues/381#issuecomment-494150826
 //
 // The statement is passed in so it can be included in the trace.
-func (r Recording) ToJaegerJSON(stmt, comment, nodeStr string) (string, error) {
+func (r Recording) ToJaegerJSON(stmt string) (string, error) {
 	if len(r) == 0 {
 		return "", nil
 	}
@@ -318,10 +294,6 @@ func (r Recording) ToJaegerJSON(stmt, comment, nodeStr string) (string, error) {
 				node = fmt.Sprintf("node %s", v)
 				break
 			}
-		}
-		// If we have passed in an explicit nodeStr then use that as a processID.
-		if nodeStr != "" {
-			node = nodeStr
 		}
 		pid := jaegerjson.ProcessID(node)
 		if _, ok := processes[pid]; !ok {
@@ -373,26 +345,6 @@ func (r Recording) ToJaegerJSON(stmt, comment, nodeStr string) (string, error) {
 			}
 			s.Logs = append(s.Logs, jl)
 		}
-
-		// If the span was verbose then the Structured events would have been
-		// stringified and included in the Logs above. If the span was not verbose
-		// we should add the Structured events now.
-		if !isVerbose(sp) {
-			sp.Structured(func(sr *types.Any, t time.Time) {
-				jl := jaegerjson.Log{Timestamp: uint64(t.UnixNano() / 1000)}
-				jsonStr, err := MessageToJSONString(sr, true /* emitDefaults */)
-				if err != nil {
-					return
-				}
-				jl.Fields = append(jl.Fields, jaegerjson.KeyValue{
-					Key:   "structured",
-					Value: jsonStr,
-					Type:  "STRING",
-				})
-				s.Logs = append(s.Logs, jl)
-			})
-		}
-
 		t.Spans = append(t.Spans, s)
 	}
 
@@ -401,7 +353,11 @@ func (r Recording) ToJaegerJSON(stmt, comment, nodeStr string) (string, error) {
 		// Add a comment that will show-up at the top of the JSON file, is someone opens the file.
 		// NOTE: This comment is scarce on newlines because they appear as \n in the
 		// generated file doing more harm than good.
-		Comment: comment,
+		Comment: fmt.Sprintf(`This is a trace for SQL statement: %s
+This trace can be imported into Jaeger for visualization. From the Jaeger Search screen, select JSON File.
+Jaeger can be started using docker with: docker run -d --name jaeger -p 16686:16686 jaegertracing/all-in-one:1.17
+The UI can then be accessed at http://localhost:16686/search`,
+			stmt),
 	}
 	json, err := json.MarshalIndent(data, "" /* prefix */, "\t" /* indent */)
 	if err != nil {
@@ -416,15 +372,6 @@ type TraceCollection struct {
 	// Comment is a dummy field we use to put instructions on how to load the trace.
 	Comment string             `json:"_comment"`
 	Data    []jaegerjson.Trace `json:"data"`
-}
-
-// isVerbose returns true if the RecordedSpan was started is a verbose mode.
-func isVerbose(s tracingpb.RecordedSpan) bool {
-	if s.Baggage == nil {
-		return false
-	}
-	_, isVerbose := s.Baggage[verboseTracingBaggageKey]
-	return isVerbose
 }
 
 // TestingCheckRecordedSpans checks whether a recording looks like an expected
@@ -512,7 +459,7 @@ func TestingCheckRecordedSpans(rec Recording, expected string) error {
 		for _, l := range rs.Logs {
 			var msg string
 			for _, f := range l.Fields {
-				msg = msg + fmt.Sprintf("    %s: %v", f.Key, f.Value.StripMarkers())
+				msg = msg + fmt.Sprintf("    %s: %v", f.Key, f.Value)
 			}
 			row(d, "%s", msg)
 		}
@@ -529,7 +476,7 @@ func TestingCheckRecordedSpans(rec Recording, expected string) error {
 			Context:  4,
 		}
 		diffText, _ := difflib.GetUnifiedDiffString(diff)
-		return errors.Newf("unexpected diff:\n%s\n\nrecording:\n%s", diffText, rec.String())
+		return errors.Newf("unexpected diff:\n%s\n%s", diffText, rec.String())
 	}
 	return nil
 }

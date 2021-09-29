@@ -17,7 +17,6 @@ go_library(
         "//pkg/cmd/roachprod/vm/flagstub",
         "//pkg/util/retry",
         "//pkg/util/syncutil",
-        "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_errors//oserror",
         "@com_github_spf13_pflag//:pflag",
@@ -32,7 +31,7 @@ genrule(
     cmd = """
       $(location //pkg/cmd/roachprod/vm/aws/terraformgen) -o $@
     """,
-    exec_tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
+    tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
 )
 
 bindata(
@@ -41,12 +40,6 @@ bindata(
         "config.json",
         "old.json",
     ],
-    extra_args = [
-        "-mode",
-        "0600",
-        "-modtime",
-        "1400000000",
-    ],
-    metadata = True,
+    extra_args = ["."],
     package = "aws",
 )

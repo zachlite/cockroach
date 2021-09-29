@@ -48,19 +48,13 @@ message ScanOperation {
   bytes key = 1;
   bytes end_key = 2;
   bool for_update = 3;
-  bool reverse = 4;
-  Result result = 5 [(gogoproto.nullable) = false];
+  Result result = 4 [(gogoproto.nullable) = false];
 }
 
 message PutOperation {
   bytes key = 1;
   bytes value = 2;
   Result result = 3 [(gogoproto.nullable) = false];
-}
-
-message DeleteOperation {
-  bytes key = 1;
-  Result result = 2 [(gogoproto.nullable) = false];
 }
 
 message SplitOperation {
@@ -85,15 +79,6 @@ message TransferLeaseOperation {
   Result result = 3 [(gogoproto.nullable) = false];
 }
 
-enum ChangeZoneType {
-  ToggleGlobalReads = 0;
-}
-
-message ChangeZoneOperation {
-  ChangeZoneType type = 1;
-  Result result = 2 [(gogoproto.nullable) = false];
-}
-
 message Operation {
   option (gogoproto.goproto_stringer) = false;
   option (gogoproto.onlyone) = true;
@@ -109,12 +94,10 @@ message Operation {
   GetOperation get = 7;
   PutOperation put = 8;
   ScanOperation scan = 9;
-  DeleteOperation delete = 10;
-  SplitOperation split = 11;
-  MergeOperation merge = 12;
-  ChangeReplicasOperation change_replicas = 13;
-  TransferLeaseOperation transfer_lease = 14;
-  ChangeZoneOperation change_zone = 15;
+  SplitOperation split = 10;
+  MergeOperation merge = 11;
+  ChangeReplicasOperation change_replicas = 12;
+  TransferLeaseOperation transfer_lease = 13;
 }
 
 enum ResultType {

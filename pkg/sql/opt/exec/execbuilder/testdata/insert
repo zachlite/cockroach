@@ -315,24 +315,28 @@ vectorized: true
 │ auto commit
 │
 └── • render
-    │ columns: (x, v, rowid_default)
+    │ columns: (x, v, column11)
     │ estimated row count: 10 (missing stats)
-    │ render rowid_default: unique_rowid()
+    │ render column11: unique_rowid()
     │ render x: x
     │ render v: v
     │
-    └── • top-k
+    └── • limit
         │ columns: (x, v)
-        │ ordering: -v
         │ estimated row count: 10 (missing stats)
-        │ order: -v
-        │ k: 10
+        │ count: 10
         │
-        └── • scan
-              columns: (x, v)
-              estimated row count: 1,000 (missing stats)
-              table: select_t@primary
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (x, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (x, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: select_t@primary
+                  spans: FULL SCAN
 
 # Check that INSERT supports LIMIT (MySQL extension)
 query T
@@ -348,9 +352,9 @@ vectorized: true
 │ auto commit
 │
 └── • render
-    │ columns: (x, v, rowid_default)
+    │ columns: (x, v, column11)
     │ estimated row count: 1 (missing stats)
-    │ render rowid_default: unique_rowid()
+    │ render column11: unique_rowid()
     │ render x: x
     │ render v: v
     │
@@ -395,13 +399,16 @@ vectorized: true
 └── • render
     │ estimated row count: 1
     │
-    └── • top-k
+    └── • limit
         │ estimated row count: 1
-        │ order: +column2
-        │ k: 1
+        │ count: 1
         │
-        └── • values
-              size: 2 columns, 2 rows
+        └── • sort
+            │ estimated row count: 2
+            │ order: +column2
+            │
+            └── • values
+                  size: 2 columns, 2 rows
 
 query T
 EXPLAIN (PLAN) INSERT INTO insert_t (VALUES (1,1), (2,2) ORDER BY 2) LIMIT 1
@@ -416,13 +423,16 @@ vectorized: true
 └── • render
     │ estimated row count: 1
     │
-    └── • top-k
+    └── • limit
         │ estimated row count: 1
-        │ order: +column2
-        │ k: 1
+        │ count: 1
         │
-        └── • values
-              size: 2 columns, 2 rows
+        └── • sort
+            │ estimated row count: 2
+            │ order: +column2
+            │
+            └── • values
+                  size: 2 columns, 2 rows
 
 query T
 EXPLAIN (PLAN) INSERT INTO insert_t (VALUES (1,1), (2,2) ORDER BY 2 LIMIT 1)
@@ -437,13 +447,16 @@ vectorized: true
 └── • render
     │ estimated row count: 1
     │
-    └── • top-k
+    └── • limit
         │ estimated row count: 1
-        │ order: +column2
-        │ k: 1
+        │ count: 1
         │
-        └── • values
-              size: 2 columns, 2 rows
+        └── • sort
+            │ estimated row count: 2
+            │ order: +column2
+            │
+            └── • values
+                  size: 2 columns, 2 rows
 
 # ORDER BY expression that's not inserted into table.
 query T
@@ -464,31 +477,35 @@ vectorized: true
     │ into: insert_t(x, v, rowid)
     │
     └── • render
-        │ columns: (length, "?column?", rowid_default)
+        │ columns: (length, "?column?", column13)
         │ estimated row count: 10 (missing stats)
-        │ render rowid_default: unique_rowid()
+        │ render column13: unique_rowid()
         │ render length: length
         │ render ?column?: "?column?"
         │
-        └── • top-k
+        └── • limit
             │ columns: (length, "?column?", column12)
-            │ ordering: +column12
             │ estimated row count: 10 (missing stats)
-            │ order: +column12
-            │ k: 10
+            │ count: 10
             │
-            └── • render
+            └── • sort
                 │ columns: (length, "?column?", column12)
+                │ ordering: +column12
                 │ estimated row count: 1,000 (missing stats)
-                │ render length: length(k)
-                │ render ?column?: 2
-                │ render column12: k::STRING || v::STRING
+                │ order: +column12
                 │
-                └── • scan
-                      columns: (k, v)
-                      estimated row count: 1,000 (missing stats)
-                      table: kv@primary
-                      spans: FULL SCAN
+                └── • render
+                    │ columns: (length, "?column?", column12)
+                    │ estimated row count: 1,000 (missing stats)
+                    │ render length: length(k)
+                    │ render ?column?: 2
+                    │ render column12: k::STRING || v::STRING
+                    │
+                    └── • scan
+                          columns: (k, v)
+                          estimated row count: 1,000 (missing stats)
+                          table: kv@primary
+                          spans: FULL SCAN
 
 # ------------------------------------------------------------------------------
 # Insert rows into table during schema changes.
@@ -593,9 +610,9 @@ vectorized: true
                 │ into: xyz(x, y, z, rowid)
                 │
                 └── • render
-                    │ columns: (a, b, c, rowid_default)
+                    │ columns: (a, b, c, column13)
                     │ estimated row count: 1,000 (missing stats)
-                    │ render rowid_default: unique_rowid()
+                    │ render column13: unique_rowid()
                     │ render a: a
                     │ render b: b
                     │ render c: c

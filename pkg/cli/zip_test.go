@@ -79,6 +79,7 @@ table_name NOT IN (
 	'interleaved',
 	'lost_descriptors_with_data',
 	'table_columns',
+	'table_indexes',
 	'table_row_statistics',
 	'ranges',
 	'ranges_no_leases',
@@ -87,8 +88,7 @@ table_name NOT IN (
 	'session_variables',
 	'tables',
 	'statement_statistics',
-	'transaction_statistics',
-	'tenant_usage_details'
+	'transaction_statistics'
 )
 ORDER BY name ASC`)
 	assert.NoError(t, err)
@@ -105,7 +105,6 @@ ORDER BY name ASC`)
 		"system.descriptor",
 		"system.namespace",
 		"system.scheduled_jobs",
-		"system.settings",
 	)
 	sort.Strings(tables)
 

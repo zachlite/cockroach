@@ -146,7 +146,6 @@ const (
 	CrdbInternalRegionsTable
 	CrdbInternalDefaultPrivilegesTable
 	CrdbInternalActiveRangeFeedsTable
-	CrdbInternalTenantUsageDetailsViewID
 	InformationSchemaID
 	InformationSchemaAdministrableRoleAuthorizationsID
 	InformationSchemaApplicableRolesID

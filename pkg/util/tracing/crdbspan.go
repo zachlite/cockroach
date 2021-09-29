@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/types"
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/opentracing/opentracing-go"
 )
 
 // crdbSpan is a span for internal crdb usage. This is used to power SQL session
@@ -96,7 +96,7 @@ type crdbSpanMu struct {
 	// this Span.
 	// TODO(radu): perhaps we want a recording to capture all the tags (even
 	// those that were set before recording started)?
-	tags map[string]attribute.Value
+	tags opentracing.Tags
 
 	// The Span's associated baggage.
 	baggage map[string]string
@@ -171,7 +171,13 @@ func (s *crdbSpan) recordingType() RecordingType {
 
 // enableRecording start recording on the Span. From now on, log events and
 // child spans will be stored.
-func (s *crdbSpan) enableRecording(recType RecordingType) {
+//
+// If parent != nil, the Span will be registered as a child of the respective
+// parent. If nil, the parent's recording will not include this child.
+func (s *crdbSpan) enableRecording(parent *crdbSpan, recType RecordingType) {
+	if parent != nil {
+		parent.addChild(s)
+	}
 	if recType == RecordingOff || s.recordingType() == recType {
 		return
 	}
@@ -273,14 +279,14 @@ func (s *crdbSpan) importRemoteSpans(remoteSpans []tracingpb.RecordedSpan) {
 	s.mu.recording.remoteSpans = append(s.mu.recording.remoteSpans, remoteSpans...)
 }
 
-func (s *crdbSpan) setTagLocked(key string, value attribute.Value) {
+func (s *crdbSpan) setTagLocked(key string, value interface{}) {
 	if s.recordingType() != RecordingVerbose {
 		// Don't bother storing tags if we're unlikely to retrieve them.
 		return
 	}
 
 	if s.mu.tags == nil {
-		s.mu.tags = make(map[string]attribute.Value)
+		s.mu.tags = make(opentracing.Tags)
 	}
 	s.mu.tags[key] = value
 }
@@ -370,7 +376,7 @@ func (s *crdbSpan) setBaggageItemAndTag(restrictedKey, value string) {
 	// span verbosity, as it is named nondescriptly and the recording knows
 	// how to display its verbosity independently.
 	if restrictedKey != verboseTracingBaggageKey {
-		s.setTagLocked(restrictedKey, attribute.StringValue(value))
+		s.setTagLocked(restrictedKey, value)
 	}
 }
 
@@ -460,7 +466,7 @@ func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 		if len(s.mu.tags) > 0 {
 			for k, v := range s.mu.tags {
 				// We encode the tag values as strings.
-				addTag(k, v.Emit())
+				addTag(k, fmt.Sprint(v))
 			}
 		}
 	}
@@ -487,7 +493,7 @@ func (s *crdbSpan) addChild(child *crdbSpan) {
 // recurses on its list of children.
 func (s *crdbSpan) setVerboseRecursively(to bool) {
 	if to {
-		s.enableRecording(RecordingVerbose)
+		s.enableRecording(nil /* parent */, RecordingVerbose)
 	} else {
 		s.disableRecording()
 	}

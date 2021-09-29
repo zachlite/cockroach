@@ -279,6 +279,12 @@ var implicitColumnPartitioningEnabledClusterMode = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
+var dropEnumValueEnabledClusterMode = settings.RegisterBoolSetting(
+	"sql.defaults.drop_enum_value.enabled",
+	"default value for enable_drop_enum_value; allows for dropping enum values",
+	false,
+).WithPublic()
+
 var overrideMultiRegionZoneConfigClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.override_multi_region_zone_config.enabled",
 	"default value for override_multi_region_zone_config; "+
@@ -534,7 +540,6 @@ var SerialNormalizationMode = settings.RegisterEnumSetting(
 	"rowid",
 	map[int64]string{
 		int64(sessiondatapb.SerialUsesRowID):              "rowid",
-		int64(sessiondatapb.SerialUsesUnorderedRowID):     "unordered_rowid",
 		int64(sessiondatapb.SerialUsesVirtualSequences):   "virtual_sequence",
 		int64(sessiondatapb.SerialUsesSQLSequences):       "sql_sequence",
 		int64(sessiondatapb.SerialUsesCachedSQLSequences): "sql_sequence_cached",
@@ -1297,6 +1302,11 @@ type ExecutorTestingKnobs struct {
 
 	// OnTxnRetry, if set, will be called if there is a transaction retry.
 	OnTxnRetry func(autoRetryReason error, evalCtx *tree.EvalContext)
+
+	// AllowDeclarativeSchemaChanger is used to allow enabling the new,
+	// declarative schema changer. It cannot be enabled without this testing knob
+	// in 21.2.
+	AllowDeclarativeSchemaChanger bool
 }
 
 // PGWireTestingKnobs contains knobs for the pgwire module.
@@ -1423,7 +1433,7 @@ func getPlanDistribution(
 		return physicalplan.LocalPlan
 	}
 
-	rec, err := checkSupportForPlanNode(plan.planNode)
+	rec, err := checkSupportForPlanNode(plan.planNode, false /* outputNodeHasLimit */)
 	if err != nil {
 		// Don't use distSQL for this request.
 		log.VEventf(ctx, 1, "query not supported for distSQL: %s", err)
@@ -2837,6 +2847,10 @@ func (m *sessionDataMutator) SetTempTablesEnabled(val bool) {
 
 func (m *sessionDataMutator) SetImplicitColumnPartitioningEnabled(val bool) {
 	m.data.ImplicitColumnPartitioningEnabled = val
+}
+
+func (m *sessionDataMutator) SetDropEnumValueEnabled(val bool) {
+	m.data.DropEnumValueEnabled = val
 }
 
 func (m *sessionDataMutator) SetOverrideMultiRegionZoneConfigEnabled(val bool) {

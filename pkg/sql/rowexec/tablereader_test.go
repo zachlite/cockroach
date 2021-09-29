@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -439,7 +438,7 @@ func TestLimitScans(t *testing.T) {
 		if span.Operation == tableReaderProcName {
 			// Verify that stat collection lines up with results.
 			stats := execinfrapb.ComponentStats{}
-			span.Structured(func(item *types.Any, _ time.Time) {
+			span.Structured(func(item *types.Any) {
 				if !types.Is(item, &stats) {
 					return
 				}
@@ -454,7 +453,7 @@ func TestLimitScans(t *testing.T) {
 		}
 		for _, l := range span.Logs {
 			for _, f := range l.Fields {
-				match := re.FindStringSubmatch(f.Value.StripMarkers())
+				match := re.FindStringSubmatch(f.Value)
 				if match == nil {
 					continue
 				}

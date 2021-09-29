@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/cockroach/pkg/workload/workloadimpl"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/spf13/pflag"
 	"golang.org/x/exp/rand"
 	"golang.org/x/sync/errgroup"
@@ -43,8 +43,6 @@ type tpcc struct {
 	interleaved      bool
 	nowString        []byte
 	numConns         int
-
-	idleConns int
 
 	// Used in non-uniform random data generation. cLoad is the value of C at load
 	// time. cCustomerID is the value of C for the customer id generator. cItemID
@@ -76,20 +74,12 @@ type tpcc struct {
 	clientPartitions   int
 	affinityPartitions []int
 	wPart              *partitioner
-	wMRPart            *partitioner
 	zoneCfg            zoneConfig
 	multiRegionCfg     multiRegionConfig
 
-	// localWarehouses determines whether or not we should force transactions to
-	// operate on a local warehouse (local to where the given transaction
-	// originated). This is only used for multi-region configurations, and is in
-	// violation of the TPC-C spec, so it should only be used for internal
-	// testing purposes.
-	localWarehouses bool
-
 	usePostgres  bool
 	serializable bool
-	txOpts       pgx.TxOptions
+	txOpts       *pgx.TxOptions
 
 	expensiveChecks bool
 
@@ -175,9 +165,7 @@ var tpccMeta = workload.Meta{
 			`wait`:               {RuntimeOnly: true},
 			`workers`:            {RuntimeOnly: true},
 			`conns`:              {RuntimeOnly: true},
-			`idle-conns`:         {RuntimeOnly: true},
 			`expensive-checks`:   {RuntimeOnly: true, CheckConsistencyOnly: true},
-			`region-local`:       {RuntimeOnly: true},
 		}
 
 		g.flags.Uint64Var(&g.seed, `seed`, 1, `Random number generator seed`)
@@ -185,9 +173,6 @@ var tpccMeta = workload.Meta{
 		g.flags.BoolVar(&g.fks, `fks`, true, `Add the foreign keys`)
 		g.flags.BoolVar(&g.deprecatedFkIndexes, `deprecated-fk-indexes`, false, `Add deprecated foreign keys (needed when running against v20.1 or below clusters)`)
 		g.flags.BoolVar(&g.interleaved, `interleaved`, false, `Use interleaved tables`)
-		if err := g.Flags().MarkHidden("interleaved"); err != nil {
-			panic(errors.Wrap(err, "no interleaved flag?"))
-		}
 
 		g.flags.StringVar(&g.mix, `mix`,
 			`newOrder=10,payment=10,orderStatus=1,delivery=1,stockLevel=1`,
@@ -203,7 +188,6 @@ var tpccMeta = workload.Meta{
 			`Number of connections. Defaults to --warehouses * %d (except in nowait mode, where it defaults to --workers`,
 			numConnsPerWarehouse,
 		))
-		g.flags.IntVar(&g.idleConns, `idle-conns`, 0, `Number of idle connections. Defaults to 0`)
 		g.flags.IntVar(&g.partitions, `partitions`, 1, `Partition tables`)
 		g.flags.IntVar(&g.clientPartitions, `client-partitions`, 0, `Make client behave as if the tables are partitioned, but does not actually partition underlying data. Requires --partition-affinity.`)
 		g.flags.IntSliceVar(&g.affinityPartitions, `partition-affinity`, nil, `Run load generator against specific partition (requires partitions). `+
@@ -212,7 +196,7 @@ var tpccMeta = workload.Meta{
 		g.flags.Var(&g.zoneCfg.strategy, `partition-strategy`, `Partition tables according to which strategy [replication, leases]`)
 		g.flags.StringSliceVar(&g.zoneCfg.zones, "zones", []string{}, "Zones for legacy partitioning, the number of zones should match the number of partitions and the zones used to start cockroach. Does not work with --regions.")
 		g.flags.StringSliceVar(&g.multiRegionCfg.regions, "regions", []string{}, "Regions to use for multi-region partitioning. The first region is the PRIMARY REGION. Does not work with --zones.")
-		g.flags.Var(&g.multiRegionCfg.survivalGoal, "survival-goal", "Survival goal to use for multi-region setups. Allowed values: [zone, region].")
+		g.flags.Var(&g.multiRegionCfg.survivalGoal, "survival-goal", "Survival goal to use for multi-region setups. Allowed values: [az, region].")
 		g.flags.IntVar(&g.activeWarehouses, `active-warehouses`, 0, `Run the load generator against a specific number of warehouses. Defaults to --warehouses'`)
 		g.flags.BoolVar(&g.scatter, `scatter`, false, `Scatter ranges`)
 		g.flags.BoolVar(&g.serializable, `serializable`, false, `Force serializable mode`)
@@ -220,7 +204,6 @@ var tpccMeta = workload.Meta{
 		g.flags.BoolVar(&g.expensiveChecks, `expensive-checks`, false, `Run expensive checks`)
 		g.flags.BoolVar(&g.separateColumnFamilies, `families`, false, `Use separate column families for dynamic and static columns`)
 		g.flags.BoolVar(&g.replicateStaticColumns, `replicate-static-columns`, false, "Create duplicate indexes for all static columns in district, items and warehouse tables, such that each zone or rack has them locally.")
-		g.flags.BoolVar(&g.localWarehouses, `local-warehouses`, false, `Force transactions to use a local warehouse in all cases (in violation of the TPC-C specification)`)
 		g.connFlags = workload.NewConnFlags(&g.flags)
 
 		// Hardcode this since it doesn't seem like anyone will want to change
@@ -320,32 +303,25 @@ func (w *tpcc) Hooks() workload.Hooks {
 			}
 
 			if w.serializable {
-				w.txOpts = pgx.TxOptions{IsoLevel: pgx.Serializable}
+				w.txOpts = &pgx.TxOptions{IsoLevel: pgx.Serializable}
 			}
 
 			w.auditor = newAuditor(w.activeWarehouses)
 
 			// Create a partitioner to help us partition the warehouses. The base-case is
 			// where w.warehouses == w.activeWarehouses and w.partitions == 1.
-			partitions := w.partitions
-			if w.clientPartitions > 0 {
-				partitions = w.clientPartitions
-			}
 			var err error
-			// This partitioner will not actually be used to partition the
-			// data, but instead is only used to limit the warehouses the
-			// client attempts to manipulate.
-			w.wPart, err = makePartitioner(w.warehouses, w.activeWarehouses, partitions)
+			if w.clientPartitions > 0 {
+				// This partitioner will not actually be used to partiton the data, but instead
+				// is only used to limit the warehouses the client attempts to manipulate.
+				w.wPart, err = makePartitioner(w.warehouses, w.activeWarehouses, w.clientPartitions)
+			} else {
+				w.wPart, err = makePartitioner(w.warehouses, w.activeWarehouses, w.partitions)
+			}
 			if err != nil {
 				return errors.Wrap(err, "error creating partitioner")
 			}
-			if len(w.multiRegionCfg.regions) != 0 {
-				// For multi-region workloads, make a multi-region partitioner.
-				w.wMRPart, err = makeMRPartitioner(w.warehouses, w.activeWarehouses, partitions)
-				if err != nil {
-					return errors.Wrap(err, "error creating multi-region partitioner")
-				}
-			}
+
 			return initializeMix(w)
 		},
 		PreCreate: func(db *gosql.DB) error {
@@ -476,7 +452,7 @@ func (w *tpcc) Hooks() workload.Hooks {
 			return w.partitionAndScatterWithDB(db)
 		},
 		PostRun: func(startElapsed time.Duration) error {
-			w.auditor.runChecks(w.localWarehouses)
+			w.auditor.runChecks()
 			const totalHeader = "\n_elapsed_______tpmC____efc__avg(ms)__p50(ms)__p90(ms)__p95(ms)__p99(ms)_pMax(ms)"
 			fmt.Println(totalHeader)
 
@@ -751,8 +727,6 @@ func (w *tpcc) Ops(
 		}
 	}
 
-	counters := setupTPCCMetrics(reg.Registerer())
-
 	sqlDatabase, err := workload.SanitizeUrls(w, w.dbOverride, urls)
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -774,14 +748,13 @@ func (w *tpcc) Ops(
 		MaxConnsPerPool: 50,
 	}
 	fmt.Printf("Initializing %d connections...\n", w.numConns)
-
 	dbs := make([]*workload.MultiConnPool, len(urls))
 	var g errgroup.Group
 	for i := range urls {
 		i := i
 		g.Go(func() error {
 			var err error
-			dbs[i], err = workload.NewMultiConnPool(ctx, cfg, urls[i])
+			dbs[i], err = workload.NewMultiConnPool(cfg, urls[i])
 			return err
 		})
 	}
@@ -809,8 +782,8 @@ func (w *tpcc) Ops(
 
 	} else {
 		// This is making some assumptions about how racks are handed out.
-		// If we have more than one affinityPartition then we assume that the
-		// URLs are mapped to partitions in a round-robin fashion.
+		// If we have more than one affinityPartion then we assume that the URLs
+		// are mapped to partitions in a round-robin fashion.
 		// Imagine there are 5 partitions and 15 urls, this code assumes that urls
 		// 0, 5, and 10 correspond to the 0th partition.
 		for i, db := range dbs {
@@ -825,21 +798,6 @@ func (w *tpcc) Ops(
 		}
 	}
 
-	fmt.Printf("Initializing %d idle connections...\n", w.idleConns)
-	var conns []*pgx.Conn
-	for i := 0; i < w.idleConns; i++ {
-		for _, url := range urls {
-			connConfig, err := pgx.ParseConfig(url)
-			if err != nil {
-				return workload.QueryLoad{}, err
-			}
-			conn, err := pgx.ConnectConfig(ctx, connConfig)
-			if err != nil {
-				return workload.QueryLoad{}, err
-			}
-			conns = append(conns, conn)
-		}
-	}
 	fmt.Printf("Initializing %d workers and preparing statements...\n", w.workers)
 	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
 	ql.WorkerFns = make([]func(context.Context) error, 0, w.workers)
@@ -861,16 +819,8 @@ func (w *tpcc) Ops(
 	sem := make(chan struct{}, 100)
 	for workerIdx := 0; workerIdx < w.workers; workerIdx++ {
 		workerIdx := workerIdx
-		var warehouse int
-		var p int
-		if len(w.multiRegionCfg.regions) == 0 {
-			warehouse = w.wPart.totalElems[workerIdx%len(w.wPart.totalElems)]
-			p = w.wPart.partElemsMap[warehouse]
-		} else {
-			// For multi-region workloads, use the multi-region partitioning.
-			warehouse = w.wMRPart.totalElems[workerIdx%len(w.wMRPart.totalElems)]
-			p = w.wMRPart.partElemsMap[warehouse]
-		}
+		warehouse := w.wPart.totalElems[workerIdx%len(w.wPart.totalElems)]
+		p := w.wPart.partElemsMap[warehouse]
 
 		// This isn't part of our local partition.
 		if !isMyPart(p) {
@@ -884,7 +834,7 @@ func (w *tpcc) Ops(
 		idx := len(ql.WorkerFns) - 1
 		sem <- struct{}{}
 		group.Go(func() error {
-			worker, err := newWorker(ctx, w, db, reg.GetHandle(), counters, warehouse)
+			worker, err := newWorker(ctx, w, db, reg.GetHandle(), warehouse)
 			if err == nil {
 				ql.WorkerFns[idx] = worker.run
 			}
@@ -898,15 +848,6 @@ func (w *tpcc) Ops(
 	// Preregister all of the histograms so they always print.
 	for _, tx := range allTxs {
 		reg.GetHandle().Get(tx.name)
-	}
-
-	// Close idle connections.
-	ql.Close = func(context context.Context) {
-		for _, conn := range conns {
-			if err := conn.Close(ctx); err != nil {
-				log.Warningf(ctx, "%v", err)
-			}
-		}
 	}
 	return ql, nil
 }

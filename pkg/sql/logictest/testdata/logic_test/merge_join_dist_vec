@@ -63,7 +63,7 @@ vectorized: true
       table: r@primary
       spans: [/2 - /2]
 ·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzEk9GPk0AQxt_9Kybz1OoaWIovJJdglFMuPTiBiyaGh70ytiQci7tLYtP0fzeASQV7tY1R39jd-X0z3zdhh_prhR4Gn-6Wr8MIZm_DNEs_LOeQBsvgTQbP4TqJb6GCZXCdwU0cRqDgPg2jdzATc_j4PkgCEHAFDjKsZUGReCSN3mfkyNDBnGGj5Iq0lqq73vVFYfENPZthWTet6a5zhiupCL0dmtJUhB5m4qGihERByuq0CjKirHpp5TeqfBRqiwzTRtTaA8uxbMz3DGVrfmgepB62sBF6MxbxOeb7nKE2Yk3oOXv2xGwHnbaWqiBFxUgp78jflRwxeEtqTTeyrElZi_Fs2bYhb4g8vs-CpA8eGVb0xcx8_mJ-pcr1ZvhEhnFrPPA58x3mu5MUDg4Xf-DwyPiRfCkby51GcbS1O2rNz1-8Pc6l-guL50_O9i8W7_zXxR8ZLiHdyFrTWXu1O3tUrGmIS8tWrehOyVXfZjjGPdcnW5A2w6s7HMK6f-r_vfNhfhrmU9j-GXZGMJ_Czkn41Qi2p_DiAs-_dD4N89Owe5HnfP_sewAAAP__ZsHuOw==
+Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzEk9GPk0AQxt_9KzbjS6t7gd3iyyaXYJRTLj04gYsmhoe9MrYkHIu7S2LT9H83gEkFe7UXo76xu_P7Zr5vwg7M1woEBJ9ul6_DiMzehmmWfljOSRosgzcZeUGukviGVGQZXGXkOg4josldGkbvyEzOycf3QRIQSS4JBwq1KjCSD2hAfAYGFDjkFBqtVmiM0t31ri8Ki28gXApl3bS2u84prJRGEDuwpa0QBGTyvsIEZYHa6bQKtLKsemntN7p8kHoLFNJG1kYQh1843HkO-Z6Cau0P2YPa_ZZspNmMdXwG-T6nYKxcIwi-p4-Md9Bpa6UL1FiMlPKO_F3JEY83qNd4rcoatbMYz5ZtGxRD6vFdFiR99kChwi925rOX80tdrjfDJ1CIWyuIz6jPqe9NUjg4XPyBwyPjR-pCNY43jeJoa2_Ump2_e3ecS_V3ds8eHe9f7J7_190fGS5B06ja4FmrdTt7WKxxiMuoVq_wVqtV32Y4xj3XJ1ugscOrNxzCun_qf7_zYXYaZlPY_RnmI5hNYX4SfjWC3Sm8eILnXzqfhtlp2HuS53z_7HsAAAD___ZW7z0=
 
 # Test that we can handle merge joins with equality columns of integers with
 # different widths.
@@ -81,7 +81,7 @@ EXPLAIN (VEC) SELECT * FROM numbers AS t1 INNER MERGE JOIN numbers AS t2 ON t1._
 │
 └ Node 1
   └ *colexecjoin.mergeJoinInnerOp
-    ├ *colexecbase.castInt2Int4Op
+    ├ *colexecbase.castInt16Int32Op
     │ └ *colexec.sortOp
     │   └ *colfetcher.ColBatchScan
     └ *colexec.sortOp
@@ -95,7 +95,7 @@ EXPLAIN (VEC) SELECT * FROM numbers AS t1 INNER MERGE JOIN numbers AS t2 ON t1._
   └ *colexecjoin.mergeJoinInnerOp
     ├ *colexec.sortOp
     │ └ *colfetcher.ColBatchScan
-    └ *colexecbase.castInt2IntOp
+    └ *colexecbase.castInt16Int64Op
       └ *colexec.sortOp
         └ *colfetcher.ColBatchScan
 

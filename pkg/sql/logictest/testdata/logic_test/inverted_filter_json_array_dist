@@ -295,25 +295,25 @@ vectorized: true
 │ distinct on: a
 │ order key: a
 │
-└── • union all
+└── • sort
+    │ order: +a
     │
-    ├── • index join
-    │   │ table: json_tab@primary
-    │   │
-    │   └── • sort
-    │       │ order: +a
-    │       │
-    │       └── • scan
-    │             missing stats
-    │             table: json_tab@json_inv
-    │             spans: 1 span
-    │
-    └── • scan
-          missing stats
-          table: json_tab@primary
-          spans: [/44 - /44]
+    └── • union all
+        │
+        ├── • index join
+        │   │ table: json_tab@primary
+        │   │
+        │   └── • scan
+        │         missing stats
+        │         table: json_tab@json_inv
+        │         spans: 1 span
+        │
+        └── • scan
+              missing stats
+              table: json_tab@primary
+              spans: [/44 - /44]
 ·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lFFP2zAUhd_3K6z7AmhBiZ20hUiTykamdWKUpUjbxKLJbTzIVOLMdicQ6n-fkrCmKcRu1og3N_Z377HvOX0A-XsOPgRfL85ORudo_3Q0uZx8PjtAk-AseHeJKHofjj-hX5KnPxSdoi8fgjBA-1M0_L5wHJehvSsc7R2gcYj2KXqDPC9fnwYhevsNUbAg5TE7p7dMgn8FGCwgYIELkQWZ4DMmJRf51kNxcBTfge9YkKTZQuWfIwtmXDDwH0Alas7Ah0s6nbOQ0ZgJ2wELYqZoMi_K_1M5zERyS8U9WDDJaCp9ZHtecXi8UD4aYmtIIFpawBeqaiQVvWbg46W1vZjTRKoknSn7uK5kmN90LGImWJw33OhWFZjeoxsqb57Q0bJS1GtUVNXhZa_NOq_LQo2yMWmlu9LU71zTOT_kmY3d-vHHgTXqGNR04O2tgxusUyyS9M-ad7Bjnwhh48PVyr4Q7GdyF6Rx5alGiaSNxAkXignbfe7Rni_vtin_kSfp4wP0jNnZIixem-Yr1w1eLCy407A4nYSFbG9Ssr1JycqkZHeTGiQ-mtT7X5Mayq-ZtN-9SQ3NV9M-ejGTkk5Nijv_R3-mXchkxlPJar2aKju5YBZfs_KCki_EjF0IPivalD_HBVd8iJlU5S4uf4zScisXuA7jTRivw0c1GLeDsbsLTfQw0V7a0NnVv5infzJPS_f0cE8L9_VwXwsP9PBgl0nrYdOk9bRh0ke7TPpYP2nHEA5DtEzZeuLwOk4M-BOPt8qmnjaGU48bZob1CdvsHS1f_Q0AAP__NmxOwg==
+Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lF9v2jwUxu_fT2Gd96Kt5ipxEqCNNIluzTQmBiwgbVMXTYZ4bSYaZ7aZWiG--5SE8bfYobDeOXF-5zz2eZ5MQf4agw_Bl177qtVBp9et_qD_qX2G-kE7eDtAFL0Lux_RT8nT74oO0ef3QRig0yFqfpvYtsvQyQ2JTs5QN0SnFL1Gnpevr4MQvfmKKGBIecw69J5J8G-AAAYHMLgQYcgEHzEpuci3psWHrfgBfBtDkmYTlb-OMIy4YOBPQSVqzMCHAR2OWchozIRlA4aYKZqMi_J_VTYzkdxT8QgY-hlNpY8szzu3PM_6HzB0J8pHTYKbDkQzDHyils2korcMfDLD1QX1uVBMWI11LU3yamd5b5_y14lUSTpSFrE3O-SHETETLM4PtNFuWWH4iO6ovNuio9lSUm2npGUdXvZ66pxa3a5B92IkOy-sfnR1HX7OM4t4a5_vat9Ya0-q-5Ps8GexSNLfKwYltnUlhEXOFyurJ9iP5CFI4wo35Owj8QNP0rlC15igCnFx92k-j0vtuXExlF_Y7uLF0kKOmhZy5LQ41e3qVLers7Crc7hdDRJX7Ood366G5nO71p9rV0P5xdwvX8yuzlHt6vzDn_sTjUMmM55KVum_befSWXzLyqNKPhEj1hN8VLQpH7sFV7yImVTlLikfWmm5lQtchYkWdvSwswmTVfhyDSb7wcQ7hHb1sKs9tKGzp7_umv7Kalq6rofrWrihhxta-EIPXxwyaT1smrSeNkz68pBJE0OyTNHSZ4sYwkW2LL6OuwZ8y-T7jMxAm2ZmwA1DI_qIbfaOZv_9CQAA___7R4gK
 
 # We cannot use the index for this query.
 query T
@@ -413,25 +413,25 @@ vectorized: true
 │ distinct on: a
 │ order key: a
 │
-└── • union all
+└── • sort
+    │ order: +a
     │
-    ├── • index join
-    │   │ table: array_tab@primary
-    │   │
-    │   └── • sort
-    │       │ order: +a
-    │       │
-    │       └── • scan
-    │             missing stats
-    │             table: array_tab@arr_inv
-    │             spans: 1 span
-    │
-    └── • scan
-          missing stats
-          table: array_tab@primary
-          spans: [/1 - /1]
+    └── • union all
+        │
+        ├── • index join
+        │   │ table: array_tab@primary
+        │   │
+        │   └── • scan
+        │         missing stats
+        │         table: array_tab@arr_inv
+        │         spans: 1 span
+        │
+        └── • scan
+              missing stats
+              table: array_tab@primary
+              spans: [/1 - /1]
 ·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy0lF9r2zAUxd_3KcR9acpUbNn5axhkWzyWkSWdHdjGZopiX4ohtTxJHivB333EDm1dEsVJ6YuxpPu751wd0AbUnzV44P-4nr2fzklnMg2X4bfZJQn9mf9xSTj5FCy-Ei4lv7_RfEW-f_YDn3RWZPy7sG0XycWGlReXZBGQDifvCNv-TvyAfPhJOFDIRIJzfocKvF_AgIIDFFyIKORSxKiUkNujTVU4Tf6BZ1NIs7zQ9bZO9RrBAyETlJgAhQQ1T9dVvzF7C1EZUYiFRPAeq-fiSuTWsFEdlRREoXedIwpK81sEr1fSA-p7Gk9SpdMs1tbouROgsKg9eqReFbr6O6Tbb-gys-6Sr9YYIE9QWqwp_ZDNmEt5k2Z_gUKY80x5xGK2xa62X6eFIecUQ6GQGqXl7gtkf3v3lPZfRJrtxu0dGjeX6R2X94-T0bFzUL3bUHfa37Z9XP7htqviFmbYuWac9tE7VfTOOdEfMbSLvntu9EfaP4m-_8rRv-x5GbR6XuxTnpcAVS4yhS07RxQwucV6FCUKGeO1FHElUy8XFVdtJKh0fcrqxTSrj7YGn8LMDNtm2jHSrhl2jXDXDHeNcNM2ew73jPDIDPeN8MBse2CEh2Z4-BLbo5MuLCrf_A8AAP__OQalPQ==
+Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy0k19r2zAUxd_3KcTdQ1umYEv5O8Mg2-KxjCzp7MA2NlMU-1IMqeVJ8lgJ-e7DdmnqUKtOx16MpavfPUc63B3oX1vwwP92uXg7X5Lz2Txch18WFyT0F_77NRHkQ7D6TIRS4vbKiA35-tEPfHK-IdOfhev2kZzt2P7sgqwCci7IG8LK35kfkHffiQAKmUxwKW5Qg_cDGFDgQKEPEYVcyRi1lqos7aqD8-QPeC6FNMsLU2-b1GwRPCgyqRJUmACFBI1It2U92kcUYqkQvMPRpezJ3BkdHaQgC3PXNqKgjbhG8AZ72iL9SONQKoPKGTc6w5S9grb2w1Paz1Jt0iw2zuRYACis6tt7pF4Vpvpr0x01dJlddy02WwxQJKgc1pS-z30qlLpKs99AIcxFpj3iMNdhvfLLOxjipxj6JNPszk-_zU-u0huhbg_SdMpb1fsNdd79Odyn5e-fo-cw52U3P-y5fnj3eHgVD39OPE8YehDP4D_HcxB9bPoBLPM_7DT_7ikDGqDOZaaxY-eIAibXWN9Dy0LFeKlkXMnUy1XFVRsJalNXWb2YZ3WpNPgQZlaY22FuhV_b4b4VHtjhgRV2GzA7hodWeGKHR1Z4bLc9_hflyUl3jvYv_gYAAP__5A1x4g==
 
 # The split disjunction rule allows us to use the index for this query.
 query T
@@ -445,29 +445,29 @@ vectorized: true
 │ distinct on: a
 │ order key: a
 │
-└── • union all
+└── • sort
+    │ order: +a
     │
-    ├── • index join
-    │   │ table: array_tab@primary
-    │   │
-    │   └── • sort
-    │       │ order: +a
-    │       │
-    │       └── • inverted filter
-    │           │ inverted column: b_inverted_key
-    │           │ num spans: 1
-    │           │
-    │           └── • scan
-    │                 missing stats
-    │                 table: array_tab@arr_inv
-    │                 spans: 1 span
-    │
-    └── • scan
-          missing stats
-          table: array_tab@primary
-          spans: [/1 - /1]
+    └── • union all
+        │
+        ├── • index join
+        │   │ table: array_tab@primary
+        │   │
+        │   └── • inverted filter
+        │       │ inverted column: b_inverted_key
+        │       │ num spans: 1
+        │       │
+        │       └── • scan
+        │             missing stats
+        │             table: array_tab@arr_inv
+        │             spans: 1 span
+        │
+        └── • scan
+              missing stats
+              table: array_tab@primary
+              spans: [/1 - /1]
 ·
-Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMlV9P2zwUxu_fT3F0bgC9QY2dlkKkSd1G0DoxylqkbVor5DZHEKnYme0iEOp3n5J0LSmt0yA07QbhP4_Pz-d54j6h-TXFEKPvl-fvuxewf9odXA2-nh_AIDqPPl6BgLN-7wsIrcXjtRVj-PYp6kewvz-GznDm-wHB3hOb7x1Arw-lST7fOyhmBbwDlv17GvXhww8Q6KFUMV2IOzIY_kSGHnL0MMCRh6lWEzJG6WzpKd_YjR8w9D1MZDqzxbRN7JQwxJlUOiZNMXoYkxXJNFsfzUceTpQmDFdbTxNjEzmxjVZpL3ay8r2ZDaHDcDT3UM3sos7IQ2PFDWHYnHtbWDZUGihtSTeO1uv8v_X4Vp3jP6tE9knEpBvtcomlTZ1UJ3dCP65u5nX41upHdaov23i8qY2FGRtauTpg_Ai3wty-UOemLYjaW4lW52wyftFkFzbza3GvmI7fnOlCHaq0wXh5e1UUT0oczO3WlRhPaREWti0sQuvrRN6jh4NUSBNCg_kNdpj9DXZLEK_D1JX3pC3FZ8nUkiadF3kG9mc9ekg1KAkdFoLJwMBYoW04xOGQMzZEIBkvRsEQYStdUKLju3fMr_68lh3LN-_QKvZaGL67fTy3j7_SvgqmF_Y1_yX7lt_5yV97nvibPk_szZ-nDeX6ZFIlDa39am4-2c-AKb6h4oJGzfSELrWa5GWKYS_X5RMxGVussmLQlcVSBvhczJxi7hZzpzhwi4N1MXsubpbErJ6Ycbe66eRuucUtd7srbn3kVLfd4rZT7Lu5j93cFTk5cav9ipS5M1pBzl6EtE5UKtRVWWHukK-HZTT_73cAAAD__yXI0Rs=
+Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJzMVGFv2jAQ_b5fYd0-tNVSJedAaSNNYltTjakrHVTapoEqQ05tJGpntqlaVfz3KQRBU8AB1E37grDP7967u5d7AvN7BBHEPy7PP7Qu2P5pq3vV_XZ-wLrxefzpigl21ml_ZUJr8XhtxYB9_xx3Yra_P2DN3jgIQmJ7TzjZO2DtDitd8sneQXEr2HuG-d_TuMM-_mQCPJAqoQtxRwaiX4DgAQcPQuh7kGk1JGOUzkNP04et5AGiwINUZmNbXNvUjggiGEulE9KUgAcJWZGO8nh_0vdgqDRBtHh6mhqbyqH166W30Mzp22MbsSZCf-KBGtsZT98DY8UNQVSbeGu0rGD6olLZIZGQ9o_KXPM-NjOd3gn9uKD2mnwte30b9q7SlrTfeFnlu7Xpj7ZJP2_jyao2FsNY0cpFgsEjuxXmdgk9HdpMUWOtokWeVYOflemSjVihu9oMx6-u7kIdqszH8IWLV9OflOjRPa4rMRjRzIy4zoxC6-tU3oMH3UxIEzEfAx8P899wM4fybTS15D1pS8lZOrKkSfvluufx-CHTTEnWxIiZXBgzVmgb9aDX44g9YCST2SnsAVurLiyp45t3LKj-fOcdO_TRf7tZt3BXPXzzCfLpBPmOE6zQtDTB2v80wdkGPN51A1akX6yS4J-tQP6qK5D_xRW4grhDJlPS0EbbLcilU3JDRalGjfWQLrUaTmmKY3uKm14kZGwRxeLQkkUoF_gcjE4wd4O5Exy6weFLMD4H10pg3A6MoRtdc-quu8F1d7tr7qqPnOiGG9xwggO37mO37gqfnLjRQYXL3B6tUI5uk2KFS3HJpts4rQJdZTVccqrTa_3Jmz8BAAD__zm3B-Y=
 
 # We cannot use the index for this query.
 query T

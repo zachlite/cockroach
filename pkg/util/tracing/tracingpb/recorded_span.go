@@ -18,7 +18,8 @@ import (
 	types "github.com/gogo/protobuf/types"
 )
 
-// LogMessageField is the field name used for the log message in a LogRecord.
+// LogMessageField is the field name used for the opentracing.Span.LogFields()
+// for a log message.
 const LogMessageField = "event"
 
 func (s *RecordedSpan) String() string {
@@ -32,19 +33,9 @@ func (s *RecordedSpan) String() string {
 
 // Structured visits the data passed to RecordStructured for the Span from which
 // the RecordedSpan was created.
-func (s *RecordedSpan) Structured(visit func(*types.Any, time.Time)) {
-	// Check if the RecordedSpan is from a node running a version less than 21.2.
-	// If it is, we set the "recorded at" time to the StartTime of the span.
-	// TODO(adityamaru): Remove this code in 22.1 since all RecordedSpans will
-	// have StructuredRecords in 21.2+ nodes.
-	if s.StructuredRecords == nil {
-		for _, item := range s.DeprecatedInternalStructured {
-			visit(item, s.StartTime)
-		}
-		return
-	}
-	for _, sr := range s.StructuredRecords {
-		visit(sr.Payload, sr.Time)
+func (s *RecordedSpan) Structured(visit func(*types.Any)) {
+	for _, item := range s.InternalStructured {
+		visit(item)
 	}
 }
 
@@ -54,7 +45,7 @@ func (l LogRecord) Msg() string {
 	for _, f := range l.Fields {
 		key := f.Key
 		if key == LogMessageField {
-			return f.Value.StripMarkers()
+			return f.Value
 		}
 		if key == "error" {
 			return fmt.Sprint("error:", f.Value)

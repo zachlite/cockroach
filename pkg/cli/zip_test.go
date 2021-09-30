@@ -16,7 +16,6 @@ import (
 	"context"
 	enc_hex "encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
@@ -68,27 +66,20 @@ table_name NOT IN (
 	-- allowlisted tables that don't need to be in debug zip
 	'backward_dependencies',
 	'builtin_functions',
-	'cluster_contended_keys',
-	'cluster_contended_indexes',
-	'cluster_contended_tables',
-	'cluster_inflight_traces',
-	'cross_db_references',
+	'create_statements',
+	'create_type_statements',
 	'databases',
 	'forward_dependencies',
 	'index_columns',
-	'interleaved',
-	'lost_descriptors_with_data',
 	'table_columns',
+	'table_indexes',
 	'table_row_statistics',
 	'ranges',
 	'ranges_no_leases',
 	'predefined_comments',
 	'session_trace',
 	'session_variables',
-	'tables',
-	'statement_statistics',
-	'transaction_statistics',
-	'tenant_usage_details'
+	'tables'
 )
 ORDER BY name ASC`)
 	assert.NoError(t, err)
@@ -104,39 +95,34 @@ ORDER BY name ASC`)
 		"system.jobs",
 		"system.descriptor",
 		"system.namespace",
+		"system.namespace2",
 		"system.scheduled_jobs",
-		"system.settings",
 	)
 	sort.Strings(tables)
 
 	var exp []string
 	exp = append(exp, debugZipTablesPerNode...)
-	for _, t := range debugZipTablesPerCluster {
-		t = strings.TrimPrefix(t, `"".`)
-		exp = append(exp, t)
-	}
+	exp = append(exp, debugZipTablesPerCluster...)
 	sort.Strings(exp)
 
 	assert.Equal(t, exp, tables)
 }
 
-// This tests the operation of zip over secure clusters.
+// This test the operation of zip over secure clusters.
 func TestZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
-	skip.UnderRace(t, "test too slow under race")
 
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
 
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
-	out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=1s " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=1s " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,70 +137,18 @@ func TestZip(t *testing.T) {
 	})
 }
 
-// This tests the operation of zip running concurrently.
-func TestConcurrentZip(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	// We want a low timeout so that the test doesn't take forever;
-	// however low timeouts make race runs flaky with false positives.
-	skip.UnderShort(t)
-	skip.UnderRace(t)
-
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
-
-	ctx := context.Background()
-
-	// Three nodes. We want to see what `zip` thinks when one of the nodes is down.
-	params, _ := tests.CreateTestServerParams()
-	params.Insecure = true
-	tc := testcluster.StartTestCluster(t, 3,
-		base.TestClusterArgs{ServerArgs: params})
-	defer tc.Stopper().Stop(ctx)
-
-	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
-		t:          t,
-		TestServer: tc.Server(0).(*server.TestServer),
-	}
-	defer func(prevStderr *os.File) { stderr = prevStderr }(stderr)
-	stderr = os.Stdout
-
-	out, err := c.RunWithCapture("debug zip --timeout=30s --cpu-profile-duration=0s " + os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Strip any non-deterministic messages.
-	out = eraseNonDeterministicZipOutput(out)
-
-	// Sort the lines to remove non-determinism in the concurrent execution.
-	lines := strings.Split(out, "\n")
-	sort.Strings(lines)
-	out = strings.TrimSpace(strings.Join(lines, "\n"))
-
-	// We use datadriven simply to read the golden output file; we don't actually
-	// run any commands. Using datadriven allows TESTFLAGS=-rewrite.
-	datadriven.RunTest(t, "testdata/zip/testzip_concurrent", func(t *testing.T, td *datadriven.TestData) string {
-		return out
-	})
-}
-
 func TestZipSpecialNames(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
 
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
 	c.RunWithArgs([]string{"sql", "-e", `
 create database "a:b";
@@ -229,7 +163,7 @@ create table defaultdb."pg_catalog.pg_class"(x int);
 create table defaultdb."../system"(x int);
 `})
 
-	out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=0 " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,16 +185,12 @@ create table defaultdb."../system"(x int);
 func TestUnavailableZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	skip.WithIssue(t, 53306, "flaky test")
+	defer log.Scope(t).Close(t)
 
 	skip.UnderShort(t)
 	// Race builds make the servers so slow that they report spurious
 	// unavailability.
 	skip.UnderRace(t)
-
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
 
 	// unavailableCh is used by the replica command filter
 	// to conditionally block requests and simulate unavailability.
@@ -279,14 +209,11 @@ func TestUnavailableZip(t *testing.T) {
 	}
 
 	// Make a 2-node cluster, with an option to make the first node unavailable.
-	params, _ := tests.CreateTestServerParams()
-	params.Insecure = true
 	tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
 		ServerArgsPerNode: map[int]base.TestServerArgs{
 			0: {Insecure: true, Knobs: base.TestingKnobs{Store: knobs}},
 			1: {Insecure: true},
 		},
-		ServerArgs: params,
 	})
 	defer tc.Stopper().Stop(context.Background())
 
@@ -301,7 +228,7 @@ func TestUnavailableZip(t *testing.T) {
 	defer close(ch)
 
 	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
+	c := cliTest{
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
@@ -309,7 +236,7 @@ func TestUnavailableZip(t *testing.T) {
 	stderr = os.Stdout
 
 	// Keep the timeout short so that the test doesn't take forever.
-	out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=0 " + os.DevNull + " --timeout=.5s")
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull + " --timeout=.5s")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,20 +264,14 @@ func eraseNonDeterministicZipOutput(out string) string {
 	out = re.ReplaceAllString(out, `log file ...`)
 	re = regexp.MustCompile(`(?m)RPC connection to .*$`)
 	out = re.ReplaceAllString(out, `RPC connection to ...`)
-	re = regexp.MustCompile(`(?m)dial tcp .*$`)
-	out = re.ReplaceAllString(out, `dial tcp ...`)
-	re = regexp.MustCompile(`(?m)rpc error: .*$`)
-	out = re.ReplaceAllString(out, `rpc error: ...`)
+	re = regexp.MustCompile(`(?m)\^- resulted in.*$`)
+	out = re.ReplaceAllString(out, `^- resulted in ...`)
 
 	// The number of memory profiles previously collected is not deterministic.
-	re = regexp.MustCompile(`(?m)^\[node \d+\] \d+ heap profiles found$`)
-	out = re.ReplaceAllString(out, `[node ?] ? heap profiles found`)
-	re = regexp.MustCompile(`(?m)^\[node \d+\] retrieving (memprof|memstats).*$` + "\n")
+	re = regexp.MustCompile(`(?m)requesting heap files for node 1\.\.\..*found$`)
+	out = re.ReplaceAllString(out, `requesting heap files for node 1... ? found`)
+	re = regexp.MustCompile(`(?m)\^writing.*memprof*$`)
 	out = re.ReplaceAllString(out, ``)
-	re = regexp.MustCompile(`(?m)^\[node \d+\] writing profile.*$` + "\n")
-	out = re.ReplaceAllString(out, ``)
-
-	//out = strings.ReplaceAll(out, "\n\n", "\n")
 	return out
 }
 
@@ -361,38 +282,32 @@ func eraseNonDeterministicZipOutput(out string) string {
 // need the SSL certs dir to run a CLI test securely.
 func TestPartialZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.ScopeWithoutShowLogs(t).Close(t)
 
 	// We want a low timeout so that the test doesn't take forever;
 	// however low timeouts make race runs flaky with false positives.
 	skip.UnderShort(t)
 	skip.UnderRace(t)
 
-	sc := log.ScopeWithoutShowLogs(t)
-	defer sc.Close(t)
-	// Reduce the number of output log files to just what's expected.
-	defer sc.SetupSingleFileLogging()()
-
 	ctx := context.Background()
 
 	// Three nodes. We want to see what `zip` thinks when one of the nodes is down.
-	params, _ := tests.CreateTestServerParams()
-	params.Insecure = true
 	tc := testcluster.StartTestCluster(t, 3,
-		base.TestClusterArgs{ServerArgs: params})
+		base.TestClusterArgs{ServerArgs: base.TestServerArgs{Insecure: true}})
 	defer tc.Stopper().Stop(ctx)
 
 	// Switch off the second node.
 	tc.StopServer(1)
 
 	// Zip it. We fake a CLI test context for this.
-	c := TestCLI{
+	c := cliTest{
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
 	defer func(prevStderr *os.File) { stderr = prevStderr }(stderr)
 	stderr = os.Stdout
 
-	out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=0s " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0s " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +322,7 @@ func TestPartialZip(t *testing.T) {
 		})
 
 	// Now do it again and exclude the down node explicitly.
-	out, err = c.RunWithCapture("debug zip " + os.DevNull + " --concurrency=1 --exclude-nodes=2 --cpu-profile-duration=0")
+	out, err = c.RunWithCapture("debug zip " + os.DevNull + " --exclude-nodes=2 --cpu-profile-duration=0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +349,7 @@ func TestPartialZip(t *testing.T) {
 	// is no risk to see the override bumped due to a gossip update
 	// because this setting is not otherwise set in the test cluster.
 	s := tc.Server(0)
-	kvserver.TimeUntilStoreDead.Override(ctx, &s.ClusterSettings().SV, kvserver.TestTimeUntilStoreDead)
+	kvserver.TimeUntilStoreDead.Override(&s.ClusterSettings().SV, kvserver.TestTimeUntilStoreDead)
 
 	// This last case may take a little while to converge. To make this work with datadriven and at the same
 	// time retain the ability to use the `-rewrite` flag, we use a retry loop within that already checks the
@@ -442,7 +357,7 @@ func TestPartialZip(t *testing.T) {
 	datadriven.RunTest(t, "testdata/zip/partial2",
 		func(t *testing.T, td *datadriven.TestData) string {
 			f := func() string {
-				out, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=0 " + os.DevNull)
+				out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -468,9 +383,7 @@ func TestZipRetries(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	params, _ := tests.CreateTestServerParams()
-	params.Insecure = true
-	s, _, _ := serverutils.StartServer(t, params)
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 	defer s.Stopper().Stop(context.Background())
 
 	dir, cleanupFn := testutils.TempDir(t)
@@ -496,25 +409,13 @@ func TestZipRetries(t *testing.T) {
 			Host:     s.ServingSQLAddr(),
 			RawQuery: "sslmode=disable",
 		}
-		sqlConn := sqlConnCtx.MakeSQLConn(ioutil.Discard, ioutil.Discard, sqlURL.String())
-		defer func() {
-			if err := sqlConn.Close(); err != nil {
-				t.Fatal(err)
-			}
-		}()
+		sqlConn := makeSQLConn(sqlURL.String())
+		defer sqlConn.Close()
 
-		zr := zipCtx.newZipReporter("test")
-		zc := debugZipContext{
-			z:       z,
-			timeout: 3 * time.Second,
-		}
-		if err := zc.dumpTableDataForZip(
-			zr,
-			sqlConn,
-			"test",
-			`generate_series(1,15000) as t(x)`,
-			`select if(x<11000,x,crdb_internal.force_retry('1h')) from generate_series(1,15000) as t(x)`,
-		); err != nil {
+		if err := dumpTableDataForZip(
+			z, sqlConn, 3*time.Second,
+			"test", `generate_series(1,15000) as t(x)`,
+			`if(x<11000,x,crdb_internal.force_retry('1h'))`); err != nil {
 			t.Fatal(err)
 		}
 	}()
@@ -549,17 +450,17 @@ func TestToHex(t *testing.T) {
 
 	dir, cleanupFn := testutils.TempDir(t)
 	defer cleanupFn()
-	c := NewCLITest(TestCLIParams{
-		StoreSpecs: []base.StoreSpec{{
+	c := newCLITest(cliTestParams{
+		storeSpecs: []base.StoreSpec{{
 			Path: dir,
 		}},
 	})
-	defer c.Cleanup()
+	defer c.cleanup()
 
 	// Create a job to have non-empty system.jobs table.
 	c.RunWithArgs([]string{"sql", "-e", "CREATE STATISTICS foo FROM system.namespace"})
 
-	_, err := c.RunWithCapture("debug zip --concurrency=1 --cpu-profile-duration=0 " + dir + "/debug.zip")
+	_, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + dir + "/debug.zip")
 	if err != nil {
 		t.Fatal(err)
 	}

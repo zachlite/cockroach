@@ -1,8 +1,7 @@
 ---
-name: 'Performance inquiry'
-title: ''
-about: 'You have a question about CockroachDB's performance and it is not a bug or a feature request'
-labels: 'C-question'
+name: Performance inquiry
+about: You have a question about CockroachDB's performance and it is not a bug or
+  a feature request
 
 ---
 

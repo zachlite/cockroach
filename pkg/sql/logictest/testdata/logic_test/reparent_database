@@ -81,4 +81,7 @@ statement ok
 ALTER DATABASE to_schema CONVERT TO SCHEMA WITH PARENT parent2;
 
 statement ok
-GRANT USAGE ON SCHEMA parent2.to_schema TO testuser;
+USE parent2;
+
+statement ok
+GRANT USAGE ON SCHEMA to_schema TO testuser;

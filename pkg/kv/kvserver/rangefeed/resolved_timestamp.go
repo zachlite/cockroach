@@ -217,27 +217,13 @@ func (rts *resolvedTimestamp) recompute() bool {
 	if !rts.IsInit() {
 		return false
 	}
-	if rts.closedTS.Less(rts.resolvedTS) {
-		panic(fmt.Sprintf("closed timestamp below resolved timestamp: %s < %s",
-			rts.closedTS, rts.resolvedTS))
-	}
 	newTS := rts.closedTS
-
-	// Take into account the intents that haven't been yet resolved - their
-	// timestamps cannot be resolved yet.
 	if txn := rts.intentQ.Oldest(); txn != nil {
-		if txn.timestamp.LessEq(rts.resolvedTS) {
-			panic(fmt.Sprintf("unresolved txn equal to or below resolved timestamp: %s <= %s",
-				txn.timestamp, rts.resolvedTS))
+		txnTS := txn.timestamp.FloorPrev()
+		if txnTS.Less(newTS) {
+			newTS = txnTS
 		}
-		// txn.timestamp cannot be resolved, so the resolved timestamp must be Prev.
-		txnTS := txn.timestamp.Prev()
-		newTS.Backward(txnTS)
 	}
-	// Truncate the logical part. It might have come from a Prev call above, and
-	// it's dangerous to start pushing things above Logical=MaxInt32.
-	newTS.Logical = 0
-
 	if newTS.Less(rts.resolvedTS) {
 		panic(fmt.Sprintf("resolved timestamp regression, was %s, recomputed as %s",
 			rts.resolvedTS, newTS))
@@ -251,7 +237,7 @@ func (rts *resolvedTimestamp) recompute() bool {
 func (rts *resolvedTimestamp) assertNoChange() {
 	before := rts.resolvedTS
 	changed := rts.recompute()
-	if changed || !before.EqOrdering(rts.resolvedTS) {
+	if changed || (before != rts.resolvedTS) {
 		panic(fmt.Sprintf("unexpected resolved timestamp change on recomputation, "+
 			"was %s, recomputed as %s", before, rts.resolvedTS))
 	}
@@ -326,7 +312,7 @@ func (h unresolvedTxnHeap) Less(i, j int) bool {
 	// container/heap constructs a min-heap by default, so prioritize the txn
 	// with the smaller timestamp. Break ties by comparing IDs to establish a
 	// total order.
-	if h[i].timestamp.EqOrdering(h[j].timestamp) {
+	if h[i].timestamp == h[j].timestamp {
 		return bytes.Compare(h[i].txnID.GetBytes(), h[j].txnID.GetBytes()) < 0
 	}
 	return h[i].timestamp.Less(h[j].timestamp)

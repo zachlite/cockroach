@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -28,7 +27,6 @@ type controlJobsNode struct {
 	rows          planNode
 	desiredStatus jobs.Status
 	numRows       int
-	reason        string
 }
 
 var jobCommandToDesiredStatus = map[tree.JobCommand]jobs.Status{
@@ -63,11 +61,6 @@ func (n *controlJobsNode) startExec(params runParams) error {
 		}
 	}
 
-	if n.desiredStatus != jobs.StatusPaused && len(n.reason) > 0 {
-		return errors.AssertionFailedf("status %v is not %v and thus does not support a reason %v",
-			n.desiredStatus, jobs.StatusPaused, n.reason)
-	}
-
 	reg := params.p.ExecCfg().JobRegistry
 	for {
 		ok, err := n.rows.Next(params)
@@ -88,13 +81,13 @@ func (n *controlJobsNode) startExec(params runParams) error {
 			return errors.AssertionFailedf("%q: expected *DInt, found %T", jobIDDatum, jobIDDatum)
 		}
 
-		job, err := reg.LoadJobWithTxn(params.ctx, jobspb.JobID(jobID), params.p.Txn())
+		job, err := reg.LoadJobWithTxn(params.ctx, int64(jobID), params.p.Txn())
 		if err != nil {
 			return err
 		}
 
 		if job != nil {
-			owner := job.Payload().UsernameProto.Decode()
+			owner := job.Payload().Username
 
 			if !userIsAdmin {
 				ok, err := params.p.UserHasAdminRole(params.ctx, owner)
@@ -112,11 +105,11 @@ func (n *controlJobsNode) startExec(params runParams) error {
 
 		switch n.desiredStatus {
 		case jobs.StatusPaused:
-			err = reg.PauseRequested(params.ctx, params.p.txn, jobspb.JobID(jobID), n.reason)
+			err = reg.PauseRequested(params.ctx, params.p.txn, int64(jobID))
 		case jobs.StatusRunning:
-			err = reg.Unpause(params.ctx, params.p.txn, jobspb.JobID(jobID))
+			err = reg.Unpause(params.ctx, params.p.txn, int64(jobID))
 		case jobs.StatusCanceled:
-			err = reg.CancelRequested(params.ctx, params.p.txn, jobspb.JobID(jobID))
+			err = reg.CancelRequested(params.ctx, params.p.txn, int64(jobID))
 		default:
 			err = errors.AssertionFailedf("unhandled status %v", n.desiredStatus)
 		}

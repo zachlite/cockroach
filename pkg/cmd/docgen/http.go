@@ -26,27 +26,24 @@ import (
 
 func init() {
 	var (
-		protocPath  string
-		protocFlags string
-		genDocPath  string
-		outPath     string
+		protocPath   string
+		protobufPath string
+		genDocPath   string
+		outPath      string
 	)
 
 	cmdHTTP := &cobra.Command{
 		Use:   "http",
 		Short: "Generate HTTP docs",
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := runHTTP(protocPath, genDocPath, protocFlags, outPath); err != nil {
+			if err := runHTTP(protocPath, genDocPath, protobufPath, outPath); err != nil {
 				fmt.Fprintln(os.Stdout, err)
 				os.Exit(1)
 			}
 		},
 	}
-	cmdHTTP.Flags().StringVar(&protocPath, "protoc", "", `Path to the protoc compiler.
-If given, we will call into this executable to generate the code; otherwise, we will call
-into "buf protoc".`)
-	cmdHTTP.Flags().StringVar(&protocFlags, "protoc-flags", "",
-		"Whitespace-separated list of flags to pass to {buf} protoc. This should include the list of input sources.")
+	cmdHTTP.Flags().StringVar(&protocPath, "protoc", "protoc", "Path to protoc binary.")
+	cmdHTTP.Flags().StringVar(&protobufPath, "protobuf", "", "Protobuf include paths.")
 	cmdHTTP.Flags().StringVar(&genDocPath, "gendoc", "protoc-gen-doc", "Path to protoc-gen-doc binary.")
 	cmdHTTP.Flags().StringVar(&outPath, "out", "docs/generated/http", "File output path.")
 
@@ -55,8 +52,6 @@ into "buf protoc".`)
 
 var singleMethods = []string{
 	"HotRanges",
-	"Nodes",
-	"Health",
 }
 
 // runHTTP extracts HTTP endpoint documentation. It does this by reading the
@@ -65,7 +60,7 @@ var singleMethods = []string{
 // files. A full.md file is produced with all endpoints. The singleMethods
 // string slice is used to produce additional markdown files with a single
 // method per file.
-func runHTTP(protocPath, genDocPath, protocFlags, outPath string) error {
+func runHTTP(protocPath, genDocPath, protobufPath, outPath string) error {
 	// Extract out all the data into a JSON file. We will use this JSON
 	// file to then generate full and single pages.
 	if err := os.MkdirAll(outPath, 0777); err != nil {
@@ -84,21 +79,14 @@ func runHTTP(protocPath, genDocPath, protocFlags, outPath string) error {
 	defer func() {
 		_ = os.RemoveAll(tmpJSON)
 	}()
-	var args []string
-	if protocPath == "" {
-		args = append(args, "protoc")
-	}
-	args = append(args,
+	// Generate the JSON file.
+	cmd := exec.Command(protocPath,
+		fmt.Sprintf("-I%s", protobufPath),
+		fmt.Sprintf("--plugin=protoc-gen-doc=%s", genDocPath),
 		fmt.Sprintf("--doc_out=%s", tmpJSON),
 		fmt.Sprintf("--doc_opt=%s,http.json", jsonTmpl),
-		fmt.Sprintf("--plugin=protoc-gen-doc=%s", genDocPath))
-	args = append(args, strings.Fields(protocFlags)...)
-	// Generate the JSON file.
-	executable := protocPath
-	if protocPath == "" {
-		executable = "buf"
-	}
-	cmd := exec.Command(executable, args...)
+		"./pkg/server/serverpb/status.proto",
+	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Println(string(out))
 		return err
@@ -111,53 +99,20 @@ func runHTTP(protocPath, genDocPath, protocFlags, outPath string) error {
 	if err := json.Unmarshal(dataFile, &data); err != nil {
 		return fmt.Errorf("json unmarshal: %w", err)
 	}
-
-	// Annotate all non-public message, method and field descriptions
-	// with a disclaimer.
-	for k := range data.Files {
-		file := &data.Files[k]
-		for i := range file.Messages {
-			m := &file.Messages[i]
-			if !(strings.HasSuffix(m.Name, "Entry") && len(m.Fields) == 2 && m.Fields[0].Name == "key" && m.Fields[1].Name == "value") {
-				// We only annotate the support status for non-KV
-				// (auto-generated, intermediate) message types.
-				annotateStatus(&m.Description, &m.SupportStatus, "payload")
-				for j := range m.Fields {
-					f := &m.Fields[j]
-					annotateStatus(&f.Description, &f.SupportStatus, "field")
-				}
-			}
-		}
-		for j := range file.Services {
-			service := &file.Services[j]
-			for i := range service.Methods {
-				m := &service.Methods[i]
-				annotateStatus(&m.Description, &m.SupportStatus, "endpoint")
-				if len(m.Options.GoogleAPIHTTP.Rules) > 0 {
-					// Just keep the last entry. This is a special accommodation for
-					// "/health" which aliases "/_admin/v1/health": we only
-					// want to document the latter.
-					m.Options.GoogleAPIHTTP.Rules = m.Options.GoogleAPIHTTP.Rules[len(m.Options.GoogleAPIHTTP.Rules)-1:]
-				}
-			}
-		}
+	if len(data.Files) != 1 || len(data.Files[0].Services) != 1 {
+		return fmt.Errorf("expected 1 file with 1 service")
 	}
+	file := data.Files[0]
+	service := file.Services[0]
 
 	// Start by making maps of methods and messages for lookup.
 	messages := make(map[string]*protoMessage)
+	for i := range file.Messages {
+		messages[file.Messages[i].FullName] = &file.Messages[i]
+	}
 	methods := make(map[string]*protoMethod)
-	for f := range data.Files {
-		file := &data.Files[f]
-		for i := range file.Messages {
-			messages[file.Messages[i].FullName] = &file.Messages[i]
-		}
-
-		for j := range file.Services {
-			service := &file.Services[j]
-			for i := range service.Methods {
-				methods[service.Methods[i].Name] = &service.Methods[i]
-			}
-		}
+	for i := range service.Methods {
+		methods[service.Methods[i].Name] = &service.Methods[i]
 	}
 
 	// Given a message type, returns all message types in its type field that are
@@ -210,7 +165,7 @@ func runHTTP(protocPath, genDocPath, protocFlags, outPath string) error {
 	tmplMessages := template.Must(template.New("single").Funcs(tmplFuncs).Parse(messagesTemplate))
 
 	// JSON data is now in memory. Generate full doc page.
-	if err := execHTTPTmpl(tmplFull, &data, filepath.Join(outPath, "full.md")); err != nil {
+	if err := execHTTPTmpl(tmplFull, &file, filepath.Join(outPath, "full.md")); err != nil {
 		return fmt.Errorf("execHTTPTmpl: %w", err)
 	}
 
@@ -231,21 +186,6 @@ func runHTTP(protocPath, genDocPath, protocFlags, outPath string) error {
 		}
 	}
 	return nil
-}
-
-func annotateStatus(desc *string, status *string, kind string) {
-	if !strings.Contains(*desc, "API: PUBLIC") {
-		*status = `[reserved](#support-status)`
-	}
-	if strings.Contains(*desc, "API: PUBLIC ALPHA") {
-		*status = `[alpha](#support-status)`
-	}
-	if *status == "" {
-		*status = `[public](#support-status)`
-	}
-	*desc = strings.Replace(*desc, "API: PUBLIC ALPHA", "", 1)
-	*desc = strings.Replace(*desc, "API: PUBLIC", "", 1)
-	*desc = strings.TrimSpace(*desc)
 }
 
 func execHTTPTmpl(tmpl *template.Template, data interface{}, path string) error {
@@ -302,7 +242,6 @@ type protoData struct {
 type protoMethod struct {
 	Name              string `json:"name"`
 	Description       string `json:"description"`
-	SupportStatus     string `json:"supportStatus"`
 	RequestType       string `json:"requestType"`
 	RequestLongType   string `json:"requestLongType"`
 	RequestFullType   string `json:"requestFullType"`
@@ -326,20 +265,18 @@ type protoMessage struct {
 	LongName      string        `json:"longName"`
 	FullName      string        `json:"fullName"`
 	Description   string        `json:"description"`
-	SupportStatus string        `json:"supportStatus"`
 	HasExtensions bool          `json:"hasExtensions"`
 	HasFields     bool          `json:"hasFields"`
 	Extensions    []interface{} `json:"extensions"`
 	Fields        []struct {
-		Name          string `json:"name"`
-		Description   string `json:"description"`
-		SupportStatus string `json:"supportStatus"`
-		Label         string `json:"label"`
-		Type          string `json:"type"`
-		LongType      string `json:"longType"`
-		FullType      string `json:"fullType"`
-		Ismap         bool   `json:"ismap"`
-		DefaultValue  string `json:"defaultValue"`
+		Name         string `json:"name"`
+		Description  string `json:"description"`
+		Label        string `json:"label"`
+		Type         string `json:"type"`
+		LongType     string `json:"longType"`
+		FullType     string `json:"fullType"`
+		Ismap        bool   `json:"ismap"`
+		DefaultValue string `json:"defaultValue"`
 	} `json:"fields"`
 }
 
@@ -349,14 +286,11 @@ const fullTemplate = `
 {{- define "FIELDS" -}}
 {{with getMessage .}}
 {{$message := .}}
-
-{{with .Description}}{{.}}{{end}}
-
 {{with .Fields}}
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
 {{- range .}}
-| {{.Name}} | [{{.LongType}}](#{{$message.FullName}}-{{.FullType}}) | {{.Label}} | {{.Description | tableCell}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} | {{.SupportStatus | tableCell}} |
+| {{.Name}} | [{{.LongType}}](#{{$message.FullName}}-{{.FullType}}) | {{.Label}} | {{.Description | tableCell}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
 {{- end}} {{- /* range */}}
 {{end}} {{- /* with .Fields */}}
 
@@ -367,12 +301,10 @@ const fullTemplate = `
 <a name="{{$message.FullName}}-{{.FullName}}"></a>
 #### {{.LongName}}
 
-{{with .Description}}{{.}}{{end}}
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
 {{- range .Fields}}
-| {{.Name}} | [{{.LongType}}](#{{$message.FullName}}-{{.FullType}}) | {{.Label}} | {{.Description | tableCell}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} | {{.SupportStatus | tableCell}} |
+| {{.Name}} | [{{.LongType}}](#{{$message.FullName}}-{{.FullType}}) | {{.Label}} | {{.Description | tableCell}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
 {{- end}} {{- /* range */}}
 {{end}} {{- /* if .Fields */}}
 {{end}} {{- /* with getMessage */}}
@@ -381,20 +313,16 @@ const fullTemplate = `
 {{end}} {{- /* with getMessage */}}
 {{- end}} {{- /* template */}}
 
-{{- range .Files}}
-
 {{- range .Services}}
 
 {{- range .Methods -}}
 ## {{.Name}}
 
 {{range .Options.GoogleAPIHTTP.Rules -}}
-` + "`{{.Method}} {{.Pattern}}` " + `
+` + "`{{.Method}} {{.Pattern}}`" + `
 {{- end}}
 
 {{with .Description}}{{.}}{{end}}
-
-{{with .SupportStatus}}Support status: {{.}}{{end}}
 
 #### Request Parameters
 
@@ -407,7 +335,6 @@ const fullTemplate = `
 {{end}} {{- /* methods */}}
 
 {{- end -}} {{- /* services */ -}}
-{{- end -}} {{- /* files */ -}}
 `
 
 var messagesTemplate = `
@@ -415,16 +342,11 @@ var messagesTemplate = `
 {{with getMessage .}}
 <a name="{{.FullName}}"></a>
 #### {{.LongName}}
-
-{{with .Description}}{{.}}{{end}}
-
-{{with .SupportStatus}}Support status: {{.}}{{end}}
-
 {{with .Fields}}
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
+| Field | Type | Label |
+| ----- | ---- | ----- |
 {{- range .}}
-| {{.Name}} | [{{.LongType}}](#{{.FullType}}) | {{.Label}} | {{.Description|tableCell}} | {{.SupportStatus | tableCell}} |
+| {{.Name}} | [{{.LongType}}](#{{.FullType}}) | {{.Label}} |
 {{- end}} {{- /* range */}}
 {{end}}{{- /* with .Fields */}}
 {{end}}{{- /* with getMessage */}}

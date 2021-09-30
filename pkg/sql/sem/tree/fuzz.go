@@ -27,7 +27,7 @@ func FuzzParseDDecimal(data []byte) int {
 }
 
 func FuzzParseDDate(data []byte) int {
-	_, _, err := ParseDDate(timeCtx, string(data))
+	_, err := ParseDDate(timeCtx, string(data))
 	if err != nil {
 		return 0
 	}

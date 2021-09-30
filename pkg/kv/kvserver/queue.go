@@ -17,11 +17,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -211,7 +212,7 @@ func isExpectedQueueError(err error) bool {
 // Returns a bool for whether to queue as well as a priority based
 // on how long it's been since last processed.
 func shouldQueueAgain(now, last hlc.Timestamp, minInterval time.Duration) (bool, float64) {
-	if minInterval == 0 || last.IsEmpty() {
+	if minInterval == 0 || last == (hlc.Timestamp{}) {
 		return true, 0
 	}
 	if diff := now.GoTime().Sub(last.GoTime()); diff >= minInterval {
@@ -219,7 +220,7 @@ func shouldQueueAgain(now, last hlc.Timestamp, minInterval time.Duration) (bool,
 		// If there's a non-zero last processed timestamp, adjust the
 		// priority by a multiple of how long it's been since the last
 		// time this replica was processed.
-		if !last.IsEmpty() {
+		if last != (hlc.Timestamp{}) {
 			priority = float64(diff.Nanoseconds()) / float64(minInterval.Nanoseconds())
 		}
 		return true, priority
@@ -241,20 +242,23 @@ type replicaInQueue interface {
 	Desc() *roachpb.RangeDescriptor
 	maybeInitializeRaftGroup(context.Context)
 	redirectOnOrAcquireLease(context.Context) (kvserverpb.LeaseStatus, *roachpb.Error)
-	LeaseStatusAt(context.Context, hlc.ClockTimestamp) kvserverpb.LeaseStatus
+	IsLeaseValid(context.Context, roachpb.Lease, hlc.Timestamp) bool
+	GetLease() (roachpb.Lease, roachpb.Lease)
 }
 
 type queueImpl interface {
 	// shouldQueue accepts current time, a replica, and the system config
 	// and returns whether it should be queued and if so, at what priority.
 	// The Replica is guaranteed to be initialized.
-	shouldQueue(context.Context, hlc.ClockTimestamp, *Replica, spanconfig.StoreReader) (shouldQueue bool, priority float64)
+	shouldQueue(
+		context.Context, hlc.Timestamp, *Replica, *config.SystemConfig,
+	) (shouldQueue bool, priority float64)
 
 	// process accepts a replica, and the system config and executes
 	// queue-specific work on it. The Replica is guaranteed to be initialized.
 	// We return a boolean to indicate if the Replica was processed successfully
-	// (vs. it being a no-op or an error).
-	process(context.Context, *Replica, spanconfig.StoreReader) (processed bool, err error)
+	// (vs. it being being a no-op or an error).
+	process(context.Context, *Replica, *config.SystemConfig) (processed bool, err error)
 
 	// timer returns a duration to wait between processing the next item
 	// from the queue. The duration of the last processing of a replica
@@ -399,8 +403,9 @@ type baseQueue struct {
 	// from the constructor function will return a queueImpl containing
 	// a pointer to a structure which is a copy of the one within which
 	// it is contained. DANGER.
-	impl  queueImpl
-	store *Store
+	impl   queueImpl
+	store  *Store
+	gossip *gossip.Gossip
 	queueConfig
 	incoming         chan struct{} // Channel signaled when a new replica is added to the queue.
 	processSem       chan struct{}
@@ -424,7 +429,9 @@ type baseQueue struct {
 // replicas from being added, it just limits the total size. Higher priority
 // replicas can still be added; their addition simply removes the lowest
 // priority replica.
-func newBaseQueue(name string, impl queueImpl, store *Store, cfg queueConfig) *baseQueue {
+func newBaseQueue(
+	name string, impl queueImpl, store *Store, gossip *gossip.Gossip, cfg queueConfig,
+) *baseQueue {
 	// Use the default process timeout if none specified.
 	if cfg.processTimeoutFunc == nil {
 		cfg.processTimeoutFunc = defaultProcessTimeoutFunc
@@ -451,6 +458,7 @@ func newBaseQueue(name string, impl queueImpl, store *Store, cfg queueConfig) *b
 		name:             name,
 		impl:             impl,
 		store:            store,
+		gossip:           gossip,
 		queueConfig:      cfg,
 		incoming:         make(chan struct{}, 1),
 		processSem:       make(chan struct{}, cfg.maxConcurrency),
@@ -535,9 +543,7 @@ type baseQueueHelper struct {
 	bq *baseQueue
 }
 
-func (h baseQueueHelper) MaybeAdd(
-	ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp,
-) {
+func (h baseQueueHelper) MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	h.bq.maybeAdd(ctx, repl, now)
 }
 
@@ -549,7 +555,7 @@ func (h baseQueueHelper) Add(ctx context.Context, repl replicaInQueue, prio floa
 }
 
 type queueHelper interface {
-	MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp)
+	MaybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp)
 	Add(ctx context.Context, repl replicaInQueue, prio float64)
 }
 
@@ -569,12 +575,7 @@ func (bq *baseQueue) Async(
 		log.InfofDepth(ctx, 2, "%s", log.Safe(opName))
 	}
 	opName += " (" + bq.name + ")"
-	if err := bq.store.stopper.RunAsyncTaskEx(context.Background(),
-		stop.TaskOpts{
-			TaskName:   opName,
-			Sem:        bq.addOrMaybeAddSem,
-			WaitForSem: wait,
-		},
+	if err := bq.store.stopper.RunLimitedAsyncTask(context.Background(), opName, bq.addOrMaybeAddSem, wait,
 		func(ctx context.Context) {
 			fn(ctx, baseQueueHelper{bq})
 		}); err != nil && bq.addLogN.ShouldLog() {
@@ -585,9 +586,7 @@ func (bq *baseQueue) Async(
 // MaybeAddAsync offers the replica to the queue. The queue will only process a
 // certain number of these operations concurrently, and will drop (i.e. treat as
 // a noop) any additional calls.
-func (bq *baseQueue) MaybeAddAsync(
-	ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp,
-) {
+func (bq *baseQueue) MaybeAddAsync(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	bq.Async(ctx, "MaybeAdd", false /* wait */, func(ctx context.Context, h queueHelper) {
 		h.MaybeAdd(ctx, repl, now)
 	})
@@ -602,16 +601,15 @@ func (bq *baseQueue) AddAsync(ctx context.Context, repl replicaInQueue, prio flo
 	})
 }
 
-func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.ClockTimestamp) {
+func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.Timestamp) {
 	ctx = repl.AnnotateCtx(ctx)
 	// Load the system config if it's needed.
-	var confReader spanconfig.StoreReader
+	var cfg *config.SystemConfig
 	if bq.needsSystemConfig {
-		var err error
-		confReader, err = bq.store.GetConfReader()
-		if err != nil {
-			if errors.Is(err, errSysCfgUnavailable) && log.V(1) {
-				log.Warningf(ctx, "unable to retrieve system config, skipping: %v", err)
+		cfg = bq.gossip.GetSystemConfig()
+		if cfg == nil {
+			if log.V(1) {
+				log.Infof(ctx, "no system config available. skipping")
 			}
 			return
 		}
@@ -633,9 +631,9 @@ func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.
 		repl.maybeInitializeRaftGroup(ctx)
 	}
 
-	if !bq.acceptsUnsplitRanges && confReader.NeedsSplit(ctx, repl.Desc().StartKey, repl.Desc().EndKey) {
-		// Range needs to be split due to span configs, but queue does not
-		// accept unsplit ranges.
+	if cfg != nil && bq.requiresSplit(ctx, cfg, repl) {
+		// Range needs to be split due to zone configs, but queue does
+		// not accept unsplit ranges.
 		if log.V(1) {
 			log.Infof(ctx, "split needed; not adding")
 		}
@@ -645,10 +643,10 @@ func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.
 	if bq.needsLease {
 		// Check to see if either we own the lease or do not know who the lease
 		// holder is.
-		st := repl.LeaseStatusAt(ctx, now)
-		if st.IsValid() && !st.OwnedBy(repl.StoreID()) {
+		if lease, _ := repl.GetLease(); repl.IsLeaseValid(ctx, lease, now) &&
+			!lease.OwnedBy(repl.StoreID()) {
 			if log.V(1) {
-				log.Infof(ctx, "needs lease; not adding: %v", st.Lease)
+				log.Infof(ctx, "needs lease; not adding: %+v", lease)
 			}
 			return
 		}
@@ -657,13 +655,23 @@ func (bq *baseQueue) maybeAdd(ctx context.Context, repl replicaInQueue, now hlc.
 	// it may not be and shouldQueue will be passed a nil realRepl. These tests
 	// know what they're getting into so that's fine.
 	realRepl, _ := repl.(*Replica)
-	should, priority := bq.impl.shouldQueue(ctx, now, realRepl, confReader)
+	should, priority := bq.impl.shouldQueue(ctx, now, realRepl, cfg)
 	if !should {
 		return
 	}
 	if _, err := bq.addInternal(ctx, repl.Desc(), repl.ReplicaID(), priority); !isExpectedQueueError(err) {
 		log.Errorf(ctx, "unable to add: %+v", err)
 	}
+}
+
+func (bq *baseQueue) requiresSplit(
+	ctx context.Context, cfg *config.SystemConfig, repl replicaInQueue,
+) bool {
+	if bq.acceptsUnsplitRanges {
+		return false
+	}
+	desc := repl.Desc()
+	return cfg.NeedsSplit(ctx, desc.StartKey, desc.EndKey)
 }
 
 // addInternal adds the replica the queue with specified priority. If
@@ -788,13 +796,12 @@ func (bq *baseQueue) MaybeRemove(rangeID roachpb.RangeID) {
 // stopper signals exit.
 func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 	ctx := bq.AnnotateCtx(context.Background())
-	stop := func() {
-		bq.mu.Lock()
-		bq.mu.stopped = true
-		bq.mu.Unlock()
-	}
-	if err := stopper.RunAsyncTask(ctx, "queue-loop", func(ctx context.Context) {
-		defer stop()
+	stopper.RunWorker(ctx, func(ctx context.Context) {
+		defer func() {
+			bq.mu.Lock()
+			bq.mu.stopped = true
+			bq.mu.Unlock()
+		}()
 
 		// nextTime is initially nil; we don't start any timers until the queue
 		// becomes non-empty.
@@ -806,7 +813,7 @@ func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 		for {
 			select {
 			// Exit on stopper.
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 
 			// Incoming signal sets the next time to process if there were previously
@@ -865,9 +872,7 @@ func (bq *baseQueue) processLoop(stopper *stop.Stopper) {
 				}
 			}
 		}
-	}); err != nil {
-		stop()
-	}
+	})
 }
 
 // lastProcessDuration returns the duration of the last processing attempt.
@@ -891,22 +896,16 @@ func (bq *baseQueue) recordProcessDuration(ctx context.Context, dur time.Duratio
 // ctx should already be annotated by repl.AnnotateCtx().
 func (bq *baseQueue) processReplica(ctx context.Context, repl replicaInQueue) error {
 	// Load the system config if it's needed.
-	var confReader spanconfig.StoreReader
+	var cfg *config.SystemConfig
 	if bq.needsSystemConfig {
-		var err error
-		confReader, err = bq.store.GetConfReader()
-		if errors.Is(err, errSysCfgUnavailable) {
-			if log.V(1) {
-				log.Warningf(ctx, "unable to retrieve conf reader, skipping: %v", err)
-			}
+		cfg = bq.gossip.GetSystemConfig()
+		if cfg == nil {
+			log.VEventf(ctx, 1, "no system config available. skipping")
 			return nil
-		}
-		if err != nil {
-			return err
 		}
 	}
 
-	if !bq.acceptsUnsplitRanges && confReader.NeedsSplit(ctx, repl.Desc().StartKey, repl.Desc().EndKey) {
+	if cfg != nil && bq.requiresSplit(ctx, cfg, repl) {
 		// Range needs to be split due to zone configs, but queue does
 		// not accept unsplit ranges.
 		log.VEventf(ctx, 3, "split needed; skipping")
@@ -956,7 +955,7 @@ func (bq *baseQueue) processReplica(ctx context.Context, repl replicaInQueue) er
 			// it may not be and shouldQueue will be passed a nil realRepl. These tests
 			// know what they're getting into so that's fine.
 			realRepl, _ := repl.(*Replica)
-			processed, err := bq.impl.process(ctx, realRepl, confReader)
+			processed, err := bq.impl.process(ctx, realRepl, cfg)
 			if err != nil {
 				return err
 			}
@@ -1091,7 +1090,7 @@ func (bq *baseQueue) finishProcessingReplica(
 
 	// Maybe add replica back into queue, if requested.
 	if requeue {
-		bq.maybeAdd(ctx, repl, bq.store.Clock().NowAsClockTimestamp())
+		bq.maybeAdd(ctx, repl, bq.store.Clock().Now())
 	}
 }
 
@@ -1141,7 +1140,7 @@ func (bq *baseQueue) addToPurgatoryLocked(
 	}
 
 	workerCtx := bq.AnnotateCtx(context.Background())
-	_ = stopper.RunAsyncTask(workerCtx, "purgatory", func(ctx context.Context) {
+	stopper.RunWorker(workerCtx, func(ctx context.Context) {
 		ticker := time.NewTicker(purgatoryReportInterval)
 		for {
 			select {
@@ -1202,7 +1201,7 @@ func (bq *baseQueue) addToPurgatoryLocked(
 				for errStr, count := range errMap {
 					log.Errorf(ctx, "%d replicas failing with %q", count, errStr)
 				}
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 			}
 		}

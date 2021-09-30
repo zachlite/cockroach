@@ -237,7 +237,7 @@ func generateBaseCerts(certsDir string) error {
 
 		if err := security.CreateClientPair(
 			certsDir, caKey,
-			testKeySize, time.Hour*48, true, security.RootUserName(), false,
+			testKeySize, time.Hour*48, true, security.RootUser, false,
 		); err != nil {
 			return err
 		}
@@ -287,14 +287,14 @@ func generateSplitCACerts(certsDir string) error {
 
 	if err := security.CreateClientPair(
 		certsDir, filepath.Join(certsDir, security.EmbeddedClientCAKey),
-		testKeySize, time.Hour*48, true, security.NodeUserName(), false,
+		testKeySize, time.Hour*48, true, security.NodeUser, false,
 	); err != nil {
 		return errors.Errorf("could not generate Client pair: %v", err)
 	}
 
 	if err := security.CreateClientPair(
 		certsDir, filepath.Join(certsDir, security.EmbeddedClientCAKey),
-		testKeySize, time.Hour*48, true, security.RootUserName(), false,
+		testKeySize, time.Hour*48, true, security.RootUser, false,
 	); err != nil {
 		return errors.Errorf("could not generate Client pair: %v", err)
 	}
@@ -507,19 +507,17 @@ func TestUseSplitCACerts(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			pgUrl := makeSecurePGUrl(s.ServingSQLAddr(), tc.user, certsDir, tc.caName, tc.certPrefix+".crt", tc.certPrefix+".key")
-			goDB, err := gosql.Open("postgres", pgUrl)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer goDB.Close()
+		pgUrl := makeSecurePGUrl(s.ServingSQLAddr(), tc.user, certsDir, tc.caName, tc.certPrefix+".crt", tc.certPrefix+".key")
+		goDB, err := gosql.Open("postgres", pgUrl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer goDB.Close()
 
-			_, err = goDB.Exec("SELECT 1")
-			if !testutils.IsError(err, tc.expectedError) {
-				t.Errorf("#%d: expected error %v, got %v", i, tc.expectedError, err)
-			}
-		})
+		_, err = goDB.Exec("SELECT 1")
+		if !testutils.IsError(err, tc.expectedError) {
+			t.Errorf("#%d: expected error %v, got %v", i, tc.expectedError, err)
+		}
 	}
 }
 

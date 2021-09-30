@@ -12,7 +12,6 @@ package stats
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"reflect"
 	"sort"
@@ -21,18 +20,17 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -101,32 +99,28 @@ func lookupTableStats(
 }
 
 func checkStatsForTable(
-	ctx context.Context,
-	t *testing.T,
-	sc *TableStatisticsCache,
-	expected []*TableStatisticProto,
-	tableID descpb.ID,
-) {
-	t.Helper()
+	ctx context.Context, sc *TableStatisticsCache, expected []*TableStatisticProto, tableID descpb.ID,
+) error {
 	// Initially the stats won't be in the cache.
 	if statsList, ok := lookupTableStats(ctx, sc, tableID); ok {
-		t.Fatalf("lookup of missing key %d returned: %s", tableID, statsList)
+		return errors.Errorf("lookup of missing key %d returned: %s", tableID, statsList)
 	}
 
 	// Perform the lookup and refresh, and confirm the
 	// returned stats match the expected values.
-	statsList, err := sc.getTableStatsFromCache(ctx, tableID)
+	statsList, err := sc.GetTableStats(ctx, tableID)
 	if err != nil {
-		t.Fatalf("error retrieving stats: %s", err)
+		return errors.Wrap(err, "retrieving stats")
 	}
 	if !checkStats(statsList, expected) {
-		t.Fatalf("for lookup of key %d, expected stats %s, got %s", tableID, expected, statsList)
+		return errors.Errorf("for lookup of key %d, expected stats %s, got %s", tableID, expected, statsList)
 	}
 
 	// Now the stats should be in the cache.
 	if _, ok := lookupTableStats(ctx, sc, tableID); !ok {
-		t.Fatalf("for lookup of key %d, expected stats %s", tableID, expected)
+		return errors.Errorf("for lookup of key %d, expected stats %s", tableID, expected)
 	}
+	return nil
 }
 
 func checkStats(actual []*TableStatistic, expected []*TableStatisticProto) bool {
@@ -235,26 +229,22 @@ func TestCacheBasic(t *testing.T) {
 	// will result in the cache getting populated. When the stats cache size is
 	// exceeded, entries should be evicted according to the LRU policy.
 	sc := NewTableStatisticsCache(
-		ctx,
 		2, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		db,
 		ex,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
-		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	for _, tableID := range tableIDs {
-		checkStatsForTable(ctx, t, sc, expectedStats[tableID], tableID)
+		if err := checkStatsForTable(ctx, sc, expectedStats[tableID], tableID); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	tab0 := descpb.ID(100)
-	tab1 := descpb.ID(101)
-	tab2 := descpb.ID(102)
-	tab3 := descpb.ID(103)
-
 	// Table IDs 0 and 1 should have been evicted since the cache size is 2.
-	tableIDs = []descpb.ID{tab0, tab1}
+	tableIDs = []descpb.ID{descpb.ID(100), descpb.ID(101)}
 	for _, tableID := range tableIDs {
 		if statsList, ok := lookupTableStats(ctx, sc, tableID); ok {
 			t.Fatalf("lookup of evicted key %d returned: %s", tableID, statsList)
@@ -262,7 +252,7 @@ func TestCacheBasic(t *testing.T) {
 	}
 
 	// Table IDs 2 and 3 should still be in the cache.
-	tableIDs = []descpb.ID{tab2, tab3}
+	tableIDs = []descpb.ID{descpb.ID(102), descpb.ID(103)}
 	for _, tableID := range tableIDs {
 		if _, ok := lookupTableStats(ctx, sc, tableID); !ok {
 			t.Fatalf("for lookup of key %d, expected stats %s", tableID, expectedStats[tableID])
@@ -270,8 +260,9 @@ func TestCacheBasic(t *testing.T) {
 	}
 
 	// Insert a new stat for Table ID 2.
+	tableID := descpb.ID(102)
 	stat := TableStatisticProto{
-		TableID:       tab2,
+		TableID:       tableID,
 		StatisticID:   35,
 		Name:          "table2",
 		ColumnIDs:     []descpb.ColumnID{1, 2, 3},
@@ -284,44 +275,30 @@ func TestCacheBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Table ID 2 should be available immediately in the cache for querying, and
-	// eventually should contain the updated stat.
-	if _, ok := lookupTableStats(ctx, sc, tab2); !ok {
-		t.Fatalf("expected lookup of refreshed key %d to succeed", tab2)
+	// After refreshing, Table ID 2 should be available immediately in the cache
+	// for querying, and eventually should contain the updated stat.
+	sc.RefreshTableStats(ctx, tableID)
+	if _, ok := lookupTableStats(ctx, sc, tableID); !ok {
+		t.Fatalf("expected lookup of refreshed key %d to succeed", tableID)
 	}
-	expected := append([]*TableStatisticProto{&stat}, expectedStats[tab2]...)
+	expected := append([]*TableStatisticProto{&stat}, expectedStats[tableID]...)
 	testutils.SucceedsSoon(t, func() error {
-		statsList, ok := lookupTableStats(ctx, sc, tab2)
+		statsList, ok := lookupTableStats(ctx, sc, tableID)
 		if !ok {
-			return errors.Errorf("expected lookup of refreshed key %d to succeed", tab2)
+			return errors.Errorf("expected lookup of refreshed key %d to succeed", tableID)
 		}
 		if !checkStats(statsList, expected) {
 			return errors.Errorf(
-				"for lookup of key %d, expected stats %s but found %s", tab2, expected, statsList,
+				"for lookup of key %d, expected stats %s but found %s", tableID, expected, statsList,
 			)
 		}
 		return nil
 	})
 
 	// After invalidation Table ID 2 should be gone.
-	sc.InvalidateTableStats(ctx, tab2)
-	if statsList, ok := lookupTableStats(ctx, sc, tab2); ok {
-		t.Fatalf("lookup of invalidated key %d returned: %s", tab2, statsList)
-	}
-
-	// Verify that Refresh doesn't count toward the "recently used" policy.
-	checkStatsForTable(ctx, t, sc, expectedStats[tab0], tab0)
-	checkStatsForTable(ctx, t, sc, expectedStats[tab1], tab1)
-
-	// Sleep a bit to give the async refresh process a chance to do something.
-	// Note that this is not flaky - the check below passes even if the refresh is
-	// delayed.
-	time.Sleep(time.Millisecond)
-
-	checkStatsForTable(ctx, t, sc, expectedStats[tab3], tab3)
-	// Verify that tab0 was evicted (despite the refreshes).
-	if statsList, ok := lookupTableStats(ctx, sc, tab0); ok {
-		t.Fatalf("lookup of evicted key %d returned: %s", tab0, statsList)
+	sc.InvalidateTableStats(ctx, tableID)
+	if statsList, ok := lookupTableStats(ctx, sc, tableID); ok {
+		t.Fatalf("lookup of invalidated key %d returned: %s", tableID, statsList)
 	}
 }
 
@@ -345,19 +322,18 @@ CREATE STATISTICS s FROM tt;
 	_ = kvDB
 	// Make a stats cache.
 	sc := NewTableStatisticsCache(
-		ctx,
 		1,
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		s.InternalExecutor().(sqlutil.InternalExecutor),
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
-		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	tbl := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "tt")
 	// Get stats for our table. We are ensuring here that the access to the stats
 	// for tt properly hydrates the user defined type t before access.
-	stats, err := sc.GetTableStats(ctx, tbl)
+	stats, err := sc.GetTableStats(ctx, tbl.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +349,7 @@ CREATE STATISTICS s FROM tt;
 	sc.InvalidateTableStats(ctx, tbl.GetID())
 	// Verify that GetTableStats ignores the statistic on the now unknown type and
 	// returns the rest.
-	stats, err = sc.GetTableStats(ctx, tbl)
+	stats, err = sc.GetTableStats(ctx, tbl.GetID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,17 +382,18 @@ func TestCacheWait(t *testing.T) {
 	}
 	sort.Sort(tableIDs)
 	sc := NewTableStatisticsCache(
-		ctx,
 		len(tableIDs), /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		db,
 		ex,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
-		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	for _, tableID := range tableIDs {
-		checkStatsForTable(ctx, t, sc, expectedStats[tableID], tableID)
+		if err := checkStatsForTable(ctx, sc, expectedStats[tableID], tableID); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	for run := 0; run < 10; run++ {
@@ -429,7 +406,7 @@ func TestCacheWait(t *testing.T) {
 		for n := 0; n < 10; n++ {
 			wg.Add(1)
 			go func() {
-				stats, err := sc.getTableStatsFromCache(ctx, id)
+				stats, err := sc.GetTableStats(ctx, id)
 				if err != nil {
 					t.Error(err)
 				} else if !checkStats(stats, expectedStats[id]) {
@@ -449,63 +426,4 @@ func TestCacheWait(t *testing.T) {
 			t.Fatalf("expected 1 query, got %d", num)
 		}
 	}
-}
-
-// TestCacheAutoRefresh verifies that the cache gets refreshed automatically
-// when new statistics are added.
-func TestCacheAutoRefresh(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	tc := serverutils.StartNewTestCluster(t, 3 /* numNodes */, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-
-	s := tc.Server(0)
-	sc := NewTableStatisticsCache(
-		ctx,
-		10, /* cacheSize */
-		s.DB(),
-		s.InternalExecutor().(sqlutil.InternalExecutor),
-		keys.SystemSQLCodec,
-		s.ClusterSettings(),
-		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
-	)
-
-	sr0 := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	sr0.Exec(t, "SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false")
-	sr0.Exec(t, "CREATE DATABASE test")
-	sr0.Exec(t, "CREATE TABLE test.t (k INT PRIMARY KEY, v INT)")
-	sr0.Exec(t, "INSERT INTO test.t VALUES (1, 1), (2, 2), (3, 3)")
-
-	tableDesc := catalogkv.TestingGetTableDescriptor(tc.Server(0).DB(), keys.SystemSQLCodec, "test", "t")
-
-	expectNStats := func(n int) error {
-		stats, err := sc.GetTableStats(ctx, tableDesc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(stats) != n {
-			return fmt.Errorf("expected %d stats, got: %v", n, stats)
-		}
-		return nil
-	}
-
-	if err := expectNStats(0); err != nil {
-		t.Fatal(err)
-	}
-	sr1 := sqlutils.MakeSQLRunner(tc.ServerConn(1))
-	sr1.Exec(t, "CREATE STATISTICS k ON k FROM test.t")
-
-	testutils.SucceedsSoon(t, func() error {
-		return expectNStats(1)
-	})
-
-	sr2 := sqlutils.MakeSQLRunner(tc.ServerConn(2))
-	sr2.Exec(t, "CREATE STATISTICS v ON v FROM test.t")
-
-	testutils.SucceedsSoon(t, func() error {
-		return expectNStats(2)
-	})
 }

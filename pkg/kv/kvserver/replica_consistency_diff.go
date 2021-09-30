@@ -52,7 +52,7 @@ func (rsds ReplicaSnapshotDiffSlice) SafeFormat(buf redact.SafePrinter, _ rune) 
 		buf.Printf(format,
 			prefix, d.Timestamp, d.Key,
 			prefix, d.Timestamp.GoTime(),
-			prefix, SprintMVCCKeyValue(storage.MVCCKeyValue{Key: mvccKey, Value: d.Value}, false /* printKey */),
+			prefix, SprintKeyValue(storage.MVCCKeyValue{Key: mvccKey, Value: d.Value}, false /* printKey */),
 			prefix, storage.EncodeKey(mvccKey), d.Value)
 	}
 }
@@ -112,10 +112,10 @@ func diffRange(l, r *roachpb.RaftSnapshotData) ReplicaSnapshotDiffSlice {
 		case 0:
 			// Timestamp sorting is weird. Timestamp{} sorts first, the
 			// remainder sort in descending order. See storage/engine/doc.go.
-			if !e.Timestamp.EqOrdering(v.Timestamp) {
-				if e.Timestamp.IsEmpty() {
+			if e.Timestamp != v.Timestamp {
+				if e.Timestamp == (hlc.Timestamp{}) {
 					addLeaseHolder()
-				} else if v.Timestamp.IsEmpty() {
+				} else if v.Timestamp == (hlc.Timestamp{}) {
 					addReplica()
 				} else if v.Timestamp.Less(e.Timestamp) {
 					addLeaseHolder()

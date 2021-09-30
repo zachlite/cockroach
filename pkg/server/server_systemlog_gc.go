@@ -35,7 +35,7 @@ const (
 var (
 	// rangeLogTTL is the TTL for rows in system.rangelog. If non zero, range log
 	// entries are periodically garbage collected.
-	rangeLogTTL = settings.RegisterDurationSetting(
+	rangeLogTTL = settings.RegisterPublicDurationSetting(
 		"server.rangelog.ttl",
 		fmt.Sprintf(
 			"if nonzero, range log entries older than this duration are deleted every %s. "+
@@ -43,19 +43,19 @@ var (
 			systemLogGCPeriod,
 		),
 		30*24*time.Hour, // 30 days
-	).WithPublic()
+	)
 
 	// eventLogTTL is the TTL for rows in system.eventlog. If non zero, event log
 	// entries are periodically garbage collected.
-	eventLogTTL = settings.RegisterDurationSetting(
+	eventLogTTL = settings.RegisterPublicDurationSetting(
 		"server.eventlog.ttl",
 		fmt.Sprintf(
-			"if nonzero, entries in system.eventlog older than this duration are deleted every %s. "+
+			"if nonzero, event log entries older than this duration are deleted every %s. "+
 				"Should not be lowered below 24 hours.",
 			systemLogGCPeriod,
 		),
 		90*24*time.Hour, // 90 days
-	).WithPublic()
+	)
 )
 
 // gcSystemLog deletes entries in the given system log table between
@@ -70,7 +70,7 @@ func (s *Server) gcSystemLog(
 	ctx context.Context, table string, timestampLowerBound, timestampUpperBound time.Time,
 ) (time.Time, int64, error) {
 	var totalRowsAffected int64
-	repl, _, err := s.node.stores.GetReplicaForRangeID(ctx, roachpb.RangeID(1))
+	repl, _, err := s.node.stores.GetReplicaForRangeID(roachpb.RangeID(1))
 	if roachpb.IsRangeNotFoundError(err) {
 		return timestampLowerBound, 0, nil
 	}
@@ -78,12 +78,12 @@ func (s *Server) gcSystemLog(
 		return timestampLowerBound, 0, err
 	}
 
-	if !repl.IsFirstRange() || !repl.OwnsValidLease(ctx, s.clock.NowAsClockTimestamp()) {
+	if !repl.IsFirstRange() || !repl.OwnsValidLease(ctx, s.clock.Now()) {
 		return timestampLowerBound, 0, nil
 	}
 
 	deleteStmt := fmt.Sprintf(
-		`SELECT count(1), max(timestamp) FROM
+		`SELECT count(1), max(timestamp) FROM 
 [DELETE FROM system.%s WHERE timestamp >= $1 AND timestamp <= $2 LIMIT 1000 RETURNING timestamp]`,
 		table,
 	)
@@ -96,7 +96,7 @@ func (s *Server) gcSystemLog(
 				ctx,
 				table+"-gc",
 				txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				deleteStmt,
 				timestampLowerBound,
 				timestampUpperBound,
@@ -164,7 +164,7 @@ func (s *Server) startSystemLogsGC(ctx context.Context) {
 		},
 	}
 
-	_ = s.stopper.RunAsyncTask(ctx, "system-log-gc", func(ctx context.Context) {
+	s.stopper.RunWorker(ctx, func(ctx context.Context) {
 		period := systemLogGCPeriod
 		if storeKnobs, ok := s.cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs); ok && storeKnobs.SystemLogsGCPeriod != 0 {
 			period = storeKnobs.SystemLogsGCPeriod
@@ -205,12 +205,12 @@ func (s *Server) startSystemLogsGC(ctx context.Context) {
 				if storeKnobs, ok := s.cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs); ok && storeKnobs.SystemLogsGCGCDone != nil {
 					select {
 					case storeKnobs.SystemLogsGCGCDone <- struct{}{}:
-					case <-s.stopper.ShouldQuiesce():
+					case <-s.stopper.ShouldStop():
 						// Test has finished.
 						return
 					}
 				}
-			case <-s.stopper.ShouldQuiesce():
+			case <-s.stopper.ShouldStop():
 				return
 			}
 		}

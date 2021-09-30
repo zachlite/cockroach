@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // txnState contains state associated with an ongoing SQL txn; it constitutes
@@ -107,10 +106,6 @@ type txnState struct {
 	// txnAbortCount is incremented whenever the state transitions to
 	// stateAborted.
 	txnAbortCount *metric.Counter
-
-	// testingForceRealTracingSpans is a test-only knob that forces the use of
-	// real (i.e. not no-op) tracing spans for every statement.
-	testingForceRealTracingSpans bool
 }
 
 // txnType represents the type of a SQL transaction.
@@ -166,7 +161,7 @@ func (ts *txnState) resetForNewSQLTxn(
 	var txnCtx context.Context
 	var sp *tracing.Span
 	duration := traceTxnThreshold.Get(&tranCtx.settings.SV)
-	if alreadyRecording || ts.testingForceRealTracingSpans || duration > 0 {
+	if alreadyRecording || duration > 0 {
 		// WithForceRealSpan is used to support the use of session tracing,
 		// which will start recording on this span. Similarly, it enables the
 		// tracing of the txns that exceed the duration threshold.
@@ -175,7 +170,7 @@ func (ts *txnState) resetForNewSQLTxn(
 		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer)
 	}
 	if txnType == implicitTxn {
-		sp.SetTag("implicit", attribute.StringValue("true"))
+		sp.SetTag("implicit", "true")
 	}
 
 	if !alreadyRecording && (duration > 0) {
@@ -203,9 +198,7 @@ func (ts *txnState) resetForNewSQLTxn(
 	ts.mu.txnStart = timeutil.Now()
 	ts.mu.Unlock()
 	if historicalTimestamp != nil {
-		if err := ts.setHistoricalTimestamp(ts.Ctx, *historicalTimestamp); err != nil {
-			panic(err)
-		}
+		ts.setHistoricalTimestamp(ts.Ctx, *historicalTimestamp)
 	}
 	if err := ts.setReadOnlyMode(readOnly); err != nil {
 		panic(err)
@@ -265,16 +258,11 @@ func (ts *txnState) finishExternalTxn() {
 	ts.mu.Unlock()
 }
 
-func (ts *txnState) setHistoricalTimestamp(
-	ctx context.Context, historicalTimestamp hlc.Timestamp,
-) error {
+func (ts *txnState) setHistoricalTimestamp(ctx context.Context, historicalTimestamp hlc.Timestamp) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if err := ts.mu.txn.SetFixedTimestamp(ctx, historicalTimestamp); err != nil {
-		return err
-	}
+	ts.mu.txn.SetFixedTimestamp(ctx, historicalTimestamp)
+	ts.mu.Unlock()
 	ts.isHistorical = true
-	return nil
 }
 
 // getReadTimestamp returns the transaction's current read timestamp.

@@ -43,14 +43,16 @@ EXPLAIN SELECT a, b FROM t ORDER BY b LIMIT 2
 distribution: local
 vectorized: true
 ·
-• top-k
-│ order: +b
-│ k: 2
+• limit
+│ count: 2
 │
-└── • scan
-      missing stats
-      table: t@primary
-      spans: FULL SCAN
+└── • sort
+    │ order: +b
+    │
+    └── • scan
+          missing stats
+          table: t@primary
+          spans: FULL SCAN
 
 query T
 EXPLAIN (VERBOSE) SELECT DISTINCT c, b FROM t ORDER BY b LIMIT 2
@@ -58,23 +60,27 @@ EXPLAIN (VERBOSE) SELECT DISTINCT c, b FROM t ORDER BY b LIMIT 2
 distribution: local
 vectorized: true
 ·
-• top-k
+• limit
 │ columns: (c, b)
-│ ordering: +b
 │ estimated row count: 2 (missing stats)
-│ order: +b
-│ k: 2
+│ count: 2
 │
-└── • distinct
+└── • sort
     │ columns: (b, c)
+    │ ordering: +b
     │ estimated row count: 300 (missing stats)
-    │ distinct on: b, c
+    │ order: +b
     │
-    └── • scan
-          columns: (b, c)
-          estimated row count: 1,000 (missing stats)
-          table: t@primary
-          spans: FULL SCAN
+    └── • distinct
+        │ columns: (b, c)
+        │ estimated row count: 300 (missing stats)
+        │ distinct on: b, c
+        │
+        └── • scan
+              columns: (b, c)
+              estimated row count: 1,000 (missing stats)
+              table: t@primary
+              spans: FULL SCAN
 
 query T
 EXPLAIN SELECT b FROM t ORDER BY a DESC
@@ -749,7 +755,7 @@ vectorized: true
           columns: (a, b)
           estimated row count: 1 (missing stats)
           table: t@primary
-          spans: /3/0
+          spans: /3-/3/#
 
 query T
 EXPLAIN (VERBOSE) UPDATE t SET c = TRUE RETURNING b
@@ -1173,22 +1179,25 @@ EXPLAIN (VERBOSE) SELECT * FROM xyz WHERE z=1 AND x=y ORDER BY x;
 distribution: local
 vectorized: true
 ·
-• filter
+• sort
 │ columns: (x, y, z)
-│ ordering: +y
+│ ordering: +x
 │ estimated row count: 0 (missing stats)
-│ filter: x = y
+│ order: +x
 │
-└── • index join
+└── • filter
     │ columns: (x, y, z)
-    │ ordering: +y
-    │ estimated row count: 10 (missing stats)
-    │ table: xyz@primary
-    │ key columns: rowid
+    │ estimated row count: 0 (missing stats)
+    │ filter: x = y
     │
-    └── • scan
-          columns: (y, z, rowid)
-          ordering: +y
-          estimated row count: 10 (missing stats)
-          table: xyz@xyz_z_y_idx
-          spans: /1/!NULL-/2
+    └── • index join
+        │ columns: (x, y, z)
+        │ estimated row count: 10 (missing stats)
+        │ table: xyz@primary
+        │ key columns: rowid
+        │
+        └── • scan
+              columns: (y, z, rowid)
+              estimated row count: 10 (missing stats)
+              table: xyz@xyz_z_y_idx
+              spans: /1/!NULL-/2

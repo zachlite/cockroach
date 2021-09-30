@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/rand"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -35,7 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -297,9 +297,6 @@ func TestRandomSyntaxFunctions(t *testing.T) {
 				case "st_frechetdistance":
 					// Calculating the Frechet distance is slow and testing it here
 					// is not worth it.
-					continue
-				case "crdb_internal.reset_sql_stats":
-					// Skipped due to long execution time.
 					continue
 				}
 				_, variations := builtins.GetBuiltinProperties(name)
@@ -711,7 +708,7 @@ func testRandomSyntax(
 	defer s.Stopper().Stop(ctx)
 	db := &verifyFormatDB{db: rawDB}
 
-	yBytes, err := ioutil.ReadFile(testutils.TestDataPath(t, "rsg", "sql.y"))
+	yBytes, err := ioutil.ReadFile(filepath.Join("..", "parser", "sql.y"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,10 +770,7 @@ func testRandomSyntax(
 				countsMu.success++
 			} else {
 				if c := (*crasher)(nil); errors.As(err, &c) {
-					// NOTE: Changes to this output format must be kept in-sync
-					// with logic in CondensedMessage.RSGCrash in order for
-					// crashes to be correctly reported to Github.
-					t.Errorf("Crash detected: %s\n%s;\n\nStack trace:\n%s", c.Error(), c.sql, c.detail)
+					t.Errorf("Crash detected: \n%s\n\nStack trace:\n%s", c.sql, c.detail)
 				}
 			}
 			countsMu.Unlock()

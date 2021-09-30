@@ -14,7 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/errors"
 )
@@ -82,7 +81,7 @@ type IndexID tree.IndexID
 func (IndexID) SafeValue() {}
 
 // DescriptorVersion is a custom type for TableDescriptor Versions.
-type DescriptorVersion uint64
+type DescriptorVersion uint32
 
 // SafeValue implements the redact.SafeValue interface.
 func (DescriptorVersion) SafeValue() {}
@@ -111,14 +110,6 @@ const (
 	// each column ID in the ColumnIDs, StoreColumnIDs and KeySuffixColumnIDs
 	// slices are unique within each slice, and the slices form disjoint sets.
 	StrictIndexColumnIDGuaranteesVersion
-	// PrimaryIndexWithStoredColumnsVersion corresponds to the encoding of
-	// primary indexes that is identical to the unspecified scheme previously in
-	// use (the IndexDescriptorVersion type was originally only used for
-	// secondary indexes) but with the guarantee that the StoreColumnIDs and
-	// StoreColumnNames slices are explicitly populated and maintained. Previously
-	// these were implicitly derived based on the set of non-virtual columns in
-	// the table.
-	PrimaryIndexWithStoredColumnsVersion
 )
 
 // ColumnID is a custom type for ColumnDescriptor IDs.
@@ -160,22 +151,6 @@ func (c ColumnIDs) Equals(input ColumnIDs) bool {
 	return true
 }
 
-// PermutationOf returns true if this list and the input list contain the same
-// set of column IDs in any order. Duplicate ColumnIDs have no effect.
-func (c ColumnIDs) PermutationOf(input ColumnIDs) bool {
-	ourColsSet := util.MakeFastIntSet()
-	for _, col := range c {
-		ourColsSet.Add(int(col))
-	}
-
-	inputColsSet := util.MakeFastIntSet()
-	for _, inputCol := range input {
-		inputColsSet.Add(int(inputCol))
-	}
-
-	return inputColsSet.Equals(ourColsSet)
-}
-
 // Contains returns whether this list contains the input ID.
 func (c ColumnIDs) Contains(i ColumnID) bool {
 	for _, id := range c {
@@ -215,6 +190,39 @@ const InvalidMutationID MutationID = 0
 // IsSet returns whether or not the foreign key actually references a table.
 func (f ForeignKeyReference) IsSet() bool {
 	return f.Table != 0
+}
+
+// FindPartitionByName searches this partitioning descriptor for a partition
+// whose name is the input and returns it, or nil if no match is found.
+func (desc *PartitioningDescriptor) FindPartitionByName(name string) *PartitioningDescriptor {
+	for _, l := range desc.List {
+		if l.Name == name {
+			return desc
+		}
+		if s := l.Subpartitioning.FindPartitionByName(name); s != nil {
+			return s
+		}
+	}
+	for _, r := range desc.Range {
+		if r.Name == name {
+			return desc
+		}
+	}
+	return nil
+}
+
+// PartitionNames returns a slice containing the name of every partition and
+// subpartition in an arbitrary order.
+func (desc *PartitioningDescriptor) PartitionNames() []string {
+	var names []string
+	for _, l := range desc.List {
+		names = append(names, l.Name)
+		names = append(names, l.Subpartitioning.PartitionNames()...)
+	}
+	for _, r := range desc.Range {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
 // Public implements the Descriptor interface.
@@ -369,7 +377,7 @@ var _ UniqueConstraint = &IndexDescriptor{}
 func (u *UniqueWithoutIndexConstraint) IsValidReferencedUniqueConstraint(
 	referencedColIDs ColumnIDs,
 ) bool {
-	return ColumnIDs(u.ColumnIDs).PermutationOf(referencedColIDs)
+	return ColumnIDs(u.ColumnIDs).Equals(referencedColIDs)
 }
 
 // GetName is part of the UniqueConstraint interface.
@@ -380,19 +388,4 @@ func (u *UniqueWithoutIndexConstraint) GetName() string {
 // IsPartial returns true if the constraint is a partial unique constraint.
 func (u *UniqueWithoutIndexConstraint) IsPartial() bool {
 	return u.Predicate != ""
-}
-
-// GetParentID implements the catalog.NameKeyHaver interface.
-func (ni NameInfo) GetParentID() ID {
-	return ni.ParentID
-}
-
-// GetParentSchemaID implements the catalog.NameKeyHaver interface.
-func (ni NameInfo) GetParentSchemaID() ID {
-	return ni.ParentSchemaID
-}
-
-// GetName implements the catalog.NameKeyHaver interface.
-func (ni NameInfo) GetName() string {
-	return ni.Name
 }

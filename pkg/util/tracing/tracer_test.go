@@ -12,16 +12,16 @@ package tracing
 
 import (
 	"sort"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/logtags"
+	lightstep "github.com/lightstep/lightstep-tracer-go"
+	"github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/log"
+	zipkin "github.com/openzipkin-contrib/zipkin-go-opentracing"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
-	otelsdk "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -32,7 +32,7 @@ func TestStartSpanAlwaysTrace(t *testing.T) {
 	tr._useNetTrace = 1
 	require.True(t, tr.AlwaysTrace())
 	nilMeta := tr.noopSpan.Meta()
-	require.True(t, nilMeta.Empty())
+	require.Nil(t, nilMeta)
 	sp := tr.StartSpan("foo", WithParentAndManualCollection(nilMeta))
 	require.False(t, sp.IsVerbose()) // parent was not verbose, so neither is sp
 	require.False(t, sp.i.isNoop())
@@ -69,18 +69,11 @@ func TestTracerRecording(t *testing.T) {
 	}
 
 	// Initial recording of this fresh (real) span.
-	if err := TestingCheckRecordedSpans(s1.GetRecording(), ``); err != nil {
-		t.Fatal(err)
-	}
-
-	s1.SetVerbose(true)
 	if err := TestingCheckRecordedSpans(s1.GetRecording(), `
 		span: a
-			tags: _unfinished=1 _verbose=1
 	`); err != nil {
 		t.Fatal(err)
 	}
-	s1.SetVerbose(false)
 
 	// Real parent --> real child.
 	real3 := tr.StartSpan("noop3", WithParentAndManualCollection(s1.Meta()))
@@ -119,7 +112,7 @@ func TestTracerRecording(t *testing.T) {
 
 	s3 := tr.StartSpan("c", WithParentAndAutoCollection(s2))
 	s3.Recordf("x=%d", 4)
-	s3.SetTag("tag", attribute.StringValue("val"))
+	s3.SetTag("tag", "val")
 
 	s2.Finish()
 
@@ -244,8 +237,8 @@ func TestTracerInjectExtract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !wireSpanMeta.Empty() {
-		t.Errorf("expected no-op span meta: %v", wireSpanMeta)
+	if wireSpanMeta != nil {
+		t.Errorf("expected noop context: %v", wireSpanMeta)
 	}
 	noop2 := tr2.StartSpan("remote op", WithParentAndManualCollection(wireSpanMeta))
 	if !noop2.i.isNoop() {
@@ -332,63 +325,106 @@ func TestTracer_PropagateNonRecordingRealSpanAcrossRPCBoundaries(t *testing.T) {
 	require.NotZero(t, sp2.i.crdb.spanID)
 }
 
-func TestOtelTracer(t *testing.T) {
+func TestShadowTracer(t *testing.T) {
+	zipMgr, _ := createZipkinTracer("127.0.0.1:900000")
+	zipRec := zipkin.NewInMemoryRecorder()
+	zipTr, err := zipkin.NewTracer(zipRec)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		mgr   shadowTracerManager
+		str   opentracing.Tracer
+		check func(t *testing.T, sp opentracing.Span)
+	}{
+		{
+			mgr: lightStepManager{},
+			str: lightstep.NewTracer(lightstep.Options{
+				AccessToken: "invalid",
+				// Massaged the creation here to not erroneously send crap to
+				// lightstep's API. One of the ways below would've done it but
+				// can't hurt to block it in multiple ways just in case.
+				MinReportingPeriod: time.Hour,
+				Collector: lightstep.Endpoint{
+					Host:      "127.0.0.1",
+					Port:      65535,
+					Plaintext: true,
+				},
+				MaxLogsPerSpan: maxLogsPerSpanExternal,
+				UseGRPC:        true,
+			}),
+		},
+		{
+			mgr: zipMgr,
+			str: zipTr,
+			check: func(t *testing.T, spi opentracing.Span) {
+				rs := zipRec.GetSpans()
+				require.Len(t, rs, 1)
+				require.Len(t, rs[0].Logs, 1)
+				require.Equal(t, log.String("event", "hello"), rs[0].Logs[0].Fields[0])
+			},
+		},
+	} {
+		t.Run(tc.mgr.Name(), func(t *testing.T) {
+			tr := NewTracer()
+			tr.setShadowTracer(tc.mgr, tc.str)
+			s := tr.StartSpan("test")
+			defer func() {
+				if tc.check != nil {
+					tc.check(t, s.i.ot.shadowSpan)
+				}
+			}()
+			defer s.Finish()
+			// The span is not verbose, but has a sink (i.e. the log messages
+			// go somewhere), though we'll actually check that end-to-end below
+			// at least for the mock tracer.
+			require.False(t, s.IsVerbose())
+			require.True(t, s.i.hasVerboseSink())
+			// Put something in the span.
+			s.Record("hello")
+
+			const testBaggageKey = "test-baggage"
+			const testBaggageVal = "test-val"
+			s.SetBaggageItem(testBaggageKey, testBaggageVal)
+
+			carrier := metadataCarrier{metadata.MD{}}
+			if err := tr.InjectMetaInto(s.Meta(), carrier); err != nil {
+				t.Fatal(err)
+			}
+
+			// ExtractMetaFrom also extracts the embedded lightstep context.
+			wireSpanMeta, err := tr.ExtractMetaFrom(carrier)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			s2 := tr.StartSpan("child", WithParentAndManualCollection(wireSpanMeta))
+			s2Ctx := s2.i.ot.shadowSpan.Context()
+
+			// Verify that the baggage is correct in both the tracer context and in the
+			// lightstep context.
+			shadowBaggage := make(map[string]string)
+			s2Ctx.ForeachBaggageItem(func(k, v string) bool {
+				shadowBaggage[k] = v
+				return true
+			})
+			exp := map[string]string{
+				testBaggageKey: testBaggageVal,
+			}
+			require.Equal(t, exp, s2.Meta().Baggage)
+			require.Equal(t, exp, shadowBaggage)
+		})
+	}
+
+}
+
+func TestShadowTracerNilTracer(t *testing.T) {
 	tr := NewTracer()
-	sr := tracetest.NewSpanRecorder()
-	otelTr := otelsdk.NewTracerProvider(
-		otelsdk.WithSpanProcessor(sr),
-		otelsdk.WithSampler(otelsdk.AlwaysSample()),
-	).Tracer("test")
-	tr.SetOpenTelemetryTracer(otelTr)
-	s := tr.StartSpan("test")
-	defer s.Finish()
-	// The span is not verbose, but has a sink (i.e. the log messages
-	// go somewhere), though we'll actually check that end-to-end below
-	// at least for the mock tracer.
-	require.False(t, s.IsVerbose())
-	require.True(t, s.i.hasVerboseSink())
-	// Put something in the span.
-	s.Record("hello")
-
-	const testBaggageKey = "test-baggage"
-	const testBaggageVal = "test-val"
-	s.SetBaggageItem(testBaggageKey, testBaggageVal)
-
-	carrier := metadataCarrier{metadata.MD{}}
-	if err := tr.InjectMetaInto(s.Meta(), carrier); err != nil {
-		t.Fatal(err)
-	}
-
-	// ExtractMetaFrom also extracts the embedded OpenTelemetry context.
-	wireSpanMeta, err := tr.ExtractMetaFrom(carrier)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s2 := tr.StartSpan("child", WithParentAndManualCollection(wireSpanMeta))
-
-	exp := map[string]string{
-		testBaggageKey: testBaggageVal,
-	}
-	require.Equal(t, exp, s2.Meta().Baggage)
-	// Note: we don't propagate baggage to the otel spans very well - we don't use
-	// the otel baggage features. We do, however, set attributes on the shadow
-	// spans when we can, which happens to be sufficient for this test.
-
-	rs := sr.Started()
-	require.Len(t, rs, 2)
-	require.Len(t, rs[0].Events(), 1)
-	require.Equal(t, "hello", rs[0].Events()[0].Name)
-	require.Len(t, rs[0].Attributes(), 1)
-	require.Equal(t,
-		attribute.KeyValue{Key: testBaggageKey, Value: attribute.StringValue(testBaggageVal)},
-		rs[0].Attributes()[0])
-	require.Len(t, rs[1].Attributes(), 1)
-	require.Equal(t,
-		attribute.KeyValue{Key: testBaggageKey, Value: attribute.StringValue(testBaggageVal)},
-		rs[1].Attributes()[0])
-	require.Equal(t, rs[0].SpanContext().TraceID(), rs[1].Parent().TraceID())
-	require.Equal(t, rs[0].SpanContext().SpanID(), rs[1].Parent().SpanID())
+	// The lightstep tracer is nil when lightstep find that it is
+	// misconfigured or can't instantiate a connection. Make sure
+	// this does not lead to a crash.
+	require.NotPanics(t, func() {
+		tr.setShadowTracer(lightStepManager{}, nil)
+	})
 }
 
 func TestTracer_RegistryMaxSize(t *testing.T) {
@@ -564,6 +600,22 @@ func TestSpanRecordingFinished(t *testing.T) {
 	require.Len(t, spanOpsWithFinished, 0)
 }
 
+func TestTracer_TracingVerbosityIndependentSemanticsIsActive(t *testing.T) {
+	// Verify that GetRecording() returns nil for non-verbose spans if we're in
+	// mixed-version mode.
+	tr := NewTracer()
+	tr.TracingVerbosityIndependentSemanticsIsActive = func() bool { return false }
+	sp := tr.StartSpan("root", WithForceRealSpan())
+	defer sp.Finish()
+	sp.SetVerbose(true)
+	sp.Record("foo")
+	require.NotNil(t, sp.GetRecording())
+	sp.SetVerbose(false)
+	require.Nil(t, sp.GetRecording())
+	tr.TracingVerbosityIndependentSemanticsIsActive = func() bool { return true }
+	require.NotNil(t, sp.GetRecording())
+}
+
 func TestNoopSpanFinish(t *testing.T) {
 	tr := NewTracer()
 	sp := tr.StartSpan("noop")
@@ -571,28 +623,4 @@ func TestNoopSpanFinish(t *testing.T) {
 	require.EqualValues(t, 1, tr.noopSpan.numFinishCalled)
 	sp.Finish()
 	require.EqualValues(t, 1, tr.noopSpan.numFinishCalled)
-}
-
-func TestConcurrentChildAndRecording(t *testing.T) {
-	tr := NewTracer()
-	rootSp := tr.StartSpan("root", WithForceRealSpan())
-	rootSp.SetVerbose(true)
-	var wg sync.WaitGroup
-	const n = 1000
-	wg.Add(2 * n)
-	for i := 0; i < n; i++ {
-		go func() {
-			defer wg.Done()
-			sp := tr.StartSpan(
-				"child",
-				WithParentAndAutoCollection(rootSp),      // links sp to rootSp
-				WithSpanKind(oteltrace.SpanKindConsumer)) // causes a tag to be set
-			sp.Finish()
-		}()
-		go func() {
-			defer wg.Done()
-			_ = rootSp.GetRecording()
-		}()
-	}
-	wg.Wait()
 }

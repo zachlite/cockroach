@@ -20,8 +20,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -41,17 +39,17 @@ var stmtDiagListCmd = &cobra.Command{
 	Long: `List statement diagnostics that are available for download and outstanding
 diagnostics activation requests.`,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runStmtDiagList),
+	RunE: MaybeDecorateGRPCError(runStmtDiagList),
 }
 
-func runStmtDiagList(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagList(cmd *cobra.Command, args []string) error {
 	const timeFmt = "2006-01-02 15:04:05 MST"
 
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	// -- List bundles --
 
@@ -143,10 +141,10 @@ var stmtDiagDownloadCmd = &cobra.Command{
 	Long: `Download statement diagnostics bundle into a zip file, using an ID returned by
 the list command.`,
 	Args: cobra.ExactArgs(2),
-	RunE: clierrorplus.MaybeDecorateError(runStmtDiagDownload),
+	RunE: MaybeDecorateGRPCError(runStmtDiagDownload),
 }
 
-func runStmtDiagDownload(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagDownload(cmd *cobra.Command, args []string) error {
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil || id < 0 {
 		return errors.New("invalid bundle id")
@@ -157,7 +155,7 @@ func runStmtDiagDownload(cmd *cobra.Command, args []string) (resErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	// Retrieve the chunk IDs; these are stored in an INT ARRAY column.
 	rows, err := conn.Query(
@@ -215,15 +213,15 @@ var stmtDiagDeleteCmd = &cobra.Command{
 	Long: `Delete a statement diagnostics bundle using an ID returned by the list
 command, or delete all bundles.`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runStmtDiagDelete),
+	RunE: MaybeDecorateGRPCError(runStmtDiagDelete),
 }
 
-func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagDelete(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if stmtDiagCtx.all {
 		if len(args) > 0 {
@@ -251,7 +249,7 @@ func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
 		return err
 	}
 
-	return conn.ExecTxn(func(conn clisqlclient.TxBoundConn) error {
+	return conn.ExecTxn(func(conn *sqlConn) error {
 		// Delete the request metadata.
 		if err := conn.Exec(
 			"DELETE FROM system.statement_diagnostics_requests WHERE statement_diagnostics_id = $1",
@@ -277,8 +275,8 @@ func runStmtDiagDelete(cmd *cobra.Command, args []string) (resErr error) {
 	})
 }
 
-func runStmtDiagDeleteAll(conn clisqlclient.Conn) error {
-	return conn.ExecTxn(func(conn clisqlclient.TxBoundConn) error {
+func runStmtDiagDeleteAll(conn *sqlConn) error {
+	return conn.ExecTxn(func(conn *sqlConn) error {
 		// Delete the request metadata.
 		if err := conn.Exec(
 			"DELETE FROM system.statement_diagnostics_requests WHERE completed",
@@ -307,15 +305,15 @@ var stmtDiagCancelCmd = &cobra.Command{
 	Long: `Cancel an outstanding activation request, using an ID returned by the
 list command, or cancel all outstanding requests.`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runStmtDiagCancel),
+	RunE: MaybeDecorateGRPCError(runStmtDiagCancel),
 }
 
-func runStmtDiagCancel(cmd *cobra.Command, args []string) (resErr error) {
+func runStmtDiagCancel(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach statement-diag", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if stmtDiagCtx.all {
 		if len(args) > 0 {

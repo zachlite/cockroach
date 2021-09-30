@@ -61,10 +61,9 @@ func rejectIfSystemTenant(tenID uint64, op string) error {
 	return nil
 }
 
-// CreateTenantRecord creates a tenant in system.tenants, and optionally
-// initializes the usage data in system.tenant_usage (if info.Usage is set).
+// CreateTenantRecord creates a tenant in system.tenants.
 func CreateTenantRecord(
-	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, info *descpb.TenantInfoWithUsage,
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, info *descpb.TenantInfo,
 ) error {
 	const op = "create"
 	if err := rejectIfCantCoordinateMultiTenancy(execCfg.Codec, op); err != nil {
@@ -76,7 +75,7 @@ func CreateTenantRecord(
 
 	tenID := info.ID
 	active := info.State == descpb.TenantInfo_ACTIVE
-	infoBytes, err := protoutil.Marshal(&info.TenantInfo)
+	infoBytes, err := protoutil.Marshal(info)
 	if err != nil {
 		return err
 	}
@@ -93,33 +92,6 @@ func CreateTenantRecord(
 		return errors.Wrap(err, "inserting new tenant")
 	} else if num != 1 {
 		log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
-	}
-
-	if u := info.Usage; u != nil {
-		if num, err := execCfg.InternalExecutor.ExecEx(
-			ctx, "create-tenant-usage", txn, sessiondata.NodeUserSessionDataOverride,
-			`INSERT INTO system.tenant_usage (
-			  tenant_id, instance_id, next_instance_id, last_update,
-			  ru_burst_limit, ru_refill_rate, ru_current, current_share_sum,
-			  total_ru_usage, total_read_requests, total_read_bytes,
-			  total_write_requests, total_write_bytes, total_sql_pod_cpu_seconds)
-			VALUES (
-				$1, 0, 0, now(),
-				$2, $3, $4, 0, 
-				$5, $6, $7,
-				$8, $9, $10)`,
-			tenID,
-			u.RUBurstLimit, u.RURefillRate, u.RUCurrent,
-			u.Consumption.RU, u.Consumption.ReadRequests, u.Consumption.ReadBytes,
-			u.Consumption.WriteRequests, u.Consumption.WriteBytes, u.Consumption.SQLPodsCPUSeconds,
-		); err != nil {
-			if pgerror.GetPGCode(err) == pgcode.UniqueViolation {
-				return pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\" already has usage data", tenID)
-			}
-			return errors.Wrap(err, "inserting tenant usage data")
-		} else if num != 1 {
-			log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
-		}
 	}
 	return nil
 }
@@ -171,13 +143,11 @@ func updateTenantRecord(
 
 // CreateTenant implements the tree.TenantOperator interface.
 func (p *planner) CreateTenant(ctx context.Context, tenID uint64) error {
-	info := &descpb.TenantInfoWithUsage{
-		TenantInfo: descpb.TenantInfo{
-			ID: tenID,
-			// We synchronously initialize the tenant's keyspace below, so
-			// we can skip the ADD state and go straight to an ACTIVE state.
-			State: descpb.TenantInfo_ACTIVE,
-		},
+	info := &descpb.TenantInfo{
+		ID: tenID,
+		// We synchronously initialize the tenant's keyspace below, so
+		// we can skip the ADD state and go straight to an ACTIVE state.
+		State: descpb.TenantInfo_ACTIVE,
 	}
 	if err := CreateTenantRecord(ctx, p.ExecCfg(), p.Txn(), info); err != nil {
 		return err
@@ -187,8 +157,8 @@ func (p *planner) CreateTenant(ctx context.Context, tenID uint64) error {
 	// Initialize the tenant's keyspace.
 	schema := bootstrap.MakeMetadataSchema(
 		codec,
-		p.ExtendedEvalContext().ExecCfg.DefaultZoneConfig, /* defaultZoneConfig */
-		nil, /* defaultSystemZoneConfig */
+		nil, /* defaultZoneConfig */
+		nil, /* defaultZoneConfig */
 	)
 	kvs, splits := schema.GetInitialValues()
 
@@ -256,7 +226,7 @@ func generateTenantClusterSettingKV(
 	kvs, err := rowenc.EncodePrimaryIndex(
 		codec,
 		systemschema.SettingsTable,
-		systemschema.SettingsTable.GetPrimaryIndex(),
+		systemschema.SettingsTable.GetPrimaryIndex().IndexDesc(),
 		catalog.ColumnIDToOrdinalMap(systemschema.SettingsTable.PublicColumns()),
 		[]tree.Datum{
 			tree.NewDString(clusterversion.KeyVersionSetting),      // name
@@ -381,13 +351,6 @@ func GCTenantSync(ctx context.Context, execCfg *ExecutorConfig, info *descpb.Ten
 		} else if num != 1 {
 			log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
 		}
-
-		if _, err := execCfg.InternalExecutor.ExecEx(
-			ctx, "delete-tenant-usage", txn, sessiondata.NodeUserSessionDataOverride,
-			`DELETE FROM system.tenant_usage WHERE tenant_id = $1`, info.ID,
-		); err != nil {
-			return errors.Wrapf(err, "deleting tenant %d usage", info.ID)
-		}
 		return nil
 	})
 	return errors.Wrapf(err, "deleting tenant %d record", info.ID)
@@ -442,27 +405,4 @@ func (p *planner) GCTenant(ctx context.Context, tenID uint64) error {
 	}
 
 	return GCTenantJob(ctx, p.ExecCfg(), p.Txn(), p.User(), tenID)
-}
-
-// UpdateTenantResourceLimits implements the tree.TenantOperator interface.
-func (p *planner) UpdateTenantResourceLimits(
-	ctx context.Context,
-	tenantID uint64,
-	availableRU float64,
-	refillRate float64,
-	maxBurstRU float64,
-	asOf time.Time,
-	asOfConsumedRequestUnits float64,
-) error {
-	const op = "update-resource-limits"
-	if err := rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op); err != nil {
-		return err
-	}
-	if err := rejectIfSystemTenant(tenantID, op); err != nil {
-		return err
-	}
-	return p.ExecCfg().TenantUsageServer.ReconfigureTokenBucket(
-		ctx, p.Txn(), roachpb.MakeTenantID(tenantID),
-		availableRU, refillRate, maxBurstRU, asOf, asOfConsumedRequestUnits,
-	)
 }

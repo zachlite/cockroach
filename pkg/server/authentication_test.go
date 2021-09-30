@@ -753,20 +753,20 @@ func TestGRPCAuthentication(t *testing.T) {
 			return err
 		}},
 		{"closedTimestamp", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := ctpb.NewSideTransportClient(conn).PushUpdates(ctx)
+			stream, err := ctpb.NewClosedTimestampClient(conn).Get(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&ctpb.Update{})
+			_ = stream.Send(&ctpb.Reaction{})
 			_, err = stream.Recv()
 			return err
 		}},
 		{"distSQL", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := execinfrapb.NewDistSQLClient(conn).FlowStream(ctx)
+			stream, err := execinfrapb.NewDistSQLClient(conn).RunSyncFlow(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&execinfrapb.ProducerMessage{})
+			_ = stream.Send(&execinfrapb.ConsumerSignal{})
 			_, err = stream.Recv()
 			return err
 		}},

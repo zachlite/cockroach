@@ -224,16 +224,8 @@ func (e *emitter) nodeName(n *Node) (string, error) {
 		a := n.args.(*applyJoinArgs)
 		return e.joinNodeName("apply", a.JoinType), nil
 
-	case hashSetOpOp:
-		a := n.args.(*hashSetOpArgs)
-		name := strings.ToLower(a.Typ.String())
-		if a.All {
-			name += " all"
-		}
-		return name, nil
-
-	case streamingSetOpOp:
-		a := n.args.(*streamingSetOpArgs)
+	case setOpOp:
+		a := n.args.(*setOpArgs)
 		name := strings.ToLower(a.Typ.String())
 		if a.All {
 			name += " all"
@@ -295,14 +287,11 @@ var nodeNames = [...]string{
 	scanBufferOp:           "scan buffer",
 	scanOp:                 "", // This node does not have a fixed name.
 	sequenceSelectOp:       "sequence select",
-	hashSetOpOp:            "", // This node does not have a fixed name.
-	streamingSetOpOp:       "", // This node does not have a fixed name.
-	unionAllOp:             "union all",
+	setOpOp:                "", // This node does not have a fixed name.
 	showTraceOp:            "show trace",
 	simpleProjectOp:        "project",
 	serializingProjectOp:   "project",
 	sortOp:                 "sort",
-	topKOp:                 "top-k",
 	updateOp:               "update",
 	upsertOp:               "upsert",
 	valuesOp:               "", // This node does not have a fixed name.
@@ -358,29 +347,11 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 				e.ob.AddField("vectorized batch count", humanizeutil.Count(s.VectorizedBatchCount.Value()))
 			}
 		}
-		if s.KVTime.HasValue() {
-			e.ob.AddField("KV time", humanizeutil.Duration(s.KVTime.Value()))
-		}
-		if s.KVContentionTime.HasValue() {
-			e.ob.AddField("KV contention time", humanizeutil.Duration(s.KVContentionTime.Value()))
-		}
 		if s.KVRowsRead.HasValue() {
 			e.ob.AddField("KV rows read", humanizeutil.Count(s.KVRowsRead.Value()))
 		}
 		if s.KVBytesRead.HasValue() {
 			e.ob.AddField("KV bytes read", humanize.IBytes(s.KVBytesRead.Value()))
-		}
-		if e.ob.flags.Verbose {
-			if s.StepCount.HasValue() {
-				e.ob.AddField("MVCC step count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.StepCount.Value()), humanizeutil.Count(s.InternalStepCount.Value()),
-				))
-			}
-			if s.SeekCount.HasValue() {
-				e.ob.AddField("MVCC seek count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.SeekCount.Value()), humanizeutil.Count(s.InternalSeekCount.Value()),
-				))
-			}
 		}
 	}
 
@@ -388,7 +359,7 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		s := stats.(*exec.EstimatedStats)
 
 		// Show the estimated row count (except Values, where it is redundant).
-		if n.op != valuesOp && !e.ob.flags.OnlyShape {
+		if n.op != valuesOp {
 			count := uint64(math.Round(s.RowCount))
 			if s.TableStatsAvailable {
 				if n.op == scanOp && s.TableStatsRowCount != 0 {
@@ -495,13 +466,8 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			ob.Attr("already ordered", colinfo.ColumnOrdering(a.Ordering[:p]).String(n.Columns()))
 		}
 
-	case topKOp:
-		a := n.args.(*topKArgs)
-		ob.Attr("order", colinfo.ColumnOrdering(a.Ordering).String(n.Columns()))
-		ob.Attr("k", a.K)
-
-	case unionAllOp:
-		a := n.args.(*unionAllArgs)
+	case setOpOp:
+		a := n.args.(*setOpArgs)
 		if a.HardLimit > 0 {
 			ob.Attr("limit", a.HardLimit)
 		}
@@ -605,7 +571,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			ob.Attr("equality cols are key", "")
 		}
 		ob.Expr("lookup condition", a.LookupExpr, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
-		ob.Expr("remote lookup condition", a.RemoteLookupExpr, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
 		ob.Expr("pred", a.OnCond, appendColumns(inputCols, tableColumns(a.Table, a.LookupCols)...))
 		e.emitLockingPolicy(a.Locking)
 
@@ -784,8 +749,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		serializingProjectOp,
 		ordinalityOp,
 		max1RowOp,
-		hashSetOpOp,
-		streamingSetOpOp,
 		explainOptOp,
 		explainOp,
 		showTraceOp,

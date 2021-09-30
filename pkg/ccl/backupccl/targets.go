@@ -10,17 +10,13 @@ package backupccl
 
 import (
 	"context"
-	"fmt"
-	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupresolver"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
@@ -28,14 +24,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -321,7 +313,7 @@ func lookupDatabaseID(
 
 func fullClusterTargetsRestore(
 	allDescs []catalog.Descriptor, lastBackupManifest BackupManifest,
-) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
+) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfo, error) {
 	fullClusterDescs, fullClusterDBs, err := fullClusterTargets(allDescs)
 	if err != nil {
 		return nil, nil, nil, err
@@ -340,7 +332,7 @@ func fullClusterTargetsRestore(
 	}
 
 	// Restore all tenants during full-cluster restore.
-	tenants := lastBackupManifest.GetTenants()
+	tenants := lastBackupManifest.Tenants
 
 	return filteredDescs, filteredDBs, tenants, nil
 }
@@ -349,9 +341,9 @@ func fullClusterTargetsRestore(
 // full cluster backup, and all the user databases.
 func fullClusterTargets(
 	allDescs []catalog.Descriptor,
-) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, error) {
+) ([]catalog.Descriptor, []*dbdesc.Immutable, error) {
 	fullClusterDescs := make([]catalog.Descriptor, 0, len(allDescs))
-	fullClusterDBs := make([]catalog.DatabaseDescriptor, 0)
+	fullClusterDBs := make([]*dbdesc.Immutable, 0)
 
 	systemTablesToBackup := GetSystemTablesToIncludeInClusterBackup()
 
@@ -373,7 +365,7 @@ func fullClusterTargets(
 				}
 			} else {
 				// Add all user tables that are not in a DROP state.
-				if !desc.Dropped() {
+				if desc.GetState() != descpb.DescriptorState_DROP {
 					fullClusterDescs = append(fullClusterDescs, desc)
 				}
 			}
@@ -404,14 +396,6 @@ func fullClusterTargetsBackup(
 	return fullClusterDescs, fullClusterDBIDs, nil
 }
 
-// selectTargets loads all descriptors from the selected backup manifest(s), and
-// filters the descriptors based on the targets specified in the restore. Post
-// filtering, the method returns:
-//  - A list of all descriptors (table, type, database, schema) along with their
-//    parent databases.
-//  - A list of database descriptors IFF the user is restoring on the cluster or
-//    database level
-//  - A list of tenants to restore, if applicable.
 func selectTargets(
 	ctx context.Context,
 	p sql.PlanHookState,
@@ -419,7 +403,7 @@ func selectTargets(
 	targets tree.TargetList,
 	descriptorCoverage tree.DescriptorCoverage,
 	asOf hlc.Timestamp,
-) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfoWithUsage, error) {
+) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfo, error) {
 	allDescs, lastBackupManifest := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
 
 	if descriptorCoverage == tree.AllDescriptors {
@@ -427,18 +411,18 @@ func selectTargets(
 	}
 
 	if targets.Tenant != (roachpb.TenantID{}) {
-		for _, tenant := range lastBackupManifest.GetTenants() {
+		for _, tenant := range lastBackupManifest.Tenants {
 			// TODO(dt): for now it is zero-or-one but when that changes, we should
 			// either keep it sorted or build a set here.
 			if tenant.ID == targets.Tenant.ToUint64() {
-				return nil, nil, []descpb.TenantInfoWithUsage{tenant}, nil
+				return nil, nil, []descpb.TenantInfo{tenant}, nil
 			}
 		}
 		return nil, nil, nil, errors.Errorf("tenant %d not in backup", targets.Tenant.ToUint64())
 	}
 
 	matched, err := backupresolver.DescriptorsMatchingTargets(ctx,
-		p.CurrentDatabase(), p.CurrentSearchPath(), allDescs, targets, asOf)
+		p.CurrentDatabase(), p.CurrentSearchPath(), allDescs, targets)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -454,199 +438,4 @@ func selectTargets(
 	}
 
 	return matched.Descs, matched.RequestedDBs, nil, nil
-}
-
-// EntryFiles is a group of sst files of a backup table range
-type EntryFiles []execinfrapb.RestoreFileSpec
-
-// BackupTableEntry wraps information of a table retrieved
-// from backup manifests.
-// exported to cliccl for exporting data directly from backup sst.
-type BackupTableEntry struct {
-	Desc                 catalog.TableDescriptor
-	Span                 roachpb.Span
-	Files                []EntryFiles
-	LastSchemaChangeTime hlc.Timestamp
-}
-
-// MakeBackupTableEntry looks up the descriptor of fullyQualifiedTableName
-// from backupManifests and returns a BackupTableEntry, which contains
-// the table descriptor, the primary index span, and the sst files.
-func MakeBackupTableEntry(
-	ctx context.Context,
-	fullyQualifiedTableName string,
-	backupManifests []BackupManifest,
-	endTime hlc.Timestamp,
-	user security.SQLUsername,
-	backupCodec keys.SQLCodec,
-) (BackupTableEntry, error) {
-	var descName []string
-	if descName = strings.Split(fullyQualifiedTableName, "."); len(descName) != 3 {
-		return BackupTableEntry{}, errors.Newf("table name should be specified in format databaseName.schemaName.tableName")
-	}
-
-	if !endTime.IsEmpty() {
-		ind := -1
-		for i, b := range backupManifests {
-			if b.StartTime.Less(endTime) && endTime.LessEq(b.EndTime) {
-				if endTime != b.EndTime && b.MVCCFilter != MVCCFilter_All {
-					errorHints := "reading data for requested time requires that BACKUP was created with %q" +
-						" or should specify the time to be an exact backup time, nearest backup time is %s"
-					return BackupTableEntry{}, errors.WithHintf(
-						errors.Newf("unknown read time: %s", timeutil.Unix(0, endTime.WallTime).UTC()),
-						errorHints, backupOptRevisionHistory, timeutil.Unix(0, b.EndTime.WallTime).UTC(),
-					)
-				}
-				ind = i
-				break
-			}
-		}
-		if ind == -1 {
-			return BackupTableEntry{}, errors.Newf("supplied backups do not cover requested time %s", timeutil.Unix(0, endTime.WallTime).UTC())
-		}
-		backupManifests = backupManifests[:ind+1]
-	}
-
-	allDescs, _ := loadSQLDescsFromBackupsAtTime(backupManifests, endTime)
-	resolver, err := backupresolver.NewDescriptorResolver(allDescs)
-	if err != nil {
-		return BackupTableEntry{}, errors.Wrapf(err, "creating a new resolver for all descriptors")
-	}
-
-	found, _, desc, err := resolver.LookupObject(ctx, tree.ObjectLookupFlags{}, descName[0], descName[1], descName[2])
-	if err != nil {
-		return BackupTableEntry{}, errors.Wrapf(err, "looking up table %s", fullyQualifiedTableName)
-	}
-	if !found {
-		return BackupTableEntry{}, errors.Newf("table %s not found", fullyQualifiedTableName)
-	}
-	tbMutable, ok := desc.(*tabledesc.Mutable)
-	if !ok {
-		return BackupTableEntry{}, errors.Newf("object %s not mutable", fullyQualifiedTableName)
-	}
-	tbDesc, err := catalog.AsTableDescriptor(tbMutable)
-	if err != nil {
-		return BackupTableEntry{}, errors.Wrapf(err, "fetching table %s descriptor", fullyQualifiedTableName)
-	}
-
-	tablePrimaryIndexSpan := tbDesc.PrimaryIndexSpan(backupCodec)
-
-	entry, _, err := makeImportSpans(
-		[]roachpb.Span{tablePrimaryIndexSpan},
-		backupManifests,
-		nil,           /*backupLocalityInfo*/
-		roachpb.Key{}, /*lowWaterMark*/
-		errOnMissingRange)
-	if err != nil {
-		return BackupTableEntry{}, errors.Wrapf(err, "making spans for table %s", fullyQualifiedTableName)
-	}
-
-	lastSchemaChangeTime := findLastSchemaChangeTime(backupManifests, tbDesc, endTime)
-
-	backupTableEntry := BackupTableEntry{
-		tbDesc,
-		tablePrimaryIndexSpan,
-		make([]EntryFiles, 0),
-		lastSchemaChangeTime,
-	}
-
-	for _, e := range entry {
-		backupTableEntry.Files = append(backupTableEntry.Files, e.Files)
-	}
-
-	return backupTableEntry, nil
-}
-
-func findLastSchemaChangeTime(
-	backupManifests []BackupManifest, tbDesc catalog.TableDescriptor, endTime hlc.Timestamp,
-) hlc.Timestamp {
-	lastSchemaChangeTime := endTime
-	for i := len(backupManifests) - 1; i >= 0; i-- {
-		manifest := backupManifests[i]
-		for j := len(manifest.DescriptorChanges) - 1; j >= 0; j-- {
-			rev := manifest.DescriptorChanges[j]
-
-			if endTime.LessEq(rev.Time) {
-				continue
-			}
-
-			if rev.ID == tbDesc.GetID() {
-				d := catalogkv.NewBuilder(rev.Desc).BuildExistingMutable()
-				revDesc, _ := catalog.AsTableDescriptor(d)
-				if !reflect.DeepEqual(revDesc.PublicColumns(), tbDesc.PublicColumns()) {
-					return lastSchemaChangeTime
-				}
-				lastSchemaChangeTime = rev.Time
-			}
-		}
-	}
-	return lastSchemaChangeTime
-}
-
-// checkMultiRegionCompatible checks if the given table is compatible to be
-// restored into the given database according to its multi-region locality.
-// It returns an error describing the incompatibility if not.
-func checkMultiRegionCompatible(
-	ctx context.Context,
-	txn *kv.Txn,
-	codec keys.SQLCodec,
-	table *tabledesc.Mutable,
-	database catalog.DatabaseDescriptor,
-) error {
-	// If either the database or table are non-MR then allow it.
-	if !database.IsMultiRegion() || table.GetLocalityConfig() == nil {
-		return nil
-	}
-
-	if table.IsLocalityGlobal() {
-		// Global tables are allowed because they do not reference a particular
-		// region.
-		return nil
-	}
-
-	if table.IsLocalityRegionalByTable() {
-		regionName, _ := table.GetRegionalByTableRegion()
-		if regionName == descpb.RegionName(tree.PrimaryRegionNotSpecifiedName) {
-			// REGIONAL BY PRIMARY REGION tables are allowed since they do not
-			// reference a particular region.
-			return nil
-		}
-
-		// For REGION BY TABLE IN <region> tables, allow the restore if the
-		// database has the region.
-		regionEnumID := database.GetRegionConfig().RegionEnumID
-		regionEnum, err := catalogkv.MustGetTypeDescByID(ctx, txn, codec, regionEnumID)
-		if err != nil {
-			return err
-		}
-		dbRegionNames, err := regionEnum.RegionNames()
-		if err != nil {
-			return err
-		}
-		existingRegions := make([]string, len(dbRegionNames))
-		for i, dbRegionName := range dbRegionNames {
-			if dbRegionName == regionName {
-				return nil
-			}
-			existingRegions[i] = fmt.Sprintf("%q", dbRegionName)
-		}
-
-		return errors.Newf(
-			"cannot restore REGIONAL BY TABLE %s IN REGION %q (table ID: %d) into database %q; region %q not found in database regions %s",
-			table.GetName(), regionName, table.GetID(),
-			database.GetName(), regionName, strings.Join(existingRegions, ", "),
-		)
-	}
-
-	if table.IsLocalityRegionalByRow() {
-		return unimplemented.NewWithIssuef(67269,
-			"cannot restore REGIONAL BY ROW table %s (ID: %d) individually into a multi-region database %s",
-			table.GetName(), table.GetID(), database.GetName(),
-		)
-	}
-
-	return errors.AssertionFailedf(
-		"locality config of table %s (ID: %d) has locality %v which is unknown by RESTORE",
-		table.GetName(), table.GetID(), table.GetLocalityConfig(),
-	)
 }

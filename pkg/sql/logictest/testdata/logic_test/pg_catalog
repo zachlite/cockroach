@@ -3529,8 +3529,8 @@ ORDER BY rolname
 ----
 oid         rolname   rolsuper  rolinherit  rolcreaterole  rolcreatedb  rolcatupdate  rolcanlogin  rolreplication
 2310524507  admin     true      true        true           true         false         true         false
-1546506610  root      true      true        true           true         false         true         false
-2264919399  testuser  false     true        false          false        false         true         false
+1546506610  root      true      false       true           true         false         true         false
+2264919399  testuser  false     false       false          false        false         true         false
 
 query OTITTBT colnames
 SELECT oid, rolname, rolconnlimit, rolpassword, rolvaliduntil, rolbypassrls, rolconfig
@@ -3778,7 +3778,7 @@ objoid      classoid    objsubid  description
 4294967081  4294967132  0         sequences (see also information_schema.sequences)
 4294967080  4294967132  0         pg_sequences is very similar as pg_sequence.
 4294967079  4294967132  0         session variables (incomplete)
-4294967078  4294967132  0         pg_shadow lists properties for roles that are marked as rolcanlogin in pg_authid
+4294967078  4294967132  0         pg_shadow was created for compatibility and is currently unimplemented
 4294967075  4294967132  0         Shared Dependencies (Roles depending on objects).
 4294967077  4294967132  0         shared object comments
 4294967074  4294967132  0         pg_shmem_allocations was created for compatibility and is currently unimplemented
@@ -3819,7 +3819,7 @@ objoid      classoid    objsubid  description
 4294967040  4294967132  0         pg_statio_user_indexes was created for compatibility and is currently unimplemented
 4294967039  4294967132  0         pg_statio_user_sequences was created for compatibility and is currently unimplemented
 4294967038  4294967132  0         pg_statio_user_tables was created for compatibility and is currently unimplemented
-4294967037  4294967132  0         pg_statistic_ext has the statistics objects created with CREATE STATISTICS
+4294967037  4294967132  0         pg_statistic_ext was created for compatibility and is currently unimplemented
 4294967035  4294967132  0         pg_subscription was created for compatibility and is currently unimplemented
 4294967036  4294967132  0         pg_subscription_rel was created for compatibility and is currently unimplemented
 4294967034  4294967132  0         tables summary (see also information_schema.tables, pg_catalog.pg_class)
@@ -3931,6 +3931,7 @@ disallow_full_table_scans                              off                 NULL 
 distsql                                                off                 NULL      NULL        NULL        string
 distsql_workmem                                        64 MiB              NULL      NULL        NULL        string
 enable_copying_partitioning_when_deinterleaving_table  off                 NULL      NULL        NULL        string
+enable_drop_enum_value                                 off                 NULL      NULL        NULL        string
 enable_experimental_alter_column_type_general          off                 NULL      NULL        NULL        string
 enable_experimental_stream_replication                 off                 NULL      NULL        NULL        string
 enable_implicit_select_for_update                      on                  NULL      NULL        NULL        string
@@ -4026,6 +4027,7 @@ disallow_full_table_scans                              off                 NULL 
 distsql                                                off                 NULL  user     NULL      off                 off
 distsql_workmem                                        64 MiB              NULL  user     NULL      64 MiB              64 MiB
 enable_copying_partitioning_when_deinterleaving_table  off                 NULL  user     NULL      off                 off
+enable_drop_enum_value                                 off                 NULL  user     NULL      off                 off
 enable_experimental_alter_column_type_general          off                 NULL  user     NULL      off                 off
 enable_experimental_stream_replication                 off                 NULL  user     NULL      off                 off
 enable_implicit_select_for_update                      on                  NULL  user     NULL      on                  on
@@ -4117,6 +4119,7 @@ disallow_full_table_scans                              NULL    NULL     NULL    
 distsql                                                NULL    NULL     NULL     NULL        NULL
 distsql_workmem                                        NULL    NULL     NULL     NULL        NULL
 enable_copying_partitioning_when_deinterleaving_table  NULL    NULL     NULL     NULL        NULL
+enable_drop_enum_value                                 NULL    NULL     NULL     NULL        NULL
 enable_experimental_alter_column_type_general          NULL    NULL     NULL     NULL        NULL
 enable_experimental_stream_replication                 NULL    NULL     NULL     NULL        NULL
 enable_implicit_select_for_update                      NULL    NULL     NULL     NULL        NULL
@@ -4947,20 +4950,20 @@ CREATE TEMPORARY TABLE test_temp (id UUID PRIMARY KEY);
 CREATE UNLOGGED TABLE test_unlogged (id UUID PRIMARY KEY);
 CREATE TABLE test_persistent (id UUID PRIMARY KEY);
 
-# We don't store UNLOGGED beyond the parser at the moment so we expect 'p' for test_unlogged.
-query TTB
+# we don't store UNLOGGED beyond the parser at the moment so we expect 'p' for test_unlogged
+query T
 SELECT
-  relname, relpersistence, relistemp
+  relpersistence
 FROM
   pg_catalog.pg_class
 WHERE
   relname IN ('test_temp', 'test_unlogged', 'test_persistent')
 ORDER BY
-  relname
+  relpersistence
 ----
-test_persistent  p  false
-test_temp        t  true
-test_unlogged    p  false
+p
+p
+t
 
 # Issue 44793
 statement ok
@@ -5237,170 +5240,3 @@ datname     rolname   deptype
 sh_db       sh_owner  o
 sh_db       sh_role   a
 sh_db_root  sh_role   a
-
-# Testing settings and createDB from forEachRoles
-statement ok
-CREATE USER testuser1;
-CREATE USER testuser2;
-CREATE ROLE testrole1;
-CREATE DATABASE foreachroles;
-ALTER USER testuser1 WITH CREATEDB;
-ALTER USER testuser1 SET TimeZone = 'America/Los_Angeles';
-ALTER USER testuser1 SET application_name = 'a';
-ALTER USER testuser1 IN DATABASE foreachroles SET application_name = 'b';
-ALTER USER testuser2 WITH CREATEROLE PASSWORD '123' VALID UNTIL '3022-01-01';
-
-query TBT colnames
-SELECT usename, usecreatedb, useconfig
-FROM pg_user
-WHERE usename IN ('testuser1', 'testuser2')
-ORDER BY usename
-----
-usename    usecreatedb  useconfig
-testuser1  true         {timezone=America/Los_Angeles,application_name=a}
-testuser2  false        NULL
-
-query TBTBBT colnames
-SELECT rolname, rolcreatedb, rolconfig, rolinherit, rolcanlogin, rolvaliduntil
-FROM pg_roles
-WHERE rolname IN ('testuser1', 'testuser2', 'testrole1')
-ORDER BY rolname
-----
-rolname    rolcreatedb  rolconfig                                          rolinherit  rolcanlogin  rolvaliduntil
-testrole1  false        NULL                                               true        false        NULL
-testuser1  true         {timezone=America/Los_Angeles,application_name=a}  true        true         NULL
-testuser2  false        NULL                                               true        true         3022-01-01 00:00:00 +0000 UTC
-
-query TBBBBT colnames
-SELECT rolname, rolcreatedb, rolcreaterole, rolinherit, rolcanlogin, rolvaliduntil
-FROM pg_authid
-WHERE rolname IN ('testuser1', 'testuser2', 'testrole1', 'root')
-ORDER BY rolname
-----
-rolname    rolcreatedb  rolcreaterole  rolinherit  rolcanlogin  rolvaliduntil
-root       true         true           true        true         NULL
-testrole1  false        false          true        false        NULL
-testuser1  true         false          true        true         NULL
-testuser2  false        true           true        true         3022-01-01 00:00:00 +0000 UTC
-
-# Testing users that have admin role
-
-statement ok;
-CREATE USER super_user;
-GRANT admin TO super_user;
-CREATE USER regular_user;
-CREATE ROLE super_role;
-GRANT admin TO super_role;
-CREATE ROLE regular_role;
-
-query TB colnames
-SELECT rolname, rolsuper
-FROM pg_authid
-WHERE rolname IN ('super_user', 'super_role', 'regular_user', 'regular_role', 'root', 'admin')
-ORDER BY rolname
-----
-rolname       rolsuper
-admin         true
-regular_role  false
-regular_user  false
-root          true
-super_role    true
-super_user    true
-
-query TB colnames
-SELECT rolname, rolsuper
-FROM pg_roles
-WHERE rolname IN ('super_user', 'super_role', 'regular_user', 'regular_role', 'root', 'admin')
-ORDER BY rolname
-----
-rolname       rolsuper
-admin         true
-regular_role  false
-regular_user  false
-root          true
-super_role    true
-super_user    true
-
-query TB colnames
-SELECT usename, usesuper
-FROM pg_user
-WHERE usename IN ('super_user', 'regular_user', 'root')
-ORDER BY usename
-----
-usename       usesuper
-regular_user  false
-root          true
-super_user    true
-
-# Testing null valid until roles
-statement ok
-CREATE USER regression_70180 WITH password '123' VALID UNTIL null;
-
-query TT colnames
-SELECT usename, valuntil
-FROM pg_user
-WHERE usename = 'regression_70180'
-----
-usename           valuntil
-regression_70180  NULL
-
-# Testing pg_statistic_ext
-statement ok
-CREATE TABLE stxtbl(a INT, b INT, c INT);
-CREATE STATISTICS stxobj ON b, c FROM stxtbl;
-
-query TTOOTTT colnames
-SELECT
-  relname,
-  stxname,
-  stxnamespace,
-  stxowner,
-  stxstattarget,
-  stxkeys,
-  stxkind
-FROM pg_statistic_ext
-JOIN pg_class ON pg_statistic_ext.stxrelid = pg_class.oid
-----
-relname  stxname  stxnamespace  stxowner  stxstattarget  stxkeys  stxkind
-stxtbl   stxobj   NULL          NULL      NULL           {2,3}    NULL
-
-# Test that pg_shadow doesn't include roles that can't login
-query B colnames
-SELECT (count(1) = 0) AS PASSED
-FROM pg_shadow
-WHERE EXISTS (
-  SELECT 1 FROM pg_authid WHERE oid = usesysid AND NOT rolcanlogin
-)
-----
-passed
-true
-
-# Test pg_shadow contents
-query TOBBBBTTT colnames
-SELECT * FROM pg_shadow ORDER BY usename;
-----
-usename                       usesysid    usecreatedb  usesuper  userepl  usebypassrls  passwd    valuntil                       useconfig
-admin                         2310524507  true         true      false    false         ********  NULL                           NULL
-anyuser                       2525089181  false        false     false    false         ********  NULL                           NULL
-regression_70180              2066478618  false        false     false    false         ********  NULL                           NULL
-regular_user                  3044356792  false        false     false    false         ********  NULL                           NULL
-role_test_login               2531829827  false        false     false    false         ********  NULL                           NULL
-role_test_nodate              1492950893  false        false     false    false         ********  NULL                           NULL
-role_test_with_date           1212615927  false        false     false    false         ********  2021-01-01 00:00:00 +0000 UTC  NULL
-role_test_with_date_timezone  1682504215  false        false     false    false         ********  2020-12-31 22:00:00 +0000 UTC  NULL
-root                          1546506610  true         true      false    false         ********  NULL                           NULL
-sh_owner                      2488412215  false        false     false    false         ********  NULL                           NULL
-sh_user                       2387559583  false        false     false    false         ********  NULL                           NULL
-super_user                    2430969455  false        true      false    false         ********  NULL                           NULL
-testuser                      2264919399  false        false     false    false         ********  NULL                           NULL
-testuser1                     3957504276  true         false     false    false         ********  NULL                           {timezone=America/Los_Angeles,application_name=a}
-testuser2                     3957504279  false        false     false    false         ********  3022-01-01 00:00:00 +0000 UTC  NULL
-
-# Testing oids references the same roles in pg_shadow and pg_authid
-query B colnames
-SELECT bool_and(usename = rolname) PASSED
-FROM pg_shadow
-JOIN pg_authid ON usesysid = oid
-----
-passed
-true

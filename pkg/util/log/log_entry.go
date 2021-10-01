@@ -62,8 +62,6 @@ type logEntry struct {
 	// The channel on which the entry was sent. This is not reported by
 	// formatters when the header boolean is set.
 	ch Channel
-	// The binary version with which the event was generated.
-	version string
 
 	// The goroutine where the event was generated.
 	gid int64
@@ -165,7 +163,6 @@ func makeEntry(ctx context.Context, s Severity, c Channel, depth int) (res logEn
 		ts:        timeutil.Now().UnixNano(),
 		sev:       s,
 		ch:        c,
-		version:   build.BinaryVersion(),
 		gid:       goid.Get(),
 		tags:      logtags.FromContext(ctx),
 	}

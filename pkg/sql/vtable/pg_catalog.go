@@ -709,7 +709,7 @@ CREATE TABLE pg_catalog.pg_settings (
     pending_restart BOOL
 )`
 
-// PGCatalogShdepend describes the schema of the pg_catalog. table.
+// PGCatalogShdepend describes the schema of the pg_catalog.pg_shdepend table.
 // https://www.postgresql.org/docs/9.6/catalog-pg-shdepend.html,
 const PGCatalogShdepend = `
 CREATE TABLE pg_catalog.pg_shdepend (
@@ -823,7 +823,7 @@ CREATE TABLE pg_catalog.pg_user (
 	userepl  BOOL,
 	usebypassrls BOOL,
 	passwd TEXT,
-	valuntil TIMESTAMPTZ,
+	valuntil TIMESTAMP,
 	useconfig TEXT[]
 )`
 
@@ -1051,19 +1051,19 @@ CREATE TABLE pg_catalog.pg_rules (
 	tablename NAME
 )`
 
-// PgCatalogShadow is the implementation of pg_catalog.pg_shadow
-// see https://www.postgresql.org/docs/13/view-pg-shadow.html
+// PgCatalogShadow is an empty table created by pg_catalog_test
+// and is currently unimplemented.
 const PgCatalogShadow = `
 CREATE TABLE pg_catalog.pg_shadow (
-	usename NAME,
-	usesysid OID,
+	useconfig STRING[],
 	usecreatedb BOOL,
+	userepl BOOL,
 	usesuper BOOL,
-  userepl BOOL,
-  usebypassrls BOOL,
+	usesysid OID,
+	valuntil TIMESTAMPTZ,
 	passwd STRING,
-  valuntil TIMESTAMPTZ,
-	useconfig STRING[]
+	usename NAME,
+	usebypassrls BOOL
 )`
 
 // PgCatalogPublication is an empty table created by pg_catalog_test
@@ -1238,18 +1238,18 @@ CREATE TABLE pg_catalog.pg_hba_file_rules (
 	options STRING[]
 )`
 
-// PgCatalogStatisticExt describes the schema of pg_catalog.pg_statistic_ext
-// https://www.postgresql.org/docs/13/catalog-pg-statistic-ext.html
+// PgCatalogStatisticExt is an empty table created by pg_catalog_test
+// and is currently unimplemented.
 const PgCatalogStatisticExt = `
 CREATE TABLE pg_catalog.pg_statistic_ext (
-	oid OID,
 	stxrelid OID,
-  stxname NAME,
-  stxnamespace OID,
-	stxowner OID,
 	stxstattarget INT4,
+	oid OID,
 	stxkeys INT2VECTOR,
-	stxkind "char"[]
+	stxkind "char"[],
+	stxname NAME,
+	stxnamespace OID,
+	stxowner OID
 )`
 
 // PgCatalogReplicationOrigin is an empty table created by pg_catalog_test

@@ -107,12 +107,6 @@ var retiredSettings = map[string]struct{}{
 	"kv.closed_timestamp.close_fraction":                             {},
 	"sql.telemetry.query_sampling.qps_threshold":                     {},
 	"sql.telemetry.query_sampling.sample_rate":                       {},
-
-	// removed as of 22.1.
-	"sql.defaults.drop_enum_value.enabled": {},
-	"trace.lightstep.token":                {},
-	"trace.datadog.agent":                  {},
-	"trace.datadog.project":                {},
 }
 
 // register adds a setting to the registry.

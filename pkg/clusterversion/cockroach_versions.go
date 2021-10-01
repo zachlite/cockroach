@@ -156,6 +156,8 @@ const (
 
 	// v21.1 versions.
 	//
+	// Start21_1 demarcates work towards CockroachDB v21.1.
+	Start21_1
 	// replacedTruncatedAndRangeAppliedStateMigration stands in for
 	// TruncatedAndRangeAppliedStateMigration which was	re-introduced after the
 	// migration job was introduced. This is necessary because the jobs
@@ -183,9 +185,6 @@ const (
 	// that no replicated truncated state representation is found.
 	PostTruncatedAndRangeAppliedStateMigration
 	// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
-	//
-	// TODO(irfansharif): This can be removed as part of #69828 (bumping the min
-	// cluster version).
 	V21_1
 
 	// v21.1PLUS release. This is a special v21.1.x release with extra changes,
@@ -314,7 +313,12 @@ const (
 // minor version until we are absolutely sure that no new migrations will need
 // to be added (i.e., when cutting the final release candidate).
 var versionsSingleton = keyedVersions{
-	// v21.1 versions.
+
+	// v21.1 versions. Internal versions defined here-on-forth must be even.
+	{
+		Key:     Start21_1,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 2},
+	},
 	{
 		Key:     replacedTruncatedAndRangeAppliedStateMigration,
 		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 14},
@@ -336,8 +340,6 @@ var versionsSingleton = keyedVersions{
 		Key:     V21_1,
 		Version: roachpb.Version{Major: 21, Minor: 1},
 	},
-
-	// Internal versions must be even.
 
 	// v21.1PLUS version. This is a special v21.1.x release with extra changes,
 	// used internally for the 2021 Serverless offering.
@@ -500,8 +502,7 @@ var (
 	// binaryMinSupportedVersion is the earliest version of data supported by
 	// this binary. If this binary is started using a store marked with an older
 	// version than binaryMinSupportedVersion, then the binary will exit with
-	// an error. This typically trails the current release by one (see top-level
-	// comment).
+	// an error.
 	binaryMinSupportedVersion = ByKey(V21_1)
 
 	// binaryVersion is the version of this binary.

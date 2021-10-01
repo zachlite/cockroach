@@ -207,7 +207,7 @@ func StartTenant(
 
 	if err := args.stopper.RunAsyncTask(ctx, "serve-http", func(ctx context.Context) {
 		mux := http.NewServeMux()
-		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn(), s.execCfg.SQLStatusServer)
+		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn())
 		mux.Handle("/", debugServer)
 		mux.Handle("/_status/", gwMux)
 		mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
@@ -276,13 +276,6 @@ func StartTenant(
 	log.SetNodeIDs(clusterID, 0 /* nodeID is not known for a SQL-only server. */)
 	log.SetTenantIDs(args.TenantID.String(), int32(s.SQLInstanceID()))
 
-	externalUsageFn := func(ctx context.Context) multitenant.ExternalUsage {
-		return multitenant.ExternalUsage{
-			CPUSecs:     status.GetUserCPUSeconds(ctx),
-			PGWireBytes: s.pgServer.BytesInAndOut(),
-		}
-	}
-
 	nextLiveInstanceIDFn := makeNextLiveInstanceIDFn(
 		ctx,
 		args.stopper,
@@ -292,7 +285,7 @@ func StartTenant(
 
 	if err := args.costController.Start(
 		ctx, args.stopper, s.SQLInstanceID(), s.sqlLivenessSessionID,
-		externalUsageFn, nextLiveInstanceIDFn,
+		status.GetUserCPUSeconds, nextLiveInstanceIDFn,
 	); err != nil {
 		return nil, "", "", err
 	}
@@ -598,7 +591,7 @@ func (noopTenantSideCostController) Start(
 	stopper *stop.Stopper,
 	instanceID base.SQLInstanceID,
 	sessionID sqlliveness.SessionID,
-	externalUsageFn multitenant.ExternalUsageFn,
+	cpuSecsFn multitenant.CPUSecsFn,
 	nextLiveInstanceIDFn multitenant.NextLiveInstanceIDFn,
 ) error {
 	return nil

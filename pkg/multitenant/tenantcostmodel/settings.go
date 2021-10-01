@@ -61,13 +61,6 @@ var (
 		settings.PositiveFloat,
 	)
 
-	pgwireCostPerMB = settings.RegisterFloatSetting(
-		"tenant_cost_model.pgwire_cost_per_megabyte",
-		"cost of client <-> SQL ingress/egress per MB",
-		585.0,
-		settings.PositiveFloat,
-	)
-
 	// List of config settings, used by SetOnChange.
 	configSettings = [...]settings.WritableSetting{
 		readRequestCost,
@@ -75,7 +68,6 @@ var (
 		writeRequestCost,
 		writeCostPerMB,
 		podCPUSecondCost,
-		pgwireCostPerMB,
 	}
 )
 
@@ -89,7 +81,6 @@ func ConfigFromSettings(sv *settings.Values) Config {
 		KVWriteRequest: RU(writeRequestCost.Get(sv)),
 		KVWriteByte:    RU(writeCostPerMB.Get(sv) * perMBToPerByte),
 		PodCPUSecond:   RU(podCPUSecondCost.Get(sv)),
-		PGWireByte:     RU(pgwireCostPerMB.Get(sv) * perMBToPerByte),
 	}
 }
 
@@ -102,7 +93,6 @@ func DefaultConfig() Config {
 		KVWriteRequest: RU(writeRequestCost.Default()),
 		KVWriteByte:    RU(writeCostPerMB.Default() * perMBToPerByte),
 		PodCPUSecond:   RU(podCPUSecondCost.Default()),
-		PGWireByte:     RU(pgwireCostPerMB.Default() * perMBToPerByte),
 	}
 }
 

@@ -5001,7 +5001,7 @@ CREATE TABLE crdb_internal.default_privileges (
 					}
 					return nil
 				}
-				if err := forEachRole(ctx, p, func(username security.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error {
+				if err := forEachRole(ctx, p, func(username security.SQLUsername, isRole bool, noLogin bool, rolValidUntil *time.Time) error {
 					role := descpb.DefaultPrivilegesRole{
 						Role: username,
 					}
@@ -5314,8 +5314,7 @@ CREATE VIEW crdb_internal.tenant_usage_details AS
     (j->>'readRequests')::INT8 AS total_read_requests,
     (j->>'writeBytes')::INT8 AS total_write_bytes,
     (j->>'writeRequests')::INT8 AS total_write_requests,
-    (j->>'sqlPodsCpuSeconds')::FLOAT8 AS total_sql_pod_seconds,
-    (j->>'pgwireBytes')::INT8 AS total_pgwire_bytes
+    (j->>'sqlPodsCpuSeconds')::FLOAT8 AS total_sql_pod_seconds
   FROM
     (
       SELECT
@@ -5335,6 +5334,5 @@ CREATE VIEW crdb_internal.tenant_usage_details AS
 		{Name: "total_write_bytes", Typ: types.Int},
 		{Name: "total_write_requests", Typ: types.Int},
 		{Name: "total_sql_pod_seconds", Typ: types.Float},
-		{Name: "total_pgwire_bytes", Typ: types.Int},
 	},
 }

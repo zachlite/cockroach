@@ -158,7 +158,7 @@ type tenantSideCostController struct {
 	stopper              *stop.Stopper
 	instanceID           base.SQLInstanceID
 	sessionID            sqlliveness.SessionID
-	externalUsageFn      multitenant.ExternalUsageFn
+	cpuSecsFn            multitenant.CPUSecsFn
 	nextLiveInstanceIDFn multitenant.NextLiveInstanceIDFn
 
 	mu struct {
@@ -177,10 +177,8 @@ type tenantSideCostController struct {
 
 	// run contains the state that is updated by the main loop.
 	run struct {
-		now time.Time
-		// externalUsage stores the last value returned by externalUsageFn.
-		externalUsage multitenant.ExternalUsage
-		// consumption stores the last value of mu.consumption.
+		now         time.Time
+		cpuSecs     float64
 		consumption roachpb.TenantConsumption
 		// requestSeqNum is an increasing sequence number that is included in token
 		// bucket requests.
@@ -243,7 +241,7 @@ func (c *tenantSideCostController) Start(
 	stopper *stop.Stopper,
 	instanceID base.SQLInstanceID,
 	sessionID sqlliveness.SessionID,
-	externalUsageFn multitenant.ExternalUsageFn,
+	cpuSecsFn multitenant.CPUSecsFn,
 	nextLiveInstanceIDFn multitenant.NextLiveInstanceIDFn,
 ) error {
 	if instanceID == 0 {
@@ -255,7 +253,7 @@ func (c *tenantSideCostController) Start(
 	c.stopper = stopper
 	c.instanceID = instanceID
 	c.sessionID = sessionID
-	c.externalUsageFn = externalUsageFn
+	c.cpuSecsFn = cpuSecsFn
 	c.nextLiveInstanceIDFn = nextLiveInstanceIDFn
 	return stopper.RunAsyncTask(ctx, "cost-controller", func(ctx context.Context) {
 		c.mainLoop(ctx)
@@ -267,7 +265,7 @@ func (c *tenantSideCostController) initRunState(ctx context.Context) {
 
 	now := c.timeSource.Now()
 	c.run.now = now
-	c.run.externalUsage = c.externalUsageFn(ctx)
+	c.run.cpuSecs = c.cpuSecsFn(ctx)
 	c.run.lastRequestTime = now
 	c.run.avgRUPerSec = initialRUs / c.run.targetPeriod.Seconds()
 	c.run.requestSeqNum = 1
@@ -279,11 +277,11 @@ func (c *tenantSideCostController) updateRunState(ctx context.Context) {
 	c.run.targetPeriod = TargetPeriodSetting.Get(&c.settings.SV)
 
 	newTime := c.timeSource.Now()
-	newExternalUsage := c.externalUsageFn(ctx)
+	newCPUSecs := c.cpuSecsFn(ctx)
 
 	// Update CPU consumption.
 
-	deltaCPU := newExternalUsage.CPUSecs - c.run.externalUsage.CPUSecs
+	deltaCPU := newCPUSecs - c.run.cpuSecs
 
 	// Subtract any allowance that we consider free background usage.
 	if deltaTime := newTime.Sub(c.run.now); deltaTime > 0 {
@@ -292,28 +290,21 @@ func (c *tenantSideCostController) updateRunState(ctx context.Context) {
 	if deltaCPU < 0 {
 		deltaCPU = 0
 	}
-	ru := deltaCPU * float64(c.costCfg.PodCPUSecond)
-
-	var deltaPGWireBytes uint64
-	if newExternalUsage.PGWireBytes > c.run.externalUsage.PGWireBytes {
-		deltaPGWireBytes = newExternalUsage.PGWireBytes - c.run.externalUsage.PGWireBytes
-		ru += float64(deltaPGWireBytes) * float64(c.costCfg.PGWireByte)
-	}
+	cpuRU := deltaCPU * float64(c.costCfg.PodCPUSecond)
 
 	c.mu.Lock()
 	c.mu.consumption.SQLPodsCPUSeconds += deltaCPU
-	c.mu.consumption.PGWireBytes += deltaPGWireBytes
-	c.mu.consumption.RU += ru
+	c.mu.consumption.RU += cpuRU
 	newConsumption := c.mu.consumption
 	c.mu.Unlock()
 
 	c.run.now = newTime
-	c.run.externalUsage = newExternalUsage
+	c.run.cpuSecs = newCPUSecs
 	c.run.consumption = newConsumption
 
 	// TODO(radu): figure out how to "smooth out" this debt over a longer period
 	// (so we don't have periodic stalls).
-	c.limiter.AdjustTokens(newTime, -tenantcostmodel.RU(ru))
+	c.limiter.AdjustTokens(newTime, -tenantcostmodel.RU(cpuRU))
 }
 
 // updateAvgRUPerSec is called exactly once per mainLoopUpdateInterval.

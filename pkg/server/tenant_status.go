@@ -193,55 +193,9 @@ func (t *tenantStatusServer) CancelSession(
 }
 
 func (t *tenantStatusServer) ListContentionEvents(
-	ctx context.Context, req *serverpb.ListContentionEventsRequest,
+	ctx context.Context, request *serverpb.ListContentionEventsRequest,
 ) (*serverpb.ListContentionEventsResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = t.AnnotateCtx(ctx)
-
-	// Check permissions early to avoid fan-out to all nodes.
-	if err := t.hasViewActivityPermissions(ctx); err != nil {
-		return nil, err
-	}
-
-	var response serverpb.ListContentionEventsResponse
-
-	podFn := func(ctx context.Context, client interface{}, _ base.SQLInstanceID) (interface{}, error) {
-		statusClient := client.(serverpb.StatusClient)
-		resp, err := statusClient.ListLocalContentionEvents(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		if len(resp.Errors) > 0 {
-			return nil, errors.Errorf("%s", resp.Errors[0].Message)
-		}
-		return resp, nil
-	}
-	responseFn := func(_ base.SQLInstanceID, nodeResp interface{}) {
-		if nodeResp == nil {
-			return
-		}
-		events := nodeResp.(*serverpb.ListContentionEventsResponse).Events
-		response.Events = contention.MergeSerializedRegistries(response.Events, events)
-	}
-	errorFn := func(instanceID base.SQLInstanceID, err error) {
-		errResponse := serverpb.ListActivityError{
-			NodeID:  roachpb.NodeID(instanceID),
-			Message: err.Error(),
-		}
-		response.Errors = append(response.Errors, errResponse)
-	}
-
-	if err := t.iteratePods(
-		ctx,
-		"contention events list",
-		t.dialCallback,
-		podFn,
-		responseFn,
-		errorFn,
-	); err != nil {
-		return nil, err
-	}
-	return &response, nil
+	return t.ListLocalContentionEvents(ctx, request)
 }
 
 func (t *tenantStatusServer) ResetSQLStats(
@@ -563,22 +517,6 @@ func (t *tenantStatusServer) ListDistSQLFlows(
 	ctx context.Context, request *serverpb.ListDistSQLFlowsRequest,
 ) (*serverpb.ListDistSQLFlowsResponse, error) {
 	return t.ListLocalDistSQLFlows(ctx, request)
-}
-
-// Profile implements the profiling endpoint by delegating the request
-// to the local handler. No facility for requesting profiles from
-// remote nodes is facilitated at this time. Requests for nodes other
-// than "local" will return an error.
-func (t *tenantStatusServer) Profile(
-	ctx context.Context, request *serverpb.ProfileRequest,
-) (*serverpb.JSONResponse, error) {
-	ctx = propagateGatewayMetadata(ctx)
-	ctx = t.AnnotateCtx(ctx)
-
-	if request.NodeId != "local" {
-		return nil, status.Errorf(codes.Unimplemented, "profiling arbitrary tenants is unsupported")
-	}
-	return profileLocal(ctx, request, t.st)
 }
 
 func (t *tenantStatusServer) IndexUsageStatistics(

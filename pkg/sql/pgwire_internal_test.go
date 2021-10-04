@@ -78,7 +78,7 @@ func TestPGWireConnectionCloseReleasesLeases(t *testing.T) {
 	lm.VisitLeases(func(
 		desc catalog.Descriptor, dropped bool, refCount int, expiration tree.DTimestamp,
 	) (wantMore bool) {
-		if desc.GetID() == tableDesc.GetID() {
+		if desc.GetID() == tableDesc.ID {
 			leases++
 		}
 		return true
@@ -93,7 +93,7 @@ func TestPGWireConnectionCloseReleasesLeases(t *testing.T) {
 		lm.VisitLeases(func(
 			desc catalog.Descriptor, dropped bool, refCount int, expiration tree.DTimestamp,
 		) (wantMore bool) {
-			if desc.GetID() == tableDesc.GetID() {
+			if desc.GetID() == tableDesc.ID {
 				totalRefCount += refCount
 			}
 			return true

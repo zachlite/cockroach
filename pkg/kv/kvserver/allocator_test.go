@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/constraint"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -64,38 +64,10 @@ var simpleZoneConfig = zonepb.ZoneConfig{
 	},
 }
 
-var multiDCConfigSSD = zonepb.ZoneConfig{
+var multiDCConfig = zonepb.ZoneConfig{
 	NumReplicas: proto.Int32(2),
 	Constraints: []zonepb.ConstraintsConjunction{
 		{Constraints: []zonepb.Constraint{{Value: "ssd", Type: zonepb.Constraint_REQUIRED}}},
-	},
-}
-
-var multiDCConfigConstrainToA = zonepb.ZoneConfig{
-	NumReplicas: proto.Int32(2),
-	Constraints: []zonepb.ConstraintsConjunction{
-		{Constraints: []zonepb.Constraint{{Value: "a", Type: zonepb.Constraint_REQUIRED}}},
-	},
-}
-
-var multiDCConfigUnsatisfiableVoterConstraints = zonepb.ZoneConfig{
-	NumReplicas: proto.Int32(2),
-	VoterConstraints: []zonepb.ConstraintsConjunction{
-		{Constraints: []zonepb.Constraint{{Value: "doesNotExist", Type: zonepb.Constraint_REQUIRED}}},
-	},
-}
-
-// multiDCConfigVoterAndNonVoter prescribes that one voting replica be placed in
-// DC "b" and one non-voting replica be placed in DC "a".
-var multiDCConfigVoterAndNonVoter = zonepb.ZoneConfig{
-	NumReplicas: proto.Int32(2),
-	Constraints: []zonepb.ConstraintsConjunction{
-		// Constrain the non-voter to "a".
-		{Constraints: []zonepb.Constraint{{Value: "a", Type: zonepb.Constraint_REQUIRED}}, NumReplicas: 1},
-	},
-	VoterConstraints: []zonepb.ConstraintsConjunction{
-		// Constrain the voter to "b".
-		{Constraints: []zonepb.Constraint{{Value: "b", Type: zonepb.Constraint_REQUIRED}}},
 	},
 }
 
@@ -319,42 +291,6 @@ var multiDiversityDCStores = []*roachpb.StoreDescriptor{
 	},
 }
 
-var oneStoreWithFullDisk = []*roachpb.StoreDescriptor{
-	{
-		StoreID:  1,
-		Node:     roachpb.NodeDescriptor{NodeID: 1},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 5, RangeCount: 600},
-	},
-	{
-		StoreID:  2,
-		Node:     roachpb.NodeDescriptor{NodeID: 2},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 600},
-	},
-	{
-		StoreID:  3,
-		Node:     roachpb.NodeDescriptor{NodeID: 3},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 600},
-	},
-}
-
-var oneStoreWithTooManyRanges = []*roachpb.StoreDescriptor{
-	{
-		StoreID:  1,
-		Node:     roachpb.NodeDescriptor{NodeID: 1},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 5, RangeCount: 600},
-	},
-	{
-		StoreID:  2,
-		Node:     roachpb.NodeDescriptor{NodeID: 2},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 200},
-	},
-	{
-		StoreID:  3,
-		Node:     roachpb.NodeDescriptor{NodeID: 3},
-		Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 200},
-	},
-}
-
 func replicas(storeIDs ...roachpb.StoreID) []roachpb.ReplicaDescriptor {
 	res := make([]roachpb.ReplicaDescriptor, len(storeIDs))
 	for i, storeID := range storeIDs {
@@ -373,23 +309,11 @@ func createTestAllocator(
 	stopper, g, manual, storePool, _ := createTestStorePool(
 		TestTimeUntilStoreDeadOff, deterministic,
 		func() int { return numNodes },
-		livenesspb.NodeLivenessStatus_LIVE)
+		kvserverpb.NodeLivenessStatus_LIVE)
 	a := MakeAllocator(storePool, func(string) (time.Duration, bool) {
 		return 0, true
 	})
 	return stopper, g, storePool, a, manual
-}
-
-// checkReplExists checks whether the given `repl` exists on any of the
-// `stores`.
-func checkReplExists(repl roachpb.ReplicaDescriptor, stores []roachpb.StoreID) (found bool) {
-	for _, storeID := range stores {
-		if repl.StoreID == storeID {
-			found = true
-			break
-		}
-	}
-	return found
 }
 
 // mockStorePool sets up a collection of a alive and dead stores in the store
@@ -401,15 +325,14 @@ func mockStorePool(
 	deadStoreIDs []roachpb.StoreID,
 	decommissioningStoreIDs []roachpb.StoreID,
 	decommissionedStoreIDs []roachpb.StoreID,
-	suspectedStoreIDs []roachpb.StoreID,
 ) {
 	storePool.detailsMu.Lock()
 	defer storePool.detailsMu.Unlock()
 
-	liveNodeSet := map[roachpb.NodeID]livenesspb.NodeLivenessStatus{}
+	liveNodeSet := map[roachpb.NodeID]kvserverpb.NodeLivenessStatus{}
 	storePool.detailsMu.storeDetails = map[roachpb.StoreID]*storeDetail{}
 	for _, storeID := range aliveStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_LIVE
+		liveNodeSet[roachpb.NodeID(storeID)] = kvserverpb.NodeLivenessStatus_LIVE
 		detail := storePool.getStoreDetailLocked(storeID)
 		detail.desc = &roachpb.StoreDescriptor{
 			StoreID: storeID,
@@ -417,7 +340,7 @@ func mockStorePool(
 		}
 	}
 	for _, storeID := range unavailableStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_UNAVAILABLE
+		liveNodeSet[roachpb.NodeID(storeID)] = kvserverpb.NodeLivenessStatus_UNAVAILABLE
 		detail := storePool.getStoreDetailLocked(storeID)
 		detail.desc = &roachpb.StoreDescriptor{
 			StoreID: storeID,
@@ -425,7 +348,7 @@ func mockStorePool(
 		}
 	}
 	for _, storeID := range deadStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_DEAD
+		liveNodeSet[roachpb.NodeID(storeID)] = kvserverpb.NodeLivenessStatus_DEAD
 		detail := storePool.getStoreDetailLocked(storeID)
 		detail.desc = &roachpb.StoreDescriptor{
 			StoreID: storeID,
@@ -433,7 +356,7 @@ func mockStorePool(
 		}
 	}
 	for _, storeID := range decommissioningStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_DECOMMISSIONING
+		liveNodeSet[roachpb.NodeID(storeID)] = kvserverpb.NodeLivenessStatus_DECOMMISSIONING
 		detail := storePool.getStoreDetailLocked(storeID)
 		detail.desc = &roachpb.StoreDescriptor{
 			StoreID: storeID,
@@ -441,19 +364,8 @@ func mockStorePool(
 		}
 	}
 	for _, storeID := range decommissionedStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_DECOMMISSIONED
+		liveNodeSet[roachpb.NodeID(storeID)] = kvserverpb.NodeLivenessStatus_DECOMMISSIONED
 		detail := storePool.getStoreDetailLocked(storeID)
-		detail.desc = &roachpb.StoreDescriptor{
-			StoreID: storeID,
-			Node:    roachpb.NodeDescriptor{NodeID: roachpb.NodeID(storeID)},
-		}
-	}
-
-	for _, storeID := range suspectedStoreIDs {
-		liveNodeSet[roachpb.NodeID(storeID)] = livenesspb.NodeLivenessStatus_LIVE
-		detail := storePool.getStoreDetailLocked(storeID)
-		detail.lastAvailable = storePool.clock.Now().GoTime()
-		detail.lastUnavailable = storePool.clock.Now().GoTime()
 		detail.desc = &roachpb.StoreDescriptor{
 			StoreID: storeID,
 			Node:    roachpb.NodeDescriptor{NodeID: roachpb.NodeID(storeID)},
@@ -462,11 +374,11 @@ func mockStorePool(
 
 	// Set the node liveness function using the set we constructed.
 	storePool.nodeLivenessFn =
-		func(nodeID roachpb.NodeID, now time.Time, threshold time.Duration) livenesspb.NodeLivenessStatus {
+		func(nodeID roachpb.NodeID, now time.Time, threshold time.Duration) kvserverpb.NodeLivenessStatus {
 			if status, ok := liveNodeSet[nodeID]; ok {
 				return status
 			}
-			return livenesspb.NodeLivenessStatus_UNAVAILABLE
+			return kvserverpb.NodeLivenessStatus_UNAVAILABLE
 		}
 }
 
@@ -477,10 +389,10 @@ func TestAllocatorSimpleRetrieval(t *testing.T) {
 	stopper, g, _, a, _ := createTestAllocator(1, false /* deterministic */)
 	defer stopper.Stop(context.Background())
 	gossiputil.NewStoreGossiper(g).GossipStores(singleStore, t)
-	result, _, err := a.AllocateVoter(
+	result, _, err := a.AllocateTarget(
 		context.Background(),
 		&simpleZoneConfig,
-		nil /* existingVoters */, nil, /* existingNonVoters */
+		[]roachpb.ReplicaDescriptor{},
 	)
 	if err != nil {
 		t.Fatalf("Unable to perform allocation: %+v", err)
@@ -496,10 +408,10 @@ func TestAllocatorNoAvailableDisks(t *testing.T) {
 
 	stopper, _, _, a, _ := createTestAllocator(1, false /* deterministic */)
 	defer stopper.Stop(context.Background())
-	result, _, err := a.AllocateVoter(
+	result, _, err := a.AllocateTarget(
 		context.Background(),
 		&simpleZoneConfig,
-		nil /* existingVoters */, nil, /* existingNonVoters */
+		[]roachpb.ReplicaDescriptor{},
 	)
 	if result != nil {
 		t.Errorf("expected nil result: %+v", result)
@@ -517,21 +429,21 @@ func TestAllocatorTwoDatacenters(t *testing.T) {
 	defer stopper.Stop(context.Background())
 	gossiputil.NewStoreGossiper(g).GossipStores(multiDCStores, t)
 	ctx := context.Background()
-	result1, _, err := a.AllocateVoter(
+	result1, _, err := a.AllocateTarget(
 		ctx,
-		&multiDCConfigSSD,
-		nil /* existingVoters */, nil, /* existingNonVoters */
+		&multiDCConfig,
+		[]roachpb.ReplicaDescriptor{},
 	)
 	if err != nil {
 		t.Fatalf("Unable to perform allocation: %+v", err)
 	}
-	result2, _, err := a.AllocateVoter(
+	result2, _, err := a.AllocateTarget(
 		ctx,
-		&multiDCConfigSSD,
+		&multiDCConfig,
 		[]roachpb.ReplicaDescriptor{{
 			NodeID:  result1.Node.NodeID,
 			StoreID: result1.StoreID,
-		}}, nil, /* existingNonVoters */
+		}},
 	)
 	if err != nil {
 		t.Fatalf("Unable to perform allocation: %+v", err)
@@ -542,9 +454,9 @@ func TestAllocatorTwoDatacenters(t *testing.T) {
 		t.Errorf("Expected nodes %+v: %+v vs %+v", expected, result1.Node, result2.Node)
 	}
 	// Verify that no result is forthcoming if we already have a replica.
-	result3, _, err := a.AllocateVoter(
+	result3, _, err := a.AllocateTarget(
 		ctx,
-		&multiDCConfigSSD,
+		&multiDCConfig,
 		[]roachpb.ReplicaDescriptor{
 			{
 				NodeID:  result1.Node.NodeID,
@@ -554,7 +466,7 @@ func TestAllocatorTwoDatacenters(t *testing.T) {
 				NodeID:  result2.Node.NodeID,
 				StoreID: result2.StoreID,
 			},
-		}, nil, /* existingNonVoters */
+		},
 	)
 	if err == nil {
 		t.Errorf("expected error on allocation without available stores: %+v", result3)
@@ -568,7 +480,7 @@ func TestAllocatorExistingReplica(t *testing.T) {
 	stopper, g, _, a, _ := createTestAllocator(1, false /* deterministic */)
 	defer stopper.Stop(context.Background())
 	gossiputil.NewStoreGossiper(g).GossipStores(sameDCStores, t)
-	result, _, err := a.AllocateVoter(
+	result, _, err := a.AllocateTarget(
 		context.Background(),
 		&zonepb.ZoneConfig{
 			NumReplicas: proto.Int32(0),
@@ -586,7 +498,7 @@ func TestAllocatorExistingReplica(t *testing.T) {
 				NodeID:  2,
 				StoreID: 2,
 			},
-		}, nil, /* existingNonVoters */
+		},
 	)
 	if err != nil {
 		t.Fatalf("Unable to perform allocation: %+v", err)
@@ -687,33 +599,30 @@ func TestAllocatorMultipleStoresPerNode(t *testing.T) {
 
 	for _, tc := range testCases {
 		{
-			result, _, err := a.AllocateVoter(
-				context.Background(), zonepb.EmptyCompleteZoneConfig(), tc.existing, nil,
+			result, _, err := a.AllocateTarget(
+				context.Background(),
+				zonepb.EmptyCompleteZoneConfig(),
+				tc.existing,
 			)
 			if e, a := tc.expectTargetAllocate, result != nil; e != a {
-				t.Errorf(
-					"AllocateVoter(%v) got target %v, err %v; expectTarget=%v",
-					tc.existing, result, err, tc.expectTargetAllocate,
-				)
+				t.Errorf("AllocateTarget(%v) got target %v, err %v; expectTarget=%v",
+					tc.existing, result, err, tc.expectTargetAllocate)
 			}
 		}
 
 		{
 			var rangeUsageInfo RangeUsageInfo
-			target, _, details, ok := a.RebalanceVoter(
+			target, _, details, ok := a.RebalanceTarget(
 				context.Background(),
 				zonepb.EmptyCompleteZoneConfig(),
-				nil,
+				nil, /* raftStatus */
 				tc.existing,
-				nil,
 				rangeUsageInfo,
 				storeFilterThrottled,
 			)
 			if e, a := tc.expectTargetRebalance, ok; e != a {
-				t.Errorf(
-					"RebalanceVoter(%v) got target %v, details %v; expectTarget=%v",
-					tc.existing, target, details, tc.expectTargetRebalance,
-				)
+				t.Errorf("RebalanceTarget(%v) got target %v, details %v; expectTarget=%v",
+					tc.existing, target, details, tc.expectTargetRebalance)
 			}
 		}
 	}
@@ -772,7 +681,14 @@ func TestAllocatorMultipleStoresPerNodeLopsided(t *testing.T) {
 	// After that we should not be seeing replicas move.
 	var rangeUsageInfo RangeUsageInfo
 	for i := 1; i < 40; i++ {
-		add, remove, _, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), nil, ranges[i].InternalReplicas, nil, rangeUsageInfo, storeFilterThrottled)
+		add, remove, _, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			nil, /* raftStatus */
+			ranges[i].InternalReplicas,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if ok {
 			// Update the descriptor.
 			newReplicas := make([]roachpb.ReplicaDescriptor, 0, len(ranges[i].InternalReplicas))
@@ -804,7 +720,14 @@ func TestAllocatorMultipleStoresPerNodeLopsided(t *testing.T) {
 	// We dont expect any range wanting to move since the system should have
 	// reached a stable state at this point.
 	for i := 1; i < 40; i++ {
-		_, _, _, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), nil, ranges[i].InternalReplicas, nil, rangeUsageInfo, storeFilterThrottled)
+		_, _, _, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			nil, /* raftStatus */
+			ranges[i].InternalReplicas,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		require.False(t, ok)
 	}
 }
@@ -867,7 +790,14 @@ func TestAllocatorRebalance(t *testing.T) {
 	// Every rebalance target must be either store 1 or 2.
 	for i := 0; i < 10; i++ {
 		var rangeUsageInfo RangeUsageInfo
-		target, _, _, ok := a.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, []roachpb.ReplicaDescriptor{{NodeID: 3, StoreID: 3}}, nil, rangeUsageInfo, storeFilterThrottled)
+		target, _, _, ok := a.RebalanceTarget(
+			ctx,
+			zonepb.EmptyCompleteZoneConfig(),
+			nil,
+			[]roachpb.ReplicaDescriptor{{NodeID: 3, StoreID: 3}},
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if !ok {
 			i-- // loop until we find 10 candidates
 			continue
@@ -879,14 +809,14 @@ func TestAllocatorRebalance(t *testing.T) {
 		}
 	}
 
-	// Verify shouldRebalanceBasedOnRangeCount results.
+	// Verify shouldRebalance results.
 	for i, store := range stores {
 		desc, ok := a.storePool.getStoreDescriptor(store.StoreID)
 		if !ok {
 			t.Fatalf("%d: unable to get store %d descriptor", i, store.StoreID)
 		}
 		sl, _, _ := a.storePool.getStoreList(storeFilterThrottled)
-		result := shouldRebalanceBasedOnRangeCount(ctx, desc, sl, a.scorerOptions())
+		result := shouldRebalance(ctx, desc, sl, a.scorerOptions())
 		if expResult := (i >= 2); expResult != result {
 			t.Errorf("%d: expected rebalance %t; got %t; desc %+v; sl: %+v", i, expResult, result, desc, sl)
 		}
@@ -905,8 +835,8 @@ func TestAllocatorRebalanceTarget(t *testing.T) {
 	// We make 5 stores in this test -- 3 in the same datacenter, and 1 each in
 	// 2 other datacenters. All of our replicas are distributed within these 3
 	// datacenters. Originally, the stores that are all alone in their datacenter
-	// are fuller than the other stores. If we didn't simulate RemoveVoter in
-	// RebalanceVoter, we would try to choose store 2 or 3 as the target store
+	// are fuller than the other stores. If we didn't simulate RemoveTarget in
+	// RebalanceTarget, we would try to choose store 2 or 3 as the target store
 	// to make a rebalance. However, we would immediately remove the replica on
 	// store 1 or 2 to retain the locality diversity.
 	stores := []*roachpb.StoreDescriptor{
@@ -1011,7 +941,14 @@ func TestAllocatorRebalanceTarget(t *testing.T) {
 		}
 	}
 	for i := 0; i < 10; i++ {
-		result, _, details, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), status, replicas, nil, rangeUsageInfo, storeFilterThrottled)
+		result, _, details, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			status,
+			replicas,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if ok {
 			t.Fatalf("expected no rebalance, but got target s%d; details: %s", result.StoreID, details)
 		}
@@ -1024,7 +961,14 @@ func TestAllocatorRebalanceTarget(t *testing.T) {
 	stores[2].Capacity.RangeCount = 46
 	sg.GossipStores(stores, t)
 	for i := 0; i < 10; i++ {
-		target, _, details, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), status, replicas, nil, rangeUsageInfo, storeFilterThrottled)
+		target, _, details, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			status,
+			replicas,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if ok {
 			t.Fatalf("expected no rebalance, but got target s%d; details: %s", target.StoreID, details)
 		}
@@ -1034,7 +978,14 @@ func TestAllocatorRebalanceTarget(t *testing.T) {
 	stores[1].Capacity.RangeCount = 44
 	sg.GossipStores(stores, t)
 	for i := 0; i < 10; i++ {
-		target, origin, details, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), status, replicas, nil, rangeUsageInfo, storeFilterThrottled)
+		target, origin, details, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			status,
+			replicas,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		expTo := stores[1].StoreID
 		expFrom := stores[0].StoreID
 		if !ok || target.StoreID != expTo || origin.StoreID != expFrom {
@@ -1057,7 +1008,6 @@ func TestAllocatorRebalanceDeadNodes(t *testing.T) {
 		[]roachpb.StoreID{1, 2, 3, 4, 5, 6},
 		nil,
 		[]roachpb.StoreID{7, 8},
-		nil,
 		nil,
 		nil,
 	)
@@ -1091,6 +1041,8 @@ func TestAllocatorRebalanceDeadNodes(t *testing.T) {
 	}{
 		// 3/3 live -> 3/4 live: ok
 		{replicas(1, 2, 3), 6},
+		// 2/3 live -> 2/4 live: nope
+		{replicas(1, 2, 7), 0},
 		// 4/4 live -> 4/5 live: ok
 		{replicas(1, 2, 3, 4), 6},
 		// 3/4 live -> 3/5 live: ok
@@ -1099,12 +1051,20 @@ func TestAllocatorRebalanceDeadNodes(t *testing.T) {
 		{replicas(1, 2, 3, 4, 5), 6},
 		// 4/5 live -> 4/6 live: ok
 		{replicas(1, 2, 3, 4, 7), 6},
+		// 3/5 live -> 3/6 live: nope
+		{replicas(1, 2, 3, 7, 8), 0},
 	}
 
 	for _, c := range testCases {
 		t.Run("", func(t *testing.T) {
 			var rangeUsageInfo RangeUsageInfo
-			target, _, _, ok := a.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, c.existing, nil, rangeUsageInfo, storeFilterThrottled)
+			target, _, _, ok := a.RebalanceTarget(
+				ctx,
+				zonepb.EmptyCompleteZoneConfig(),
+				nil,
+				c.existing,
+				rangeUsageInfo,
+				storeFilterThrottled)
 			if c.expected > 0 {
 				if !ok {
 					t.Fatalf("expected %d, but found nil", c.expected)
@@ -1240,14 +1200,14 @@ func TestAllocatorRebalanceThrashing(t *testing.T) {
 			})
 			sl, _, _ := a.storePool.getStoreList(storeFilterThrottled)
 
-			// Verify shouldRebalanceBasedOnRangeCount returns the expected value.
+			// Verify shouldRebalance returns the expected value.
 			for j, store := range stores {
 				desc, ok := a.storePool.getStoreDescriptor(store.StoreID)
 				if !ok {
 					t.Fatalf("[store %d]: unable to get store %d descriptor", j, store.StoreID)
 				}
-				if a, e := shouldRebalanceBasedOnRangeCount(context.Background(), desc, sl, a.scorerOptions()), cluster[j].shouldRebalanceFrom; a != e {
-					t.Errorf("[store %d]: shouldRebalanceBasedOnRangeCount %t != expected %t", store.StoreID, a, e)
+				if a, e := shouldRebalance(context.Background(), desc, sl, a.scorerOptions()), cluster[j].shouldRebalanceFrom; a != e {
+					t.Errorf("[store %d]: shouldRebalance %t != expected %t", store.StoreID, a, e)
 				}
 			}
 		})
@@ -1294,24 +1254,68 @@ func TestAllocatorRebalanceByCount(t *testing.T) {
 	// Every rebalance target must be store 4 (or nil for case of missing the only option).
 	for i := 0; i < 10; i++ {
 		var rangeUsageInfo RangeUsageInfo
-		result, _, _, ok := a.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, []roachpb.ReplicaDescriptor{{StoreID: stores[0].StoreID}}, nil, rangeUsageInfo, storeFilterThrottled)
+		result, _, _, ok := a.RebalanceTarget(
+			ctx,
+			zonepb.EmptyCompleteZoneConfig(),
+			nil,
+			[]roachpb.ReplicaDescriptor{{StoreID: stores[0].StoreID}},
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if ok && result.StoreID != 4 {
 			t.Errorf("expected store 4; got %d", result.StoreID)
 		}
 	}
 
-	// Verify shouldRebalanceBasedOnRangeCount results.
+	// Verify shouldRebalance results.
 	for i, store := range stores {
 		desc, ok := a.storePool.getStoreDescriptor(store.StoreID)
 		if !ok {
 			t.Fatalf("%d: unable to get store %d descriptor", i, store.StoreID)
 		}
 		sl, _, _ := a.storePool.getStoreList(storeFilterThrottled)
-		result := shouldRebalanceBasedOnRangeCount(ctx, desc, sl, a.scorerOptions())
+		result := shouldRebalance(ctx, desc, sl, a.scorerOptions())
 		if expResult := (i < 3); expResult != result {
 			t.Errorf("%d: expected rebalance %t; got %t", i, expResult, result)
 		}
 	}
+}
+
+// mockRepl satisfies the interface for the `leaseRepl` passed into
+// `Allocator.TransferLeaseTarget()` for these tests.
+type mockRepl struct {
+	replicationFactor     int32
+	storeID               roachpb.StoreID
+	replsInNeedOfSnapshot map[roachpb.ReplicaID]struct{}
+}
+
+func (r *mockRepl) RaftStatus() *raft.Status {
+	raftStatus := &raft.Status{
+		Progress: make(map[uint64]tracker.Progress),
+	}
+	for i := int32(1); i <= r.replicationFactor; i++ {
+		state := tracker.StateReplicate
+		if _, ok := r.replsInNeedOfSnapshot[roachpb.ReplicaID(i)]; ok {
+			state = tracker.StateSnapshot
+		}
+		raftStatus.Progress[uint64(i)] = tracker.Progress{State: state}
+	}
+	return raftStatus
+}
+
+func (r *mockRepl) StoreID() roachpb.StoreID {
+	return r.storeID
+}
+
+func (r *mockRepl) GetRangeID() roachpb.RangeID {
+	return roachpb.RangeID(0)
+}
+
+func (r *mockRepl) markReplAsNeedingSnapshot(id roachpb.ReplicaID) {
+	if r.replsInNeedOfSnapshot == nil {
+		r.replsInNeedOfSnapshot = make(map[roachpb.ReplicaID]struct{})
+	}
+	r.replsInNeedOfSnapshot[id] = struct{}{}
 }
 
 func TestAllocatorTransferLeaseTarget(t *testing.T) {
@@ -1334,9 +1338,9 @@ func TestAllocatorTransferLeaseTarget(t *testing.T) {
 	sg.GossipStores(stores, t)
 
 	existing := []roachpb.ReplicaDescriptor{
-		{StoreID: 1},
-		{StoreID: 2},
-		{StoreID: 3},
+		{StoreID: 1, ReplicaID: 1},
+		{StoreID: 2, ReplicaID: 2},
+		{StoreID: 3, ReplicaID: 3},
 	}
 
 	// TODO(peter): Add test cases for non-empty constraints.
@@ -1364,7 +1368,10 @@ func TestAllocatorTransferLeaseTarget(t *testing.T) {
 				context.Background(),
 				zonepb.EmptyCompleteZoneConfig(),
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 3,
+					storeID:           c.leaseholder,
+				},
 				nil, /* replicaStats */
 				c.check,
 				true,  /* checkCandidateFullness */
@@ -1377,89 +1384,111 @@ func TestAllocatorTransferLeaseTarget(t *testing.T) {
 	}
 }
 
-func TestAllocatorTransferLeaseTargetConstraints(t *testing.T) {
+func TestAllocatorTransferLeaseToReplicasNeedingSnapshot(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	existing := []roachpb.ReplicaDescriptor{
+		{StoreID: 1, NodeID: 1, ReplicaID: 1},
+		{StoreID: 2, NodeID: 2, ReplicaID: 2},
+		{StoreID: 3, NodeID: 3, ReplicaID: 3},
+		{StoreID: 4, NodeID: 4, ReplicaID: 4},
+	}
 	stopper, g, _, a, _ := createTestAllocator(10, true /* deterministic */)
 	defer stopper.Stop(context.Background())
 
-	// 6 stores with the following setup
-	// 1 | locality=dc=1 | lease_count=10
-	// 2 | locality=dc=0 | lease_count=0
-	// 3 | locality=dc=1 | lease_count=30
-	// 4 | locality=dc=0 | lease_count=0
-	// 5 | locality=dc=1 | lease_count=50
-	// 6 | locality=dc=0 | lease_count=0
+	// 4 stores where the lease count for each store is equal to 10x the store
+	// ID.
 	var stores []*roachpb.StoreDescriptor
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 4; i++ {
 		stores = append(stores, &roachpb.StoreDescriptor{
-			StoreID: roachpb.StoreID(i),
-			Node: roachpb.NodeDescriptor{
-				NodeID: roachpb.NodeID(i),
-				Locality: roachpb.Locality{
-					Tiers: []roachpb.Tier{
-						{Key: "dc", Value: strconv.FormatInt(int64(i%2), 10)},
-					},
-				},
-			},
-			Capacity: roachpb.StoreCapacity{LeaseCount: int32(100 * i * (i % 2))},
+			StoreID:  roachpb.StoreID(i),
+			Node:     roachpb.NodeDescriptor{NodeID: roachpb.NodeID(i)},
+			Capacity: roachpb.StoreCapacity{LeaseCount: int32(10 * i)},
 		})
 	}
 	sg := gossiputil.NewStoreGossiper(g)
 	sg.GossipStores(stores, t)
 
-	existing := replicas(1, 3, 5)
-
-	constraint := func(value string) []zonepb.ConstraintsConjunction {
-		return []zonepb.ConstraintsConjunction{
-			{
-				Constraints: []zonepb.Constraint{
-					{Key: "dc", Value: value, Type: zonepb.Constraint_REQUIRED},
-				},
-			},
-		}
-	}
-
-	constraints := func(value string) *zonepb.ZoneConfig {
-		return &zonepb.ZoneConfig{
-			NumReplicas: proto.Int32(1),
-			Constraints: constraint(value),
-		}
-	}
-
-	voterConstraints := func(value string) *zonepb.ZoneConfig {
-		return &zonepb.ZoneConfig{
-			NumReplicas:      proto.Int32(1),
-			VoterConstraints: constraint(value),
-		}
-	}
-
 	testCases := []struct {
-		existing    []roachpb.ReplicaDescriptor
-		leaseholder roachpb.StoreID
-		expected    roachpb.StoreID
-		zone        *zonepb.ZoneConfig
+		existing          []roachpb.ReplicaDescriptor
+		replsNeedingSnaps []roachpb.ReplicaID
+		leaseholder       roachpb.StoreID
+		checkSource       bool
+		transferTarget    roachpb.StoreID
 	}{
-		{existing: existing, leaseholder: 5, expected: 1, zone: constraints("1")},
-		{existing: existing, leaseholder: 5, expected: 1, zone: voterConstraints("1")},
-		{existing: existing, leaseholder: 5, expected: 0, zone: constraints("0")},
-		{existing: existing, leaseholder: 5, expected: 0, zone: voterConstraints("0")},
-		{existing: existing, leaseholder: 5, expected: 1, zone: zonepb.EmptyCompleteZoneConfig()},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1},
+			leaseholder:       3,
+			checkSource:       true,
+			transferTarget:    0,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1},
+			leaseholder:       3,
+			checkSource:       false,
+			transferTarget:    2,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1},
+			leaseholder:       4,
+			checkSource:       true,
+			transferTarget:    2,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1},
+			leaseholder:       4,
+			checkSource:       false,
+			transferTarget:    2,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1, 2},
+			leaseholder:       4,
+			checkSource:       false,
+			transferTarget:    3,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1, 2},
+			leaseholder:       4,
+			checkSource:       true,
+			transferTarget:    0,
+		},
+		{
+			existing:          existing,
+			replsNeedingSnaps: []roachpb.ReplicaID{1, 2, 3},
+			leaseholder:       4,
+			checkSource:       true,
+			transferTarget:    0,
+		},
 	}
+
 	for _, c := range testCases {
+		repl := &mockRepl{
+			replicationFactor: 4,
+			storeID:           c.leaseholder,
+		}
+		for _, r := range c.replsNeedingSnaps {
+			repl.markReplAsNeedingSnapshot(r)
+		}
 		t.Run("", func(t *testing.T) {
 			target := a.TransferLeaseTarget(
 				context.Background(),
-				c.zone,
+				zonepb.EmptyCompleteZoneConfig(),
 				c.existing,
-				c.leaseholder,
-				nil, /* replicaStats */
-				true,
+				repl,
+				nil,
+				c.checkSource,
 				true,  /* checkCandidateFullness */
 				false, /* alwaysAllowDecisionWithoutStats */
 			)
-			if c.expected != target.StoreID {
-				t.Fatalf("expected %d, but found %d", c.expected, target.StoreID)
+			if c.transferTarget != target.StoreID {
+				t.Fatalf("expected %d, but found %d", c.transferTarget, target.StoreID)
 			}
 		})
 	}
@@ -1473,7 +1502,7 @@ func TestAllocatorTransferLeaseTargetDraining(t *testing.T) {
 	stopper, g, _, storePool, nl := createTestStorePool(
 		TestTimeUntilStoreDeadOff, true, /* deterministic */
 		func() int { return 10 }, /* nodeCount */
-		livenesspb.NodeLivenessStatus_LIVE)
+		kvserverpb.NodeLivenessStatus_LIVE)
 	a := MakeAllocator(storePool, func(string) (time.Duration, bool) {
 		return 0, true
 	})
@@ -1502,7 +1531,8 @@ func TestAllocatorTransferLeaseTargetDraining(t *testing.T) {
 	sg := gossiputil.NewStoreGossiper(g)
 	sg.GossipStores(stores, t)
 
-	nl.setNodeStatus(1, livenesspb.NodeLivenessStatus_DRAINING)
+	// UNAVAILABLE is the node liveness status used for a node that's draining.
+	nl.setNodeStatus(1, kvserverpb.NodeLivenessStatus_UNAVAILABLE)
 	preferDC1 := []zonepb.LeasePreference{
 		{Constraints: []zonepb.Constraint{{Key: "dc", Value: "1", Type: zonepb.Constraint_REQUIRED}}},
 	}
@@ -1512,9 +1542,9 @@ func TestAllocatorTransferLeaseTargetDraining(t *testing.T) {
 	}
 
 	existing := []roachpb.ReplicaDescriptor{
-		{StoreID: 1},
-		{StoreID: 2},
-		{StoreID: 3},
+		{StoreID: 1, ReplicaID: 1},
+		{StoreID: 2, ReplicaID: 2},
+		{StoreID: 3, ReplicaID: 3},
 	}
 
 	testCases := []struct {
@@ -1550,7 +1580,10 @@ func TestAllocatorTransferLeaseTargetDraining(t *testing.T) {
 				context.Background(),
 				c.zone,
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 3,
+					storeID:           c.leaseholder,
+				},
 				nil, /* replicaStats */
 				c.check,
 				true,  /* checkCandidateFullness */
@@ -1681,13 +1714,20 @@ func TestAllocatorRebalanceDifferentLocalitySizes(t *testing.T) {
 
 	for i, tc := range testCases {
 		var rangeUsageInfo RangeUsageInfo
-		result, _, details, ok := a.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, tc.existing, nil, rangeUsageInfo, storeFilterThrottled)
+		result, _, details, ok := a.RebalanceTarget(
+			ctx,
+			zonepb.EmptyCompleteZoneConfig(),
+			nil, /* raftStatus */
+			tc.existing,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		var resultID roachpb.StoreID
 		if ok {
 			resultID = result.StoreID
 		}
 		if resultID != tc.expected {
-			t.Errorf("%d: RebalanceVoter(%v) expected s%d; got %v: %s", i, tc.existing, tc.expected, result, details)
+			t.Errorf("%d: RebalanceTarget(%v) expected s%d; got %v: %s", i, tc.existing, tc.expected, result, details)
 		}
 	}
 
@@ -1744,7 +1784,14 @@ func TestAllocatorRebalanceDifferentLocalitySizes(t *testing.T) {
 	for i, tc := range testCases2 {
 		log.Infof(ctx, "case #%d", i)
 		var rangeUsageInfo RangeUsageInfo
-		result, _, details, ok := a.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, tc.existing, nil, rangeUsageInfo, storeFilterThrottled)
+		result, _, details, ok := a.RebalanceTarget(
+			ctx,
+			zonepb.EmptyCompleteZoneConfig(),
+			nil, /* raftStatus */
+			tc.existing,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		var gotExpected bool
 		if !ok {
 			gotExpected = (tc.expected == nil)
@@ -1757,9 +1804,69 @@ func TestAllocatorRebalanceDifferentLocalitySizes(t *testing.T) {
 			}
 		}
 		if !gotExpected {
-			t.Errorf("%d: RebalanceVoter(%v) expected store in %v; got %v: %s",
+			t.Errorf("%d: RebalanceTarget(%v) expected store in %v; got %v: %s",
 				i, tc.existing, tc.expected, result, details)
 		}
+	}
+}
+
+func TestAllocatorTransferLeaseTargetMultiStore(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	stopper, g, _, a, _ := createTestAllocator(10, true /* deterministic */)
+	defer stopper.Stop(context.Background())
+
+	// 3 nodes and 6 stores where the lease count for the first store on each
+	// node is equal to 10x the node ID.
+	var stores []*roachpb.StoreDescriptor
+	for i := 1; i <= 6; i++ {
+		node := 1 + (i-1)/2
+		stores = append(stores, &roachpb.StoreDescriptor{
+			StoreID:  roachpb.StoreID(i),
+			Node:     roachpb.NodeDescriptor{NodeID: roachpb.NodeID(node)},
+			Capacity: roachpb.StoreCapacity{LeaseCount: int32(10 * node * (i % 2))},
+		})
+	}
+	sg := gossiputil.NewStoreGossiper(g)
+	sg.GossipStores(stores, t)
+
+	existing := []roachpb.ReplicaDescriptor{
+		{NodeID: 1, StoreID: 1, ReplicaID: 1},
+		{NodeID: 2, StoreID: 3, ReplicaID: 2},
+		{NodeID: 3, StoreID: 5, ReplicaID: 3},
+	}
+
+	testCases := []struct {
+		leaseholder roachpb.StoreID
+		check       bool
+		expected    roachpb.StoreID
+	}{
+		{leaseholder: 1, check: false, expected: 3},
+		{leaseholder: 1, check: true, expected: 0},
+		{leaseholder: 3, check: false, expected: 1},
+		{leaseholder: 3, check: true, expected: 0},
+		{leaseholder: 5, check: false, expected: 1},
+		{leaseholder: 5, check: true, expected: 1},
+	}
+	for _, c := range testCases {
+		t.Run("", func(t *testing.T) {
+			target := a.TransferLeaseTarget(
+				context.Background(),
+				zonepb.EmptyCompleteZoneConfig(),
+				existing,
+				&mockRepl{
+					replicationFactor: 6,
+					storeID:           c.leaseholder,
+				},
+				nil, /* replicaStats */
+				c.check,
+				true,  /* checkCandidateFullness */
+				false, /* alwaysAllowDecisionWithoutStats */
+			)
+			if c.expected != target.StoreID {
+				t.Fatalf("expected %d, but found %d", c.expected, target.StoreID)
+			}
+		})
 	}
 }
 
@@ -1823,7 +1930,7 @@ func TestAllocatorShouldTransferLeaseDraining(t *testing.T) {
 	stopper, g, _, storePool, nl := createTestStorePool(
 		TestTimeUntilStoreDeadOff, true, /* deterministic */
 		func() int { return 10 }, /* nodeCount */
-		livenesspb.NodeLivenessStatus_LIVE)
+		kvserverpb.NodeLivenessStatus_LIVE)
 	a := MakeAllocator(storePool, func(string) (time.Duration, bool) {
 		return 0, true
 	})
@@ -1843,7 +1950,7 @@ func TestAllocatorShouldTransferLeaseDraining(t *testing.T) {
 	sg.GossipStores(stores, t)
 
 	// UNAVAILABLE is the node liveness status used for a node that's draining.
-	nl.setNodeStatus(1, livenesspb.NodeLivenessStatus_UNAVAILABLE)
+	nl.setNodeStatus(1, kvserverpb.NodeLivenessStatus_UNAVAILABLE)
 
 	testCases := []struct {
 		leaseholder roachpb.StoreID
@@ -1877,56 +1984,6 @@ func TestAllocatorShouldTransferLeaseDraining(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAllocatorShouldTransferSuspected(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	stopper, g, clock, storePool, nl := createTestStorePool(
-		TestTimeUntilStoreDeadOff, true, /* deterministic */
-		func() int { return 10 }, /* nodeCount */
-		livenesspb.NodeLivenessStatus_LIVE)
-	a := MakeAllocator(storePool, func(string) (time.Duration, bool) {
-		return 0, true
-	})
-	defer stopper.Stop(context.Background())
-
-	var stores []*roachpb.StoreDescriptor
-	// Structure the capacity so we only get the desire to move when store 1 is around.
-	capacity := []int32{0, 20, 20}
-	for i := 1; i <= 3; i++ {
-		stores = append(stores, &roachpb.StoreDescriptor{
-			StoreID:  roachpb.StoreID(i),
-			Node:     roachpb.NodeDescriptor{NodeID: roachpb.NodeID(i)},
-			Capacity: roachpb.StoreCapacity{LeaseCount: capacity[i-1]},
-		})
-	}
-	sg := gossiputil.NewStoreGossiper(g)
-	sg.GossipStores(stores, t)
-
-	assertShouldTransferLease := func(expected bool) {
-		t.Helper()
-		result := a.ShouldTransferLease(
-			context.Background(),
-			zonepb.EmptyCompleteZoneConfig(),
-			replicas(1, 2, 3),
-			2,
-			nil, /* replicaStats */
-		)
-		require.Equal(t, expected, result)
-	}
-	timeAfterStoreSuspect := TimeAfterStoreSuspect.Get(&storePool.st.SV)
-	// Based on capacity node 1 is desirable.
-	assertShouldTransferLease(true)
-	// Flip node 1 to unavailable, there should be no lease transfer now.
-	nl.setNodeStatus(1, livenesspb.NodeLivenessStatus_UNAVAILABLE)
-	assertShouldTransferLease(false)
-	// Set node back to live, but it's still suspected so not lease transfer expected.
-	nl.setNodeStatus(1, livenesspb.NodeLivenessStatus_LIVE)
-	assertShouldTransferLease(false)
-	// Wait out the suspected store timeout, verify that lease transfers are back.
-	clock.Increment(timeAfterStoreSuspect.Nanoseconds() + time.Millisecond.Nanoseconds())
-	assertShouldTransferLease(true)
 }
 
 func TestAllocatorLeasePreferences(t *testing.T) {
@@ -2060,7 +2117,10 @@ func TestAllocatorLeasePreferences(t *testing.T) {
 				context.Background(),
 				zone,
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 5,
+					storeID:           c.leaseholder,
+				},
 				nil,   /* replicaStats */
 				true,  /* checkTransferLeaseSource */
 				true,  /* checkCandidateFullness */
@@ -2073,7 +2133,10 @@ func TestAllocatorLeasePreferences(t *testing.T) {
 				context.Background(),
 				zone,
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 5,
+					storeID:           c.leaseholder,
+				},
 				nil,   /* replicaStats */
 				false, /* checkTransferLeaseSource */
 				true,  /* checkCandidateFullness */
@@ -2156,7 +2219,10 @@ func TestAllocatorLeasePreferencesMultipleStoresPerLocality(t *testing.T) {
 				context.Background(),
 				zone,
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 6,
+					storeID:           c.leaseholder,
+				},
 				nil,   /* replicaStats */
 				true,  /* checkTransferLeaseSource */
 				true,  /* checkCandidateFullness */
@@ -2169,7 +2235,10 @@ func TestAllocatorLeasePreferencesMultipleStoresPerLocality(t *testing.T) {
 				context.Background(),
 				zone,
 				c.existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 6,
+					storeID:           c.leaseholder,
+				},
 				nil,   /* replicaStats */
 				false, /* checkTransferLeaseSource */
 				true,  /* checkCandidateFullness */
@@ -2182,13 +2251,7 @@ func TestAllocatorLeasePreferencesMultipleStoresPerLocality(t *testing.T) {
 	}
 }
 
-// TestAllocatorRemoveBasedOnDiversity tests that replicas that are removed on
-// the basis of diversity are such that the resulting diversity score of the
-// range (after their removal) is the highest. Additionally, it also ensures
-// that voting replica removals only consider the set of existing voters when
-// computing the diversity score, whereas non-voting replica removal considers
-// all existing replicas for its diversity calculation.
-func TestAllocatorRemoveBasedOnDiversity(t *testing.T) {
+func TestAllocatorRemoveTargetLocality(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -2200,163 +2263,61 @@ func TestAllocatorRemoveBasedOnDiversity(t *testing.T) {
 	// Given a set of existing replicas for a range, pick out the ones that should
 	// be removed purely on the basis of locality diversity.
 	testCases := []struct {
-		existingVoters, existingNonVoters     []roachpb.ReplicaDescriptor
-		expVoterRemovals, expNonVoterRemovals []roachpb.StoreID
+		existing []roachpb.StoreID
+		expected []roachpb.StoreID
 	}{
-		// NB: the `existingNonVoters` in these subtests are such that they would be
-		// expected to alter the diversity scores if they were not disregarded
-		// during voter removal.
 		{
-			existingVoters:    replicas(1, 2, 3, 5),
-			existingNonVoters: replicas(6, 7),
-			// 1 and 2 are in the same datacenter.
-			expVoterRemovals:    []roachpb.StoreID{1, 2},
-			expNonVoterRemovals: []roachpb.StoreID{6},
+			[]roachpb.StoreID{1, 2, 3, 5},
+			[]roachpb.StoreID{1, 2},
 		},
 		{
-			existingVoters:      replicas(1, 2, 3),
-			existingNonVoters:   replicas(4, 6, 7),
-			expVoterRemovals:    []roachpb.StoreID{1, 2},
-			expNonVoterRemovals: []roachpb.StoreID{4},
+			[]roachpb.StoreID{1, 2, 3},
+			[]roachpb.StoreID{1, 2},
 		},
 		{
-			existingVoters:      replicas(1, 3, 4, 5),
-			existingNonVoters:   replicas(2),
-			expVoterRemovals:    []roachpb.StoreID{3, 4},
-			expNonVoterRemovals: []roachpb.StoreID{2},
+			[]roachpb.StoreID{1, 3, 4, 5},
+			[]roachpb.StoreID{3, 4},
 		},
 		{
-			existingVoters:      replicas(1, 3, 5, 6),
-			existingNonVoters:   replicas(2, 7, 8),
-			expVoterRemovals:    []roachpb.StoreID{5, 6},
-			expNonVoterRemovals: []roachpb.StoreID{2, 7, 8},
+			[]roachpb.StoreID{1, 3, 5, 6},
+			[]roachpb.StoreID{5, 6},
 		},
 		{
-			existingVoters:      replicas(3, 4, 7, 8),
-			existingNonVoters:   replicas(2, 5, 6),
-			expVoterRemovals:    []roachpb.StoreID{3, 4, 7, 8},
-			expNonVoterRemovals: []roachpb.StoreID{5, 6},
+			[]roachpb.StoreID{1, 3, 5},
+			[]roachpb.StoreID{1, 3, 5},
+		},
+		{
+			[]roachpb.StoreID{1, 3, 4, 6, 7, 8},
+			[]roachpb.StoreID{3, 4, 7, 8},
 		},
 	}
 	for _, c := range testCases {
-		targetVoter, details, err := a.RemoveVoter(
-			context.Background(),
-			zonepb.EmptyCompleteZoneConfig(),
-			c.existingVoters, /* voterCandidates */
-			c.existingVoters,
-			c.existingNonVoters,
-		)
-		require.NoError(t, err)
-
-		require.Truef(
-			t,
-			checkReplExists(targetVoter, c.expVoterRemovals),
-			"expected RemoveVoter(%v) in %v, but got %d; details: %s",
-			c.existingVoters, c.expVoterRemovals, targetVoter.StoreID, details,
-		)
-		// Ensure that we get the same set of results if we didn't have any
-		// non-voting replicas. If non-voters were to have an impact on voters'
-		// diversity score calculations, we would fail here.
-		targetVoter, _, err = a.RemoveVoter(
-			context.Background(),
-			zonepb.EmptyCompleteZoneConfig(),
-			c.existingVoters, /* voterCandidates */
-			c.existingVoters,
-			nil, /* existingNonVoters */
-		)
-		require.NoError(t, err)
-		require.Truef(t, checkReplExists(targetVoter, c.expVoterRemovals),
-			"voter target for removal differs from expectation when non-voters are present;"+
-				" expected %v, got %d", c.expVoterRemovals, targetVoter.StoreID)
-
-		targetNonVoter, _, err := a.RemoveNonVoter(
-			context.Background(),
-			zonepb.EmptyCompleteZoneConfig(),
-			c.existingNonVoters, /* nonVoterCandidates */
-			c.existingVoters,
-			c.existingNonVoters,
-		)
-		require.NoError(t, err)
-		require.True(t, checkReplExists(targetNonVoter, c.expNonVoterRemovals))
-	}
-}
-
-// TestAllocatorConstraintsAndVoterConstraints tests that allocation of voting
-// replicas respects both the `constraints` and the `voter_constraints` and the
-// allocation of non-voting replicas respects just the `constraints`.
-func TestAllocatorConstraintsAndVoterConstraints(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	testCases := []struct {
-		name                                          string
-		existingVoters, existingNonVoters             []roachpb.ReplicaDescriptor
-		stores                                        []*roachpb.StoreDescriptor
-		zone                                          *zonepb.ZoneConfig
-		expectedVoters, expectedNonVoters             []roachpb.StoreID
-		shouldVoterAllocFail, shouldNonVoterAllocFail bool
-		expError                                      string
-	}{
-		{
-			name:              "one store satisfies constraints for each type of replica",
-			stores:            multiDCStores,
-			zone:              &multiDCConfigVoterAndNonVoter,
-			expectedVoters:    []roachpb.StoreID{2},
-			expectedNonVoters: []roachpb.StoreID{1},
-		},
-		{
-			name:                    "only voter can satisfy constraints",
-			stores:                  multiDCStores,
-			zone:                    &multiDCConfigConstrainToA,
-			expectedVoters:          []roachpb.StoreID{1},
-			shouldNonVoterAllocFail: true,
-		},
-		{
-			name:                 "only non_voter can satisfy constraints",
-			stores:               multiDCStores,
-			zone:                 &multiDCConfigUnsatisfiableVoterConstraints,
-			shouldVoterAllocFail: true,
-			expectedNonVoters:    []roachpb.StoreID{1, 2},
-		},
-	}
-
-	check := func(target roachpb.StoreID, stores []roachpb.StoreID) bool {
-		for _, s := range stores {
-			if s == target {
-				return true
+		existingRepls := make([]roachpb.ReplicaDescriptor, len(c.existing))
+		for i, storeID := range c.existing {
+			existingRepls[i] = roachpb.ReplicaDescriptor{
+				NodeID:  roachpb.NodeID(storeID),
+				StoreID: storeID,
 			}
 		}
-		return false
-	}
-
-	for i, test := range testCases {
-		t.Run(fmt.Sprintf("%d:%s", i+1, test.name), func(t *testing.T) {
-			ctx := context.Background()
-			stopper, g, _, a, _ := createTestAllocator(10, false /* deterministic */)
-			defer stopper.Stop(ctx)
-			sg := gossiputil.NewStoreGossiper(g)
-			sg.GossipStores(test.stores, t)
-
-			// Allocate the voting replica first, before the non-voter. This is the
-			// order in which we'd expect the allocator to repair a given range. See
-			// TestAllocatorComputeAction.
-			voterTarget, _, err := a.AllocateVoter(ctx, test.zone, test.existingVoters, test.existingNonVoters)
-			if test.shouldVoterAllocFail {
-				require.Errorf(t, err, "expected voter allocation to fail; got %v as a valid target instead", voterTarget)
-			} else {
-				require.NoError(t, err)
-				require.True(t, check(voterTarget.StoreID, test.expectedVoters))
-				test.existingVoters = append(test.existingVoters, replicas(voterTarget.StoreID)...)
+		targetRepl, details, err := a.RemoveTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			existingRepls,
+			existingRepls,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, storeID := range c.expected {
+			if targetRepl.StoreID == storeID {
+				found = true
+				break
 			}
-
-			nonVoterTarget, _, err := a.AllocateNonVoter(ctx, test.zone, test.existingVoters, test.existingNonVoters)
-			if test.shouldNonVoterAllocFail {
-				require.Errorf(t, err, "expected non-voter allocation to fail; got %v as a valid target instead", nonVoterTarget)
-			} else {
-				require.True(t, check(nonVoterTarget.StoreID, test.expectedNonVoters))
-				require.NoError(t, err)
-			}
-		})
+		}
+		if !found {
+			t.Errorf("expected RemoveTarget(%v) in %v, but got %d; details: %s", c.existing, c.expected, targetRepl.StoreID, details)
+		}
 	}
 }
 
@@ -2422,7 +2383,11 @@ func TestAllocatorAllocateTargetLocality(t *testing.T) {
 				StoreID: storeID,
 			}
 		}
-		targetStore, details, err := a.AllocateVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), existingRepls, nil)
+		targetStore, details, err := a.AllocateTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			existingRepls,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2434,7 +2399,7 @@ func TestAllocatorAllocateTargetLocality(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("expected AllocateVoter(%v) in %v, but got %d; details: %s", c.existing, c.expected, targetStore.StoreID, details)
+			t.Errorf("expected AllocateTarget(%v) in %v, but got %d; details: %s", c.existing, c.expected, targetStore.StoreID, details)
 		}
 	}
 }
@@ -2540,9 +2505,16 @@ func TestAllocatorRebalanceTargetLocality(t *testing.T) {
 			}
 		}
 		var rangeUsageInfo RangeUsageInfo
-		target, _, details, ok := a.RebalanceVoter(context.Background(), zonepb.EmptyCompleteZoneConfig(), nil, existingRepls, nil, rangeUsageInfo, storeFilterThrottled)
+		target, _, details, ok := a.RebalanceTarget(
+			context.Background(),
+			zonepb.EmptyCompleteZoneConfig(),
+			nil,
+			existingRepls,
+			rangeUsageInfo,
+			storeFilterThrottled,
+		)
 		if !ok {
-			t.Fatalf("%d: RebalanceVoter(%v) returned no target store; details: %s", i, c.existing, details)
+			t.Fatalf("%d: RebalanceTarget(%v) returned no target store; details: %s", i, c.existing, details)
 		}
 		var found bool
 		for _, storeID := range c.expected {
@@ -2552,7 +2524,7 @@ func TestAllocatorRebalanceTargetLocality(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("%d: expected RebalanceVoter(%v) in %v, but got %d; details: %s",
+			t.Errorf("%d: expected RebalanceTarget(%v) in %v, but got %d; details: %s",
 				i, c.existing, c.expected, target.StoreID, details)
 		}
 	}
@@ -2672,229 +2644,6 @@ var (
 		},
 	}
 )
-
-// TestAllocateCandidatesExcludeNonReadyNodes checks that non-ready
-// (e.g. draining) nodes, as per a store pool's
-// isNodeValidForRoutineReplicaTransfer(), are excluded from the list
-// of candidates for an allocation.
-func TestAllocateCandidatesExcludeNonReadyNodes(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	// NB: These stores are ordered from least likely to most likely to receive a
-	// replica.
-	stores := []*roachpb.StoreDescriptor{
-		{
-			StoreID:  1,
-			Node:     roachpb.NodeDescriptor{NodeID: 1},
-			Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 600},
-		},
-		{
-			StoreID:  2,
-			Node:     roachpb.NodeDescriptor{NodeID: 2},
-			Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 450},
-		},
-		{
-			StoreID:  3,
-			Node:     roachpb.NodeDescriptor{NodeID: 3},
-			Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 300},
-		},
-		{
-			StoreID:  4,
-			Node:     roachpb.NodeDescriptor{NodeID: 4},
-			Capacity: roachpb.StoreCapacity{Capacity: 200, Available: 100, RangeCount: 150},
-		},
-	}
-
-	stopper, g, _, a, _ := createTestAllocator(10, false /* deterministic */)
-	defer stopper.Stop(context.Background())
-	sg := gossiputil.NewStoreGossiper(g)
-	sg.GossipStores(stores, t)
-	sl, _, _ := a.storePool.getStoreList(storeFilterThrottled)
-
-	testCases := []struct {
-		existing []roachpb.StoreID
-		excluded []roachpb.StoreID
-		expected []roachpb.StoreID
-	}{
-		{
-			[]roachpb.StoreID{1},
-			[]roachpb.StoreID{2},
-			[]roachpb.StoreID{3, 4},
-		},
-		{
-			[]roachpb.StoreID{1},
-			[]roachpb.StoreID{2, 3},
-			[]roachpb.StoreID{4},
-		},
-		{
-			[]roachpb.StoreID{1},
-			[]roachpb.StoreID{2, 3, 4},
-			[]roachpb.StoreID{},
-		},
-		{
-			[]roachpb.StoreID{1},
-			[]roachpb.StoreID{2, 4},
-			[]roachpb.StoreID{3},
-		},
-	}
-
-	for testIdx, tc := range testCases {
-		existingRepls := make([]roachpb.ReplicaDescriptor, len(tc.existing))
-		for i, storeID := range tc.existing {
-			existingRepls[i] = roachpb.ReplicaDescriptor{
-				NodeID:  roachpb.NodeID(storeID),
-				StoreID: storeID,
-			}
-		}
-		// No constraints.
-		zone := &zonepb.ZoneConfig{NumReplicas: proto.Int32(0), Constraints: nil}
-		analyzed := constraint.AnalyzeConstraints(
-			context.Background(), a.storePool.getStoreDescriptor, existingRepls, *zone.NumReplicas,
-			zone.Constraints)
-		allocationConstraintsChecker := voterConstraintsCheckerForAllocation(analyzed, constraint.EmptyAnalyzedConstraints)
-		removalConstraintsChecker := voterConstraintsCheckerForRemoval(analyzed, constraint.EmptyAnalyzedConstraints)
-		rebalanceConstraintsChecker := voterConstraintsCheckerForRebalance(analyzed, constraint.EmptyAnalyzedConstraints)
-
-		a.storePool.isStoreReadyForRoutineReplicaTransfer = func(_ context.Context, storeID roachpb.StoreID) bool {
-			for _, s := range tc.excluded {
-				if s == storeID {
-					return false
-				}
-			}
-			return true
-		}
-
-		t.Run(fmt.Sprintf("%d/allocate", testIdx), func(t *testing.T) {
-			candidates := rankedCandidateListForAllocation(
-				context.Background(),
-				sl,
-				allocationConstraintsChecker,
-				existingRepls,
-				a.storePool.getLocalitiesByStore(existingRepls),
-				a.storePool.isStoreReadyForRoutineReplicaTransfer,
-				false, /* allowMultipleReplsPerNode */
-				a.scorerOptions(),
-			)
-
-			if !expectedStoreIDsMatch(tc.expected, candidates) {
-				t.Errorf("expected rankedCandidateListForAllocation(%v) = %v, but got %v",
-					tc.existing, tc.expected, candidates)
-			}
-		})
-
-		t.Run(fmt.Sprintf("%d/rebalance", testIdx), func(t *testing.T) {
-			rebalanceOpts := rankedCandidateListForRebalancing(
-				context.Background(),
-				sl,
-				removalConstraintsChecker,
-				rebalanceConstraintsChecker,
-				existingRepls,
-				nil,
-				a.storePool.getLocalitiesByStore(existingRepls),
-				a.storePool.isStoreReadyForRoutineReplicaTransfer,
-				a.scorerOptions(),
-			)
-			if len(tc.expected) > 0 {
-				require.Len(t, rebalanceOpts, 1)
-				candidateStores := make([]roachpb.StoreID, len(rebalanceOpts[0].candidates))
-				for i, cand := range rebalanceOpts[0].candidates {
-					candidateStores[i] = cand.store.StoreID
-				}
-				require.ElementsMatch(t, tc.expected, candidateStores)
-				existingStores := make([]roachpb.StoreID, len(rebalanceOpts[0].existingCandidates))
-				for i, cand := range rebalanceOpts[0].existingCandidates {
-					existingStores[i] = cand.store.StoreID
-				}
-				require.ElementsMatch(t, tc.existing, existingStores)
-			} else {
-				require.Len(t, rebalanceOpts, 0)
-			}
-		})
-	}
-}
-
-// TestAllocatorNonVoterAllocationExcludesVoterNodes checks that when allocating
-// non-voting replicas, stores that have any existing replica (voting or
-// non-voting) are excluded from the list of candidates.
-func TestAllocatorNonVoterAllocationExcludesVoterNodes(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	testCases := []struct {
-		name                              string
-		existingVoters, existingNonVoters []roachpb.ReplicaDescriptor
-		stores                            []*roachpb.StoreDescriptor
-		zone                              *zonepb.ZoneConfig
-		expected                          roachpb.StoreID
-		shouldFail                        bool
-		expError                          string
-	}{
-		{
-			name:              "voters only",
-			existingNonVoters: replicas(1, 2, 3, 4),
-			stores:            sameDCStores,
-			zone:              zonepb.EmptyCompleteZoneConfig(),
-			// Expect that that the store that doesn't have any replicas would be
-			// the one to receive a new non-voter.
-			expected: roachpb.StoreID(5),
-		},
-		{
-			name:              "non-voters only",
-			existingNonVoters: replicas(1, 2, 3, 4),
-			stores:            sameDCStores,
-			zone:              zonepb.EmptyCompleteZoneConfig(),
-			expected:          roachpb.StoreID(5),
-		},
-		{
-			name:              "mixed",
-			existingVoters:    replicas(1, 2),
-			existingNonVoters: replicas(3, 4),
-			stores:            sameDCStores,
-			zone:              zonepb.EmptyCompleteZoneConfig(),
-			expected:          roachpb.StoreID(5),
-		},
-		{
-			name: "only valid store has a voter",
-			// Place a voter on the only store that would meet the constraints of
-			// `multiDCConfigConstrainToA`.
-			existingVoters: replicas(1),
-			stores:         multiDCStores,
-			zone:           &multiDCConfigConstrainToA,
-			shouldFail:     true,
-			expError:       "0 of 2 live stores are able to take a new replica for the range",
-		},
-		{
-			name: "only valid store has a non_voter",
-			// Place a non-voter on the only store that would meet the constraints of
-			// `multiDCConfigConstrainToA`.
-			existingNonVoters: replicas(1),
-			stores:            multiDCStores,
-			zone:              &multiDCConfigConstrainToA,
-			shouldFail:        true,
-			expError:          "0 of 2 live stores are able to take a new replica for the range",
-		},
-	}
-
-	for i, test := range testCases {
-		t.Run(fmt.Sprintf("%d:%s", i+1, test.name), func(t *testing.T) {
-			ctx := context.Background()
-			stopper, g, _, a, _ := createTestAllocator(10, false /* deterministic */)
-			defer stopper.Stop(ctx)
-			sg := gossiputil.NewStoreGossiper(g)
-			sg.GossipStores(test.stores, t)
-
-			result, _, err := a.AllocateNonVoter(ctx, test.zone, test.existingVoters, test.existingNonVoters)
-			if test.shouldFail {
-				require.Error(t, err)
-				require.Regexp(t, test.expError, err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, test.expected, result.StoreID)
-			}
-		})
-	}
-}
 
 func TestAllocateCandidatesNumReplicasConstraints(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -3106,18 +2855,12 @@ func TestAllocateCandidatesNumReplicasConstraints(t *testing.T) {
 		}
 		zone := &zonepb.ZoneConfig{NumReplicas: proto.Int32(0), Constraints: tc.constraints}
 		analyzed := constraint.AnalyzeConstraints(
-			context.Background(), a.storePool.getStoreDescriptor, existingRepls, *zone.NumReplicas,
-			zone.Constraints)
-		checkFn := voterConstraintsCheckerForAllocation(analyzed, constraint.EmptyAnalyzedConstraints)
-
-		candidates := rankedCandidateListForAllocation(
-			context.Background(),
+			context.Background(), a.storePool.getStoreDescriptor, existingRepls, zone)
+		candidates := allocateCandidates(
 			sl,
-			checkFn,
+			analyzed,
 			existingRepls,
 			a.storePool.getLocalitiesByStore(existingRepls),
-			func(context.Context, roachpb.StoreID) bool { return true },
-			false, /* allowMultipleReplsPerNode */
 			a.scorerOptions(),
 		)
 		best := candidates.best()
@@ -3136,7 +2879,7 @@ func TestAllocateCandidatesNumReplicasConstraints(t *testing.T) {
 			}
 		}
 		if !match {
-			t.Errorf("%d: expected rankedCandidateListForAllocation(%v) = %v, but got %v",
+			t.Errorf("%d: expected allocateCandidates(%v) = %v, but got %v",
 				testIdx, tc.existing, tc.expected, candidates)
 		}
 	}
@@ -3334,33 +3077,18 @@ func TestRemoveCandidatesNumReplicasConstraints(t *testing.T) {
 				StoreID: storeID,
 			}
 		}
-		ctx := context.Background()
-		analyzed := constraint.AnalyzeConstraints(ctx, a.storePool.getStoreDescriptor, existingRepls,
-			0 /* numReplicas */, tc.constraints)
-
-		// Check behavior in a zone config where `voter_constraints` are empty.
-		checkFn := voterConstraintsCheckerForRemoval(analyzed, constraint.EmptyAnalyzedConstraints)
-		candidates := rankedCandidateListForRemoval(sl,
-			checkFn,
+		zone := &zonepb.ZoneConfig{NumReplicas: proto.Int32(0), Constraints: tc.constraints}
+		analyzed := constraint.AnalyzeConstraints(
+			context.Background(), a.storePool.getStoreDescriptor, existingRepls, zone)
+		candidates := removeCandidates(
+			sl,
+			analyzed,
 			a.storePool.getLocalitiesByStore(existingRepls),
-			a.scorerOptions())
+			a.scorerOptions(),
+		)
 		if !expectedStoreIDsMatch(tc.expected, candidates.worst()) {
-			t.Errorf("%d (with `constraints`): expected rankedCandidateListForRemoval(%v)"+
-				" = %v, but got %v\n for candidates %v", testIdx, tc.existing, tc.expected,
-				candidates.worst(), candidates)
-		}
-
-		// Check that we'd see the same result if the same constraints were
-		// specified as `voter_constraints`.
-		checkFn = voterConstraintsCheckerForRemoval(constraint.EmptyAnalyzedConstraints, analyzed)
-		candidates = rankedCandidateListForRemoval(sl,
-			checkFn,
-			a.storePool.getLocalitiesByStore(existingRepls),
-			a.scorerOptions())
-		if !expectedStoreIDsMatch(tc.expected, candidates.worst()) {
-			t.Errorf("%d (with `voter_constraints`): expected rankedCandidateListForRemoval(%v)"+
-				" = %v, but got %v\n for candidates %v", testIdx, tc.existing, tc.expected,
-				candidates.worst(), candidates)
+			t.Errorf("%d: expected removeCandidates(%v) = %v, but got %v",
+				testIdx, tc.existing, tc.expected, candidates)
 		}
 	}
 }
@@ -3378,199 +3106,6 @@ func expectedStoreIDsMatch(expected []roachpb.StoreID, results candidateList) bo
 		}
 	}
 	return true
-}
-
-// TestAllocatorRebalanceNonVoters tests that non-voting replicas rebalance "as
-// expected". In particular, it checks the following things:
-//
-// 1. Non-voter rebalancing obeys the allocator's capacity based heuristics.
-// 2. Non-voter rebalancing tries to ensure constraints conformance.
-func TestAllocatorRebalanceNonVoters(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
-
-	type testCase struct {
-		name                                      string
-		stores                                    []*roachpb.StoreDescriptor
-		zone                                      *zonepb.ZoneConfig
-		existingVoters, existingNonVoters         []roachpb.ReplicaDescriptor
-		expectNoAction                            bool
-		expectedRemoveTargets, expectedAddTargets []roachpb.StoreID
-	}
-	tests := []testCase{
-		{
-			name:              "no-op",
-			stores:            multiDiversityDCStores,
-			zone:              zonepb.EmptyCompleteZoneConfig(),
-			existingVoters:    replicas(1),
-			existingNonVoters: replicas(3),
-			expectNoAction:    true,
-		},
-		// Test that rebalancing based on just the diversity scores works as
-		// expected. In particular, we expect non-voter rebalancing to compute
-		// diversity scores based on the entire existing replica set, and not just
-		// the set of non-voting replicas.
-		{
-			name:                  "diversity among non-voters",
-			stores:                multiDiversityDCStores,
-			zone:                  zonepb.EmptyCompleteZoneConfig(),
-			existingVoters:        replicas(1, 2),
-			existingNonVoters:     replicas(3, 4, 6),
-			expectedRemoveTargets: []roachpb.StoreID{3, 4},
-			expectedAddTargets:    []roachpb.StoreID{7, 8},
-		},
-		{
-			name:                  "diversity among all existing replicas",
-			stores:                multiDiversityDCStores,
-			zone:                  zonepb.EmptyCompleteZoneConfig(),
-			existingVoters:        replicas(1),
-			existingNonVoters:     replicas(2, 4, 6),
-			expectedRemoveTargets: []roachpb.StoreID{2},
-			expectedAddTargets:    []roachpb.StoreID{7, 8},
-		},
-		// Test that non-voting replicas obey the capacity / load based heuristics
-		// for rebalancing.
-		{
-			name: "move off of nodes with full disk",
-			// NB: Store 1 has a 97.5% full disk.
-			stores:                oneStoreWithFullDisk,
-			zone:                  zonepb.EmptyCompleteZoneConfig(),
-			existingVoters:        replicas(3),
-			existingNonVoters:     replicas(1),
-			expectedRemoveTargets: []roachpb.StoreID{1},
-			expectedAddTargets:    []roachpb.StoreID{2},
-		},
-		{
-			name: "move off of nodes with too many ranges",
-			// NB: Store 1 has 3x the number of ranges as the other stores.
-			stores:                oneStoreWithTooManyRanges,
-			zone:                  zonepb.EmptyCompleteZoneConfig(),
-			existingVoters:        replicas(3),
-			existingNonVoters:     replicas(1),
-			expectedRemoveTargets: []roachpb.StoreID{1},
-			expectedAddTargets:    []roachpb.StoreID{2},
-		},
-		// Test that `constraints` cause non-voters to move around in order to
-		// sustain constraints conformance.
-		{
-			name:   "already on a store that satisfies constraints for non_voters",
-			stores: multiDCStores,
-			// Constrain a voter to store 2 and a non_voter to store 1.
-			zone:              &multiDCConfigVoterAndNonVoter,
-			existingVoters:    replicas(2),
-			existingNonVoters: replicas(1),
-			expectNoAction:    true,
-		},
-		{
-			name:   "need to rebalance to conform to constraints",
-			stores: multiDCStores,
-			// Constrain a non_voter to store 1.
-			zone:                  &multiDCConfigVoterAndNonVoter,
-			existingVoters:        nil,
-			existingNonVoters:     replicas(2),
-			expectedRemoveTargets: []roachpb.StoreID{2},
-			expectedAddTargets:    []roachpb.StoreID{1},
-		},
-		{
-			// Test that non-voting replica rebalancing does not consider stores that
-			// have voters as valid candidates, even if those stores satisfy
-			// constraints.
-			name:              "need to rebalance, but cannot because a voter already exists",
-			stores:            multiDCStores,
-			zone:              &multiDCConfigVoterAndNonVoter,
-			existingVoters:    replicas(1),
-			existingNonVoters: replicas(2),
-			expectNoAction:    true,
-		},
-	}
-
-	var rangeUsageInfo RangeUsageInfo
-	chk := func(target roachpb.ReplicationTarget, expectedCandidates []roachpb.StoreID) bool {
-		for _, candidate := range expectedCandidates {
-			if target.StoreID == candidate {
-				return true
-			}
-		}
-		return false
-	}
-
-	for i, test := range tests {
-		t.Run(fmt.Sprintf("%d_%s", i+1, test.name), func(t *testing.T) {
-			stopper, g, _, a, _ := createTestAllocator(10, false /* deterministic */)
-			defer stopper.Stop(ctx)
-			sg := gossiputil.NewStoreGossiper(g)
-			sg.GossipStores(test.stores, t)
-			add, remove, _, ok := a.RebalanceNonVoter(ctx,
-				test.zone,
-				nil,
-				test.existingVoters,
-				test.existingNonVoters,
-				rangeUsageInfo,
-				storeFilterThrottled)
-			if test.expectNoAction {
-				require.True(t, !ok)
-			} else {
-				require.Truef(t, ok, "no action taken on range")
-				require.Truef(t,
-					chk(add, test.expectedAddTargets),
-					"the addition target %+v from RebalanceNonVoter doesn't match expectation",
-					add)
-				require.Truef(t,
-					chk(remove, test.expectedRemoveTargets),
-					"the removal target %+v from RebalanceNonVoter doesn't match expectation",
-					remove)
-			}
-		})
-	}
-}
-
-// TestVotersCanRebalanceToNonVoterStores ensures that rebalancing of voting
-// replicas considers stores that have non-voters as feasible candidates.
-func TestVotersCanRebalanceToNonVoterStores(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	ctx := context.Background()
-	stopper, g, _, a, _ := createTestAllocator(10, false /* deterministic */)
-	defer stopper.Stop(context.Background())
-	sg := gossiputil.NewStoreGossiper(g)
-	sg.GossipStores(multiDiversityDCStores, t)
-
-	zone := zonepb.ZoneConfig{
-		NumReplicas: proto.Int32(4),
-		NumVoters:   proto.Int32(2),
-		// We constrain 2 voting replicas to datacenter "a" (stores 1 and 2) but
-		// place non voting replicas there. In order to achieve constraints
-		// conformance, each of the voters must want to move to one of these stores.
-		VoterConstraints: []zonepb.ConstraintsConjunction{
-			{
-				NumReplicas: 2,
-				Constraints: []zonepb.Constraint{
-					{Type: zonepb.Constraint_REQUIRED, Key: "datacenter", Value: "a"},
-				},
-			},
-		},
-	}
-
-	var rangeUsageInfo RangeUsageInfo
-	existingNonVoters := replicas(1, 2)
-	existingVoters := replicas(3, 4)
-	add, remove, _, ok := a.RebalanceVoter(
-		ctx,
-		&zone,
-		nil,
-		existingVoters,
-		existingNonVoters,
-		rangeUsageInfo,
-		storeFilterThrottled,
-	)
-
-	require.Truef(t, ok, "no action taken")
-	if !(add.StoreID == roachpb.StoreID(1) || add.StoreID == roachpb.StoreID(2)) {
-		t.Fatalf("received unexpected addition target %s from RebalanceVoter", add)
-	}
-	if !(remove.StoreID == roachpb.StoreID(3) || remove.StoreID == roachpb.StoreID(4)) {
-		t.Fatalf("received unexpected removal target %s from RebalanceVoter", remove)
-	}
 }
 
 func TestRebalanceCandidatesNumReplicasConstraints(t *testing.T) {
@@ -4339,26 +3874,13 @@ func TestRebalanceCandidatesNumReplicasConstraints(t *testing.T) {
 			NumReplicas: proto.Int32(tc.zoneNumReplicas),
 		}
 		analyzed := constraint.AnalyzeConstraints(
-			context.Background(), a.storePool.getStoreDescriptor, existingRepls,
-			*zone.NumReplicas, zone.Constraints)
-		removalConstraintsChecker := voterConstraintsCheckerForRemoval(
-			analyzed,
-			constraint.EmptyAnalyzedConstraints,
-		)
-		rebalanceConstraintsChecker := voterConstraintsCheckerForRebalance(
-			analyzed,
-			constraint.EmptyAnalyzedConstraints,
-		)
-
-		results := rankedCandidateListForRebalancing(
+			context.Background(), a.storePool.getStoreDescriptor, existingRepls, zone)
+		results := rebalanceCandidates(
 			context.Background(),
 			sl,
-			removalConstraintsChecker,
-			rebalanceConstraintsChecker,
+			analyzed,
 			existingRepls,
-			nil,
 			a.storePool.getLocalitiesByStore(existingRepls),
-			func(context.Context, roachpb.StoreID) bool { return true },
 			a.scorerOptions(),
 		)
 		match := true
@@ -4377,12 +3899,13 @@ func TestRebalanceCandidatesNumReplicasConstraints(t *testing.T) {
 			}
 		}
 		if !match {
-			t.Errorf("%d: expected rankedCandidateListForRebalancing(%v) = %v, but got %v",
+			t.Errorf("%d: expected rebalanceCandidates(%v) = %v, but got %v",
 				testIdx, tc.existing, tc.expected, results)
 		} else {
-			// Also verify that RebalanceVoter picks out one of the best options as
+			// Also verify that RebalanceTarget picks out one of the best options as
 			// the final rebalance choice.
-			target, _, details, ok := a.RebalanceVoter(context.Background(), zone, nil, existingRepls, nil, rangeUsageInfo, storeFilterThrottled)
+			target, _, details, ok := a.RebalanceTarget(
+				context.Background(), zone, nil, existingRepls, rangeUsageInfo, storeFilterThrottled)
 			var found bool
 			if !ok && len(tc.validTargets) == 0 {
 				found = true
@@ -4394,7 +3917,7 @@ func TestRebalanceCandidatesNumReplicasConstraints(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Errorf("%d: expected RebalanceVoter(%v) to be in %v, but got %v; details: %s",
+				t.Errorf("%d: expected RebalanceTarget(%v) to be in %v, but got %v; details: %s",
 					testIdx, tc.existing, tc.validTargets, target, details)
 			}
 		}
@@ -4410,7 +3933,7 @@ func TestAllocatorTransferLeaseTargetLoadBased(t *testing.T) {
 	stopper, g, _, storePool, _ := createTestStorePool(
 		TestTimeUntilStoreDeadOff, true, /* deterministic */
 		func() int { return 10 }, /* nodeCount */
-		livenesspb.NodeLivenessStatus_LIVE)
+		kvserverpb.NodeLivenessStatus_LIVE)
 	defer stopper.Stop(context.Background())
 
 	// 3 stores where the lease count for each store is equal to 10x the store ID.
@@ -4479,9 +4002,9 @@ func TestAllocatorTransferLeaseTargetLoadBased(t *testing.T) {
 	}
 
 	existing := []roachpb.ReplicaDescriptor{
-		{NodeID: 1, StoreID: 1},
-		{NodeID: 2, StoreID: 2},
-		{NodeID: 3, StoreID: 3},
+		{NodeID: 1, StoreID: 1, ReplicaID: 1},
+		{NodeID: 2, StoreID: 2, ReplicaID: 2},
+		{NodeID: 3, StoreID: 3, ReplicaID: 3},
 	}
 
 	testCases := []struct {
@@ -4559,7 +4082,10 @@ func TestAllocatorTransferLeaseTargetLoadBased(t *testing.T) {
 				context.Background(),
 				zonepb.EmptyCompleteZoneConfig(),
 				existing,
-				c.leaseholder,
+				&mockRepl{
+					replicationFactor: 3,
+					storeID:           c.leaseholder,
+				},
 				c.stats,
 				c.check,
 				true,  /* checkCandidateFullness */
@@ -4576,9 +4102,8 @@ func TestLoadBasedLeaseRebalanceScore(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	enableLoadBasedLeaseRebalancing.Override(ctx, &st.SV, true)
+	enableLoadBasedLeaseRebalancing.Override(&st.SV, true)
 
 	remoteStore := roachpb.StoreDescriptor{
 		Node: roachpb.NodeDescriptor{
@@ -4682,13 +4207,13 @@ func TestLoadBasedLeaseRebalanceScore(t *testing.T) {
 	}
 }
 
-// TestAllocatorRemoveTargetBasedOnCapacity verifies that the replica chosen by
-// RemoveVoter is the one with the lowest capacity.
-func TestAllocatorRemoveTargetBasedOnCapacity(t *testing.T) {
+// TestAllocatorRemoveTarget verifies that the replica chosen by RemoveTarget is
+// the one with the lowest capacity.
+func TestAllocatorRemoveTarget(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// List of replicas that will be passed to RemoveVoter
+	// List of replicas that will be passed to RemoveTarget
 	replicas := []roachpb.ReplicaDescriptor{
 		{
 			StoreID:   1,
@@ -4755,13 +4280,17 @@ func TestAllocatorRemoveTargetBasedOnCapacity(t *testing.T) {
 
 	// Repeat this test 10 times, it should always be either store 2 or 3.
 	for i := 0; i < 10; i++ {
-		targetRepl, _, err := a.RemoveVoter(ctx, zonepb.EmptyCompleteZoneConfig(), replicas, replicas,
-			nil)
+		targetRepl, _, err := a.RemoveTarget(
+			ctx,
+			zonepb.EmptyCompleteZoneConfig(),
+			replicas,
+			replicas,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if a, e1, e2 := targetRepl, replicas[1], replicas[2]; a != e1 && a != e2 {
-			t.Fatalf("%d: RemoveVoter did not select either expected replica; expected %v or %v, got %v",
+			t.Fatalf("%d: RemoveTarget did not select either expected replica; expected %v or %v, got %v",
 				i, e1, e2, a)
 		}
 	}
@@ -4805,7 +4334,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorReplaceDeadVoter,
+			expectedAction: AllocatorReplaceDead,
 		},
 		// Need five replicas, one is on a dead store.
 		{
@@ -4844,70 +4373,8 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorReplaceDeadVoter,
+			expectedAction: AllocatorReplaceDead,
 		},
-		// Need 1 non-voter but a voter is on a dead store.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(5),
-				NumVoters:     proto.Int32(3),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-					},
-					{
-						StoreID:   4,
-						NodeID:    4,
-						ReplicaID: 4,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorReplaceDeadVoter,
-		},
-		// Need 3 replicas, have 2, but one of them is dead so we don't have quorum.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(3),
-				Constraints:   []zonepb.ConstraintsConjunction{{Constraints: []zonepb.Constraint{{Value: "us-east", Type: zonepb.Constraint_DEPRECATED_POSITIVE}}}},
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-					},
-				},
-			},
-			// TODO(aayush): This test should be returning an
-			// AllocatorRangeUnavailable.
-			expectedAction: AllocatorAddVoter,
-		},
-
 		// Need three replicas, have two.
 		{
 			zone: zonepb.ZoneConfig{
@@ -4930,37 +4397,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorAddVoter,
-		},
-		// Need a voter and a non-voter.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(5),
-				NumVoters:     proto.Int32(3),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-					},
-					{
-						StoreID:   4,
-						NodeID:    4,
-						ReplicaID: 4,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorAddVoter,
+			expectedAction: AllocatorAdd,
 		},
 		// Need five replicas, have four, one is on a dead store.
 		{
@@ -4994,7 +4431,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorAddVoter,
+			expectedAction: AllocatorAdd,
 		},
 		// Need five replicas, have four.
 		{
@@ -5028,7 +4465,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorAddVoter,
+			expectedAction: AllocatorAdd,
 		},
 		// Need three replicas, have four, one is on a dead store.
 		{
@@ -5062,7 +4499,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorRemoveDeadVoter,
+			expectedAction: AllocatorRemoveDead,
 		},
 		// Need five replicas, have six, one is on a dead store.
 		{
@@ -5106,7 +4543,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorRemoveDeadVoter,
+			expectedAction: AllocatorRemoveDead,
 		},
 		// Need three replicas, have five, one is on a dead store.
 		{
@@ -5145,7 +4582,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorRemoveDeadVoter,
+			expectedAction: AllocatorRemoveDead,
 		},
 		// Need three replicas, have four.
 		{
@@ -5179,7 +4616,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorRemoveVoter,
+			expectedAction: AllocatorRemove,
 		},
 		// Need three replicas, have five.
 		{
@@ -5218,163 +4655,7 @@ func TestAllocatorComputeAction(t *testing.T) {
 					},
 				},
 			},
-			expectedAction: AllocatorRemoveVoter,
-		},
-		// Need 2 non-voting replicas, have 2 but one of them is on a dead node.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(5),
-				NumVoters:     proto.Int32(3),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-					},
-					{
-						StoreID:   3,
-						NodeID:    3,
-						ReplicaID: 3,
-					},
-					{
-						StoreID:   4,
-						NodeID:    4,
-						ReplicaID: 4,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorReplaceDeadNonVoter,
-		},
-		// Need 2 non-voting replicas, have none.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(5),
-				NumVoters:     proto.Int32(3),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-					},
-					{
-						StoreID:   3,
-						NodeID:    3,
-						ReplicaID: 3,
-					},
-				},
-			},
-			expectedAction: AllocatorAddNonVoter,
-		},
-		// Need 2 non-voting replicas, have 1 but its on a dead node.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(3),
-				NumVoters:     proto.Int32(1),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorAddNonVoter,
-		},
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(2),
-				NumVoters:     proto.Int32(1),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorRemoveDeadNonVoter,
-		},
-		// Need 1 non-voting replicas, have 2.
-		{
-			zone: zonepb.ZoneConfig{
-				NumReplicas:   proto.Int32(2),
-				NumVoters:     proto.Int32(1),
-				RangeMinBytes: proto.Int64(0),
-				RangeMaxBytes: proto.Int64(64000),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   2,
-						NodeID:    2,
-						ReplicaID: 2,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   3,
-						NodeID:    3,
-						ReplicaID: 3,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction: AllocatorRemoveNonVoter,
+			expectedAction: AllocatorRemove,
 		},
 		// Need three replicas, two are on dead stores. Should
 		// be a noop because there aren't enough live replicas for
@@ -5479,7 +4760,6 @@ func TestAllocatorComputeAction(t *testing.T) {
 		[]roachpb.StoreID{6, 7},
 		nil,
 		nil,
-		nil,
 	)
 
 	lastPriority := float64(999999999)
@@ -5545,14 +4825,14 @@ func TestAllocatorComputeActionRemoveDead(t *testing.T) {
 			desc:           threeReplDesc,
 			live:           []roachpb.StoreID{1, 2},
 			dead:           []roachpb.StoreID{3},
-			expectedAction: AllocatorReplaceDeadVoter,
+			expectedAction: AllocatorReplaceDead,
 		},
 		// Needs three replicas, one is dead, but there is a replacement.
 		{
 			desc:           threeReplDesc,
 			live:           []roachpb.StoreID{1, 2, 4},
 			dead:           []roachpb.StoreID{3},
-			expectedAction: AllocatorReplaceDeadVoter,
+			expectedAction: AllocatorReplaceDead,
 		},
 		// Needs three replicas, two are dead (i.e. the range lacks a quorum).
 		{
@@ -5566,7 +4846,7 @@ func TestAllocatorComputeActionRemoveDead(t *testing.T) {
 			desc:           fourReplDesc,
 			live:           []roachpb.StoreID{1, 2, 4},
 			dead:           []roachpb.StoreID{3},
-			expectedAction: AllocatorRemoveDeadVoter,
+			expectedAction: AllocatorRemoveDead,
 		},
 		// Needs three replicas, has four, two are dead (i.e. the range lacks a quorum).
 		{
@@ -5582,82 +4862,7 @@ func TestAllocatorComputeActionRemoveDead(t *testing.T) {
 	defer stopper.Stop(ctx)
 
 	for i, tcase := range testCases {
-		mockStorePool(sp, tcase.live, nil, tcase.dead, nil, nil, nil)
-		action, _ := a.ComputeAction(ctx, &zone, &tcase.desc)
-		if tcase.expectedAction != action {
-			t.Errorf("Test case %d expected action %d, got action %d", i, tcase.expectedAction, action)
-		}
-	}
-}
-
-func TestAllocatorComputeActionSuspect(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	zone := zonepb.ZoneConfig{
-		NumReplicas: proto.Int32(3),
-	}
-	threeReplDesc := roachpb.RangeDescriptor{
-		InternalReplicas: []roachpb.ReplicaDescriptor{
-			{
-				StoreID:   1,
-				NodeID:    1,
-				ReplicaID: 1,
-			},
-			{
-				StoreID:   2,
-				NodeID:    2,
-				ReplicaID: 2,
-			},
-			{
-				StoreID:   3,
-				NodeID:    3,
-				ReplicaID: 3,
-			},
-		},
-	}
-
-	testCases := []struct {
-		desc           roachpb.RangeDescriptor
-		live           []roachpb.StoreID
-		suspect        []roachpb.StoreID
-		expectedAction AllocatorAction
-	}{
-		{
-			desc:           threeReplDesc,
-			live:           []roachpb.StoreID{1, 2, 3},
-			suspect:        nil,
-			expectedAction: AllocatorConsiderRebalance,
-		},
-		{
-			desc:           threeReplDesc,
-			live:           []roachpb.StoreID{1, 2},
-			suspect:        []roachpb.StoreID{3},
-			expectedAction: AllocatorConsiderRebalance,
-		},
-		{
-			desc:           threeReplDesc,
-			live:           []roachpb.StoreID{1, 2, 4},
-			suspect:        []roachpb.StoreID{3},
-			expectedAction: AllocatorConsiderRebalance,
-		},
-		{
-			// When trying to determine whether a range can achieve quorum, we count
-			// suspect nodes as live because they _currently_ have a "live" node
-			// liveness record.
-			desc:           threeReplDesc,
-			live:           []roachpb.StoreID{1, 4},
-			suspect:        []roachpb.StoreID{2, 3},
-			expectedAction: AllocatorConsiderRebalance,
-		},
-	}
-
-	stopper, _, sp, a, _ := createTestAllocator(10, false /* deterministic */)
-	ctx := context.Background()
-	defer stopper.Stop(ctx)
-
-	for i, tcase := range testCases {
-		mockStorePool(sp, tcase.live, nil, nil, nil, nil, tcase.suspect)
+		mockStorePool(sp, tcase.live, nil, tcase.dead, nil, nil)
 		action, _ := a.ComputeAction(ctx, &zone, &tcase.desc)
 		if tcase.expectedAction != action {
 			t.Errorf("Test case %d expected action %d, got action %d", i, tcase.expectedAction, action)
@@ -5704,7 +4909,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorReplaceDecommissioningVoter,
+			expectedAction:  AllocatorReplaceDecommissioning,
 			live:            []roachpb.StoreID{1, 2},
 			dead:            nil,
 			decommissioning: []roachpb.StoreID{3},
@@ -5734,7 +4939,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorReplaceDeadVoter,
+			expectedAction:  AllocatorReplaceDead,
 			live:            []roachpb.StoreID{1},
 			dead:            []roachpb.StoreID{2},
 			decommissioning: []roachpb.StoreID{3},
@@ -5769,7 +4974,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorRemoveDeadVoter,
+			expectedAction:  AllocatorRemoveDead,
 			live:            []roachpb.StoreID{1, 4},
 			dead:            []roachpb.StoreID{2},
 			decommissioning: []roachpb.StoreID{3},
@@ -5804,7 +5009,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorRemoveDeadVoter,
+			expectedAction:  AllocatorRemoveDead,
 			live:            []roachpb.StoreID{1, 4},
 			dead:            nil,
 			decommissioning: []roachpb.StoreID{3},
@@ -5834,7 +5039,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorReplaceDecommissioningVoter,
+			expectedAction:  AllocatorReplaceDecommissioning,
 			live:            nil,
 			dead:            nil,
 			decommissioning: []roachpb.StoreID{1, 2, 3},
@@ -5868,78 +5073,10 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 					},
 				},
 			},
-			expectedAction:  AllocatorRemoveDecommissioningVoter,
+			expectedAction:  AllocatorRemoveDecommissioning,
 			live:            []roachpb.StoreID{4},
 			dead:            nil,
 			decommissioning: []roachpb.StoreID{1, 2, 3},
-		},
-		{
-			zone: zonepb.ZoneConfig{
-				NumVoters:   proto.Int32(1),
-				NumReplicas: proto.Int32(3),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   4,
-						NodeID:    4,
-						ReplicaID: 4,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   7,
-						NodeID:    7,
-						ReplicaID: 7,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction:  AllocatorRemoveDecommissioningNonVoter,
-			live:            []roachpb.StoreID{1, 4, 6},
-			dead:            nil,
-			decommissioning: []roachpb.StoreID{7},
-		},
-		{
-			zone: zonepb.ZoneConfig{
-				NumVoters:   proto.Int32(1),
-				NumReplicas: proto.Int32(3),
-			},
-			desc: roachpb.RangeDescriptor{
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{
-						StoreID:   1,
-						NodeID:    1,
-						ReplicaID: 1,
-					},
-					{
-						StoreID:   4,
-						NodeID:    4,
-						ReplicaID: 4,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-					{
-						StoreID:   6,
-						NodeID:    6,
-						ReplicaID: 6,
-						Type:      roachpb.ReplicaTypeNonVoter(),
-					},
-				},
-			},
-			expectedAction:  AllocatorReplaceDecommissioningNonVoter,
-			live:            []roachpb.StoreID{1, 2, 3, 4, 6},
-			dead:            nil,
-			decommissioning: []roachpb.StoreID{4},
 		},
 	}
 
@@ -5948,7 +5085,7 @@ func TestAllocatorComputeActionDecommission(t *testing.T) {
 	defer stopper.Stop(ctx)
 
 	for i, tcase := range testCases {
-		mockStorePool(sp, tcase.live, nil, tcase.dead, tcase.decommissioning, tcase.decommissioned, nil)
+		mockStorePool(sp, tcase.live, nil, tcase.dead, tcase.decommissioning, tcase.decommissioned)
 		action, _ := a.ComputeAction(ctx, &tcase.zone, &tcase.desc)
 		if tcase.expectedAction != action {
 			t.Errorf("Test case %d expected action %s, got action %s", i, tcase.expectedAction, action)
@@ -5987,7 +5124,7 @@ func TestAllocatorRemoveLearner(t *testing.T) {
 	ctx := context.Background()
 	defer stopper.Stop(ctx)
 	live, dead := []roachpb.StoreID{1, 2}, []roachpb.StoreID{3}
-	mockStorePool(sp, live, nil, dead, nil, nil, nil)
+	mockStorePool(sp, live, nil, dead, nil, nil)
 	action, _ := a.ComputeAction(ctx, &zone, &rangeWithLearnerDesc)
 	require.Equal(t, AllocatorRemoveLearner, action)
 }
@@ -6014,7 +5151,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// drop past 3, so 3 it is.
 			storeList:           []roachpb.StoreID{1, 2, 3, 4},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorRemoveDecommissioningVoter,
+			expectedAction:      AllocatorRemoveDecommissioning,
 			live:                []roachpb.StoreID{4},
 			unavailable:         nil,
 			dead:                nil,
@@ -6024,7 +5161,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// Ditto.
 			storeList:           []roachpb.StoreID{1, 2, 3},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorReplaceDecommissioningVoter,
+			expectedAction:      AllocatorReplaceDecommissioning,
 			live:                []roachpb.StoreID{4, 5},
 			unavailable:         nil,
 			dead:                nil,
@@ -6037,7 +5174,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// from the range at hand, rather than trying to replace it.
 			storeList:           []roachpb.StoreID{1, 2, 3, 4},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorRemoveDeadVoter,
+			expectedAction:      AllocatorRemoveDead,
 			live:                []roachpb.StoreID{1, 2, 3, 5},
 			unavailable:         nil,
 			dead:                []roachpb.StoreID{4},
@@ -6050,7 +5187,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// important than replacing the dead one.
 			storeList:           []roachpb.StoreID{1, 4},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorAddVoter,
+			expectedAction:      AllocatorAdd,
 			live:                []roachpb.StoreID{1, 2, 3, 5},
 			unavailable:         nil,
 			dead:                []roachpb.StoreID{4},
@@ -6072,7 +5209,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// it is and we are under-replicaed.
 			storeList:           []roachpb.StoreID{1, 2},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorAddVoter,
+			expectedAction:      AllocatorAdd,
 			live:                []roachpb.StoreID{1, 2},
 			unavailable:         nil,
 			dead:                nil,
@@ -6092,7 +5229,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// Three again, on account of avoiding the even four.
 			storeList:           []roachpb.StoreID{1, 2, 3, 4},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorRemoveVoter,
+			expectedAction:      AllocatorRemove,
 			live:                []roachpb.StoreID{1, 2, 3, 4},
 			unavailable:         nil,
 			dead:                nil,
@@ -6146,7 +5283,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// slice in these tests).
 			storeList:           []roachpb.StoreID{1, 2, 3, 4, 5},
 			expectedNumReplicas: 5,
-			expectedAction:      AllocatorReplaceDeadVoter,
+			expectedAction:      AllocatorReplaceDead,
 			live:                []roachpb.StoreID{1, 2, 3},
 			unavailable:         []roachpb.StoreID{4},
 			dead:                []roachpb.StoreID{5},
@@ -6157,7 +5294,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			// the most important thing is removing a decommissioning replica.
 			storeList:           []roachpb.StoreID{1, 2, 3, 4, 5},
 			expectedNumReplicas: 3,
-			expectedAction:      AllocatorRemoveDecommissioningVoter,
+			expectedAction:      AllocatorRemoveDecommissioning,
 			live:                []roachpb.StoreID{1, 2, 3},
 			unavailable:         []roachpb.StoreID{4},
 			dead:                nil,
@@ -6169,7 +5306,7 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 	stopper, _, _, sp, _ := createTestStorePool(
 		TestTimeUntilStoreDeadOff, false, /* deterministic */
 		func() int { return numNodes },
-		livenesspb.NodeLivenessStatus_LIVE)
+		kvserverpb.NodeLivenessStatus_LIVE)
 	a := MakeAllocator(sp, func(string) (time.Duration, bool) {
 		return 0, true
 	})
@@ -6188,12 +5325,12 @@ func TestAllocatorComputeActionDynamicNumReplicas(t *testing.T) {
 			t.Run(prefixKey.String(), func(t *testing.T) {
 				numNodes = len(c.storeList) - len(c.decommissioning)
 				mockStorePool(sp, c.live, c.unavailable, c.dead,
-					c.decommissioning, nil, nil)
+					c.decommissioning, []roachpb.StoreID{})
 				desc := makeDescriptor(c.storeList)
 				desc.EndKey = prefixKey
 
 				clusterNodes := a.storePool.ClusterNodeCount()
-				effectiveNumReplicas := GetNeededVoters(*zone.NumReplicas, clusterNodes)
+				effectiveNumReplicas := GetNeededReplicas(*zone.NumReplicas, clusterNodes)
 				require.Equal(t, c.expectedNumReplicas, effectiveNumReplicas, "clusterNodes=%d", clusterNodes)
 
 				action, _ := a.ComputeAction(ctx, zone, &desc)
@@ -6212,7 +5349,7 @@ func TestAllocatorGetNeededReplicas(t *testing.T) {
 		availNodes int
 		expected   int
 	}{
-		// If zone.NumReplicas <= 3, GetNeededVoters should always return zone.NumReplicas.
+		// If zone.NumReplicas <= 3, GetNeededReplicas should always return zone.NumReplicas.
 		{1, 0, 1},
 		{1, 1, 1},
 		{2, 0, 2},
@@ -6247,9 +5384,9 @@ func TestAllocatorGetNeededReplicas(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if e, a := tc.expected, GetNeededVoters(tc.zoneRepls, tc.availNodes); e != a {
+		if e, a := tc.expected, GetNeededReplicas(tc.zoneRepls, tc.availNodes); e != a {
 			t.Errorf(
-				"GetNeededVoters(zone.NumReplicas=%d, availNodes=%d) got %d; want %d",
+				"GetNeededReplicas(zone.NumReplicas=%d, availNodes=%d) got %d; want %d",
 				tc.zoneRepls, tc.availNodes, a, e)
 		}
 	}
@@ -6311,40 +5448,25 @@ func TestAllocatorError(t *testing.T) {
 		ae       allocatorError
 		expected string
 	}{
-		{allocatorError{constraints: nil, existingVoterCount: 1, aliveStores: 1},
-			"0 of 1 live stores are able to take a new replica for the range" +
-				" (1 already has a voter, 0 already have a non-voter); likely not enough nodes in cluster",
-		},
-		{allocatorError{constraints: nil, existingVoterCount: 1, aliveStores: 2, throttledStores: 1},
-			"0 of 2 live stores are able to take a new replica for the range" +
-				" (1 throttled, 1 already has a voter, 0 already have a non-voter)"},
-		{allocatorError{constraints: constraint, existingVoterCount: 1, aliveStores: 1},
-			"0 of 1 live stores are able to take a new replica for the range" +
-				" (1 already has a voter, 0 already have a non-voter);" +
-				" replicas must match constraints [{+one}];" +
-				" voting replicas must match voter_constraints []",
-		},
-		{allocatorError{constraints: constraint, existingVoterCount: 1, aliveStores: 2},
-			"0 of 2 live stores are able to take a new replica for the range" +
-				" (1 already has a voter, 0 already have a non-voter);" +
-				" replicas must match constraints [{+one}];" +
-				" voting replicas must match voter_constraints []"},
-		{allocatorError{constraints: constraints, existingVoterCount: 1, aliveStores: 1},
-			"0 of 1 live stores are able to take a new replica for the range" +
-				" (1 already has a voter, 0 already have a non-voter);" +
-				" replicas must match constraints [{+one,+two}];" +
-				" voting replicas must match voter_constraints []"},
-		{allocatorError{constraints: constraints, existingVoterCount: 1, aliveStores: 2},
-			"0 of 2 live stores are able to take a new replica for the range" +
-				" (1 already has a voter, 0 already have a non-voter);" +
-				" replicas must match constraints [{+one,+two}];" +
-				" voting replicas must match voter_constraints []"},
-		{allocatorError{constraints: constraint, existingVoterCount: 1, aliveStores: 2, throttledStores: 1},
-			"0 of 2 live stores are able to take a new replica for the range" +
-				" (1 throttled, 1 already has a voter, 0 already have a non-voter);" +
-				" replicas must match constraints [{+one}];" +
-				" voting replicas must match voter_constraints []",
-		},
+		{allocatorError{constraints: nil, existingReplicas: 1, aliveStores: 1},
+			"0 of 1 live stores are able to take a new replica for the range (1 already has a replica); likely not enough nodes in cluster"},
+		{allocatorError{constraints: nil, existingReplicas: 1, aliveStores: 2, throttledStores: 1},
+			"0 of 2 live stores are able to take a new replica for the range (1 throttled, 1 already has a replica)"},
+		{allocatorError{constraints: constraint, existingReplicas: 1, aliveStores: 1},
+			`0 of 1 live stores are able to take a new replica for the range (1 already has a replica); ` +
+				`must match constraints [{+one}]`},
+		{allocatorError{constraints: constraint, existingReplicas: 1, aliveStores: 2},
+			`0 of 2 live stores are able to take a new replica for the range (1 already has a replica); ` +
+				`must match constraints [{+one}]`},
+		{allocatorError{constraints: constraints, existingReplicas: 1, aliveStores: 1},
+			`0 of 1 live stores are able to take a new replica for the range (1 already has a replica); ` +
+				`must match constraints [{+one,+two}]`},
+		{allocatorError{constraints: constraints, existingReplicas: 1, aliveStores: 2},
+			`0 of 2 live stores are able to take a new replica for the range (1 already has a replica); ` +
+				`must match constraints [{+one,+two}]`},
+		{allocatorError{constraints: constraint, existingReplicas: 1, aliveStores: 2, throttledStores: 1},
+			`0 of 2 live stores are able to take a new replica for the range (1 throttled, 1 already has a replica); ` +
+				`must match constraints [{+one}]`},
 	}
 
 	for i, testCase := range testCases {
@@ -6363,14 +5485,22 @@ func TestAllocatorThrottled(t *testing.T) {
 	defer stopper.Stop(ctx)
 
 	// First test to make sure we would send the replica to purgatory.
-	_, _, err := a.AllocateVoter(ctx, &simpleZoneConfig, []roachpb.ReplicaDescriptor{}, nil)
+	_, _, err := a.AllocateTarget(
+		ctx,
+		&simpleZoneConfig,
+		[]roachpb.ReplicaDescriptor{},
+	)
 	if !errors.HasInterface(err, (*purgatoryError)(nil)) {
 		t.Fatalf("expected a purgatory error, got: %+v", err)
 	}
 
 	// Second, test the normal case in which we can allocate to the store.
 	gossiputil.NewStoreGossiper(g).GossipStores(singleStore, t)
-	result, _, err := a.AllocateVoter(ctx, &simpleZoneConfig, []roachpb.ReplicaDescriptor{}, nil)
+	result, _, err := a.AllocateTarget(
+		ctx,
+		&simpleZoneConfig,
+		[]roachpb.ReplicaDescriptor{},
+	)
 	if err != nil {
 		t.Fatalf("unable to perform allocation: %+v", err)
 	}
@@ -6387,7 +5517,11 @@ func TestAllocatorThrottled(t *testing.T) {
 	}
 	storeDetail.throttledUntil = timeutil.Now().Add(24 * time.Hour)
 	a.storePool.detailsMu.Unlock()
-	_, _, err = a.AllocateVoter(ctx, &simpleZoneConfig, []roachpb.ReplicaDescriptor{}, nil)
+	_, _, err = a.AllocateTarget(
+		ctx,
+		&simpleZoneConfig,
+		[]roachpb.ReplicaDescriptor{},
+	)
 	if errors.HasInterface(err, (*purgatoryError)(nil)) {
 		t.Fatalf("expected a non purgatory error, got: %+v", err)
 	}
@@ -6706,7 +5840,14 @@ func TestAllocatorRebalanceAway(t *testing.T) {
 			}
 
 			var rangeUsageInfo RangeUsageInfo
-			actual, _, _, ok := a.RebalanceVoter(ctx, &zonepb.ZoneConfig{NumReplicas: proto.Int32(0), Constraints: []zonepb.ConstraintsConjunction{constraints}}, nil, existingReplicas, nil, rangeUsageInfo, storeFilterThrottled)
+			actual, _, _, ok := a.RebalanceTarget(
+				ctx,
+				&zonepb.ZoneConfig{NumReplicas: proto.Int32(0), Constraints: []zonepb.ConstraintsConjunction{constraints}},
+				nil,
+				existingReplicas,
+				rangeUsageInfo,
+				storeFilterThrottled,
+			)
 
 			if tc.expected == nil && ok {
 				t.Errorf("rebalancing to the incorrect store, expected nil, got %d", actual.StoreID)
@@ -6783,14 +5924,14 @@ func TestAllocatorFullDisks(t *testing.T) {
 	server := rpc.NewServer(rpcContext) // never started
 	g := gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
 
-	TimeUntilStoreDead.Override(ctx, &st.SV, TestTimeUntilStoreDeadOff)
+	TimeUntilStoreDead.Override(&st.SV, TestTimeUntilStoreDeadOff)
 
 	const generations = 100
 	const nodes = 20
 	const capacity = (1 << 30) + 1
 	const rangeSize = 16 << 20
 
-	mockNodeLiveness := newMockNodeLiveness(livenesspb.NodeLivenessStatus_LIVE)
+	mockNodeLiveness := newMockNodeLiveness(kvserverpb.NodeLivenessStatus_LIVE)
 	sp := NewStorePool(
 		log.AmbientContext{Tracer: st.Tracer},
 		st,
@@ -6832,7 +5973,7 @@ func TestAllocatorFullDisks(t *testing.T) {
 	for i := 0; i < generations; i++ {
 		// First loop through test stores and randomly add data.
 		for j := 0; j < len(testStores); j++ {
-			if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(j), time.Time{}, 0) == livenesspb.NodeLivenessStatus_DEAD {
+			if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(j), time.Time{}, 0) == kvserverpb.NodeLivenessStatus_DEAD {
 				continue
 			}
 			ts := &testStores[j]
@@ -6847,7 +5988,7 @@ func TestAllocatorFullDisks(t *testing.T) {
 			if ts.Capacity.Available <= 0 {
 				t.Errorf("testStore %d ran out of space during generation %d (rangesAdded=%d/%d): %+v",
 					j, i, rangesAdded, rangesToAdd, ts.Capacity)
-				mockNodeLiveness.setNodeStatus(roachpb.NodeID(j), livenesspb.NodeLivenessStatus_DEAD)
+				mockNodeLiveness.setNodeStatus(roachpb.NodeID(j), kvserverpb.NodeLivenessStatus_DEAD)
 			}
 			wg.Add(1)
 			if err := g.AddInfoProto(gossip.MakeStoreKey(roachpb.StoreID(j)), &ts.StoreDescriptor, 0); err != nil {
@@ -6859,14 +6000,21 @@ func TestAllocatorFullDisks(t *testing.T) {
 		// Loop through each store a number of times and maybe rebalance.
 		for j := 0; j < 10; j++ {
 			for k := 0; k < len(testStores); k++ {
-				if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(k), time.Time{}, 0) == livenesspb.NodeLivenessStatus_DEAD {
+				if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(k), time.Time{}, 0) == kvserverpb.NodeLivenessStatus_DEAD {
 					continue
 				}
 				ts := &testStores[k]
 				// Rebalance until there's no more rebalancing to do.
 				if ts.Capacity.RangeCount > 0 {
 					var rangeUsageInfo RangeUsageInfo
-					target, _, details, ok := alloc.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, []roachpb.ReplicaDescriptor{{NodeID: ts.Node.NodeID, StoreID: ts.StoreID}}, nil, rangeUsageInfo, storeFilterThrottled)
+					target, _, details, ok := alloc.RebalanceTarget(
+						ctx,
+						zonepb.EmptyCompleteZoneConfig(),
+						nil,
+						[]roachpb.ReplicaDescriptor{{NodeID: ts.Node.NodeID, StoreID: ts.StoreID}},
+						rangeUsageInfo,
+						storeFilterThrottled,
+					)
 					if ok {
 						if log.V(1) {
 							log.Infof(ctx, "rebalancing to %v; details: %s", target, details)
@@ -6886,11 +6034,11 @@ func TestAllocatorFullDisks(t *testing.T) {
 
 		// Simulate rocksdb compactions freeing up disk space.
 		for j := 0; j < len(testStores); j++ {
-			if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(j), time.Time{}, 0) != livenesspb.NodeLivenessStatus_DEAD {
+			if mockNodeLiveness.nodeLivenessFunc(roachpb.NodeID(j), time.Time{}, 0) != kvserverpb.NodeLivenessStatus_DEAD {
 				ts := &testStores[j]
 				if ts.Capacity.Available <= 0 {
 					t.Errorf("testStore %d ran out of space during generation %d: %+v", j, i, ts.Capacity)
-					mockNodeLiveness.setNodeStatus(roachpb.NodeID(j), livenesspb.NodeLivenessStatus_DEAD)
+					mockNodeLiveness.setNodeStatus(roachpb.NodeID(j), kvserverpb.NodeLivenessStatus_DEAD)
 				} else {
 					ts.compact()
 				}
@@ -6903,7 +6051,6 @@ func Example_rebalancing() {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
 
-	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 
@@ -6920,7 +6067,7 @@ func Example_rebalancing() {
 	server := rpc.NewServer(rpcContext) // never started
 	g := gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
 
-	TimeUntilStoreDead.Override(ctx, &st.SV, TestTimeUntilStoreDeadOff)
+	TimeUntilStoreDead.Override(&st.SV, TestTimeUntilStoreDeadOff)
 
 	const generations = 100
 	const nodes = 20
@@ -6936,7 +6083,7 @@ func Example_rebalancing() {
 		func() int {
 			return nodes
 		},
-		newMockNodeLiveness(livenesspb.NodeLivenessStatus_LIVE).nodeLivenessFunc,
+		newMockNodeLiveness(kvserverpb.NodeLivenessStatus_LIVE).nodeLivenessFunc,
 		/* deterministic */ true,
 	)
 	alloc := MakeAllocator(sp, func(string) (time.Duration, bool) {
@@ -6989,9 +6136,16 @@ func Example_rebalancing() {
 		for j := 0; j < len(testStores); j++ {
 			ts := &testStores[j]
 			var rangeUsageInfo RangeUsageInfo
-			target, _, details, ok := alloc.RebalanceVoter(ctx, zonepb.EmptyCompleteZoneConfig(), nil, []roachpb.ReplicaDescriptor{{NodeID: ts.Node.NodeID, StoreID: ts.StoreID}}, nil, rangeUsageInfo, storeFilterThrottled)
+			target, _, details, ok := alloc.RebalanceTarget(
+				context.Background(),
+				zonepb.EmptyCompleteZoneConfig(),
+				nil,
+				[]roachpb.ReplicaDescriptor{{NodeID: ts.Node.NodeID, StoreID: ts.StoreID}},
+				rangeUsageInfo,
+				storeFilterThrottled,
+			)
 			if ok {
-				log.Infof(ctx, "rebalancing to %v; details: %s", target, details)
+				log.Infof(context.Background(), "rebalancing to %v; details: %s", target, details)
 				testStores[j].rebalance(&testStores[int(target.StoreID)], alloc.randGen.Int63n(1<<20))
 			}
 		}

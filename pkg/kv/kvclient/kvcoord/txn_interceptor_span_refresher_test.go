@@ -120,6 +120,7 @@ func TestTxnSpanRefresherRefreshesTransactions(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	txn := makeTxnProto()
+	txn.UpdateObservedTimestamp(1, txn.WriteTimestamp.Add(20, 0))
 	keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
 
 	cases := []struct {
@@ -158,24 +159,24 @@ func TestTxnSpanRefresherRefreshesTransactions(t *testing.T) {
 		},
 		{
 			pErr: func() *roachpb.Error {
-				return roachpb.NewError(
-					&roachpb.ReadWithinUncertaintyIntervalError{
-						ExistingTimestamp: txn.WriteTimestamp.Add(25, 0),
-					})
+				pErr := roachpb.NewError(&roachpb.ReadWithinUncertaintyIntervalError{})
+				pErr.OriginNode = 1
+				return pErr
 			},
 			expRefresh:   true,
-			expRefreshTS: txn.WriteTimestamp.Add(25, 1), // see ExistingTimestamp
+			expRefreshTS: txn.WriteTimestamp.Add(20, 0), // see UpdateObservedTimestamp
 		},
 		{
 			pErr: func() *roachpb.Error {
-				return roachpb.NewError(
+				pErr := roachpb.NewError(
 					&roachpb.ReadWithinUncertaintyIntervalError{
-						ExistingTimestamp:     txn.WriteTimestamp.Add(25, 0),
-						LocalUncertaintyLimit: txn.WriteTimestamp.Add(30, 0),
+						ExistingTimestamp: txn.WriteTimestamp.Add(25, 0),
 					})
+				pErr.OriginNode = 1
+				return pErr
 			},
 			expRefresh:   true,
-			expRefreshTS: txn.WriteTimestamp.Add(30, 0), // see LocalUncertaintyLimit
+			expRefreshTS: txn.WriteTimestamp.Add(25, 1), // see ExistingTimestamp
 		},
 		{
 			pErr: func() *roachpb.Error {
@@ -823,8 +824,6 @@ func TestTxnSpanRefresherSplitEndTxnOnAutoRetry(t *testing.T) {
 
 type singleRangeIterator struct{}
 
-var _ condensableSpanSetRangeIterator = singleRangeIterator{}
-
 func (s singleRangeIterator) Valid() bool {
 	return true
 }
@@ -861,7 +860,7 @@ func TestTxnSpanRefresherMaxTxnRefreshSpansBytes(t *testing.T) {
 	keyD, keyE := roachpb.Key("d"), roachpb.Key("e")
 
 	// Set MaxTxnRefreshSpansBytes limit to 3 bytes.
-	MaxTxnRefreshSpansBytes.Override(ctx, &tsr.st.SV, 3)
+	MaxTxnRefreshSpansBytes.Override(&tsr.st.SV, 3)
 
 	// Send a batch below the limit.
 	var ba roachpb.BatchRequest
@@ -1071,6 +1070,151 @@ func TestTxnSpanRefresherAssignsCanForwardReadTimestamp(t *testing.T) {
 	require.False(t, tsr.refreshInvalid)
 }
 
+// TestTxnSpanRefresherAssignsCanCommitAtHigherTimestamp tests that the
+// txnSpanRefresher assigns the CanCommitAtHigherTimestamp flag on EndTxn
+// requests, along with the CanForwardReadTimestamp on Batch headers.
+func TestTxnSpanRefresherAssignsCanCommitAtHigherTimestamp(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	tsr, mockSender := makeMockTxnSpanRefresher()
+
+	txn := makeTxnProto()
+	keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
+	keyC, keyD := roachpb.Key("c"), roachpb.Key("d")
+
+	// Send an EndTxn request. Should set DeprecatedCanCommitAtHigherTimestamp
+	// and CanForwardReadTimestamp flags.
+	var ba roachpb.BatchRequest
+	ba.Header = roachpb.Header{Txn: &txn}
+	ba.Add(&roachpb.EndTxnRequest{})
+
+	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.True(t, ba.CanForwardReadTimestamp)
+		require.IsType(t, &roachpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		require.True(t, ba.Requests[0].GetEndTxn().DeprecatedCanCommitAtHigherTimestamp)
+
+		br := ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
+
+	br, pErr := tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Send an EndTxn request for a transaction with a fixed commit timestamp.
+	// Should NOT set DeprecatedCanCommitAtHigherTimestamp and
+	// CanForwardReadTimestamp flags.
+	txnFixed := txn.Clone()
+	txnFixed.CommitTimestampFixed = true
+	var baFixed roachpb.BatchRequest
+	baFixed.Header = roachpb.Header{Txn: txnFixed}
+	baFixed.Add(&roachpb.EndTxnRequest{})
+
+	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.False(t, ba.CanForwardReadTimestamp)
+		require.IsType(t, &roachpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		require.False(t, ba.Requests[0].GetEndTxn().DeprecatedCanCommitAtHigherTimestamp)
+
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
+
+	br, pErr = tsr.SendLocked(ctx, baFixed)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Send a batch below the limit to collect refresh spans.
+	ba.Requests = nil
+	scanArgs := roachpb.ScanRequest{RequestHeader: roachpb.RequestHeader{Key: keyA, EndKey: keyB}}
+	ba.Add(&scanArgs)
+
+	mockSender.Reset()
+	br, pErr = tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	require.Equal(t, []roachpb.Span{scanArgs.Span()}, tsr.refreshFootprint.asSlice())
+	require.False(t, tsr.refreshInvalid)
+
+	// Send another EndTxn request. Should NOT set
+	// DeprecatedCanCommitAtHigherTimestamp and CanForwardReadTimestamp flags.
+	ba.Requests = nil
+	ba.Add(&roachpb.EndTxnRequest{})
+
+	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.False(t, ba.CanForwardReadTimestamp)
+		require.IsType(t, &roachpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		require.False(t, ba.Requests[0].GetEndTxn().DeprecatedCanCommitAtHigherTimestamp)
+
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
+
+	br, pErr = tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Send another batch.
+	ba.Requests = nil
+	scanArgs2 := roachpb.ScanRequest{RequestHeader: roachpb.RequestHeader{Key: keyC, EndKey: keyD}}
+	ba.Add(&scanArgs2)
+
+	mockSender.Reset()
+	br, pErr = tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Send another EndTxn request. Still should NOT set
+	// DeprecatedCanCommitAtHigherTimestamp and CanForwardReadTimestamp flags.
+	ba.Requests = nil
+	ba.Add(&roachpb.EndTxnRequest{})
+
+	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.False(t, ba.CanForwardReadTimestamp)
+		require.IsType(t, &roachpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		require.False(t, ba.Requests[0].GetEndTxn().DeprecatedCanCommitAtHigherTimestamp)
+
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
+
+	br, pErr = tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+
+	// Increment the transaction's epoch and send another EndTxn request. Should
+	// set DeprecatedCanCommitAtHigherTimestamp and CanForwardReadTimestamp
+	// flags.
+	ba.Requests = nil
+	ba.Add(&roachpb.EndTxnRequest{})
+
+	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.True(t, ba.CanForwardReadTimestamp)
+		require.IsType(t, &roachpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		require.True(t, ba.Requests[0].GetEndTxn().DeprecatedCanCommitAtHigherTimestamp)
+
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
+
+	tsr.epochBumpedLocked()
+	br, pErr = tsr.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	require.Equal(t, []roachpb.Span(nil), tsr.refreshFootprint.asSlice())
+	require.False(t, tsr.refreshInvalid)
+}
+
 // TestTxnSpanRefresherEpochIncrement tests that a txnSpanRefresher's refresh
 // spans and span validity status are reset on an epoch increment.
 func TestTxnSpanRefresherEpochIncrement(t *testing.T) {
@@ -1086,7 +1230,7 @@ func TestTxnSpanRefresherEpochIncrement(t *testing.T) {
 	keyC, keyD := roachpb.Key("c"), roachpb.Key("d")
 
 	// Set MaxTxnRefreshSpansBytes limit to 3 bytes.
-	MaxTxnRefreshSpansBytes.Override(ctx, &tsr.st.SV, 3)
+	MaxTxnRefreshSpansBytes.Override(&tsr.st.SV, 3)
 
 	// Send a batch below the limit.
 	var ba roachpb.BatchRequest

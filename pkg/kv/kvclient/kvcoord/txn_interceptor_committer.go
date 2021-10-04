@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/errors"
 )
 
 var parallelCommitsEnabled = settings.RegisterBoolSetting(
@@ -128,10 +127,6 @@ func (tc *txnCommitter) SendLocked(
 	}
 	et := rArgs.(*roachpb.EndTxnRequest)
 
-	if err := tc.validateEndTxnBatch(ba); err != nil {
-		return nil, roachpb.NewError(err)
-	}
-
 	// Determine whether we can elide the EndTxn entirely. We can do so if the
 	// transaction is read-only, which we determine based on whether the EndTxn
 	// request contains any writes.
@@ -168,7 +163,7 @@ func (tc *txnCommitter) SendLocked(
 			// Make a copy of the EndTxn, since we're going to change it below to
 			// disable the parallel commit.
 			etCpy := *et
-			ba.Requests[len(ba.Requests)-1].MustSetInner(&etCpy)
+			ba.Requests[len(ba.Requests)-1].SetInner(&etCpy)
 			et = &etCpy
 		}
 	}
@@ -260,28 +255,6 @@ func (tc *txnCommitter) SendLocked(
 	return br, nil
 }
 
-// validateEndTxnBatch runs sanity checks on a commit or rollback request.
-func (tc *txnCommitter) validateEndTxnBatch(ba roachpb.BatchRequest) error {
-	// Check that we don't combine a limited DeleteRange with a commit. We cannot
-	// attempt to run such a batch as a 1PC because, if it gets split and thus
-	// doesn't run as a 1PC, resolving the intents will be very expensive.
-	// Resolving the intents would require scanning the whole key span, which
-	// might be much larger than the span of keys deleted before the limit was
-	// hit. Requests that actually run as 1PC don't have this problem, as they
-	// don't write and resolve intents. So, we make an exception and allow batches
-	// that set Require1PC - those are guaranteed to either execute as 1PC or
-	// fail. See also #37457.
-	if ba.Header.MaxSpanRequestKeys == 0 {
-		return nil
-	}
-	e, endTxn := ba.GetArg(roachpb.EndTxn)
-	_, delRange := ba.GetArg(roachpb.DeleteRange)
-	if delRange && endTxn && !e.(*roachpb.EndTxnRequest).Require1PC {
-		return errors.Errorf("possible 1PC batch cannot contain EndTxn without setting Require1PC; see #37457")
-	}
-	return nil
-}
-
 // sendLockedWithElidedEndTxn sends the provided batch without its EndTxn
 // request. However, if the EndTxn request is alone in the batch, nothing will
 // be sent at all. Either way, the result of the EndTxn will be synthesized and
@@ -308,13 +281,10 @@ func (tc *txnCommitter) sendLockedWithElidedEndTxn(
 		br.Txn = ba.Txn
 	}
 
-	// Check if the (read-only) txn was pushed above its deadline, if the
-	// transaction is trying to commit.
-	if et.Commit {
-		deadline := et.Deadline
-		if deadline != nil && deadline.LessEq(br.Txn.WriteTimestamp) {
-			return nil, generateTxnDeadlineExceededErr(ba.Txn, *deadline)
-		}
+	// Check if the (read-only) txn was pushed above its deadline.
+	deadline := et.Deadline
+	if deadline != nil && deadline.LessEq(br.Txn.WriteTimestamp) {
+		return nil, generateTxnDeadlineExceededErr(ba.Txn, *deadline)
 	}
 
 	// Update the response's transaction proto. This normally happens on the
@@ -417,7 +387,7 @@ func mergeIntoSpans(s []roachpb.Span, ws []roachpb.SequencedWrite) ([]roachpb.Sp
 	for i, w := range ws {
 		m[len(s)+i] = roachpb.Span{Key: w.Key}
 	}
-	return roachpb.MergeSpans(&m)
+	return roachpb.MergeSpans(m)
 }
 
 // needTxnRetryAfterStaging determines whether the transaction needs to refresh
@@ -500,6 +470,7 @@ func makeTxnCommitExplicitLocked(
 	et := roachpb.EndTxnRequest{Commit: true}
 	et.Key = txn.Key
 	et.LockSpans = lockSpans
+	et.DeprecatedCanCommitAtHigherTimestamp = canFwdRTS
 	ba.Add(&et)
 
 	_, pErr := s.SendLocked(ctx, ba)
@@ -535,16 +506,16 @@ func (*txnCommitter) populateLeafFinalState(*roachpb.LeafTxnFinalState) {}
 // importLeafFinalState is part of the txnInterceptor interface.
 func (*txnCommitter) importLeafFinalState(context.Context, *roachpb.LeafTxnFinalState) {}
 
-// epochBumpedLocked implements the txnInterceptor interface.
+// epochBumpedLocked implements the txnReqInterceptor interface.
 func (tc *txnCommitter) epochBumpedLocked() {}
 
-// createSavepointLocked is part of the txnInterceptor interface.
+// createSavepointLocked is part of the txnReqInterceptor interface.
 func (*txnCommitter) createSavepointLocked(context.Context, *savepoint) {}
 
-// rollbackToSavepointLocked is part of the txnInterceptor interface.
+// rollbackToSavepointLocked is part of the txnReqInterceptor interface.
 func (*txnCommitter) rollbackToSavepointLocked(context.Context, savepoint) {}
 
-// closeLocked implements the txnInterceptor interface.
+// closeLocked implements the txnReqInterceptor interface.
 func (tc *txnCommitter) closeLocked() {}
 
 func cloneWithStatus(txn *roachpb.Transaction, s roachpb.TransactionStatus) *roachpb.Transaction {

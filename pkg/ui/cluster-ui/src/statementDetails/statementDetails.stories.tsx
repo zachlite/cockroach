@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -68,10 +68,10 @@ storiesOf("StatementDetails", module)
     props.uiConfig.showStatementDiagnosticsLink = false;
     return <StatementDetails {...props} />;
   })
-  .add("Explain Plan tab", () => {
+  .add("Logical Plan tab", () => {
     const props = getStatementDetailsPropsFixture();
     props.history.location.search = new URLSearchParams([
-      ["tab", "explain-plan"],
+      ["tab", "logical-plan"],
     ]).toString();
     return <StatementDetails {...props} />;
   })

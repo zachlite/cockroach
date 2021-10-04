@@ -11,7 +11,6 @@
 package tree
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 )
@@ -43,14 +42,12 @@ func (*AlterTypeRenameValue) alterTypeCmd() {}
 func (*AlterTypeRename) alterTypeCmd()      {}
 func (*AlterTypeSetSchema) alterTypeCmd()   {}
 func (*AlterTypeOwner) alterTypeCmd()       {}
-func (*AlterTypeDropValue) alterTypeCmd()   {}
 
 var _ AlterTypeCmd = &AlterTypeAddValue{}
 var _ AlterTypeCmd = &AlterTypeRenameValue{}
 var _ AlterTypeCmd = &AlterTypeRename{}
 var _ AlterTypeCmd = &AlterTypeSetSchema{}
 var _ AlterTypeCmd = &AlterTypeOwner{}
-var _ AlterTypeCmd = &AlterTypeDropValue{}
 
 // AlterTypeAddValue represents an ALTER TYPE ADD VALUE command.
 type AlterTypeAddValue struct {
@@ -107,22 +104,6 @@ func (node *AlterTypeRenameValue) TelemetryCounter() telemetry.Counter {
 	return sqltelemetry.SchemaChangeAlterCounterWithExtra("type", "rename_value")
 }
 
-// AlterTypeDropValue represents an ALTER TYPE DROP VALUE command.
-type AlterTypeDropValue struct {
-	Val EnumValue
-}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterTypeDropValue) Format(ctx *FmtCtx) {
-	ctx.WriteString(" DROP VALUE ")
-	ctx.FormatNode(&node.Val)
-}
-
-// TelemetryCounter implements the AlterTypeCmd interface.
-func (node *AlterTypeDropValue) TelemetryCounter() telemetry.Counter {
-	return sqltelemetry.SchemaChangeAlterCounterWithExtra("type", "drop_value")
-}
-
 // AlterTypeRename represents an ALTER TYPE RENAME command.
 type AlterTypeRename struct {
 	NewName Name
@@ -157,15 +138,13 @@ func (node *AlterTypeSetSchema) TelemetryCounter() telemetry.Counter {
 
 // AlterTypeOwner represents an ALTER TYPE OWNER TO command.
 type AlterTypeOwner struct {
-	// TODO(solon): Adjust this, see
-	// https://github.com/cockroachdb/cockroach/issues/54696
-	Owner security.SQLUsername
+	Owner Name
 }
 
 // Format implements the NodeFormatter interface.
 func (node *AlterTypeOwner) Format(ctx *FmtCtx) {
 	ctx.WriteString(" OWNER TO ")
-	ctx.FormatUsername(node.Owner)
+	ctx.FormatNode(&node.Owner)
 }
 
 // TelemetryCounter implements the AlterTypeCmd interface.

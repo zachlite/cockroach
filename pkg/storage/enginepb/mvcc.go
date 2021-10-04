@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // TxnEpoch is a zero-indexed epoch for a transaction. When a transaction
@@ -83,8 +82,8 @@ func TxnSeqIsIgnored(seq TxnSeq, ignored []IgnoredSeqNumRange) bool {
 }
 
 // Short returns a prefix of the transaction's ID.
-func (t TxnMeta) Short() redact.SafeString {
-	return redact.SafeString(t.ID.Short())
+func (t TxnMeta) Short() string {
+	return t.ID.Short()
 }
 
 // Total returns the range size as the sum of the key and value
@@ -166,7 +165,6 @@ func (ms *MVCCStats) Add(oms MVCCStats) {
 	ms.KeyCount += oms.KeyCount
 	ms.ValCount += oms.ValCount
 	ms.IntentCount += oms.IntentCount
-	ms.SeparatedIntentCount += oms.SeparatedIntentCount
 	ms.SysBytes += oms.SysBytes
 	ms.SysCount += oms.SysCount
 	ms.AbortSpanBytes += oms.AbortSpanBytes
@@ -193,7 +191,6 @@ func (ms *MVCCStats) Subtract(oms MVCCStats) {
 	ms.KeyCount -= oms.KeyCount
 	ms.ValCount -= oms.ValCount
 	ms.IntentCount -= oms.IntentCount
-	ms.SeparatedIntentCount -= oms.SeparatedIntentCount
 	ms.SysBytes -= oms.SysBytes
 	ms.SysCount -= oms.SysCount
 	ms.AbortSpanBytes -= oms.AbortSpanBytes

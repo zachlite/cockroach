@@ -34,15 +34,15 @@ var (
 	testPutResp = roachpb.PutResponse{}
 )
 
-// An example of verbose tracing being used to dump a trace around a
+// An example of snowball tracing being used to dump a trace around a
 // transaction. Use something similar whenever you cannot use
 // sql.trace.txn.threshold.
-func TestTxnVerboseTrace(t *testing.T) {
+func TestTxnSnowballTrace(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	tracer := tracing.NewTracer()
-	ctx, sp := tracing.StartVerboseTrace(context.Background(), tracer, "test-txn")
+	ctx, sp := tracing.StartSnowballTrace(context.Background(), tracer, "test-txn")
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
@@ -56,12 +56,12 @@ func TestTxnVerboseTrace(t *testing.T) {
 	}
 	log.Event(ctx, "txn complete")
 	sp.Finish()
-	collectedSpans := sp.GetRecording()
+	collectedSpans := tracing.GetRecording(sp)
 	dump := collectedSpans.String()
 	// dump:
 	//    0.105ms      0.000ms    event:inside txn
 	//    0.275ms      0.171ms    event:client.Txn did AutoCommit. err: <nil>
-	//txn: "internal/client/txn_test.go:67 TestTxnVerboseTrace" id=<nil> key=/Min lock=false pri=0.00000000 iso=SERIALIZABLE stat=COMMITTED epo=0 ts=0.000000000,0 orig=0.000000000,0 max=0.000000000,0 wto=false rop=false
+	//txn: "internal/client/txn_test.go:67 TestTxnSnowballTrace" id=<nil> key=/Min lock=false pri=0.00000000 iso=SERIALIZABLE stat=COMMITTED epo=0 ts=0.000000000,0 orig=0.000000000,0 max=0.000000000,0 wto=false rop=false
 	//    0.278ms      0.173ms    event:txn complete
 	found, err := regexp.MatchString(
 		// The (?s) makes "." match \n. This makes the test resilient to other log
@@ -254,7 +254,7 @@ func TestRunTransactionRetryOnErrors(t *testing.T) {
 		err   error
 		retry bool // Expect retry?
 	}{
-		{roachpb.NewReadWithinUncertaintyIntervalError(hlc.Timestamp{}, hlc.Timestamp{}, hlc.Timestamp{}, nil), true},
+		{roachpb.NewReadWithinUncertaintyIntervalError(hlc.Timestamp{}, hlc.Timestamp{}, nil), true},
 		{&roachpb.TransactionAbortedError{}, true},
 		{&roachpb.TransactionPushError{}, true},
 		{&roachpb.TransactionRetryError{}, true},
@@ -280,18 +280,18 @@ func TestRunTransactionRetryOnErrors(t *testing.T) {
 							if errors.HasType(test.err, (*roachpb.ReadWithinUncertaintyIntervalError)(nil)) {
 								// This error requires an observed timestamp to have been
 								// recorded on the origin node.
-								ba.Txn.UpdateObservedTimestamp(1, hlc.ClockTimestamp{WallTime: 1, Logical: 1})
+								ba.Txn.UpdateObservedTimestamp(1, hlc.Timestamp{WallTime: 1, Logical: 1})
 								pErr = roachpb.NewErrorWithTxn(test.err, ba.Txn)
 								pErr.OriginNode = 1
 							} else {
 								pErr = roachpb.NewErrorWithTxn(test.err, ba.Txn)
 							}
 
-							if pErr.TransactionRestart() != roachpb.TransactionRestart_NONE {
+							if pErr.TransactionRestart != roachpb.TransactionRestart_NONE {
 								// HACK ALERT: to do without a TxnCoordSender, we jump through
 								// hoops to get the retryable error expected by db.Txn().
 								return nil, roachpb.NewError(roachpb.NewTransactionRetryWithProtoRefreshError(
-									"foo", ba.Txn.ID, *ba.Txn))
+									pErr.Message, ba.Txn.ID, *ba.Txn))
 							}
 							return nil, pErr
 						}
@@ -497,24 +497,25 @@ func TestUpdateDeadlineMaybe(t *testing.T) {
 	}
 
 	deadline := hlc.Timestamp{WallTime: 10, Logical: 1}
-	err := txn.UpdateDeadline(ctx, deadline)
-	require.NoError(t, err, "Deadline update failed")
+	if !txn.UpdateDeadlineMaybe(ctx, deadline) {
+		t.Errorf("expected update, but it didn't happen")
+	}
 	if d := *txn.deadline(); d != deadline {
 		t.Errorf("unexpected deadline: %s", d)
 	}
 
-	// Deadline is always updated now, there is no
-	// maybe.
 	futureDeadline := hlc.Timestamp{WallTime: 11, Logical: 1}
-	err = txn.UpdateDeadline(ctx, futureDeadline)
-	require.NoError(t, err, "Future deadline update failed")
-	if d := *txn.deadline(); d != futureDeadline {
+	if txn.UpdateDeadlineMaybe(ctx, futureDeadline) {
+		t.Errorf("expected no update, but update happened")
+	}
+	if d := *txn.deadline(); d != deadline {
 		t.Errorf("unexpected deadline: %s", d)
 	}
 
 	pastDeadline := hlc.Timestamp{WallTime: 9, Logical: 1}
-	err = txn.UpdateDeadline(ctx, pastDeadline)
-	require.NoError(t, err, "Past deadline update failed")
+	if !txn.UpdateDeadlineMaybe(ctx, pastDeadline) {
+		t.Errorf("expected update, but it didn't happen")
+	}
 	if d := *txn.deadline(); d != pastDeadline {
 		t.Errorf("unexpected deadline: %s", d)
 	}
@@ -539,53 +540,4 @@ func TestAnchoringErrorNoTrigger(t *testing.T) {
 	txn := NewTxn(ctx, db, 0 /* gatewayNodeID */)
 	require.EqualError(t, txn.SetSystemConfigTrigger(true /* forSystemTenant */), "unimplemented")
 	require.False(t, txn.systemConfigTrigger)
-}
-
-// TestTxnNegotiateAndSend tests the behavior of NegotiateAndSend, both when the
-// server-side fast path is possible (for single-range reads) and when it is not
-// (for cross-range reads).
-func TestTxnNegotiateAndSend(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	stopper := stop.NewStopper()
-	defer stopper.Stop(ctx)
-
-	testutils.RunTrueAndFalse(t, "fast-path", func(t *testing.T, fastPath bool) {
-		ts20 := hlc.Timestamp{WallTime: 20}
-		mc := hlc.NewManualClock(1)
-		clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
-		txnSender := MakeMockTxnSenderFactoryWithNonTxnSender(nil /* senderFunc */, func(
-			_ context.Context, ba roachpb.BatchRequest,
-		) (*roachpb.BatchResponse, *roachpb.Error) {
-			if !fastPath {
-				return nil, roachpb.NewError(&roachpb.OpRequiresTxnError{})
-			}
-			br := ba.CreateReply()
-			br.Timestamp = ts20
-			return br, nil
-		})
-		db := NewDB(testutils.MakeAmbientCtx(), txnSender, clock, stopper)
-		txn := NewTxn(ctx, db, 0 /* gatewayNodeID */)
-
-		var ba roachpb.BatchRequest
-		ba.BoundedStaleness = &roachpb.BoundedStalenessHeader{
-			MinTimestampBound: hlc.Timestamp{WallTime: 10},
-		}
-		ba.RoutingPolicy = roachpb.RoutingPolicy_NEAREST
-		ba.Add(roachpb.NewGet(roachpb.Key("a"), false))
-		br, pErr := txn.NegotiateAndSend(ctx, ba)
-
-		if fastPath {
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-			require.Equal(t, ts20, br.Timestamp)
-			require.True(t, txn.CommitTimestampFixed())
-			require.Equal(t, ts20, txn.CommitTimestamp())
-		} else {
-			require.Nil(t, br)
-			require.NotNil(t, pErr)
-			require.Regexp(t, "unimplemented: cross-range bounded staleness reads not yet implemented", pErr)
-		}
-	})
 }

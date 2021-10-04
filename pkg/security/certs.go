@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 )
 
 const (
@@ -167,19 +166,19 @@ func createCACertAndKey(
 
 	var key crypto.PrivateKey
 	if _, err := os.Stat(caKeyPath); err != nil {
-		if !oserror.IsNotExist(err) {
-			return errors.Wrapf(err, "could not stat CA key file %s", caKeyPath)
+		if !os.IsNotExist(err) {
+			return errors.Errorf("could not stat CA key file %s: %v", caKeyPath, err)
 		}
 
 		// The key does not exist: create it.
 		key, err = rsa.GenerateKey(rand.Reader, keySize)
 		if err != nil {
-			return errors.Wrap(err, "could not generate new CA key")
+			return errors.Errorf("could not generate new CA key: %v", err)
 		}
 
 		// overwrite is not technically needed here, but use it in case something else created it.
 		if err := writeKeyToFile(caKeyPath, key, overwrite); err != nil {
-			return errors.Wrapf(err, "could not write CA key to file %s", caKeyPath)
+			return errors.Errorf("could not write CA key to file %s: %v", caKeyPath, err)
 		}
 
 		log.Infof(context.Background(), "generated CA key %s", caKeyPath)
@@ -190,12 +189,12 @@ func createCACertAndKey(
 		// The key exists, parse it.
 		contents, err := ioutil.ReadFile(caKeyPath)
 		if err != nil {
-			return errors.Wrapf(err, "could not read CA key file %s", caKeyPath)
+			return errors.Errorf("could not read CA key file %s: %v", caKeyPath, err)
 		}
 
 		key, err = PEMToPrivateKey(contents)
 		if err != nil {
-			return errors.Wrapf(err, "could not parse CA key file %s", caKeyPath)
+			return errors.Errorf("could not parse CA key file %s: %v", caKeyPath, err)
 		}
 
 		log.Infof(context.Background(), "using CA key from file %s", caKeyPath)
@@ -204,7 +203,7 @@ func createCACertAndKey(
 	// Generate certificate.
 	certContents, err := GenerateCA(key.(crypto.Signer), lifetime)
 	if err != nil {
-		return errors.Wrap(err, "could not generate CA certificate")
+		return errors.Errorf("could not generate CA certificate: %v", err)
 	}
 
 	var certPath string
@@ -227,17 +226,17 @@ func createCACertAndKey(
 		// The cert file already exists, load certificates.
 		contents, err := ioutil.ReadFile(certPath)
 		if err != nil {
-			return errors.Wrapf(err, "could not read existing CA cert file %s", certPath)
+			return errors.Errorf("could not read existing CA cert file %s: %v", certPath, err)
 		}
 
 		existingCertificates, err = PEMToCertificates(contents)
 		if err != nil {
-			return errors.Wrapf(err, "could not parse existing CA cert file %s", certPath)
+			return errors.Errorf("could not parse existing CA cert file %s: %v", certPath, err)
 		}
 		log.Infof(context.Background(), "found %d certificates in %s",
 			len(existingCertificates), certPath)
-	} else if !oserror.IsNotExist(err) {
-		return errors.Wrapf(err, "could not stat CA cert file %s", certPath)
+	} else if !os.IsNotExist(err) {
+		return errors.Errorf("could not stat CA cert file %s: %v", certPath, err)
 	}
 
 	// Always place the new certificate first.
@@ -245,7 +244,7 @@ func createCACertAndKey(
 	certificates = append(certificates, existingCertificates...)
 
 	if err := WritePEMToFile(certPath, certFileMode, overwrite, certificates...); err != nil {
-		return errors.Wrapf(err, "could not write CA certificate file %s", certPath)
+		return errors.Errorf("could not write CA certificate file %s: %v", certPath, err)
 	}
 
 	log.Infof(context.Background(), "wrote %d certificates to %s", len(certificates), certPath)
@@ -285,15 +284,12 @@ func CreateNodePair(
 	// Generate certificates and keys.
 	nodeKey, err := rsa.GenerateKey(rand.Reader, keySize)
 	if err != nil {
-		return errors.Wrap(err, "could not generate new node key")
+		return errors.Errorf("could not generate new node key: %v", err)
 	}
 
 	// Allow control of the principal to place in the cert via an env var. This
 	// is intended for testing purposes only.
-	nodeUser, _ := MakeSQLUsernameFromUserInput(
-		envutil.EnvOrDefaultString("COCKROACH_CERT_NODE_USER", NodeUser),
-		UsernameValidation)
-
+	nodeUser := envutil.EnvOrDefaultString("COCKROACH_CERT_NODE_USER", NodeUser)
 	nodeCert, err := GenerateServerCert(caCert, caPrivateKey,
 		nodeKey.Public(), lifetime, nodeUser, hosts)
 	if err != nil {
@@ -302,13 +298,13 @@ func CreateNodePair(
 
 	certPath := cm.NodeCertPath()
 	if err := writeCertificateToFile(certPath, nodeCert, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing node server certificate to %s", certPath)
+		return errors.Errorf("error writing node server certificate to %s: %v", certPath, err)
 	}
 	log.Infof(context.Background(), "generated node certificate: %s", certPath)
 
 	keyPath := cm.NodeKeyPath()
 	if err := writeKeyToFile(keyPath, nodeKey, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing node server key to %s", keyPath)
+		return errors.Errorf("error writing node server key to %s: %v", keyPath, err)
 	}
 	log.Infof(context.Background(), "generated node key: %s", keyPath)
 
@@ -347,7 +343,7 @@ func CreateUIPair(
 	// Generate certificates and keys.
 	uiKey, err := rsa.GenerateKey(rand.Reader, keySize)
 	if err != nil {
-		return errors.Wrap(err, "could not generate new UI key")
+		return errors.Errorf("could not generate new UI key: %v", err)
 	}
 
 	uiCert, err := GenerateUIServerCert(caCert, caPrivateKey, uiKey.Public(), lifetime, hosts)
@@ -357,13 +353,13 @@ func CreateUIPair(
 
 	certPath := cm.UICertPath()
 	if err := writeCertificateToFile(certPath, uiCert, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing UI server certificate to %s", certPath)
+		return errors.Errorf("error writing UI server certificate to %s: %v", certPath, err)
 	}
 	log.Infof(context.Background(), "generated UI certificate: %s", certPath)
 
 	keyPath := cm.UIKeyPath()
 	if err := writeKeyToFile(keyPath, uiKey, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing UI server key to %s", keyPath)
+		return errors.Errorf("error writing UI server key to %s: %v", keyPath, err)
 	}
 	log.Infof(context.Background(), "generated UI key: %s", keyPath)
 
@@ -380,7 +376,7 @@ func CreateClientPair(
 	keySize int,
 	lifetime time.Duration,
 	overwrite bool,
-	user SQLUsername,
+	user string,
 	wantPKCS8Key bool,
 ) error {
 	if len(caKeyPath) == 0 {
@@ -418,7 +414,7 @@ func CreateClientPair(
 	// Generate certificates and keys.
 	clientKey, err := rsa.GenerateKey(rand.Reader, keySize)
 	if err != nil {
-		return errors.Wrap(err, "could not generate new client key")
+		return errors.Errorf("could not generate new client key: %v", err)
 	}
 
 	clientCert, err := GenerateClientCert(caCert, caPrivateKey, clientKey.Public(), lifetime, user)
@@ -428,20 +424,20 @@ func CreateClientPair(
 
 	certPath := cm.ClientCertPath(user)
 	if err := writeCertificateToFile(certPath, clientCert, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing client certificate to %s", certPath)
+		return errors.Errorf("error writing client certificate to %s: %v", certPath, err)
 	}
 	log.Infof(context.Background(), "generated client certificate: %s", certPath)
 
 	keyPath := cm.ClientKeyPath(user)
 	if err := writeKeyToFile(keyPath, clientKey, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing client key to %s", keyPath)
+		return errors.Errorf("error writing client key to %s: %v", keyPath, err)
 	}
 	log.Infof(context.Background(), "generated client key: %s", keyPath)
 
 	if wantPKCS8Key {
 		pkcs8KeyPath := keyPath + ".pk8"
 		if err := writePKCS8KeyToFile(pkcs8KeyPath, clientKey, overwrite); err != nil {
-			return errors.Wrapf(err, "error writing client PKCS8 key to %s", pkcs8KeyPath)
+			return errors.Errorf("error writing client PKCS8 key to %s: %v", pkcs8KeyPath, err)
 		}
 		log.Infof(context.Background(), "generated PKCS8 client key: %s", pkcs8KeyPath)
 	}
@@ -497,7 +493,7 @@ func CreateTenantClientPair(
 	// Generate certificates and keys.
 	clientKey, err := rsa.GenerateKey(rand.Reader, keySize)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not generate new tenant key")
+		return nil, errors.Errorf("could not generate new tenant key: %v", err)
 	}
 
 	clientCert, err := GenerateTenantClientCert(
@@ -525,13 +521,13 @@ func WriteTenantClientPair(certsDir string, cp *TenantClientPair, overwrite bool
 	tenantIdentifier := cert.Subject.CommonName
 	certPath := cm.TenantClientCertPath(tenantIdentifier)
 	if err := writeCertificateToFile(certPath, cp.Cert, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing tenant certificate to %s", certPath)
+		return errors.Errorf("error writing tenant certificate to %s: %v", certPath, err)
 	}
 	log.Infof(context.Background(), "wrote SQL tenant client certificate: %s", certPath)
 
 	keyPath := cm.TenantClientKeyPath(tenantIdentifier)
 	if err := writeKeyToFile(keyPath, cp.PrivateKey, overwrite); err != nil {
-		return errors.Wrapf(err, "error writing tenant key to %s", keyPath)
+		return errors.Errorf("error writing tenant key to %s: %v", keyPath, err)
 	}
 	log.Infof(context.Background(), "generated tenant key: %s", keyPath)
 	return nil

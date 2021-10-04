@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -9,21 +9,17 @@
 // licenses/APL.txt.
 
 import { assert } from "chai";
-import {
-  filterTransactions,
-  getStatementsByFingerprintId,
-  statementFingerprintIdsToText,
-} from "./utils";
-import { Filters } from "../queryFilter/filter";
-import { data, nodeRegions } from "./transactions.fixture";
+import { filterTransactions, getStatementsById } from "./utils";
+import { Filters } from ".";
+import { data } from "./transactions.fixture";
 import Long from "long";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 type Transaction = protos.cockroach.server.serverpb.StatementsResponse.IExtendedCollectedTransactionStatistics;
 
-describe("getStatementsByFingerprintId", () => {
-  it("filters statements by fingerprint id", () => {
-    const selectedStatements = getStatementsByFingerprintId(
+describe("getStatementsById", () => {
+  it("filters statements by id", () => {
+    const selectedStatements = getStatementsById(
       [Long.fromInt(4104049045071304794), Long.fromInt(3334049045071304794)],
       [
         { id: Long.fromInt(4104049045071304794) },
@@ -45,17 +41,9 @@ describe("Filter transactions", () => {
       app: "All",
       timeNumber: "0",
       timeUnit: "seconds",
-      nodes: "",
-      regions: "",
     };
     assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
+      filterTransactions(txData, filter, "$ internal").transactions.length,
       11,
     );
   });
@@ -65,17 +53,9 @@ describe("Filter transactions", () => {
       app: "$ TEST",
       timeNumber: "0",
       timeUnit: "seconds",
-      nodes: "",
-      regions: "",
     };
     assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
+      filterTransactions(txData, filter, "$ internal").transactions.length,
       3,
     );
   });
@@ -85,17 +65,9 @@ describe("Filter transactions", () => {
       app: "$ TEST EXACT",
       timeNumber: "0",
       timeUnit: "seconds",
-      nodes: "",
-      regions: "",
     };
     assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
+      filterTransactions(txData, filter, "$ internal").transactions.length,
       1,
     );
   });
@@ -105,17 +77,9 @@ describe("Filter transactions", () => {
       app: data.internal_app_name_prefix,
       timeNumber: "0",
       timeUnit: "seconds",
-      nodes: "",
-      regions: "",
     };
     assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
+      filterTransactions(txData, filter, "$ internal").transactions.length,
       7,
     );
   });
@@ -125,137 +89,10 @@ describe("Filter transactions", () => {
       app: "All",
       timeNumber: "40",
       timeUnit: "miliseconds",
-      nodes: "",
-      regions: "",
     };
     assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
+      filterTransactions(txData, filter, "$ internal").transactions.length,
       8,
-    );
-  });
-
-  it("filters by one node", () => {
-    const filter: Filters = {
-      app: "All",
-      timeNumber: "0",
-      timeUnit: "seconds",
-      nodes: "n1",
-      regions: "",
-    };
-    assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
-      6,
-    );
-  });
-
-  it("filters by multiple nodes", () => {
-    const filter: Filters = {
-      app: "All",
-      timeNumber: "0",
-      timeUnit: "seconds",
-      nodes: "n2,n4",
-      regions: "",
-    };
-    assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
-      8,
-    );
-  });
-
-  it("filters by one region", () => {
-    const filter: Filters = {
-      app: "All",
-      timeNumber: "0",
-      timeUnit: "seconds",
-      nodes: "",
-      regions: "gcp-europe-west1",
-    };
-    assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
-      4,
-    );
-  });
-
-  it("filters by multiple regions", () => {
-    const filter: Filters = {
-      app: "All",
-      timeNumber: "0",
-      timeUnit: "seconds",
-      nodes: "",
-      regions: "gcp-us-west1,gcp-europe-west1",
-    };
-    assert.equal(
-      filterTransactions(
-        txData,
-        filter,
-        "$ internal",
-        data.statements,
-        nodeRegions,
-      ).transactions.length,
-      9,
-    );
-  });
-});
-
-describe("statementFingerprintIdsToText", () => {
-  it("translate statement fingerprint IDs into queries", () => {
-    const statements = [
-      {
-        id: Long.fromInt(4104049045071304794),
-        key: {
-          // eslint-disable-next-line @typescript-eslint/camelcase
-          key_data: {
-            query: "SELECT _",
-          },
-        },
-      },
-      {
-        id: Long.fromInt(5104049045071304794),
-        key: {
-          // eslint-disable-next-line @typescript-eslint/camelcase
-          key_data: {
-            query: "SELECT _, _",
-          },
-        },
-      },
-    ];
-    const statementFingerprintIds = [
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(5104049045071304794),
-      Long.fromInt(4104049045071304794),
-      Long.fromInt(4104049045071304794),
-    ];
-
-    assert.equal(
-      statementFingerprintIdsToText(statementFingerprintIds, statements),
-      `SELECT _
-SELECT _, _
-SELECT _
-SELECT _`,
     );
   });
 });

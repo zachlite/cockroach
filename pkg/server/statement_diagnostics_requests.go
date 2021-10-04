@@ -96,9 +96,9 @@ func (s *statusServer) StatementDiagnosticsRequests(
 	var err error
 
 	// TODO(davidh): Add pagination to this request.
-	it, err := s.internalExecutor.QueryIteratorEx(ctx, "stmt-diag-get-all", nil, /* txn */
+	rows, err := s.internalExecutor.QueryEx(ctx, "stmt-diag-get-all", nil, /* txn */
 		sessiondata.InternalExecutorOverride{
-			User: security.RootUserName(),
+			User: security.RootUser,
 		},
 		`SELECT
 			id,
@@ -112,10 +112,8 @@ func (s *statusServer) StatementDiagnosticsRequests(
 		return nil, err
 	}
 
-	var requests []stmtDiagnosticsRequest
-	var ok bool
-	for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-		row := it.Cur()
+	requests := make([]stmtDiagnosticsRequest, len(rows))
+	for i, row := range rows {
 		id := int(*row[0].(*tree.DInt))
 		statementFingerprint := string(*row[1].(*tree.DString))
 		completed := bool(*row[2].(*tree.DBool))
@@ -134,10 +132,7 @@ func (s *statusServer) StatementDiagnosticsRequests(
 			req.RequestedAt = requestedAt.Time
 		}
 
-		requests = append(requests, req)
-	}
-	if err != nil {
-		return nil, err
+		requests[i] = req
 	}
 
 	response := &serverpb.StatementDiagnosticsReportsResponse{
@@ -170,7 +165,7 @@ func (s *statusServer) StatementDiagnostics(
 	var err error
 	row, err := s.internalExecutor.QueryRowEx(ctx, "stmt-diag-get-one", nil, /* txn */
 		sessiondata.InternalExecutorOverride{
-			User: security.RootUserName(),
+			User: security.RootUser,
 		},
 		`SELECT
 			id,

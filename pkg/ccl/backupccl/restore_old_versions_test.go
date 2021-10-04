@@ -19,16 +19,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -61,46 +52,22 @@ func TestRestoreOldVersions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	const (
-		testdataBase                = "testdata/restore_old_versions"
-		exportDirsWithoutInterleave = testdataBase + "/exports-without-interleaved"
-		exportDirs                  = testdataBase + "/exports"
-		fkRevDirs                   = testdataBase + "/fk-rev-history"
-		clusterDirs                 = testdataBase + "/cluster"
-		exceptionalDirs             = testdataBase + "/exceptional"
-		privilegeDirs               = testdataBase + "/privileges"
-		interleavedDirs             = testdataBase + "/interleaved"
+		testdataBase    = "testdata/restore_old_versions"
+		exportDirs      = testdataBase + "/exports"
+		fkRevDirs       = testdataBase + "/fk-rev-history"
+		clusterDirs     = testdataBase + "/cluster"
+		exceptionalDirs = testdataBase + "/exceptional"
+		privilegeDirs   = testdataBase + "/privileges"
 	)
 
-	t.Run("interleaved", func(t *testing.T) {
-		dirs, err := ioutil.ReadDir(interleavedDirs)
-		require.NoError(t, err)
-		for _, dir := range dirs {
-			require.True(t, dir.IsDir())
-			interleavedDirs, err := filepath.Abs(filepath.Join(interleavedDirs, dir.Name()))
-			require.NoError(t, err)
-			t.Run(dir.Name(), restoreInterleavedTest(interleavedDirs))
-		}
-	})
-
 	t.Run("table-restore", func(t *testing.T) {
-		dirs, err := ioutil.ReadDir(exportDirsWithoutInterleave)
-		require.NoError(t, err)
-		for _, dir := range dirs {
-			require.True(t, dir.IsDir())
-			exportDir, err := filepath.Abs(filepath.Join(exportDirsWithoutInterleave, dir.Name()))
-			require.NoError(t, err)
-			t.Run(dir.Name(), restoreOldVersionTest(exportDir))
-		}
-	})
-
-	t.Run("table-restore-with-interleave", func(t *testing.T) {
-		dirs, err := ioutil.ReadDir(exportDirsWithoutInterleave)
+		dirs, err := ioutil.ReadDir(exportDirs)
 		require.NoError(t, err)
 		for _, dir := range dirs {
 			require.True(t, dir.IsDir())
 			exportDir, err := filepath.Abs(filepath.Join(exportDirs, dir.Name()))
 			require.NoError(t, err)
-			t.Run(dir.Name(), restoreOldVersionTestWithInterleave(exportDir))
+			t.Run(dir.Name(), restoreOldVersionTest(exportDir))
 		}
 	})
 
@@ -130,6 +97,49 @@ func TestRestoreOldVersions(t *testing.T) {
 	// versions, but are now disallowed, but we should check that we fail
 	// gracefully with them.
 	t.Run("exceptional-backups", func(t *testing.T) {
+		t.Run("duplicate-db-desc", func(t *testing.T) {
+			backupUnderTest := "doubleDB"
+			/*
+					This backup was generated with the following SQL on (v21.1.6):
+
+				  CREATE DATABASE db1;
+				  DROP DATABASE db1;
+				  CREATE DATABASE db1;
+				  BACKUP TO 'nodelocal://1/doubleDB' WITH revision_history;
+			*/
+			dir, err := os.Stat(filepath.Join(exceptionalDirs, backupUnderTest))
+			require.NoError(t, err)
+			require.True(t, dir.IsDir())
+
+			// We could create tables which reference types in another database on
+			// 20.2 release candidates.
+			exportDir, err := filepath.Abs(filepath.Join(exceptionalDirs, dir.Name()))
+			require.NoError(t, err)
+
+			externalDir, dirCleanup := testutils.TempDir(t)
+			ctx := context.Background()
+			tc := testcluster.StartTestCluster(t, singleNode, base.TestClusterArgs{
+				ServerArgs: base.TestServerArgs{
+					ExternalIODir: externalDir,
+				},
+			})
+			sqlDB := sqlutils.MakeSQLRunner(tc.Conns[0])
+			defer func() {
+				tc.Stopper().Stop(ctx)
+				dirCleanup()
+			}()
+			err = os.Symlink(exportDir, filepath.Join(externalDir, "foo"))
+			require.NoError(t, err)
+
+			sqlDB.Exec(t, `RESTORE FROM $1`, LocalFoo)
+			sqlDB.Exec(t, `DROP DATABASE db1;`)
+			sqlDB.Exec(t, `RESTORE DATABASE db1 FROM $1`, LocalFoo)
+			sqlDB.CheckQueryResults(t,
+				`SELECT count(*) FROM [SHOW DATABASES] WHERE database_name = 'db1'`,
+				[][]string{{"1"}},
+			)
+		})
+
 		t.Run("x-db-type-reference", func(t *testing.T) {
 			backupUnderTest := "xDbRef"
 			/*
@@ -197,93 +207,12 @@ ORDER BY object_type, object_name`, [][]string{
 	})
 }
 
-func restoreInterleavedTest(exportDir string) func(t *testing.T) {
-	return func(t *testing.T) {
-		params := base.TestServerArgs{
-			Knobs: base.TestingKnobs{
-				Server: &server.TestingKnobs{
-					DisableAutomaticVersionUpgrade: 1,
-					BinaryVersionOverride:          clusterversion.ByKey(clusterversion.PreventNewInterleavedTables - 1),
-				},
-			},
-		}
-		const numAccounts = 1000
-		_, _, sqlDB, dir, cleanup := backupRestoreTestSetupWithParams(t, singleNode, numAccounts,
-			InitManualReplication, base.TestClusterArgs{ServerArgs: params})
-		defer cleanup()
-		err := os.Symlink(exportDir, filepath.Join(dir, "foo"))
-		require.NoError(t, err)
-		sqlDB.Exec(t, `CREATE DATABASE test`)
-		var unused string
-		var importedRows int
-		sqlDB.QueryRow(t, `RESTORE test.* FROM $1`, LocalFoo).Scan(
-			&unused, &unused, &unused, &importedRows, &unused, &unused,
-		)
-		// No rows in the imported table.
-		const totalRows = 4
-		if importedRows != totalRows {
-			t.Fatalf("expected %d rows, got %d", totalRows, importedRows)
-		}
-		// Validate an empty result set is generated.
-		orderResults := [][]string{
-			{"1", "1", "20.00000"},
-			{"2", "2", "30.00000"},
-		}
-		customerResults := [][]string{
-			{"1", "BOB"},
-			{"2", "BILL"},
-		}
-		sqlDB.CheckQueryResults(t, `SELECT * FROM test.orders`, orderResults)
-		sqlDB.CheckQueryResults(t, `SELECT * FROM test.customers`, customerResults)
-		// Result of show tables.
-		showTableResult := [][]string{
-			{"test.public.orders",
-				"CREATE TABLE public.orders (\n\tcustomer INT8 NOT NULL,\n\tid INT8 NOT NULL,\n\ttotal DECIMAL(20,5) NULL,\n\tCONSTRAINT \"primary\" PRIMARY KEY (customer ASC, id ASC),\n\tCONSTRAINT fk_customer FOREIGN KEY (customer) REFERENCES public.customers(id),\n\tFAMILY \"primary\" (customer, id, total)\n) INTERLEAVE IN PARENT public.customers (customer)"},
-		}
-		sqlDB.CheckQueryResults(t, "SHOW CREATE TABLE test.orders", showTableResult)
-		// We should still have interleaved tables.
-		interleavedResult := [][]string{
-			{"test", "public", "orders", "primary", "test", "public", "customers"}}
-		sqlDB.ExecSucceedsSoon(t, "SET DATABASE = test")
-		sqlDB.CheckQueryResultsRetry(t, "SELECT * FROM crdb_internal.interleaved", interleavedResult)
-		// Next move to a version that blocks restores.
-		sqlDB.ExecSucceedsSoon(t,
-			"SET CLUSTER SETTING version = $1",
-			clusterversion.ByKey(clusterversion.PreventNewInterleavedTables).String())
-		// Clean up the old database.
-		sqlDB.ExecSucceedsSoon(t, "SET DATABASE = defaultdb")
-		sqlDB.ExecSucceedsSoon(t, "set sql_safe_updates=false")
-		sqlDB.ExecSucceedsSoon(t, "DROP DATABASE TEST")
-		// Restore should now fail.
-		sqlDB.ExpectErr(t,
-			"pq: restoring interleaved tables is no longer allowed. table customers was found to be interleaved",
-			`RESTORE test.* FROM $1`, LocalFoo)
-	}
-}
-
-func restoreOldVersionTestWithInterleave(exportDir string) func(t *testing.T) {
-	return func(t *testing.T) {
-		params := base.TestServerArgs{}
-		const numAccounts = 1000
-		_, _, sqlDB, dir, cleanup := backupRestoreTestSetupWithParams(t, singleNode, numAccounts,
-			InitManualReplication, base.TestClusterArgs{ServerArgs: params})
-		defer cleanup()
-		err := os.Symlink(exportDir, filepath.Join(dir, "foo"))
-		require.NoError(t, err)
-		sqlDB.Exec(t, `CREATE DATABASE test`)
-		// Restore should now fail.
-		sqlDB.ExpectErr(t,
-			"pq: restoring interleaved tables is no longer allowed. table t3 was found to be interleaved",
-			`RESTORE test.* FROM $1`, LocalFoo)
-	}
-}
-
 func restoreOldVersionTest(exportDir string) func(t *testing.T) {
 	return func(t *testing.T) {
 		params := base.TestServerArgs{}
 		const numAccounts = 1000
 		_, _, sqlDB, dir, cleanup := backupRestoreTestSetupWithParams(t, singleNode, numAccounts,
-			InitManualReplication, base.TestClusterArgs{ServerArgs: params})
+			InitNone, base.TestClusterArgs{ServerArgs: params})
 		defer cleanup()
 		err := os.Symlink(exportDir, filepath.Join(dir, "foo"))
 		require.NoError(t, err)
@@ -305,10 +234,6 @@ func restoreOldVersionTest(exportDir string) func(t *testing.T) {
 		sqlDB.CheckQueryResults(t, `SELECT * FROM test.t1 ORDER BY k`, results)
 		sqlDB.CheckQueryResults(t, `SELECT * FROM test.t2 ORDER BY k`, results)
 		sqlDB.CheckQueryResults(t, `SELECT * FROM test.t4 ORDER BY k`, results)
-
-		results = append(results, []string{"4", "5", "6"})
-		sqlDB.Exec(t, `INSERT INTO test.t1 VALUES (4, 5 ,6)`)
-		sqlDB.CheckQueryResults(t, `SELECT * FROM test.t1 ORDER BY k`, results)
 	}
 }
 
@@ -320,19 +245,19 @@ func restoreOldVersionTest(exportDir string) func(t *testing.T) {
 func restoreV201ZoneconfigPrivilegeTest(exportDir string) func(t *testing.T) {
 	return func(t *testing.T) {
 		const numAccounts = 1000
-		_, _, _, tmpDir, cleanupFn := BackupRestoreTestSetup(t, MultiNode, numAccounts, InitManualReplication)
+		_, _, _, tmpDir, cleanupFn := BackupRestoreTestSetup(t, MultiNode, numAccounts, InitNone)
 		defer cleanupFn()
 
 		_, _, sqlDB, cleanup := backupRestoreTestSetupEmpty(t, singleNode, tmpDir,
-			InitManualReplication, base.TestClusterArgs{})
+			InitNone, base.TestClusterArgs{})
 		defer cleanup()
 		err := os.Symlink(exportDir, filepath.Join(tmpDir, "foo"))
 		require.NoError(t, err)
 		sqlDB.Exec(t, `RESTORE FROM $1`, LocalFoo)
 		testDBGrants := [][]string{
-			{"test", "admin", "ALL"},
-			{"test", "root", "ALL"},
-			{"test", "testuser", "ZONECONFIG"},
+			{"test", "public", "admin", "ALL"},
+			{"test", "public", "root", "ALL"},
+			{"test", "public", "testuser", "ZONECONFIG"},
 		}
 		sqlDB.CheckQueryResults(t, `show grants on database test`, testDBGrants)
 
@@ -357,7 +282,7 @@ func restoreOldVersionFKRevTest(exportDir string) func(t *testing.T) {
 		params := base.TestServerArgs{}
 		const numAccounts = 1000
 		_, _, sqlDB, dir, cleanup := backupRestoreTestSetupWithParams(t, singleNode, numAccounts,
-			InitManualReplication, base.TestClusterArgs{ServerArgs: params})
+			InitNone, base.TestClusterArgs{ServerArgs: params})
 		defer cleanup()
 		err := os.Symlink(exportDir, filepath.Join(dir, "foo"))
 		require.NoError(t, err)
@@ -566,7 +491,6 @@ func TestRestoreOldBackupMissingOfflineIndexes(t *testing.T) {
 			sqlDBRestore := sqlutils.MakeSQLRunner(restoreTC.Conns[0])
 			from := strings.Join(backupDirs[:i], `,`)
 			sqlDBRestore.Exec(t, fmt.Sprintf(`RESTORE FROM %s`, from))
-
 			for j := i; j > 1; j-- {
 				var res int64
 				switch j % 3 {
@@ -589,9 +513,9 @@ func TestRestoreOldBackupMissingOfflineIndexes(t *testing.T) {
 					if res != expected {
 						t.Fatalf("got %d, expected %d", res, expected)
 					}
-				// case 1 and 0 are both inverted, which we can't validate via SQL, so
-				// this is just checking that it eventually shows up, i.e. that the code
-				// to validate and create the schema change works.
+					// case 1 and 0 are both inverted, which we can't validate via SQL, so
+					// this is just checking that it eventually shows up, i.e. that the code
+					// to validate and create the schema change works.
 				case 0:
 					found := false
 					for i := 0; i < 50; i++ {
@@ -616,58 +540,4 @@ func TestRestoreOldBackupMissingOfflineIndexes(t *testing.T) {
 			}
 		}
 	}
-}
-
-func TestRestoreWithDroppedSchemaCorruption(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	const (
-		dbName    = "foo"
-		backupDir = "testdata/restore_with_dropped_schema/exports/v20.2.7"
-		fromDir   = "nodelocal://0/"
-	)
-
-	args := base.TestServerArgs{ExternalIODir: backupDir}
-	s, sqlDB, _ := serverutils.StartServer(t, args)
-	tdb := sqlutils.MakeSQLRunner(sqlDB)
-	defer s.Stopper().Stop(ctx)
-
-	tdb.Exec(t, fmt.Sprintf("RESTORE DATABASE %s FROM '%s'", dbName, fromDir))
-	query := fmt.Sprintf("SELECT database_name FROM [SHOW DATABASES] WHERE database_name = '%s'", dbName)
-	tdb.CheckQueryResults(t, query, [][]string{{dbName}})
-
-	// Read descriptor without validation.
-	execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
-	hasSameNameSchema := func(dbName string) bool {
-		exists := false
-		var desc catalog.DatabaseDescriptor
-		require.NoError(t, sql.DescsTxn(ctx, &execCfg, func(
-			ctx context.Context, txn *kv.Txn, collection *descs.Collection,
-		) error {
-			// Using this method to avoid validation.
-			allDescs, err := catalogkv.GetAllDescriptors(ctx, txn, execCfg.Codec, false)
-			if err != nil {
-				return err
-			}
-			for _, d := range allDescs {
-				if d.GetName() == dbName {
-					desc, err = catalog.AsDatabaseDescriptor(d)
-					require.NoError(t, err, "unable to cast to database descriptor")
-					return nil
-				}
-			}
-			return nil
-		}))
-		require.NoError(t, desc.ForEachSchemaInfo(
-			func(id descpb.ID, name string, isDropped bool) error {
-				if name == dbName {
-					exists = true
-				}
-				return nil
-			}))
-		return exists
-	}
-	require.Falsef(t, hasSameNameSchema(dbName), "corrupted descriptor exists")
 }

@@ -25,22 +25,16 @@ import * as protos from "src/js/protos";
 
 const sandbox = sinon.createSandbox();
 
-describe("analytics listener", function () {
+describe("analytics listener", function() {
   const clusterID = "a49f0ced-7ada-4135-af37-8acf6b548df0";
-  const setClusterData = (
-    store: Store<AdminUIState>,
-    enabled = true,
-    enterprise = true,
-  ) => {
-    store.dispatch(
-      clusterReducerObj.receiveData(
-        new protos.cockroach.server.serverpb.ClusterResponse({
-          cluster_id: clusterID,
-          reporting_enabled: enabled,
-          enterprise_enabled: enterprise,
-        }),
-      ),
-    );
+  const setClusterData = (store: Store<AdminUIState>, enabled = true, enterprise = true) => {
+    store.dispatch(clusterReducerObj.receiveData(
+      new protos.cockroach.server.serverpb.ClusterResponse({
+        cluster_id: clusterID,
+        reporting_enabled: enabled,
+        enterprise_enabled: enterprise,
+      }),
+    ));
   };
 
   describe("page method", function () {
@@ -164,38 +158,22 @@ describe("analytics listener", function () {
       return { title, input, expected };
     }
 
-    [
+    ([
       testRedaction(
-        "old database URL (redirect)",
+        "old database URL",
         "/databases/database/foobar/table/baz",
         "/databases/database/[db]/table/[tbl]",
       ),
       testRedaction(
-        "database URL (redirect)",
-        "/database/foobar",
-        "/database/[db]",
-      ),
-      testRedaction(
-        "database tables URL",
-        "/database/foobar/tables",
-        "/database/[db]/tables",
-      ),
-      testRedaction(
-        "database grants URL",
-        "/database/foobar/grants",
-        "/database/[db]/grants",
-      ),
-      testRedaction(
-        "database table URL (redirect)",
-        "/database/foobar/table",
-        "/database/[db]/table",
-      ),
-      testRedaction(
-        "database table URL",
+        "new database URL",
         "/database/foobar/table/baz",
         "/database/[db]/table/[tbl]",
       ),
-      testRedaction("clusterviz map root", "/overview/map/", "/overview/map/"),
+      testRedaction(
+        "clusterviz map root",
+        "/overview/map/",
+        "/overview/map/",
+      ),
       testRedaction(
         "clusterviz map single locality",
         "/overview/map/datacenter=us-west-1",
@@ -216,7 +194,7 @@ describe("analytics listener", function () {
         "/statement/SELECT * FROM database.table",
         "/statement/[statement]",
       ),
-    ].map(function ({ title, input, expected }) {
+    ]).map(function ({ title, input, expected }) {
       it(`applies a redaction for ${title}`, function () {
         setClusterData(store);
         const sync = new AnalyticsSync(analytics, store, defaultRedactions);
@@ -225,25 +203,14 @@ describe("analytics listener", function () {
         sync.page(createLocation(input));
 
         assert.isTrue(pageSpy.calledOnce);
-
-        const actualArgs = pageSpy.args[0][0];
-        const expectedArgs = {
+        assert.deepEqual(pageSpy.args[0][0], {
           userId: clusterID,
           name: expectedLocation.pathname,
           properties: {
             path: expectedLocation.pathname,
             search: expectedLocation.search,
           },
-        };
-        assert.deepEqual(
-          actualArgs,
-          expectedArgs,
-          `Expected:\n${JSON.stringify(
-            expectedArgs,
-            null,
-            2,
-          )}\nActual:\n${JSON.stringify(actualArgs, null, 2)}\n`,
-        );
+        });
       });
     });
   });
@@ -269,15 +236,13 @@ describe("analytics listener", function () {
     });
 
     const setVersionData = function () {
-      store.dispatch(
-        nodesReducerObj.receiveData([
-          {
-            build_info: {
-              tag: "0.1",
-            },
+      store.dispatch(nodesReducerObj.receiveData([
+        {
+          build_info: {
+            tag: "0.1",
           },
-        ]),
-      );
+        },
+      ]));
     };
 
     it("does nothing if cluster info is not available", function () {

@@ -1195,14 +1195,6 @@ func (m *CommonLargeRowDetails) AppendJSONFields(printComma bool, b redact.Redac
 		b = append(b, '"')
 	}
 
-	if m.ViolatesMaxRowSizeErr {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"ViolatesMaxRowSizeErr\":true"...)
-	}
-
 	return printComma, b
 }
 
@@ -1577,29 +1569,13 @@ func (m *CommonTxnRowsLimitDetails) AppendJSONFields(printComma bool, b redact.R
 		b = append(b, '"')
 	}
 
-	if m.Limit != 0 {
+	if m.NumRows != 0 {
 		if printComma {
 			b = append(b, ',')
 		}
 		printComma = true
-		b = append(b, "\"Limit\":"...)
-		b = strconv.AppendInt(b, int64(m.Limit), 10)
-	}
-
-	if m.ViolatesTxnRowsLimitErr {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"ViolatesTxnRowsLimitErr\":true"...)
-	}
-
-	if m.IsRead {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"IsRead\":true"...)
+		b = append(b, "\"NumRows\":"...)
+		b = strconv.AppendInt(b, int64(m.NumRows), 10)
 	}
 
 	return printComma, b
@@ -2738,6 +2714,27 @@ func (m *RuntimeStats) AppendJSONFields(printComma bool, b redact.RedactableByte
 		printComma = true
 		b = append(b, "\"NetHostSendBytes\":"...)
 		b = strconv.AppendUint(b, uint64(m.NetHostSendBytes), 10)
+	}
+
+	return printComma, b
+}
+
+// AppendJSONFields implements the EventPayload interface.
+func (m *SampledQuery) AppendJSONFields(printComma bool, b redact.RedactableBytes) (bool, redact.RedactableBytes) {
+
+	printComma, b = m.CommonEventDetails.AppendJSONFields(printComma, b)
+
+	printComma, b = m.CommonSQLEventDetails.AppendJSONFields(printComma, b)
+
+	printComma, b = m.CommonSQLExecDetails.AppendJSONFields(printComma, b)
+
+	if m.SkippedQueries != 0 {
+		if printComma {
+			b = append(b, ',')
+		}
+		printComma = true
+		b = append(b, "\"SkippedQueries\":"...)
+		b = strconv.AppendUint(b, uint64(m.SkippedQueries), 10)
 	}
 
 	return printComma, b

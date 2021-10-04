@@ -138,7 +138,8 @@ type BaseConfig struct {
 
 	// DefaultZoneConfig is used to set the default zone config inside the server.
 	// It can be overridden during tests by setting the DefaultZoneConfigOverride
-	// server testing knob.
+	// server testing knob. Whatever is installed here is in turn used to
+	// initialize stores, which need a default span config.
 	DefaultZoneConfig zonepb.ZoneConfig
 
 	// Locality is a description of the topography of the server.
@@ -147,6 +148,9 @@ type BaseConfig struct {
 	// StorageEngine specifies the engine type (eg. rocksdb, pebble) to use to
 	// instantiate stores.
 	StorageEngine enginepb.EngineType
+
+	// Enables the use of the (experimental) span configs infrastructure.
+	SpanConfigsEnabled bool
 
 	// TestingKnobs is used for internal test controls only.
 	TestingKnobs base.TestingKnobs
@@ -416,6 +420,9 @@ func (cfg *Config) String() string {
 	if cfg.Linearizable {
 		fmt.Fprintln(w, "linearizable\t", cfg.Linearizable)
 	}
+	if cfg.SpanConfigsEnabled {
+		fmt.Fprintln(w, "span configs enabled\t", cfg.SpanConfigsEnabled)
+	}
 	_ = w.Flush()
 
 	return buf.String()
@@ -522,7 +529,8 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 					storage.CacheSize(cfg.CacheSize),
 					storage.MaxSize(sizeInBytes),
 					storage.EncryptionAtRest(spec.EncryptionOptions),
-					storage.Settings(cfg.Settings))
+					storage.Settings(cfg.Settings),
+					storage.SetSeparatedIntents(disableSeparatedIntents))
 				if err != nil {
 					return Engines{}, err
 				}

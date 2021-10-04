@@ -16,7 +16,6 @@ import (
 	"reflect"
 	"sync/atomic"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -263,7 +262,14 @@ func (j *Job) started(ctx context.Context, txn *kv.Txn) error {
 			md.Payload.StartedMicros = timeutil.ToUnixMicros(j.registry.clock.Now().GoTime())
 			ju.UpdatePayload(md.Payload)
 		}
-		if j.registry.settings.Version.IsActive(ctx, clusterversion.RetryJobsWithExponentialBackoff) {
+		// md.RunStats can be nil because of the timing of version-update when exponential-backoff
+		// gets activated. It may happen that backoff is not activated when Update() function was
+		// called, which will cause to not populate md.RunStats. However, when the code reaches this
+		// point, version update may have been updated to enable backoff. In this case, we can skip
+		// updating num_runs and last_run, treating this job run as if backoff was not activated.
+		//
+		// TODO (sajjad): Update this comment after version 22.2 has been released.
+		if md.RunStats != nil {
 			ju.UpdateRunStats(md.RunStats.NumRuns+1, j.registry.clock.Now().GoTime())
 		}
 		return nil
@@ -541,7 +547,12 @@ func (j *Job) reverted(
 			}
 			ju.UpdateStatus(StatusReverting)
 		}
-		if j.registry.settings.Version.IsActive(ctx, clusterversion.RetryJobsWithExponentialBackoff) {
+		// md.RunStats will be nil if clusterversion.RetryJobsWithExponentialBackoff
+		// was not active when Update was called above. In this case, we skip updating
+		// the runStats, treating this job run as if backoff is not active.
+		//
+		// TODO (sajjad): Update this comment after version 22.2 has been released.
+		if md.RunStats != nil {
 			// We can reach here due to a failure or due to the job being canceled.
 			// We should reset the exponential backoff parameters if the job was not
 			// canceled. Note that md.Status will be StatusReverting if the job
@@ -730,11 +741,15 @@ func (j *Job) runInTxn(
 
 // JobNotFoundError is returned from load when the job does not exist.
 type JobNotFoundError struct {
-	jobID jobspb.JobID
+	jobID     jobspb.JobID
+	sessionID sqlliveness.SessionID
 }
 
 // Error makes JobNotFoundError an error.
 func (e *JobNotFoundError) Error() string {
+	if e.sessionID != "" {
+		return fmt.Sprintf("job with ID %d does not exist with claim session id %q", e.jobID, e.sessionID.String())
+	}
 	return fmt.Sprintf("job with ID %d does not exist", e.jobID)
 }
 
@@ -749,10 +764,21 @@ func (j *Job) load(ctx context.Context, txn *kv.Txn) error {
 	var createdBy *CreatedByInfo
 
 	if err := j.runInTxn(ctx, txn, func(ctx context.Context, txn *kv.Txn) error {
-		const stmt = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
-		row, err := j.registry.ex.QueryRowEx(
-			ctx, "load-job-query", txn, sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-			stmt, j.ID())
+		const (
+			queryNoSessionID   = "SELECT payload, progress, created_by_type, created_by_id FROM system.jobs WHERE id = $1"
+			queryWithSessionID = queryNoSessionID + " AND claim_session_id = $2"
+		)
+		sess := sessiondata.InternalExecutorOverride{User: security.RootUserName()}
+
+		var err error
+		var row tree.Datums
+		if j.sessionID == "" {
+			row, err = j.registry.ex.QueryRowEx(ctx, "load-job-query", txn, sess,
+				queryNoSessionID, j.ID())
+		} else {
+			row, err = j.registry.ex.QueryRowEx(ctx, "load-job-query", txn, sess,
+				queryWithSessionID, j.ID(), j.sessionID.UnsafeBytes())
+		}
 		if err != nil {
 			return err
 		}

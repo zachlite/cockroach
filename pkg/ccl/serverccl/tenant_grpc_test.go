@@ -22,11 +22,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 )
 
 // TestTenantGRPCServices tests that the gRPC servers that are externally
@@ -47,6 +45,9 @@ func TestTenantGRPCServices(t *testing.T) {
 
 	server := testCluster.Server(0)
 
+	httpClient, err := server.RPCContext().GetHTTPClient()
+	require.NoError(t, err)
+
 	tenantID := serverutils.TestTenantID()
 	tenant, connTenant := serverutils.StartTenant(t, server, base.TestTenantArgs{
 		TenantID: tenantID,
@@ -65,9 +66,6 @@ func TestTenantGRPCServices(t *testing.T) {
 		nodeID := roachpb.NodeID(tenant.SQLInstanceID())
 		conn, err := rpcCtx.GRPCDialNode(grpcAddr, nodeID, rpc.DefaultClass).Connect(ctx)
 		require.NoError(t, err)
-		defer func(conn *grpc.ClientConn) {
-			_ = conn.Close()
-		}(conn)
 
 		client := serverpb.NewStatusClient(conn)
 
@@ -77,7 +75,7 @@ func TestTenantGRPCServices(t *testing.T) {
 	})
 
 	t.Run("gRPC Gateway is running", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/_status/statements")
+		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/_status/statements")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -98,7 +96,7 @@ func TestTenantGRPCServices(t *testing.T) {
 	defer connTenant2.Close()
 
 	t.Run("statements endpoint fans out request to multiple pods", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant2.HTTPAddr()+"/_status/statements")
+		resp, err := httpClient.Get("https://" + tenant2.HTTPAddr() + "/_status/statements")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -115,7 +113,7 @@ func TestTenantGRPCServices(t *testing.T) {
 	defer connTenant3.Close()
 
 	t.Run("fanout of statements endpoint is segregated by tenant", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant3.HTTPAddr()+"/_status/statements")
+		resp, err := httpClient.Get("https://" + tenant3.HTTPAddr() + "/_status/statements")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -132,9 +130,6 @@ func TestTenantGRPCServices(t *testing.T) {
 		nodeID := roachpb.NodeID(tenant.SQLInstanceID())
 		conn, err := rpcCtx.GRPCDialNode(grpcAddr, nodeID, rpc.DefaultClass).Connect(ctx)
 		require.NoError(t, err)
-		defer func(conn *grpc.ClientConn) {
-			_ = conn.Close()
-		}(conn)
 
 		client := serverpb.NewStatusClient(conn)
 
@@ -149,9 +144,6 @@ func TestTenantGRPCServices(t *testing.T) {
 
 		conn, err := rpcCtx.GRPCDialNode(grpcAddr, server.NodeID(), rpc.DefaultClass).Connect(ctx)
 		require.NoError(t, err)
-		defer func(conn *grpc.ClientConn) {
-			_ = conn.Close()
-		}(conn)
 
 		client := serverpb.NewStatusClient(conn)
 
@@ -160,7 +152,7 @@ func TestTenantGRPCServices(t *testing.T) {
 	})
 
 	t.Run("sessions endpoint is available", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/_status/sessions")
+		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/_status/sessions")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)

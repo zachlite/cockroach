@@ -35,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -52,7 +51,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -285,6 +283,9 @@ type Server struct {
 
 	// InternalMetrics is used to account internal queries.
 	InternalMetrics Metrics
+
+	// TelemetryLoggingMetrics is used to track metrics for logging to the telemetry channel.
+	TelemetryLoggingMetrics *TelemetryLoggingMetrics
 }
 
 // Metrics collects timeseries data about SQL activity.
@@ -352,6 +353,11 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 		}),
 	}
 
+	telemetryLoggingMetrics := &TelemetryLoggingMetrics{}
+
+	telemetryLoggingMetrics.Knobs = cfg.TelemetryLoggingTestingKnobs
+	s.TelemetryLoggingMetrics = telemetryLoggingMetrics
+
 	sqlStatsInternalExecutor := MakeInternalExecutor(context.Background(), s, MemoryMetrics{}, cfg.Settings)
 	persistedSQLStats := persistedsqlstats.New(&persistedsqlstats.Config{
 		Settings:         s.cfg.Settings,
@@ -390,9 +396,10 @@ func makeMetrics(cfg *ExecutorConfig, internal bool) Metrics {
 				6*metricsSampleInterval),
 			SQLTxnsOpen: metric.NewGauge(getMetricMeta(MetaSQLTxnsOpen, internal)),
 
-			TxnAbortCount:             metric.NewCounter(getMetricMeta(MetaTxnAbort, internal)),
-			FailureCount:              metric.NewCounter(getMetricMeta(MetaFailure, internal)),
-			FullTableOrIndexScanCount: metric.NewCounter(getMetricMeta(MetaFullTableOrIndexScan, internal)),
+			TxnAbortCount:                     metric.NewCounter(getMetricMeta(MetaTxnAbort, internal)),
+			FailureCount:                      metric.NewCounter(getMetricMeta(MetaFailure, internal)),
+			FullTableOrIndexScanCount:         metric.NewCounter(getMetricMeta(MetaFullTableOrIndexScan, internal)),
+			FullTableOrIndexScanRejectedCount: metric.NewCounter(getMetricMeta(MetaFullTableOrIndexScanRejected, internal)),
 		},
 		StartedStatementCounters:  makeStartedStatementCounters(internal),
 		ExecutedStatementCounters: makeExecutedStatementCounters(internal),
@@ -465,7 +472,7 @@ func (s *Server) GetReportedSQLStatsController() *sslocal.Controller {
 func (s *Server) GetScrubbedStmtStats(
 	ctx context.Context,
 ) ([]roachpb.CollectedStatementStatistics, error) {
-	return s.getScrubbedStmtStats(ctx, s.sqlStats)
+	return s.getScrubbedStmtStats(ctx, s.sqlStats.GetLocalMemProvider())
 }
 
 // Avoid lint errors.
@@ -482,7 +489,7 @@ func (s *Server) GetUnscrubbedStmtStats(
 		return nil
 	}
 	err :=
-		s.sqlStats.IterateStatementStats(ctx, &sqlstats.IteratorOptions{}, stmtStatsVisitor)
+		s.sqlStats.GetLocalMemProvider().IterateStatementStats(ctx, &sqlstats.IteratorOptions{}, stmtStatsVisitor)
 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to fetch statement stats")
@@ -502,7 +509,7 @@ func (s *Server) GetUnscrubbedTxnStats(
 		return nil
 	}
 	err :=
-		s.sqlStats.IterateTransactionStats(ctx, &sqlstats.IteratorOptions{}, txnStatsVisitor)
+		s.sqlStats.GetLocalMemProvider().IterateTransactionStats(ctx, &sqlstats.IteratorOptions{}, txnStatsVisitor)
 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to fetch statement stats")
@@ -591,12 +598,14 @@ func (s *Server) SetupConn(
 	stmtBuf *StmtBuf,
 	clientComm ClientComm,
 	memMetrics MemoryMetrics,
+	onDefaultIntSizeChange func(newSize int32),
 ) (ConnectionHandler, error) {
 	sd := s.newSessionData(args)
 	sds := sessiondata.NewStack(sd)
 	// Set the SessionData from args.SessionDefaults. This also validates the
 	// respective values.
 	sdMutIterator := s.makeSessionDataMutatorIterator(sds, args.SessionDefaults)
+	sdMutIterator.onDefaultIntSizeChange = onDefaultIntSizeChange
 	if err := sdMutIterator.applyOnEachMutatorError(func(m sessionDataMutator) error {
 		return resetSessionVars(ctx, m)
 	}); err != nil {
@@ -616,18 +625,6 @@ func (s *Server) SetupConn(
 // it away from other packages.
 type ConnectionHandler struct {
 	ex *connExecutor
-}
-
-// GetUnqualifiedIntSize implements pgwire.sessionDataProvider and returns
-// the type that INT should be parsed as.
-func (h ConnectionHandler) GetUnqualifiedIntSize() *types.T {
-	var size int32
-	if h.ex != nil {
-		// The executor will be nil in certain testing situations where
-		// no server is actually present.
-		size = h.ex.sessionData().DefaultIntSize
-	}
-	return parser.NakedIntTypeFromDefaultIntSize(size)
 }
 
 // GetParamStatus retrieves the configured value of the session
@@ -821,7 +818,9 @@ func (s *Server) newConnExecutor(
 		portals:   make(map[string]PreparedPortal),
 	}
 	ex.extraTxnState.prepStmtsNamespaceMemAcc = ex.sessionMon.MakeBoundAccount()
-	ex.extraTxnState.descCollection = s.cfg.CollectionFactory.MakeCollection(sdMutIterator.sds.Top())
+	ex.extraTxnState.descCollection = s.cfg.CollectionFactory.MakeCollection(
+		descs.NewTemporarySchemaProvider(sdMutIterator.sds),
+	)
 	ex.extraTxnState.txnRewindPos = -1
 	ex.extraTxnState.schemaChangeJobRecords = make(map[descpb.ID]*jobs.Record)
 	ex.mu.ActiveQueries = make(map[ClusterWideID]*queryMeta)
@@ -1207,10 +1206,13 @@ type connExecutor struct {
 
 		// savepoints maintains the stack of savepoints currently open.
 		savepoints savepointStack
-		// savepointsAtTxnRewindPos is a snapshot of the savepoints stack before
-		// processing the command at position txnRewindPos. When rewinding, we're
-		// going to restore this snapshot.
-		savepointsAtTxnRewindPos savepointStack
+		// rewindPosSnapshot is a snapshot of the savepoints and sessionData stack
+		// before processing the command at position txnRewindPos. When rewinding,
+		// we're going to restore this snapshot.
+		rewindPosSnapshot struct {
+			savepoints       savepointStack
+			sessionDataStack *sessiondata.Stack
+		}
 
 		// transactionStatementFingerprintIDs tracks all statement IDs that make up the current
 		// transaction. It's length is bound by the TxnStatsNumStmtFingerprintIDsToRecord
@@ -1889,7 +1891,10 @@ func (ex *connExecutor) execCmd(ctx context.Context) error {
 		}
 	case rewind:
 		ex.rewindPrepStmtNamespace(ctx)
-		ex.extraTxnState.savepoints = ex.extraTxnState.savepointsAtTxnRewindPos
+		ex.extraTxnState.savepoints = ex.extraTxnState.rewindPosSnapshot.savepoints
+		// Note we use the Replace function instead of reassigning, as there are
+		// copies of the ex.sessionDataStack in the iterators and extendedEvalContext.
+		ex.sessionDataStack.Replace(ex.extraTxnState.rewindPosSnapshot.sessionDataStack)
 		advInfo.rewCap.rewindAndUnlock(ctx)
 	case stayInPlace:
 		// Nothing to do. The same statement will be executed again.
@@ -2031,7 +2036,8 @@ func (ex *connExecutor) setTxnRewindPos(ctx context.Context, pos CmdPos) {
 	ex.extraTxnState.txnRewindPos = pos
 	ex.stmtBuf.Ltrim(ctx, pos)
 	ex.commitPrepStmtNamespace(ctx)
-	ex.extraTxnState.savepointsAtTxnRewindPos = ex.extraTxnState.savepoints.clone()
+	ex.extraTxnState.rewindPosSnapshot.savepoints = ex.extraTxnState.savepoints.clone()
+	ex.extraTxnState.rewindPosSnapshot.sessionDataStack = ex.sessionDataStack.Clone()
 }
 
 // stmtDoesntNeedRetry returns true if the given statement does not need to be
@@ -2387,7 +2393,7 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 		ex.memMetrics,
 		ex.server.cfg.Settings,
 	)
-	ie.SetSessionData(ex.sessionData())
+	ie.SetSessionDataStack(ex.sessionDataStack)
 
 	*evalCtx = extendedEvalContext{
 		EvalContext: tree.EvalContext{
@@ -2397,6 +2403,7 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 			ClientNoticeSender:     p,
 			Sequence:               p,
 			Tenant:                 p,
+			Regions:                p,
 			JoinTokenCreator:       p,
 			PreparedStatementState: &ex.extraTxnState.prepStmtsNamespace,
 			SessionDataStack:       ex.sessionDataStack,
@@ -2427,7 +2434,7 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 		TxnModesSetter:         ex,
 		Jobs:                   &ex.extraTxnState.jobs,
 		SchemaChangeJobRecords: ex.extraTxnState.schemaChangeJobRecords,
-		statsStorage:           ex.server.sqlStats,
+		statsProvider:          ex.server.sqlStats,
 		indexUsageStats:        ex.indexUsageStats,
 	}
 }

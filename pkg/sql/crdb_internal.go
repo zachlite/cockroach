@@ -46,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
@@ -155,6 +156,7 @@ var crdbInternal = virtualSchema{
 		catconstants.CrdbInternalRegionsTable:                     crdbInternalRegionsTable,
 		catconstants.CrdbInternalDefaultPrivilegesTable:           crdbInternalDefaultPrivilegesTable,
 		catconstants.CrdbInternalActiveRangeFeedsTable:            crdbInternalActiveRangeFeedsTable,
+		catconstants.CrdbInternalTenantUsageDetailsViewID:         crdbInternalTenantUsageDetailsView,
 	},
 	validWithNoDatabaseContext: true,
 }
@@ -399,7 +401,7 @@ CREATE TABLE crdb_internal.tables (
 				locality := tree.DNull
 				if c := table.GetLocalityConfig(); c != nil {
 					f := p.EvalContext().FmtCtx(tree.FmtSimple)
-					if err := tabledesc.FormatTableLocalityConfig(c, f); err != nil {
+					if err := multiregion.FormatTableLocalityConfig(c, f); err != nil {
 						return err
 					}
 					locality = tree.NewDString(f.String())
@@ -901,14 +903,16 @@ func execStatVar(count int64, n roachpb.NumericStat) tree.Datum {
 	return tree.NewDFloat(tree.DFloat(n.GetVariance(count)))
 }
 
-// getSQLStats retrieves a sqlStats storage subsystem from the planner or
+// getSQLStats retrieves a sqlStats provider from the planner or
 // returns an error if not available. virtualTableName specifies the virtual
 // table for which this sqlStats object is needed.
-func getSQLStats(p *planner, virtualTableName string) (sqlstats.Storage, error) {
-	if p.extendedEvalCtx.statsStorage == nil {
+func getSQLStats(
+	p *planner, virtualTableName string,
+) (*persistedsqlstats.PersistedSQLStats, error) {
+	if p.extendedEvalCtx.statsProvider == nil {
 		return nil, errors.Newf("%s cannot be used in this context", virtualTableName)
 	}
-	return p.extendedEvalCtx.statsStorage, nil
+	return p.extendedEvalCtx.statsProvider, nil
 }
 
 var crdbInternalNodeStmtStatsTable = virtualSchemaTable{
@@ -1053,7 +1057,7 @@ CREATE TABLE crdb_internal.node_statement_statistics (
 			return nil
 		}
 
-		return sqlStats.IterateStatementStats(ctx, &sqlstats.IteratorOptions{
+		return sqlStats.GetLocalMemProvider().IterateStatementStats(ctx, &sqlstats.IteratorOptions{
 			SortedAppNames: true,
 			SortedKey:      true,
 		}, statementVisitor)
@@ -1152,7 +1156,7 @@ CREATE TABLE crdb_internal.node_transaction_statistics (
 			return nil
 		}
 
-		return sqlStats.IterateTransactionStats(ctx, &sqlstats.IteratorOptions{
+		return sqlStats.GetLocalMemProvider().IterateTransactionStats(ctx, &sqlstats.IteratorOptions{
 			SortedAppNames: true,
 			SortedKey:      true,
 		}, transactionVisitor)
@@ -5296,5 +5300,41 @@ CREATE TABLE crdb_internal.transaction_statistics (
 			})
 		}
 		return setupGenerator(ctx, worker, stopper)
+	},
+}
+
+// crdbInternalTenantUsageDetailsView, exposes system ranges.
+var crdbInternalTenantUsageDetailsView = virtualSchemaView{
+	schema: `
+CREATE VIEW crdb_internal.tenant_usage_details AS
+  SELECT
+    tenant_id,
+    (j->>'rU')::FLOAT8 AS total_ru,
+    (j->>'readBytes')::INT8 AS total_read_bytes,
+    (j->>'readRequests')::INT8 AS total_read_requests,
+    (j->>'writeBytes')::INT8 AS total_write_bytes,
+    (j->>'writeRequests')::INT8 AS total_write_requests,
+    (j->>'sqlPodsCpuSeconds')::FLOAT8 AS total_sql_pod_seconds,
+    (j->>'pgwireBytes')::INT8 AS total_pgwire_bytes
+  FROM
+    (
+      SELECT
+        tenant_id,
+        crdb_internal.pb_to_json('cockroach.roachpb.TenantConsumption', total_consumption) AS j
+      FROM
+        system.tenant_usage
+      WHERE
+        instance_id = 0
+    )
+`,
+	resultColumns: colinfo.ResultColumns{
+		{Name: "tenant_id", Typ: types.Int},
+		{Name: "total_ru", Typ: types.Float},
+		{Name: "total_read_bytes", Typ: types.Int},
+		{Name: "total_read_requests", Typ: types.Int},
+		{Name: "total_write_bytes", Typ: types.Int},
+		{Name: "total_write_requests", Typ: types.Int},
+		{Name: "total_sql_pod_seconds", Typ: types.Float},
+		{Name: "total_pgwire_bytes", Typ: types.Int},
 	},
 }

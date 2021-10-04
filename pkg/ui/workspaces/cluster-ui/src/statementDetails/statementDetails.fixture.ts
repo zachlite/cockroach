@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
+import moment from "moment";
 import Long from "long";
 import { createMemoryHistory } from "history";
 import { noop } from "lodash";
@@ -117,6 +118,8 @@ const statementStats: any = {
   exec_stats: execStats,
 };
 
+const aggregatedTs = Date.parse("Sep 15 2021 01:00:00 GMT") * 1e-3;
+
 export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
   history,
   location: {
@@ -137,6 +140,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       database: "defaultdb",
     },
   },
+  dateRange: [moment.utc("2021.08.08"), moment.utc("2021.08.12")],
   statement: {
     statement: "SELECT city, id FROM vehicles WHERE city = $1",
     stats: statementStats,
@@ -144,6 +148,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
     byNode: [
       {
         label: "4",
+        aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -151,6 +156,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "3",
+        aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -158,6 +164,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "2",
+        aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -165,6 +172,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "1",
+        aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,

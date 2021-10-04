@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -105,6 +106,12 @@ var adminAuditLogEnabled = settings.RegisterBoolSetting(
 	false,
 )
 
+var telemetryLoggingEnabled = settings.RegisterBoolSetting(
+	"sql.telemetry.query_sampling.enabled",
+	"when set to true, executed queries will emit an event on the telemetry logging channel",
+	false,
+).WithPublic()
+
 type executorType int
 
 const (
@@ -133,8 +140,9 @@ func (p *planner) maybeLogStatement(
 	err error,
 	queryReceived time.Time,
 	hasAdminRoleCache *HasAdminRoleCache,
+	telemetryLoggingMetrics *TelemetryLoggingMetrics,
 ) {
-	p.maybeLogStatementInternal(ctx, execType, numRetries, txnCounter, rows, err, queryReceived, hasAdminRoleCache)
+	p.maybeLogStatementInternal(ctx, execType, numRetries, txnCounter, rows, err, queryReceived, hasAdminRoleCache, telemetryLoggingMetrics)
 }
 
 func (p *planner) maybeLogStatementInternal(
@@ -144,6 +152,7 @@ func (p *planner) maybeLogStatementInternal(
 	err error,
 	startTime time.Time,
 	hasAdminRoleCache *HasAdminRoleCache,
+	telemetryMetrics *TelemetryLoggingMetrics,
 ) {
 	// Note: if you find the code below crashing because p.execCfg == nil,
 	// do not add a test "if p.execCfg == nil { do nothing }" !
@@ -157,6 +166,10 @@ func (p *planner) maybeLogStatementInternal(
 	slowQueryLogEnabled := slowLogThreshold != 0
 	slowInternalQueryLogEnabled := slowInternalQueryLogEnabled.Get(&p.execCfg.Settings.SV)
 	auditEventsDetected := len(p.curPlan.auditEvents) != 0
+	maxEventFrequency := telemetryMaxEventFrequency.Get(&p.execCfg.Settings.SV)
+
+	// We only consider non-internal SQL statements for telemetry logging.
+	telemetryLoggingEnabled := telemetryLoggingEnabled.Get(&p.execCfg.Settings.SV) && execType != executorTypeInternal
 
 	// If hasAdminRoleCache IsSet is true iff AdminAuditLog is enabled.
 	shouldLogToAdminAuditLog := hasAdminRoleCache.IsSet && hasAdminRoleCache.HasAdminRole
@@ -166,7 +179,7 @@ func (p *planner) maybeLogStatementInternal(
 	// member of the admin role).
 
 	if !logV && !logExecuteEnabled && !auditEventsDetected && !slowQueryLogEnabled &&
-		!shouldLogToAdminAuditLog {
+		!shouldLogToAdminAuditLog && !telemetryLoggingEnabled {
 		// Shortcut: avoid the expense of computing anything log-related
 		// if logging is not enabled by configuration.
 		return
@@ -346,6 +359,24 @@ func (p *planner) maybeLogStatementInternal(
 
 	if shouldLogToAdminAuditLog {
 		p.logEventsOnlyExternally(ctx, eventLogEntry{event: &eventpb.AdminQuery{CommonSQLExecDetails: execDetails}})
+	}
+
+	if telemetryLoggingEnabled {
+		// We only log to the telemetry channel if enough time has elapsed from
+		// the last event emission.
+		requiredTimeElapsed := 1.0 / float64(maxEventFrequency)
+		if p.stmt.AST.StatementType() != tree.TypeDML {
+			requiredTimeElapsed = 0
+		}
+		if telemetryMetrics.maybeUpdateLastEmittedTime(telemetryMetrics.timeNow(), requiredTimeElapsed) {
+			skippedQueries := telemetryMetrics.resetSkippedQueryCount()
+			p.logEventsOnlyExternally(ctx, eventLogEntry{event: &eventpb.SampledQuery{
+				CommonSQLExecDetails: execDetails,
+				SkippedQueries:       skippedQueries,
+			}})
+		} else {
+			telemetryMetrics.incSkippedQueryCount()
+		}
 	}
 }
 

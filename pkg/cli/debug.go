@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	gohex "encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -32,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/cli/syncbench"
 	"github.com/cockroachdb/cockroach/pkg/config"
-	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
@@ -66,6 +66,7 @@ import (
 	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble/tool"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/cockroachdb/ttycolor"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/kr/pretty"
@@ -672,7 +673,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	defer stopper.Stop(context.Background())
 
 	var rangeID roachpb.RangeID
-	gcTTLInSeconds := int64((24 * time.Hour).Seconds())
+	gcTTL := 24 * time.Hour
 	intentAgeThreshold := gc.IntentAgeThreshold.Default()
 	intentBatchSize := gc.MaxIntentsPerCleanupBatch.Default()
 
@@ -683,10 +684,11 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if len(args) > 2 {
-		var err error
-		if gcTTLInSeconds, err = parsePositiveInt(args[2]); err != nil {
+		gcTTLInSeconds, err := parsePositiveInt(args[2])
+		if err != nil {
 			return errors.Wrapf(err, "unable to parse %v as TTL", args[2])
 		}
+		gcTTL = time.Duration(gcTTLInSeconds) * time.Second
 	}
 	if len(args) > 1 {
 		var err error
@@ -736,14 +738,14 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 	for _, desc := range descs {
 		snap := db.NewSnapshot()
 		defer snap.Close()
-		policy := zonepb.GCPolicy{TTLSeconds: int32(gcTTLInSeconds)}
 		now := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
-		thresh := gc.CalculateThreshold(now, policy)
+		thresh := gc.CalculateThreshold(now, gcTTL)
 		info, err := gc.Run(
 			context.Background(),
 			&desc, snap,
-			now, thresh, gc.RunOptions{IntentAgeThreshold: intentAgeThreshold, MaxIntentsPerIntentCleanupBatch: intentBatchSize}, policy,
-			gc.NoopGCer{},
+			now, thresh,
+			gc.RunOptions{IntentAgeThreshold: intentAgeThreshold, MaxIntentsPerIntentCleanupBatch: intentBatchSize},
+			gcTTL, gc.NoopGCer{},
 			func(_ context.Context, _ []roachpb.Intent) error { return nil },
 			func(_ context.Context, _ *roachpb.Transaction) error { return nil },
 		)
@@ -1290,6 +1292,7 @@ var debugMergeLogsOpts = struct {
 	keepRedactable bool
 	redactInput    bool
 	format         string
+	useColor       forceColor
 }{
 	program:        nil, // match everything
 	file:           regexp.MustCompile(log.FilePattern),
@@ -1307,7 +1310,41 @@ func runDebugMergeLogs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeLogStream(s, cmd.OutOrStdout(), o.filter, o.prefix, o.keepRedactable)
+
+	// Only auto-detect if auto-detection is needed, as it may fail with an error.
+	autoDetect := func(outStream io.Writer) (ttycolor.Profile, error) {
+		if f, ok := outStream.(*os.File); ok {
+			// If the output is a terminal, auto-detect the color scheme based
+			// on that.
+			return ttycolor.DetectProfile(f)
+		}
+		return nil, nil
+	}
+	outStream := cmd.OutOrStdout()
+	var cp ttycolor.Profile
+	// Now choose the color profile depending on the user option.
+	switch o.useColor {
+	case forceColorOff:
+		// Nothing to do, cp stays nil.
+	case forceColorOn:
+		// If there was a color profile auto-detected, we want
+		// to use that as it will be tailored to the output terminal.
+		var err error
+		cp, err = autoDetect(outStream)
+		if err != nil || cp == nil {
+			// The user requested "forcing" the color mode but
+			// auto-detection failed. Ignore the error and use a best guess.
+			cp = ttycolor.Profile8
+		}
+	case forceColorAuto:
+		var err error
+		cp, err = autoDetect(outStream)
+		if err != nil {
+			return err
+		}
+	}
+
+	return writeLogStream(s, outStream, o.filter, o.prefix, o.keepRedactable, cp)
 }
 
 var debugIntentCount = &cobra.Command{
@@ -1410,11 +1447,12 @@ var DebugCmdsForRocksDB = []*cobra.Command{
 	debugCheckStoreCmd,
 	debugCompactCmd,
 	debugGCCmd,
+	debugIntentCount,
 	debugKeysCmd,
 	debugRaftLogCmd,
 	debugRangeDataCmd,
 	debugRangeDescriptorsCmd,
-	debugIntentCount,
+	debugUnsafeRemoveDeadReplicasCmd,
 }
 
 // All other debug commands go here.
@@ -1428,7 +1466,6 @@ var debugCmds = append(DebugCmdsForRocksDB,
 	debugTimeSeriesDumpCmd,
 	debugSyncBenchCmd,
 	debugSyncTestCmd,
-	debugUnsafeRemoveDeadReplicasCmd,
 	debugEnvCmd,
 	debugZipCmd,
 	debugMergeLogsCmd,
@@ -1553,6 +1590,8 @@ func init() {
 		"redact the input files to remove sensitive information")
 	f.StringVar(&debugMergeLogsOpts.format, "format", "",
 		"log format of the input files")
+	f.Var(&debugMergeLogsOpts.useColor, "color",
+		"force use of TTY escape codes to colorize the output")
 
 	f = debugDecodeProtoCmd.Flags()
 	f.StringVar(&debugDecodeProtoName, "schema", "cockroach.sql.sqlbase.Descriptor",

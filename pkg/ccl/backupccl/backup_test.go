@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl"
+	_ "github.com/cockroachdb/cockroach/pkg/ccl/multitenantccl"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/partitionccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
@@ -168,6 +169,7 @@ func (d *datadrivenTestState) addServer(
 		}
 		settings := cluster.MakeTestingClusterSettings()
 		sql.TempObjectCleanupInterval.Override(context.Background(), &settings.SV, duration)
+		sql.TempObjectWaitInterval.Override(context.Background(), &settings.SV, time.Millisecond)
 		params.ServerArgs.Settings = settings
 	}
 
@@ -317,12 +319,12 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 				ret := ds.noticeBuffer
 				if err != nil {
 					ret = append(ds.noticeBuffer, err.Error())
-					if err, ok := err.(*pq.Error); ok {
-						if err.Detail != "" {
-							ret = append(ret, "DETAIL: "+err.Detail)
+					if pqErr := (*pq.Error)(nil); errors.As(err, &pqErr) {
+						if pqErr.Detail != "" {
+							ret = append(ret, "DETAIL: "+pqErr.Detail)
 						}
-						if err.Hint != "" {
-							ret = append(ret, "HINT: "+err.Hint)
+						if pqErr.Hint != "" {
+							ret = append(ret, "HINT: "+pqErr.Hint)
 						}
 					}
 				}
@@ -2184,6 +2186,46 @@ func TestRestoreFailDatabaseCleanup(t *testing.T) {
 		t, `database "data" does not exist`,
 		`DROP DATABASE data`,
 	)
+}
+
+func TestRestoreFailCleansUpTempSystemDatabase(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	_, _, sqlDB, dir, cleanup := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
+	defer cleanup()
+
+	// Create a database with a type and table.
+	sqlDB.Exec(t, `
+CREATE DATABASE d;
+CREATE TYPE d.ty AS ENUM ('hello');
+CREATE TABLE d.tb (x d.ty);
+INSERT INTO d.tb VALUES ('hello'), ('hello');
+`)
+
+	// Cluster BACKUP.
+	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
+
+	// Bugger the backup by removing the SST files.
+	if err := filepath.Walk(dir+"/foo", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Name() == backupManifestName || !strings.HasSuffix(path, ".sst") {
+			return nil
+		}
+		return os.Remove(path)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, sqlDBRestore, cleanupRestore := backupRestoreTestSetupEmpty(t, singleNode, dir, InitManualReplication,
+		base.TestClusterArgs{})
+	defer cleanupRestore()
+	// We should get an error when restoring the table.
+	sqlDBRestore.ExpectErr(t, "sst: no such file", `RESTORE FROM $1`, LocalFoo)
+	row := sqlDBRestore.QueryStr(t, fmt.Sprintf(`SELECT * FROM [SHOW DATABASES] WHERE database_name = '%s'`, restoreTempSystemDB))
+	require.Equal(t, 0, len(row))
 }
 
 func TestBackupRestoreUserDefinedSchemas(t *testing.T) {
@@ -6631,7 +6673,7 @@ type exportResumePoint struct {
 	timestamp   hlc.Timestamp
 }
 
-var withTS = hlc.Timestamp{1, 0, false}
+var withTS = hlc.Timestamp{WallTime: 1}
 var withoutTS = hlc.Timestamp{}
 
 func TestPaginatedBackupTenant(t *testing.T) {
@@ -6733,7 +6775,7 @@ func TestPaginatedBackupTenant(t *testing.T) {
 		{[]byte("/Tenant/10/Table/53/1/410/0"), []byte("/Tenant/10/Table/53/2"), withoutTS},
 		{[]byte("/Tenant/10/Table/53/1/510/0"), []byte("/Tenant/10/Table/53/2"), withoutTS},
 	} {
-		expected = append(expected, requestSpanStr(roachpb.Span{resume.key, resume.endKey}, resume.timestamp))
+		expected = append(expected, requestSpanStr(roachpb.Span{Key: resume.key, EndKey: resume.endKey}, resume.timestamp))
 	}
 	require.Equal(t, expected, exportRequestSpans)
 	resetStateVars()
@@ -6760,7 +6802,7 @@ func TestPaginatedBackupTenant(t *testing.T) {
 		{[]byte("/Tenant/10/Table/57/1/410/0"), []byte("/Tenant/10/Table/57/2"), withoutTS},
 		{[]byte("/Tenant/10/Table/57/1/510/0"), []byte("/Tenant/10/Table/57/2"), withoutTS},
 	} {
-		expected = append(expected, requestSpanStr(roachpb.Span{resume.key, resume.endKey}, resume.timestamp))
+		expected = append(expected, requestSpanStr(roachpb.Span{Key: resume.key, EndKey: resume.endKey}, resume.timestamp))
 	}
 	require.Equal(t, expected, exportRequestSpans)
 	resetStateVars()
@@ -6918,6 +6960,16 @@ func TestBackupRestoreTenant(t *testing.T) {
 	tenant10 := sqlutils.MakeSQLRunner(conn10)
 	tenant10.Exec(t, `CREATE DATABASE foo; CREATE TABLE foo.bar(i int primary key); INSERT INTO foo.bar VALUES (110), (210)`)
 
+	// Wait until tenant 10 usage data is initialized - we will later check that
+	// it is restored.
+	testutils.SucceedsSoon(t, func() error {
+		res := systemDB.QueryStr(t, `SELECT 1 FROM system.tenant_usage WHERE tenant_id = 10`)
+		if len(res) == 0 {
+			return errors.Errorf("no tenant_usage data for tenant 10")
+		}
+		return nil
+	})
+
 	// Prevent a logging assertion that the server ID is initialized multiple times.
 	log.TestingClearServerIdentifiers()
 
@@ -6978,8 +7030,13 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t, `select * from system.tenants`, [][]string{})
 		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/t10'`)
 		restoreDB.CheckQueryResults(t,
-			`select id, active, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
+			`SELECT id, active, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) FROM system.tenants`,
 			[][]string{{`10`, `true`, `{"id": "10", "state": "ACTIVE"}`}},
+		)
+		restoreDB.CheckQueryResults(t,
+			`SELECT ru_refill_rate, instance_id, next_instance_id, current_share_sum
+			 FROM system.tenant_usage WHERE tenant_id = 10`,
+			[][]string{{`100`, `0`, `0`, `0`}},
 		)
 
 		log.TestingClearServerIdentifiers()
@@ -8039,11 +8096,14 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 
 	numNodes := 4
 	// Start a new server that shares the data directory.
+	settings := cluster.MakeTestingClusterSettings()
+	sql.TempObjectWaitInterval.Override(context.Background(), &settings.SV, time.Microsecond*0)
 	dir, dirCleanupFn := testutils.TempDir(t)
 	defer dirCleanupFn()
 	params := base.TestClusterArgs{}
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.UseDatabase = "defaultdb"
+	params.ServerArgs.Settings = settings
 	knobs := base.TestingKnobs{
 		SQLExecutor: &sql.ExecutorTestingKnobs{
 			DisableTempObjectsCleanupOnSessionExit: true,
@@ -8097,6 +8157,7 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 		},
 	}
 	params.ServerArgs.Knobs = knobs
+	params.ServerArgs.Settings = settings
 	_, _, sqlDBRestore, cleanupRestore := backupRestoreTestSetupEmpty(t, singleNode, dir, InitManualReplication,
 		params)
 	defer cleanupRestore()
@@ -8566,4 +8627,135 @@ DROP INDEX idx_3;
 	time.Sleep(2 * time.Second)
 
 	sqlDB.Exec(t, `BACKUP test.t TO 'nodelocal://1/backup_test' WITH revision_history`)
+}
+
+func waitForStatus(t *testing.T, db *sqlutils.SQLRunner, jobID int64, status jobs.Status) error {
+	return testutils.SucceedsSoonError(func() error {
+		var jobStatus string
+		db.QueryRow(t, `SELECT status FROM system.jobs WHERE id = $1`, jobID).Scan(&jobStatus)
+
+		if status != jobs.Status(jobStatus) {
+			return errors.Newf("expected jobID %d to have status %, got %s", jobID, status, jobStatus)
+		}
+		return nil
+	})
+}
+
+// Test to verify that RESTORE jobs self pause on error when given the
+// DEBUG_PAUSE_ON = 'error' option.
+func TestRestorePauseOnError(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.ScopeWithoutShowLogs(t).Close(t)
+
+	defer jobs.TestingSetProgressThresholds()()
+
+	baseDir := "testdata"
+	args := base.TestServerArgs{ExternalIODir: baseDir, Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()}}
+	params := base.TestClusterArgs{ServerArgs: args}
+	_, tc, sqlDB, _, cleanupFn := backupRestoreTestSetupWithParams(t, singleNode, 1,
+		InitManualReplication, params)
+	defer cleanupFn()
+
+	var forceFailure bool
+	for i := range tc.Servers {
+		tc.Servers[i].JobRegistry().(*jobs.Registry).TestingResumerCreationKnobs = map[jobspb.Type]func(raw jobs.Resumer) jobs.Resumer{
+			jobspb.TypeRestore: func(raw jobs.Resumer) jobs.Resumer {
+				r := raw.(*restoreResumer)
+				r.testingKnobs.beforePublishingDescriptors = func() error {
+					if forceFailure {
+						return errors.New("testing injected failure")
+					}
+					return nil
+				}
+				return r
+			},
+		}
+	}
+
+	sqlDB.Exec(t, `CREATE DATABASE r1`)
+	sqlDB.Exec(t, `CREATE TABLE r1.foo (id INT)`)
+	sqlDB.Exec(t, `BACKUP DATABASE r1 TO 'nodelocal://0/eventlogging'`)
+	sqlDB.Exec(t, `DROP DATABASE r1`)
+
+	restoreQuery := `RESTORE DATABASE r1 FROM 'nodelocal://0/eventlogging' WITH DEBUG_PAUSE_ON = 'error'`
+	findJobQuery := `SELECT job_id FROM [SHOW JOBS] WHERE description LIKE '%RESTORE DATABASE%' ORDER BY created DESC`
+
+	// Verify that a RESTORE job will self pause on an error, but can be resumed
+	// after the source of error is fixed.
+	{
+		var jobID int64
+		forceFailure = true
+
+		sqlDB.QueryRow(t, restoreQuery)
+
+		sqlDB.QueryRow(t, findJobQuery).Scan(&jobID)
+		if err := waitForStatus(t, sqlDB, jobID, jobs.StatusPaused); err != nil {
+			t.Fatal(err)
+		}
+
+		forceFailure = false
+		sqlDB.Exec(t, "RESUME JOB $1", jobID)
+
+		if err := waitForStatus(t, sqlDB, jobID, jobs.StatusSucceeded); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Verify that a RESTORE job will self pause on an error and can be canceled.
+	{
+		var jobID int64
+		forceFailure = true
+		sqlDB.Exec(t, `DROP DATABASE r1`)
+		sqlDB.QueryRow(t, restoreQuery)
+		sqlDB.QueryRow(t, findJobQuery).Scan(&jobID)
+		if err := waitForStatus(t, sqlDB, jobID, jobs.StatusPaused); err != nil {
+			t.Fatal(err)
+		}
+
+		sqlDB.Exec(t, "CANCEL JOB $1", jobID)
+
+		if err := waitForStatus(t, sqlDB, jobID, jobs.StatusCanceled); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestDroppedDescriptorRevisionAndSystemDBIDClash is a regression test for a
+// discrepancy in the descriptor resolution logic during restore planning and
+// execution.
+//
+// While the resolution logic in restore planning filtered out descriptor
+// revisions in the dropped state, the logic in execution did not do this. As a
+// a result of this, the restore job would process additional descriptors (the
+// dropped revisions). In the case of full cluster restores, the planning phase
+// picks an id higher than all restored desc ids, for the tempSystemDB. The
+// additional dropped descriptor revisions during execution could have the same
+// id as the tempSystemDB. This id clash would cause issues when processing
+// descriptor rewrites which are keyed on the descriptor id.
+//
+// Table and database restores are not affected by this bug since we filter the
+// descriptors during execution based on the descriptor rewrites we allocated in
+// planning. Since no additional entries for system tables are added to the
+// rewrites, we expect to filter out all dropped revisions since there will be
+// no rewrites allocated for them in the first place.
+func TestDroppedDescriptorRevisionAndSystemDBIDClash(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	_, _, sqlDB, tempDir, cleanupFn := BackupRestoreTestSetup(t, singleNode, 1, InitManualReplication)
+	defer cleanupFn()
+
+	sqlDB.Exec(t, `
+CREATE TABLE foo (id INT);
+BACKUP TO 'nodelocal://0/foo' WITH revision_history;
+DROP TABLE foo;
+`)
+
+	var aost string
+	sqlDB.QueryRow(t, "SELECT cluster_logical_timestamp()").Scan(&aost)
+	sqlDB.Exec(t, `BACKUP TO $1 WITH revision_history`, LocalFoo)
+
+	_, _, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir,
+		InitManualReplication, base.TestClusterArgs{})
+	defer cleanupEmptyCluster()
+	sqlDBRestore.Exec(t, "RESTORE FROM $1 AS OF SYSTEM TIME "+aost, LocalFoo)
 }

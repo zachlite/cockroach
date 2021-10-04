@@ -180,6 +180,10 @@ type Node struct {
 	tenantUsage multitenant.TenantUsageServer
 
 	spanConfigAccessor spanconfig.KVAccessor // powers the span configuration RPCs
+
+	// Turns `Node.writeNodeStatus` into a no-op. This is a hack to enable the
+	// COCKROACH_DEBUG_TS_IMPORT_FILE env var.
+	suppressNodeStatus syncutil.AtomicBool
 }
 
 var _ roachpb.InternalServer = &Node{}
@@ -390,9 +394,6 @@ func (n *Node) start(
 	if err := n.storeCfg.Gossip.SetNodeDescriptor(&n.Descriptor); err != nil {
 		return errors.Errorf("couldn't gossip descriptor for node %d: %s", n.Descriptor.NodeID, err)
 	}
-
-	// Start the closed timestamp subsystem.
-	n.storeCfg.ClosedTimestamp.Start(n.Descriptor.NodeID)
 
 	// Create stores from the engines that were already initialized.
 	for _, e := range state.initializedEngines {
@@ -781,6 +782,9 @@ func (n *Node) startWriteNodeStatus(frequency time.Duration) error {
 // If mustExist is true the status key must already exist and must
 // not change during writing -- if false, the status is always written.
 func (n *Node) writeNodeStatus(ctx context.Context, alertTTL time.Duration, mustExist bool) error {
+	if n.suppressNodeStatus.Get() {
+		return nil
+	}
 	var err error
 	if runErr := n.stopper.RunTask(ctx, "node.Node: writing summary", func(ctx context.Context) {
 		nodeStatus := n.recorder.GenerateNodeStatus(ctx)
@@ -884,7 +888,7 @@ func checkNoUnknownRequest(reqs []roachpb.RequestUnion) *roachpb.UnsupportedRequ
 }
 
 func (n *Node) batchInternal(
-	ctx context.Context, args *roachpb.BatchRequest,
+	ctx context.Context, tenID roachpb.TenantID, args *roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, error) {
 	if detail := checkNoUnknownRequest(args.Requests); detail != nil {
 		var br roachpb.BatchResponse
@@ -896,7 +900,7 @@ func (n *Node) batchInternal(
 	if err := n.stopper.RunTaskWithErr(ctx, "node.Node: batch", func(ctx context.Context) error {
 		var finishSpan func(*roachpb.BatchResponse)
 		// Shadow ctx from the outer function. Written like this to pass the linter.
-		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, grpcutil.IsLocalRequestContext(ctx))
+		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, tenID)
 		// NB: wrapped to delay br evaluation to its value when returning.
 		defer func() { finishSpan(br) }()
 		if log.HasSpanOrEvent(ctx) {
@@ -1000,7 +1004,7 @@ func (n *Node) Batch(
 			}
 		}
 	}
-	br, err := n.batchInternal(ctx, args)
+	br, err := n.batchInternal(ctx, tenantID, args)
 	if callAdmittedWorkDoneOnKVAdmissionQ {
 		n.kvAdmissionQ.AdmittedWorkDone(tenantID)
 	}
@@ -1039,14 +1043,14 @@ func (n *Node) Batch(
 // in which the response is to serialized. The BatchResponse can
 // be nil in case no response is to be returned to the rpc caller.
 func (n *Node) setupSpanForIncomingRPC(
-	ctx context.Context, isLocalRequest bool,
+	ctx context.Context, tenID roachpb.TenantID,
 ) (context.Context, func(*roachpb.BatchResponse)) {
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
 	tr := n.storeCfg.AmbientCtx.Tracer
 	var newSpan, grpcSpan *tracing.Span
-	if isLocalRequest {
+	if isLocalRequest := grpcutil.IsLocalRequestContext(ctx) && tenID == roachpb.SystemTenantID; isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
 		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName)
 		// Set the same span.kind tag as the gRPC interceptor.
@@ -1074,7 +1078,11 @@ func (n *Node) setupSpanForIncomingRPC(
 			// If our local span descends from a parent on the other
 			// end of the RPC (i.e. the !isLocalRequest) case,
 			// attach the span recording to the batch response.
+			// Tenants get a redacted recording, i.e. with anything
+			// sensitive stripped out of the verbose messages. However,
+			// structured payloads stay untouched.
 			if rec := grpcSpan.GetRecording(); rec != nil {
+				maybeRedactRecording(tenID, rec)
 				br.CollectedSpans = append(br.CollectedSpans, rec...)
 			}
 		}
@@ -1401,7 +1409,11 @@ func (n *Node) TokenBucket(
 
 // NewTenantUsageServer is a hook for CCL code which implements the tenant usage
 // server.
-var NewTenantUsageServer = func(db *kv.DB, executor *sql.InternalExecutor) multitenant.TenantUsageServer {
+var NewTenantUsageServer = func(
+	settings *cluster.Settings,
+	db *kv.DB,
+	executor *sql.InternalExecutor,
+) multitenant.TenantUsageServer {
 	return dummyTenantUsageServer{}
 }
 

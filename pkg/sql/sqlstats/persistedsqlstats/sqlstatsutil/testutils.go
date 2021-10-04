@@ -14,10 +14,13 @@ import (
 	"html/template"
 	"math/rand"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,10 +39,12 @@ func GetRandomizedCollectedStatementStatisticsForTest(
 }
 
 type randomData struct {
-	Bool   bool
-	String string
-	Int64  int64
-	Float  float64
+	Bool     bool
+	String   string
+	Int64    int64
+	Float    float64
+	IntArray []int64
+	Time     time.Time
 }
 
 var alphabet = []rune("abcdefghijklmkopqrstuvwxyz")
@@ -58,11 +63,37 @@ func genRandomData() randomData {
 	r.Int64 = rand.Int63()
 	r.Float = rand.Float64()
 
+	// Generate a randomized array of length 5.
+	arrLen := 5
+	r.IntArray = make([]int64, arrLen)
+	for i := 0; i < arrLen; i++ {
+		r.IntArray[i] = rand.Int63()
+	}
+
+	r.Time = timeutil.Now()
 	return r
 }
 
 func fillTemplate(t *testing.T, tmplStr string, data randomData) string {
-	tmpl, err := template.New("").Parse(tmplStr)
+	joinInts := func(arr []int64) string {
+		strArr := make([]string, len(arr))
+		for i, val := range arr {
+			strArr[i] = strconv.FormatInt(val, 10)
+		}
+		return strings.Join(strArr, ",")
+	}
+	stringifyTime := func(tm time.Time) string {
+		s, err := tm.MarshalText()
+		require.NoError(t, err)
+		return string(s)
+	}
+	tmpl, err := template.
+		New("").
+		Funcs(template.FuncMap{
+			"joinInts":      joinInts,
+			"stringifyTime": stringifyTime,
+		}).
+		Parse(tmplStr)
 	require.NoError(t, err)
 
 	b := strings.Builder{}
@@ -72,12 +103,14 @@ func fillTemplate(t *testing.T, tmplStr string, data randomData) string {
 	return b.String()
 }
 
+// fieldBlacklist contains a list of fields in the protobuf message where
+// we don't populate using random data. This can be because it is either a
+// complex type or might be the test data is already hard coded with values.
 var fieldBlacklist = map[string]struct{}{
 	"App":                     {},
 	"SensitiveInfo":           {},
 	"LegacyLastErr":           {},
 	"LegacyLastErrRedacted":   {},
-	"LastExecTimestamp":       {},
 	"StatementFingerprintIDs": {},
 	"AggregatedTs":            {},
 }
@@ -102,20 +135,26 @@ func fillObject(t *testing.T, val reflect.Value, data *randomData) {
 	case reflect.Bool:
 		val.SetBool(data.Bool)
 	case reflect.Slice:
-		numElem := val.Len()
-		for i := 0; i < numElem; i++ {
-			fillObject(t, val.Index(i).Addr(), data)
+		for _, randInt := range data.IntArray {
+			val.Set(reflect.Append(val, reflect.ValueOf(randInt)))
 		}
 	case reflect.Struct:
-		numFields := val.NumField()
-		for i := 0; i < numFields; i++ {
-			fieldName := val.Type().Field(i).Name
-			fieldAddr := val.Field(i).Addr()
-			if _, ok := fieldBlacklist[fieldName]; ok {
-				continue
-			}
+		switch val.Type().Name() {
+		// Special handling time.Time.
+		case "Time":
+			val.Set(reflect.ValueOf(data.Time))
+			return
+		default:
+			numFields := val.NumField()
+			for i := 0; i < numFields; i++ {
+				fieldName := val.Type().Field(i).Name
+				fieldAddr := val.Field(i).Addr()
+				if _, ok := fieldBlacklist[fieldName]; ok {
+					continue
+				}
 
-			fillObject(t, fieldAddr, data)
+				fillObject(t, fieldAddr, data)
+			}
 		}
 	default:
 		t.Fatalf("unsupported type: %s", val.Kind().String())

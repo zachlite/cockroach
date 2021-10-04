@@ -684,7 +684,9 @@ message CancelSessionResponse {
 message ListContentionEventsRequest {}
 
 // An error wrapper object for ListContentionEventsResponse and
-// ListDistSQLFlowsResponse.
+// ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+// implemented on a tenant, the `node_id` field refers to the instanceIDs that
+// identify individual tenant pods.
 message ListActivityError {
   // ID of node that was being contacted when this error occurred.
   int32 node_id = 1 [
@@ -1118,6 +1120,9 @@ message JobStatusResponse {
 // Request object for issuing a SQL stats reset request.
 message ResetSQLStatsRequest {
   string node_id = 1 [(gogoproto.customname) = "NodeID"];
+  // reset_persisted_stats specifies if the persisted SQL Stats will be reset
+  // along with the in-memory SQL stats.
+  bool reset_persisted_stats = 2;
 }
 
 // Response object returned by ResetSQLStats.

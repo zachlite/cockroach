@@ -195,7 +195,8 @@ message RestoreDetails {
   // Like TypeDescs, it does not include existing schema descriptors in the
   // cluster that backed up schemas are remapped to.
   repeated sqlbase.SchemaDescriptor schema_descs = 15;
-  repeated sqlbase.TenantInfo tenants = 13 [(gogoproto.nullable) = false];
+  reserved 13;
+  repeated sqlbase.TenantInfoWithUsage tenants = 21 [(gogoproto.nullable) = false];
 
   string override_db = 6 [(gogoproto.customname) = "OverrideDB"];
 
@@ -244,7 +245,10 @@ message RestoreDetails {
     (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.ID"
   ];
 
-  // NEXT ID: 20.
+  // DebugPauseOn describes the events that the job should pause itself on for debugging purposes.
+  string debug_pause_on = 20;
+
+  // NEXT ID: 22.
 }
 
 message RestoreProgress {
@@ -264,8 +268,13 @@ message ImportDetails {
   message Schema {
     sqlbase.SchemaDescriptor desc = 1;
   }
+  message Type {
+    sqlbase.TypeDescriptor desc = 1;
+  }
   repeated Table tables = 1 [(gogoproto.nullable) = false];
   repeated Schema schemas = 23 [(gogoproto.nullable) = false];
+  repeated Type types = 26 [(gogoproto.nullable) = false];
+
   repeated string uris = 2 [(gogoproto.customname) = "URIs"];
   roachpb.IOFileFormat format = 3 [(gogoproto.nullable) = false];
 
@@ -314,7 +323,13 @@ message ImportDetails {
   // when the import is planned.
   int32 default_int_size = 25;
 
-  // next val: 26
+  // If the database being imported into is a multi-region database, then this
+  // field stores the databases' primary region.
+  string database_primary_region = 27 [
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb.RegionName"
+  ];
+
+  // next val: 28
 }
 
 // SequenceValChunks represents a single chunk of sequence values allocated
@@ -708,12 +723,13 @@ message MigrationDetails {
 }
 
 message MigrationProgress {
+  bytes watermark = 1;
 }
 
-message SQLStatsCompactionDetails {
+message AutoSQLStatsCompactionDetails {
 }
 
-message SQLStatsCompactionProgress {
+message AutoSQLStatsCompactionProgress {
 }
 
 message Payload {
@@ -760,7 +776,7 @@ message Payload {
     NewSchemaChangeDetails newSchemaChange = 24;
     MigrationDetails migration = 25;
     AutoSpanConfigReconciliationDetails autoSpanConfigReconciliation = 27;
-    SQLStatsCompactionDetails sqlStatsCompaction = 30;
+    AutoSQLStatsCompactionDetails autoSQLStatsCompaction = 30;
   }
   reserved 26;
   // PauseReason is used to describe the reason that the job is currently paused
@@ -796,7 +812,7 @@ message Progress {
     NewSchemaChangeProgress newSchemaChange = 19;
     MigrationProgress migration = 20;
     AutoSpanConfigReconciliationProgress AutoSpanConfigReconciliation = 22;
-    SQLStatsCompactionProgress sqlStatsCompaction = 23;
+    AutoSQLStatsCompactionProgress autoSQLStatsCompaction = 23;
   }
 
   uint64 trace_id = 21 [(gogoproto.customname) = "TraceID"];
@@ -822,7 +838,7 @@ enum Type {
   NEW_SCHEMA_CHANGE = 11 [(gogoproto.enumvalue_customname) = "TypeNewSchemaChange"];
   MIGRATION = 12 [(gogoproto.enumvalue_customname) = "TypeMigration"];
   AUTO_SPAN_CONFIG_RECONCILIATION = 13 [(gogoproto.enumvalue_customname) = "TypeAutoSpanConfigReconciliation"];
-  SQL_STATS_COMPACTION = 14 [(gogoproto.enumvalue_customname) = "TypeSQLStatsCompaction"];
+  AUTO_SQL_STATS_COMPACTION = 14 [(gogoproto.enumvalue_customname) = "TypeAutoSQLStatsCompaction"];
 }
 
 message Job {

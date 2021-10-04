@@ -30,10 +30,11 @@ import {
   NumericStat,
   StatementStatistics,
   stdDev,
-  getMatchParamByName,
   formatNumberForDisplay,
   calculateTotalWorkload,
   unique,
+  queryByName,
+  aggregatedTsAttr,
 } from "src/util";
 import { Loading } from "src/loading";
 import { Button } from "src/button";
@@ -59,7 +60,7 @@ import sortedTableStyles from "src/sortedtable/sortedtable.module.scss";
 import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
 import styles from "./statementDetails.module.scss";
 import { NodeSummaryStats } from "../nodes";
-import { UIConfigState } from "../store/uiConfig";
+import { UIConfigState } from "../store";
 import moment, { Moment } from "moment";
 import { StatementsRequest } from "src/api/statementsApi";
 
@@ -146,7 +147,7 @@ export interface StatementDetailsDispatchProps {
 export interface StatementDetailsStateProps {
   statement: SingleStatementStatistics;
   statementsError: Error | null;
-  dateRange?: [Moment, Moment];
+  dateRange: [Moment, Moment];
   nodeNames: { [nodeId: string]: string };
   nodeRegions: { [nodeId: string]: string };
   diagnosticsReports: cockroach.server.serverpb.IStatementDiagnosticsReport[];
@@ -163,8 +164,7 @@ const summaryCardStylesCx = classNames.bind(summaryCardStyles);
 
 function statementsRequestFromProps(
   props: StatementDetailsProps,
-): cockroach.server.serverpb.StatementsRequest | null {
-  if (props.isTenant || props.dateRange == null) return null;
+): cockroach.server.serverpb.StatementsRequest {
   return new cockroach.server.serverpb.StatementsRequest({
     combined: true,
     start: Long.fromNumber(props.dateRange[0].unix()),
@@ -336,7 +336,7 @@ export class StatementDetails extends React.Component<
     isTenant: false,
   };
 
-  changeSortSetting = (ss: SortSetting) => {
+  changeSortSetting = (ss: SortSetting): void => {
     this.setState({
       sortSetting: ss,
     });
@@ -345,26 +345,30 @@ export class StatementDetails extends React.Component<
     }
   };
 
-  refreshStatements = () => {
+  refreshStatements = (): void => {
     const req = statementsRequestFromProps(this.props);
     this.props.refreshStatements(req);
   };
 
-  componentDidMount() {
+  componentDidMount(): void {
     this.refreshStatements();
-    this.props.refreshStatementDiagnosticsRequests();
-    this.props.refreshNodes();
-    this.props.refreshNodesLiveness();
+    if (!this.props.isTenant) {
+      this.props.refreshStatementDiagnosticsRequests();
+      this.props.refreshNodes();
+      this.props.refreshNodesLiveness();
+    }
   }
 
-  componentDidUpdate() {
+  componentDidUpdate(): void {
     this.refreshStatements();
-    this.props.refreshStatementDiagnosticsRequests();
-    this.props.refreshNodes();
-    this.props.refreshNodesLiveness();
+    if (!this.props.isTenant) {
+      this.props.refreshStatementDiagnosticsRequests();
+      this.props.refreshNodes();
+      this.props.refreshNodesLiveness();
+    }
   }
 
-  onTabChange = (tabId: string) => {
+  onTabChange = (tabId: string): void => {
     const { history } = this.props;
     const searchParams = new URLSearchParams(history.location.search);
     searchParams.set("tab", tabId);
@@ -378,15 +382,15 @@ export class StatementDetails extends React.Component<
     this.props.onTabChanged && this.props.onTabChanged(tabId);
   };
 
-  backToStatementsClick = () => {
+  backToStatementsClick = (): void => {
     this.props.history.push("/statements");
     if (this.props.onBackToStatementsClick) {
       this.props.onBackToStatementsClick();
     }
   };
 
-  render() {
-    const app = getMatchParamByName(this.props.match, appAttr);
+  render(): React.ReactElement {
+    const app = queryByName(this.props.location, appAttr);
     return (
       <div className={cx("root")}>
         <Helmet title={`Details | ${app ? `${app} App |` : ""} Statements`} />
@@ -397,12 +401,13 @@ export class StatementDetails extends React.Component<
             size="small"
             icon={<ArrowLeft fontSize={"10px"} />}
             iconPosition="left"
+            className="small-margin"
           >
             Statements
           </Button>
-          <h1 className={cx("base-heading", "page--header__title")}>
+          <h3 className={cx("base-heading", "no-margin-bottom")}>
             Statement Details
-          </h1>
+          </h3>
         </div>
         <section className={cx("section", "section--container")}>
           <Loading
@@ -415,7 +420,7 @@ export class StatementDetails extends React.Component<
     );
   }
 
-  renderContent = () => {
+  renderContent = (): React.ReactElement => {
     const {
       createStatementDiagnosticsReport,
       diagnosticsReports,
@@ -442,7 +447,7 @@ export class StatementDetails extends React.Component<
     } = this.props.statement;
 
     if (!stats) {
-      const sourceApp = getMatchParamByName(this.props.match, appAttr);
+      const sourceApp = queryByName(this.props.location, appAttr);
       const listUrl = "/statements" + (sourceApp ? "/" + sourceApp : "");
 
       return (
@@ -499,6 +504,28 @@ export class StatementDetails extends React.Component<
       moment(stats.last_exec_timestamp.seconds.low * 1e3).format(
         "MMM DD, YYYY HH:MM",
       );
+    const statementSampled = stats.exec_stats.count > Long.fromNumber(0);
+    const unavailableTooltip = !statementSampled && (
+      <Tooltip
+        placement="bottom"
+        style="default"
+        content={
+          <p>
+            This metric is part of the statement execution and therefore will
+            not be available until the statement is sampled via tracing.
+          </p>
+        }
+      >
+        <span className={cx("tooltip-info")}>unavailable</span>
+      </Tooltip>
+    );
+
+    // If the aggregatedTs is unset, we are aggregating over the whole date range.
+    const aggregatedTs = queryByName(this.props.location, aggregatedTsAttr);
+    const intervalStartTime = aggregatedTs
+      ? moment.unix(parseInt(aggregatedTs)).utc()
+      : this.props.dateRange[0];
+
     return (
       <Tabs
         defaultActiveKey="1"
@@ -555,41 +582,53 @@ export class StatementDetails extends React.Component<
                     </div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Mean rows/bytes read</Text>
-                      <Text>
-                        {formatNumberForDisplay(
-                          stats.rows_read.mean,
-                          formatTwoPlaces,
-                        )}
-                        {" / "}
-                        {formatNumberForDisplay(stats.bytes_read.mean, Bytes)}
-                      </Text>
+                      {statementSampled && (
+                        <Text>
+                          {formatNumberForDisplay(
+                            stats.rows_read.mean,
+                            formatTwoPlaces,
+                          )}
+                          {" / "}
+                          {formatNumberForDisplay(stats.bytes_read.mean, Bytes)}
+                        </Text>
+                      )}
+                      {unavailableTooltip}
                     </div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Max memory usage</Text>
-                      <Text>
-                        {formatNumberForDisplay(
-                          stats.exec_stats.max_mem_usage.mean,
-                          Bytes,
-                        )}
-                      </Text>
+                      {statementSampled && (
+                        <Text>
+                          {formatNumberForDisplay(
+                            stats.exec_stats.max_mem_usage.mean,
+                            Bytes,
+                          )}
+                        </Text>
+                      )}
+                      {unavailableTooltip}
                     </div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Network usage</Text>
-                      <Text>
-                        {formatNumberForDisplay(
-                          stats.exec_stats.network_bytes.mean,
-                          Bytes,
-                        )}
-                      </Text>
+                      {statementSampled && (
+                        <Text>
+                          {formatNumberForDisplay(
+                            stats.exec_stats.network_bytes.mean,
+                            Bytes,
+                          )}
+                        </Text>
+                      )}
+                      {unavailableTooltip}
                     </div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Max scratch disk usage</Text>
-                      <Text>
-                        {formatNumberForDisplay(
-                          stats.exec_stats.max_disk_usage.mean,
-                          Bytes,
-                        )}
-                      </Text>
+                      {statementSampled && (
+                        <Text>
+                          {formatNumberForDisplay(
+                            stats.exec_stats.max_disk_usage.mean,
+                            Bytes,
+                          )}
+                        </Text>
+                      )}
+                      {unavailableTooltip}
                     </div>
                   </Col>
                 </Row>
@@ -598,6 +637,11 @@ export class StatementDetails extends React.Component<
             <Col className="gutter-row" span={8}>
               <SummaryCard className={cx("summary-card")}>
                 <Heading type="h5">Statement details</Heading>
+                <div className={summaryCardStylesCx("summary--card__item")}>
+                  <Text>Interval start time</Text>
+                  <Text>{intervalStartTime.format("MMM D, h:mm A (UTC)")}</Text>
+                </div>
+
                 {!isTenant && (
                   <div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
@@ -703,25 +747,27 @@ export class StatementDetails extends React.Component<
             </Col>
           </Row>
         </TabPane>
-        <TabPane
-          tab={`Diagnostics ${
-            hasDiagnosticReports ? `(${diagnosticsReports.length})` : ""
-          }`}
-          key="diagnostics"
-        >
-          <DiagnosticsView
-            activate={createStatementDiagnosticsReport}
-            diagnosticsReports={diagnosticsReports}
-            dismissAlertMessage={dismissStatementDiagnosticsAlertMessage}
-            hasData={hasDiagnosticReports}
-            statementFingerprint={statement}
-            onDownloadDiagnosticBundleClick={onDiagnosticBundleDownload}
-            showDiagnosticsViewLink={
-              this.props.uiConfig.showStatementDiagnosticsLink
-            }
-            onSortingChange={this.props.onSortingChange}
-          />
-        </TabPane>
+        {!isTenant && (
+          <TabPane
+            tab={`Diagnostics ${
+              hasDiagnosticReports ? `(${diagnosticsReports.length})` : ""
+            }`}
+            key="diagnostics"
+          >
+            <DiagnosticsView
+              activate={createStatementDiagnosticsReport}
+              diagnosticsReports={diagnosticsReports}
+              dismissAlertMessage={dismissStatementDiagnosticsAlertMessage}
+              hasData={hasDiagnosticReports}
+              statementFingerprint={statement}
+              onDownloadDiagnosticBundleClick={onDiagnosticBundleDownload}
+              showDiagnosticsViewLink={
+                this.props.uiConfig.showStatementDiagnosticsLink
+              }
+              onSortingChange={this.props.onSortingChange}
+            />
+          </TabPane>
+        )}
         <TabPane tab="Explain Plan" key="explain-plan">
           <SummaryCard>
             <PlanView
@@ -737,7 +783,7 @@ export class StatementDetails extends React.Component<
           className={cx("fit-content-width")}
         >
           <SummaryCard>
-            <h2
+            <h3
               className={classNames(
                 cx("base-heading"),
                 summaryCardStylesCx("summary--card__title"),
@@ -755,7 +801,7 @@ export class StatementDetails extends React.Component<
                   </div>
                 </Tooltip>
               </div>
-            </h2>
+            </h3>
             <NumericStatTable
               title="Phase"
               measure="Latency"
@@ -780,14 +826,14 @@ export class StatementDetails extends React.Component<
             />
           </SummaryCard>
           <SummaryCard>
-            <h2
+            <h3
               className={classNames(
                 cx("base-heading"),
                 summaryCardStylesCx("summary--card__title"),
               )}
             >
               Other Execution Statistics
-            </h2>
+            </h3>
             <NumericStatTable
               title="Stat"
               measure="Quantity"
@@ -830,7 +876,7 @@ export class StatementDetails extends React.Component<
           </SummaryCard>
           {!isTenant && (
             <SummaryCard className={cx("fit-content-width")}>
-              <h2
+              <h3
                 className={classNames(
                   cx("base-heading"),
                   summaryCardStylesCx("summary--card__title"),
@@ -848,7 +894,7 @@ export class StatementDetails extends React.Component<
                     </div>
                   </Tooltip>
                 </div>
-              </h2>
+              </h3>
               <StatementsSortedTable
                 className={cx("statements-table")}
                 data={statsByNode}

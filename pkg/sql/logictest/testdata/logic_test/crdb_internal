@@ -74,6 +74,7 @@ crdb_internal  table_columns                table  NULL  NULL  NULL
 crdb_internal  table_indexes                table  NULL  NULL  NULL
 crdb_internal  table_row_statistics         table  NULL  NULL  NULL
 crdb_internal  tables                       table  NULL  NULL  NULL
+crdb_internal  tenant_usage_details         view   NULL  NULL  NULL
 crdb_internal  transaction_statistics       table  NULL  NULL  NULL
 crdb_internal  zones                        table  NULL  NULL  NULL
 
@@ -320,6 +321,7 @@ SELECT zone_id, target FROM crdb_internal.zones ORDER BY 1
 22  RANGE liveness
 25  TABLE system.public.replication_constraint_stats
 27  TABLE system.public.replication_stats
+45  TABLE system.public.tenant_usage
 53  DATABASE testdb
 54  TABLE testdb.public.foo
 57  TABLE test.schema.bar
@@ -904,3 +906,10 @@ query TT
 SELECT * FROM crdb_internal.regions ORDER BY 1
 ----
 test  {}
+
+# Regression test for incorrectly handling tree.DOidWrappers by some builtins
+# (#69684).
+statement ok
+CREATE TABLE t69684(a NAME);
+INSERT INTO t69684 VALUES ('foo');
+SELECT * FROM t69684 WHERE crdb_internal.increment_feature_counter(a)

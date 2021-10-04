@@ -86,13 +86,25 @@ type Builder struct {
 	// IsDDL is set to true if the statement contains DDL.
 	IsDDL bool
 
-	// containsFullTableScan is set to true if the statement contains a primary
-	// index scan.
+	// ContainsFullTableScan is set to true if the statement contains an
+	// unconstrained primary index scan. This could be a full scan of any
+	// cardinality.
 	ContainsFullTableScan bool
 
-	// containsFullIndexScan is set to true if the statement contains a secondary
-	// index scan.
+	// ContainsFullIndexScan is set to true if the statement contains an
+	// unconstrained secondary index scan. This could be a full scan of any
+	// cardinality.
 	ContainsFullIndexScan bool
+
+	// ContainsLargeFullTableScan is set to true if the statement contains an
+	// unconstrained primary index scan estimated to read more than
+	// large_full_scan_rows (or without available stats).
+	ContainsLargeFullTableScan bool
+
+	// ContainsLargeFullIndexScan is set to true if the statement contains an
+	// unconstrained secondary index scan estimated to read more than
+	// large_full_scan_rows (or without without available stats).
+	ContainsLargeFullIndexScan bool
 
 	// containsBoundedStalenessScan is true if the query uses bounded
 	// staleness and contains a scan.
@@ -145,7 +157,8 @@ func New(
 		// in such a scenario tableWriterBase.finalize is responsible for making
 		// sure that the rows written limit is not reached before the auto
 		// commit.
-		b.allowAutoCommit = b.allowAutoCommit && (sd.TxnRowsReadErr == 0 && !sd.Internal)
+		prohibitAutoCommit := sd.TxnRowsReadErr != 0 && !sd.Internal
+		b.allowAutoCommit = b.allowAutoCommit && !prohibitAutoCommit
 		b.initialAllowAutoCommit = b.allowAutoCommit
 		b.allowInsertFastPath = sd.InsertFastPath
 	}

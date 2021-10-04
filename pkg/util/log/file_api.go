@@ -53,6 +53,7 @@ func MakeFileInfo(details logpb.FileDetails, info os.FileInfo) logpb.FileInfo {
 		SizeBytes:    info.Size(),
 		ModTimeNanos: info.ModTime().UnixNano(),
 		Details:      details,
+		FileMode:     uint32(info.Mode()),
 	}
 }
 
@@ -91,7 +92,7 @@ var errNoFileLogging = errors.New("log: file logging is not configured")
 // listLogGroups returns slices of logpb.FileInfo structs.
 // There is one logpb.FileInfo slice per file sink.
 func listLogGroups() (logGroups [][]logpb.FileInfo, err error) {
-	err = allSinkInfos.iterFileSinks(func(l *fileSink) error {
+	err = logging.allSinkInfos.iterFileSinks(func(l *fileSink) error {
 		_, thisLoggerFiles, err := l.listLogFiles()
 		if err != nil {
 			return err
@@ -115,7 +116,7 @@ func ListLogFiles() (logFiles []logpb.FileInfo, err error) {
 		return fileSink.mu.logDir
 	}()
 
-	err = allSinkInfos.iterFileSinks(func(l *fileSink) error {
+	err = logging.allSinkInfos.iterFileSinks(func(l *fileSink) error {
 		// For now, only gather logs from the main log directory.
 		// This is because the other APIs don't yet understand
 		// secondary log directories, and we don't want

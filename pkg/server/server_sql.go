@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/blobs/blobspb"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -131,11 +130,14 @@ type SQLServer struct {
 	// sqlMemMetrics are used to track memory usage of sql sessions.
 	sqlMemMetrics           sql.MemoryMetrics
 	stmtDiagnosticsRegistry *stmtdiagnostics.Registry
-	sqlLivenessProvider     sqlliveness.Provider
-	sqlInstanceProvider     sqlinstance.Provider
-	metricsRegistry         *metric.Registry
-	diagnosticsReporter     *diagnostics.Reporter
-	spanconfigMgr           *spanconfigmanager.Manager
+	// sqlLivenessSessionID will be populated with a non-zero value for non-system
+	// tenants.
+	sqlLivenessSessionID sqlliveness.SessionID
+	sqlLivenessProvider  sqlliveness.Provider
+	sqlInstanceProvider  sqlinstance.Provider
+	metricsRegistry      *metric.Registry
+	diagnosticsReporter  *diagnostics.Reporter
+	spanconfigMgr        *spanconfigmanager.Manager
 
 	// settingsWatcher is utilized by secondary tenants to watch for settings
 	// changes. It is nil on the system tenant.
@@ -732,6 +734,9 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	if sqlStatsKnobs := cfg.TestingKnobs.SQLStatsKnobs; sqlStatsKnobs != nil {
 		execCfg.SQLStatsTestingKnobs = sqlStatsKnobs.(*sqlstats.TestingKnobs)
 	}
+	if telemetryLoggingKnobs := cfg.TestingKnobs.TelemetryLoggingKnobs; telemetryLoggingKnobs != nil {
+		execCfg.TelemetryLoggingTestingKnobs = telemetryLoggingKnobs.(*sql.TelemetryLoggingTestingKnobs)
+	}
 
 	statsRefresher := stats.MakeRefresher(
 		cfg.Settings,
@@ -829,20 +834,21 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		execCfg.MigrationTestingKnobs = knobs
 	}
 
-	// Instantiate a span config manager; it exposes a hook to idempotently
-	// create the span config reconciliation job and captures all relevant job
-	// dependencies.
-	knobs, _ := cfg.TestingKnobs.SpanConfig.(*spanconfig.TestingKnobs)
-	spanconfigMgr := spanconfigmanager.New(
-		cfg.db,
-		jobRegistry,
-		cfg.circularInternalExecutor,
-		cfg.stopper,
-		cfg.Settings,
-		cfg.spanConfigAccessor,
-		knobs,
-	)
-	execCfg.SpanConfigReconciliationJobDeps = spanconfigMgr
+	var spanConfigMgr *spanconfigmanager.Manager
+	if cfg.SpanConfigsEnabled {
+		// Instantiate a span config manager.
+		spanConfigKnobs, _ := cfg.TestingKnobs.SpanConfig.(*spanconfig.TestingKnobs)
+		spanConfigMgr = spanconfigmanager.New(
+			cfg.db,
+			jobRegistry,
+			cfg.circularInternalExecutor,
+			cfg.stopper,
+			cfg.Settings,
+			cfg.spanConfigAccessor,
+			spanConfigKnobs,
+		)
+		execCfg.SpanConfigReconciliationJobDeps = spanConfigMgr
+	}
 
 	temporaryObjectCleaner := sql.NewTemporaryObjectCleaner(
 		cfg.Settings,
@@ -904,7 +910,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		sqlInstanceProvider:     cfg.sqlInstanceProvider,
 		metricsRegistry:         cfg.registry,
 		diagnosticsReporter:     reporter,
-		spanconfigMgr:           spanconfigMgr,
+		spanconfigMgr:           spanConfigMgr,
 		settingsWatcher:         settingsWatcher,
 	}, nil
 }
@@ -952,7 +958,7 @@ func (s *SQLServer) initInstanceID(ctx context.Context) error {
 		// as this is not a SQL pod server.
 		return nil
 	}
-	instanceID, err := s.sqlInstanceProvider.Instance(ctx)
+	instanceID, sessionID, err := s.sqlInstanceProvider.Instance(ctx)
 	if err != nil {
 		return err
 	}
@@ -960,6 +966,7 @@ func (s *SQLServer) initInstanceID(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.sqlLivenessSessionID = sessionID
 	s.execCfg.DistSQLPlanner.SetNodeInfo(roachpb.NodeDescriptor{NodeID: roachpb.NodeID(instanceID)})
 	return nil
 }
@@ -1043,8 +1050,10 @@ func (s *SQLServer) preStart(
 		return err
 	}
 
-	if err := s.spanconfigMgr.Start(ctx); err != nil {
-		return err
+	if s.spanconfigMgr != nil {
+		if err := s.spanconfigMgr.Start(ctx); err != nil {
+			return err
+		}
 	}
 
 	var bootstrapVersion roachpb.Version
@@ -1070,7 +1079,7 @@ func (s *SQLServer) preStart(
 		// superfluous but necessarily idempotent SQL migrations, so at worst, we're
 		// doing more work than strictly necessary during the first time that the
 		// migrations are run.
-		bootstrapVersion = clusterversion.ByKey(clusterversion.Start20_2)
+		bootstrapVersion = roachpb.Version{Major: 20, Minor: 1, Internal: 1}
 	}
 
 	if s.settingsWatcher != nil {

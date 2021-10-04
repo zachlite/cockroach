@@ -456,6 +456,13 @@ func resolveLocalLocks(
 		// These transactions rely on having their locks resolved synchronously.
 		resolveAllowance = math.MaxInt64
 	}
+	onlySeparatedIntents := false
+	st := evalCtx.ClusterSettings()
+	// Some tests have st == nil.
+	if st != nil {
+		onlySeparatedIntents = st.Version.ActiveVersionOrEmpty(ctx).IsActive(
+			clusterversion.PostSeparatedIntentsMigration)
+	}
 	for _, span := range args.LockSpans {
 		if err := func() error {
 			if resolveAllowance == 0 {
@@ -496,7 +503,7 @@ func resolveLocalLocks(
 			if inSpan != nil {
 				update.Span = *inSpan
 				num, resumeSpan, err := storage.MVCCResolveWriteIntentRange(
-					ctx, readWriter, ms, update, resolveAllowance)
+					ctx, readWriter, ms, update, resolveAllowance, onlySeparatedIntents)
 				if err != nil {
 					return err
 				}
@@ -924,15 +931,6 @@ func splitTriggerHelper(
 		return enginepb.MVCCStats{}, result.Result{}, err
 	}
 
-	if !rec.ClusterSettings().Version.IsActive(ctx, clusterversion.AbortSpanBytes) {
-		// Since the stats here is used to seed the initial state for the RHS
-		// replicas, we need to be careful about zero-ing out the abort span
-		// bytes if the cluster version introducing it is not yet active. Not
-		// doing so can result in inconsistencies in MVCCStats across replicas
-		// in a mixed-version cluster.
-		h.AbsPostSplitRight().AbortSpanBytes = 0
-	}
-
 	// Note: we don't copy the queue last processed times. This means
 	// we'll process the RHS range in consistency and time series
 	// maintenance queues again possibly sooner than if we copied. The
@@ -1110,8 +1108,7 @@ func mergeTrigger(
 	// directly in this method. The primary reason why these are different is
 	// because the RHS's persistent read summary may not be up-to-date, as it is
 	// not updated by the SubsumeRequest.
-	readSumActive := rec.ClusterSettings().Version.IsActive(ctx, clusterversion.PriorReadSummaries)
-	if merge.RightReadSummary != nil && readSumActive {
+	if merge.RightReadSummary != nil {
 		mergedSum := merge.RightReadSummary.Clone()
 		if priorSum, err := readsummary.Load(ctx, batch, rec.GetRangeID()); err != nil {
 			return result.Result{}, err

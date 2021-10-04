@@ -4363,7 +4363,11 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"key", types.String}},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				key := string(*(args[0].(*tree.DString)))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				key := string(s)
 				for i := range ctx.Locality.Tiers {
 					tier := &ctx.Locality.Tiers[i]
 					if tier.Key == key {
@@ -4662,8 +4666,16 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"errorCode", types.String}, {"msg", types.String}},
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				errCode := string(*args[0].(*tree.DString))
-				msg := string(*args[1].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				errCode := string(s)
+				s, ok = tree.AsDString(args[1])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[1])
+				}
+				msg := string(s)
 				// We construct the errors below via %s as the
 				// message may contain PII.
 				if errCode == "" {
@@ -4684,7 +4696,11 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"msg", types.String}},
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				msg := string(*args[0].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				msg := string(s)
 				return crdbInternalSendNotice(ctx, "NOTICE", msg)
 			},
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
@@ -4694,8 +4710,16 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"severity", types.String}, {"msg", types.String}},
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				severityString := string(*args[0].(*tree.DString))
-				msg := string(*args[1].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				severityString := string(s)
+				s, ok = tree.AsDString(args[1])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[1])
+				}
+				msg := string(s)
 				if _, ok := pgnotice.ParseDisplaySeverity(severityString); !ok {
 					return nil, pgerror.Newf(pgcode.InvalidParameterValue, "severity %s is invalid", severityString)
 				}
@@ -4714,7 +4738,11 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"msg", types.String}},
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				msg := string(*args[0].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				msg := string(s)
 				return nil, errors.AssertionFailedf("%s", msg)
 			},
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
@@ -4733,7 +4761,11 @@ value if you rely on the HLC for accuracy.`,
 				if err := checkPrivilegedUser(ctx); err != nil {
 					return nil, err
 				}
-				msg := string(*args[0].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				msg := string(s)
 				// Use a special method to panic in order to go around the
 				// vectorized panic-catcher (which would catch the panic from
 				// Golang's 'panic' and would convert it into an internal
@@ -4758,7 +4790,11 @@ value if you rely on the HLC for accuracy.`,
 				if err := checkPrivilegedUser(ctx); err != nil {
 					return nil, err
 				}
-				msg := string(*args[0].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				msg := string(s)
 				log.Fatalf(ctx.Ctx(), "force_log_fatal(): %s", msg)
 				return nil, nil
 			},
@@ -5019,7 +5055,12 @@ value if you rely on the HLC for accuracy.`,
 				if err := checkPrivilegedUser(ctx); err != nil {
 					return nil, err
 				}
-				return tree.DZero, log.SetVModule(string(*args[0].(*tree.DString)))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				vmodule := string(s)
+				return tree.DZero, log.SetVModule(vmodule)
 			},
 			Info: "Set the equivalent of the `--vmodule` flag on the gateway node processing this request; " +
 				"it affords control over the logging verbosity of different files. " +
@@ -5660,7 +5701,11 @@ value if you rely on the HLC for accuracy.`,
 			Types:      tree.ArgTypes{{"feature", types.String}},
 			ReturnType: tree.FixedReturnType(types.Bool),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				feature := string(*args[0].(*tree.DString))
+				s, ok := tree.AsDString(args[0])
+				if !ok {
+					return nil, errors.Newf("expected string value, got %T", args[0])
+				}
+				feature := string(s)
 				telemetry.Inc(sqltelemetry.HashedFeatureCounter(feature))
 				return tree.DBoolTrue, nil
 			},
@@ -5751,7 +5796,11 @@ value if you rely on the HLC for accuracy.`,
 	),
 
 	GatewayRegionBuiltinName: makeBuiltin(
-		tree.FunctionProperties{Category: categoryMultiRegion},
+		tree.FunctionProperties{
+			Category: categoryMultiRegion,
+			// We should always evaluate this built-in at the gateway.
+			DistsqlBlocklist: true,
+		},
 		tree.Overload{
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.String),
@@ -5774,7 +5823,7 @@ the locality flag on node startup. Returns an error if no region is set.`,
 		tree.FunctionProperties{Category: categoryMultiRegion},
 		stringOverload1(
 			func(evalCtx *tree.EvalContext, s string) (tree.Datum, error) {
-				regionConfig, err := evalCtx.Sequence.CurrentDatabaseRegionConfig(evalCtx.Context)
+				regionConfig, err := evalCtx.Regions.CurrentDatabaseRegionConfig(evalCtx.Context)
 				if err != nil {
 					return nil, err
 				}
@@ -5804,7 +5853,7 @@ the locality flag on node startup. Returns an error if no region is set.`,
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(evalCtx *tree.EvalContext, arg tree.Datums) (tree.Datum, error) {
-				regionConfig, err := evalCtx.Sequence.CurrentDatabaseRegionConfig(evalCtx.Context)
+				regionConfig, err := evalCtx.Regions.CurrentDatabaseRegionConfig(evalCtx.Context)
 				if err != nil {
 					return nil, err
 				}
@@ -5839,7 +5888,7 @@ the locality flag on node startup. Returns an error if no region is set.`,
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.Bool),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				if err := evalCtx.Sequence.ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
+				if err := evalCtx.Regions.ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
 					evalCtx.Context,
 				); err != nil {
 					return nil, err
@@ -5861,7 +5910,7 @@ the locality flag on node startup. Returns an error if no region is set.`,
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				id := int64(*args[0].(*tree.DInt))
 
-				if err := evalCtx.Sequence.ResetMultiRegionZoneConfigsForTable(
+				if err := evalCtx.Regions.ResetMultiRegionZoneConfigsForTable(
 					evalCtx.Context,
 					id,
 				); err != nil {
@@ -5883,7 +5932,7 @@ table.`,
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				id := int64(*args[0].(*tree.DInt))
 
-				if err := evalCtx.Sequence.ResetMultiRegionZoneConfigsForDatabase(
+				if err := evalCtx.Regions.ResetMultiRegionZoneConfigsForDatabase(
 					evalCtx.Context,
 					id,
 				); err != nil {

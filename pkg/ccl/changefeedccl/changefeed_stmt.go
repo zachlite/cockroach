@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupresolver"
@@ -154,10 +155,17 @@ func changefeedPlanHook(
 			return err
 		}
 
-		if opts[changefeedbase.OptFormat] == changefeedbase.DeprecatedOptFormatAvro {
+		for key, value := range opts {
+			// if option is case insensitive then convert its value to lower case
+			if _, ok := changefeedbase.CaseInsensitiveOpts[key]; ok {
+				opts[key] = strings.ToLower(value)
+			}
+		}
+
+		if newFormat, ok := changefeedbase.NoLongerExperimental[opts[changefeedbase.OptFormat]]; ok {
 			p.BufferClientNotice(ctx, pgnotice.Newf(
 				`%[1]s is no longer experimental, use %[2]s=%[1]s`,
-				changefeedbase.OptFormatAvro, changefeedbase.OptFormat),
+				newFormat, changefeedbase.OptFormat),
 			)
 			// Still serialize the experimental_ form for backwards compatibility
 		}
@@ -279,6 +287,13 @@ func changefeedPlanHook(
 		if err != nil {
 			return err
 		}
+		if newScheme, ok := changefeedbase.NoLongerExperimental[parsedSink.Scheme]; ok {
+			parsedSink.Scheme = newScheme // This gets munged anyway when building the sink
+			p.BufferClientNotice(ctx, pgnotice.Newf(`%[1]s is no longer experimental, use %[1]s://`,
+				newScheme),
+			)
+		}
+
 		if details, err = validateDetails(details); err != nil {
 			return err
 		}
@@ -726,7 +741,7 @@ func (b *changefeedResumer) resumeWithRetries(
 		}
 		// Re-load the job in order to update our progress object, which may have
 		// been updated by the changeFrontier processor since the flow started.
-		reloadedJob, reloadErr := execCfg.JobRegistry.LoadJob(ctx, jobID)
+		reloadedJob, reloadErr := execCfg.JobRegistry.LoadClaimedJob(ctx, jobID)
 		if reloadErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

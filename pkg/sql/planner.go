@@ -37,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
@@ -97,7 +96,7 @@ type extendedEvalContext struct {
 	// SchemaChangeJobRecords refers to schemaChangeJobsCache in extraTxnState.
 	SchemaChangeJobRecords map[descpb.ID]*jobs.Record
 
-	statsStorage sqlstats.Storage
+	statsProvider *persistedsqlstats.PersistedSQLStats
 
 	indexUsageStats *idxusage.LocalIndexUsageStats
 
@@ -308,9 +307,10 @@ func newInternalPlanner(
 	sd.SessionData.Database = "system"
 	sd.SessionData.UserProto = user.EncodeProto()
 	sd.SessionData.Internal = true
+	sds := sessiondata.NewStack(sd)
 
 	if params.collection == nil {
-		params.collection = execCfg.CollectionFactory.NewCollection(sd)
+		params.collection = execCfg.CollectionFactory.NewCollection(descs.NewTemporarySchemaProvider(sds))
 	}
 
 	var ts time.Time
@@ -344,7 +344,6 @@ func newInternalPlanner(
 		noteworthyInternalMemoryUsageBytes, execCfg.Settings)
 	plannerMon.Start(ctx, execCfg.RootMemoryMonitor, mon.BoundAccount{})
 
-	sds := sessiondata.NewStack(sd)
 	smi := &sessionDataMutatorIterator{
 		sds: sds,
 		sessionDataMutatorBase: sessionDataMutatorBase{
@@ -374,6 +373,7 @@ func newInternalPlanner(
 	p.extendedEvalCtx.ClientNoticeSender = p
 	p.extendedEvalCtx.Sequence = p
 	p.extendedEvalCtx.Tenant = p
+	p.extendedEvalCtx.Regions = p
 	p.extendedEvalCtx.JoinTokenCreator = p
 	p.extendedEvalCtx.ClusterID = execCfg.ClusterID()
 	p.extendedEvalCtx.ClusterName = execCfg.RPCContext.ClusterName()

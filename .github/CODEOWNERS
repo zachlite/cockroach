@@ -48,6 +48,7 @@
 /pkg/sql/tests/rsg_test.go   @cockroachdb/sql-experience
 
 /pkg/sql/catalog/            @cockroachdb/sql-schema
+/pkg/sql/catalog/multiregion @cockroachdb/multiregion
 /pkg/sql/doctor/             @cockroachdb/sql-schema
 /pkg/sql/gcjob/              @cockroachdb/sql-schema
 /pkg/sql/gcjob_test/         @cockroachdb/sql-schema
@@ -173,6 +174,7 @@
 /pkg/cmd/roachprod/          @cockroachdb/dev-inf
 /pkg/cmd/roachprod-stress/   @cockroachdb/test-eng
 /pkg/cmd/roachtest/          @cockroachdb/test-eng
+/pkg/cmd/tag-merged-pr/      @cockroachdb/dev-inf
 # This isn't quite right, each file should ideally be owned
 # by a team (or at least most of them), namely the team that
 # is the Owner for the roachtest, but until we unify these

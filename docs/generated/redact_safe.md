@@ -4,7 +4,8 @@ File | Type
 --|--
 pkg/cli/exit/exit.go | `Code`
 pkg/jobs/jobspb/wrap.go | `Type`
-pkg/kv/kvserver/closedts/ctpb/entry.go | `LAI`
+pkg/kv/kvserver/closedts/ctpb/service.go | `LAI`
+pkg/kv/kvserver/closedts/ctpb/service.go | `SeqNum`
 pkg/kv/kvserver/concurrency/lock/locking.go | `WaitPolicy`
 pkg/kv/kvserver/raft.go | `SnapshotRequest_Type`
 pkg/roachpb/data.go | `LeaseSequence`
@@ -16,6 +17,7 @@ pkg/roachpb/metadata.go | `ReplicaID`
 pkg/roachpb/metadata.go | `ReplicaType`
 pkg/roachpb/metadata.go | `StoreID`
 pkg/roachpb/method.go | `Method`
+pkg/rpc/connection_class.go | `ConnectionClass`
 pkg/sql/catalog/descpb/structured.go | `ColumnID`
 pkg/sql/catalog/descpb/structured.go | `ConstraintType`
 pkg/sql/catalog/descpb/structured.go | `ConstraintValidity`

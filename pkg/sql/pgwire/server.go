@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -306,6 +307,12 @@ func MakeServer(
 		})
 
 	return server
+}
+
+// BytesInAndOut returns the total number of bytes transmitted to and from this
+// server.
+func (s *Server) BytesInAndOut() uint64 {
+	return uint64(s.metrics.BytesInCount.Count() + s.metrics.BytesOutCount.Count())
 }
 
 // AnnotateCtxForIncomingConn annotates the provided context with a
@@ -922,7 +929,7 @@ func splitOptions(options string) []string {
 	for i < len(options) {
 		sb.Reset()
 		// skip leading space
-		for i < len(options) && options[i] == ' ' {
+		for i < len(options) && unicode.IsSpace(rune(options[i])) {
 			i++
 		}
 		if i == len(options) {
@@ -932,7 +939,7 @@ func splitOptions(options string) []string {
 		lastWasEscape := false
 
 		for i < len(options) {
-			if options[i] == ' ' && !lastWasEscape {
+			if unicode.IsSpace(rune(options[i])) && !lastWasEscape {
 				break
 			}
 			if !lastWasEscape && options[i] == '\\' {

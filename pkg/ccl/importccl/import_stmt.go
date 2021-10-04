@@ -286,6 +286,58 @@ func addToFileFormatTelemetry(fileFormat, state string) {
 	telemetry.Count(fmt.Sprintf("%s.%s.%s", "import", strings.ToLower(fileFormat), state))
 }
 
+// resolveUDTsUsedByImportInto resolves all the user defined types that are
+// referenced by the table being imported into.
+func resolveUDTsUsedByImportInto(
+	ctx context.Context, p sql.PlanHookState, table *tabledesc.Mutable,
+) ([]catalog.TypeDescriptor, error) {
+	typeDescs := make([]catalog.TypeDescriptor, 0)
+	var dbDesc catalog.DatabaseDescriptor
+	err := sql.DescsTxn(ctx, p.ExecCfg(), func(
+		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
+	) (err error) {
+		_, dbDesc, err = descriptors.GetImmutableDatabaseByID(ctx, txn, table.GetParentID(),
+			tree.DatabaseLookupFlags{
+				Required:    true,
+				AvoidCached: true,
+			})
+		if err != nil {
+			return err
+		}
+		typeIDs, _, err := table.GetAllReferencedTypeIDs(dbDesc,
+			func(id descpb.ID) (catalog.TypeDescriptor, error) {
+				immutDesc, err := descriptors.GetImmutableTypeByID(ctx, txn, id, tree.ObjectLookupFlags{
+					CommonLookupFlags: tree.CommonLookupFlags{
+						Required:    true,
+						AvoidCached: true,
+					},
+				})
+				if err != nil {
+					return nil, err
+				}
+				return immutDesc, nil
+			})
+		if err != nil {
+			return errors.Wrap(err, "resolving type descriptors")
+		}
+
+		for _, typeID := range typeIDs {
+			immutDesc, err := descriptors.GetImmutableTypeByID(ctx, txn, typeID, tree.ObjectLookupFlags{
+				CommonLookupFlags: tree.CommonLookupFlags{
+					Required:    true,
+					AvoidCached: true,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			typeDescs = append(typeDescs, immutDesc)
+		}
+		return err
+	})
+	return typeDescs, err
+}
+
 // importPlanHook implements sql.PlanHookFn.
 func importPlanHook(
 	ctx context.Context, stmt tree.Statement, p sql.PlanHookState,
@@ -744,28 +796,13 @@ func importPlanHook(
 
 		var tableDetails []jobspb.ImportDetails_Table
 		var tableDescs []*tabledesc.Mutable // parallel with tableDetails
+		var typeDetails []jobspb.ImportDetails_Type
 		jobDesc, err := importJobDescription(p, importStmt, nil, filenamePatterns, opts)
 		if err != nil {
 			return err
 		}
 
 		if importStmt.Into {
-			// TODO(dt): this is a prototype for incremental import but there are many
-			// TODOs remaining before it is ready to graduate to prime-time. Some of
-			// them are captured in specific TODOs below, but some of the big, scary
-			// things to do are:
-			// - review planner vs txn use very carefully. We should try to get to a
-			//   single txn used to plan the job and create it. Using the planner's
-			//   txn today is very wrong since it will not commit until after the job
-			//   has run, so starting a job based on reads it returned is very wrong.
-			// - audit every place that we resolve/lease/read table descs to be sure
-			//   that the IMPORTING state is handled correctly. SQL lease acquisition
-			//   is probably the easy one here since it has single read path -- the
-			//   things that read directly like the queues or background jobs are the
-			//   ones we'll need to really carefully look though.
-			// - Look at if/how cleanup/rollback works. Reconsider the cpu from the
-			//   desc version (perhaps we should be re-reading instead?).
-			// - Write _a lot_ of tests.
 			if _, ok := allowedIntoFormats[importStmt.FileFormat]; !ok {
 				return errors.Newf(
 					"%s file format is currently unsupported by IMPORT INTO",
@@ -817,6 +854,21 @@ func importPlanHook(
 					}
 				}
 			}
+
+			{
+				// Resolve the UDTs used by the table being imported into.
+				typeDescs, err := resolveUDTsUsedByImportInto(ctx, p, found)
+				if err != nil {
+					return errors.Wrap(err, "resolving UDTs used by table being imported into")
+				}
+				if len(typeDescs) > 0 {
+					typeDetails = make([]jobspb.ImportDetails_Type, 0, len(typeDescs))
+				}
+				for _, typeDesc := range typeDescs {
+					typeDetails = append(typeDetails, jobspb.ImportDetails_Type{Desc: typeDesc.TypeDesc()})
+				}
+			}
+
 			tableDetails = []jobspb.ImportDetails_Table{{Desc: &found.TableDescriptor, IsNew: false, TargetCols: intoCols}}
 		} else {
 			seqVals := make(map[descpb.ID]int64)
@@ -922,6 +974,24 @@ func importPlanHook(
 			}
 		}
 
+		// Store the primary region of the database being imported into. This is
+		// used during job execution to evaluate certain default expressions and
+		// computed columns such as `gateway_region`.
+		var databasePrimaryRegion descpb.RegionName
+		if db.IsMultiRegion() {
+			if err := sql.DescsTxn(ctx, p.ExecCfg(), func(ctx context.Context, txn *kv.Txn,
+				descsCol *descs.Collection) error {
+				regionConfig, err := sql.SynthesizeRegionConfig(ctx, txn, db.GetID(), descsCol)
+				if err != nil {
+					return err
+				}
+				databasePrimaryRegion = regionConfig.PrimaryRegion()
+				return nil
+			}); err != nil {
+				return errors.Wrap(err, "failed to resolve region config for multi region database")
+			}
+		}
+
 		telemetry.CountBucketed("import.files", int64(len(files)))
 
 		// Record telemetry for userfile being used as the import target.
@@ -950,15 +1020,17 @@ func importPlanHook(
 		// StartableJob which we attached to the connExecutor somehow.
 
 		importDetails := jobspb.ImportDetails{
-			URIs:              files,
-			Format:            format,
-			ParentID:          db.GetID(),
-			Tables:            tableDetails,
-			SSTSize:           sstSize,
-			Oversample:        oversample,
-			SkipFKs:           skipFKs,
-			ParseBundleSchema: importStmt.Bundle,
-			DefaultIntSize:    p.SessionData().DefaultIntSize,
+			URIs:                  files,
+			Format:                format,
+			ParentID:              db.GetID(),
+			Tables:                tableDetails,
+			Types:                 typeDetails,
+			SSTSize:               sstSize,
+			Oversample:            oversample,
+			SkipFKs:               skipFKs,
+			ParseBundleSchema:     importStmt.Bundle,
+			DefaultIntSize:        p.SessionData().DefaultIntSize,
+			DatabasePrimaryRegion: databasePrimaryRegion,
 		}
 
 		jr := jobs.Record{
@@ -1241,9 +1313,6 @@ func prepareExistingTableDescForIngestion(
 ) (*descpb.TableDescriptor, error) {
 	if len(desc.Mutations) > 0 {
 		return nil, errors.Errorf("cannot IMPORT INTO a table with schema changes in progress -- try again later (pending mutation %s)", desc.Mutations[0].String())
-	}
-	if desc.LocalityConfig != nil && desc.LocalityConfig.GetRegionalByRow() != nil {
-		return nil, unimplemented.NewWithIssueDetailf(61133, "import.regional-by-row", "IMPORT into REGIONAL BY ROW table not supported")
 	}
 
 	// Note that desc is just used to verify that the version matches.
@@ -2014,6 +2083,12 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 			}
 		}
 	}
+
+	typeDescs := make([]*descpb.TypeDescriptor, len(details.Types))
+	for i, t := range details.Types {
+		typeDescs[i] = t.Desc
+	}
+
 	// If details.Walltime is still 0, then it was not set during
 	// `prepareTableDescsForIngestion`. This indicates that we are in an IMPORT INTO,
 	// and that the walltime was not set in a previous run of IMPORT.
@@ -2045,7 +2120,7 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 		}
 	}
 
-	res, err := ingestWithRetry(ctx, p, r.job, tables, files, format, details.Walltime,
+	res, err := ingestWithRetry(ctx, p, r.job, tables, typeDescs, files, format, details.Walltime,
 		r.testingKnobs.alwaysFlushJobProgress)
 	if err != nil {
 		return err
@@ -2067,6 +2142,13 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 		if err := r.testingKnobs.afterImport(r.res); err != nil {
 			return err
 		}
+	}
+
+	// If the table being imported into referenced UDTs, ensure that a concurrent
+	// schema change on any of the typeDescs has not modified the type descriptor. If
+	// it has, it is unsafe to import the data and we fail the import job.
+	if err := r.checkForUDTModification(ctx, p.ExecCfg()); err != nil {
+		return err
 	}
 
 	if err := r.publishSchemas(ctx, p.ExecCfg()); err != nil {
@@ -2118,6 +2200,7 @@ func ingestWithRetry(
 	execCtx sql.JobExecContext,
 	job *jobs.Job,
 	tables map[string]*execinfrapb.ReadImportDataSpec_ImportTable,
+	typeDescs []*descpb.TypeDescriptor,
 	from []string,
 	format roachpb.IOFileFormat,
 	walltime int64,
@@ -2146,7 +2229,8 @@ func ingestWithRetry(
 			AttemptNumber: retryCount,
 			RetryError:    tracing.RedactAndTruncateError(err),
 		})
-		res, err = sql.DistIngest(ctx, execCtx, job, tables, from, format, walltime, alwaysFlushProgress)
+		res, err = sql.DistIngest(ctx, execCtx, job, tables, typeDescs, from, format, walltime,
+			alwaysFlushProgress)
 		if err == nil {
 			break
 		}
@@ -2214,6 +2298,44 @@ func (r *importResumer) publishSchemas(ctx context.Context, execCfg *sql.Executo
 		err := r.job.SetDetails(ctx, txn, details)
 		if err != nil {
 			return errors.Wrap(err, "updating job details after publishing schemas")
+		}
+		return nil
+	})
+}
+
+// checkForUDTModification checks whether any of the types referenced by the
+// table being imported into have been modified since they were read during
+// import planning. If they have, it may be unsafe to continue with the import
+// since we could be ingesting data that is no longer valid for the type.
+//
+// Egs: Renaming an enum value mid import could result in the import ingesting a
+// value that is no longer valid.
+//
+// TODO(SQL Schema): This method might be unnecessarily aggressive in failing
+// the import. The semantics of what concurrent type changes are/are not safe
+// during an IMPORT still need to be ironed out. Once they are, we can make this
+// method more conservative in what it uses to deem a type change dangerous.
+func (r *importResumer) checkForUDTModification(
+	ctx context.Context, execCfg *sql.ExecutorConfig,
+) error {
+	details := r.job.Details().(jobspb.ImportDetails)
+	if details.Types == nil {
+		return nil
+	}
+	return sql.DescsTxn(ctx, execCfg, func(ctx context.Context, txn *kv.Txn,
+		col *descs.Collection) error {
+		for _, savedTypeDesc := range details.Types {
+			typeDesc, err := catalogkv.MustGetTypeDescByID(ctx, txn, execCfg.Codec,
+				savedTypeDesc.Desc.GetID())
+			if err != nil {
+				return errors.Wrap(err, "resolving type descriptor when checking version mismatch")
+			}
+			if typeDesc.GetModificationTime() != savedTypeDesc.Desc.GetModificationTime() {
+				return errors.Newf("type descriptor %d has a different modification time than what"+
+					" was saved during import planning; unsafe to import since the type"+
+					" has changed during the course of the import",
+					typeDesc.GetID())
+			}
 		}
 		return nil
 	})

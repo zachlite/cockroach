@@ -44,12 +44,12 @@ require (
 	github.com/cockroachdb/go-test-teamcity v0.0.0-20191211140407-cff980ad0a55
 	github.com/cockroachdb/gostdlib v1.13.0
 	github.com/cockroachdb/logtags v0.0.0-20190617123548-eb05cc24525f
-	github.com/cockroachdb/pebble v0.0.0-20210826190118-2b4f90f7395e
+	github.com/cockroachdb/pebble v0.0.0-20210930205914-c17bf6f57e8f
 	github.com/cockroachdb/redact v1.1.3
 	github.com/cockroachdb/returncheck v0.0.0-20200612231554-92cdbca611dd
 	github.com/cockroachdb/sentry-go v0.6.1-cockroachdb.2
 	github.com/cockroachdb/stress v0.0.0-20170808184505-29b5d31b4c3a
-	github.com/cockroachdb/ttycolor v0.0.0-20210717002733-a2a538deeb8c
+	github.com/cockroachdb/ttycolor v0.0.0-20210902133924-c7d7dcdde4e8
 	github.com/codahale/hdrhistogram v0.0.0-20161010025455-3a0bb77429bd
 	github.com/containerd/containerd v1.4.6
 	github.com/coreos/go-oidc v2.2.1+incompatible
@@ -61,7 +61,6 @@ require (
 	github.com/dustin/go-humanize v1.0.0
 	github.com/edsrzf/mmap-go v1.0.0
 	github.com/elastic/gosigar v0.10.0
-	github.com/elazarl/go-bindata-assetfs v1.0.0
 	github.com/emicklei/dot v0.15.0
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a
 	github.com/ghemawat/stream v0.0.0-20171120220530-696b145b53b9

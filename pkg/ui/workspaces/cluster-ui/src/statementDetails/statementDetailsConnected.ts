@@ -37,19 +37,23 @@ import { actions as nodesActions } from "../store/nodes";
 import { actions as nodeLivenessActions } from "../store/liveness";
 import { selectDateRange } from "../statementsPage/statementsPage.selectors";
 
+// For tenant cases, we don't show information about node, regions and
+// diagnostics.
 const mapStateToProps = (state: AppState, props: StatementDetailsProps) => {
   const statement = selectStatement(state, props);
   const statementFingerprint = statement?.statement;
   return {
     statement,
     statementsError: state.adminUI.statements.lastError,
-    dateRange: selectIsTenant(state) ? null : selectDateRange(state),
-    nodeNames: nodeDisplayNameByIDSelector(state),
-    nodeRegions: nodeRegionsByIDSelector(state),
-    diagnosticsReports: selectDiagnosticsReportsByStatementFingerprint(
-      state,
-      statementFingerprint,
-    ),
+    dateRange: selectDateRange(state),
+    nodeNames: selectIsTenant(state) ? {} : nodeDisplayNameByIDSelector(state),
+    nodeRegions: selectIsTenant(state) ? {} : nodeRegionsByIDSelector(state),
+    diagnosticsReports: selectIsTenant(state)
+      ? []
+      : selectDiagnosticsReportsByStatementFingerprint(
+          state,
+          statementFingerprint,
+        ),
     uiConfig: selectStatementDetailsUiConfig(state),
     isTenant: selectIsTenant(state),
   };

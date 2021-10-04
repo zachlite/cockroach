@@ -21,6 +21,10 @@ import (
 //
 // The KV operation parameters are set based on experiments, where 1000 Request
 // Units correspond to one CPU second of usage on the host cluster.
+//
+// TODO(radu): these settings are not currently used on the tenant side; there,
+// only the defaults are used. Ideally, the tenant would always get the values
+// from the host cluster.
 var (
 	readRequestCost = settings.RegisterFloatSetting(
 		"tenant_cost_model.kv_read_request_cost",
@@ -57,6 +61,13 @@ var (
 		settings.PositiveFloat,
 	)
 
+	pgwireCostPerMB = settings.RegisterFloatSetting(
+		"tenant_cost_model.pgwire_cost_per_megabyte",
+		"cost of client <-> SQL ingress/egress per MB",
+		585.0,
+		settings.PositiveFloat,
+	)
+
 	// List of config settings, used by SetOnChange.
 	configSettings = [...]settings.WritableSetting{
 		readRequestCost,
@@ -64,6 +75,7 @@ var (
 		writeRequestCost,
 		writeCostPerMB,
 		podCPUSecondCost,
+		pgwireCostPerMB,
 	}
 )
 
@@ -77,6 +89,7 @@ func ConfigFromSettings(sv *settings.Values) Config {
 		KVWriteRequest: RU(writeRequestCost.Get(sv)),
 		KVWriteByte:    RU(writeCostPerMB.Get(sv) * perMBToPerByte),
 		PodCPUSecond:   RU(podCPUSecondCost.Get(sv)),
+		PGWireByte:     RU(pgwireCostPerMB.Get(sv) * perMBToPerByte),
 	}
 }
 
@@ -89,6 +102,7 @@ func DefaultConfig() Config {
 		KVWriteRequest: RU(writeRequestCost.Default()),
 		KVWriteByte:    RU(writeCostPerMB.Default() * perMBToPerByte),
 		PodCPUSecond:   RU(podCPUSecondCost.Default()),
+		PGWireByte:     RU(pgwireCostPerMB.Default() * perMBToPerByte),
 	}
 }
 

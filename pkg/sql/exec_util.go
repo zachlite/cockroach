@@ -260,6 +260,13 @@ var autoRehomingEnabledClusterMode = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
+var onUpdateRehomeRowEnabledClusterMode = settings.RegisterBoolSetting(
+	"sql.defaults.on_update_rehome_row.enabled",
+	"default value for on_update_rehome_row;"+
+		" enables ON UPDATE rehome_row() expressions to trigger on updates",
+	true,
+).WithPublic()
+
 var temporaryTablesEnabledClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.experimental_temporary_tables.enabled",
 	"default value for experimental_enable_temp_tables; allows for use of temporary tables by default",
@@ -594,7 +601,7 @@ var dateStyleEnabled = settings.RegisterBoolSetting(
 var txnRowsWrittenLog = settings.RegisterIntSetting(
 	"sql.defaults.transaction_rows_written_log",
 	"the threshold for the number of rows written by a SQL transaction "+
-		"which - once reached - will trigger a logging event to SQL_PERF (or "+
+		"which - once exceeded - will trigger a logging event to SQL_PERF (or "+
 		"SQL_INTERNAL_PERF for internal transactions); use 0 to disable",
 	0,
 	settings.NonNegativeInt,
@@ -603,7 +610,7 @@ var txnRowsWrittenLog = settings.RegisterIntSetting(
 var txnRowsWrittenErr = settings.RegisterIntSetting(
 	"sql.defaults.transaction_rows_written_err",
 	"the limit for the number of rows written by a SQL transaction which - "+
-		"once reached - will fail the transaction (or will trigger a logging "+
+		"once exceeded - will fail the transaction (or will trigger a logging "+
 		"event to SQL_INTERNAL_PERF for internal transactions); use 0 to disable",
 	0,
 	settings.NonNegativeInt,
@@ -612,7 +619,7 @@ var txnRowsWrittenErr = settings.RegisterIntSetting(
 var txnRowsReadLog = settings.RegisterIntSetting(
 	"sql.defaults.transaction_rows_read_log",
 	"the threshold for the number of rows read by a SQL transaction "+
-		"which - once reached - will trigger a logging event to SQL_PERF (or "+
+		"which - once exceeded - will trigger a logging event to SQL_PERF (or "+
 		"SQL_INTERNAL_PERF for internal transactions); use 0 to disable",
 	0,
 	settings.NonNegativeInt,
@@ -621,10 +628,20 @@ var txnRowsReadLog = settings.RegisterIntSetting(
 var txnRowsReadErr = settings.RegisterIntSetting(
 	"sql.defaults.transaction_rows_read_err",
 	"the limit for the number of rows read by a SQL transaction which - "+
-		"once reached - will fail the transaction (or will trigger a logging "+
+		"once exceeded - will fail the transaction (or will trigger a logging "+
 		"event to SQL_INTERNAL_PERF for internal transactions); use 0 to disable",
 	0,
 	settings.NonNegativeInt,
+).WithPublic()
+
+// This is a float setting (rather than an int setting) because the optimizer
+// uses floating point for calculating row estimates.
+var largeFullScanRows = settings.RegisterFloatSetting(
+	"sql.defaults.large_full_scan_rows",
+	"default value for large_full_scan_rows session setting which determines "+
+		"the maximum table size allowed for a full scan when disallow_full_table_scans "+
+		"is set to true",
+	1000.0,
 ).WithPublic()
 
 var errNoTransactionInProgress = errors.New("there is no transaction in progress")
@@ -987,6 +1004,12 @@ var (
 		Measurement: "Errored transactions",
 		Unit:        metric.Unit_COUNT,
 	}
+	MetaFullTableOrIndexScanRejected = metric.Metadata{
+		Name:        "sql.guardrails.full_scan_rejected.count",
+		Help:        "Number of full table or index scans that have been rejected because of `disallow_full_table_scans` guardrail",
+		Measurement: "SQL Statements",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 func getMetricMeta(meta metric.Metadata, internal bool) metric.Metadata {
@@ -1069,6 +1092,7 @@ type ExecutorConfig struct {
 	StreamingTestingKnobs         *StreamingTestingKnobs
 	IndexUsageStatsTestingKnobs   *idxusage.TestingKnobs
 	SQLStatsTestingKnobs          *sqlstats.TestingKnobs
+	TelemetryLoggingTestingKnobs  *TelemetryLoggingTestingKnobs
 	// HistogramWindowInterval is (server.Config).HistogramWindowInterval.
 	HistogramWindowInterval time.Duration
 
@@ -1278,6 +1302,11 @@ type ExecutorTestingKnobs struct {
 
 	// OnTxnRetry, if set, will be called if there is a transaction retry.
 	OnTxnRetry func(autoRetryReason error, evalCtx *tree.EvalContext)
+
+	// AllowDeclarativeSchemaChanger is used to allow enabling the new,
+	// declarative schema changer. It cannot be enabled without this testing knob
+	// in 21.2.
+	AllowDeclarativeSchemaChanger bool
 }
 
 // PGWireTestingKnobs contains knobs for the pgwire module.
@@ -2524,7 +2553,14 @@ type sessionDataMutatorCallbacks struct {
 	// on the search path (the first and only time).
 	// It can be nil, in which case nothing triggers on execution.
 	onTempSchemaCreation func()
-	// onApplicationName is called when the application name changes.
+	// onDefaultIntSizeChange is called when default_int_size changes. It is
+	// needed because the pgwire connection's read buffer needs to be aware
+	// of the default int size in order to be able to parse the unqualified
+	// INT type correctly.
+	onDefaultIntSizeChange func(int32)
+	// onApplicationName is called when the application_name changes. It is
+	// needed because the stats writer needs to be notified of changes to the
+	// application name.
 	onApplicationNameChange func(string)
 }
 
@@ -2645,6 +2681,9 @@ func (m *sessionDataMutator) SetTemporarySchemaIDForDatabase(dbID uint32, tempSc
 
 func (m *sessionDataMutator) SetDefaultIntSize(size int32) {
 	m.data.DefaultIntSize = size
+	if m.onDefaultIntSizeChange != nil {
+		m.onDefaultIntSizeChange(size)
+	}
 }
 
 func (m *sessionDataMutator) SetDefaultTransactionPriority(val tree.UserPriority) {
@@ -2798,6 +2837,10 @@ func (m *sessionDataMutator) SetAutoRehomingEnabled(val bool) {
 	m.data.AutoRehomingEnabled = val
 }
 
+func (m *sessionDataMutator) SetOnUpdateRehomeRowEnabled(val bool) {
+	m.data.OnUpdateRehomeRowEnabled = val
+}
+
 func (m *sessionDataMutator) SetTempTablesEnabled(val bool) {
 	m.data.TempTablesEnabled = val
 }
@@ -2911,6 +2954,10 @@ func (m *sessionDataMutator) SetTxnRowsReadLog(val int64) {
 
 func (m *sessionDataMutator) SetTxnRowsReadErr(val int64) {
 	m.data.TxnRowsReadErr = val
+}
+
+func (m *sessionDataMutator) SetLargeFullScanRows(val float64) {
+	m.data.LargeFullScanRows = val
 }
 
 // Utility functions related to scrubbing sensitive information on SQL Stats.

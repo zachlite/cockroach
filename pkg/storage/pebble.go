@@ -28,6 +28,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -472,7 +473,7 @@ type Pebble struct {
 	// settings must be non-nil if this Pebble instance will be used to write
 	// intents.
 	settings     *cluster.Settings
-	statsHandler EncryptionStatsHandler
+	encryption   *EncryptionEnv
 	fileRegistry *PebbleFileRegistry
 
 	// Stats updated by pebble.EventListener invocations, and returned in
@@ -495,13 +496,34 @@ type Pebble struct {
 	storeIDPebbleLog *base.StoreIDContainer
 }
 
+// EncryptionEnv describes the encryption-at-rest environment, providing
+// access to a filesystem with on-the-fly encryption.
+type EncryptionEnv struct {
+	// Closer closes the encryption-at-rest environment. Once the
+	// environment is closed, the environment's VFS may no longer be
+	// used.
+	Closer io.Closer
+	// FS provides the encrypted virtual filesystem. New files are
+	// transparently encrypted.
+	FS vfs.FS
+	// StatsHandler exposes encryption-at-rest state for observability.
+	StatsHandler EncryptionStatsHandler
+	// UpgradeVersion is a temporary field that allows Pebble to inform
+	// low-level encryption-at-rest machinery that the CockroachDB 21.2
+	// version has been finalized, and it's okay to begin writing in a
+	// backwards in-compatible format.
+	//
+	// TODO(jackson): Remove this in 22.1.
+	UpgradeVersion func() error
+}
+
 var _ Engine = &Pebble{}
 
 // NewEncryptedEnvFunc creates an encrypted environment and returns the vfs.FS to use for reading
 // and writing data. This should be initialized by calling engineccl.Init() before calling
 // NewPebble(). The optionBytes is a binary serialized baseccl.EncryptionOptions, so that non-CCL
 // code does not depend on CCL code.
-var NewEncryptedEnvFunc func(fs vfs.FS, fr *PebbleFileRegistry, dbDir string, readOnly bool, optionBytes []byte) (vfs.FS, EncryptionStatsHandler, error)
+var NewEncryptedEnvFunc func(fs vfs.FS, fr *PebbleFileRegistry, dbDir string, readOnly bool, optionBytes []byte) (*EncryptionEnv, error)
 
 // StoreIDSetter is used to set the store id in the log.
 type StoreIDSetter interface {
@@ -525,9 +547,7 @@ func (p *Pebble) SetStoreID(ctx context.Context, storeID int32) {
 // ResolveEncryptedEnvOptions fills in cfg.Opts.FS with an encrypted vfs if this
 // store has encryption-at-rest enabled. Also returns the associated file
 // registry and EncryptionStatsHandler.
-func ResolveEncryptedEnvOptions(
-	cfg *PebbleConfig,
-) (*PebbleFileRegistry, EncryptionStatsHandler, error) {
+func ResolveEncryptedEnvOptions(cfg *PebbleConfig) (*PebbleFileRegistry, *EncryptionEnv, error) {
 	fileRegistry := &PebbleFileRegistry{FS: cfg.Opts.FS, DBDir: cfg.Dir, ReadOnly: cfg.Opts.ReadOnly}
 	if cfg.UseFileRegistry {
 		if err := fileRegistry.Load(); err != nil {
@@ -541,7 +561,7 @@ func ResolveEncryptedEnvOptions(
 		fileRegistry = nil
 	}
 
-	var statsHandler EncryptionStatsHandler
+	var env *EncryptionEnv
 	if cfg.IsEncrypted() {
 		// Encryption is enabled.
 		if !cfg.UseFileRegistry {
@@ -551,13 +571,21 @@ func ResolveEncryptedEnvOptions(
 			return nil, nil, fmt.Errorf("encryption is enabled but no function to create the encrypted env")
 		}
 		var err error
-		cfg.Opts.FS, statsHandler, err =
-			NewEncryptedEnvFunc(cfg.Opts.FS, fileRegistry, cfg.Dir, cfg.Opts.ReadOnly, cfg.EncryptionOptions)
+		env, err = NewEncryptedEnvFunc(
+			cfg.Opts.FS,
+			fileRegistry,
+			cfg.Dir,
+			cfg.Opts.ReadOnly,
+			cfg.EncryptionOptions,
+		)
 		if err != nil {
 			return nil, nil, err
 		}
+		// TODO(jackson): Should this just return an EncryptionEnv,
+		// rather than mutating cfg.Opts?
+		cfg.Opts.FS = env.FS
 	}
-	return fileRegistry, statsHandler, nil
+	return fileRegistry, env, nil
 }
 
 // NewPebble creates a new Pebble instance, at the specified path.
@@ -591,7 +619,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 	unencryptedFS := cfg.Opts.FS
 	// TODO(jackson): Assert that unencryptedFS provides atomic renames.
 
-	fileRegistry, statsHandler, err := ResolveEncryptedEnvOptions(&cfg)
+	fileRegistry, env, err := ResolveEncryptedEnvOptions(&cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +670,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 		maxSize:                 cfg.MaxSize,
 		attrs:                   cfg.Attrs,
 		settings:                cfg.Settings,
-		statsHandler:            statsHandler,
+		encryption:              env,
 		fileRegistry:            fileRegistry,
 		fs:                      cfg.Opts.FS,
 		unencryptedFS:           unencryptedFS,
@@ -660,11 +688,39 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 	p.eventListener = &cfg.Opts.EventListener
 	p.wrappedIntentWriter = wrapIntentWriter(ctx, p, cfg.DisableSeparatedIntents)
 
+	// Read the current store cluster version.
+	storeClusterVersion, err := getMinVersion(unencryptedFS, cfg.Dir)
+	if err != nil {
+		return nil, err
+	}
+
 	db, err := pebble.Open(cfg.StorageConfig.Dir, cfg.Opts)
 	if err != nil {
 		return nil, err
 	}
 	p.db = db
+
+	if storeClusterVersion != (roachpb.Version{}) {
+		// The storage engine performs its own internal migrations
+		// through the setting of the store cluster version. When
+		// storage's min version is set, SetMinVersion writes to disk to
+		// commit to the new store cluster version. Then it idempotently
+		// applies any internal storage engine migrations necessitated
+		// or enabled by the new store cluster version. If we crash
+		// after committing the new store cluster version but before
+		// applying the internal migrations, we're left in an in-between
+		// state.
+		//
+		// To account for this, after the engine is open,
+		// unconditionally set the min cluster version again. If any
+		// storage engine state has not been updated, the call to
+		// SetMinVersion will update it.  If all storage engine state is
+		// already updated, SetMinVersion is a noop.
+		if err := p.SetMinVersion(storeClusterVersion); err != nil {
+			p.Close()
+			return nil, err
+		}
+	}
 
 	return p, nil
 }
@@ -721,6 +777,9 @@ func (p *Pebble) Close() {
 	_ = p.db.Close()
 	if p.fileRegistry != nil {
 		_ = p.fileRegistry.Close()
+	}
+	if p.encryption != nil {
+		_ = p.encryption.Closer.Close()
 	}
 }
 
@@ -981,6 +1040,11 @@ func (p *Pebble) PutEngineKey(key EngineKey, value []byte) error {
 	return p.db.Set(key.Encode(), value, pebble.Sync)
 }
 
+// OverrideTxnDidNotUpdateMetaToFalse implements the Engine interface.
+func (p *Pebble) OverrideTxnDidNotUpdateMetaToFalse(ctx context.Context) bool {
+	return overrideTxnDidNotUpdateMetaToFalse(ctx, p.settings)
+}
+
 // IsSeparatedIntentsEnabledForTesting implements the Engine interface.
 func (p *Pebble) IsSeparatedIntentsEnabledForTesting(ctx context.Context) bool {
 	return !p.disableSeparatedIntents
@@ -1145,8 +1209,8 @@ func (p *Pebble) GetMetrics() Metrics {
 func (p *Pebble) GetEncryptionRegistries() (*EncryptionRegistries, error) {
 	rv := &EncryptionRegistries{}
 	var err error
-	if p.statsHandler != nil {
-		rv.KeyRegistry, err = p.statsHandler.GetDataKeysRegistry()
+	if p.encryption != nil {
+		rv.KeyRegistry, err = p.encryption.StatsHandler.GetDataKeysRegistry()
 		if err != nil {
 			return nil, err
 		}
@@ -1165,17 +1229,17 @@ func (p *Pebble) GetEnvStats() (*EnvStats, error) {
 	// TODO(sumeer): make the stats complete. There are no bytes stats. The TotalFiles is missing
 	// files that are not in the registry (from before encryption was enabled).
 	stats := &EnvStats{}
-	if p.statsHandler == nil {
+	if p.encryption == nil {
 		return stats, nil
 	}
-	stats.EncryptionType = p.statsHandler.GetActiveStoreKeyType()
+	stats.EncryptionType = p.encryption.StatsHandler.GetActiveStoreKeyType()
 	var err error
-	stats.EncryptionStatus, err = p.statsHandler.GetEncryptionStatus()
+	stats.EncryptionStatus, err = p.encryption.StatsHandler.GetEncryptionStatus()
 	if err != nil {
 		return nil, err
 	}
 	fr := p.fileRegistry.getRegistryCopy()
-	activeKeyID, err := p.statsHandler.GetActiveDataKeyID()
+	activeKeyID, err := p.encryption.StatsHandler.GetActiveDataKeyID()
 	if err != nil {
 		return nil, err
 	}
@@ -1201,7 +1265,7 @@ func (p *Pebble) GetEnvStats() (*EnvStats, error) {
 	}
 
 	for filePath, entry := range fr.Files {
-		keyID, err := p.statsHandler.GetKeyIDFromSettings(entry.EncryptionSettings)
+		keyID, err := p.encryption.StatsHandler.GetKeyIDFromSettings(entry.EncryptionSettings)
 		if err != nil {
 			return nil, err
 		}
@@ -1236,7 +1300,7 @@ func (p *Pebble) GetAuxiliaryDir() string {
 func (p *Pebble) NewBatch() Batch {
 	return newPebbleBatch(
 		p.db, p.db.NewIndexedBatch(), false, /* writeOnly */
-		p.disableSeparatedIntents)
+		p.disableSeparatedIntents, overrideTxnDidNotUpdateMetaToFalse(context.TODO(), p.settings))
 }
 
 // NewReadOnly implements the Engine interface.
@@ -1246,7 +1310,8 @@ func (p *Pebble) NewReadOnly() ReadWriter {
 
 // NewUnindexedBatch implements the Engine interface.
 func (p *Pebble) NewUnindexedBatch(writeOnly bool) Batch {
-	return newPebbleBatch(p.db, p.db.NewBatch(), writeOnly, p.disableSeparatedIntents)
+	return newPebbleBatch(p.db, p.db.NewBatch(), writeOnly, p.disableSeparatedIntents,
+		overrideTxnDidNotUpdateMetaToFalse(context.TODO(), p.settings))
 }
 
 // NewSnapshot implements the Engine interface.
@@ -1390,14 +1455,59 @@ func (p *Pebble) CreateCheckpoint(dir string) error {
 	return p.db.Checkpoint(dir)
 }
 
-// DeprecateBaseEncryptionRegistry implements the Engine interface.
-func (p *Pebble) DeprecateBaseEncryptionRegistry(version *roachpb.Version) error {
-	if err := WriteMinVersionFile(p.unencryptedFS, p.path, version); err != nil {
+// SetMinVersion implements the Engine interface.
+func (p *Pebble) SetMinVersion(version roachpb.Version) error {
+	// NB: SetMinVersion must be idempotent. It may called multiple
+	// times with the same version.
+
+	// Writing the min version file commits this storage engine to the
+	// provided cluster version.
+	if err := writeMinVersionFile(p.unencryptedFS, p.path, version); err != nil {
 		return err
 	}
+
+	// Pebble has a concept of format major versions, similar to cluster
+	// versions. Backwards incompatible changes to Pebble's on-disk
+	// format are gated behind new format major versions. Bumping the
+	// storage engine's format major version is tied to a CockroachDB
+	// cluster version.
+	//
+	// Format major versions and cluster versions both only ratchet
+	// upwards. Here we map the persisted cluster version to the
+	// corresponding format major version, ratcheting Pebble's format
+	// major version if necessary.
+	formatVers := pebble.FormatMostCompatible
+	// Cases are ordered from newer to older versions.
+	switch {
+	case !version.Less(clusterversion.ByKey(clusterversion.PebbleSetWithDelete)):
+		if formatVers < pebble.FormatSetWithDelete {
+			formatVers = pebble.FormatSetWithDelete
+		}
+	case !version.Less(clusterversion.ByKey(clusterversion.PebbleFormatVersioned)):
+		if formatVers < pebble.FormatVersioned {
+			formatVers = pebble.FormatVersioned
+		}
+	}
+	if p.db.FormatMajorVersion() < formatVers {
+		if err := p.db.RatchetFormatMajorVersion(formatVers); err != nil {
+			return errors.Wrap(err, "ratcheting format major version")
+		}
+	}
+
 	if p.fileRegistry != nil {
-		if err := p.fileRegistry.StopUsingOldRegistry(); err != nil {
-			return err
+		recordsRegistryCV := clusterversion.ByKey(clusterversion.RecordsBasedRegistry)
+		if !version.Less(recordsRegistryCV) {
+			if err := p.fileRegistry.StopUsingOldRegistry(); err != nil {
+				return err
+			}
+		}
+	}
+	if p.encryption != nil {
+		markerDataKeysRegistryCV := clusterversion.ByKey(clusterversion.MarkerDataKeysRegistry)
+		if !version.Less(markerDataKeysRegistryCV) {
+			if err := p.encryption.UpgradeVersion(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1412,7 +1522,7 @@ func (p *Pebble) UsingRecordsEncryptionRegistry() (bool, error) {
 }
 
 // MinVersionIsAtLeastTargetVersion implements the Engine interface.
-func (p *Pebble) MinVersionIsAtLeastTargetVersion(target *roachpb.Version) (bool, error) {
+func (p *Pebble) MinVersionIsAtLeastTargetVersion(target roachpb.Version) (bool, error) {
 	return MinVersionIsAtLeastTargetVersion(p.unencryptedFS, p.path, target)
 }
 
@@ -1745,6 +1855,10 @@ func (p *pebbleReadOnly) LogLogicalOp(op MVCCLogicalOpType, details MVCCLogicalO
 	panic("not implemented")
 }
 
+func (p *pebbleReadOnly) OverrideTxnDidNotUpdateMetaToFalse(ctx context.Context) bool {
+	panic("not implemented")
+}
+
 // pebbleSnapshot represents a snapshot created using Pebble.NewSnapshot().
 type pebbleSnapshot struct {
 	snapshot *pebble.Snapshot
@@ -1929,7 +2043,7 @@ func pebbleExportToSst(
 			EnableTimeBoundIteratorOptimization: useTBI,
 			StartTime:                           startTS,
 			EndTime:                             endTS,
-			EnableWriteIntentAggregation:        true,
+			IntentPolicy:                        MVCCIncrementalIterIntentPolicyAggregate,
 		})
 	defer iter.Close()
 	var curKey roachpb.Key // only used if exportAllRevisions
@@ -2035,4 +2149,12 @@ func pebbleExportToSst(
 	}
 
 	return rows.BulkOpSummary, MVCCKey{Key: resumeKey, Timestamp: resumeTS}, nil
+}
+
+// See the comment for Writer.OverrideTxnDidNotUpdateMetaToFalse.
+func overrideTxnDidNotUpdateMetaToFalse(ctx context.Context, st *cluster.Settings) bool {
+	// The fix to the single delete bug in 21.2 has nothing to do with
+	// PebbleFormatVersioned, but both are part of the 21.2 beta, which will be
+	// the earliest production version of 21.2.
+	return !st.Version.ActiveVersionOrEmpty(ctx).IsActive(clusterversion.PebbleFormatVersioned)
 }

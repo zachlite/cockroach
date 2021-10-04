@@ -39,7 +39,7 @@ func tenantFromCommonName(commonName string) (roachpb.TenantID, error) {
 }
 
 // authorize enforces a security boundary around endpoints that tenants
-// request from the host KV node.
+// request from the host KV node or other tenant SQL pod.
 func (a tenantAuthorizer) authorize(
 	tenID roachpb.TenantID, fullMethod string, req interface{},
 ) error {
@@ -68,7 +68,25 @@ func (a tenantAuthorizer) authorize(
 	case "/cockroach.server.serverpb.Status/Statements":
 		return a.authTenant(tenID)
 
+	case "/cockroach.server.serverpb.Status/CombinedStatementStats":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/ResetSQLStats":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/ListContentionEvents":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/ListLocalContentionEvents":
+		return a.authTenant(tenID)
+
 	case "/cockroach.server.serverpb.Status/ListSessions":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/ListLocalSessions":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/IndexUsageStatistics":
 		return a.authTenant(tenID)
 
 	case "/cockroach.roachpb.Internal/GetSpanConfigs":

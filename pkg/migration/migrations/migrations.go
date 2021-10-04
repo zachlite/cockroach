@@ -91,7 +91,7 @@ var migrations = []migration.Migration{
 		databaseRoleSettingsTableMigration,
 	),
 	migration.NewTenantMigration(
-		"add the systems.tenant_usage table",
+		"add the system.tenant_usage table",
 		toCV(clusterversion.TenantUsageTable),
 		NoPrecondition,
 		tenantUsageTableMigration,
@@ -118,7 +118,7 @@ var migrations = []migration.Migration{
 	migration.NewTenantMigration(
 		"validates no interleaved tables exist",
 		toCV(clusterversion.EnsureNoInterleavedTables),
-		interleavedTablesRemovedMigration,
+		interleavedTablesRemovedCheck,
 		interleavedTablesRemovedMigration,
 	),
 	migration.NewTenantMigration(
@@ -132,6 +132,18 @@ var migrations = []migration.Migration{
 		toCV(clusterversion.SpanConfigurationsTable),
 		NoPrecondition,
 		spanConfigurationsTableMigration,
+	),
+	migration.NewTenantMigration(
+		"create indexes on revokedAt and lastUsedAt columns from system.web_sessions",
+		toCV(clusterversion.AlterSystemWebSessionsCreateIndexes),
+		NoPrecondition,
+		alterSystemWebSessionsCreateIndexes,
+	),
+	migration.NewTenantMigration(
+		"change system.tenant_usage table to use a single column for consumption",
+		toCV(clusterversion.TenantUsageSingleConsumptionColumn),
+		NoPrecondition,
+		tenantUsageSingleConsumptionColumn,
 	),
 }
 

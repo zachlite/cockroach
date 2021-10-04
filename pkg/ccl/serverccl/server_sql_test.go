@@ -16,13 +16,15 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl/licenseccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/lib/pq"
@@ -84,6 +86,29 @@ func TestTenantCannotSetClusterSetting(t *testing.T) {
 	require.Equal(t, pq.ErrorCode(pgcode.InsufficientPrivilege.String()), pqErr.Code, "err %v has unexpected code", err)
 }
 
+func TestTenantCanUseEnterpriseFeatures(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	license, _ := (&licenseccl.License{
+		Type: licenseccl.License_Enterprise,
+	}).Encode()
+
+	defer utilccl.TestingDisableEnterprise()()
+	defer envutil.TestSetEnv(t, "COCKROACH_TENANT_LICENSE", license)()
+
+	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
+	defer tc.Stopper().Stop(context.Background())
+
+	_, db := serverutils.StartTenant(t, tc.Server(0), base.TestTenantArgs{TenantID: serverutils.TestTenantID(), AllowSettingClusterSettings: false})
+	defer db.Close()
+
+	_, err := db.Exec(`BACKUP INTO 'userfile:///backup'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`BACKUP INTO LATEST IN 'userfile:///backup'`)
+	require.NoError(t, err)
+}
+
 func TestTenantUnauthenticatedAccess(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -115,13 +140,16 @@ func TestTenantHTTP(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
+	httpClient, err := tc.Server(0).RPCContext().GetHTTPClient()
+	require.NoError(t, err)
+
 	tenant, err := tc.Server(0).StartTenant(ctx,
 		base.TestTenantArgs{
 			TenantID: serverutils.TestTenantID(),
 		})
 	require.NoError(t, err)
 	t.Run("prometheus", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/_status/vars")
+		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/_status/vars")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -130,7 +158,7 @@ func TestTenantHTTP(t *testing.T) {
 		require.Contains(t, string(body), "sql_ddl_started_count_internal")
 	})
 	t.Run("pprof", func(t *testing.T) {
-		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/debug/pprof/goroutine?debug=2")
+		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/debug/pprof/goroutine?debug=2")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()

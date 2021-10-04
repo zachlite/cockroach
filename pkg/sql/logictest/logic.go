@@ -460,6 +460,9 @@ type testClusterConfig struct {
 	// If true, a sql tenant server will be started and pointed at a node in the
 	// cluster. Connections on behalf of the logic test will go to that tenant.
 	useTenant bool
+	// If set, the span configs infrastructure will be enabled. This is
+	// equivalent to setting COCKROACH_EXPERIMENTAL_SPAN_CONFIGS.
+	enableSpanConfigs bool
 	// isCCLConfig should be true for any config that can only be run with a CCL
 	// binary.
 	isCCLConfig bool
@@ -724,6 +727,11 @@ var logicTestConfigs = []testClusterConfig{
 		overrideAutoStats: "false",
 		localities:        multiregion9node3region3azsLocalities,
 		overrideVectorize: "off",
+	},
+	{
+		name:              "experimental-span-configs",
+		numNodes:          1,
+		enableSpanConfigs: true,
 	},
 }
 
@@ -1372,7 +1380,8 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 					ForceProductionBatchSizes:       serverArgs.forceProductionBatchSizes,
 				},
 				SQLExecutor: &sql.ExecutorTestingKnobs{
-					DeterministicExplain: true,
+					DeterministicExplain:          true,
+					AllowDeclarativeSchemaChanger: true,
 				},
 				SQLStatsKnobs: &sqlstats.TestingKnobs{
 					AOSTClause: "AS OF SYSTEM TIME '-1us'",
@@ -1386,10 +1395,13 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 		ReplicationMode: base.ReplicationManual,
 	}
 
+	cfg := t.cfg
+	if cfg.enableSpanConfigs {
+		params.ServerArgs.EnableSpanConfigs = true
+	}
 	distSQLKnobs := &execinfra.TestingKnobs{
 		MetadataTestLevel: execinfra.Off,
 	}
-	cfg := t.cfg
 	if cfg.sqlExecUseDisk {
 		distSQLKnobs.ForceDiskSpill = true
 	}
@@ -1482,7 +1494,8 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 				AllowSettingClusterSettings: true,
 				TestingKnobs: base.TestingKnobs{
 					SQLExecutor: &sql.ExecutorTestingKnobs{
-						DeterministicExplain: true,
+						DeterministicExplain:          true,
+						AllowDeclarativeSchemaChanger: true,
 					},
 					SQLStatsKnobs: &sqlstats.TestingKnobs{
 						AOSTClause: "AS OF SYSTEM TIME '-1us'",
@@ -3123,22 +3136,58 @@ SELECT encode(descriptor, 'hex') AS descriptor
 		}
 	}
 
-	// TODO(lucy): we should really drop all created databases in this test, not
-	// just the one we started with.
-	stmt := "SET sql_safe_updates=false; DROP DATABASE IF EXISTS test CASCADE"
-	if _, err := t.db.Exec(stmt); err != nil {
-		return errors.Wrap(err, "dropping test database failed")
+	var dbNames pq.StringArray
+	if err := t.db.QueryRow(
+		`SELECT array_agg(database_name) FROM [SHOW DATABASES] WHERE database_name NOT IN ('system', 'postgres')`,
+	).Scan(&dbNames); err != nil {
+		return errors.Wrap(err, "error getting database names")
 	}
 
+	for _, dbName := range dbNames {
+		if err := func() (retErr error) {
+			ctx := context.Background()
+			// Open a new connection, since we want to preserve the original DB
+			// that we were originally on in t.db.
+			conn, err := t.db.Conn(ctx)
+			if err != nil {
+				return errors.Wrap(err, "error grabbing new connection")
+			}
+			defer func() {
+				retErr = errors.CombineErrors(retErr, conn.Close())
+			}()
+			if _, err := conn.ExecContext(ctx, "SET database = $1", dbName); err != nil {
+				return errors.Wrapf(err, "error validating zone config for database %s", dbName)
+			}
+			// Ensure each database's zone configs are valid.
+			if _, err := conn.ExecContext(ctx, "SELECT crdb_internal.validate_multi_region_zone_configs()"); err != nil {
+				return errors.Wrapf(err, "error validating zone config for database %s", dbName)
+			}
+			// Drop the database.
+			dbTreeName := tree.Name(dbName)
+			dropDatabaseStmt := fmt.Sprintf(
+				"DROP DATABASE %s CASCADE",
+				dbTreeName.String(),
+			)
+			if _, err := t.db.Exec(dropDatabaseStmt); err != nil {
+				return errors.Wrapf(err, "dropping database %s failed", dbName)
+			}
+			return nil
+		}(); err != nil {
+			return err
+		}
+	}
+
+	// Ensure after dropping all databases state is still valid.
 	invalidObjects, err = validate()
 	if err != nil {
-		return errors.Wrap(err, "running object validation after failed")
+		return errors.Wrap(err, "running object validation after database drops failed")
 	}
 	if invalidObjects != "" {
 		return errors.Errorf(
-			"descriptor validation failed after dropping test database:\n%s", invalidObjects,
+			"descriptor validation failed after dropping databases:\n%s", invalidObjects,
 		)
 	}
+
 	return nil
 }
 

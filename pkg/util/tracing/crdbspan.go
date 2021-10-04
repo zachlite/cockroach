@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/types"
 	"github.com/opentracing/opentracing-go"
 )
@@ -222,22 +223,9 @@ func (s *crdbSpan) disableRecording() {
 	}
 }
 
-func (s *crdbSpan) getRecording(everyoneIsV211 bool, wantTags bool) Recording {
+func (s *crdbSpan) getRecording(wantTags bool) Recording {
 	if s == nil {
 		return nil // noop span
-	}
-
-	if !everyoneIsV211 {
-		// The cluster may contain nodes that are running v20.2. Unfortunately that
-		// version can easily crash when a peer returns a recording that that node
-		// did not expect would get created. To circumvent this, retain the v20.2
-		// behavior of eliding recordings when verbosity is off until we're sure
-		// that v20.2 is not around any longer.
-		//
-		// TODO(tbg): remove this in the v21.2 cycle.
-		if s.recordingType() == RecordingOff {
-			return nil
-		}
 	}
 
 	// Return early (without allocating) if the trace is empty, i.e. there are
@@ -262,7 +250,7 @@ func (s *crdbSpan) getRecording(everyoneIsV211 bool, wantTags bool) Recording {
 	s.mu.Unlock()
 
 	for _, child := range children {
-		result = append(result, child.getRecording(everyoneIsV211, wantTags)...)
+		result = append(result, child.getRecording(wantTags)...)
 	}
 
 	// Sort the spans by StartTime, except the first Span (the root of this
@@ -303,7 +291,7 @@ func (s *crdbSpan) setTagLocked(key string, value interface{}) {
 	s.mu.tags[key] = value
 }
 
-func (s *crdbSpan) record(msg string) {
+func (s *crdbSpan) record(msg redact.RedactableString) {
 	if s.recordingType() != RecordingVerbose {
 		return
 	}
@@ -410,13 +398,14 @@ func (s *crdbSpan) setBaggageItemLocked(restrictedKey, value string) {
 // optimization as stringifying the tag values can be expensive.
 func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 	rs := tracingpb.RecordedSpan{
-		TraceID:      s.traceID,
-		SpanID:       s.spanID,
-		ParentSpanID: s.parentSpanID,
-		GoroutineID:  s.goroutineID,
-		Operation:    s.mu.operation,
-		StartTime:    s.startTime,
-		Duration:     s.mu.duration,
+		TraceID:        s.traceID,
+		SpanID:         s.spanID,
+		ParentSpanID:   s.parentSpanID,
+		GoroutineID:    s.goroutineID,
+		Operation:      s.mu.operation,
+		StartTime:      s.startTime,
+		Duration:       s.mu.duration,
+		RedactableLogs: true,
 	}
 
 	if rs.Duration == -1 {

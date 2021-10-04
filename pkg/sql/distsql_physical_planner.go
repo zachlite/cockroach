@@ -730,11 +730,12 @@ func (p *PlanningCtx) getDefaultSaveFlowsFunc(
 		if planner.instrumentation.collectBundle && planner.curPlan.flags.IsSet(planFlagVectorized) {
 			flowCtx := newFlowCtxForExplainPurposes(p, planner)
 			getExplain := func(verbose bool) []string {
-				explain, err := colflow.ExplainVec(
+				explain, cleanup, err := colflow.ExplainVec(
 					ctx, flowCtx, flows, p.infra.LocalProcessors, opChains,
 					planner.extendedEvalCtx.DistSQLPlanner.gatewayNodeID,
 					verbose, planner.curPlan.flags.IsDistributed(),
 				)
+				cleanup()
 				if err != nil {
 					// In some edge cases (like when subqueries are present or
 					// when certain component doesn't implement execinfra.OpNode
@@ -1350,10 +1351,7 @@ var localScansConcurrencyLimit = settings.RegisterIntSetting(
 // for the local flow that would benefit (and is safe) to parallelize.
 func (dsp *DistSQLPlanner) maybeParallelizeLocalScans(
 	planCtx *PlanningCtx, info *tableReaderPlanningInfo,
-) (spanPartitions []SpanPartition, parallelizeLocal bool, err error) {
-	if !planCtx.isLocal {
-		return spanPartitions, parallelizeLocal, errors.AssertionFailedf("maybeParallelizeLocalScans called for a distributed plan")
-	}
+) (spanPartitions []SpanPartition, parallelizeLocal bool) {
 	// For local plans, if:
 	// - there is no required ordering,
 	// - the scan is safe to parallelize, and
@@ -1378,10 +1376,15 @@ func (dsp *DistSQLPlanner) maybeParallelizeLocalScans(
 		// Temporarily unset isLocal so that PartitionSpans divides all spans
 		// according to the respective leaseholders.
 		planCtx.isLocal = false
+		var err error
 		spanPartitions, err = dsp.PartitionSpans(planCtx, info.spans)
 		planCtx.isLocal = true
 		if err != nil {
-			return spanPartitions, parallelizeLocal, err
+			// For some reason we couldn't partition the spans - fallback to
+			// having a single TableReader.
+			spanPartitions = []SpanPartition{{dsp.gatewayNodeID, info.spans}}
+			parallelizeLocal = false
+			return spanPartitions, parallelizeLocal
 		}
 		for i := range spanPartitions {
 			spanPartitions[i].Node = dsp.gatewayNodeID
@@ -1444,7 +1447,7 @@ func (dsp *DistSQLPlanner) maybeParallelizeLocalScans(
 	} else {
 		spanPartitions = []SpanPartition{{dsp.gatewayNodeID, info.spans}}
 	}
-	return spanPartitions, parallelizeLocal, err
+	return spanPartitions, parallelizeLocal
 }
 
 func (dsp *DistSQLPlanner) planTableReaders(
@@ -1456,10 +1459,7 @@ func (dsp *DistSQLPlanner) planTableReaders(
 		err              error
 	)
 	if planCtx.isLocal {
-		spanPartitions, parallelizeLocal, err = dsp.maybeParallelizeLocalScans(planCtx, info)
-		if err != nil {
-			return err
-		}
+		spanPartitions, parallelizeLocal = dsp.maybeParallelizeLocalScans(planCtx, info)
 	} else if info.post.Limit == 0 {
 		// No hard limit - plan all table readers where their data live. Note
 		// that we're ignoring soft limits for now since the TableReader will

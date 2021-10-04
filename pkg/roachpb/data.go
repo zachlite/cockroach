@@ -22,11 +22,12 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -444,7 +445,7 @@ func (v *Value) SetGeo(so geopb.SpatialObject) error {
 
 // SetBox2D encodes the specified Box2D value into the bytes field of the
 // receiver, sets the tag and clears the checksum.
-func (v *Value) SetBox2D(b geopb.BoundingBox) {
+func (v *Value) SetBox2D(b geo.CartesianBoundingBox) {
 	v.ensureRawBytes(headerSize + 32)
 	encoding.EncodeUint64Ascending(v.RawBytes[headerSize:headerSize], math.Float64bits(b.LoX))
 	encoding.EncodeUint64Ascending(v.RawBytes[headerSize+8:headerSize+8], math.Float64bits(b.HiX))
@@ -592,8 +593,8 @@ func (v Value) GetGeo() (geopb.SpatialObject, error) {
 
 // GetBox2D decodes a geo value from the bytes field of the receiver. If the
 // tag is not BOX2D an error will be returned.
-func (v Value) GetBox2D() (geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func (v Value) GetBox2D() (geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if tag := v.GetTag(); tag != ValueType_BOX2D {
 		return box, fmt.Errorf("value type is not %s: %s", ValueType_BOX2D, tag)
 	}
@@ -903,8 +904,7 @@ func (ts TransactionStatus) IsFinalized() bool {
 	return ts == COMMITTED || ts == ABORTED
 }
 
-// SafeValue implements the redact.SafeValue interface.
-func (TransactionStatus) SafeValue() {}
+var _ errors.SafeMessager = Transaction{}
 
 // MakeTransaction creates a new transaction. The transaction key is
 // composed using the specified baseKey (for locality with data
@@ -1267,26 +1267,48 @@ func (t *Transaction) LocksAsLockUpdates() []LockUpdate {
 }
 
 // String formats transaction into human readable string.
+//
+// NOTE: When updating String(), you probably want to also update SafeMessage().
 func (t Transaction) String() string {
-	return redact.StringWithoutMarkers(t)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (t Transaction) SafeFormat(w redact.SafePrinter, _ rune) {
+	var buf strings.Builder
 	if len(t.Name) > 0 {
-		w.Printf("%q ", redact.SafeString(t.Name))
+		fmt.Fprintf(&buf, "%q ", t.Name)
 	}
-	w.Printf("meta={%s} lock=%t stat=%s rts=%s wto=%t gul=%s",
+	fmt.Fprintf(&buf, "meta={%s} lock=%t stat=%s rts=%s wto=%t gul=%s",
 		t.TxnMeta, t.IsLocking(), t.Status, t.ReadTimestamp, t.WriteTooOld, t.GlobalUncertaintyLimit)
 	if ni := len(t.LockSpans); t.Status != PENDING && ni > 0 {
-		w.Printf(" int=%d", ni)
+		fmt.Fprintf(&buf, " int=%d", ni)
 	}
 	if nw := len(t.InFlightWrites); t.Status != PENDING && nw > 0 {
-		w.Printf(" ifw=%d", nw)
+		fmt.Fprintf(&buf, " ifw=%d", nw)
 	}
 	if ni := len(t.IgnoredSeqNums); ni > 0 {
-		w.Printf(" isn=%d", ni)
+		fmt.Fprintf(&buf, " isn=%d", ni)
 	}
+	return buf.String()
+}
+
+// SafeMessage implements the SafeMessager interface.
+//
+// This method should be kept largely synchronized with String(), except that it
+// can't include sensitive info (e.g. the transaction key).
+func (t Transaction) SafeMessage() string {
+	var buf strings.Builder
+	if len(t.Name) > 0 {
+		fmt.Fprintf(&buf, "%q ", t.Name)
+	}
+	fmt.Fprintf(&buf, "meta={%s} lock=%t stat=%s rts=%s wto=%t gul=%s",
+		t.TxnMeta.SafeMessage(), t.IsLocking(), t.Status, t.ReadTimestamp, t.WriteTooOld, t.GlobalUncertaintyLimit)
+	if ni := len(t.LockSpans); t.Status != PENDING && ni > 0 {
+		fmt.Fprintf(&buf, " int=%d", ni)
+	}
+	if nw := len(t.InFlightWrites); t.Status != PENDING && nw > 0 {
+		fmt.Fprintf(&buf, " ifw=%d", nw)
+	}
+	if ni := len(t.IgnoredSeqNums); ni > 0 {
+		fmt.Fprintf(&buf, " isn=%d", ni)
+	}
+	return buf.String()
 }
 
 // ResetObservedTimestamps clears out all timestamps recorded from individual
@@ -1949,10 +1971,6 @@ func (l Lease) Equivalent(newL Lease) bool {
 	// Ignore sequence numbers, they are simply a reflection of
 	// the equivalency of other fields.
 	l.Sequence, newL.Sequence = 0, 0
-	// Ignore the acquisition type, as leases will always be extended via
-	// RequestLease requests regardless of how a leaseholder first acquired its
-	// lease.
-	l.AcquisitionType, newL.AcquisitionType = 0, 0
 	// Ignore the ReplicaDescriptor's type. This shouldn't affect lease
 	// equivalency because Raft state shouldn't be factored into the state of a
 	// Replica's lease. We don't expect a leaseholder to ever become a LEARNER
@@ -2223,18 +2241,6 @@ func (s Span) ContainsKey(key Key) bool {
 	return bytes.Compare(key, s.Key) >= 0 && bytes.Compare(key, s.EndKey) < 0
 }
 
-// CompareKey returns -1 if the key precedes the span start, 0 if its contained
-// by the span and 1 if its after the end of the span.
-func (s Span) CompareKey(key Key) int {
-	if bytes.Compare(key, s.Key) >= 0 {
-		if bytes.Compare(key, s.EndKey) < 0 {
-			return 0
-		}
-		return 1
-	}
-	return -1
-}
-
 // ProperlyContainsKey returns whether the span properly contains the given key.
 func (s Span) ProperlyContainsKey(key Key) bool {
 	return bytes.Compare(key, s.Key) > 0 && bytes.Compare(key, s.EndKey) < 0
@@ -2294,15 +2300,6 @@ func (s Span) Valid() bool {
 	return true
 }
 
-// SpanOverhead is the overhead of Span in bytes.
-const SpanOverhead = int64(unsafe.Sizeof(Span{}))
-
-// MemUsage returns the size of the Span in bytes for memory accounting
-// purposes.
-func (s Span) MemUsage() int64 {
-	return SpanOverhead + int64(cap(s.Key)) + int64(cap(s.EndKey))
-}
-
 // Spans is a slice of spans.
 type Spans []Span
 
@@ -2321,22 +2318,6 @@ func (a Spans) ContainsKey(key Key) bool {
 	}
 
 	return false
-}
-
-// SpansOverhead is the overhead of Spans in bytes.
-const SpansOverhead = int64(unsafe.Sizeof(Spans{}))
-
-// MemUsage returns the size of the Spans in bytes for memory accounting
-// purposes.
-func (a Spans) MemUsage() int64 {
-	// Slice the full capacity of a so we can account for the memory
-	// used by spans past the length of a.
-	aCap := a[:cap(a)]
-	size := SpansOverhead
-	for i := range aCap {
-		size += aCap[i].MemUsage()
-	}
-	return size
 }
 
 // RSpan is a key range with an inclusive start RKey and an exclusive end RKey.

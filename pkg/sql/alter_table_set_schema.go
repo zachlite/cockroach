@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -27,7 +26,6 @@ import (
 
 type alterTableSetSchemaNode struct {
 	newSchema string
-	prefix    catalog.ResolvedObjectPrefix
 	tableDesc *tabledesc.Mutable
 	n         *tree.AlterTableSetSchema
 }
@@ -52,7 +50,7 @@ func (p *planner) AlterTableSetSchema(
 	} else if n.IsSequence {
 		requiredTableKind = tree.ResolveRequireSequenceDesc
 	}
-	prefix, tableDesc, err := p.ResolveMutableTableDescriptor(
+	tableDesc, err := p.ResolveMutableTableDescriptor(
 		ctx, &tn, !n.IfExists, requiredTableKind)
 	if err != nil {
 		return nil, err
@@ -90,7 +88,6 @@ func (p *planner) AlterTableSetSchema(
 
 	return &alterTableSetSchemaNode{
 		newSchema: string(n.Schema),
-		prefix:    prefix,
 		tableDesc: tableDesc,
 		n:         n,
 	}, nil
@@ -105,9 +102,12 @@ func (n *alterTableSetSchemaNode) startExec(params runParams) error {
 	databaseID := tableDesc.GetParentID()
 
 	kind := tree.GetTableType(tableDesc.IsSequence(), tableDesc.IsView(), tableDesc.GetIsMaterializedView())
-	oldName := tree.MakeTableNameFromPrefix(n.prefix.NamePrefix(), tree.Name(n.tableDesc.GetName()))
+	oldName, err := p.getQualifiedTableName(ctx, tableDesc)
+	if err != nil {
+		return err
+	}
 
-	desiredSchemaID, err := p.prepareSetSchema(ctx, n.prefix.Database, tableDesc, n.newSchema)
+	desiredSchemaID, err := p.prepareSetSchema(ctx, tableDesc, n.newSchema)
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,6 @@ func (n *alterTableSetSchemaNode) startExec(params runParams) error {
 		return nil
 	}
 
-	// TODO(ajwerner): Use the collection here.
 	exists, _, err := catalogkv.LookupObjectID(
 		ctx, p.txn, p.ExecCfg().Codec, databaseID, desiredSchemaID, tableDesc.Name,
 	)
@@ -145,7 +144,10 @@ func (n *alterTableSetSchemaNode) startExec(params runParams) error {
 		return err
 	}
 
-	if err := p.writeNameKey(ctx, tableDesc, tableDesc.ID); err != nil {
+	newTbKey := catalogkv.MakeObjectNameKey(ctx, p.ExecCfg().Settings,
+		databaseID, desiredSchemaID, tableDesc.Name)
+
+	if err := p.writeNameKey(ctx, newTbKey, tableDesc.ID); err != nil {
 		return err
 	}
 

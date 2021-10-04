@@ -60,6 +60,7 @@ type logEntry struct {
 	// The channel on which the entry was sent. This is not reported by
 	// formatters when the header boolean is set.
 	ch Channel
+
 	// The binary version with which the event was generated.
 	version string
 

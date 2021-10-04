@@ -47,7 +47,7 @@ func TestFluentClient(t *testing.T) {
 	cfg.Sinks.FluentServers = map[string]*logconfig.FluentSinkConfig{
 		"ops": {
 			Address:  serverAddr,
-			Channels: logconfig.SelectChannels(channel.OPS)},
+			Channels: logconfig.ChannelList{Channels: []Channel{channel.OPS}}},
 	}
 	// Derive a full config using the same directory as the
 	// TestLogScope.

@@ -68,8 +68,7 @@ type SyncedCluster struct {
 	// all other fields are populated in newCluster.
 	Nodes          []int
 	Secure         bool
-	CertsDir       string
-	Env            []string
+	Env            string
 	Args           []string
 	Tag            string
 	Impl           ClusterImpl
@@ -895,7 +894,6 @@ rm -fr certs
 mkdir -p certs
 %[1]s cert create-ca --certs-dir=certs --ca-key=certs/ca.key
 %[1]s cert create-client root --certs-dir=certs --ca-key=certs/ca.key
-%[1]s cert create-client testuser --certs-dir=certs --ca-key=certs/ca.key
 %[1]s cert create-node localhost %[2]s --certs-dir=certs --ca-key=certs/ca.key
 tar cvf certs.tar certs
 `, cockroachNodeBinary(c, 1), strings.Join(nodeNames, " "))
@@ -1246,8 +1244,7 @@ func (c *SyncedCluster) Logs(
 				"-o ControlMaster=auto "+
 				"-o ControlPath=~/.ssh/%r@%h:%p "+
 				"-o UserKnownHostsFile=/dev/null "+
-				"-o ControlPersist=2m "+
-				strings.Join(sshAuthArgs(), " "))
+				"-o ControlPersist=2m")
 			// Use rsync-path flag to sudo into user if different from sshUser.
 			if user != "" && user != sshUser {
 				rsyncArgs = append(rsyncArgs, "--rsync-path",
@@ -1652,53 +1649,23 @@ func (c *SyncedCluster) scp(src, dest string) error {
 	return nil
 }
 
-// ParallelResult captures the result of a user-defined function
-// passed to Parallel or ParallelE.
-type ParallelResult struct {
-	Index int
-	Out   []byte
-	Err   error
-}
-
-// Parallel runs a user-defined function across the nodes in the
-// cluster. If any of the commands fail, Parallel will log an error
-// and exit the program.
-//
-// See ParallelE for more information.
+// Parallel TODO(peter): document
 func (c *SyncedCluster) Parallel(
 	display string, count, concurrency int, fn func(i int) ([]byte, error),
 ) {
-	failed, err := c.ParallelE(display, count, concurrency, fn)
-	if err != nil {
-		sort.Slice(failed, func(i, j int) bool { return failed[i].Index < failed[j].Index })
-		for _, f := range failed {
-			fmt.Fprintf(os.Stderr, "%d: %+v: %s\n", f.Index, f.Err, f.Out)
-		}
-		log.Fatal("command failed")
-	}
-}
-
-// ParallelE runs the given function in parallel across the given
-// nodes, returning an error if function returns an error.
-//
-// ParallelE runs the user-defined functions on the first `count`
-// nodes in the cluster. It runs at most `concurrency` (or
-// `c.MaxConcurrency` if it is lower) in parallel. If `concurrency` is
-// 0, then it defaults to `count`.
-//
-// If err is non-nil, the slice of ParallelResults will contain the
-// results from any of the failed invocations.
-func (c *SyncedCluster) ParallelE(
-	display string, count, concurrency int, fn func(i int) ([]byte, error),
-) ([]ParallelResult, error) {
 	if concurrency == 0 || concurrency > count {
 		concurrency = count
 	}
 	if c.MaxConcurrency > 0 && concurrency > c.MaxConcurrency {
 		concurrency = c.MaxConcurrency
 	}
+	type result struct {
+		index int
+		out   []byte
+		err   error
+	}
 
-	results := make(chan ParallelResult, count)
+	results := make(chan result, count)
 	var wg sync.WaitGroup
 	wg.Add(count)
 
@@ -1707,7 +1674,7 @@ func (c *SyncedCluster) ParallelE(
 		go func(i int) {
 			defer wg.Done()
 			out, err := fn(i)
-			results <- ParallelResult{i, out, err}
+			results <- result{i, out, err}
 		}(index)
 		index++
 	}
@@ -1734,9 +1701,10 @@ func (c *SyncedCluster) ParallelE(
 		ticker = time.NewTicker(1000 * time.Millisecond)
 		fmt.Fprintf(out, "%s", display)
 	}
+
 	defer ticker.Stop()
 	complete := make([]bool, count)
-	var failed []ParallelResult
+	var failed []result
 
 	var spinner = []string{"|", "/", "-", "\\"}
 	spinnerIdx := 0
@@ -1748,12 +1716,12 @@ func (c *SyncedCluster) ParallelE(
 				fmt.Fprintf(out, ".")
 			}
 		case r, ok := <-results:
-			if r.Err != nil {
+			if r.err != nil {
 				failed = append(failed, r)
 			}
 			done = !ok
 			if ok {
-				complete[r.Index] = true
+				complete[r.index] = true
 			}
 			if index < count {
 				startNext()
@@ -1783,9 +1751,12 @@ func (c *SyncedCluster) ParallelE(
 	}
 
 	if len(failed) > 0 {
-		return failed, errors.New("one or more parallel execution failure")
+		sort.Slice(failed, func(i, j int) bool { return failed[i].index < failed[j].index })
+		for _, f := range failed {
+			fmt.Fprintf(os.Stderr, "%d: %+v: %s\n", f.index, f.err, f.out)
+		}
+		log.Fatal("command failed")
 	}
-	return nil, nil
 }
 
 func (c *SyncedCluster) escapedTag() string {

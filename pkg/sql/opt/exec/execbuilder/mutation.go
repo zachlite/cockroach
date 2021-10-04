@@ -718,7 +718,7 @@ func (b *Builder) buildDeleteRange(
 		// We can't calculate the maximum number of keys if there are interleaved
 		// children, as we don't know how many children rows may be in range.
 		if len(interleavedTables) == 0 {
-			if maxRows, ok := b.indexConstraintMaxResults(&scan.ScanPrivate, scan.Relational()); ok {
+			if maxRows, ok := b.indexConstraintMaxResults(scan); ok {
 				if maxKeys := maxRows * uint64(tab.FamilyCount()); maxKeys <= row.TableTruncateChunkSize {
 					// Other mutations only allow auto-commit if there are no FK checks or
 					// cascades. In this case, we won't actually execute anything for the
@@ -1047,11 +1047,12 @@ func (b *Builder) canAutoCommit(rel memo.RelExpr) bool {
 
 	case opt.ProjectOp:
 		// Allow Project on top, as long as the expressions are not side-effecting.
+		//
+		// TODO(radu): for now, we only allow passthrough projections because not all
+		// builtins that can error out are marked as side-effecting.
 		proj := rel.(*memo.ProjectExpr)
-		for i := 0; i < len(proj.Projections); i++ {
-			if !proj.Projections[i].ScalarProps().VolatilitySet.IsLeakProof() {
-				return false
-			}
+		if len(proj.Projections) != 0 {
+			return false
 		}
 		return b.canAutoCommit(proj.Input)
 
@@ -1114,7 +1115,7 @@ func (b *Builder) shouldApplyImplicitLockingToMutationInput(mutExpr memo.RelExpr
 // not worth risking the transformation being a pessimization, so it is only
 // applied when doing so does not risk creating artificial contention.
 func (b *Builder) shouldApplyImplicitLockingToUpdateInput(upd *memo.UpdateExpr) bool {
-	if !b.evalCtx.SessionData().ImplicitSelectForUpdate {
+	if !b.evalCtx.SessionData.ImplicitSelectForUpdate {
 		return false
 	}
 
@@ -1135,7 +1136,7 @@ func (b *Builder) shouldApplyImplicitLockingToUpdateInput(upd *memo.UpdateExpr) 
 // should apply a FOR UPDATE row-level locking mode to the initial row scan of
 // an UPSERT statement.
 func (b *Builder) shouldApplyImplicitLockingToUpsertInput(ups *memo.UpsertExpr) bool {
-	if !b.evalCtx.SessionData().ImplicitSelectForUpdate {
+	if !b.evalCtx.SessionData.ImplicitSelectForUpdate {
 		return false
 	}
 

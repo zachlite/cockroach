@@ -40,7 +40,7 @@ func TestNodeLevelThrottler(t *testing.T) {
 
 	// Update config and verify throttler been updated.
 	changefeedbase.NodeSinkThrottleConfig.Override(
-		ctx, sv, `{"MessageRate": 1, "ByteRate": 1, "FlushRate": 1}`,
+		sv, `{"MessageRate": 1, "ByteRate": 1, "FlushRate": 1}`,
 	)
 	require.True(t, throttler.messageLimiter.AdmitN(1))
 	require.False(t, throttler.messageLimiter.AdmitN(1))

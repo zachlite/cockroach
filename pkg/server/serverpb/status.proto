@@ -437,18 +437,12 @@ message ProfileRequest {
 
   enum Type {
       HEAP = 0;
-      CPU = 1; // with labels on by default
-      GOROUTINE = 2;
-      THREADCREATE = 3;
-      ALLOCS = 4;
-      BLOCK = 5;
-      MUTEX = 6;
+      CPU = 1; // with labels on
   }
   // The type of profile to retrieve.
   Type type = 5;
 
   int32 seconds = 6; // applies only to Type=CPU, defaults to 30
-  bool labels = 7; // applies only to Type=CPU, defaults to false
 }
 
 message MetricsRequest {
@@ -690,7 +684,9 @@ message CancelSessionResponse {
 message ListContentionEventsRequest {}
 
 // An error wrapper object for ListContentionEventsResponse and
-// ListDistSQLFlowsResponse.
+// ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+// implemented on a tenant, the `node_id` field refers to the instanceIDs that
+// identify individual tenant pods.
 message ListActivityError {
   // ID of node that was being contacted when this error occurred.
   int32 node_id = 1 [

@@ -2234,36 +2234,24 @@ func (r *restoreResumer) dropDescriptors(
 
 	// Delete any schema descriptors that this restore created. Also collect the
 	// descriptors so we can update their parent databases later.
-	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.Descriptor)
+	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.SchemaDescriptor)
 	for _, schemaDesc := range details.SchemaDescs {
+		sc := schemadesc.NewBuilder(schemaDesc).BuildImmutableSchema()
 		// We need to ignore descriptors we just added since we haven't committed the txn that deletes these.
-		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, schemaDesc.GetID(), allDescs, ignoredChildDescIDs)
+		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, sc.GetID(), allDescs, ignoredChildDescIDs)
 		if err != nil {
-			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", schemaDesc.GetName())
+			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", sc.GetName())
 		}
 
 		if !isSchemaEmpty {
-			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", schemaDesc.GetName())
+			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", sc.GetName())
 			continue
 		}
 
-		mutSchema, err := descsCol.GetMutableDescriptorByID(ctx, schemaDesc.GetID(), txn)
-		if err != nil {
-			return err
-		}
-
-		// Mark schema as dropped and add uncommitted version to pass pre-txn
-		// descriptor validation.
-		mutSchema.SetDropped()
-		mutSchema.MaybeIncrementVersion()
-		if err := descsCol.AddUncommittedDescriptor(mutSchema); err != nil {
-			return err
-		}
-
-		b.Del(catalogkeys.EncodeNameKey(codec, mutSchema))
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, mutSchema.GetID()))
-		descsCol.AddDeletedDescriptor(mutSchema)
-		dbsWithDeletedSchemas[mutSchema.GetParentID()] = append(dbsWithDeletedSchemas[mutSchema.GetParentID()], mutSchema)
+		b.Del(catalogkeys.EncodeNameKey(codec, sc))
+		b.Del(catalogkeys.MakeDescMetadataKey(codec, sc.GetID()))
+		descsCol.AddDeletedDescriptor(sc)
+		dbsWithDeletedSchemas[sc.GetParentID()] = append(dbsWithDeletedSchemas[sc.GetParentID()], sc)
 	}
 
 	// Delete the database descriptors.

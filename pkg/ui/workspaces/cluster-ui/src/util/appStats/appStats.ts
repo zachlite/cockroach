@@ -42,13 +42,13 @@ export function aggregateNumericStats(
   countB: number,
 ): { mean: number; squared_diffs: number } {
   const total = countA + countB;
-  const delta = b.mean - a.mean;
+  const delta = b?.mean - a?.mean;
 
   return {
-    mean: (a.mean * countA + b.mean * countB) / total,
+    mean: (a?.mean * countA + b?.mean * countB) / total,
     squared_diffs:
-      a.squared_diffs +
-      b.squared_diffs +
+      a?.squared_diffs +
+      b?.squared_diffs +
       (delta * delta * countA * countB) / total,
   };
 }
@@ -151,12 +151,6 @@ export function addStatementStats(
       countB,
     ),
     rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: aggregateNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     sensitive_info: coalesceSensitiveInfo(a.sensitive_info, b.sensitive_info),
     legacy_last_err: "",
     legacy_last_err_redacted: "",
@@ -203,6 +197,7 @@ export interface ExecutionStatistics {
   database: string;
   distSQL: boolean;
   vec: boolean;
+  opt: boolean;
   implicit_txn: boolean;
   full_scan: boolean;
   failed: boolean;
@@ -220,6 +215,7 @@ export function flattenStatementStats(
     database: stmt.key.key_data.database,
     distSQL: stmt.key.key_data.distSQL,
     vec: stmt.key.key_data.vec,
+    opt: stmt.key.key_data.opt,
     implicit_txn: stmt.key.key_data.implicit_txn,
     full_scan: stmt.key.key_data.full_scan,
     failed: stmt.key.key_data.failed,

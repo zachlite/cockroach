@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -24,11 +23,6 @@ import (
 // different set of columns than its input. Either way, it updates
 // projectionsScope.group with the output memo group ID.
 func (b *Builder) constructProjectForScope(inScope, projectionsScope *scope) {
-	if b.evalCtx.SessionData().PropagateInputOrdering && len(projectionsScope.ordering) == 0 {
-		// Preserve the input ordering.
-		projectionsScope.copyOrdering(inScope)
-	}
-
 	// Don't add an unnecessary "pass through" project.
 	if projectionsScope.hasSameColumns(inScope) {
 		projectionsScope.expr = inScope.expr
@@ -146,7 +140,7 @@ func (b *Builder) analyzeSelectList(
 						outScope.cols = make([]scopeColumn, 0, len(selects)+len(exprs)-1)
 					}
 					for j, e := range exprs {
-						outScope.addColumn(scopeColName(tree.Name(aliases[j])), e)
+						b.addColumn(outScope, aliases[j], e)
 					}
 					continue
 				}
@@ -167,7 +161,7 @@ func (b *Builder) analyzeSelectList(
 			outScope.cols = make([]scopeColumn, 0, len(selects))
 		}
 		alias := b.getColName(e)
-		outScope.addColumn(scopeColName(tree.Name(alias)), texpr)
+		b.addColumn(outScope, alias, texpr)
 	}
 }
 
@@ -192,19 +186,9 @@ func (b *Builder) resolveColRef(e tree.Expr, inScope *scope) tree.TypedExpr {
 	unresolved, ok := e.(*tree.UnresolvedName)
 	if ok && !unresolved.Star && unresolved.NumParts == 1 {
 		colName := unresolved.Parts[0]
-		_, srcMeta, _, resolveErr := inScope.FindSourceProvidingColumn(b.ctx, tree.Name(colName))
-		if resolveErr != nil {
-			// It may be a reference to a table, e.g. SELECT tbl FROM tbl.
-			// Attempt to resolve as a TupleStar. We do not attempt to resolve
-			// as a TupleStar if we are inside a view definition because views
-			// do not support * expressions.
-			if !b.insideViewDef && sqlerrors.IsUndefinedColumnError(resolveErr) {
-				return func() tree.TypedExpr {
-					defer wrapColTupleStarPanic(resolveErr)
-					return inScope.resolveType(columnNameAsTupleStar(colName), types.Any)
-				}()
-			}
-			panic(resolveErr)
+		_, srcMeta, _, err := inScope.FindSourceProvidingColumn(b.ctx, tree.Name(colName))
+		if err != nil {
+			panic(err)
 		}
 		return srcMeta.(tree.TypedExpr)
 	}
@@ -241,7 +225,6 @@ func (b *Builder) finishBuildScalar(
 	texpr tree.TypedExpr, scalar opt.ScalarExpr, inScope, outScope *scope, outCol *scopeColumn,
 ) (out opt.ScalarExpr) {
 	b.maybeTrackRegclassDependenciesForViews(texpr)
-	b.maybeTrackUserDefinedTypeDepsForViews(texpr)
 
 	if outScope == nil {
 		return scalar
@@ -303,7 +286,7 @@ func (b *Builder) finishBuildScalarRef(
 		// Avoid synthesizing a new column if possible.
 		existing := outScope.findExistingCol(col, false /* allowSideEffects */)
 		if existing == nil || existing == outCol {
-			if outCol.name.IsAnonymous() {
+			if outCol.name == "" {
 				outCol.name = col.name
 			}
 			group := b.factory.ConstructVariable(col.id)
@@ -317,56 +300,4 @@ func (b *Builder) finishBuildScalarRef(
 	// Project the column.
 	b.projectColumn(outCol, col)
 	return outCol.scalar
-}
-
-// projectionBuilder is a helper for adding projected columns to a scope and
-// constructing a Project operator as needed.
-//
-// Sample usage:
-//
-//   pb := makeProjectionBuilder(b, scope)
-//   b.Add(name, expr, typ)
-//   ...
-//   scope = pb.Finish()
-//
-// Note that this is all a cheap no-op if Add is not called.
-type projectionBuilder struct {
-	b        *Builder
-	inScope  *scope
-	outScope *scope
-}
-
-func makeProjectionBuilder(b *Builder, inScope *scope) projectionBuilder {
-	return projectionBuilder{b: b, inScope: inScope}
-}
-
-// Add a projection.
-//
-// Returns the newly synthesized column ID and the scalar expression. If the
-// given expression is a just bare column reference, it returns that column's ID
-// and a nil scalar expression.
-func (pb *projectionBuilder) Add(
-	name scopeColumnName, expr tree.Expr, desiredType *types.T,
-) (opt.ColumnID, opt.ScalarExpr) {
-	if pb.outScope == nil {
-		pb.outScope = pb.inScope.replace()
-		pb.outScope.appendColumnsFromScope(pb.inScope)
-	}
-	typedExpr := pb.inScope.resolveAndRequireType(expr, desiredType)
-	scopeCol := pb.outScope.addColumn(name, typedExpr)
-	scalar := pb.b.buildScalar(typedExpr, pb.inScope, pb.outScope, scopeCol, nil)
-
-	return scopeCol.id, scalar
-}
-
-// Finish returns a scope that contains all the columns in the original scope
-// plus all the projected columns. If no columns have been added, returns the
-// original scope.
-func (pb *projectionBuilder) Finish() (outScope *scope) {
-	if pb.outScope == nil {
-		// No columns were added; return the original scope.
-		return pb.inScope
-	}
-	pb.b.constructProjectForScope(pb.inScope, pb.outScope)
-	return pb.outScope
 }

@@ -16,14 +16,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -176,19 +175,10 @@ func RandomVec(args RandomVecArgs) {
 		for i := 0; i < args.N; i++ {
 			intervals[i] = duration.FromFloat64(args.Rand.Float64())
 		}
-	case types.JsonFamily:
-		j := args.Vec.JSON()
-		for i := 0; i < args.N; i++ {
-			random, err := json.Random(20, args.Rand)
-			if err != nil {
-				panic(err)
-			}
-			j.Set(i, random)
-		}
 	default:
 		datums := args.Vec.Datum()
 		for i := 0; i < args.N; i++ {
-			datums.Set(i, randgen.RandDatum(args.Rand, args.Vec.Type(), false /* nullOk */))
+			datums.Set(i, rowenc.RandDatum(args.Rand, args.Vec.Type(), false /* nullOk */))
 		}
 	}
 	args.Vec.Nulls().UnsetNulls()
@@ -198,23 +188,8 @@ func RandomVec(args RandomVecArgs) {
 
 	for i := 0; i < args.N; i++ {
 		if args.Rand.Float64() < args.NullProbability {
-			setNull(args.Rand, args.Vec, i)
+			args.Vec.Nulls().SetNull(i)
 		}
-	}
-}
-
-// setNull sets ith element in vec to null and might set the actual value (which
-// should be ignored) to some garbage.
-func setNull(rng *rand.Rand, vec coldata.Vec, i int) {
-	vec.Nulls().SetNull(i)
-	switch vec.CanonicalTypeFamily() {
-	case types.DecimalFamily:
-		_, err := vec.Decimal()[i].SetFloat64(rng.Float64())
-		if err != nil {
-			colexecerror.InternalError(errors.AssertionFailedf("%v", err))
-		}
-	case types.IntervalFamily:
-		vec.Interval()[i] = duration.MakeDuration(rng.Int63(), rng.Int63(), rng.Int63())
 	}
 }
 
@@ -320,7 +295,6 @@ type RandomDataOpArgs struct {
 // RandomDataOp is an operator that generates random data according to
 // RandomDataOpArgs. Call GetBuffer to get all data that was returned.
 type RandomDataOp struct {
-	ctx              context.Context
 	allocator        *colmem.Allocator
 	batchAccumulator func(ctx context.Context, b coldata.Batch, typs []*types.T)
 	typs             []*types.T
@@ -332,7 +306,7 @@ type RandomDataOp struct {
 	nulls            bool
 }
 
-var _ colexecop.Operator = &RandomDataOp{}
+var _ colexecbase.Operator = &RandomDataOp{}
 
 // NewRandomDataOp creates a new RandomDataOp.
 func NewRandomDataOp(
@@ -358,7 +332,7 @@ func NewRandomDataOp(
 		// Generate at least one type.
 		typs = make([]*types.T, 1+rng.Intn(maxSchemaLength))
 		for i := range typs {
-			typs[i] = randgen.RandType(rng)
+			typs[i] = rowenc.RandType(rng)
 		}
 	}
 	return &RandomDataOp{
@@ -373,18 +347,16 @@ func NewRandomDataOp(
 	}
 }
 
-// Init is part of the colexecop.Operator interface.
-func (o *RandomDataOp) Init(ctx context.Context) {
-	o.ctx = ctx
-}
+// Init is part of the colexec.Operator interface.
+func (o *RandomDataOp) Init() {}
 
-// Next is part of the colexecop.Operator interface.
-func (o *RandomDataOp) Next() coldata.Batch {
+// Next is part of the colexec.Operator interface.
+func (o *RandomDataOp) Next(ctx context.Context) coldata.Batch {
 	if o.numReturned == o.numBatches {
 		// Done.
 		b := coldata.ZeroBatch
 		if o.batchAccumulator != nil {
-			o.batchAccumulator(o.ctx, b, o.typs)
+			o.batchAccumulator(ctx, b, o.typs)
 		}
 		return b
 	}
@@ -409,7 +381,7 @@ func (o *RandomDataOp) Next() coldata.Batch {
 		}
 		o.numReturned++
 		if o.batchAccumulator != nil {
-			o.batchAccumulator(o.ctx, b, o.typs)
+			o.batchAccumulator(ctx, b, o.typs)
 		}
 		return b
 	}

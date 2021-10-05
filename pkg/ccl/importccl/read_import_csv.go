@@ -13,13 +13,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/errors"
@@ -27,42 +26,30 @@ import (
 
 type csvInputReader struct {
 	importCtx *parallelImportContext
-	// The number of columns that we expect in the CSV data file.
-	numExpectedDataCols int
-	opts                roachpb.CSVOptions
+	opts      roachpb.CSVOptions
 }
 
 var _ inputConverter = &csvInputReader{}
 
 func newCSVInputReader(
-	semaCtx *tree.SemaContext,
 	kvCh chan row.KVBatch,
 	opts roachpb.CSVOptions,
 	walltime int64,
 	parallelism int,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	targetCols tree.NameList,
 	evalCtx *tree.EvalContext,
-	seqChunkProvider *row.SeqChunkProvider,
 ) *csvInputReader {
-	numExpectedDataCols := len(targetCols)
-	if numExpectedDataCols == 0 {
-		numExpectedDataCols = len(tableDesc.VisibleColumns())
-	}
-
 	return &csvInputReader{
 		importCtx: &parallelImportContext{
-			semaCtx:          semaCtx,
-			walltime:         walltime,
-			numWorkers:       parallelism,
-			evalCtx:          evalCtx,
-			tableDesc:        tableDesc,
-			targetCols:       targetCols,
-			kvCh:             kvCh,
-			seqChunkProvider: seqChunkProvider,
+			walltime:   walltime,
+			numWorkers: parallelism,
+			evalCtx:    evalCtx,
+			tableDesc:  tableDesc,
+			targetCols: targetCols,
+			kvCh:       kvCh,
 		},
-		numExpectedDataCols: numExpectedDataCols,
-		opts:                opts,
+		opts: opts,
 	}
 }
 
@@ -75,7 +62,7 @@ func (c *csvInputReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user security.SQLUsername,
+	user string,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, c.readFile, makeExternalStorage, user)
 }
@@ -93,21 +80,20 @@ func (c *csvInputReader) readFile(
 		source:   inputIdx,
 		skip:     resumePos,
 		rejected: rejected,
-		rowLimit: c.opts.RowLimit,
 	}
 
 	return runParallelImport(ctx, c.importCtx, fileCtx, producer, consumer)
 }
 
 type csvRowProducer struct {
-	importCtx          *parallelImportContext
-	opts               *roachpb.CSVOptions
-	csv                *csv.Reader
-	rowNum             int64
-	err                error
-	record             []string
-	progress           func() float32
-	numExpectedColumns int
+	importCtx       *parallelImportContext
+	opts            *roachpb.CSVOptions
+	csv             *csv.Reader
+	rowNum          int64
+	err             error
+	record          []string
+	progress        func() float32
+	expectedColumns tree.NameList
 }
 
 var _ importRowProducer = &csvRowProducer{}
@@ -146,7 +132,19 @@ func strRecord(record []string, sep rune) string {
 // Row() implements importRowProducer interface.
 func (p *csvRowProducer) Row() (interface{}, error) {
 	p.rowNum++
-	expectedColsLen := p.numExpectedColumns
+	expectedColsLen := len(p.expectedColumns)
+	if expectedColsLen == 0 {
+		// TODO(anzoteh96): this should really be only checked once per import instead of every row.
+		for _, col := range p.importCtx.tableDesc.VisibleColumns() {
+			if col.IsComputed() {
+				return nil,
+					errors.Newf(
+						"IMPORT CSV with computed column %q requires targeted column specification",
+						col.Name)
+			}
+		}
+		expectedColsLen = len(p.importCtx.tableDesc.VisibleColumns())
+	}
 
 	if len(p.record) == expectedColsLen {
 		// Expected number of columns.
@@ -185,7 +183,7 @@ func (c *csvRowConsumer) FillDatums(
 	for i, field := range record {
 		// Skip over record entries corresponding to columns not in the target
 		// columns specified by the user.
-		if !conv.TargetColOrds.Contains(i) {
+		if _, ok := conv.IsTargetCol[i]; !ok {
 			continue
 		}
 
@@ -198,7 +196,7 @@ func (c *csvRowConsumer) FillDatums(
 			if err != nil {
 				col := conv.VisibleCols[i]
 				return newImportRowError(
-					errors.Wrapf(err, "parse %q as %s", col.GetName(), col.GetType().SQLString()),
+					errors.Wrapf(err, "parse %q as %s", col.Name, col.Type.SQLString()),
 					strRecord(record, c.opts.Comma),
 					rowNum)
 			}
@@ -218,11 +216,11 @@ func newCSVPipeline(c *csvInputReader, input *fileReader) (*csvRowProducer, *csv
 	cr.Comment = c.opts.Comment
 
 	producer := &csvRowProducer{
-		importCtx:          c.importCtx,
-		opts:               &c.opts,
-		csv:                cr,
-		progress:           func() float32 { return input.ReadFraction() },
-		numExpectedColumns: c.numExpectedDataCols,
+		importCtx:       c.importCtx,
+		opts:            &c.opts,
+		csv:             cr,
+		progress:        func() float32 { return input.ReadFraction() },
+		expectedColumns: c.importCtx.targetCols,
 	}
 	consumer := &csvRowConsumer{
 		importCtx: c.importCtx,

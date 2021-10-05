@@ -15,12 +15,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -44,10 +42,8 @@ func (*tableDeleter) desc() string { return "deleter" }
 func (td *tableDeleter) walkExprs(_ func(desc string, index int, expr tree.TypedExpr)) {}
 
 // init is part of the tableWriter interface.
-func (td *tableDeleter) init(
-	_ context.Context, txn *kv.Txn, evalCtx *tree.EvalContext, sv *settings.Values,
-) error {
-	td.tableWriterBase.init(txn, td.tableDesc(), evalCtx, sv)
+func (td *tableDeleter) init(_ context.Context, txn *kv.Txn, evalCtx *tree.EvalContext) error {
+	td.tableWriterBase.init(txn, td.tableDesc(), evalCtx)
 	return nil
 }
 
@@ -119,9 +115,8 @@ func (td *tableDeleter) deleteAllRowsScan(
 	}
 
 	var valNeededForCol util.FastIntSet
-	for i := range td.rd.FetchCols {
-		col := td.rd.FetchCols[i].GetID()
-		valNeededForCol.Add(td.rd.FetchColIDtoRowIndex.GetDefault(col))
+	for _, idx := range td.rd.FetchColIDtoRowIndex {
+		valNeededForCol.Add(idx)
 	}
 
 	var rf row.Fetcher
@@ -141,7 +136,6 @@ func (td *tableDeleter) deleteAllRowsScan(
 		// control whether we perform locking implicitly during DELETEs.
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		td.lockTimeout,
 		false, /* isCheck */
 		td.alloc,
 		// TODO(bulkio): this might need a memory monitor for the slow case of truncate.
@@ -150,9 +144,7 @@ func (td *tableDeleter) deleteAllRowsScan(
 	); err != nil {
 		return resume, err
 	}
-	if err := rf.StartScan(
-		ctx, td.txn, roachpb.Spans{resume}, rowinfra.DefaultBatchBytesLimit, rowinfra.NoRowLimit, traceKV, td.forceProductionBatchSizes,
-	); err != nil {
+	if err := rf.StartScan(ctx, td.txn, roachpb.Spans{resume}, true /* limit batches */, 0, traceKV); err != nil {
 		return resume, err
 	}
 
@@ -194,7 +186,7 @@ func (td *tableDeleter) deleteAllRowsScan(
 //
 // limit is a limit on the number of index entries deleted in the operation.
 func (td *tableDeleter) deleteIndex(
-	ctx context.Context, idx catalog.Index, resume roachpb.Span, limit int64, traceKV bool,
+	ctx context.Context, idx *descpb.IndexDescriptor, resume roachpb.Span, limit int64, traceKV bool,
 ) (roachpb.Span, error) {
 	if idx.IsInterleaved() {
 		if log.V(2) {
@@ -206,10 +198,10 @@ func (td *tableDeleter) deleteIndex(
 }
 
 func (td *tableDeleter) deleteIndexFast(
-	ctx context.Context, idx catalog.Index, resume roachpb.Span, limit int64, traceKV bool,
+	ctx context.Context, idx *descpb.IndexDescriptor, resume roachpb.Span, limit int64, traceKV bool,
 ) (roachpb.Span, error) {
 	if resume.Key == nil {
-		resume = td.tableDesc().IndexSpan(td.rd.Helper.Codec, idx.GetID())
+		resume = td.tableDesc().IndexSpan(td.rd.Helper.Codec, idx.ID)
 	}
 
 	if traceKV {
@@ -226,18 +218,15 @@ func (td *tableDeleter) deleteIndexFast(
 	return td.b.Results[0].ResumeSpanAsValue(), nil
 }
 
-func (td *tableDeleter) clearIndex(ctx context.Context, idx catalog.Index) error {
+func (td *tableDeleter) clearIndex(ctx context.Context, idx *descpb.IndexDescriptor) error {
 	if idx.IsInterleaved() {
-		return errors.Errorf("unexpected interleaved index %d", idx.GetID())
+		return errors.Errorf("unexpected interleaved index %d", idx.ID)
 	}
 
-	sp := td.tableDesc().IndexSpan(td.rd.Helper.Codec, idx.GetID())
+	sp := td.tableDesc().IndexSpan(td.rd.Helper.Codec, idx.ID)
 
 	// ClearRange cannot be run in a transaction, so create a
 	// non-transactional batch to send the request.
-
-	// TODO(sumeer): this is bypassing admission control, since it is not using
-	// the currently instrumented shared code paths.
 	b := &kv.Batch{}
 	b.AddRawRequest(&roachpb.ClearRangeRequest{
 		RequestHeader: roachpb.RequestHeader{
@@ -249,16 +238,15 @@ func (td *tableDeleter) clearIndex(ctx context.Context, idx catalog.Index) error
 }
 
 func (td *tableDeleter) deleteIndexScan(
-	ctx context.Context, idx catalog.Index, resume roachpb.Span, limit int64, traceKV bool,
+	ctx context.Context, idx *descpb.IndexDescriptor, resume roachpb.Span, limit int64, traceKV bool,
 ) (roachpb.Span, error) {
 	if resume.Key == nil {
 		resume = td.tableDesc().PrimaryIndexSpan(td.rd.Helper.Codec)
 	}
 
 	var valNeededForCol util.FastIntSet
-	for i := range td.rd.FetchCols {
-		col := td.rd.FetchCols[i].GetID()
-		valNeededForCol.Add(td.rd.FetchColIDtoRowIndex.GetDefault(col))
+	for _, idx := range td.rd.FetchColIDtoRowIndex {
+		valNeededForCol.Add(idx)
 	}
 
 	var rf row.Fetcher
@@ -278,7 +266,6 @@ func (td *tableDeleter) deleteIndexScan(
 		// control whether we perform locking implicitly during DELETEs.
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		td.lockTimeout,
 		false, /* isCheck */
 		td.alloc,
 		// TODO(bulkio): this might need a memory monitor.
@@ -287,9 +274,7 @@ func (td *tableDeleter) deleteIndexScan(
 	); err != nil {
 		return resume, err
 	}
-	if err := rf.StartScan(
-		ctx, td.txn, roachpb.Spans{resume}, rowinfra.DefaultBatchBytesLimit, rowinfra.NoRowLimit, traceKV, td.forceProductionBatchSizes,
-	); err != nil {
+	if err := rf.StartScan(ctx, td.txn, roachpb.Spans{resume}, true /* limit batches */, 0, traceKV); err != nil {
 		return resume, err
 	}
 

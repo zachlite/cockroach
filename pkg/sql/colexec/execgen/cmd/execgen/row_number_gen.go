@@ -21,13 +21,13 @@ type rowNumberTmplInfo struct {
 	String       string
 }
 
-const rowNumberTmpl = "pkg/sql/colexec/colexecwindow/row_number_tmpl.go"
+const rowNumberTmpl = "pkg/sql/colexec/row_number_tmpl.go"
 
 func genRowNumberOp(inputFileContents string, wr io.Writer) error {
 	s := strings.ReplaceAll(inputFileContents, "_ROW_NUMBER_STRING", "{{.String}}")
 
-	computeRowNumberRe := makeFunctionRegex("_COMPUTE_ROW_NUMBER", 1)
-	s = computeRowNumberRe.ReplaceAllString(s, `{{template "computeRowNumber" buildDict "HasPartition" .HasPartition "HasSel" $1}}`)
+	computeRowNumberRe := makeFunctionRegex("_COMPUTE_ROW_NUMBER", 0)
+	s = computeRowNumberRe.ReplaceAllString(s, `{{template "computeRowNumber" buildDict "HasPartition" .HasPartition}}`)
 
 	// Now, generate the op, from the template.
 	tmpl, err := template.New("row_number_op").Funcs(template.FuncMap{"buildDict": buildDict}).Parse(s)
@@ -35,11 +35,11 @@ func genRowNumberOp(inputFileContents string, wr io.Writer) error {
 		return err
 	}
 
-	rowNumberTmplInfos := []rowNumberTmplInfo{
+	rankTmplInfos := []rowNumberTmplInfo{
 		{HasPartition: false, String: "rowNumberNoPartition"},
 		{HasPartition: true, String: "rowNumberWithPartition"},
 	}
-	return tmpl.Execute(wr, rowNumberTmplInfos)
+	return tmpl.Execute(wr, rankTmplInfos)
 }
 
 func init() {

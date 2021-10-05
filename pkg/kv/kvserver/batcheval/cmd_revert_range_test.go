@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -31,11 +30,13 @@ import (
 func hashRange(t *testing.T, reader storage.Reader, start, end roachpb.Key) []byte {
 	t.Helper()
 	h := sha256.New()
-	if err := reader.MVCCIterate(start, end, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
-		h.Write(kv.Key.Key)
-		h.Write(kv.Value)
-		return nil
-	}); err != nil {
+	if err := reader.Iterate(start, end,
+		func(kv storage.MVCCKeyValue) (bool, error) {
+			h.Write(kv.Key.Key)
+			h.Write(kv.Value)
+			return false, nil
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	return h.Sum(nil)
@@ -43,25 +44,31 @@ func hashRange(t *testing.T, reader storage.Reader, start, end roachpb.Key) []by
 
 func getStats(t *testing.T, reader storage.Reader) enginepb.MVCCStats {
 	t.Helper()
-	iter := reader.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
+	iter := reader.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
 	defer iter.Close()
-	s, err := storage.ComputeStatsForRange(iter, keys.LocalMax, roachpb.KeyMax, 1100)
+	s, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 1100)
 	if err != nil {
 		t.Fatalf("%+v", err)
 	}
 	return s
 }
 
+// createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
+// storage capacity.
+func createTestRocksDBEngine(ctx context.Context) storage.Engine {
+	return storage.NewInMem(ctx, enginepb.EngineTypeRocksDB, roachpb.Attributes{}, 1<<20)
+}
+
 // createTestPebbleEngine returns a new in-memory Pebble storage engine.
-func createTestPebbleEngine(ctx context.Context) (storage.Engine, error) {
-	return storage.Open(ctx, storage.InMemory(),
-		storage.MaxSize(1<<20), storage.ForTesting)
+func createTestPebbleEngine(ctx context.Context) storage.Engine {
+	return storage.NewInMem(ctx, enginepb.EngineTypePebble, roachpb.Attributes{}, 1<<20)
 }
 
 var engineImpls = []struct {
 	name   string
-	create func(context.Context) (storage.Engine, error)
+	create func(context.Context) storage.Engine
 }{
+	{"rocksdb", createTestRocksDBEngine},
 	{"pebble", createTestPebbleEngine},
 }
 
@@ -79,10 +86,7 @@ func TestCmdRevertRange(t *testing.T) {
 	// https://github.com/cockroachdb/cockroach/pull/42386
 	for _, engineImpl := range engineImpls {
 		t.Run(engineImpl.name, func(t *testing.T) {
-			eng, err := engineImpl.create(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
+			eng := engineImpl.create(ctx)
 			defer eng.Close()
 
 			baseTime := hlc.Timestamp{WallTime: 1000}
@@ -151,9 +155,7 @@ func TestCmdRevertRange(t *testing.T) {
 					defer batch.Close()
 
 					req := roachpb.RevertRangeRequest{
-						RequestHeader:                       roachpb.RequestHeader{Key: startKey, EndKey: endKey},
-						TargetTime:                          tc.ts,
-						EnableTimeBoundIteratorOptimization: true,
+						RequestHeader: roachpb.RequestHeader{Key: startKey, EndKey: endKey}, TargetTime: tc.ts,
 					}
 					cArgs.Stats = &enginepb.MVCCStats{}
 					cArgs.Args = &req
@@ -227,9 +229,7 @@ func TestCmdRevertRange(t *testing.T) {
 					defer batch.Close()
 					cArgs.Stats = &enginepb.MVCCStats{}
 					req := roachpb.RevertRangeRequest{
-						RequestHeader:                       roachpb.RequestHeader{Key: startKey, EndKey: endKey},
-						TargetTime:                          tc.ts,
-						EnableTimeBoundIteratorOptimization: true,
+						RequestHeader: roachpb.RequestHeader{Key: startKey, EndKey: endKey}, TargetTime: tc.ts,
 					}
 					cArgs.Args = &req
 					var resumes int

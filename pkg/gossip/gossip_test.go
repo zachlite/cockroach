@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
+	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -36,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 )
 
 // TestGossipInfoStore verifies operation of gossip instance infostore.
@@ -81,7 +83,7 @@ func TestGossipMoveNode(t *testing.T) {
 	for _, node := range nodes {
 		if val, err := g.GetNodeDescriptor(node.NodeID); err != nil {
 			t.Fatal(err)
-		} else if !node.Equal(val) {
+		} else if !proto.Equal(node, val) {
 			t.Fatalf("expected node %+v, got %+v", node, val)
 		}
 	}
@@ -97,7 +99,7 @@ func TestGossipMoveNode(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		if val, err := g.GetNodeDescriptor(movedNode.NodeID); err != nil {
 			return err
-		} else if !movedNode.Equal(val) {
+		} else if !proto.Equal(movedNode, val) {
 			return fmt.Errorf("expected node %+v, got %+v", movedNode, val)
 		}
 		return nil
@@ -109,19 +111,29 @@ func TestGossipGetNextBootstrapAddress(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
 
-	addresses := []util.UnresolvedAddr{
-		util.MakeUnresolvedAddr("tcp", "127.0.0.1:9000"),
-		util.MakeUnresolvedAddr("tcp", "127.0.0.1:9001"),
-		util.MakeUnresolvedAddr("tcp", "localhost:9004"),
+	resolverSpecs := []string{
+		"127.0.0.1:9000",
+		"127.0.0.1:9001",
+		"localhost:9004",
 	}
 
+	resolvers := []resolver.Resolver{}
+	for _, rs := range resolverSpecs {
+		resolver, err := resolver.NewResolver(rs)
+		if err == nil {
+			resolvers = append(resolvers, resolver)
+		}
+	}
+	if len(resolvers) != 3 {
+		t.Errorf("expected 3 resolvers; got %d", len(resolvers))
+	}
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 	server := rpc.NewServer(rpcContext)
 	g := NewTest(0, nil, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
-	g.setAddresses(addresses)
+	g.setResolvers(resolvers)
 
-	// Using specified addresses, fetch bootstrap addresses 3 times
+	// Using specified resolvers, fetch bootstrap addresses 3 times
 	// and verify the results match expected addresses.
 	expAddresses := []string{
 		"127.0.0.1:9000",
@@ -130,8 +142,9 @@ func TestGossipGetNextBootstrapAddress(t *testing.T) {
 	}
 	for i := 0; i < len(expAddresses); i++ {
 		g.mu.Lock()
-		addr := g.getNextBootstrapAddressLocked()
-		if addrStr := addr.String(); addrStr != expAddresses[i] {
+		if addr := g.getNextBootstrapAddressLocked(); addr == nil {
+			t.Errorf("%d: unexpected nil addr when expecting %s", i, expAddresses[i])
+		} else if addrStr := addr.String(); addrStr != expAddresses[i] {
 			t.Errorf("%d: expected addr %s; got %s", i, expAddresses[i], addrStr)
 		}
 		g.mu.Unlock()
@@ -237,7 +250,7 @@ func TestGossipRaceLogStatus(t *testing.T) {
 
 	local.mu.Lock()
 	peer := startGossip(clusterID, 2, stopper, t, metric.NewRegistry())
-	local.startClientLocked(peer.mu.is.NodeAddr)
+	local.startClientLocked(&peer.mu.is.NodeAddr)
 	local.mu.Unlock()
 
 	// Race gossiping against LogStatus.
@@ -294,7 +307,7 @@ func TestGossipOutgoingLimitEnforced(t *testing.T) {
 		// before we start the actual test.
 		newPeer := startGossip(clusterID, roachpb.NodeID(i+2), stopper, t, metric.NewRegistry())
 		newPeer.mu.Lock()
-		newPeer.startClientLocked(localAddr)
+		newPeer.startClientLocked(&localAddr)
 		newPeer.mu.Unlock()
 		peers = append(peers, newPeer)
 	}
@@ -348,7 +361,7 @@ func TestGossipMostDistant(t *testing.T) {
 		addr := to.mu.is.NodeAddr
 		to.mu.Unlock()
 		from.mu.Lock()
-		from.startClientLocked(addr)
+		from.startClientLocked(&addr)
 		from.mu.Unlock()
 	}
 
@@ -558,7 +571,7 @@ func TestGossipCullNetwork(t *testing.T) {
 	local.mu.Lock()
 	for i := 0; i < minPeers; i++ {
 		peer := startGossip(clusterID, roachpb.NodeID(i+2), stopper, t, metric.NewRegistry())
-		local.startClientLocked(*peer.GetNodeAddr())
+		local.startClientLocked(peer.GetNodeAddr())
 	}
 	local.mu.Unlock()
 
@@ -613,7 +626,7 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 	peerAddrStr := peerAddr.String()
 
 	local.mu.Lock()
-	local.startClientLocked(*peerAddr)
+	local.startClientLocked(peerAddr)
 	local.mu.Unlock()
 
 	testutils.SucceedsSoon(t, func() error {
@@ -626,8 +639,8 @@ func TestGossipOrphanedStallDetection(t *testing.T) {
 	})
 
 	testutils.SucceedsSoon(t, func() error {
-		for _, addr := range local.GetAddresses() {
-			if addr.String() == peerAddrStr {
+		for _, resolver := range local.GetResolvers() {
+			if resolver.Addr() == peerAddrStr {
 				return nil
 			}
 		}
@@ -721,15 +734,19 @@ func TestGossipJoinTwoClusters(t *testing.T) {
 		}
 		addrs = append(addrs, ln.Addr())
 
-		// Only the third node has addresses.
-		var addresses []util.UnresolvedAddr
+		// Only the third node has resolvers.
+		var resolvers []resolver.Resolver
 		switch i {
 		case 2:
 			for j := 0; j < 2; j++ {
-				addresses = append(addresses, util.MakeUnresolvedAddr("tcp", addrs[j].String()))
+				resolver, err := resolver.NewResolver(addrs[j].String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				resolvers = append(resolvers, resolver)
 			}
 		}
-		gnode.Start(ln.Addr(), addresses)
+		gnode.Start(ln.Addr(), resolvers)
 	}
 
 	// Wait for connections.
@@ -797,7 +814,7 @@ func TestGossipPropagation(t *testing.T) {
 			// Restart the client connection in the loop. It might have failed due to
 			// a heartbeat timeout.
 			local.mu.Lock()
-			local.startClientLocked(rAddr)
+			local.startClientLocked(&rAddr)
 			local.mu.Unlock()
 			return fmt.Errorf("unable to find local to remote client")
 		}
@@ -900,7 +917,7 @@ func TestGossipLoopbackInfoPropagation(t *testing.T) {
 
 	// Start a client connection to the remote node.
 	local.mu.Lock()
-	local.startClientLocked(rAddr)
+	local.startClientLocked(&rAddr)
 	local.mu.Unlock()
 
 	getInfo := func(g *Gossip, key string) *Info {

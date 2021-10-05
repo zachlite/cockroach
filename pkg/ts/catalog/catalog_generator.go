@@ -369,19 +369,19 @@ func (ic *IndividualChart) addMetrics(
 // addNames sets the IndividualChart's Title, Longname, and CollectionName.
 func (ic *IndividualChart) addNames(organization []string) {
 
-	// Find string delimiters that are not dashes, including spaces, slashes, and
+	// Find string delimeters that are not dashes, including spaces, slashes, and
 	// commas.
-	nondashDelimiters := regexp.MustCompile("( )|/|,")
+	nondashDelimeters := regexp.MustCompile("( )|/|,")
 
-	// LongTitles look like "SQL Layer | SQL | Connections".
-	// CollectionTitless look like "sql-layer-sql-connections".
+	// Longnames look like "SQL Layer | SQL | Connections".
+	// CollectionNames look like "sql-layer-sql-connections".
 	for _, n := range organization {
 		ic.LongTitle += n + string(" | ")
-		ic.CollectionTitle += nondashDelimiters.ReplaceAllString(strings.ToLower(n), "-") + "-"
+		ic.CollectionTitle += nondashDelimeters.ReplaceAllString(strings.ToLower(n), "-") + "-"
 	}
 
 	ic.LongTitle += ic.Title
-	ic.CollectionTitle += nondashDelimiters.ReplaceAllString(strings.ToLower(ic.Title), "-")
+	ic.CollectionTitle += nondashDelimeters.ReplaceAllString(strings.ToLower(ic.Title), "-")
 
 }
 
@@ -429,8 +429,8 @@ func (ic *IndividualChart) addDisplayProperties(cd chartDescription) error {
 
 		for _, m := range ic.Metrics {
 			if m.AxisLabel != al {
-				return errors.Errorf(`Chart %s has metrics with different axis labels (%s vs %s); 
-				need to specify an AxisLabel in its chartDescription: %v`, al, m.AxisLabel, cd.Title, ic)
+				return errors.Errorf(`Chart %s has metrics with different axis labels; 
+				need to specify an AxisLabel in its chartDescription: %v`, cd.Title, ic)
 			}
 		}
 
@@ -495,29 +495,29 @@ func (cs *ChartSection) addChartAndSubsections(organization []string, ics []*Ind
 	// If not found, create a new ChartSection and append it as a subsection.
 	if subsection == nil {
 
-		// Find string delimiters that are not dashes, including spaces, slashes, and
+		// Find string delimeters that are not dashes, including spaces, slashes, and
 		// commas.
-		nondashDelimiters := regexp.MustCompile("( )|/|,")
+		nondashDelimeters := regexp.MustCompile("( )|/|,")
 
 		subsection = &ChartSection{
 			Title: organization[subsectionLevel],
-			// LongTitles look like "SQL Layer | SQL".
+			// Longnames look like "SQL Layer | SQL".
 			LongTitle: "All",
-			// CollectionTitles look like "sql-layer-sql".
-			CollectionTitle: nondashDelimiters.ReplaceAllString(strings.ToLower(organization[0]), "-"),
+			// CollectionNames look like "sql-layer-sql".
+			CollectionTitle: nondashDelimeters.ReplaceAllString(strings.ToLower(organization[0]), "-"),
 			Level:           int32(subsectionLevel),
 		}
 
-		// Complete LongTitle and CollectionTitle values.
+		// Complete Longname and Colectionname values.
 		for i := 1; i <= subsectionLevel; i++ {
 			subsection.LongTitle += " " + organization[i]
-			subsection.CollectionTitle += "-" + nondashDelimiters.ReplaceAllString(strings.ToLower(organization[i]), "-")
+			subsection.CollectionTitle += "-" + nondashDelimeters.ReplaceAllString(strings.ToLower(organization[i]), "-")
 		}
 
 		cs.Subsections = append(cs.Subsections, subsection)
 	}
 
-	// If this is the last level of the organization, add the IndividualChart here. Otherwise, recurse.
+	// If this is the last level of the organization, add the IndividualChart here. Otheriwse, recurse.
 	if subsectionLevel == (len(organization) - 1) {
 		subsection.Charts = append(subsection.Charts, ics...)
 	} else {

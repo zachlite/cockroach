@@ -96,7 +96,7 @@ func TestTypeCheck(t *testing.T) {
 		{`count(3)`, `count(3:::INT8)`},
 		{`ARRAY['a', 'b', 'c']`, `ARRAY['a':::STRING, 'b':::STRING, 'c':::STRING]:::STRING[]`},
 		{`ARRAY[1.5, 2.5, 3.5]`, `ARRAY[1.5:::DECIMAL, 2.5:::DECIMAL, 3.5:::DECIMAL]:::DECIMAL[]`},
-		{`ARRAY[NULL]`, `ARRAY[NULL]:::STRING[]`},
+		{`ARRAY[NULL]`, `ARRAY[NULL]`},
 		{`ARRAY[NULL]:::int[]`, `ARRAY[NULL]:::INT8[]`},
 		{`ARRAY[NULL, NULL]:::int[]`, `ARRAY[NULL, NULL]:::INT8[]`},
 		{`ARRAY[]::INT8[]`, `ARRAY[]:::INT8[]`},
@@ -315,10 +315,6 @@ func TestTypeCheckError(t *testing.T) {
 		{
 			`(pg_get_keywords()).foo`,
 			`could not identify column "foo" in tuple{string AS word, string AS catcode, string AS catdesc}`,
-		},
-		{
-			`((1,2,3)).foo`,
-			`could not identify column "foo" in record data type`,
 		},
 		{
 			`1::d.notatype`,

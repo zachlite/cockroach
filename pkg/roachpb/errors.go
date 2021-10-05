@@ -18,12 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/errorspb"
-	_ "github.com/cockroachdb/errors/extgrpc" // register EncodeError support for gRPC Status
-	"github.com/cockroachdb/redact"
 )
 
 // ClientVisibleRetryError is to be implemented by errors visible by
@@ -39,19 +35,10 @@ type ClientVisibleAmbiguousError interface {
 }
 
 func (e *UnhandledRetryableError) Error() string {
-	return e.String()
+	return e.PErr.Message
 }
 
 var _ error = &UnhandledRetryableError{}
-
-// SafeFormat implements redact.SafeFormatter.
-func (e *UnhandledRetryableError) SafeFormat(s redact.SafePrinter, r rune) {
-	e.PErr.SafeFormat(s, r)
-}
-
-func (e *UnhandledRetryableError) String() string {
-	return redact.StringWithoutMarkers(e)
-}
 
 // transactionRestartError is an interface implemented by errors that cause
 // a transaction to be restarted.
@@ -81,10 +68,9 @@ const (
 	// written. We allow the transaction to continue after such errors; we also
 	// allow RollbackToSavepoint() to be called after such errors. In particular,
 	// this is useful for SQL which wants to allow rolling back to a savepoint
-	// after ConditionFailedErrors (uniqueness violations) and WriteIntentError
-	// (lock not available errors). With continuing after errors its important for
-	// the coordinator to track the timestamp at which intents might have been
-	// written.
+	// after ConditionFailedErrors (uniqueness violations). With continuing after
+	// errors its important for the coordinator to track the timestamp at which
+	// intents might have been written.
 	//
 	// Note that all the lower scores also are unambiguous in this sense, so this
 	// score can be seen as an upper-bound for unambiguous errors.
@@ -110,35 +96,25 @@ const (
 
 // ErrPriority computes the priority of the given error.
 func ErrPriority(err error) ErrorPriority {
-	// TODO(tbg): this method could take an `*Error` if it weren't for SQL
-	// propagating these as an `error`. See `DistSQLReceiver.Push`.
-	var detail ErrorDetailInterface
-	switch tErr := err.(type) {
-	case nil:
+	if err == nil {
 		return 0
-	case ErrorDetailInterface:
-		detail = tErr
-	case *internalError:
-		detail = (*Error)(tErr).GetDetail()
+	}
+	switch v := err.(type) {
 	case *UnhandledRetryableError:
-		if _, ok := tErr.PErr.GetDetail().(*TransactionAbortedError); ok {
+		if _, ok := v.PErr.GetDetail().(*TransactionAbortedError); ok {
 			return ErrorScoreTxnAbort
 		}
 		return ErrorScoreTxnRestart
-	}
-
-	switch v := detail.(type) {
 	case *TransactionRetryWithProtoRefreshError:
 		if v.PrevTxnAborted() {
 			return ErrorScoreTxnAbort
 		}
 		return ErrorScoreTxnRestart
-	case *ConditionFailedError, *WriteIntentError:
+	case *ConditionFailedError:
 		// We particularly care about returning the low ErrorScoreUnambiguousError
-		// because we don't want to transition a transaction that encounters a
-		// ConditionFailedError or a WriteIntentError to an error state. More
-		// specifically, we want to allow rollbacks to savepoint after one of these
-		// errors.
+		// because we don't want to transition a transaction that encounters
+		// ConditionFailedError to an error state. More specifically, we want to
+		// allow rollbacks to savepoint after a ConditionFailedError.
 		return ErrorScoreUnambiguousError
 	}
 	return ErrorScoreNonRetriable
@@ -149,29 +125,8 @@ func NewError(err error) *Error {
 	if err == nil {
 		return nil
 	}
-	e := &Error{
-		EncodedError: errors.EncodeError(context.Background(), err),
-	}
-
-	// This block is deprecated behavior retained for compat with
-	// 20.2 nodes. It makes sure that if applicable, deprecatedMessage,
-	// ErrorDetail, and deprecatedTransactionRestart are set.
-	{
-		if intErr, ok := err.(*internalError); ok {
-			*e = *(*Error)(intErr)
-		} else if detail := ErrorDetailInterface(nil); errors.As(err, &detail) {
-			e.deprecatedMessage = detail.message(e)
-			if r, ok := detail.(transactionRestartError); ok {
-				e.deprecatedTransactionRestart = r.canRestartTransaction()
-			} else {
-				e.deprecatedTransactionRestart = TransactionRestart_NONE
-			}
-			e.deprecatedDetail.MustSetInner(detail)
-			e.checkTxnStatusValid()
-		} else {
-			e.deprecatedMessage = err.Error()
-		}
-	}
+	e := &Error{}
+	e.SetDetail(err)
 	return e
 }
 
@@ -194,89 +149,38 @@ func NewErrorf(format string, a ...interface{}) *Error {
 	return NewError(err)
 }
 
-// SafeFormat implements redact.SafeFormatter.
-func (e *Error) SafeFormat(s redact.SafePrinter, _ rune) {
-	if e == nil {
-		s.Print(nil)
-		return
-	}
-
-	if e.EncodedError != (errors.EncodedError{}) {
-		err := errors.DecodeError(context.Background(), e.EncodedError)
-		var iface ErrorDetailInterface
-		if errors.As(err, &iface) {
-			// Deprecated code: if there is a detail and the message produced by the detail
-			// (which gets to see the surrounding Error) is different, then use that message.
-			// What is likely the cause of that is that someone passed an updated Transaction
-			// to the Error via SetTxn, and the error detail prints that txn.
-			//
-			// TODO(tbg): change SetTxn so that instead of stashing the transaction on the
-			// Error struct, it wraps the EncodedError with an error containing the updated
-			// txn. Make GetTxn retrieve the first one it sees (overridden by UnexposedTxn
-			// while it's still around). Remove the `message(Error)` methods from ErrorDetailInterface.
-			// We also have to remove GetDetail() in the process since it doesn't understand the
-			// wrapping; instead we need a method that looks for a specific kind of detail, i.e.
-			// we basically want to use `errors.As` instead.
-			deprecatedMsg := iface.message(e)
-			if deprecatedMsg != err.Error() {
-				s.Print(deprecatedMsg)
-				return
-			}
-		}
-		s.Print(err)
-	} else {
-		// TODO(tbg): remove this block in the 21.2 cycle and rely on EncodedError
-		// always being populated.
-		switch t := e.GetDetail().(type) {
-		case nil:
-			s.Print(e.deprecatedMessage)
-		default:
-			// We have a detail and ignore e.deprecatedMessage. We do assume that if a detail is
-			// present, e.deprecatedMessage does correspond to that detail's message. This
-			// assumption is not enforced but appears sane.
-			s.Print(t)
-		}
-	}
-
-	if txn := e.GetTxn(); txn != nil {
-		s.SafeString(": ")
-		s.Print(txn)
-	}
-}
-
 // String implements fmt.Stringer.
 func (e *Error) String() string {
-	return redact.StringWithoutMarkers(e)
-}
-
-// TransactionRestart returns the TransactionRestart for this Error.
-func (e *Error) TransactionRestart() TransactionRestart {
-	if e.EncodedError == (errorspb.EncodedError{}) {
-		// Legacy code.
-		//
-		// TODO(tbg): delete in 21.2.
-		return e.deprecatedTransactionRestart
+	if e == nil {
+		return "<nil>"
 	}
-	var iface transactionRestartError
-	if errors.As(errors.DecodeError(context.Background(), e.EncodedError), &iface) {
-		return iface.canRestartTransaction()
-	}
-	return TransactionRestart_NONE
+	return e.Message
 }
 
 type internalError Error
+
+// Type is part of the ErrorDetailInterface.
+func (e *internalError) Type() ErrorDetailType {
+	return InternalErrType
+}
 
 func (e *internalError) Error() string {
 	return (*Error)(e).String()
 }
 
+func (e *internalError) message(_ *Error) string {
+	return (*Error)(e).String()
+}
+
+func (e *internalError) canRestartTransaction() TransactionRestart {
+	return e.TransactionRestart
+}
+
+var _ ErrorDetailInterface = &internalError{}
+
 // ErrorDetailInterface is an interface for each error detail.
-// These must not be implemented by anything other than our protobuf-backed error details
-// as we rely on a 1:1 correspondence between the interface and what can be stored via
-// `Error.DeprecatedSetDetail`.
 type ErrorDetailInterface interface {
 	error
-	protoutil.Message
 	// message returns an error message.
 	message(*Error) string
 	// Type returns the error's type.
@@ -319,9 +223,6 @@ const (
 	MergeInProgressErrType                  ErrorDetailType = 37
 	RangeFeedRetryErrType                   ErrorDetailType = 38
 	IndeterminateCommitErrType              ErrorDetailType = 39
-	InvalidLeaseErrType                     ErrorDetailType = 40
-	OptimisticEvalConflictsErrType          ErrorDetailType = 41
-	MinTimestampBoundUnsatisfiableErrType   ErrorDetailType = 42
 	// When adding new error types, don't forget to update NumErrors below.
 
 	// CommunicationErrType indicates a gRPC error; this is not an ErrorDetail.
@@ -331,59 +232,62 @@ const (
 	// detail. The value 25 is chosen because it's reserved in the errors proto.
 	InternalErrType ErrorDetailType = 25
 
-	NumErrors int = 43
+	NumErrors int = 40
 )
 
-// GoError returns a Go error converted from Error. If the error is a transaction
-// retry error, it returns the error itself wrapped in an UnhandledRetryableError.
-// Otherwise, if an error detail is present, is is returned (i.e. the result will
-// match GetDetail()). Otherwise, returns the error itself masqueraded as an `error`.
+// GoError returns a Go error converted from Error.
 func (e *Error) GoError() error {
 	if e == nil {
 		return nil
 	}
-	if e.EncodedError != (errorspb.EncodedError{}) {
-		err := errors.DecodeError(context.Background(), e.EncodedError)
-		var iface transactionRestartError
-		if errors.As(err, &iface) {
-			if txnRestart := iface.canRestartTransaction(); txnRestart != TransactionRestart_NONE {
-				// TODO(tbg): revisit this unintuitive error wrapping here and see if
-				// a better solution can be found.
-				return &UnhandledRetryableError{
-					PErr: *e,
-				}
-			}
-		}
-		return err
-	}
 
-	// Everything below is legacy behavior that can be deleted in 21.2.
-	if e.TransactionRestart() != TransactionRestart_NONE {
+	if e.TransactionRestart != TransactionRestart_NONE {
 		return &UnhandledRetryableError{
 			PErr: *e,
 		}
 	}
-	if detail := e.GetDetail(); detail != nil {
-		return detail
-	}
-	return (*internalError)(e)
+	return e.GetDetail()
 }
 
-// GetDetail returns an error detail associated with the error, or nil otherwise.
+// SetDetail sets the error detail for the error. The argument cannot be nil.
+func (e *Error) SetDetail(err error) {
+	if err == nil {
+		panic("nil err argument")
+	}
+	if intErr, ok := err.(*internalError); ok {
+		*e = *(*Error)(intErr)
+	} else {
+		if sErr, ok := err.(ErrorDetailInterface); ok {
+			e.Message = sErr.message(e)
+		} else {
+			e.Message = err.Error()
+		}
+		if r, ok := err.(transactionRestartError); ok {
+			e.TransactionRestart = r.canRestartTransaction()
+		} else {
+			e.TransactionRestart = TransactionRestart_NONE
+		}
+		// If the specific error type exists in the detail union, set it.
+		if !e.Detail.SetInner(err) {
+			_, isInternalError := err.(*internalError)
+			if !isInternalError && e.TransactionRestart != TransactionRestart_NONE {
+				panic(errors.AssertionFailedf("transactionRestartError %T must be an ErrorDetail", err))
+			}
+		}
+		e.checkTxnStatusValid()
+	}
+}
+
+// GetDetail returns an error detail associated with the error.
 func (e *Error) GetDetail() ErrorDetailInterface {
 	if e == nil {
 		return nil
 	}
-	var detail ErrorDetailInterface
-	if e.EncodedError != (errorspb.EncodedError{}) {
-		errors.As(errors.DecodeError(context.Background(), e.EncodedError), &detail)
-	} else {
-		// Legacy behavior.
-		//
-		// TODO(tbg): delete in v21.2.
-		detail, _ = e.deprecatedDetail.GetInner().(ErrorDetailInterface)
+	if err, ok := e.Detail.GetInner().(ErrorDetailInterface); ok {
+		return err
 	}
-	return detail
+	// Unknown error detail; return the generic error.
+	return (*internalError)(e)
 }
 
 // SetTxn sets the error transaction and resets the error message.
@@ -404,11 +308,9 @@ func (e *Error) UpdateTxn(o *Transaction) {
 	} else {
 		e.UnexposedTxn.Update(o)
 	}
-	if sErr, ok := e.deprecatedDetail.GetInner().(ErrorDetailInterface); ok {
+	if sErr, ok := e.Detail.GetInner().(ErrorDetailInterface); ok {
 		// Refresh the message as the txn is updated.
-		//
-		// TODO(tbg): deprecated, remove in 21.2.
-		e.deprecatedMessage = sErr.message(e)
+		e.Message = sErr.message(e)
 	}
 	e.checkTxnStatusValid()
 }
@@ -416,15 +318,12 @@ func (e *Error) UpdateTxn(o *Transaction) {
 // checkTxnStatusValid verifies that the transaction status is in-sync with the
 // error detail.
 func (e *Error) checkTxnStatusValid() {
-	// TODO(tbg): this will need to be updated when we
-	// remove all of these deprecated fields in 21.2.
-
 	txn := e.UnexposedTxn
-	err := e.deprecatedDetail.GetInner()
+	err := e.Detail.GetInner()
 	if txn == nil {
 		return
 	}
-	if e.deprecatedTransactionRestart == TransactionRestart_NONE {
+	if e.TransactionRestart == TransactionRestart_NONE {
 		return
 	}
 	if errors.HasType(err, (*TransactionAbortedError)(nil)) {
@@ -473,12 +372,12 @@ func (e *NotLeaseHolderError) Type() ErrorDetailType {
 }
 
 func (e *NotLeaseHolderError) message(_ *Error) string {
-	var buf strings.Builder
-	buf.WriteString("[NotLeaseHolderError] ")
+	const prefix = "[NotLeaseHolderError] "
 	if e.CustomMsg != "" {
-		buf.WriteString(e.CustomMsg)
-		buf.WriteString("; ")
+		return prefix + e.CustomMsg
 	}
+	var buf strings.Builder
+	buf.WriteString(prefix)
 	fmt.Fprintf(&buf, "r%d: ", e.RangeID)
 	if e.Replica != (ReplicaDescriptor{}) {
 		fmt.Fprintf(&buf, "replica %s not lease holder; ", e.Replica)
@@ -507,7 +406,7 @@ func (e *LeaseRejectedError) Error() string {
 }
 
 func (e *LeaseRejectedError) message(_ *Error) string {
-	return fmt.Sprintf("cannot replace lease %s with %s: %s", e.Existing, e.Requested.String(), e.Message)
+	return fmt.Sprintf("cannot replace lease %s with %s: %s", e.Existing, e.Requested, e.Message)
 }
 
 var _ ErrorDetailInterface = &LeaseRejectedError{}
@@ -717,11 +616,6 @@ func NewTransactionAbortedError(reason TransactionAbortedReason) *TransactionAbo
 //
 // txnID is the ID of the transaction being restarted.
 // txn is the transaction that the client should use for the next attempts.
-//
-// TODO(tbg): the message passed here is usually pErr.String(), which is a bad
-// pattern (loses structure, thus redaction). We can leverage error chaining
-// to improve this: wrap `pErr.GoError()` with a barrier and then with the
-// TransactionRetryWithProtoRefreshError.
 func NewTransactionRetryWithProtoRefreshError(
 	msg string, txnID uuid.UUID, txn Transaction,
 ) *TransactionRetryWithProtoRefreshError {
@@ -805,14 +699,21 @@ func (*TransactionRetryError) canRestartTransaction() TransactionRestart {
 var _ ErrorDetailInterface = &TransactionRetryError{}
 var _ transactionRestartError = &TransactionRetryError{}
 
-// NewTransactionStatusError initializes a new TransactionStatusError with
-// the given message and reason.
-func NewTransactionStatusError(
-	reason TransactionStatusError_Reason, msg string,
-) *TransactionStatusError {
+// NewTransactionStatusError initializes a new TransactionStatusError from
+// the given message.
+func NewTransactionStatusError(msg string) *TransactionStatusError {
 	return &TransactionStatusError{
 		Msg:    msg,
-		Reason: reason,
+		Reason: TransactionStatusError_REASON_UNKNOWN,
+	}
+}
+
+// NewTransactionCommittedStatusError initializes a new TransactionStatusError
+// with a REASON_TXN_COMMITTED.
+func NewTransactionCommittedStatusError() *TransactionStatusError {
+	return &TransactionStatusError{
+		Msg:    "already committed",
+		Reason: TransactionStatusError_REASON_TXN_COMMITTED,
 	}
 }
 
@@ -865,19 +766,6 @@ func (e *WriteIntentError) message(_ *Error) string {
 			buf.WriteString(end[i].Key.String())
 		}
 	}
-
-	switch e.Reason {
-	case WriteIntentError_REASON_UNSPECIFIED:
-		// Nothing to say.
-	case WriteIntentError_REASON_WAIT_POLICY:
-		buf.WriteString(" [reason=wait_policy]")
-	case WriteIntentError_REASON_LOCK_TIMEOUT:
-		buf.WriteString(" [reason=lock_timeout]")
-	case WriteIntentError_REASON_LOCK_WAIT_QUEUE_MAX_LENGTH_EXCEEDED:
-		buf.WriteString(" [reason=lock_wait_queue_max_length_exceeded]")
-	default:
-		// Could panic, better to silently ignore in case new reasons are added.
-	}
 	return buf.String()
 }
 
@@ -924,48 +812,39 @@ var _ transactionRestartError = &WriteTooOldError{}
 // The read and existing timestamps as well as the txn are purely informational
 // and used for formatting the error message.
 func NewReadWithinUncertaintyIntervalError(
-	readTS, existingTS, localUncertaintyLimit hlc.Timestamp, txn *Transaction,
+	readTS, existingTS hlc.Timestamp, txn *Transaction,
 ) *ReadWithinUncertaintyIntervalError {
 	rwue := &ReadWithinUncertaintyIntervalError{
-		ReadTimestamp:         readTS,
-		ExistingTimestamp:     existingTS,
-		LocalUncertaintyLimit: localUncertaintyLimit,
+		ReadTimestamp:     readTS,
+		ExistingTimestamp: existingTS,
 	}
 	if txn != nil {
-		rwue.GlobalUncertaintyLimit = txn.GlobalUncertaintyLimit
+		maxTS := txn.MaxTimestamp
+		rwue.MaxTimestamp = &maxTS
 		rwue.ObservedTimestamps = txn.ObservedTimestamps
 	}
 	return rwue
 }
 
-// SafeFormat implements redact.SafeFormatter.
-func (e *ReadWithinUncertaintyIntervalError) SafeFormat(s redact.SafePrinter, _ rune) {
-	s.Printf("ReadWithinUncertaintyIntervalError: read at time %s encountered "+
-		"previous write with future timestamp %s within uncertainty interval `t <= "+
-		"(local=%v, global=%v)`; "+
-		"observed timestamps: ",
-		e.ReadTimestamp, e.ExistingTimestamp, e.LocalUncertaintyLimit, e.GlobalUncertaintyLimit)
-
-	s.SafeRune('[')
-	for i, ot := range observedTimestampSlice(e.ObservedTimestamps) {
-		if i > 0 {
-			s.SafeRune(' ')
-		}
-		s.Printf("{%d %v}", ot.NodeID, ot.Timestamp)
-	}
-	s.SafeRune(']')
-}
-
-func (e *ReadWithinUncertaintyIntervalError) String() string {
-	return redact.StringWithoutMarkers(e)
-}
-
 func (e *ReadWithinUncertaintyIntervalError) Error() string {
-	return e.String()
+	return e.message(nil)
 }
 
 func (e *ReadWithinUncertaintyIntervalError) message(_ *Error) string {
-	return e.String()
+	var ts strings.Builder
+	ts.WriteByte('[')
+	for i, ot := range observedTimestampSlice(e.ObservedTimestamps) {
+		if i > 0 {
+			ts.WriteByte(' ')
+		}
+		fmt.Fprintf(&ts, "{%d %v}", ot.NodeID, ot.Timestamp)
+	}
+	ts.WriteByte(']')
+
+	return fmt.Sprintf("ReadWithinUncertaintyIntervalError: read at time %s encountered "+
+		"previous write with future timestamp %s within uncertainty interval `t <= %v`; "+
+		"observed timestamps: %s",
+		e.ReadTimestamp, e.ExistingTimestamp, e.MaxTimestamp, ts.String())
 }
 
 // Type is part of the ErrorDetailInterface.
@@ -1251,67 +1130,3 @@ func (e *IndeterminateCommitError) Type() ErrorDetailType {
 }
 
 var _ ErrorDetailInterface = &IndeterminateCommitError{}
-
-func (e *InvalidLeaseError) Error() string {
-	return e.message(nil)
-}
-
-func (e *InvalidLeaseError) message(_ *Error) string {
-	return "invalid lease"
-}
-
-// Type is part of the ErrorDetailInterface.
-func (e *InvalidLeaseError) Type() ErrorDetailType {
-	return InvalidLeaseErrType
-}
-
-var _ ErrorDetailInterface = &InvalidLeaseError{}
-
-// NewOptimisticEvalConflictsError initializes a new
-// OptimisticEvalConflictsError.
-func NewOptimisticEvalConflictsError() *OptimisticEvalConflictsError {
-	return &OptimisticEvalConflictsError{}
-}
-
-func (e *OptimisticEvalConflictsError) Error() string {
-	return e.message(nil)
-}
-
-func (e *OptimisticEvalConflictsError) message(pErr *Error) string {
-	return "optimistic eval encountered conflict"
-}
-
-// Type is part of the ErrorDetailInterface.
-func (e *OptimisticEvalConflictsError) Type() ErrorDetailType {
-	return OptimisticEvalConflictsErrType
-}
-
-var _ ErrorDetailInterface = &OptimisticEvalConflictsError{}
-
-// NewMinTimestampBoundUnsatisfiableError initializes a new
-// MinTimestampBoundUnsatisfiableError.
-func NewMinTimestampBoundUnsatisfiableError(
-	minTimestampBound, resolvedTimestamp hlc.Timestamp,
-) *MinTimestampBoundUnsatisfiableError {
-	return &MinTimestampBoundUnsatisfiableError{
-		MinTimestampBound: minTimestampBound,
-		ResolvedTimestamp: resolvedTimestamp,
-	}
-}
-
-func (e *MinTimestampBoundUnsatisfiableError) Error() string {
-	return e.message(nil)
-}
-
-func (e *MinTimestampBoundUnsatisfiableError) message(pErr *Error) string {
-	return fmt.Sprintf("bounded staleness read with minimum timestamp "+
-		"bound of %s could not be satisfied by a local resolved timestamp of %s",
-		e.MinTimestampBound, e.ResolvedTimestamp)
-}
-
-// Type is part of the ErrorDetailInterface.
-func (e *MinTimestampBoundUnsatisfiableError) Type() ErrorDetailType {
-	return MinTimestampBoundUnsatisfiableErrType
-}
-
-var _ ErrorDetailInterface = &MinTimestampBoundUnsatisfiableError{}

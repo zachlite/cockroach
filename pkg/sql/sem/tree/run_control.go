@@ -10,11 +10,12 @@
 
 package tree
 
+import "fmt"
+
 // ControlJobs represents a PAUSE/RESUME/CANCEL JOBS statement.
 type ControlJobs struct {
 	Jobs    *Select
 	Command JobCommand
-	Reason  Expr
 }
 
 // JobCommand determines which type of action to effect on the selected job(s).
@@ -39,10 +40,6 @@ func (n *ControlJobs) Format(ctx *FmtCtx) {
 	ctx.WriteString(JobCommandToStatement[n.Command])
 	ctx.WriteString(" JOBS ")
 	ctx.FormatNode(n.Jobs)
-	if n.Reason != nil {
-		ctx.WriteString(" WITH REASON = ")
-		ctx.FormatNode(n.Reason)
-	}
 }
 
 // CancelQueries represents a CANCEL QUERIES statement.
@@ -106,11 +103,10 @@ type ControlSchedules struct {
 
 var _ Statement = &ControlSchedules{}
 
-// Format implements the NodeFormatter interface.
+// Format implements NodeFormatter interface
 func (n *ControlSchedules) Format(ctx *FmtCtx) {
-	ctx.WriteString(n.Command.String())
-	ctx.WriteString(" SCHEDULES ")
-	ctx.FormatNode(n.Schedules)
+	fmt.Fprintf(ctx, "%s SCHEDULES ", n.Command)
+	n.Schedules.Format(ctx)
 }
 
 // ControlJobsForSchedules represents PAUSE/RESUME/CANCEL clause
@@ -120,27 +116,10 @@ type ControlJobsForSchedules struct {
 	Command   JobCommand
 }
 
-// ControlJobsOfType represents PAUSE/RESUME/CANCEL clause which
-// applies the job command to the job matching a specified type
-type ControlJobsOfType struct {
-	Type    string
-	Command JobCommand
-}
-
-// Format implements the NodeFormatter interface.
-func (n *ControlJobsOfType) Format(ctx *FmtCtx) {
-	ctx.WriteString(JobCommandToStatement[n.Command])
-	ctx.WriteString(" ALL ")
-	ctx.WriteString(n.Type)
-	ctx.WriteString(" JOBS")
-}
-
-// Format implements NodeFormatter interface.
+// Format implements NodeFormatter interface
 func (n *ControlJobsForSchedules) Format(ctx *FmtCtx) {
-	ctx.WriteString(JobCommandToStatement[n.Command])
-	ctx.WriteString(" JOBS FOR SCHEDULES ")
-	ctx.FormatNode(n.Schedules)
+	fmt.Fprintf(ctx, "%s JOBS FOR SCHEDULES %s",
+		JobCommandToStatement[n.Command], AsString(n.Schedules))
 }
 
 var _ Statement = &ControlJobsForSchedules{}
-var _ Statement = &ControlJobsOfType{}

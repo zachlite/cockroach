@@ -1,3 +1,7 @@
+# LogicTest: default-configs local-mixed-20.1-20.2
+# The mixed configuration is enabled to test backward compatibility for database
+# schema changes.
+
 statement ok
 CREATE DATABASE a
 
@@ -10,28 +14,28 @@ CREATE DATABASE IF NOT EXISTS a
 statement error pgcode 42601 empty database name
 CREATE DATABASE ""
 
-query TTTTT colnames
+query TT colnames
 SHOW DATABASES
 ----
-database_name  owner  primary_region  regions  survival_goal
-a              root   NULL            {}       NULL
-defaultdb      root   NULL            {}       NULL
-postgres       root   NULL            {}       NULL
-system         node   NULL            {}       NULL
-test           root   NULL            {}       NULL
+database_name  owner
+a              root
+defaultdb      root
+postgres       root
+system         node
+test           root
 
 statement ok
 COMMENT ON DATABASE a IS 'A'
 
-query TTTTTT colnames
+query TTT colnames
 SHOW DATABASES WITH COMMENT
 ----
-database_name  owner  primary_region  regions  survival_goal  comment
-a              root   NULL            {}       NULL           A
-defaultdb      root   NULL            {}       NULL           NULL
-postgres       root   NULL            {}       NULL           NULL
-system         node   NULL            {}       NULL           NULL
-test           root   NULL            {}       NULL           NULL
+database_name  owner  comment
+a              root   A
+defaultdb      root   NULL
+postgres       root   NULL
+system         node   NULL
+test           root   NULL
 
 query TT colnames
 SHOW SCHEMAS FROM a
@@ -94,22 +98,22 @@ CREATE DATABASE b8 WITH CONNECTION LIMIT = 1
 statement ok
 CREATE DATABASE c
 
-query TTTTT
+query TT
 SHOW DATABASES
 ----
-a          root  NULL  {}  NULL
-b          root  NULL  {}  NULL
-b2         root  NULL  {}  NULL
-b3         root  NULL  {}  NULL
-b4         root  NULL  {}  NULL
-b5         root  NULL  {}  NULL
-b6         root  NULL  {}  NULL
-b7         root  NULL  {}  NULL
-c          root  NULL  {}  NULL
-defaultdb  root  NULL  {}  NULL
-postgres   root  NULL  {}  NULL
-system     node  NULL  {}  NULL
-test       root  NULL  {}  NULL
+a          root
+b          root
+b2         root
+b3         root
+b4         root
+b5         root
+b6         root
+b7         root
+c          root
+defaultdb  root
+postgres   root
+system     node
+test       root
 
 statement ok
 CREATE TABLE b.a (id INT PRIMARY KEY)
@@ -150,16 +154,16 @@ DROP DATABASE b2 CASCADE;
 statement error pgcode 42601 empty database name
 DROP DATABASE ""
 
-query TTTTT colnames
+query TT colnames
 SHOW DATABASES
 ----
-database_name  owner  primary_region  regions  survival_goal
-a              root   NULL            {}       NULL
-c              root   NULL            {}       NULL
-defaultdb      root   NULL            {}       NULL
-postgres       root   NULL            {}       NULL
-system         node   NULL            {}       NULL
-test           root   NULL            {}       NULL
+database_name  owner
+a              root
+c              root
+defaultdb      root
+postgres       root
+system         node
+test           root
 
 statement ok
 CREATE DATABASE b
@@ -218,70 +222,3 @@ user testuser
 
 statement error permission denied to create database
 CREATE DATABASE privs
-
-# Unit test for #61150
-user root
-
-statement ok
-CREATE DATABASE d1
-
-statement ok
-BEGIN
-
-statement ok
-DROP DATABASE d1
-
-statement error pgcode 55000 database "d1" is being dropped, try again later
-CREATE DATABASE IF NOT EXISTS d1
-
-statement ok
-END
-
-statement ok
-DROP DATABASE d1
-
-subtest missing-db-error-issue-68060
-
-statement ok
-CREATE DATABASE db1;
-
-statement ok;
-USE db1;
-
-statement ok
-SET sql_safe_updates=false;
-
-statement ok
-DROP DATABASE db1;
-
-statement error pq: database "db1" does not exist
-SELECT * FROM crdb_internal.session_variables;
-
-subtest missing-schema-error-69713
-
-statement ok
-CREATE DATABASE db69713;
-
-statement ok
-USE db69713;
-
-statement ok
-CREATE SCHEMA s;
-
-statement ok
-CREATE TYPE s.testenum AS ENUM ('foo', 'bar', 'baz');
-
-statement ok
-CREATE TABLE db69713.s.pg_indexdef_test (
-    a INT PRIMARY KEY,
-    e s.testenum
-);
-
-statement ok
-CREATE TABLE db69713.s.pg_constraintdef_test (
-  a int,
-  FOREIGN KEY(a) REFERENCES db69713.s.pg_indexdef_test(a) ON DELETE CASCADE
-);
-
-statement ok
-DROP DATABASE db69713;

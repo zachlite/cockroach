@@ -10,8 +10,6 @@
 
 package pgdate
 
-import "github.com/cockroachdb/redact"
-
 //go:generate stringer -type=field
 
 // A field is some piece of information that we can newFieldExtract out of a
@@ -54,14 +52,6 @@ func (f field) AsSet() fieldSet {
 // name: "Year" vs "fieldYear".
 func (f field) Pretty() string {
 	return f.String()[5:]
-}
-
-// SafePretty wraps the generated String() function to return only the
-// name: "Year" vs "fieldYear" as a RedactableString.
-func (f field) SafePretty() redact.RedactableString {
-	// Note: this cast is safe because the String() method is generated
-	// by the stringer and only returns literal strings.
-	return redact.RedactableString(f.String()[5:])
 }
 
 // A fieldSet is an immutable aggregate of fields.
@@ -116,15 +106,13 @@ func (s fieldSet) HasAny(other fieldSet) bool {
 	return s&other != 0
 }
 
-func (s *fieldSet) String() string { return redact.StringWithoutMarkers(s) }
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (s *fieldSet) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.SafeString("[ ")
+func (s *fieldSet) String() string {
+	ret := "[ "
 	for f := fieldMinimum; f <= fieldMaximum; f++ {
 		if s.Has(f) {
-			w.Printf("%v ", f.SafePretty())
+			ret += f.Pretty() + " "
 		}
 	}
-	w.SafeRune(']')
+	ret += "]"
+	return ret
 }

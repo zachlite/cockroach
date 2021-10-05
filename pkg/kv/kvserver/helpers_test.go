@@ -24,13 +24,12 @@ import (
 	"unsafe"
 
 	circuit "github.com/cockroachdb/circuitbreaker"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -50,12 +49,11 @@ func (s *Store) Transport() *RaftTransport {
 }
 
 func (s *Store) FindTargetAndTransferLease(
-	ctx context.Context, repl *Replica, desc *roachpb.RangeDescriptor, conf roachpb.SpanConfig,
+	ctx context.Context, repl *Replica, desc *roachpb.RangeDescriptor, zone *zonepb.ZoneConfig,
 ) (bool, error) {
-	transferStatus, err := s.replicateQueue.shedLease(
-		ctx, repl, desc, conf, transferLeaseOptions{},
+	return s.replicateQueue.findTargetAndTransferLease(
+		ctx, repl, desc, zone, transferLeaseOptions{},
 	)
-	return transferStatus == transferOK, err
 }
 
 // AddReplica adds the replica to the store's replica map and to the sorted
@@ -94,7 +92,7 @@ func (s *Store) ComputeMVCCStats() (enginepb.MVCCStats, error) {
 // store's consistency queue.
 func ConsistencyQueueShouldQueue(
 	ctx context.Context,
-	now hlc.ClockTimestamp,
+	now hlc.Timestamp,
 	desc *roachpb.RangeDescriptor,
 	getQueueLastProcessed func(ctx context.Context) (hlc.Timestamp, error),
 	isNodeAvailable func(nodeID roachpb.NodeID) bool,
@@ -147,7 +145,7 @@ func (s *Store) SetSplitQueueActive(active bool) {
 	s.setSplitQueueActive(active)
 }
 
-// SetMergeQueueActive enables or disables the merge queue.
+// SetMergeQueueActive enables or disables the split queue.
 func (s *Store) SetMergeQueueActive(active bool) {
 	s.setMergeQueueActive(active)
 }
@@ -204,8 +202,46 @@ func (s *Store) RaftSchedulerPriorityID() roachpb.RangeID {
 	return s.scheduler.PriorityID()
 }
 
+// ClearClosedTimestampStorage clears the closed timestamp storage of all
+// knowledge about closed timestamps.
+func (s *Store) ClearClosedTimestampStorage() {
+	s.cfg.ClosedTimestamp.Storage.Clear()
+}
+
+// RequestClosedTimestamp instructs the closed timestamp client to request the
+// relevant node to publish its MLAI for the provided range.
+func (s *Store) RequestClosedTimestamp(nodeID roachpb.NodeID, rangeID roachpb.RangeID) {
+	s.cfg.ClosedTimestamp.Clients.Request(nodeID, rangeID)
+}
+
+// AssertInvariants verifies that the store's bookkeping is self-consistent. It
+// is only valid to call this method when there is no in-flight traffic to the
+// store (e.g., after the store is shut down).
+func (s *Store) AssertInvariants() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.mu.replicas.Range(func(_ int64, p unsafe.Pointer) bool {
+		ctx := s.cfg.AmbientCtx.AnnotateCtx(context.Background())
+		repl := (*Replica)(p)
+		// We would normally need to hold repl.raftMu. Otherwise we can observe an
+		// initialized replica that is not in s.replicasByKey, e.g., if we race with
+		// a goroutine that is currently initializing repl. The lock ordering makes
+		// acquiring repl.raftMu challenging; instead we require that this method is
+		// called only when there is no in-flight traffic to the store, at which
+		// point acquiring repl.raftMu is unnecessary.
+		if repl.IsInitialized() {
+			if ex := s.mu.replicasByKey.Get(repl); ex != repl {
+				log.Fatalf(ctx, "%v misplaced in replicasByKey; found %v instead", repl, ex)
+			}
+		} else if _, ok := s.mu.uninitReplicas[repl.RangeID]; !ok {
+			log.Fatalf(ctx, "%v missing from uninitReplicas", repl)
+		}
+		return true // keep iterating
+	})
+}
+
 func NewTestStorePool(cfg StoreConfig) *StorePool {
-	TimeUntilStoreDead.Override(context.Background(), &cfg.Settings.SV, TestTimeUntilStoreDeadOff)
+	TimeUntilStoreDead.Override(&cfg.Settings.SV, TestTimeUntilStoreDeadOff)
 	return NewStorePool(
 		cfg.AmbientCtx,
 		cfg.Settings,
@@ -215,8 +251,8 @@ func NewTestStorePool(cfg StoreConfig) *StorePool {
 		func() int {
 			return 1
 		},
-		func(roachpb.NodeID, time.Time, time.Duration) livenesspb.NodeLivenessStatus {
-			return livenesspb.NodeLivenessStatus_LIVE
+		func(roachpb.NodeID, time.Time, time.Duration) kvserverpb.NodeLivenessStatus {
+			return kvserverpb.NodeLivenessStatus_LIVE
 		},
 		/* deterministic */ false,
 	)
@@ -225,9 +261,9 @@ func NewTestStorePool(cfg StoreConfig) *StorePool {
 func (r *Replica) AssertState(ctx context.Context, reader storage.Reader) {
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	r.assertStateRaftMuLockedReplicaMuRLocked(ctx, reader)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.assertStateLocked(ctx, reader)
 }
 
 func (r *Replica) RaftLock() {
@@ -246,17 +282,15 @@ func (r *Replica) GetLastIndex() (uint64, error) {
 	return r.raftLastIndexLocked()
 }
 
-// LastAssignedLeaseIndexRLocked returns the last assigned lease index.
 func (r *Replica) LastAssignedLeaseIndex() uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.mu.proposalBuf.LastAssignedLeaseIndexRLocked()
 }
 
-// LastAssignedLeaseIndexRLocked is like LastAssignedLeaseIndex, but requires
-// b.mu to be held in read mode.
-func (b *propBuf) LastAssignedLeaseIndexRLocked() uint64 {
-	return b.assignedLAI
+// MaxClosed returns the maximum closed timestamp known to the Replica.
+func (r *Replica) MaxClosed(ctx context.Context) (_ hlc.Timestamp, ok bool) {
+	return r.maxClosed()
 }
 
 // SetQuotaPool allows the caller to set a replica's quota pool initialized to
@@ -380,12 +414,6 @@ func (r *Replica) LargestPreviousMaxRangeSizeBytes() int64 {
 	return r.mu.largestPreviousMaxRangeSizeBytes
 }
 
-// LoadBasedSplitter returns the replica's split.Decider, which is used to
-// assist load-based split (and merge) decisions.
-func (r *Replica) LoadBasedSplitter() *split.Decider {
-	return &r.loadBasedSplitter
-}
-
 func MakeSSTable(key, value string, ts hlc.Timestamp) ([]byte, storage.MVCCKeyValue) {
 	sstFile := &storage.MemFile{}
 	sst := storage.MakeIngestionSSTWriter(sstFile)
@@ -457,6 +485,13 @@ func SetMockAddSSTable() (undo func()) {
 	}
 }
 
+// IsQuiescent returns whether the replica is quiescent or not.
+func (r *Replica) IsQuiescent() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mu.quiescent
+}
+
 // GetQueueLastProcessed returns the last processed timestamp for the
 // specified queue, or the zero timestamp if not available.
 func (r *Replica) GetQueueLastProcessed(ctx context.Context, queue string) (hlc.Timestamp, error) {
@@ -477,12 +512,19 @@ func (r *Replica) ReadProtectedTimestamps(ctx context.Context) {
 	ts = r.readProtectedTimestampsRLocked(ctx, nil /* f */)
 }
 
-// ClosedTimestampPolicy returns the closed timestamp policy of the range, which
-// is updated asynchronously through gossip of zone configurations.
-func (r *Replica) ClosedTimestampPolicy() roachpb.RangeClosedTimestampPolicy {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.closedTimestampPolicyRLocked()
+func (nl *NodeLiveness) SetDrainingInternal(
+	ctx context.Context, liveness LivenessRecord, drain bool,
+) error {
+	return nl.setDrainingInternal(ctx, liveness, drain, nil /* reporter */)
+}
+
+func (nl *NodeLiveness) SetDecommissioningInternal(
+	ctx context.Context,
+	nodeID roachpb.NodeID,
+	liveness LivenessRecord,
+	targetStatus kvserverpb.MembershipStatus,
+) (changeCommitted bool, err error) {
+	return nl.setMembershipStatusInternal(ctx, nodeID, liveness, targetStatus)
 }
 
 // GetCircuitBreaker returns the circuit breaker controlling

@@ -15,7 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -83,7 +83,7 @@ func (c *CustomFuncs) SimplifyCoalesce(args memo.ScalarListExpr) opt.ScalarExpr 
 
 		// If item is not a constant value, then its value may turn out to be
 		// null, so no more folding. Return operands from then on.
-		if !c.IsConstValueOrGroupOfConstValues(item) {
+		if !c.IsConstValueOrTuple(item) {
 			return c.f.ConstructCoalesce(args[i:])
 		}
 
@@ -114,45 +114,6 @@ func (c *CustomFuncs) IsConstValueEqual(const1, const2 opt.ScalarExpr) bool {
 	default:
 		panic(errors.AssertionFailedf("unexpected Op type: %v", log.Safe(op1)))
 	}
-}
-
-// UnifyComparison attempts to convert a constant expression to the type of the
-// variable expression, if that conversion can round-trip and is monotonic.
-// Otherwise it returns ok=false.
-func (c *CustomFuncs) UnifyComparison(
-	v *memo.VariableExpr, cnst *memo.ConstExpr,
-) (_ opt.ScalarExpr, ok bool) {
-	desiredType := v.DataType()
-	originalType := cnst.DataType()
-
-	// Don't bother if they're already the same.
-	if desiredType.Equivalent(originalType) {
-		return nil, false
-	}
-
-	if !isMonotonicConversion(originalType, desiredType) {
-		return nil, false
-	}
-
-	// Check that the datum can round-trip between the types. If this is true, it
-	// means we don't lose any information needed to generate spans, and combined
-	// with monotonicity means that it's safe to convert the RHS to the type of
-	// the LHS.
-	convertedDatum, err := tree.PerformCast(c.f.evalCtx, cnst.Value, desiredType)
-	if err != nil {
-		return nil, false
-	}
-
-	convertedBack, err := tree.PerformCast(c.f.evalCtx, convertedDatum, originalType)
-	if err != nil {
-		return nil, false
-	}
-
-	if convertedBack.Compare(c.f.evalCtx, cnst.Value) != 0 {
-		return nil, false
-	}
-
-	return c.f.ConstructConst(convertedDatum, desiredType), true
 }
 
 // SimplifyWhens removes known unreachable WHEN cases and constructs a new CASE
@@ -252,8 +213,8 @@ func (c *CustomFuncs) MakeUnorderedSubquery() *memo.SubqueryPrivate {
 }
 
 // SubqueryOrdering returns the ordering property on a SubqueryPrivate.
-func (c *CustomFuncs) SubqueryOrdering(sub *memo.SubqueryPrivate) props.OrderingChoice {
-	var oc props.OrderingChoice
+func (c *CustomFuncs) SubqueryOrdering(sub *memo.SubqueryPrivate) physical.OrderingChoice {
+	var oc physical.OrderingChoice
 	oc.FromOrdering(sub.Ordering)
 	return oc
 }
@@ -327,7 +288,8 @@ func (c *CustomFuncs) InlineValues(v memo.RelExpr) *memo.TupleExpr {
 
 // IsTupleOfVars returns true if the given tuple contains Variables
 // corresponding to the given columns (in the same order).
-func (c *CustomFuncs) IsTupleOfVars(t *memo.TupleExpr, cols opt.ColList) bool {
+func (c *CustomFuncs) IsTupleOfVars(tuple opt.ScalarExpr, cols opt.ColList) bool {
+	t := tuple.(*memo.TupleExpr)
 	if len(t.Elems) != len(cols) {
 		return false
 	}
@@ -341,8 +303,10 @@ func (c *CustomFuncs) IsTupleOfVars(t *memo.TupleExpr, cols opt.ColList) bool {
 }
 
 // VarsAreSame returns true if the two variables are the same.
-func (c *CustomFuncs) VarsAreSame(left, right *memo.VariableExpr) bool {
-	return left.Col == right.Col
+func (c *CustomFuncs) VarsAreSame(left, right opt.ScalarExpr) bool {
+	lv := left.(*memo.VariableExpr)
+	rv := right.(*memo.VariableExpr)
+	return lv.Col == rv.Col
 }
 
 // EqualsColumn returns true if the two column IDs are the same.
@@ -352,13 +316,15 @@ func (c *CustomFuncs) EqualsColumn(left, right opt.ColumnID) bool {
 
 // TuplesHaveSameLength returns true if two tuples have the same number of
 // elements.
-func (c *CustomFuncs) TuplesHaveSameLength(a, b *memo.TupleExpr) bool {
-	return len(a.Elems) == len(b.Elems)
+func (c *CustomFuncs) TuplesHaveSameLength(a, b opt.ScalarExpr) bool {
+	return len(a.(*memo.TupleExpr).Elems) == len(b.(*memo.TupleExpr).Elems)
 }
 
 // SplitTupleEq splits an equality condition between two tuples into multiple
 // equalities, one for each tuple column.
-func (c *CustomFuncs) SplitTupleEq(lhs, rhs *memo.TupleExpr) memo.FiltersExpr {
+func (c *CustomFuncs) SplitTupleEq(lhsExpr, rhsExpr opt.ScalarExpr) memo.FiltersExpr {
+	lhs := lhsExpr.(*memo.TupleExpr)
+	rhs := rhsExpr.(*memo.TupleExpr)
 	if len(lhs.Elems) != len(rhs.Elems) {
 		panic(errors.AssertionFailedf("unequal tuple lengths"))
 	}

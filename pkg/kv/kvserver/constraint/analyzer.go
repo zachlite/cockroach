@@ -13,6 +13,7 @@ package constraint
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 )
 
@@ -20,7 +21,7 @@ import (
 // combines a zone's constraints with information about which stores satisfy
 // what term of the constraints disjunction.
 type AnalyzedConstraints struct {
-	Constraints []roachpb.ConstraintsConjunction
+	Constraints []zonepb.ConstraintsConjunction
 	// True if the per-replica constraints don't fully cover all the desired
 	// replicas in the range (sum(constraints.NumReplicas) < zone.NumReplicas).
 	// In such cases, we allow replicas that don't match any of the per-replica
@@ -35,10 +36,6 @@ type AnalyzedConstraints struct {
 	Satisfies map[roachpb.StoreID][]int
 }
 
-// EmptyAnalyzedConstraints represents an empty set of constraints that are
-// satisfied by any given configuration of replicas.
-var EmptyAnalyzedConstraints = AnalyzedConstraints{}
-
 // AnalyzeConstraints processes the zone config constraints that apply to a
 // range along with the current replicas for a range, spitting back out
 // information about which constraints are satisfied by which replicas and
@@ -47,20 +44,19 @@ func AnalyzeConstraints(
 	ctx context.Context,
 	getStoreDescFn func(roachpb.StoreID) (roachpb.StoreDescriptor, bool),
 	existing []roachpb.ReplicaDescriptor,
-	numReplicas int32,
-	constraints []roachpb.ConstraintsConjunction,
+	zone *zonepb.ZoneConfig,
 ) AnalyzedConstraints {
 	result := AnalyzedConstraints{
-		Constraints: constraints,
+		Constraints: zone.Constraints,
 	}
 
-	if len(constraints) > 0 {
-		result.SatisfiedBy = make([][]roachpb.StoreID, len(constraints))
+	if len(zone.Constraints) > 0 {
+		result.SatisfiedBy = make([][]roachpb.StoreID, len(zone.Constraints))
 		result.Satisfies = make(map[roachpb.StoreID][]int)
 	}
 
 	var constrainedReplicas int32
-	for i, subConstraints := range constraints {
+	for i, subConstraints := range zone.Constraints {
 		constrainedReplicas += subConstraints.NumReplicas
 		for _, repl := range existing {
 			// If for some reason we don't have the store descriptor (which shouldn't
@@ -74,7 +70,7 @@ func AnalyzeConstraints(
 			}
 		}
 	}
-	if constrainedReplicas > 0 && constrainedReplicas < numReplicas {
+	if constrainedReplicas > 0 && constrainedReplicas < *zone.NumReplicas {
 		result.UnconstrainedReplicas = true
 	}
 	return result
@@ -84,12 +80,12 @@ func AnalyzeConstraints(
 // the possibly numerous sets that apply to a range), returning true iff the
 // store matches the constraints. The contraints are AND'ed together; a store
 // matches the conjunction if it matches all of them.
-func ConjunctionsCheck(store roachpb.StoreDescriptor, constraints []roachpb.Constraint) bool {
+func ConjunctionsCheck(store roachpb.StoreDescriptor, constraints []zonepb.Constraint) bool {
 	for _, constraint := range constraints {
-		// StoreMatchesConstraint returns whether a store matches the given constraint.
-		hasConstraint := roachpb.StoreMatchesConstraint(store, constraint)
-		if (constraint.Type == roachpb.Constraint_REQUIRED && !hasConstraint) ||
-			(constraint.Type == roachpb.Constraint_PROHIBITED && hasConstraint) {
+		// StoreSatisfiesConstraint returns whether a store matches the given constraint.
+		hasConstraint := zonepb.StoreMatchesConstraint(store, constraint)
+		if (constraint.Type == zonepb.Constraint_REQUIRED && !hasConstraint) ||
+			(constraint.Type == zonepb.Constraint_PROHIBITED && hasConstraint) {
 			return false
 		}
 	}

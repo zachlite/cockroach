@@ -168,13 +168,13 @@ func (s *ColIndexJoin) Next() coldata.Batch {
 			// Index joins will always return exactly one output row per input row.
 			s.rf.setEstimatedRowCount(uint64(rowCount))
 			if err := s.rf.StartScan(
-				s.Ctx,
 				s.flowCtx.Txn,
 				spans,
 				nil,   /* bsHeader */
 				false, /* limitBatches */
 				rowinfra.NoBytesLimit,
 				rowinfra.NoRowLimit,
+				s.flowCtx.TraceKV,
 				s.flowCtx.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 			); err != nil {
 				colexecerror.InternalError(err)
@@ -512,11 +512,6 @@ var (
 // increase cluster instability.
 func adjustMemEstimate(estimate int64) int64 {
 	return estimate*memEstimateMultiplier + memEstimateAdditive
-}
-
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *ColIndexJoin) GetScanStats() execinfra.ScanStats {
-	return execinfra.GetScanStats(s.Ctx)
 }
 
 // Release implements the execinfra.Releasable interface.

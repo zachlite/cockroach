@@ -823,7 +823,7 @@ CREATE TABLE pg_catalog.pg_user (
 	userepl  BOOL,
 	usebypassrls BOOL,
 	passwd TEXT,
-	valuntil TIMESTAMPTZ,
+	valuntil TIMESTAMP,
 	useconfig TEXT[]
 )`
 
@@ -1238,18 +1238,18 @@ CREATE TABLE pg_catalog.pg_hba_file_rules (
 	options STRING[]
 )`
 
-// PgCatalogStatisticExt describes the schema of pg_catalog.pg_statistic_ext
-// https://www.postgresql.org/docs/13/catalog-pg-statistic-ext.html
+// PgCatalogStatisticExt is an empty table created by pg_catalog_test
+// and is currently unimplemented.
 const PgCatalogStatisticExt = `
 CREATE TABLE pg_catalog.pg_statistic_ext (
-	oid OID,
 	stxrelid OID,
-  stxname NAME,
-  stxnamespace OID,
-	stxowner OID,
 	stxstattarget INT4,
+	oid OID,
 	stxkeys INT2VECTOR,
-	stxkind "char"[]
+	stxkind "char"[],
+	stxname NAME,
+	stxnamespace OID,
+	stxowner OID
 )`
 
 // PgCatalogReplicationOrigin is an empty table created by pg_catalog_test

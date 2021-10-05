@@ -12,6 +12,7 @@ import { createMemoryHistory } from "history";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import Long from "long";
 import moment from "moment";
+import * as protos from "@cockroachlabs/crdb-protobuf-client";
 
 const history = createMemoryHistory({ initialEntries: ["/transactions"] });
 
@@ -42,6 +43,9 @@ export const dateRange: [moment.Moment, moment.Moment] = [
   moment.utc("2021.08.08"),
   moment.utc("2021.08.12"),
 ];
+export const timestamp = new protos.google.protobuf.Timestamp({
+  seconds: new Long(Date.parse("Sep 15 2021 01:00:00 GMT") * 1e-3),
+});
 
 export const data: cockroach.server.serverpb.IStatementsResponse = {
   statements: [
@@ -53,10 +57,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-update-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(557),
@@ -120,7 +126,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           squared_diffs: 47.74147217235174,
         },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.99 },
       },
       id: Long.fromInt(100),
     },
@@ -131,10 +136,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-fetch-single-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(70),
@@ -184,7 +191,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           squared_diffs: 31.085714285714225,
         },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(101),
     },
@@ -196,10 +202,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read orphaned leases",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(1),
@@ -240,7 +248,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 40, squared_diffs: 0 },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(102),
     },
@@ -252,10 +259,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-expire-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(280),
@@ -338,10 +347,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           mean: 15.789285714285711,
           squared_diffs: 652.5678571428576,
         },
-        rows_written: {
-          mean: 1.4444499999,
-          squared_diffs: 0.99999999,
-        },
       },
       id: Long.fromInt(103),
     },
@@ -352,10 +357,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-insert-session",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(1),
@@ -391,7 +398,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(104),
     },
@@ -402,10 +408,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-show-version",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(1),
@@ -430,7 +438,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(105),
     },
@@ -441,10 +448,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-read-setting",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(1),
@@ -479,7 +488,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 62, squared_diffs: 0 },
         rows_read: { mean: 1, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(106),
     },
@@ -491,10 +499,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-protectedts-GetMetadata",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(24),
@@ -567,7 +577,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(107),
     },
@@ -579,10 +588,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-delete-sessions",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: true,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(141),
@@ -679,7 +690,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(108),
     },
@@ -691,10 +701,12 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
           app: "$ internal-log-event",
           distSQL: false,
           failed: false,
+          opt: true,
           implicit_txn: false,
           vec: false,
         },
         node_id: 5,
+        aggregated_ts: timestamp,
       },
       stats: {
         count: Long.fromInt(1),
@@ -739,7 +751,6 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
         },
         bytes_read: { mean: 0, squared_diffs: 0 },
         rows_read: { mean: 0, squared_diffs: 0 },
-        rows_written: { mean: 2, squared_diffs: 1.999 },
       },
       id: Long.fromInt(109),
     },
@@ -751,6 +762,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(100)],
         app: "$ internal-select-running/get-claimed-jobs",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(93),
           max_retries: Long.fromInt(0),
@@ -772,6 +784,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(101)],
         app: "$ internal-stmt-diag-poll",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(281),
           max_retries: Long.fromInt(0),
@@ -793,6 +806,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(102)],
         app: "$ internal-get-tables",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(1),
           max_retries: Long.fromInt(0),
@@ -808,6 +822,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(103)],
         app: "$ internal-read orphaned leases",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(1),
           max_retries: Long.fromInt(0),
@@ -823,6 +838,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(104)],
         app: "$ internal-expire-sessions",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(280),
           max_retries: Long.fromInt(0),
@@ -841,6 +857,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(105)],
         app: "$ internal-show-version",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(1),
           max_retries: Long.fromInt(0),
@@ -856,6 +873,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(106), Long.fromInt(107)],
         app: "$ internal-delete-sessions",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(141),
           max_retries: Long.fromInt(0),
@@ -877,6 +895,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(108)],
         app: "$ TEST",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(278),
           max_retries: Long.fromInt(0),
@@ -895,6 +914,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(109)],
         app: "$ TEST",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(140),
           max_retries: Long.fromInt(0),
@@ -916,6 +936,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(107)],
         app: "$ TEST",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(280),
           max_retries: Long.fromInt(0),
@@ -937,6 +958,7 @@ export const data: cockroach.server.serverpb.IStatementsResponse = {
       stats_data: {
         statement_fingerprint_ids: [Long.fromInt(107)],
         app: "$ TEST EXACT",
+        aggregated_ts: timestamp,
         stats: {
           count: Long.fromInt(280),
           max_retries: Long.fromInt(0),

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alessio/shellescape"
+	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -83,7 +83,7 @@ func parseAddr(addr string) (string, error) {
 
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return "", fmt.Errorf("invalid address %s", addr)
+		return "", errors.Newf("invalid address %s", addr)
 	}
 
 	return fmt.Sprintf("%s:%s", ip, port), nil
@@ -127,7 +127,7 @@ func addCommonTestFlags(cmd *cobra.Command) {
 func (d *dev) ensureBinaryInPath(bin string) error {
 	if !isTesting {
 		if _, err := d.exec.LookPath(bin); err != nil {
-			return fmt.Errorf("could not find %s in PATH", bin)
+			return errors.Newf("Could not find %s in PATH", bin)
 		}
 	}
 	return nil
@@ -193,23 +193,4 @@ func setupPathReal(dev *dev) error {
 		return nil
 	}
 	return nil
-}
-
-func splitArgsAtDash(cmd *cobra.Command, args []string) (before, after []string) {
-	argsLenAtDash := cmd.ArgsLenAtDash()
-	if argsLenAtDash < 0 {
-		// If there's no dash, the value of this is -1.
-		before = args
-	} else {
-		before = args[0:argsLenAtDash]
-		after = args[argsLenAtDash:]
-	}
-	return
-}
-
-func logCommand(cmd string, args ...string) {
-	var fullArgs []string
-	fullArgs = append(fullArgs, cmd)
-	fullArgs = append(fullArgs, args...)
-	log.Printf("$ %s", shellescape.QuoteCommand(fullArgs))
 }

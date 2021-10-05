@@ -46,12 +46,122 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
   "db":      "{{.String}}",
   "distsql": {{.Bool}},
   "failed":  {{.Bool}},
+  "opt":     {{.Bool}},
   "implicitTxn": {{.Bool}},
   "vec":         {{.Bool}},
   "fullScan":    {{.Bool}}
 }
 `
 
+		expectedStatisticsStrTemplate := `
+     {
+       "statistics": {
+         "cnt": {{.Int64}},
+         "firstAttemptCnt": {{.Int64}},
+         "maxRetries":      {{.Int64}},
+         "lastExecAt":      "{{stringifyTime .Time}}",
+         "numRows": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "parseLat": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "planLat": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "runLat": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "svcLat": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "ovhLat": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "bytesRead": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "rowsRead": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "nodes": [{{joinInts .IntArray}}]
+       },
+       "execution_statistics": {
+         "cnt": {{.Int64}},
+         "networkBytes": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "maxMemUsage": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "contentionTime": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "networkMsgs": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         },
+         "maxDiskUsage": {
+           "mean": {{.Float}},
+           "sqDiff": {{.Float}}
+         }
+       }
+     }
+		 `
+
+		expectedMetadataStr := fillTemplate(t, expectedMetadataStrTemplate, data)
+		expectedStatisticsStr := fillTemplate(t, expectedStatisticsStrTemplate, data)
+		fillObject(t, reflect.ValueOf(&input), &data)
+
+		actualMetadataJSON, err := BuildStmtMetadataJSON(&input)
+		require.NoError(t, err)
+		jsonTestHelper(t, expectedMetadataStr, actualMetadataJSON)
+
+		actualStatisticsJSON, err := BuildStmtStatisticsJSON(&input.Stats)
+		require.NoError(t, err)
+		jsonTestHelper(t, expectedStatisticsStr, actualStatisticsJSON)
+
+		// Ensure that we get the same protobuf after we decode the JSON.
+		var actualJSONUnmarshalled roachpb.CollectedStatementStatistics
+
+		err = DecodeStmtStatsMetadataJSON(actualMetadataJSON, &actualJSONUnmarshalled)
+		require.NoError(t, err)
+
+		err = DecodeStmtStatsStatisticsJSON(actualStatisticsJSON, &actualJSONUnmarshalled.Stats)
+		require.NoError(t, err)
+		require.Equal(t, input, actualJSONUnmarshalled)
+	})
+
+	// When a new statistic is added to a statement payload, older versions won't have the
+	// new parameter, so this test is to confirm that all other parameters will be set and
+	// the new one will be empty, without breaking the decoding process.
+	t.Run("statement_statistics with new parameter", func(t *testing.T) {
+		data := genRandomData()
+		expectedStatistics := roachpb.CollectedStatementStatistics{}
+
+		expectedMetadataStrTemplate := `
+			{
+				"stmtTyp": "{{.String}}",
+				"query":   "{{.String}}",
+				"db":      "{{.String}}",
+				"distsql": {{.Bool}},
+				"failed":  {{.Bool}},
+				"implicitTxn": {{.Bool}},
+				"vec":         {{.Bool}},
+				"fullScan":    {{.Bool}}
+			}
+			`
 		expectedStatisticsStrTemplate := `
      {
        "statistics": {
@@ -123,27 +233,29 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
      }
 		 `
 
-		expectedMetadataStr := fillTemplate(t, expectedMetadataStrTemplate, data)
-		expectedStatisticsStr := fillTemplate(t, expectedStatisticsStrTemplate, data)
-		fillObject(t, reflect.ValueOf(&input), &data)
+		fillTemplate(t, expectedMetadataStrTemplate, data)
+		fillTemplate(t, expectedStatisticsStrTemplate, data)
+		fillObject(t, reflect.ValueOf(&expectedStatistics), &data)
 
-		actualMetadataJSON, err := BuildStmtMetadataJSON(&input)
+		actualMetadataJSON, err := BuildStmtMetadataJSON(&expectedStatistics)
 		require.NoError(t, err)
-		jsonTestHelper(t, expectedMetadataStr, actualMetadataJSON)
-
-		actualStatisticsJSON, err := BuildStmtStatisticsJSON(&input.Stats)
+		actualStatisticsJSON, err := BuildStmtStatisticsJSON(&expectedStatistics.Stats)
 		require.NoError(t, err)
-		jsonTestHelper(t, expectedStatisticsStr, actualStatisticsJSON)
 
-		// Ensure that we get the same protobuf after we decode the JSON.
 		var actualJSONUnmarshalled roachpb.CollectedStatementStatistics
 
 		err = DecodeStmtStatsMetadataJSON(actualMetadataJSON, &actualJSONUnmarshalled)
 		require.NoError(t, err)
 
+		// Remove one of the statistics on the object so its value doesn't get populated on
+		// the final actualJSONUnmarshalled.Stats.
+		actualStatisticsJSON, _, _ = actualStatisticsJSON.RemovePath([]string{"statistics", "numRows"})
+		// Initialize the field again to remove the existing value.
+		expectedStatistics.Stats.NumRows = roachpb.NumericStat{}
+
 		err = DecodeStmtStatsStatisticsJSON(actualStatisticsJSON, &actualJSONUnmarshalled.Stats)
 		require.NoError(t, err)
-		require.Equal(t, input, actualJSONUnmarshalled)
+		require.Equal(t, expectedStatistics, actualJSONUnmarshalled)
 	})
 
 	t.Run("transaction_statistics", func(t *testing.T) {
@@ -191,10 +303,6 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
       "sqDiff": {{.Float}}
     },
     "rowsRead": {
-      "mean": {{.Float}},
-      "sqDiff": {{.Float}}
-    },
-    "rowsWritten": {
       "mean": {{.Float}},
       "sqDiff": {{.Float}}
     }

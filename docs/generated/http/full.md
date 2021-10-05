@@ -1578,7 +1578,9 @@ Response object for ListContentionEvents and ListLocalContentionEvents.
 #### ListActivityError
 
 An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+implemented on a tenant, the `node_id` field refers to the instanceIDs that
+identify individual tenant pods.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -1651,7 +1653,9 @@ Response object for ListContentionEvents and ListLocalContentionEvents.
 #### ListActivityError
 
 An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+implemented on a tenant, the `node_id` field refers to the instanceIDs that
+identify individual tenant pods.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -1743,7 +1747,9 @@ Info contains an information about a single DistSQL remote flow.
 #### ListActivityError
 
 An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+implemented on a tenant, the `node_id` field refers to the instanceIDs that
+identify individual tenant pods.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -1834,7 +1840,9 @@ Info contains an information about a single DistSQL remote flow.
 #### ListActivityError
 
 An error wrapper object for ListContentionEventsResponse and
-ListDistSQLFlowsResponse.
+ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
+implemented on a tenant, the `node_id` field refers to the instanceIDs that
+identify individual tenant pods.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -2011,7 +2019,6 @@ Support status: [reserved](#support-status)
 | node_id | [string](#cockroach.server.serverpb.ProfileRequest-string) |  | node_id is a string so that "local" can be used to specify that no forwarding is necessary. | [reserved](#support-status) |
 | type | [ProfileRequest.Type](#cockroach.server.serverpb.ProfileRequest-cockroach.server.serverpb.ProfileRequest.Type) |  | The type of profile to retrieve. | [reserved](#support-status) |
 | seconds | [int32](#cockroach.server.serverpb.ProfileRequest-int32) |  | applies only to Type=CPU, defaults to 30 | [reserved](#support-status) |
-| labels | [bool](#cockroach.server.serverpb.ProfileRequest-bool) |  | applies only to Type=CPU, defaults to false | [reserved](#support-status) |
 
 
 

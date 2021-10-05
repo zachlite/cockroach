@@ -182,13 +182,6 @@ func NewProcessor(cfg Config) *Processor {
 // from underneath a stopper task to ensure that the engine has not been closed.
 type IteratorConstructor func() storage.SimpleMVCCIterator
 
-// CatchUpIteratorConstructor is used to construct an iterator that
-// can be used for catchup-scans. It should be called from underneath
-// a stopper task to ensure that the engine has not been closed.
-//
-// The constructed iterator must have an UpperBound set.
-type CatchUpIteratorConstructor func() *CatchUpIterator
-
 // Start launches a goroutine to process rangefeed events and send them to
 // registrations.
 //
@@ -253,11 +246,6 @@ func (p *Processor) run(
 			if !p.Span.AsRawSpanWithNoLocals().Contains(r.span) {
 				log.Fatalf(ctx, "registration %s not in Processor's key range %v", r, p.Span)
 			}
-
-			// Construct the catchUpIter before notifying the registration that it
-			// has been registered. Note that if the catchUpScan is never run, then
-			// the iterator constructed here will be closed in disconnect.
-			r.maybeConstructCatchUpIter()
 
 			// Add the new registration to the registry.
 			p.reg.Register(&r)
@@ -406,7 +394,7 @@ func (p *Processor) sendStop(pErr *roachpb.Error) {
 func (p *Processor) Register(
 	span roachpb.RSpan,
 	startTS hlc.Timestamp,
-	catchUpIterConstructor CatchUpIteratorConstructor,
+	catchupIterConstructor IteratorConstructor,
 	withDiff bool,
 	stream Stream,
 	errC chan<- *roachpb.Error,
@@ -417,7 +405,7 @@ func (p *Processor) Register(
 	p.syncEventC()
 
 	r := newRegistration(
-		span.AsRawSpanWithNoLocals(), startTS, catchUpIterConstructor, withDiff,
+		span.AsRawSpanWithNoLocals(), startTS, catchupIterConstructor, withDiff,
 		p.Config.EventChanCap, p.Metrics, stream, errC,
 	)
 	select {

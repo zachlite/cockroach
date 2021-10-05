@@ -1,20 +1,12 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 load("//build:STRINGER.bzl", "stringer")
 
-filegroup(
-    name = "testdata",
-    srcs = glob(["testdata/**"]),
-    visibility = ["//pkg/sql/sem/tree/eval_test:__subpackages__"],
-)
-
 go_library(
     name = "tree",
     srcs = [
         "aggregate_funcs.go",
         "alter_database.go",
-        "alter_default_privileges.go",
         "alter_index.go",
-        "alter_role.go",
         "alter_schema.go",
         "alter_sequence.go",
         "alter_table.go",
@@ -28,17 +20,14 @@ go_library(
         "col_name.go",
         "collatedstring.go",
         "comment_on_column.go",
-        "comment_on_constraint.go",
         "comment_on_database.go",
         "comment_on_index.go",
-        "comment_on_schema.go",
         "comment_on_table.go",
         "constant.go",
         "constant_eval.go",
         "constants.go",
         "copy.go",
         "create.go",
-        "data_placement.go",
         "datum.go",
         "decimal.go",
         "delete.go",
@@ -66,7 +55,7 @@ go_library(
         "operators.go",
         "overload.go",
         "parse_array.go",
-        "parse_string.go",  # keep
+        "parse_string.go",
         "persistence.go",
         "pgwire_encode.go",
         "placeholders.go",
@@ -86,6 +75,7 @@ go_library(
         "set.go",
         "show.go",
         "split.go",
+        "statementtype_string.go",
         "stmt.go",
         "stream_ingestion.go",
         "survival_goal.go",
@@ -111,22 +101,21 @@ go_library(
         "zone.go",
         ":gen-createtypevariety-stringer",  # keep
         ":gen-statementreturntype-stringer",  # keep
-        ":gen-statementtype-stringer",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/sem/tree",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/base",
+        "//pkg/clusterversion",
         "//pkg/geo",
         "//pkg/geo/geopb",
         "//pkg/keys",
         "//pkg/kv",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/server/telemetry",
         "//pkg/settings",
         "//pkg/settings/cluster",
-        "//pkg/sql/catalog/catconstants",
         "//pkg/sql/lex",
         "//pkg/sql/lexbase",
         "//pkg/sql/pgwire/pgcode",
@@ -163,7 +152,6 @@ go_library(
         "//pkg/util/uuid",
         "@com_github_cockroachdb_apd_v2//:apd",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_cockroachdb_redact//:redact",
         "@com_github_google_go_cmp//cmp",
         "@com_github_lib_pq//oid",
         "@org_golang_x_text//collate",
@@ -209,13 +197,13 @@ go_test(
         "type_name_test.go",
         "window_funcs_test.go",
     ],
-    data = glob(["testdata/**"]) + ["//pkg/sql/parser:sql.y"],
+    data = glob(["testdata/**"]),
     embed = [":tree"],
+    tags = ["broken_in_bazel"],
     deps = [
-        "//pkg/build/bazel",
         "//pkg/internal/rsg",
         "//pkg/kv",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/security/securitytest",
         "//pkg/settings/cluster",
@@ -225,14 +213,12 @@ go_test(
         "//pkg/sql/opt/optbuilder",
         "//pkg/sql/opt/xform",
         "//pkg/sql/parser",
-        "//pkg/sql/randgen",
+        "//pkg/sql/rowenc",
         "//pkg/sql/sem/builtins",
         "//pkg/sql/sessiondata",
-        "//pkg/sql/sessiondatapb",
         "//pkg/sql/types",
         "//pkg/testutils",
         "//pkg/testutils/sqlutils",
-        "//pkg/util/duration",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",
         "//pkg/util/log",
@@ -261,10 +247,4 @@ stringer(
     name = "gen-statementreturntype-stringer",
     src = "stmt.go",
     typ = "StatementReturnType",
-)
-
-stringer(
-    name = "gen-statementtype-stringer",
-    src = "stmt.go",
-    typ = "StatementType",
 )

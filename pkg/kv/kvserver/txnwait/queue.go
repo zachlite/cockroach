@@ -34,7 +34,7 @@ import (
 const maxWaitForQueryTxn = 50 * time.Millisecond
 
 // TxnLivenessHeartbeatMultiplier specifies what multiple the transaction
-// liveness threshold should be of the transaction heartbeat interval.
+// liveness threshold should be of the transaction heartbeat internval.
 var TxnLivenessHeartbeatMultiplier = envutil.EnvOrDefaultInt(
 	"COCKROACH_TXN_LIVENESS_HEARTBEAT_MULTIPLIER", 5)
 
@@ -609,10 +609,7 @@ func (q *Queue) MaybeWaitForPush(
 			switch updatedPusher.Status {
 			case roachpb.COMMITTED:
 				log.VEventf(ctx, 1, "pusher committed: %v", updatedPusher)
-				return nil, roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(
-					roachpb.TransactionStatusError_REASON_TXN_COMMITTED,
-					"already committed"),
-					updatedPusher)
+				return nil, roachpb.NewErrorWithTxn(roachpb.NewTransactionCommittedStatusError(), updatedPusher)
 			case roachpb.ABORTED:
 				log.VEventf(ctx, 1, "pusher aborted: %v", updatedPusher)
 				return nil, roachpb.NewErrorWithTxn(

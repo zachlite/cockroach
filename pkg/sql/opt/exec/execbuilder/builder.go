@@ -105,13 +105,6 @@ type Builder struct {
 	// unconstrained secondary index scan estimated to read more than
 	// large_full_scan_rows (or without without available stats).
 	ContainsLargeFullIndexScan bool
-
-	// containsBoundedStalenessScan is true if the query uses bounded
-	// staleness and contains a scan.
-	containsBoundedStalenessScan bool
-
-	// ContainsMutation is set to true if the whole plan contains any mutations.
-	ContainsMutation bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -144,7 +137,7 @@ func New(
 		initialAllowAutoCommit: allowAutoCommit,
 	}
 	if evalCtx != nil {
-		sd := evalCtx.SessionData()
+		sd := evalCtx.SessionData
 		if sd.SaveTablesPrefix != "" {
 			b.nameGen = memo.NewExprNameGenerator(sd.SaveTablesPrefix)
 		}
@@ -253,12 +246,6 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 		}
 	}
 	return nil
-}
-
-// boundedStaleness returns true if this query uses bounded staleness.
-func (b *Builder) boundedStaleness() bool {
-	return b.evalCtx != nil && b.evalCtx.AsOfSystemTime != nil &&
-		b.evalCtx.AsOfSystemTime.BoundedStaleness
 }
 
 // mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -

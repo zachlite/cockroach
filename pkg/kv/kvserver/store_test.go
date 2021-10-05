@@ -18,7 +18,6 @@ import (
 	"math/rand"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,7 +215,7 @@ func createTestStoreWithoutStart(
 		Settings:   cfg.Settings,
 	})
 	server := rpc.NewServer(rpcContext) // never started
-	cfg.Gossip = gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
+	cfg.Gossip = gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), cfg.DefaultZoneConfig)
 	cfg.StorePool = NewTestStorePool(*cfg)
 	// Many tests using this test harness (as opposed to higher-level
 	// ones like multiTestContext or TestServer) want to micro-manage
@@ -245,7 +244,7 @@ func createTestStoreWithoutStart(
 	}
 	var splits []roachpb.RKey
 	kvs, tableSplits := bootstrap.MakeMetadataSchema(
-		keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
+		keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 	).GetInitialValues()
 	if opts.createSystemRanges {
 		splits = config.StaticSplits()
@@ -463,7 +462,7 @@ func TestStoreInitAndBootstrap(t *testing.T) {
 		// Bootstrap the system ranges.
 		var splits []roachpb.RKey
 		kvs, tableSplits := bootstrap.MakeMetadataSchema(
-			keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
+			keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 		).GetInitialValues()
 		splits = config.StaticSplits()
 		splits = append(splits, tableSplits...)
@@ -1356,23 +1355,22 @@ func TestStoreSetRangesMaxBytes(t *testing.T) {
 		expMaxBytes int64
 	}{
 		{store.LookupReplica(roachpb.RKeyMin),
-			store.cfg.DefaultSpanConfig.RangeMaxBytes},
+			*store.cfg.DefaultZoneConfig.RangeMaxBytes},
 		{splitTestRange(store, roachpb.RKey(keys.SystemSQLCodec.TablePrefix(baseID)), t),
 			1 << 20},
 		{splitTestRange(store, roachpb.RKey(keys.SystemSQLCodec.TablePrefix(baseID+1)), t),
-			store.cfg.DefaultSpanConfig.RangeMaxBytes},
+			*store.cfg.DefaultZoneConfig.RangeMaxBytes},
 		{splitTestRange(store, roachpb.RKey(keys.SystemSQLCodec.TablePrefix(baseID+2)), t),
 			2 << 20},
 	}
 
 	// Set zone configs.
-	zoneA := zonepb.DefaultZoneConfig()
-	zoneA.RangeMaxBytes = proto.Int64(1 << 20)
-	config.TestingSetZoneConfig(config.SystemTenantObjectID(baseID), zoneA)
-
-	zoneB := zonepb.DefaultZoneConfig()
-	zoneB.RangeMaxBytes = proto.Int64(2 << 20)
-	config.TestingSetZoneConfig(config.SystemTenantObjectID(baseID+2), zoneB)
+	config.TestingSetZoneConfig(
+		config.SystemTenantObjectID(baseID), zonepb.ZoneConfig{RangeMaxBytes: proto.Int64(1 << 20)},
+	)
+	config.TestingSetZoneConfig(
+		config.SystemTenantObjectID(baseID+2), zonepb.ZoneConfig{RangeMaxBytes: proto.Int64(2 << 20)},
+	)
 
 	// Despite faking the zone configs, we still need to have a system config
 	// entry so that the store picks up the new zone configs. This new system
@@ -2638,72 +2636,37 @@ func TestStoreRangePlaceholders(t *testing.T) {
 		},
 	}
 
-	check := func(exp string) {
-		exp = strings.TrimSpace(exp)
-		t.Helper()
-		act := strings.TrimSpace(s.mu.replicasByKey.String())
-		require.Equal(t, exp, act)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Test that simple insertion works.
-	require.NoError(t, s.addPlaceholderLocked(placeholder1))
-	require.NoError(t, s.addPlaceholderLocked(placeholder2))
-
-	check(`
-[] - [99] (/Min - "c")
-[99] - [100] ("c" - "d")
-[100] - [255 255] ("d" - /Max)`)
-
-	checkErr := func(re string) func(bool, error) {
-		t.Helper()
-		return func(removed bool, err error) {
-			require.True(t, testutils.IsError(err, re), "expected to match %s: %v", re, err)
-			require.False(t, removed)
-		}
+	if err := s.addPlaceholderLocked(placeholder1); err != nil {
+		t.Fatalf("could not add placeholder to empty store, got %s", err)
 	}
-	checkRemoved := func(removed bool, nilErr error) {
-		t.Helper()
-		require.NoError(t, nilErr)
-		require.True(t, removed)
-	}
-	checkNotRemoved := func(removed bool, nilErr error) {
-		t.Helper()
-		require.NoError(t, nilErr)
-		require.False(t, removed)
+	if err := s.addPlaceholderLocked(placeholder2); err != nil {
+		t.Fatalf("could not add non-overlapping placeholder, got %s", err)
 	}
 
 	// Test that simple deletion works.
-	checkRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFailed))
-
-	check(`
-[] - [99] (/Min - "c")
-[100] - [255 255] ("d" - /Max)`)
+	if !s.removePlaceholderLocked(ctx, placeholder1.rangeDesc.RangeID) {
+		t.Fatalf("could not remove placeholder that was present")
+	}
 
 	// Test cannot double insert the same placeholder.
-	placeholder1.tainted = 0 // reset for re-use
-	require.NoError(t, s.addPlaceholderLocked(placeholder1))
+	if err := s.addPlaceholderLocked(placeholder1); err != nil {
+		t.Fatalf("could not re-add placeholder after removal, got %s", err)
+	}
 	if err := s.addPlaceholderLocked(placeholder1); !testutils.IsError(err, ".*overlaps with existing") {
 		t.Fatalf("should not be able to add ReplicaPlaceholder for the same key twice, got: %+v", err)
 	}
 
-	// Test double deletion of a placeholder.
-	checkRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFilled))
-	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFailed))
-	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderDropped))
-	checkErr(`attempting to fill tainted placeholder`)(s.removePlaceholderLocked(
-		ctx, placeholder1, removePlaceholderFilled,
-	))
-	placeholder1.tainted = 0 // pretend it wasn't already deleted
-	checkErr(`expected placeholder .* to exist`)(s.removePlaceholderLocked(
-		ctx, placeholder1, removePlaceholderDropped,
-	))
-
-	check(`
-[] - [99] (/Min - "c")
-[100] - [255 255] ("d" - /Max)`)
+	// Test cannot double delete a placeholder.
+	if !s.removePlaceholderLocked(ctx, placeholder1.rangeDesc.RangeID) {
+		t.Fatalf("could not remove placeholder that was present")
+	}
+	if s.removePlaceholderLocked(ctx, placeholder1.rangeDesc.RangeID) {
+		t.Fatalf("successfully removed placeholder that was not present")
+	}
 
 	// This placeholder overlaps with an existing replica.
 	placeholder1 = &ReplicaPlaceholder{
@@ -2714,20 +2677,15 @@ func TestStoreRangePlaceholders(t *testing.T) {
 		},
 	}
 
-	addPH := func(ph *ReplicaPlaceholder) (bool, error) {
-		return false, s.addPlaceholderLocked(ph)
+	// Test that placeholder cannot clobber existing replica.
+	if err := s.addPlaceholderLocked(placeholder1); !testutils.IsError(err, ".*overlaps with existing") {
+		t.Fatalf("should not be able to add ReplicaPlaceholder when Replica already exists, got: %+v", err)
 	}
 
-	// Test that placeholder cannot clobber existing replica.
-	checkErr(`.*overlaps with existing`)(addPH(placeholder1))
-
 	// Test that Placeholder deletion doesn't delete replicas.
-	placeholder1.tainted = 0
-	checkErr(`expected placeholder .* to exist`)(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFilled))
-	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFailed))
-	check(`
-[] - [99] (/Min - "c")
-[100] - [255 255] ("d" - /Max)`)
+	if s.removePlaceholderLocked(ctx, repID) {
+		t.Fatalf("should not be able to process removeReplicaPlaceholder for a RangeID where a Replica exists")
+	}
 }
 
 // Test that we remove snapshot placeholders when raft ignores the
@@ -2805,23 +2763,11 @@ func TestStoreRemovePlaceholderOnRaftIgnored(t *testing.T) {
 			},
 		},
 	}
-
-	placeholder := &ReplicaPlaceholder{rangeDesc: *repl1.Desc()}
-
-	{
-		s.mu.Lock()
-		err := s.addPlaceholderLocked(placeholder)
-		s.mu.Unlock()
-		require.NoError(t, err)
-	}
-
 	if err := s.processRaftSnapshotRequest(ctx, req,
 		IncomingSnapshot{
-			SnapUUID:    uuid.MakeV4(),
-			State:       &kvserverpb.ReplicaState{Desc: repl1.Desc()},
-			placeholder: placeholder,
-		},
-	); err != nil {
+			SnapUUID: uuid.MakeV4(),
+			State:    &kvserverpb.ReplicaState{Desc: repl1.Desc()},
+		}); err != nil {
 		t.Fatal(err)
 	}
 

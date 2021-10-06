@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -43,12 +43,13 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		db,
 		ex,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
 		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 
 	// The test data must be ordered by CreatedAt DESC so the calculated set of
@@ -57,7 +58,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   1,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{1},
 			CreatedAt:     timeutil.Now().Add(-1 * time.Hour),
 			RowCount:      1000,
@@ -67,7 +68,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   2,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{1},
 			CreatedAt:     timeutil.Now().Add(-2 * time.Hour),
 			RowCount:      1000,
@@ -87,7 +88,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   4,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{1},
 			CreatedAt:     timeutil.Now().Add(-4 * time.Hour),
 			RowCount:      1000,
@@ -97,7 +98,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   5,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{1},
 			CreatedAt:     timeutil.Now().Add(-5 * time.Hour),
 			RowCount:      1000,
@@ -107,7 +108,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   6,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{1},
 			CreatedAt:     timeutil.Now().Add(-6 * time.Hour),
 			RowCount:      1000,
@@ -117,7 +118,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   7,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-7 * time.Hour),
 			RowCount:      1000,
@@ -127,7 +128,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   8,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-8 * time.Hour),
 			RowCount:      1000,
@@ -147,7 +148,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   10,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-10 * time.Hour),
 			RowCount:      1000,
@@ -157,7 +158,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   11,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-11 * time.Hour),
 			RowCount:      1000,
@@ -167,7 +168,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   12,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-12 * time.Hour),
 			RowCount:      1000,
@@ -177,7 +178,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   13,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2},
 			CreatedAt:     timeutil.Now().Add(-13 * time.Hour),
 			RowCount:      1000,
@@ -197,7 +198,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(100),
 			StatisticID:   15,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{3, 2},
 			CreatedAt:     timeutil.Now().Add(-15 * time.Hour),
 			RowCount:      1000,
@@ -217,7 +218,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 		{
 			TableID:       descpb.ID(102),
 			StatisticID:   17,
-			Name:          jobspb.AutoStatsName,
+			Name:          AutoStatsName,
 			ColumnIDs:     []descpb.ColumnID{2, 3},
 			CreatedAt:     timeutil.Now().Add(-17 * time.Hour),
 			RowCount:      0,
@@ -272,8 +273,16 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			return err
 		}
 
+		cache.RefreshTableStats(ctx, tableID)
+		for i := range testData {
+			stat := &testData[i]
+			if stat.TableID != tableID {
+				cache.RefreshTableStats(ctx, stat.TableID)
+			}
+		}
+
 		return testutils.SucceedsSoonError(func() error {
-			tableStats, err := cache.getTableStatsFromCache(ctx, tableID)
+			tableStats, err := cache.GetTableStats(ctx, tableID)
 			if err != nil {
 				return err
 			}
@@ -281,7 +290,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			for i := range testData {
 				stat := &testData[i]
 				if stat.TableID != tableID {
-					stats, err := cache.getTableStatsFromCache(ctx, stat.TableID)
+					stats, err := cache.GetTableStats(ctx, stat.TableID)
 					if err != nil {
 						return err
 					}
@@ -316,7 +325,7 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			if !reflect.DeepEqual(stat.ColumnIDs, columnIDs) {
 				continue
 			}
-			if stat.Name == jobspb.AutoStatsName && keptStats < keepCount {
+			if stat.Name == AutoStatsName && keptStats < keepCount {
 				keptStats++
 				continue
 			}

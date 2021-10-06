@@ -25,13 +25,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
@@ -90,7 +88,6 @@ var validCasts = []castInfo{
 	{from: types.DecimalFamily, to: types.BoolFamily, volatility: VolatilityImmutable},
 	{from: types.StringFamily, to: types.BoolFamily, volatility: VolatilityImmutable},
 	{from: types.CollatedStringFamily, to: types.BoolFamily, volatility: VolatilityImmutable},
-	{from: types.JsonFamily, to: types.BoolFamily, volatility: VolatilityImmutable},
 
 	// Casts to IntFamily.
 	{from: types.UnknownFamily, to: types.IntFamily, volatility: VolatilityImmutable},
@@ -177,34 +174,14 @@ var validCasts = []castInfo{
 	{from: types.Box2DFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.GeographyFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.StringFamily, volatility: VolatilityStable},
+	{from: types.TimestampFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{
-		from:       types.TimestampFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityImmutable,
-		volatilityHint: "TIMESTAMP to STRING casts are dependent on DateStyle; consider " +
-			"using to_char(timestamp) instead.",
+		from: types.TimestampTZFamily, to: types.StringFamily, volatility: VolatilityStable,
+		volatilityHint: "TIMESTAMPTZ to STRING casts depend on the current timezone; consider using (t AT TIME ZONE 'UTC')::STRING instead.",
 	},
-	{
-		from:       types.TimestampTZFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityStable,
-		volatilityHint: "TIMESTAMPTZ to STRING casts depend on the current timezone; consider " +
-			"using to_char(t AT TIME ZONE 'UTC') instead.",
-	},
-	{
-		from:           types.IntervalFamily,
-		to:             types.StringFamily,
-		volatility:     VolatilityImmutable,
-		volatilityHint: "INTERVAL to STRING casts depends on IntervalStyle; consider using to_char(interval)",
-	},
+	{from: types.IntervalFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.UuidFamily, to: types.StringFamily, volatility: VolatilityImmutable},
-	{
-		from:       types.DateFamily,
-		to:         types.StringFamily,
-		volatility: VolatilityImmutable,
-		volatilityHint: "DATE to STRING casts are dependent on DateStyle; consider " +
-			"using to_char(date) instead.",
-	},
+	{from: types.DateFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.TimeFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.TimeTZFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.OidFamily, to: types.StringFamily, volatility: VolatilityImmutable},
@@ -250,12 +227,7 @@ var validCasts = []castInfo{
 
 	// Casts to DateFamily.
 	{from: types.UnknownFamily, to: types.DateFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.DateFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to DATE casts depend on session DateStyle; use parse_date(string) instead",
-	},
+	{from: types.StringFamily, to: types.DateFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.DateFamily, volatility: VolatilityStable},
 	{from: types.DateFamily, to: types.DateFamily, volatility: VolatilityImmutable},
 	{from: types.TimestampFamily, to: types.DateFamily, volatility: VolatilityImmutable},
@@ -264,12 +236,7 @@ var validCasts = []castInfo{
 
 	// Casts to TimeFamily.
 	{from: types.UnknownFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.TimeFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to TIME casts depend on session DateStyle; use parse_time(string) instead",
-	},
+	{from: types.StringFamily, to: types.TimeFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.TimeFamily, volatility: VolatilityStable},
 	{from: types.TimeFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
 	{from: types.TimeTZFamily, to: types.TimeFamily, volatility: VolatilityImmutable},
@@ -279,12 +246,7 @@ var validCasts = []castInfo{
 
 	// Casts to TimeTZFamily.
 	{from: types.UnknownFamily, to: types.TimeTZFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.TimeTZFamily,
-		volatility:     VolatilityStable,
-		volatilityHint: "STRING to TIMETZ casts depend on session DateStyle; use parse_timetz(string) instead",
-	},
+	{from: types.StringFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.CollatedStringFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.TimeFamily, to: types.TimeTZFamily, volatility: VolatilityStable},
 	{from: types.TimeTZFamily, to: types.TimeTZFamily, volatility: VolatilityImmutable},
@@ -294,8 +256,7 @@ var validCasts = []castInfo{
 	{from: types.UnknownFamily, to: types.TimestampFamily, volatility: VolatilityImmutable},
 	{
 		from: types.StringFamily, to: types.TimestampFamily, volatility: VolatilityStable,
-		volatilityHint: "STRING to TIMESTAMP casts are context-dependent because of relative timestamp strings " +
-			"like 'now' and session settings such as DateStyle; use parse_timestamp(string) instead.",
+		volatilityHint: "STRING to TIMESTAMP casts are context-dependent because of relative timestamp strings like 'now'; use parse_timestamp() instead.",
 	},
 	{from: types.CollatedStringFamily, to: types.TimestampFamily, volatility: VolatilityStable},
 	{from: types.DateFamily, to: types.TimestampFamily, volatility: VolatilityImmutable},
@@ -317,12 +278,7 @@ var validCasts = []castInfo{
 
 	// Casts to IntervalFamily.
 	{from: types.UnknownFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
-	{
-		from:           types.StringFamily,
-		to:             types.IntervalFamily,
-		volatility:     VolatilityImmutable,
-		volatilityHint: "STRING to INTERVAL casts depend on session IntervalStyle; use parse_interval(string) instead",
-	},
+	{from: types.StringFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.CollatedStringFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.IntFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
 	{from: types.TimeFamily, to: types.IntervalFamily, volatility: VolatilityImmutable},
@@ -380,12 +336,8 @@ type castsMapKey struct {
 
 var castsMap map[castsMapKey]*castInfo
 
-// styleCastsMap contains castInfos for casts affected by a style parameter.
-var styleCastsMap map[castsMapKey]*castInfo
-
 func init() {
 	castsMap = make(map[castsMapKey]*castInfo, len(validCasts))
-	styleCastsMap = make(map[castsMapKey]*castInfo)
 	for i := range validCasts {
 		c := &validCasts[i]
 
@@ -394,72 +346,23 @@ func init() {
 
 		key := castsMapKey{from: c.from, to: c.to}
 		castsMap[key] = c
-
-		if isDateStyleCastAffected(c.from, c.to) || isIntervalStyleCastAffected(c.from, c.to) {
-			cCopy := *c
-			cCopy.volatility = VolatilityStable
-			styleCastsMap[key] = &cCopy
-		}
 	}
-}
-
-func isIntervalStyleCastAffected(from, to types.Family) bool {
-	switch from {
-	case types.StringFamily, types.CollatedStringFamily:
-		switch to {
-		case types.IntervalFamily:
-			return true
-		}
-	case types.IntervalFamily:
-		switch to {
-		case types.StringFamily, types.CollatedStringFamily:
-			return true
-		}
-	}
-	return false
-}
-
-func isDateStyleCastAffected(from, to types.Family) bool {
-	switch from {
-	case types.StringFamily, types.CollatedStringFamily:
-		switch to {
-		case types.TimeFamily,
-			types.TimeTZFamily,
-			types.DateFamily,
-			types.TimestampFamily:
-			return true
-		}
-	case types.DateFamily,
-		types.TimestampFamily:
-		switch to {
-		case types.StringFamily, types.CollatedStringFamily:
-			return true
-		}
-	}
-	return false
 }
 
 // lookupCast returns the information for a valid cast.
 // Returns nil if this is not a valid cast.
 // Does not handle array and tuple casts.
-func lookupCast(from, to types.Family, intervalStyleEnabled bool, dateStyleEnabled bool) *castInfo {
-	k := castsMapKey{from: from, to: to}
-	if (intervalStyleEnabled && isIntervalStyleCastAffected(from, to)) ||
-		(dateStyleEnabled && isDateStyleCastAffected(from, to)) {
-		if r, ok := styleCastsMap[k]; ok {
-			return r
-		}
-	}
-	return castsMap[k]
+func lookupCast(from, to types.Family) *castInfo {
+	return castsMap[castsMapKey{from: from, to: to}]
 }
 
 // LookupCastVolatility returns the volatility of a valid cast.
-func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Volatility, ok bool) {
+func LookupCastVolatility(from, to *types.T) (_ Volatility, ok bool) {
 	fromFamily := from.Family()
 	toFamily := to.Family()
 	// Special case for casting between arrays.
 	if fromFamily == types.ArrayFamily && toFamily == types.ArrayFamily {
-		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents(), sd)
+		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents())
 	}
 	// Special case for casting between tuples.
 	if fromFamily == types.TupleFamily && toFamily == types.TupleFamily {
@@ -474,7 +377,7 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 		}
 		maxVolatility := VolatilityLeakProof
 		for i := range fromTypes {
-			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i], sd)
+			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i])
 			if !ok {
 				return 0, false
 			}
@@ -484,13 +387,7 @@ func LookupCastVolatility(from, to *types.T, sd *sessiondata.SessionData) (_ Vol
 		}
 		return maxVolatility, true
 	}
-
-	cast := lookupCast(
-		fromFamily,
-		toFamily,
-		sd != nil && sd.IntervalStyleEnabled,
-		sd != nil && sd.DateStyleEnabled,
-	)
+	cast := lookupCast(fromFamily, toFamily)
 	if cast == nil {
 		return 0, false
 	}
@@ -538,7 +435,9 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 			sv = v.Contents
 		}
 
-		sv = adjustStringValueToType(typ, sv)
+		if typ.Oid() == oid.T_bpchar {
+			sv = strings.TrimRight(sv, " ")
+		}
 
 		if typ.Width() > 0 && utf8.RuneCountInString(sv) > int(typ.Width()) {
 			return nil, pgerror.Newf(pgcode.StringDataRightTruncation,
@@ -546,11 +445,11 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 				typ.SQLString())
 		}
 
-		if typ.Oid() == oid.T_bpchar || typ.Oid() == oid.T_char {
+		if typ.Oid() == oid.T_bpchar {
 			if _, ok := AsDString(inVal); ok {
-				return NewDString(sv), nil
+				return NewDString(strings.TrimRight(sv, " ")), nil
 			} else if _, ok := inVal.(*DCollatedString); ok {
-				return NewDCollatedString(sv, typ.Locale(), &CollationEnvironment{})
+				return NewDCollatedString(strings.TrimRight(sv, " "), typ.Locale(), &CollationEnvironment{})
 			}
 		}
 	case types.IntFamily:
@@ -563,7 +462,7 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 				// implementation of math.(Max|Min)(16|32) numbers that store
 				// the boundaries of the allowed range.
 				// NOTE: when updating the code below, make sure to update
-				// execgen/cast_gen_util.go as well.
+				// execgen/overloads_cast.go as well.
 				shifted := v >> width
 				if (v >= 0 && shifted > 0) || (v < 0 && shifted < -1) {
 					if typ.Width() == 16 {
@@ -683,20 +582,6 @@ func AdjustValueToType(typ *types.T, inVal Datum) (outVal Datum, err error) {
 	return inVal, nil
 }
 
-// adjustStringToType checks that the width for strings fits the
-// specified column type.
-func adjustStringValueToType(typ *types.T, sv string) string {
-	switch typ.Oid() {
-	case oid.T_char:
-		// "char" is supposed to truncate long values
-		return util.TruncateString(sv, 1)
-	case oid.T_bpchar:
-		// bpchar types truncate trailing whitespace.
-		return strings.TrimRight(sv, " ")
-	}
-	return sv
-}
-
 // formatBitArrayToType formats bit arrays such that they fill the total width
 // if too short, or truncate if too long.
 func formatBitArrayToType(d *DBitArray, t *types.T) *DBitArray {
@@ -767,12 +652,6 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			return ParseDBool(string(*v))
 		case *DCollatedString:
 			return ParseDBool(v.Contents)
-		case *DJSON:
-			b, ok := v.AsBool()
-			if !ok {
-				return nil, failedCastFromJSON(v, t)
-			}
-			return MakeDBool(DBool(b)), nil
 		}
 
 	case types.IntFamily:
@@ -804,9 +683,14 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			}
 			res = NewDInt(DInt(f))
 		case *DDecimal:
-			i, err := roundDecimalToInt(ctx, &v.Decimal)
+			d := ctx.getTmpDec()
+			_, err := DecimalCtx.RoundToIntegralValue(d, &v.Decimal)
 			if err != nil {
 				return nil, err
+			}
+			i, err := d.Int64()
+			if err != nil {
+				return nil, ErrIntOutOfRange
 			}
 			res = NewDInt(DInt(i))
 		case *DString:
@@ -838,19 +722,12 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		case *DOid:
 			res = &v.DInt
 		case *DJSON:
-			dec, ok := v.AsDecimal()
-			if !ok {
-				return nil, failedCastFromJSON(v, t)
-			}
-			i, err := dec.Int64()
-			if err != nil {
-				// Attempt to round the number to an integer.
-				i, err = roundDecimalToInt(ctx, dec)
-				if err != nil {
-					return nil, err
+			if dec, ok := v.AsDecimal(); ok {
+				asInt, err := dec.Int64()
+				if err == nil {
+					res = NewDInt(DInt(asInt))
 				}
 			}
-			res = NewDInt(DInt(i))
 		}
 		if res != nil {
 			return res, nil
@@ -902,15 +779,13 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		case *DInterval:
 			return NewDFloat(DFloat(v.AsFloat64())), nil
 		case *DJSON:
-			dec, ok := v.AsDecimal()
-			if !ok {
-				return nil, failedCastFromJSON(v, t)
+			if dec, ok := v.AsDecimal(); ok {
+				fl, err := dec.Float64()
+				if err != nil {
+					return nil, ErrFloatOutOfRange
+				}
+				return NewDFloat(DFloat(fl)), nil
 			}
-			fl, err := dec.Float64()
-			if err != nil {
-				return nil, ErrFloatOutOfRange
-			}
-			return NewDFloat(DFloat(fl)), nil
 		}
 
 	case types.DecimalFamily:
@@ -960,11 +835,11 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			v.AsBigInt(&dd.Coeff)
 			dd.Exponent = -9
 		case *DJSON:
-			dec, ok := v.AsDecimal()
-			if !ok {
-				return nil, failedCastFromJSON(v, t)
+			if dec, ok := v.AsDecimal(); ok {
+				dd.Set(dec)
+			} else {
+				unset = false
 			}
-			dd.Set(dec)
 		default:
 			unset = true
 		}
@@ -989,7 +864,7 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 			s = t.BitArray.String()
 		case *DFloat:
 			s = strconv.FormatFloat(float64(*t), 'g',
-				ctx.SessionData().DataConversionConfig.GetFloatPrec(), 64)
+				ctx.SessionData.DataConversionConfig.GetFloatPrec(), 64)
 		case *DBool, *DInt, *DDecimal:
 			s = d.String()
 		case *DTimestamp, *DDate, *DTime, *DTimeTZ, *DGeography, *DGeometry, *DBox2D:
@@ -1005,26 +880,14 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 				FmtBareStrings,
 			)
 		case *DTuple:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData().DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DArray:
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData().DataConversionConfig),
-			)
+			s = AsStringWithFlags(d, FmtPgwireText)
 		case *DInterval:
 			// When converting an interval to string, we need a string representation
 			// of the duration (e.g. "5s") and not of the interval itself (e.g.
 			// "INTERVAL '5s'").
-			s = AsStringWithFlags(
-				d,
-				FmtPgwireText,
-				FmtDataConversionConfig(ctx.SessionData().DataConversionConfig),
-			)
+			s = t.ValueAsString()
 		case *DUuid:
 			s = t.UUID.String()
 		case *DIPAddr:
@@ -1036,7 +899,7 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		case *DBytes:
 			s = lex.EncodeByteArrayToRawBytes(
 				string(*t),
-				ctx.SessionData().DataConversionConfig.BytesEncodeFormat,
+				ctx.SessionData.DataConversionConfig.BytesEncodeFormat,
 				false, /* skipHexPrefix */
 			)
 		case *DOid:
@@ -1360,9 +1223,9 @@ func performCastWithoutPrecisionTruncation(ctx *EvalContext, d Datum, t *types.T
 		}
 		switch v := d.(type) {
 		case *DString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), string(*v), itm)
+			return ParseDIntervalWithTypeMetadata(string(*v), itm)
 		case *DCollatedString:
-			return ParseDIntervalWithTypeMetadata(ctx.GetIntervalStyle(), v.Contents, itm)
+			return ParseDIntervalWithTypeMetadata(v.Contents, itm)
 		case *DInt:
 			return NewDInterval(duration.FromInt64(int64(*v)), itm), nil
 		case *DFloat:
@@ -1462,11 +1325,7 @@ func performIntToOidCast(ctx *EvalContext, t *types.T, v DInt) (Datum, error) {
 		ret := &DOid{semanticType: t, DInt: v}
 		if typ, ok := types.OidToType[oid.Oid(v)]; ok {
 			ret.name = typ.PGName()
-		} else if types.IsOIDUserDefinedType(oid.Oid(v)) {
-			typ, err := ctx.Planner.ResolveTypeByOID(ctx.Context, oid.Oid(v))
-			if err != nil {
-				return nil, err
-			}
+		} else if typ, err := ctx.Planner.ResolveTypeByOID(ctx.Context, oid.Oid(v)); err == nil {
 			ret.name = typ.PGName()
 		}
 		return ret, nil
@@ -1482,117 +1341,11 @@ func performIntToOidCast(ctx *EvalContext, t *types.T, v DInt) (Datum, error) {
 		return ret, nil
 
 	default:
-		oid, err := ctx.Planner.ResolveOIDFromOID(ctx.Ctx(), t, NewDOid(v))
+		oid, err := queryOid(ctx, t, NewDOid(v))
 		if err != nil {
 			oid = NewDOid(v)
 			oid.semanticType = t
 		}
 		return oid, nil
 	}
-}
-
-func roundDecimalToInt(ctx *EvalContext, d *apd.Decimal) (int64, error) {
-	newD := ctx.getTmpDec()
-	if _, err := DecimalCtx.RoundToIntegralValue(newD, d); err != nil {
-		return 0, err
-	}
-	i, err := newD.Int64()
-	if err != nil {
-		return 0, ErrIntOutOfRange
-	}
-	return i, nil
-}
-
-func failedCastFromJSON(j *DJSON, t *types.T) error {
-	return pgerror.Newf(
-		pgcode.InvalidParameterValue,
-		"cannot cast jsonb %s to type %s",
-		j.Type(), t,
-	)
-}
-
-// PopulateRecordWithJSON is used for the json to record function family, like
-// json_populate_record. Given a JSON object, a desired tuple type, and a tuple
-// of the same length as the desired type, this function will populate the tuple
-// by setting each named field in the tuple to the value of the key with the
-// same name in the input JSON object. Fields in the tuple that are not present
-// in the JSON will not be modified, and JSON keys that are not in the tuple
-// will be ignored.
-// Each field will be set by a best-effort coercion to its type from the JSON
-// field. The logic is more permissive than casts.
-func PopulateRecordWithJSON(
-	ctx *EvalContext, j json.JSON, desiredType *types.T, tup *DTuple,
-) error {
-	if j.Type() != json.ObjectJSONType {
-		return pgerror.Newf(pgcode.InvalidParameterValue, "expected JSON object")
-	}
-	tupleTypes := desiredType.TupleContents()
-	labels := desiredType.TupleLabels()
-	if labels == nil {
-		return pgerror.Newf(
-			pgcode.InvalidParameterValue,
-			"anonymous records cannot be used with json{b}_populate_record{set}",
-		)
-	}
-	for i := range tupleTypes {
-		val, err := j.FetchValKey(labels[i])
-		if err != nil || val == nil {
-			// No value? Use the value that was already in the tuple.
-			continue
-		}
-		tup.D[i], err = PopulateDatumWithJSON(ctx, val, tupleTypes[i])
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// PopulateDatumWithJSON is used for the json to record function family, like
-// json_populate_record. It's less restrictive than the casting system, which
-// is why it's implemented separately.
-func PopulateDatumWithJSON(ctx *EvalContext, j json.JSON, desiredType *types.T) (Datum, error) {
-	if j == json.NullJSONValue {
-		return DNull, nil
-	}
-	switch desiredType.Family() {
-	case types.ArrayFamily:
-		if j.Type() != json.ArrayJSONType {
-			return nil, pgerror.Newf(pgcode.InvalidTextRepresentation, "expected JSON array")
-		}
-		n := j.Len()
-		elementTyp := desiredType.ArrayContents()
-		d := NewDArray(elementTyp)
-		d.Array = make(Datums, n)
-		for i := 0; i < n; i++ {
-			elt, err := j.FetchValIdx(i)
-			if err != nil {
-				return nil, err
-			}
-			d.Array[i], err = PopulateDatumWithJSON(ctx, elt, elementTyp)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return d, nil
-	case types.TupleFamily:
-		tup := NewDTupleWithLen(desiredType, len(desiredType.TupleContents()))
-		for i := range tup.D {
-			tup.D[i] = DNull
-		}
-		err := PopulateRecordWithJSON(ctx, j, desiredType, tup)
-		return tup, err
-	}
-	var s string
-	switch j.Type() {
-	case json.StringJSONType:
-		t, err := j.AsText()
-		if err != nil {
-			return nil, err
-		}
-		s = *t
-	default:
-		s = j.String()
-	}
-	return PerformCast(ctx, NewDString(s), desiredType)
 }

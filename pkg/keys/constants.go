@@ -74,9 +74,8 @@ var (
 	LocalAbortSpanSuffix = []byte("abc-")
 	// localRangeFrozenStatusSuffix is DEPRECATED and remains to prevent reuse.
 	localRangeFrozenStatusSuffix = []byte("fzn-")
-	// LocalRangeGCThresholdSuffix is the suffix for the GC threshold. It keeps
-	// the lgc- ("last GC") representation for backwards compatibility.
-	LocalRangeGCThresholdSuffix = []byte("lgc-")
+	// LocalRangeLastGCSuffix is the suffix for the last GC.
+	LocalRangeLastGCSuffix = []byte("lgc-")
 	// LocalRangeAppliedStateSuffix is the suffix for the range applied state
 	// key.
 	LocalRangeAppliedStateSuffix = []byte("rask")
@@ -137,8 +136,6 @@ var (
 	// key info, such as the txn ID in the case of a transaction record.
 	LocalRangePrefix = roachpb.Key(makeKey(LocalPrefix, roachpb.RKey("k")))
 	LocalRangeMax    = LocalRangePrefix.PrefixEnd()
-	// LocalRangeProbeSuffix is the suffix for keys for probing.
-	LocalRangeProbeSuffix = roachpb.RKey("prbe")
 	// LocalQueueLastProcessedSuffix is the suffix for replica queue state keys.
 	LocalQueueLastProcessedSuffix = roachpb.RKey("qlpt")
 	// LocalRangeDescriptorSuffix is the suffix for keys storing
@@ -152,6 +149,9 @@ var (
 	//
 	// LocalStorePrefix is the prefix identifying per-store data.
 	LocalStorePrefix = makeKey(LocalPrefix, roachpb.Key("s"))
+	// localStoreSuggestedCompactionSuffix stores suggested compactions to
+	// be aggregated and processed on the store.
+	localStoreSuggestedCompactionSuffix = []byte("comp")
 	// localStoreClusterVersionSuffix stores the cluster-wide version
 	// information for this store, updated any time the operator
 	// updates the minimum cluster version.
@@ -249,7 +249,7 @@ var (
 	// NodeLivenessKeyMax is the maximum value for any node liveness key.
 	NodeLivenessKeyMax = NodeLivenessPrefix.PrefixEnd()
 	//
-	// BootstrapVersionKey is the key at which clusters bootstrapped with a version
+	// BootstrapVersion is the key at which clusters bootstrapped with a version
 	// > 1.0 persist the version at which they were bootstrapped.
 	BootstrapVersionKey = roachpb.Key(makeKey(SystemPrefix, roachpb.RKey("bootstrap-version")))
 	//
@@ -284,14 +284,11 @@ var (
 	//
 	// TODO(nvanbenschoten): Figure out what to do with all of these. At a
 	// minimum, prefix them all with "System".
-
+	//
 	// TableDataMin is the start of the range of table data keys.
 	TableDataMin = SystemSQLCodec.TablePrefix(0)
-	// TableDataMax is the end of the range of table data keys.
+	// TableDataMin is the end of the range of table data keys.
 	TableDataMax = SystemSQLCodec.TablePrefix(math.MaxUint32).PrefixEnd()
-	// ScratchRangeMin is a key used in tests to write arbitrary data without
-	// overlapping with meta, system or tenant ranges.
-	ScratchRangeMin = TableDataMax
 	//
 	// SystemConfigSplitKey is the key to split at immediately prior to the
 	// system config span. NB: Split keys need to be valid column keys.
@@ -403,21 +400,12 @@ const (
 	TenantsRangesID                     = 38 // pseudo
 	SqllivenessID                       = 39
 	MigrationsID                        = 40
-	JoinTokensTableID                   = 41
-	StatementStatisticsTableID          = 42
-	TransactionStatisticsTableID        = 43
-	DatabaseRoleSettingsTableID         = 44
-	TenantUsageTableID                  = 45
-	SQLInstancesTableID                 = 46
-	SpanConfigurationsTableID           = 47
 
 	// CommentType is type for system.comments
-	DatabaseCommentType   = 0
-	TableCommentType      = 1
-	ColumnCommentType     = 2
-	IndexCommentType      = 3
-	SchemaCommentType     = 4
-	ConstraintCommentType = 5
+	DatabaseCommentType = 0
+	TableCommentType    = 1
+	ColumnCommentType   = 2
+	IndexCommentType    = 3
 )
 
 const (

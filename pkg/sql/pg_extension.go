@@ -18,8 +18,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo/geoprojbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -28,7 +30,7 @@ import (
 // these tables and views on the public schema, but we instead do it in
 // our own defined virtual table / schema.
 var pgExtension = virtualSchema{
-	name: catconstants.PgExtensionSchemaName,
+	name: sessiondata.PgExtensionSchemaName,
 	tableDefs: map[descpb.ID]virtualSchemaDef{
 		catconstants.PgExtensionGeographyColumnsTableID: pgExtensionGeographyColumnsTable,
 		catconstants.PgExtensionGeometryColumnsTableID:  pgExtensionGeometryColumnsTable,
@@ -39,14 +41,14 @@ var pgExtension = virtualSchema{
 
 func postgisColumnsTablePopulator(
 	matchingFamily types.Family,
-) func(context.Context, *planner, catalog.DatabaseDescriptor, func(...tree.Datum) error) error {
-	return func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
+) func(context.Context, *planner, *dbdesc.Immutable, func(...tree.Datum) error) error {
+	return func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(
 			ctx,
 			p,
 			dbContext,
 			hideVirtual,
-			func(db catalog.DatabaseDescriptor, scName string, table catalog.TableDescriptor) error {
+			func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 				if !table.IsPhysicalTable() {
 					return nil
 				}
@@ -64,6 +66,10 @@ func postgisColumnsTablePopulator(
 
 					var datumNDims tree.Datum
 					switch m.ShapeType {
+					case geopb.ShapeType_Point, geopb.ShapeType_LineString, geopb.ShapeType_Polygon,
+						geopb.ShapeType_MultiPoint, geopb.ShapeType_MultiLineString, geopb.ShapeType_MultiPolygon,
+						geopb.ShapeType_GeometryCollection:
+						datumNDims = tree.NewDInt(2)
 					case geopb.ShapeType_Geometry, geopb.ShapeType_Unset:
 						// For geometry_columns, the query in PostGIS COALESCES the value to 2.
 						// Otherwise, the value is NULL.
@@ -72,33 +78,11 @@ func postgisColumnsTablePopulator(
 						} else {
 							datumNDims = tree.DNull
 						}
-					default:
-						zm := m.ShapeType & (geopb.ZShapeTypeFlag | geopb.MShapeTypeFlag)
-						switch zm {
-						case geopb.ZShapeTypeFlag | geopb.MShapeTypeFlag:
-							datumNDims = tree.NewDInt(4)
-						case geopb.ZShapeTypeFlag, geopb.MShapeTypeFlag:
-							datumNDims = tree.NewDInt(3)
-						default:
-							datumNDims = tree.NewDInt(2)
-						}
 					}
 
-					// PostGIS is weird on this one! It has the following behavior:
-					//
-					// * For Geometry, it uses the 2D shape type, all uppercase.
-					// * For Geography, use the correct OGR case for the shape type.
-					shapeName := geopb.ShapeType_Geometry.String()
-					if matchingFamily == types.GeometryFamily {
-						if m.ShapeType == geopb.ShapeType_Unset {
-							shapeName = strings.ToUpper(shapeName)
-						} else {
-							shapeName = strings.ToUpper(m.ShapeType.To2D().String())
-						}
-					} else {
-						if m.ShapeType != geopb.ShapeType_Unset {
-							shapeName = m.ShapeType.String()
-						}
+					shapeName := m.ShapeType.String()
+					if m.ShapeType == geopb.ShapeType_Unset {
+						shapeName = geopb.ShapeType_Geometry.String()
 					}
 
 					if err := addRow(
@@ -108,7 +92,7 @@ func postgisColumnsTablePopulator(
 						tree.NewDString(col.GetName()),
 						datumNDims,
 						tree.NewDInt(tree.DInt(m.SRID)),
-						tree.NewDString(shapeName),
+						tree.NewDString(strings.ToUpper(shapeName)),
 					); err != nil {
 						return err
 					}
@@ -159,8 +143,8 @@ CREATE TABLE pg_extension.spatial_ref_sys (
 	srtext varchar(2048),
 	proj4text varchar(2048)
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		for _, projection := range geoprojbase.AllProjections() {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		for _, projection := range geoprojbase.Projections {
 			if err := addRow(
 				tree.NewDInt(tree.DInt(projection.SRID)),
 				tree.NewDString(projection.AuthName),

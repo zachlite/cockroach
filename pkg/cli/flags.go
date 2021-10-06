@@ -811,7 +811,6 @@ func init() {
 
 		intFlag(f, &demoCtx.NumNodes, cliflags.DemoNodes)
 		boolFlag(f, &demoCtx.RunWorkload, cliflags.RunDemoWorkload)
-		intFlag(f, &demoCtx.WorkloadMaxQPS, cliflags.DemoWorkloadMaxQPS)
 		varFlag(f, &demoCtx.Localities, cliflags.DemoNodeLocality)
 		boolFlag(f, &demoCtx.GeoPartitionedReplicas, cliflags.DemoGeoPartitionedReplicas)
 		varFlag(f, demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)
@@ -949,7 +948,6 @@ func init() {
 		varFlag(f, addrSetter{&serverHTTPAddr, &serverHTTPPort}, cliflags.ListenHTTPAddr)
 		varFlag(f, addrSetter{&serverAdvertiseAddr, &serverAdvertisePort}, cliflags.AdvertiseAddr)
 
-		varFlag(f, &serverCfg.Stores, cliflags.Store)
 		stringFlag(f, &startCtx.geoLibsDir, cliflags.GeoLibsDir)
 
 		stringSliceFlag(f, &serverCfg.SQLConfig.TenantKVAddrs, cliflags.KVAddrs)
@@ -958,11 +956,6 @@ func init() {
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableOutbound, cliflags.ExternalIODisabled)
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableImplicitCredentials, cliflags.ExternalIODisableImplicitCredentials)
 
-		// N.B. diskTempStorageSizeValue.ResolvePercentage() will be called after
-		// the stores flag has been parsed and the storage device that a percentage
-		// refers to becomes known.
-		varFlag(f, diskTempStorageSizeValue, cliflags.SQLTempStorage)
-		stringFlag(f, &startCtx.tempDir, cliflags.TempDir)
 	}
 
 	// Multi-tenancy proxy command flags.

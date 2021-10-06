@@ -19,7 +19,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
@@ -210,73 +209,9 @@ func getSchemaForCreateTable(
 
 	return schema, nil
 }
-func hasPrimaryKeySerialType(params runParams, colDef *tree.ColumnTableDef) (bool, error) {
-	if colDef.IsSerial || colDef.GeneratedIdentity.IsGeneratedAsIdentity {
-		return true, nil
-	}
-
-	if funcExpr, ok := colDef.DefaultExpr.Expr.(*tree.FuncExpr); ok {
-		var name string
-
-		switch t := funcExpr.Func.FunctionReference.(type) {
-		case *tree.FunctionDefinition:
-			name = t.Name
-		case *tree.UnresolvedName:
-			fn, err := t.ResolveFunction(params.SessionData().SearchPath)
-			if err != nil {
-				return false, err
-			}
-			name = fn.Name
-		}
-
-		if name == "nextval" {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
 
 func (n *createTableNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeCreateCounter("table"))
-
-	colsWithPrimaryKeyConstraint := make(map[tree.Name]bool)
-
-	for _, def := range n.n.Defs {
-		switch v := def.(type) {
-		case *tree.UniqueConstraintTableDef:
-			if v.PrimaryKey {
-				for _, indexEle := range v.IndexTableDef.Columns {
-					colsWithPrimaryKeyConstraint[indexEle.Column] = true
-				}
-			}
-
-		case *tree.ColumnTableDef:
-			if v.PrimaryKey.IsPrimaryKey {
-				colsWithPrimaryKeyConstraint[v.Name] = true
-			}
-		}
-	}
-
-	for _, def := range n.n.Defs {
-		switch v := def.(type) {
-		case *tree.ColumnTableDef:
-			if _, ok := colsWithPrimaryKeyConstraint[v.Name]; ok {
-				primaryKeySerial, err := hasPrimaryKeySerialType(params, v)
-				if err != nil {
-					return err
-				}
-
-				if primaryKeySerial {
-					params.p.BufferClientNotice(
-						params.ctx,
-						pgnotice.Newf("using sequential values in a primary key does not perform as well as using random UUIDs. See %s", docs.URL("serial.html")),
-					)
-					break
-				}
-			}
-		}
-	}
 
 	schema, err := getSchemaForCreateTable(params, n.dbDesc, n.n.Persistence, &n.n.Table,
 		tree.ResolveRequireTableDesc, n.n.IfNotExists)
@@ -544,7 +479,7 @@ func (n *createTableNode) startExec(params runParams) error {
 				*ti = tableInserter{}
 				tableInserterPool.Put(ti)
 			}()
-			if err := tw.init(params.ctx, params.p.txn, params.p.EvalContext(), &params.p.EvalContext().Settings.SV); err != nil {
+			if err := tw.init(params.ctx, params.p.txn, params.p.EvalContext()); err != nil {
 				return err
 			}
 
@@ -2292,12 +2227,8 @@ func NewTableDesc(
 	// constructing the table descriptor so that we can check all foreign key
 	// constraints in on place as opposed to traversing the input and finding all
 	// inline/explicit foreign key constraints.
-	var onUpdateErr error
-	tabledesc.ValidateOnUpdate(&desc, func(err error) {
-		onUpdateErr = err
-	})
-	if onUpdateErr != nil {
-		return nil, onUpdateErr
+	if err := tabledesc.ValidateOnUpdate(desc.AllColumns(), desc.GetOutboundFKs()); err != nil {
+		return nil, err
 	}
 
 	// AllocateIDs mutates its receiver. `return desc, desc.AllocateIDs()`
@@ -2560,14 +2491,6 @@ func replaceLikeTableOpts(n *tree.CreateTable, params runParams) (tree.TableDefs
 					def.Computed.Computed = true
 					def.Computed.Virtual = c.Virtual
 					def.Computed.Expr, err = parser.ParseExpr(*c.ComputeExpr)
-					if err != nil {
-						return nil, err
-					}
-				}
-			}
-			if c.OnUpdateExpr != nil {
-				if opts.Has(tree.LikeTableOptDefaults) {
-					def.OnUpdateExpr.Expr, err = parser.ParseExpr(*c.OnUpdateExpr)
 					if err != nil {
 						return nil, err
 					}

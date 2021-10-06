@@ -18,7 +18,6 @@ package main
 import (
 	"fmt"
 
-	_ "github.com/aws/aws-sdk-go-v2"
 	_ "github.com/bufbuild/buf/cmd/buf"
 	_ "github.com/client9/misspell/cmd/misspell"
 	_ "github.com/cockroachdb/crlfmt"
@@ -35,7 +34,6 @@ import (
 	_ "github.com/mattn/goveralls"
 	_ "github.com/mibk/dupl"
 	_ "github.com/mmatczuk/go_generics/cmd/go_generics"
-	_ "github.com/prometheus/prometheus/promql"
 	_ "github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc"
 	_ "github.com/wadey/gocovmerge"
 	_ "golang.org/x/lint/golint"

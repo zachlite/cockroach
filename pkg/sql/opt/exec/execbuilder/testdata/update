@@ -254,14 +254,16 @@ vectorized: true
 │
 └── • render
     │
-    └── • top-k
-        │ order: -v
-        │ k: 10
+    └── • limit
+        │ count: 10
         │
-        └── • scan
-              missing stats
-              table: kv@primary
-              spans: FULL SCAN
+        └── • sort
+            │ order: -v
+            │
+            └── • scan
+                  missing stats
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Use case for UPDATE ... ORDER BY: renumbering a PK without unique violation.
 query T

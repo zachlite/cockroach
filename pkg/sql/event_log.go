@@ -12,6 +12,7 @@ package sql
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -22,11 +23,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // The logging functions in this file are the different stages of a
@@ -166,9 +167,8 @@ type eventLogOptions struct {
 }
 
 func (p *planner) getCommonSQLEventDetails() eventpb.CommonSQLEventDetails {
-	redactableStmt := formatStmtKeyAsRedactableString(p.extendedEvalCtx.VirtualSchemas, p.stmt.AST, p.extendedEvalCtx.EvalContext.Annotations)
 	commonSQLEventDetails := eventpb.CommonSQLEventDetails{
-		Statement:       redactableStmt,
+		Statement:       tree.AsStringWithFQNames(p.stmt.AST, p.extendedEvalCtx.EvalContext.Annotations),
 		Tag:             p.stmt.AST.StatementTag(),
 		User:            p.User().Normalized(),
 		ApplicationName: p.SessionData().ApplicationName,
@@ -462,12 +462,10 @@ VALUES($1, $2, $3, $4, $5)`
 	args := make([]interface{}, 0, len(entries)*colsPerEvent)
 	constructArgs := func(reportingID int32, entry eventLogEntry) error {
 		event := entry.event
-		infoBytes := redact.RedactableBytes("{")
-		_, infoBytes = event.AppendJSONFields(false /* printComma */, infoBytes)
-		infoBytes = append(infoBytes, '}')
-		// In the system.eventlog table, we do not use redaction markers.
-		// (compatibility with previous versions of CockroachDB.)
-		infoBytes = infoBytes.StripMarkers()
+		infoBytes, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
 		eventType := eventpb.GetEventTypeName(event)
 		args = append(
 			args,

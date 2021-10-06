@@ -18,9 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 )
 
@@ -133,18 +131,15 @@ type Memo struct {
 
 	// The following are selected fields from SessionData which can affect
 	// planning. We need to cross-check these before reusing a cached memo.
-	reorderJoinsLimit       int
-	zigzagJoinEnabled       bool
-	useHistograms           bool
-	useMultiColStats        bool
-	localityOptimizedSearch bool
-	safeUpdates             bool
-	preferLookupJoinsForFKs bool
-	saveTablesPrefix        string
-	dateStyleEnabled        bool
-	intervalStyleEnabled    bool
-	dateStyle               pgdate.DateStyle
-	intervalStyle           duration.IntervalStyle
+	reorderJoinsLimit             int
+	zigzagJoinEnabled             bool
+	useHistograms                 bool
+	useMultiColStats              bool
+	localityOptimizedSearch       bool
+	safeUpdates                   bool
+	preferLookupJoinsForFKs       bool
+	saveTablesPrefix              string
+	improveDisjunctionSelectivity bool
 
 	// curID is the highest currently in-use scalar expression ID.
 	curID opt.ScalarID
@@ -174,19 +169,16 @@ func (m *Memo) Init(evalCtx *tree.EvalContext) {
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
 	*m = Memo{
-		metadata:                m.metadata,
-		reorderJoinsLimit:       int(evalCtx.SessionData().ReorderJoinsLimit),
-		zigzagJoinEnabled:       evalCtx.SessionData().ZigzagJoinEnabled,
-		useHistograms:           evalCtx.SessionData().OptimizerUseHistograms,
-		useMultiColStats:        evalCtx.SessionData().OptimizerUseMultiColStats,
-		localityOptimizedSearch: evalCtx.SessionData().LocalityOptimizedSearch,
-		safeUpdates:             evalCtx.SessionData().SafeUpdates,
-		preferLookupJoinsForFKs: evalCtx.SessionData().PreferLookupJoinsForFKs,
-		saveTablesPrefix:        evalCtx.SessionData().SaveTablesPrefix,
-		intervalStyleEnabled:    evalCtx.SessionData().IntervalStyleEnabled,
-		dateStyleEnabled:        evalCtx.SessionData().DateStyleEnabled,
-		dateStyle:               evalCtx.SessionData().GetDateStyle(),
-		intervalStyle:           evalCtx.SessionData().GetIntervalStyle(),
+		metadata:                      m.metadata,
+		reorderJoinsLimit:             evalCtx.SessionData.ReorderJoinsLimit,
+		zigzagJoinEnabled:             evalCtx.SessionData.ZigzagJoinEnabled,
+		useHistograms:                 evalCtx.SessionData.OptimizerUseHistograms,
+		useMultiColStats:              evalCtx.SessionData.OptimizerUseMultiColStats,
+		localityOptimizedSearch:       evalCtx.SessionData.LocalityOptimizedSearch,
+		safeUpdates:                   evalCtx.SessionData.SafeUpdates,
+		preferLookupJoinsForFKs:       evalCtx.SessionData.PreferLookupJoinsForFKs,
+		saveTablesPrefix:              evalCtx.SessionData.SaveTablesPrefix,
+		improveDisjunctionSelectivity: evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity,
 	}
 	m.metadata.Init()
 	m.logPropsBuilder.init(evalCtx, m)
@@ -287,18 +279,15 @@ func (m *Memo) IsStale(
 ) (bool, error) {
 	// Memo is stale if fields from SessionData that can affect planning have
 	// changed.
-	if m.reorderJoinsLimit != int(evalCtx.SessionData().ReorderJoinsLimit) ||
-		m.zigzagJoinEnabled != evalCtx.SessionData().ZigzagJoinEnabled ||
-		m.useHistograms != evalCtx.SessionData().OptimizerUseHistograms ||
-		m.useMultiColStats != evalCtx.SessionData().OptimizerUseMultiColStats ||
-		m.localityOptimizedSearch != evalCtx.SessionData().LocalityOptimizedSearch ||
-		m.safeUpdates != evalCtx.SessionData().SafeUpdates ||
-		m.preferLookupJoinsForFKs != evalCtx.SessionData().PreferLookupJoinsForFKs ||
-		m.saveTablesPrefix != evalCtx.SessionData().SaveTablesPrefix ||
-		m.intervalStyleEnabled != evalCtx.SessionData().IntervalStyleEnabled ||
-		m.dateStyleEnabled != evalCtx.SessionData().DateStyleEnabled ||
-		m.dateStyle != evalCtx.SessionData().GetDateStyle() ||
-		m.intervalStyle != evalCtx.SessionData().GetIntervalStyle() {
+	if m.reorderJoinsLimit != evalCtx.SessionData.ReorderJoinsLimit ||
+		m.zigzagJoinEnabled != evalCtx.SessionData.ZigzagJoinEnabled ||
+		m.useHistograms != evalCtx.SessionData.OptimizerUseHistograms ||
+		m.useMultiColStats != evalCtx.SessionData.OptimizerUseMultiColStats ||
+		m.localityOptimizedSearch != evalCtx.SessionData.LocalityOptimizedSearch ||
+		m.safeUpdates != evalCtx.SessionData.SafeUpdates ||
+		m.preferLookupJoinsForFKs != evalCtx.SessionData.PreferLookupJoinsForFKs ||
+		m.saveTablesPrefix != evalCtx.SessionData.SaveTablesPrefix ||
+		m.improveDisjunctionSelectivity != evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity {
 		return true, nil
 	}
 

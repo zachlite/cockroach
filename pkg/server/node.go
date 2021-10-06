@@ -56,7 +56,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/opentracing/opentracing-go/ext"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 )
@@ -72,38 +72,20 @@ const (
 // Metric names.
 var (
 	metaExecLatency = metric.Metadata{
-		Name: "exec.latency",
-		Help: `Latency of batch KV requests (including errors) executed on this node.
-
-This measures requests already addressed to a single replica, from the moment
-at which they arrive at the internal gRPC endpoint to the moment at which the
-response (or an error) is returned.
-
-This latency includes in particular commit waits, conflict resolution and replication,
-and end-users can easily produce high measurements via long-running transactions that
-conflict with foreground traffic. This metric thus does not provide a good signal for
-understanding the health of the KV layer.
-`,
+		Name:        "exec.latency",
+		Help:        "Latency of batch KV requests executed on this node",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 	metaExecSuccess = metric.Metadata{
-		Name: "exec.success",
-		Help: `Number of batch KV requests executed successfully on this node.
-
-A request is considered to have executed 'successfully' if it either returns a result
-or a transaction restart/abort error.
-`,
+		Name:        "exec.success",
+		Help:        "Number of batch KV requests executed successfully on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaExecError = metric.Metadata{
-		Name: "exec.error",
-		Help: `Number of batch KV requests that failed to execute on this node.
-
-This count excludes transaction restart/abort errors. However, it will include
-other errors expected during normal operation, such as ConditionFailedError.
-This metric is thus not an indicator of KV health.`,
+		Name:        "exec.error",
+		Help:        "Number of batch KV requests that failed to execute on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -916,11 +898,11 @@ func (n *Node) batchInternal(
 
 	var br *roachpb.BatchResponse
 	if err := n.stopper.RunTaskWithErr(ctx, "node.Node: batch", func(ctx context.Context) error {
-		var finishSpan func(context.Context, *roachpb.BatchResponse)
+		var finishSpan func(*roachpb.BatchResponse)
 		// Shadow ctx from the outer function. Written like this to pass the linter.
 		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, tenID)
 		// NB: wrapped to delay br evaluation to its value when returning.
-		defer func() { finishSpan(ctx, br) }()
+		defer func() { finishSpan(br) }()
 		if log.HasSpanOrEvent(ctx) {
 			log.Eventf(ctx, "node received request: %s", args.Summary())
 		}
@@ -1062,7 +1044,7 @@ func (n *Node) Batch(
 // be nil in case no response is to be returned to the rpc caller.
 func (n *Node) setupSpanForIncomingRPC(
 	ctx context.Context, tenID roachpb.TenantID,
-) (context.Context, func(context.Context, *roachpb.BatchResponse)) {
+) (context.Context, func(*roachpb.BatchResponse)) {
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
@@ -1070,7 +1052,9 @@ func (n *Node) setupSpanForIncomingRPC(
 	var newSpan, grpcSpan *tracing.Span
 	if isLocalRequest := grpcutil.IsLocalRequestContext(ctx) && tenID == roachpb.SystemTenantID; isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
-		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName, tracing.WithServerSpanKind)
+		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName)
+		// Set the same span.kind tag as the gRPC interceptor.
+		newSpan.SetTag(ext.SpanKindRPCServer.Key, ext.SpanKindRPCServer.Value)
 	} else {
 		grpcSpan = tracing.SpanFromContext(ctx)
 		if grpcSpan == nil {
@@ -1079,11 +1063,11 @@ func (n *Node) setupSpanForIncomingRPC(
 			// disabled, this will be a noop span).
 			ctx, newSpan = tr.StartSpanCtx(ctx, opName)
 		} else {
-			grpcSpan.SetTag("node", attribute.IntValue(int(n.Descriptor.NodeID)))
+			grpcSpan.SetTag("node", n.Descriptor.NodeID)
 		}
 	}
 
-	finishSpan := func(ctx context.Context, br *roachpb.BatchResponse) {
+	finishSpan := func(br *roachpb.BatchResponse) {
 		if newSpan != nil {
 			newSpan.Finish()
 		}
@@ -1098,12 +1082,8 @@ func (n *Node) setupSpanForIncomingRPC(
 			// sensitive stripped out of the verbose messages. However,
 			// structured payloads stay untouched.
 			if rec := grpcSpan.GetRecording(); rec != nil {
-				err := redactRecordingForTenant(tenID, rec)
-				if err == nil {
-					br.CollectedSpans = append(br.CollectedSpans, rec...)
-				} else {
-					log.Errorf(ctx, "error redacting trace recording: %s", err)
-				}
+				maybeRedactRecording(tenID, rec)
+				br.CollectedSpans = append(br.CollectedSpans, rec...)
 			}
 		}
 	}

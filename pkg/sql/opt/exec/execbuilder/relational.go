@@ -222,9 +222,6 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 		*memo.EnsureUpsertDistinctOnExpr:
 		ep, err = b.buildDistinct(t)
 
-	case *memo.TopKExpr:
-		ep, err = b.buildTopK(t)
-
 	case *memo.LimitExpr, *memo.OffsetExpr:
 		ep, err = b.buildLimitOffset(e)
 
@@ -661,10 +658,6 @@ func (b *Builder) buildScan(scan *memo.ScanExpr) (execPlan, error) {
 	)
 	if err != nil {
 		return execPlan{}, err
-	}
-
-	if scan.Flags.ForceZigzag {
-		return execPlan{}, fmt.Errorf("could not produce a query plan conforming to the FORCE_ZIGZAG hint")
 	}
 
 	// Save if we planned a full table/index scan on the builder so that the
@@ -1521,36 +1514,6 @@ func (b *Builder) buildSetOp(set memo.RelExpr) (execPlan, error) {
 		return execPlan{}, err
 	}
 	return ep, nil
-}
-
-// buildTopK builds a plan for a TopKOp, which is like a combined SortOp and LimitOp.
-func (b *Builder) buildTopK(e *memo.TopKExpr) (execPlan, error) {
-	inputExpr := e.Input
-	input, err := b.buildRelational(inputExpr)
-	if err != nil {
-		return execPlan{}, err
-	}
-	ordering := e.Ordering.ToOrdering()
-	inputOrdering := e.Input.ProvidedPhysical().Ordering
-	alreadyOrderedPrefix := 0
-	for i := range inputOrdering {
-		if i == len(ordering) {
-			return execPlan{}, errors.AssertionFailedf("sort ordering already provided by input")
-		}
-		if inputOrdering[i] != ordering[i] {
-			break
-		}
-		alreadyOrderedPrefix = i + 1
-	}
-	node, err := b.factory.ConstructTopK(
-		input.root,
-		e.K,
-		exec.OutputOrdering(input.sqlOrdering(ordering)),
-		alreadyOrderedPrefix)
-	if err != nil {
-		return execPlan{}, err
-	}
-	return execPlan{root: node, outputCols: input.outputCols}, nil
 }
 
 // buildLimitOffset builds a plan for a LimitOp or OffsetOp

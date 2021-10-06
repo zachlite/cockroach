@@ -655,7 +655,7 @@ func (b *buildContext) maybeCleanTableFKs(
 	ctx context.Context, table catalog.TableDescriptor, behavior tree.DropBehavior,
 ) { // Loop through and update inbound and outbound
 	// foreign key references.
-	_ = table.ForeachInboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	for _, fk := range table.GetInboundFKs() {
 		dependentTable, err := b.Descs.GetImmutableTableByID(ctx, b.EvalCtx.Txn, fk.OriginTableID, tree.ObjectLookupFlagsWithRequired())
 		if err != nil {
 			panic(err)
@@ -691,10 +691,9 @@ func (b *buildContext) maybeCleanTableFKs(
 			b.addNode(scpb.Target_DROP,
 				inFkNode)
 		}
-		return nil
-	})
+	}
 
-	_ = table.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	for _, fk := range table.GetOutboundFKs() {
 		outFkNode := &scpb.OutboundForeignKey{
 			OriginID:         fk.OriginTableID,
 			OriginColumns:    fk.OriginColumnIDs,
@@ -717,8 +716,7 @@ func (b *buildContext) maybeCleanTableFKs(
 			b.addNode(scpb.Target_DROP,
 				inFkNode)
 		}
-		return nil
-	})
+	}
 }
 
 func (b *buildContext) dropTableDesc(

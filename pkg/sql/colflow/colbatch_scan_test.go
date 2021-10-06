@@ -25,10 +25,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/colfetcher"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -74,10 +76,13 @@ func TestColBatchScanMeta(t *testing.T) {
 				Spans: []execinfrapb.TableReaderSpan{
 					{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)},
 				},
-				NeededColumns: []uint32{0},
-				Table:         *td.TableDesc(),
+				Table: *td.TableDesc(),
 			}},
-		ResultTypes: types.OneIntCol,
+		Post: execinfrapb.PostProcessSpec{
+			Projection:    true,
+			OutputColumns: []uint32{0},
+		},
+		ResultTypes: rowenc.OneIntCol,
 	}
 
 	args := &colexecargs.NewColOperatorArgs{
@@ -88,10 +93,9 @@ func TestColBatchScanMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.TestCleanupNoError(t)
-	tr := res.Root
-	tr.Init(ctx)
-	meta := res.MetadataSources[0].DrainMeta()
+	tr := res.Op
+	tr.Init()
+	meta := tr.(*colexecutils.CancelChecker).Input.(*colfetcher.ColBatchScan).DrainMeta(ctx)
 	var txnFinalStateSeen bool
 	for _, m := range meta {
 		if m.LeafTxnFinalState != nil {
@@ -131,9 +135,12 @@ func BenchmarkColBatchScan(b *testing.B) {
 						Spans: []execinfrapb.TableReaderSpan{
 							{Span: tableDesc.PrimaryIndexSpan(keys.SystemSQLCodec)},
 						},
-						NeededColumns: []uint32{0, 1},
 					}},
-				ResultTypes: types.TwoIntCols,
+				Post: execinfrapb.PostProcessSpec{
+					Projection:    true,
+					OutputColumns: []uint32{0, 1},
+				},
+				ResultTypes: rowenc.TwoIntCols,
 			}
 
 			evalCtx := tree.MakeTestingEvalContext(s.ClusterSettings())
@@ -149,6 +156,7 @@ func BenchmarkColBatchScan(b *testing.B) {
 			b.SetBytes(int64(numRows * numCols * 8))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				b.StopTimer()
 				args := &colexecargs.NewColOperatorArgs{
 					Spec:                &spec,
 					StreamingMemAccount: testMemAcc,
@@ -157,17 +165,15 @@ func BenchmarkColBatchScan(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				tr := res.Root
+				tr := res.Op
+				tr.Init()
 				b.StartTimer()
-				tr.Init(ctx)
 				for {
-					bat := tr.Next()
+					bat := tr.Next(ctx)
 					if bat.Length() == 0 {
 						break
 					}
 				}
-				b.StopTimer()
-				res.TestCleanupNoError(b)
 			}
 		})
 	}

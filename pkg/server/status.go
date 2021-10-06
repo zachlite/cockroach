@@ -56,6 +56,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/contention"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -99,11 +100,20 @@ const (
 	// paginated request. This should be much lower than maxConcurrentRequests
 	// as too much concurrency here can result in wasted results.
 	maxConcurrentPaginatedRequests = 4
+
+	// omittedKeyStr is the string returned in place of a key when keys aren't
+	// permitted in responses.
+	omittedKeyStr = "omitted (due to the 'server.remote_debugging.mode' setting)"
 )
 
 var (
 	// Pattern for local used when determining the node ID.
 	localRE = regexp.MustCompile(`(?i)local`)
+
+	// Error used to convey that remote debugging is needs to be enabled for an
+	// endpoint to be usable.
+	remoteDebuggingErr = status.Error(
+		codes.PermissionDenied, "not allowed (due to the 'server.remote_debugging.mode' setting)")
 
 	// Counter to count accesses to the prometheus vars endpoint /_status/vars .
 	telemetryPrometheusVars = telemetry.GetCounterOnce("monitoring.prometheus.vars")
@@ -127,12 +137,6 @@ func propagateGatewayMetadata(ctx context.Context) context.Context {
 // baseStatusServer implements functionality shared by the tenantStatusServer
 // and the full statusServer.
 type baseStatusServer struct {
-	// Embedding the UnimplementedStatusServer lets us easily support
-	// treating the tenantStatusServer as implementing the StatusServer
-	// interface. We'd return an unimplemented error for the methods we
-	// didn't require anyway.
-	serverpb.UnimplementedStatusServer
-
 	log.AmbientContext
 	privilegeChecker   *adminPrivilegeChecker
 	sessionRegistry    *sql.SessionRegistry
@@ -140,8 +144,6 @@ type baseStatusServer struct {
 	flowScheduler      *flowinfra.FlowScheduler
 	st                 *cluster.Settings
 	sqlServer          *SQLServer
-	rpcCtx             *rpc.Context
-	stopper            *stop.Stopper
 }
 
 // getLocalSessions returns a list of local sessions on this node. Note that the
@@ -398,7 +400,9 @@ type statusServer struct {
 	metricSource             metricMarshaler
 	nodeLiveness             *liveness.NodeLiveness
 	storePool                *kvserver.StorePool
+	rpcCtx                   *rpc.Context
 	stores                   *kvserver.Stores
+	stopper                  *stop.Stopper
 	si                       systemInfoOnce
 	stmtDiagnosticsRequester StmtDiagnosticsRequester
 	internalExecutor         *sql.InternalExecutor
@@ -443,8 +447,6 @@ func newStatusServer(
 			contentionRegistry: contentionRegistry,
 			flowScheduler:      flowScheduler,
 			st:                 st,
-			rpcCtx:             rpcCtx,
-			stopper:            stopper,
 		},
 		cfg:              cfg,
 		admin:            adminServer,
@@ -453,7 +455,9 @@ func newStatusServer(
 		metricSource:     metricSource,
 		nodeLiveness:     nodeLiveness,
 		storePool:        storePool,
+		rpcCtx:           rpcCtx,
 		stores:           stores,
+		stopper:          stopper,
 		internalExecutor: internalExecutor,
 	}
 
@@ -522,6 +526,10 @@ func (s *statusServer) Gossip(
 		return nil, err
 	}
 
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
+	}
+
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
@@ -587,6 +595,12 @@ func (s *statusServer) Allocator(
 
 	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
+	}
+
+	// TODO(a-robinson): It'd be nice to allow this endpoint and just avoid
+	// logging range start/end keys in the simulated allocator runs.
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
@@ -666,7 +680,7 @@ func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.Trac
 				Time: entry.Time,
 			}
 			if len(entry.Fields) == 1 {
-				event.Message = entry.Fields[0].Value.StripMarkers()
+				event.Message = entry.Fields[0].Value
 			} else {
 				buf.Reset()
 				for i, f := range entry.Fields {
@@ -692,6 +706,12 @@ func (s *statusServer) AllocatorRange(
 
 	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
+	}
+
+	// TODO(a-robinson): It'd be nice to allow this endpoint and just avoid
+	// logging range start/end keys in the simulated allocator runs.
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
 	}
 
 	isLiveMap := s.nodeLiveness.GetIsLiveMap()
@@ -941,6 +961,10 @@ func (s *statusServer) GetFiles(
 		return nil, err
 	}
 
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
+	}
+
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
@@ -1043,6 +1067,10 @@ func (s *statusServer) LogFile(
 		return nil, err
 	}
 
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
+	}
+
 	nodeID, local, err := s.parseNodeID(req.NodeId)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
@@ -1063,16 +1091,13 @@ func (s *statusServer) LogFile(
 
 	// Read the logs.
 	reader, err := log.GetLogReader(req.File, true /* restricted */)
-	if err != nil {
-		return nil, errors.Wrapf(err, "log file %q could not be opened", req.File)
+	if reader == nil || err != nil {
+		return nil, fmt.Errorf("log file %s could not be opened: %s", req.File, err)
 	}
 	defer reader.Close()
 
 	var resp serverpb.LogEntriesResponse
-	decoder, err := log.NewEntryDecoder(reader, inputEditMode)
-	if err != nil {
-		return nil, err
-	}
+	decoder := log.NewEntryDecoder(reader, inputEditMode)
 	for {
 		var entry logpb.Entry
 		if err := decoder.Decode(&entry); err != nil {
@@ -1126,6 +1151,10 @@ func (s *statusServer) Logs(
 
 	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
+	}
+
+	if !debug.GatewayRemoteAllowed(ctx, s.st) {
+		return nil, remoteDebuggingErr
 	}
 
 	nodeID, local, err := s.parseNodeID(req.NodeId)
@@ -1229,6 +1258,8 @@ func (s *statusServer) Stacks(
 			}
 			return &serverpb.JSONResponse{Data: buf[:length]}, nil
 		}
+	case serverpb.StacksType_THREAD_STACKS:
+		return &serverpb.JSONResponse{Data: []byte(storage.ThreadStacks())}, nil
 	default:
 		return nil, status.Errorf(codes.InvalidArgument, "unknown stacks type: %s", req.Type)
 	}
@@ -1237,8 +1268,7 @@ func (s *statusServer) Stacks(
 // TODO(tschottdorf): significant overlap with /debug/pprof/heap, except that
 // this one allows querying by NodeID.
 //
-// Profile returns a heap profile. This endpoint is used by the
-// `pprofui` package to satisfy local and remote pprof requests.
+// Profile returns a heap profile.
 func (s *statusServer) Profile(
 	ctx context.Context, req *serverpb.ProfileRequest,
 ) (*serverpb.JSONResponse, error) {
@@ -1262,20 +1292,20 @@ func (s *statusServer) Profile(
 		return status.Profile(ctx, req)
 	}
 
-	return profileLocal(ctx, req, s.st)
-}
-
-func profileLocal(
-	ctx context.Context, req *serverpb.ProfileRequest, st *cluster.Settings,
-) (*serverpb.JSONResponse, error) {
 	switch req.Type {
+	case serverpb.ProfileRequest_HEAP:
+		p := pprof.Lookup("heap")
+		if p == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: heap")
+		}
+		var buf bytes.Buffer
+		if err := p.WriteTo(&buf, 0); err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		}
+		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	case serverpb.ProfileRequest_CPU:
 		var buf bytes.Buffer
-		profileType := cluster.CPUProfileDefault
-		if req.Labels {
-			profileType = cluster.CPUProfileWithLabels
-		}
-		if err := debug.CPUProfileDo(st, profileType, func() error {
+		if err := debug.CPUProfileDo(s.st, cluster.CPUProfileWithLabels, func() error {
 			duration := 30 * time.Second
 			if req.Seconds != 0 {
 				duration = time.Duration(req.Seconds) * time.Second
@@ -1295,71 +1325,8 @@ func profileLocal(
 		}
 		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	default:
-		name, ok := serverpb.ProfileRequest_Type_name[int32(req.Type)]
-		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %d", req.Type)
-		}
-		name = strings.ToLower(name)
-		p := pprof.Lookup(name)
-		if p == nil {
-			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: %s", name)
-		}
-		var buf bytes.Buffer
-		if err := p.WriteTo(&buf, 0); err != nil {
-			return nil, status.Errorf(codes.Internal, err.Error())
-		}
-		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
+		return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %s", req.Type)
 	}
-}
-
-// Regions implements the serverpb.Status interface.
-func (s *statusServer) Regions(
-	ctx context.Context, req *serverpb.RegionsRequest,
-) (*serverpb.RegionsResponse, error) {
-	resp, _, err := s.nodesHelper(ctx, 0 /* limit */, 0 /* offset */)
-	if err != nil {
-		return nil, err
-	}
-	return regionsResponseFromNodesResponse(resp), nil
-}
-
-func regionsResponseFromNodesResponse(nr *serverpb.NodesResponse) *serverpb.RegionsResponse {
-	regionsToZones := make(map[string]map[string]struct{})
-	for _, node := range nr.Nodes {
-		var region string
-		var zone string
-		for _, tier := range node.Desc.Locality.Tiers {
-			switch tier.Key {
-			case "region":
-				region = tier.Value
-			case "zone", "availability-zone", "az":
-				zone = tier.Value
-			}
-		}
-		if region == "" {
-			continue
-		}
-		if _, ok := regionsToZones[region]; !ok {
-			regionsToZones[region] = make(map[string]struct{})
-		}
-		if zone != "" {
-			regionsToZones[region][zone] = struct{}{}
-		}
-	}
-	ret := &serverpb.RegionsResponse{
-		Regions: make(map[string]*serverpb.RegionsResponse_Region, len(regionsToZones)),
-	}
-	for region, zones := range regionsToZones {
-		zonesArr := make([]string, 0, len(zones))
-		for z := range zones {
-			zonesArr = append(zonesArr, z)
-		}
-		sort.Strings(zonesArr)
-		ret.Regions[region] = &serverpb.RegionsResponse_Region{
-			Zones: zonesArr,
-		}
-	}
-	return ret
 }
 
 // Nodes returns all node statuses.
@@ -1382,7 +1349,7 @@ func (s *statusServer) Nodes(
 		return nil, err
 	}
 
-	resp, _, err := s.nodesHelper(ctx, 0 /* limit */, 0 /* offset */)
+	resp, _, err := s.nodesHelper(ctx, 0, 0)
 	return resp, err
 }
 
@@ -1391,7 +1358,7 @@ func (s *statusServer) Nodes(
 func (s *statusServer) ListNodesInternal(
 	ctx context.Context, req *serverpb.NodesRequest,
 ) (*serverpb.NodesResponse, error) {
-	resp, _, err := s.nodesHelper(ctx, 0 /* limit */, 0 /* offset */)
+	resp, _, err := s.nodesHelper(ctx, 0, 0)
 	return resp, err
 }
 
@@ -1734,6 +1701,8 @@ func (s *statusServer) rangesHelper(
 		return state
 	}
 
+	includeRawKeys := debug.GatewayRemoteAllowed(ctx, s.st)
+
 	constructRangeInfo := func(
 		desc roachpb.RangeDescriptor, rep *kvserver.Replica, storeID roachpb.StoreID, metrics kvserver.ReplicaMetrics,
 	) serverpb.RangeInfo {
@@ -1741,22 +1710,17 @@ func (s *statusServer) rangesHelper(
 		raftState := convertRaftStatus(raftStatus)
 		leaseHistory := rep.GetLeaseHistory()
 		var span serverpb.PrettySpan
-		span.StartKey = desc.StartKey.String()
-		span.EndKey = desc.EndKey.String()
+		if includeRawKeys {
+			span.StartKey = desc.StartKey.String()
+			span.EndKey = desc.EndKey.String()
+		} else {
+			span.StartKey = omittedKeyStr
+			span.EndKey = omittedKeyStr
+		}
 		state := rep.State(ctx)
-		var topKLocksByWaiters []serverpb.RangeInfo_LockInfo
-		for _, lm := range metrics.LockTableMetrics.TopKLocksByWaiters {
-			if lm.Key == nil {
-				break
-			}
-			topKLocksByWaiters = append(topKLocksByWaiters, serverpb.RangeInfo_LockInfo{
-				PrettyKey:      lm.Key.String(),
-				Key:            lm.Key,
-				Held:           lm.Held,
-				Waiters:        lm.Waiters,
-				WaitingReaders: lm.WaitingReaders,
-				WaitingWriters: lm.WaitingWriters,
-			})
+		if !includeRawKeys {
+			state.ReplicaState.Desc.StartKey = nil
+			state.ReplicaState.Desc.EndKey = nil
 		}
 		return serverpb.RangeInfo{
 			Span:          span,
@@ -1779,15 +1743,11 @@ func (s *statusServer) rangesHelper(
 				QuiescentEqualsTicking: raftStatus != nil && metrics.Quiescent == metrics.Ticking,
 				RaftLogTooLarge:        metrics.RaftLogTooLarge,
 			},
-			LeaseStatus:                 metrics.LeaseStatus,
-			Quiescent:                   metrics.Quiescent,
-			Ticking:                     metrics.Ticking,
-			ReadLatches:                 metrics.LatchMetrics.ReadCount,
-			WriteLatches:                metrics.LatchMetrics.WriteCount,
-			Locks:                       metrics.LockTableMetrics.Locks,
-			LocksWithWaitQueues:         metrics.LockTableMetrics.LocksWithWaitQueues,
-			LockWaitQueueWaiters:        metrics.LockTableMetrics.Waiters,
-			TopKLocksByWaitQueueWaiters: topKLocksByWaiters,
+			LatchesLocal:  metrics.LatchInfoLocal,
+			LatchesGlobal: metrics.LatchInfoGlobal,
+			LeaseStatus:   metrics.LeaseStatus,
+			Quiescent:     metrics.Quiescent,
+			Ticking:       metrics.Ticking,
 		}
 	}
 
@@ -1926,6 +1886,7 @@ func (s *statusServer) HotRanges(
 
 func (s *statusServer) localHotRanges(ctx context.Context) serverpb.HotRangesResponse_NodeResponse {
 	var resp serverpb.HotRangesResponse_NodeResponse
+	includeRawKeys := debug.GatewayRemoteAllowed(ctx, s.st)
 	err := s.stores.VisitStores(func(store *kvserver.Store) error {
 		ranges := store.HottestReplicas()
 		storeResp := &serverpb.HotRangesResponse_StoreResponse{
@@ -1934,6 +1895,10 @@ func (s *statusServer) localHotRanges(ctx context.Context) serverpb.HotRangesRes
 		}
 		for i, r := range ranges {
 			storeResp.HotRanges[i].Desc = *r.Desc
+			if !includeRawKeys {
+				storeResp.HotRanges[i].Desc.StartKey = nil
+				storeResp.HotRanges[i].Desc.EndKey = nil
+			}
 			storeResp.HotRanges[i].QueriesPerSecond = r.QPS
 		}
 		resp.Stores = append(resp.Stores, storeResp)
@@ -2727,4 +2692,23 @@ func (s *statusServer) JobStatus(
 	*res.Progress = j.Progress()
 
 	return &serverpb.JobStatusResponse{Job: res}, nil
+}
+
+// GenerateJoinToken generates a new ephemeral join token. For use by the sql
+// subsystem directly. The response is a base64 marshaled form of the join token
+// that can be shared to new nodes that want to join this cluster.
+func (s *statusServer) GenerateJoinToken(ctx context.Context) (string, error) {
+	if !sql.FeatureTLSAutoJoinEnabled.Get(&s.st.SV) {
+		return "", errors.New("join token generation disabled")
+	}
+
+	jt, err := generateJoinToken(s.cfg.SSLCertsDir)
+	if err != nil {
+		return "", errors.Wrap(err, "error when generating join token")
+	}
+	token, err := jt.MarshalText()
+	if err != nil {
+		return "", errors.Wrap(err, "error when marshaling join token")
+	}
+	return string(token), nil
 }

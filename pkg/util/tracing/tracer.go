@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,19 +24,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/petermattis/goid"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/jaeger"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/zipkin"
-	"go.opentelemetry.io/otel/sdk/resource"
-	otelsdk "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/trace"
 )
 
@@ -60,24 +51,23 @@ const (
 	// a Tracer's registry.
 	maxSpanRegistrySize = 5000
 	// maxLogsPerSpanExternal limits the number of logs in a Span for external
-	// tracers (net/trace, OpenTelemetry); use a comfortable limit.
+	// tracers (net/trace, lightstep); use a comfortable limit.
 	maxLogsPerSpanExternal = 1000
 )
 
 // These constants are used to form keys to represent tracing context
-// information in "carriers" to be transported across RPC boundaries.
+// information in carriers supporting opentracing.HTTPHeaders format.
 const (
 	prefixTracerState = "crdb-tracer-"
 	prefixBaggage     = "crdb-baggage-"
+	// prefixShadow is prepended to the keys for the context of the shadow tracer
+	// (e.g. LightStep).
+	prefixShadow = "crdb-shadow-"
 
 	fieldNameTraceID = prefixTracerState + "traceid"
 	fieldNameSpanID  = prefixTracerState + "spanid"
-	// fieldNameOtel{TraceID,SpanID} will contain the OpenTelemetry span info, hex
-	// encoded.
-	fieldNameOtelTraceID = prefixTracerState + "otel_traceid"
-	fieldNameOtelSpanID  = prefixTracerState + "otel_spanid"
-
-	spanKindTagKey = "span.kind"
+	// fieldNameShadow is the name of the shadow tracer.
+	fieldNameShadowType = prefixTracerState + "shadowtype"
 )
 
 var enableNetTrace = settings.RegisterBoolSetting(
@@ -86,53 +76,21 @@ var enableNetTrace = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
-var openTelemetryCollector = settings.RegisterValidatedStringSetting(
-	"trace.opentelemetry.collector",
-	"address of an OpenTelemetry trace collector to receive "+
-		"traces using the otel gRPC protocol, as <host>:<port>. "+
-		"If no port is specified, 4317 will be used.",
-	envutil.EnvOrDefaultString("COCKROACH_OTLP_COLLECTOR", ""),
-	func(_ *settings.Values, s string) error {
-		if s == "" {
-			return nil
-		}
-		_, _, err := addr.SplitHostPort(s, "4317")
-		return err
-	},
-).WithPublic()
-
-var jaegerAgent = settings.RegisterValidatedStringSetting(
-	"trace.jaeger.agent",
-	"the address of a Jaeger agent to receive traces using the "+
-		"Jaeger UDP Thrift protocol, as <host>:<port>. "+
-		"If no port is specified, 6381 will be used.",
-	envutil.EnvOrDefaultString("COCKROACH_JAEGER", ""),
-	func(_ *settings.Values, s string) error {
-		if s == "" {
-			return nil
-		}
-		_, _, err := addr.SplitHostPort(s, "6381")
-		return err
-	},
+var lightstepToken = settings.RegisterStringSetting(
+	"trace.lightstep.token",
+	"if set, traces go to Lightstep using this token",
+	envutil.EnvOrDefaultString("COCKROACH_TEST_LIGHTSTEP_TOKEN", ""),
 ).WithPublic()
 
 // ZipkinCollector is the cluster setting that specifies the Zipkin instance
 // to send traces to, if any.
-var ZipkinCollector = settings.RegisterValidatedStringSetting(
+var ZipkinCollector = settings.RegisterStringSetting(
 	"trace.zipkin.collector",
-	"the address of a Zipkin instance to receive traces, as <host>:<port>. "+
-		"If no port is specified, 9411 will be used.",
-	envutil.EnvOrDefaultString("COCKROACH_ZIPKIN", ""),
-	func(_ *settings.Values, s string) error {
-		if s == "" {
-			return nil
-		}
-		_, _, err := addr.SplitHostPort(s, "9411")
-		return err
-	},
+	"if set, traces go to the given Zipkin instance (example: '127.0.0.1:9411'); ignored if trace.lightstep.token is set",
+	envutil.EnvOrDefaultString("COCKROACH_TEST_ZIPKIN_COLLECTOR", ""),
 ).WithPublic()
 
-// Tracer implements tracing requests. It supports:
+// Tracer is our own custom implementation of opentracing.Tracer. It supports:
 //
 //  - forwarding events to x/net/trace instances
 //
@@ -140,8 +98,8 @@ var ZipkinCollector = settings.RegisterValidatedStringSetting(
 //    the verboseTracingBaggageKey baggage and can be started explicitly as well. Recorded
 //    events can be retrieved at any time.
 //
-//  - OpenTelemetry tracing. This is implemented by maintaining a "shadow"
-//    OpenTelemetry Span inside each of our spans.
+//  - lightstep traces. This is implemented by maintaining a "shadow" lightstep
+//    Span inside each of our spans.
 //
 // Even when tracing is disabled, we still use this Tracer (with x/net/trace and
 // lightstep disabled) because of its recording capability (verbose tracing needs
@@ -158,10 +116,8 @@ type Tracer struct {
 	// True if tracing to the debug/requests endpoint. Accessed via t.useNetTrace().
 	_useNetTrace int32 // updated atomically
 
-	// Pointer to an OpenTelemetry tracer used as a "shadow tracer", if any. If
-	// not nil, the respective *otel.Tracer will be used to create mirror spans
-	// for all spans that the parent Tracer creates.
-	otelTracer unsafe.Pointer
+	// Pointer to shadowTracer, if using one.
+	shadowTracer unsafe.Pointer
 
 	// activeSpans is a map that references all non-Finish'ed local root spans,
 	// i.e. those for which no WithLocalParent(<non-nil>) option was supplied.
@@ -183,9 +139,13 @@ type Tracer struct {
 		syncutil.Mutex
 		m map[uint64]*Span
 	}
+	// TracingVerbosityIndependentSemanticsIsActive is really
+	// version.IsActive(TracingVerbosityIndependentSemanticsIsActive)
+	// but gets injected this way to avoid import cycles. It defaults
+	// to a function that returns `true`.
+	TracingVerbosityIndependentSemanticsIsActive func() bool
 
-	testingMu               syncutil.Mutex // protects testingRecordAsyncSpans
-	testingRecordAsyncSpans bool           // see TestingRecordAsyncSpans
+	includeAsyncSpansInRecordings bool // see TestingIncludeAsyncSpansInRecordings
 
 	testing *testingKnob
 }
@@ -196,6 +156,7 @@ type Tracer struct {
 func NewTracer() *Tracer {
 	t := &Tracer{}
 	t.activeSpans.m = make(map[uint64]*Span)
+	t.TracingVerbosityIndependentSemanticsIsActive = func() bool { return true }
 	// The noop span is marked as finished so that even in the case of a bug,
 	// it won't soak up data.
 	t.noopSpan = &Span{numFinishCalled: 1, i: spanInner{tracer: t}}
@@ -204,154 +165,33 @@ func NewTracer() *Tracer {
 
 // Configure sets up the Tracer according to the cluster settings (and keeps
 // it updated if they change).
-func (t *Tracer) Configure(ctx context.Context, sv *settings.Values) {
-	// traceProvider is captured by the function below.
-	var traceProvider *otelsdk.TracerProvider
-
-	// reconfigure will be called every time a cluster setting affecting tracing
-	// is updated.
-	reconfigure := func(ctx context.Context) {
-		jaegerAgentAddr := jaegerAgent.Get(sv)
-		otlpCollectorAddr := openTelemetryCollector.Get(sv)
-		zipkinAddr := ZipkinCollector.Get(sv)
-
+func (t *Tracer) Configure(sv *settings.Values) {
+	reconfigure := func() {
+		if lsToken := lightstepToken.Get(sv); lsToken != "" {
+			t.setShadowTracer(createLightStepTracer(lsToken))
+		} else if zipkinAddr := ZipkinCollector.Get(sv); zipkinAddr != "" {
+			t.setShadowTracer(createZipkinTracer(zipkinAddr))
+		} else {
+			t.setShadowTracer(nil, nil)
+		}
 		var nt int32
 		if enableNetTrace.Get(sv) {
 			nt = 1
 		}
 		atomic.StoreInt32(&t._useNetTrace, nt)
-
-		// Return early if the OpenTelemetry tracer is disabled.
-		if jaegerAgentAddr == "" && otlpCollectorAddr == "" && zipkinAddr == "" {
-			if traceProvider != nil {
-				t.SetOpenTelemetryTracer(nil)
-				if err := traceProvider.Shutdown(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "error shutting down tracer: %s", err)
-				}
-			}
-			return
-		}
-
-		opts := []otelsdk.TracerProviderOption{otelsdk.WithSampler(otelsdk.AlwaysSample())}
-		resource, err := resource.New(ctx,
-			resource.WithAttributes(semconv.ServiceNameKey.String("CockroachDB")),
-		)
-		if err == nil {
-			opts = append(opts, otelsdk.WithResource(resource))
-		} else {
-			fmt.Fprintf(os.Stderr, "failed to create OpenTelemetry resource: %s\n", err)
-		}
-
-		if otlpCollectorAddr != "" {
-			spanProcessor, err := createOTLPSpanProcessor(ctx, otlpCollectorAddr)
-			if err == nil {
-				opts = append(opts, otelsdk.WithSpanProcessor(spanProcessor))
-			} else {
-				fmt.Fprintf(os.Stderr, "failed to create OTLP processor: %s", err)
-			}
-		}
-
-		if jaegerAgentAddr != "" {
-			spanProcessor, err := createJaegerSpanCollector(ctx, jaegerAgentAddr)
-			if err == nil {
-				opts = append(opts, otelsdk.WithSpanProcessor(spanProcessor))
-			} else {
-				fmt.Fprintf(os.Stderr, "failed to create Jaeger processor: %s", err)
-			}
-		}
-
-		if zipkinAddr != "" {
-			spanProcessor, err := createZipkinCollector(ctx, zipkinAddr)
-			if err == nil {
-				opts = append(opts, otelsdk.WithSpanProcessor(spanProcessor))
-			} else {
-				fmt.Fprintf(os.Stderr, "failed to create Zipkin processor: %s", err)
-			}
-		}
-
-		oldTP := traceProvider
-		traceProvider = otelsdk.NewTracerProvider(opts...)
-
-		// Canonical OpenTelemetry wants every module to have its own Tracer
-		// instance, with each one initialized with a different name. We're not
-		// doing that though, because our code creates all the spans through a
-		// single Tracer (the receiver of this method). So, we're creating a
-		// single Tracer here.
-		otelTracer := traceProvider.Tracer("crdb")
-		t.SetOpenTelemetryTracer(otelTracer)
-
-		// Shutdown the old tracer.
-		if oldTP != nil {
-			_ = oldTP.Shutdown(context.TODO())
-		}
-
-		// TODO(andrei): Figure out how to cleanup the tracer when the server
-		// exits. It unfortunately seems hard to plumb the Stopper to here to put
-		// a closer on it.
 	}
 
-	reconfigure(ctx)
+	reconfigure()
 
 	enableNetTrace.SetOnChange(sv, reconfigure)
-	openTelemetryCollector.SetOnChange(sv, reconfigure)
+	lightstepToken.SetOnChange(sv, reconfigure)
 	ZipkinCollector.SetOnChange(sv, reconfigure)
-	jaegerAgent.SetOnChange(sv, reconfigure)
-}
-
-func createOTLPSpanProcessor(
-	ctx context.Context, otlpCollectorAddr string,
-) (otelsdk.SpanProcessor, error) {
-	host, port, err := addr.SplitHostPort(otlpCollectorAddr, "4317")
-	if err != nil {
-		return nil, err
-	}
-
-	exporter, err := otlptracegrpc.New(
-		ctx,
-		otlptracegrpc.WithEndpoint(fmt.Sprintf("%s:%s", host, port)),
-		// TODO(andrei): Add support for secure connections to the collector.
-		otlptracegrpc.WithInsecure())
-	if err != nil {
-		return nil, err
-	}
-	spanProcessor := otelsdk.NewBatchSpanProcessor(exporter)
-	return spanProcessor, nil
-}
-
-func createJaegerSpanCollector(
-	ctx context.Context, agentAddr string,
-) (otelsdk.SpanProcessor, error) {
-	host, port, err := addr.SplitHostPort(agentAddr, "6831")
-	if err != nil {
-		return nil, err
-	}
-	exporter, err := jaeger.New(jaeger.WithAgentEndpoint(
-		jaeger.WithAgentHost(host),
-		jaeger.WithAgentPort(port)))
-	if err != nil {
-		return nil, err
-	}
-	spanProcessor := otelsdk.NewBatchSpanProcessor(exporter)
-	return spanProcessor, nil
-}
-
-func createZipkinCollector(ctx context.Context, zipkinAddr string) (otelsdk.SpanProcessor, error) {
-	host, port, err := addr.SplitHostPort(zipkinAddr, "9411")
-	if err != nil {
-		return nil, err
-	}
-	exporter, err := zipkin.New(fmt.Sprintf("http://%s:%s/api/v2/spans", host, port))
-	if err != nil {
-		return nil, err
-	}
-	spanProcessor := otelsdk.NewBatchSpanProcessor(exporter)
-	return spanProcessor, nil
 }
 
 // HasExternalSink returns whether the tracer is configured to report
 // to an external tracing collector.
 func (t *Tracer) HasExternalSink() bool {
-	return t.getOtelTracer() != nil || t.useNetTrace()
+	return t.getShadowTracer() != nil || t.useNetTrace()
 }
 
 func (t *Tracer) useNetTrace() bool {
@@ -360,29 +200,25 @@ func (t *Tracer) useNetTrace() bool {
 
 // Close cleans up any resources associated with a Tracer.
 func (t *Tracer) Close() {
-	// Clean up the OpenTelemetry tracer, if any.
-	t.SetOpenTelemetryTracer(nil)
+	// Clean up any shadow tracer.
+	t.setShadowTracer(nil, nil)
 }
 
-// SetOpenTelemetryTracer sets the OpenTelemetry tracer to use as a "shadow
-// tracer". A nil value means that no otel tracer will be used.
-func (t *Tracer) SetOpenTelemetryTracer(tr oteltrace.Tracer) {
-	var p *oteltrace.Tracer
-	if tr == nil {
-		p = nil
-	} else {
-		p = &tr
+func (t *Tracer) setShadowTracer(manager shadowTracerManager, tr opentracing.Tracer) {
+	var shadow *shadowTracer
+	if manager != nil && tr != nil {
+		shadow = &shadowTracer{
+			Tracer:  tr,
+			manager: manager,
+		}
 	}
-	atomic.StorePointer(&t.otelTracer, unsafe.Pointer(p))
+	if old := atomic.SwapPointer(&t.shadowTracer, unsafe.Pointer(shadow)); old != nil {
+		(*shadowTracer)(old).Close()
+	}
 }
 
-// getOtelTracer returns the OpenTelemetry tracer to use, or nil.
-func (t *Tracer) getOtelTracer() oteltrace.Tracer {
-	p := atomic.LoadPointer(&t.otelTracer)
-	if p == nil {
-		return nil
-	}
-	return *(*oteltrace.Tracer)(p)
+func (t *Tracer) getShadowTracer() *shadowTracer {
+	return (*shadowTracer)(atomic.LoadPointer(&t.shadowTracer))
 }
 
 // StartSpan starts a Span. See SpanOption for details.
@@ -413,8 +249,8 @@ func (t *Tracer) StartSpanCtx(
 // AlwaysTrace returns true if operations should be traced regardless of the
 // context.
 func (t *Tracer) AlwaysTrace() bool {
-	otelTracer := t.getOtelTracer()
-	return t.useNetTrace() || otelTracer != nil
+	shadowTracer := t.getShadowTracer()
+	return t.useNetTrace() || shadowTracer != nil
 }
 
 // startSpanGeneric is the implementation of StartSpanCtx and StartSpan. In
@@ -423,24 +259,24 @@ func (t *Tracer) AlwaysTrace() bool {
 func (t *Tracer) startSpanGeneric(
 	ctx context.Context, opName string, opts spanOptions,
 ) (context.Context, *Span) {
-	if opts.RefType != childOfRef && opts.RefType != followsFromRef {
+	if opts.RefType != opentracing.ChildOfRef && opts.RefType != opentracing.FollowsFromRef {
 		panic(fmt.Sprintf("unexpected RefType %v", opts.RefType))
 	}
 
 	if opts.Parent != nil {
-		if !opts.RemoteParent.Empty() {
+		if opts.RemoteParent != nil {
 			panic("can't specify both Parent and RemoteParent")
 		}
+	}
+
+	if opts.LogTags == nil {
+		opts.LogTags = logtags.FromContext(ctx)
 	}
 
 	// Are we tracing everything, or have a parent, or want a real span? Then
 	// we create a real trace span. In all other cases, a noop span will do.
 	if !(t.AlwaysTrace() || opts.parentTraceID() != 0 || opts.ForceRealSpan) {
 		return maybeWrapCtx(ctx, nil /* octx */, t.noopSpan)
-	}
-
-	if opts.LogTags == nil {
-		opts.LogTags = logtags.FromContext(ctx)
 	}
 
 	if opts.LogTags == nil && opts.Parent != nil && !opts.Parent.i.isNoop() {
@@ -453,20 +289,34 @@ func (t *Tracer) startSpanGeneric(
 
 	startTime := time.Now()
 
-	// First, create any external spans that we may need (OpenTelemetry, net/trace).
+	// First, create any external spans that we may need (opentracing, net/trace).
 	// We do this early so that they are available when we construct the main Span,
 	// which makes it easier to avoid one-offs when populating the tags and baggage
 	// items for the top-level Span.
-	var otelSpan oteltrace.Span
-	if otelTr := t.getOtelTracer(); otelTr != nil {
-		parentSpan, parentContext := opts.otelContext()
-		otelSpan = makeOtelSpan(otelTr, opName, parentSpan, parentContext, opts.RefType, startTime, opts.SpanKind)
-		// If LogTags are given, pass them as tags to the otel span.
-		// Regular tags are populated later, via the top-level Span.
-		if opts.LogTags != nil {
-			setLogTags(opts.LogTags.Get(), func(remappedKey string, tag *logtags.Tag) {
-				otelSpan.SetAttributes(attribute.String(remappedKey, tag.ValueStr()))
-			})
+	var ot otSpan
+	{
+		shadowTr := t.getShadowTracer()
+
+		// Make sure not to derive spans created using an old
+		// shadow tracer via a new one.
+		typ1, ok1 := opts.shadowTrTyp() // old
+		typ2, ok2 := shadowTr.Type()    // new
+		// If both are set and don't agree, ignore shadow tracer
+		// for the new span to avoid compat issues between the
+		// two underlying tracers.
+		if ok2 && (!ok1 || typ1 == typ2) {
+			var shadowCtx opentracing.SpanContext
+			if opts.Parent != nil && opts.Parent.i.ot.shadowSpan != nil {
+				shadowCtx = opts.Parent.i.ot.shadowSpan.Context()
+			}
+			ot = makeShadowSpan(shadowTr, shadowCtx, opts.RefType, opName, startTime)
+			// If LogTags are given, pass them as tags to the shadow span.
+			// Regular tags are populated later, via the top-level Span.
+			if opts.LogTags != nil {
+				setLogTags(opts.LogTags.Get(), func(remappedKey string, tag *logtags.Tag) {
+					_ = ot.shadowSpan.SetTag(remappedKey, tag.Value())
+				})
+			}
 		}
 	}
 
@@ -475,7 +325,7 @@ func (t *Tracer) startSpanGeneric(
 		netTr = trace.New("tracing", opName)
 		netTr.SetMaxEvents(maxLogsPerSpanExternal)
 
-		// If LogTags are given, pass them as tags to the otel span.
+		// If LogTags are given, pass them as tags to the shadow span.
 		// Regular tags are populated later, via the top-level Span.
 		if opts.LogTags != nil {
 			setLogTags(opts.LogTags.Get(), func(remappedKey string, tag *logtags.Tag) {
@@ -488,6 +338,9 @@ func (t *Tracer) startSpanGeneric(
 
 	traceID := opts.parentTraceID()
 	if traceID == 0 {
+		// NB: it is tempting to use the traceID and spanID from the
+		// possibly populated otSpan in this case, but the opentracing
+		// interface doesn't give us a good way to extract these.
 		traceID = uint64(rand.Int63())
 	}
 	spanID := uint64(rand.Int63())
@@ -521,44 +374,32 @@ func (t *Tracer) startSpanGeneric(
 	helper.crdbSpan.mu.recording.logs = newSizeLimitedBuffer(maxLogBytesPerSpan)
 	helper.crdbSpan.mu.recording.structured = newSizeLimitedBuffer(maxStructuredBytesPerSpan)
 	helper.span.i = spanInner{
-		tracer:   t,
-		crdb:     &helper.crdbSpan,
-		otelSpan: otelSpan,
-		netTr:    netTr,
-	}
-
-	// Copy over the parent span's root span reference, and if there isn't one
-	// (we're creating a new root span), set a reference to ourselves.
-	//
-	// TODO(irfansharif): Given we have a handle on the root span, we should
-	// reconsider the maxChildrenPerSpan limit, which only limits the branching
-	// factor. To bound the total memory usage for pkg/tracing, we could instead
-	// limit the number of spans per trace (no-oping all subsequent ones) and
-	// do the same for the total number of root spans.
-	if rootSpan := opts.deriveRootSpan(); rootSpan != nil {
-		helper.crdbSpan.rootSpan = rootSpan
-	} else {
-		helper.crdbSpan.rootSpan = &helper.crdbSpan
+		tracer: t,
+		crdb:   &helper.crdbSpan,
+		ot:     ot,
+		netTr:  netTr,
 	}
 
 	s := &helper.span
 
 	{
-		// If a parent is specified, link the newly created Span to the parent. This
-		// is done even when not recording because recording could be started later.
-		//
-		// We inherit the recording type of the local parent, if any, over the
-		// remote parent, if any. If neither are specified, we're not recording.
-		if opts.Parent != nil && opts.Parent.i.crdb != nil {
-			defer opts.Parent.i.crdb.addChild(s.i.crdb)
+		// Link the newly created span to the parent, if necessary,
+		// and start recording, if requested.
+		// We inherit the recording type of the local parent, if any,
+		// over the remote parent, if any. If neither are specified, we're not recording.
+		var p *crdbSpan
+		if opts.Parent != nil {
+			p = opts.Parent.i.crdb
 		}
-		s.i.crdb.enableRecording(opts.recordingType())
+		s.i.crdb.enableRecording(p, opts.recordingType())
 	}
 
-	// Deal with opts.SpanKind. This needs to be done after we enable recording
-	// above because tags are dropped on the floor before recording is enabled.
-	if opts.SpanKind != oteltrace.SpanKindUnspecified {
-		helper.crdbSpan.setTagLocked(spanKindTagKey, attribute.StringValue(opts.SpanKind.String()))
+	// Set initial tags. These will propagate to the crdbSpan, ot, and netTr
+	// as appropriate.
+	//
+	// NB: this could be optimized.
+	for k, v := range opts.Tags {
+		s.SetTag(k, v)
 	}
 
 	// Copy baggage from parent. This similarly fans out over the various
@@ -569,11 +410,10 @@ func (t *Tracer) startSpanGeneric(
 		if !opts.Parent.i.isNoop() {
 			opts.Parent.i.crdb.mu.Lock()
 			m := opts.Parent.i.crdb.mu.baggage
-			opts.Parent.i.crdb.mu.Unlock()
-
 			for k, v := range m {
 				s.SetBaggageItem(k, v)
 			}
+			opts.Parent.i.crdb.mu.Unlock()
 		}
 	} else {
 		// Local root span - put it into the registry of active local root
@@ -596,7 +436,7 @@ func (t *Tracer) startSpanGeneric(
 		t.activeSpans.m[spanID] = s
 		t.activeSpans.Unlock()
 
-		if !opts.RemoteParent.Empty() {
+		if opts.RemoteParent != nil {
 			for k, v := range opts.RemoteParent.Baggage {
 				s.SetBaggageItem(k, v)
 			}
@@ -605,6 +445,39 @@ func (t *Tracer) startSpanGeneric(
 
 	return maybeWrapCtx(ctx, &helper.octx, s)
 }
+
+// serializationFormat is the format used by the Tracer to {de,}serialize span
+// metadata across process boundaries. This takes place within
+// Tracer.{InjectMetaInto,ExtractMetaFrom}. Each format is inextricably linked
+// to a corresponding Carrier, which is the thing that actually captures the
+// serialized data and crosses process boundaries.
+//
+// The usage pattern is as follows:
+//
+//     // One end of the RPC.
+//     carrier := MapCarrier{...}
+//     tracer.InjectMetaInto(sp.Meta(), carrier)
+//
+//     // carrier crosses RPC boundary.
+//
+//     // Other end of the RPC.
+//     spMeta, _ := Tracer.ExtractMetaFrom(carrier)
+//     ctx, sp := tracer.StartSpanCtx(..., spMeta)
+//
+type serializationFormat = opentracing.BuiltinFormat
+
+const (
+	_ serializationFormat = iota
+
+	// metadataFormat is used to {de,}serialize data as HTTP header string
+	// pairs. It's used with gRPC (the carrier must be metadataCarrier), for
+	// when operations straddle RPC boundaries.
+	metadataFormat = opentracing.HTTPHeaders
+
+	// mapFormat is used to serialize data as a map of string pairs. The carrier
+	// must be MapCarrier.
+	mapFormat = opentracing.TextMap
+)
 
 // Carrier is what's used to capture the serialized data. Each carrier is
 // inextricably linked to a corresponding format. See serializationFormat for
@@ -635,14 +508,33 @@ func (c MapCarrier) ForEach(fn func(key, val string) error) error {
 	return nil
 }
 
+type textMapWriterFn func(key, val string)
+
+var _ opentracing.TextMapWriter = textMapWriterFn(nil)
+
+// Set is part of the opentracing.TextMapWriter interface.
+func (fn textMapWriterFn) Set(key, val string) {
+	fn(key, val)
+}
+
 // InjectMetaInto is used to serialize the given span metadata into the given
 // Carrier. This, alongside ExtractMetaFrom, can be used to carry span metadata
 // across process boundaries. See serializationFormat for more details.
-func (t *Tracer) InjectMetaInto(sm SpanMeta, carrier Carrier) error {
-	if sm.Empty() {
+func (t *Tracer) InjectMetaInto(sm *SpanMeta, carrier Carrier) error {
+	if sm == nil {
 		// Fast path when tracing is disabled. ExtractMetaFrom will accept an
 		// empty map as a noop context.
 		return nil
+	}
+
+	var format serializationFormat
+	switch carrier.(type) {
+	case MapCarrier:
+		format = mapFormat
+	case metadataCarrier:
+		format = metadataFormat
+	default:
+		return errors.New("unsupported carrier")
 	}
 
 	carrier.Set(fieldNameTraceID, strconv.FormatUint(sm.traceID, 16))
@@ -651,78 +543,87 @@ func (t *Tracer) InjectMetaInto(sm SpanMeta, carrier Carrier) error {
 	for k, v := range sm.Baggage {
 		carrier.Set(prefixBaggage+k, v)
 	}
-	if sm.otelCtx.TraceID().IsValid() {
-		carrier.Set(fieldNameOtelTraceID, sm.otelCtx.TraceID().String())
-		carrier.Set(fieldNameOtelSpanID, sm.otelCtx.SpanID().String())
+
+	shadowTr := t.getShadowTracer()
+	if shadowTr != nil {
+		// Don't use a different shadow tracer than the one that created the parent span
+		// to put information on the wire. If something changes out from under us, forget
+		// about shadow tracing.
+		curTyp, _ := shadowTr.Type()
+		if typ := sm.shadowTracerType; typ == curTyp {
+			carrier.Set(fieldNameShadowType, sm.shadowTracerType)
+			// Encapsulate the shadow text map, prepending a prefix to the keys.
+			if err := shadowTr.Inject(sm.shadowCtx, format, textMapWriterFn(func(key, val string) {
+				carrier.Set(prefixShadow+key, val)
+			})); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
 }
 
-var noopSpanMeta = SpanMeta{}
+var noopSpanMeta = (*SpanMeta)(nil)
 
 // ExtractMetaFrom is used to deserialize a span metadata (if any) from the
 // given Carrier. This, alongside InjectMetaFrom, can be used to carry span
 // metadata across process boundaries. See serializationFormat for more details.
-func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
+func (t *Tracer) ExtractMetaFrom(carrier Carrier) (*SpanMeta, error) {
+	var format serializationFormat
+	switch carrier.(type) {
+	case MapCarrier:
+		format = mapFormat
+	case metadataCarrier:
+		format = metadataFormat
+	default:
+		return noopSpanMeta, errors.New("unsupported carrier")
+	}
+
+	var shadowType string
+	var shadowCarrier opentracing.TextMapCarrier
+
 	var traceID uint64
 	var spanID uint64
-	var otelTraceID oteltrace.TraceID
-	var otelSpanID oteltrace.SpanID
 	var baggage map[string]string
 
-	iterFn := func(k, v string) error {
+	// TODO(tbg): ForeachKey forces things on the heap. We can do better
+	// by using an explicit carrier.
+	err := carrier.ForEach(func(k, v string) error {
 		switch k = strings.ToLower(k); k {
 		case fieldNameTraceID:
 			var err error
 			traceID, err = strconv.ParseUint(v, 16, 64)
 			if err != nil {
-				return errors.Errorf("invalid trace id: %s", v)
+				return opentracing.ErrSpanContextCorrupted
 			}
 		case fieldNameSpanID:
 			var err error
 			spanID, err = strconv.ParseUint(v, 16, 64)
 			if err != nil {
-				return errors.Errorf("invalid span id: %s", v)
+				return opentracing.ErrSpanContextCorrupted
 			}
-		case fieldNameOtelTraceID:
-			var err error
-			otelTraceID, err = oteltrace.TraceIDFromHex(v)
-			if err != nil {
-				return err
-			}
-		case fieldNameOtelSpanID:
-			var err error
-			otelSpanID, err = oteltrace.SpanIDFromHex(v)
-			if err != nil {
-				return err
-			}
+		case fieldNameShadowType:
+			shadowType = v
 		default:
 			if strings.HasPrefix(k, prefixBaggage) {
 				if baggage == nil {
 					baggage = make(map[string]string)
 				}
 				baggage[strings.TrimPrefix(k, prefixBaggage)] = v
+			} else if strings.HasPrefix(k, prefixShadow) {
+				if shadowCarrier == nil {
+					shadowCarrier = make(opentracing.TextMapCarrier)
+				}
+				// We build a shadow textmap with the original shadow keys.
+				shadowCarrier.Set(strings.TrimPrefix(k, prefixShadow), v)
 			}
 		}
 		return nil
+	})
+	if err != nil {
+		return noopSpanMeta, err
 	}
-
-	// Instead of iterating through the interface type, we prefer to do so with
-	// the explicit types to avoid heap allocations.
-	switch c := carrier.(type) {
-	case MapCarrier:
-		if err := c.ForEach(iterFn); err != nil {
-			return noopSpanMeta, err
-		}
-	case metadataCarrier:
-		if err := c.ForEach(iterFn); err != nil {
-			return noopSpanMeta, err
-		}
-	default:
-		return noopSpanMeta, errors.New("unsupported carrier")
-	}
-
 	if traceID == 0 && spanID == 0 {
 		return noopSpanMeta, nil
 	}
@@ -732,21 +633,39 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 		recordingType = RecordingVerbose
 	}
 
-	var otelCtx oteltrace.SpanContext
-	if otelTraceID.IsValid() && otelSpanID.IsValid() {
-		otelCtx = otelCtx.WithRemote(true).WithTraceID(otelTraceID).WithSpanID(otelSpanID)
+	var shadowCtx opentracing.SpanContext
+	if shadowType != "" {
+		shadowTr := t.getShadowTracer()
+		curShadowTyp, _ := shadowTr.Type()
+
+		if shadowType != curShadowTyp {
+			// If either the incoming context or tracer disagree on which
+			// shadow tracer (if any) is active, scrub shadow tracing from
+			// consideration.
+			shadowType = ""
+		} else {
+			// Shadow tracing is active on this node and the incoming information
+			// was created using the same type of tracer.
+			//
+			// Extract the shadow context using the un-encapsulated textmap.
+			shadowCtx, err = shadowTr.Extract(format, shadowCarrier)
+			if err != nil {
+				return noopSpanMeta, err
+			}
+		}
 	}
 
-	return SpanMeta{
-		traceID:       traceID,
-		spanID:        spanID,
-		otelCtx:       otelCtx,
-		recordingType: recordingType,
-		Baggage:       baggage,
+	return &SpanMeta{
+		traceID:          traceID,
+		spanID:           spanID,
+		shadowTracerType: shadowType,
+		shadowCtx:        shadowCtx,
+		recordingType:    recordingType,
+		Baggage:          baggage,
 	}, nil
 }
 
-// GetActiveSpanFromID retrieves any active root span given its ID.
+// GetActiveSpanFromID retrieves any active span given its span ID.
 func (t *Tracer) GetActiveSpanFromID(spanID uint64) (*Span, bool) {
 	t.activeSpans.Lock()
 	span, found := t.activeSpans.m[spanID]
@@ -775,24 +694,11 @@ func (t *Tracer) VisitSpans(visitor func(*Span) error) error {
 	return nil
 }
 
-// TestingRecordAsyncSpans is a test-only helper that configures
+// TestingIncludeAsyncSpansInRecordings is a test-only helper that configures
 // the tracer to include recordings from forked/async child spans, when
 // retrieving the recording for a parent span.
-func (t *Tracer) TestingRecordAsyncSpans() {
-	t.testingMu.Lock()
-	defer t.testingMu.Unlock()
-
-	t.testingRecordAsyncSpans = true
-}
-
-// ShouldRecordAsyncSpans returns whether or not we should include recordings
-// from async child spans in the parent span. See TestingRecordAsyncSpans, this
-// mode is only used in tests.
-func (t *Tracer) ShouldRecordAsyncSpans() bool {
-	t.testingMu.Lock()
-	defer t.testingMu.Unlock()
-
-	return t.testingRecordAsyncSpans
+func (t *Tracer) TestingIncludeAsyncSpansInRecordings() {
+	t.includeAsyncSpansInRecordings = true
 }
 
 // ForkSpan forks the current span, if any[1]. Forked spans "follow from" the
@@ -809,14 +715,14 @@ func (t *Tracer) ShouldRecordAsyncSpans() bool {
 //
 // [1]: Looking towards the provided context to see if one exists.
 // [2]: Unless configured differently by tests, see
-//      TestingRecordAsyncSpans.
+//      TestingIncludeAsyncSpansInRecordings.
 func ForkSpan(ctx context.Context, opName string) (context.Context, *Span) {
 	sp := SpanFromContext(ctx)
 	if sp == nil {
 		return ctx, nil
 	}
 	collectionOpt := WithParentAndManualCollection(sp.Meta())
-	if sp.Tracer().ShouldRecordAsyncSpans() {
+	if sp.Tracer().includeAsyncSpansInRecordings {
 		// Using auto collection here ensures that recordings from async spans
 		// also show up at the parent.
 		collectionOpt = WithParentAndAutoCollection(sp)
@@ -915,48 +821,4 @@ func ContextWithRecordingSpan(
 		tr.Close()
 	}
 	return ctx, sp.GetRecording, cancel
-}
-
-// makeOtelSpan creates an OpenTelemetry span. If either of localParent or
-// remoteParent are not empty, the returned span will be a child of that parent.
-//
-// End() needs to be called on the returned span once the span is complete.
-func makeOtelSpan(
-	otelTr oteltrace.Tracer,
-	opName string,
-	localParent oteltrace.Span,
-	remoteParent oteltrace.SpanContext,
-	refType spanReferenceType,
-	startTime time.Time,
-	kind oteltrace.SpanKind,
-) oteltrace.Span {
-	ctx := context.Background()
-	var parentSpanContext oteltrace.SpanContext
-	if localParent != nil {
-		parentSpanContext = localParent.SpanContext()
-	} else if remoteParent.IsValid() {
-		parentSpanContext = remoteParent
-	}
-
-	opts := make([]oteltrace.SpanStartOption, 0, 3)
-	opts = append(opts, oteltrace.WithTimestamp(startTime), oteltrace.WithSpanKind(kind))
-	switch refType {
-	case childOfRef:
-		// If a parent was passed in, put it in the context. That's where Start()
-		// will take it from.
-		if parentSpanContext.IsValid() {
-			ctx = oteltrace.ContextWithSpanContext(ctx, parentSpanContext)
-		}
-
-	case followsFromRef:
-		opts = append(opts, oteltrace.WithLinks(oteltrace.Link{
-			SpanContext: parentSpanContext,
-			Attributes:  followsFromAttribute,
-		}))
-	default:
-		panic(fmt.Sprintf("unsupported span reference type: %v", refType))
-	}
-
-	_ /* ctx */, sp := otelTr.Start(ctx, opName, opts...)
-	return sp
 }

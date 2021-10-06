@@ -96,7 +96,8 @@ enum Channel {
 
   // SESSIONS is used to report client network activity when enabled via
   // the `server.auth_log.sql_connections.enabled` and/or
-  // `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html):
+  // `server.auth_log.sql_sessions.enabled` [cluster setting](cluster-settings.html)
+  // [cluster settings](cluster-settings.html):
   //
   // - Connections opened/closed
   // - Authentication events: logins, failed attempts
@@ -179,15 +180,6 @@ enum Channel {
   // channel so as to not pollute the `SQL_PERF` logging output with
   // internal troubleshooting details.
   SQL_INTERNAL_PERF = 11;
-
-  // TELEMETRY reports telemetry events. Telemetry events describe
-  // feature usage within CockroachDB and anonymizes any application-
-  // specific data.
-  TELEMETRY = 12;
-
-  // CHANNEL_MAX is the maximum allocated channel number so far.
-  // This should be increased every time a new channel is added.
-  CHANNEL_MAX = 13;
 }
 
 // Entry represents a cockroach log entry in the following two cases:
@@ -274,5 +266,4 @@ message FileInfo {
   int64 size_bytes = 2;
   int64 mod_time_nanos = 3;
   FileDetails details = 4 [(gogoproto.nullable) = false];
-  uint32 file_mode = 5;
 }

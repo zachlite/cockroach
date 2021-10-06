@@ -25,6 +25,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -594,38 +595,25 @@ func EncodeBytesDescending(b []byte, data []byte) []byte {
 // are appended to r. The remainder of the input buffer and the
 // decoded []byte are returned.
 func DecodeBytesAscending(b []byte, r []byte) ([]byte, []byte, error) {
-	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */, false /* deepCopy */)
-}
-
-// DecodeBytesAscendingDeepCopy is the same as DecodeBytesAscending, but the
-// decoded []byte will never alias memory of b.
-func DecodeBytesAscendingDeepCopy(b []byte, r []byte) ([]byte, []byte, error) {
-	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */, true /* deepCopy */)
+	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */)
 }
 
 // DecodeBytesDescending decodes a []byte value from the input buffer
 // which was encoded using EncodeBytesDescending. The decoded bytes
 // are appended to r. The remainder of the input buffer and the
 // decoded []byte are returned.
-//
-// Note that this method internally will always perform a deep copy, so there is
-// no need to introduce DecodeBytesDescendingDeepCopy to mirror
-// DecodeBytesAscendingDeepCopy.
 func DecodeBytesDescending(b []byte, r []byte) ([]byte, []byte, error) {
-	// Ask for the deep copy to make sure we never get back a sub-slice of `b`,
+	// Always pass an `r` to make sure we never get back a sub-slice of `b`,
 	// since we're going to modify the contents of the slice.
-	b, r, err := decodeBytesInternal(b, r, descendingBytesEscapes, true /* expectMarker */, true /* deepCopy */)
+	if r == nil {
+		r = []byte{}
+	}
+	b, r, err := decodeBytesInternal(b, r, descendingBytesEscapes, true /* expectMarker */)
 	onesComplement(r)
 	return b, r, err
 }
 
-// decodeBytesInternal decodes an encoded []byte value from b and appends it to
-// r. The remainder of b and the decoded []byte are returned. If deepCopy is
-// true, then the decoded []byte will be deep copied from b and there will no
-// aliasing of the same memory.
-func decodeBytesInternal(
-	b []byte, r []byte, e escapes, expectMarker bool, deepCopy bool,
-) ([]byte, []byte, error) {
+func decodeBytesInternal(b []byte, r []byte, e escapes, expectMarker bool) ([]byte, []byte, error) {
 	if expectMarker {
 		if len(b) == 0 || b[0] != e.marker {
 			return nil, nil, errors.Errorf("did not find marker %#x in buffer %#x", e.marker, b)
@@ -643,7 +631,7 @@ func decodeBytesInternal(
 		}
 		v := b[i+1]
 		if v == e.escapedTerm {
-			if r == nil && !deepCopy {
+			if r == nil {
 				r = b[:i]
 			} else {
 				r = append(r, b[:i]...)
@@ -822,14 +810,6 @@ func unsafeString(b []byte) string {
 // string may share storage with the input buffer.
 func DecodeUnsafeStringAscending(b []byte, r []byte) ([]byte, string, error) {
 	b, r, err := DecodeBytesAscending(b, r)
-	return b, unsafeString(r), err
-}
-
-// DecodeUnsafeStringAscendingDeepCopy is the same as
-// DecodeUnsafeStringAscending but the returned string will never share storage
-// with the input buffer.
-func DecodeUnsafeStringAscendingDeepCopy(b []byte, r []byte) ([]byte, string, error) {
-	b, r, err := DecodeBytesAscendingDeepCopy(b, r)
 	return b, unsafeString(r), err
 }
 
@@ -1113,7 +1093,7 @@ func decodeTime(b []byte) (r []byte, sec int64, nsec int64, err error) {
 }
 
 // EncodeBox2DAscending encodes a bounding box in ascending order.
-func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DAscending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatAscending(b, box.LoX)
 	b = EncodeFloatAscending(b, box.HiX)
@@ -1123,7 +1103,7 @@ func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // EncodeBox2DDescending encodes a bounding box in descending order.
-func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DDescending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatDescending(b, box.LoX)
 	b = EncodeFloatDescending(b, box.HiX)
@@ -1133,8 +1113,8 @@ func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // DecodeBox2DAscending decodes a box2D object in ascending order.
-func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DAscending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1161,8 +1141,8 @@ func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
 }
 
 // DecodeBox2DDescending decodes a box2D object in descending order.
-func DecodeBox2DDescending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DDescending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1235,7 +1215,7 @@ func DecodeGeoAscending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
 	}
 
 	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, ascendingGeoEscapes, false /* expectMarker */, false /* deepCopy */)
+	b, pbBytes, err = decodeBytesInternal(b, pbBytes, ascendingGeoEscapes, false /* expectMarker */)
 	if err != nil {
 		return b, err
 	}
@@ -1260,7 +1240,7 @@ func DecodeGeoDescending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
 	}
 
 	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, descendingGeoEscapes, false /* expectMarker */, false /* deepCopy */)
+	b, pbBytes, err = decodeBytesInternal(b, pbBytes, descendingGeoEscapes, false /* expectMarker */)
 	if err != nil {
 		return b, err
 	}
@@ -2388,16 +2368,16 @@ func EncodeUntaggedTimeTZValue(appendTo []byte, t timetz.TimeTZ) []byte {
 	return EncodeNonsortingStdlibVarint(appendTo, int64(t.OffsetSecs))
 }
 
-// EncodeBox2DValue encodes a geopb.BoundingBox with its value tag, appends it to
+// EncodeBox2DValue encodes a geo.CartesianBoundingBox with its value tag, appends it to
 // the supplied buffer and returns the final buffer.
-func EncodeBox2DValue(appendTo []byte, colID uint32, b geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DValue(appendTo []byte, colID uint32, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeValueTag(appendTo, colID, Box2D)
 	return EncodeUntaggedBox2DValue(appendTo, b)
 }
 
-// EncodeUntaggedBox2DValue encodes a geopb.BoundingBox value, appends it to the supplied buffer,
+// EncodeUntaggedBox2DValue encodes a geo.CartesianBoundingBox value, appends it to the supplied buffer,
 // and returns the final buffer.
-func EncodeUntaggedBox2DValue(appendTo []byte, b geopb.BoundingBox) ([]byte, error) {
+func EncodeUntaggedBox2DValue(appendTo []byte, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeFloatAscending(appendTo, b.LoX)
 	appendTo = EncodeFloatAscending(appendTo, b.HiX)
 	appendTo = EncodeFloatAscending(appendTo, b.LoY)
@@ -2690,8 +2670,10 @@ func DecodeDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err error) {
 }
 
 // DecodeUntaggedBox2DValue decodes a value encoded by EncodeUntaggedBox2DValue.
-func DecodeUntaggedBox2DValue(b []byte) (remaining []byte, box geopb.BoundingBox, err error) {
-	box = geopb.BoundingBox{}
+func DecodeUntaggedBox2DValue(
+	b []byte,
+) (remaining []byte, box geo.CartesianBoundingBox, err error) {
+	box = geo.CartesianBoundingBox{}
 	remaining = b
 
 	remaining, box.LoX, err = DecodeFloatAscending(remaining)

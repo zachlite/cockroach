@@ -30,66 +30,12 @@ const InternalAppNamePrefix = ReportableAppNamePrefix + "internal"
 // DelegatedAppNamePrefix should be scrubbed in reporting.
 const DelegatedAppNamePrefix = "$$ "
 
-// InternalSQLAppName is the application_name used by
-// the cockroach CLI by default
-const InternalSQLAppName = "cockroach sql"
-
-// SystemDatabaseName is the name of the system database.
-const SystemDatabaseName = "system"
-
-// SystemTableName is a type for system table names.
-type SystemTableName string
-
-// Names of tables in the system database.
-const (
-	NamespaceTableName                     SystemTableName = "namespace"
-	DescriptorTableName                    SystemTableName = "descriptor"
-	UsersTableName                         SystemTableName = "users"
-	ZonesTableName                         SystemTableName = "zones"
-	SettingsTableName                      SystemTableName = "settings"
-	DescIDSequenceTableName                SystemTableName = "descriptor_id_seq"
-	TenantsTableName                       SystemTableName = "tenants"
-	LeaseTableName                         SystemTableName = "lease"
-	EventLogTableName                      SystemTableName = "eventlog"
-	RangeEventTableName                    SystemTableName = "rangelog"
-	UITableName                            SystemTableName = "ui"
-	JobsTableName                          SystemTableName = "jobs"
-	WebSessionsTableName                   SystemTableName = "web_sessions"
-	TableStatisticsTableName               SystemTableName = "table_statistics"
-	LocationsTableName                     SystemTableName = "locations"
-	RoleMembersTableName                   SystemTableName = "role_members"
-	CommentsTableName                      SystemTableName = "comments"
-	ReportsMetaTableName                   SystemTableName = "reports_meta"
-	ReplicationConstraintStatsTableName    SystemTableName = "replication_constraint_stats"
-	ReplicationCriticalLocalitiesTableName SystemTableName = "replication_critical_localities"
-	ReplicationStatsTableName              SystemTableName = "replication_stats"
-	ProtectedTimestampsMetaTableName       SystemTableName = "protected_ts_meta"
-	ProtectedTimestampsRecordsTableName    SystemTableName = "protected_ts_records"
-	RoleOptionsTableName                   SystemTableName = "role_options"
-	StatementBundleChunksTableName         SystemTableName = "statement_bundle_chunks"
-	StatementDiagnosticsRequestsTableName  SystemTableName = "statement_diagnostics_requests"
-	StatementDiagnosticsTableName          SystemTableName = "statement_diagnostics"
-	ScheduledJobsTableName                 SystemTableName = "scheduled_jobs"
-	SqllivenessTableName                   SystemTableName = "sqlliveness"
-	MigrationsTableName                    SystemTableName = "migrations"
-	JoinTokensTableName                    SystemTableName = "join_tokens"
-	StatementStatisticsTableName           SystemTableName = "statement_statistics"
-	TransactionStatisticsTableName         SystemTableName = "transaction_statistics"
-	DatabaseRoleSettingsTableName          SystemTableName = "database_role_settings"
-	TenantUsageTableName                   SystemTableName = "tenant_usage"
-	SQLInstancesTableName                  SystemTableName = "sql_instances"
-	SpanConfigurationsTableName            SystemTableName = "span_configurations"
-)
-
 // Oid for virtual database and table.
 const (
 	CrdbInternalID = math.MaxUint32 - iota
 	CrdbInternalBackwardDependenciesTableID
 	CrdbInternalBuildInfoTableID
 	CrdbInternalBuiltinFunctionsTableID
-	CrdbInternalClusterContendedIndexesViewID
-	CrdbInternalClusterContendedKeysViewID
-	CrdbInternalClusterContendedTablesViewID
 	CrdbInternalClusterContentionEventsTableID
 	CrdbInternalClusterDistSQLFlowsTableID
 	CrdbInternalClusterQueriesTableID
@@ -107,7 +53,6 @@ const (
 	CrdbInternalGossipLivenessTableID
 	CrdbInternalGossipNetworkTableID
 	CrdbInternalIndexColumnsTableID
-	CrdbInternalIndexUsageStatisticsTableID
 	CrdbInternalInflightTraceSpanTableID
 	CrdbInternalJobsTableID
 	CrdbInternalKVNodeStatusTableID
@@ -119,8 +64,6 @@ const (
 	CrdbInternalLocalTransactionsTableID
 	CrdbInternalLocalSessionsTableID
 	CrdbInternalLocalMetricsTableID
-	CrdbInternalNodeStmtStatsTableID
-	CrdbInternalNodeTxnStatsTableID
 	CrdbInternalPartitionsTableID
 	CrdbInternalPredefinedCommentsTableID
 	CrdbInternalRangesNoLeasesTableID
@@ -139,101 +82,35 @@ const (
 	CrdbInternalZonesTableID
 	CrdbInternalInvalidDescriptorsTableID
 	CrdbInternalClusterDatabasePrivilegesTableID
-	CrdbInternalInterleaved
-	CrdbInternalCrossDbRefrences
 	CrdbInternalLostTableDescriptors
-	CrdbInternalClusterInflightTracesTable
-	CrdbInternalRegionsTable
-	CrdbInternalDefaultPrivilegesTable
-	CrdbInternalActiveRangeFeedsTable
-	CrdbInternalTenantUsageDetailsViewID
 	InformationSchemaID
 	InformationSchemaAdministrableRoleAuthorizationsID
 	InformationSchemaApplicableRolesID
-	InformationSchemaAttributesTableID
 	InformationSchemaCharacterSets
-	InformationSchemaCheckConstraintRoutineUsageTableID
 	InformationSchemaCheckConstraints
 	InformationSchemaCollationCharacterSetApplicability
 	InformationSchemaCollations
-	InformationSchemaColumnColumnUsageTableID
-	InformationSchemaColumnDomainUsageTableID
-	InformationSchemaColumnOptionsTableID
 	InformationSchemaColumnPrivilegesID
-	InformationSchemaColumnStatisticsTableID
-	InformationSchemaColumnUDTUsageID
-	InformationSchemaColumnsExtensionsTableID
 	InformationSchemaColumnsTableID
+	InformationSchemaColumnUDTUsageID
 	InformationSchemaConstraintColumnUsageTableID
-	InformationSchemaConstraintTableUsageTableID
-	InformationSchemaDataTypePrivilegesTableID
-	InformationSchemaDomainConstraintsTableID
-	InformationSchemaDomainUdtUsageTableID
-	InformationSchemaDomainsTableID
-	InformationSchemaElementTypesTableID
 	InformationSchemaEnabledRolesID
-	InformationSchemaEnginesTableID
-	InformationSchemaEventsTableID
-	InformationSchemaFilesTableID
-	InformationSchemaForeignDataWrapperOptionsTableID
-	InformationSchemaForeignDataWrappersTableID
-	InformationSchemaForeignServerOptionsTableID
-	InformationSchemaForeignServersTableID
-	InformationSchemaForeignTableOptionsTableID
-	InformationSchemaForeignTablesTableID
-	InformationSchemaInformationSchemaCatalogNameTableID
 	InformationSchemaKeyColumnUsageTableID
-	InformationSchemaKeywordsTableID
-	InformationSchemaOptimizerTraceTableID
 	InformationSchemaParametersTableID
-	InformationSchemaPartitionsTableID
-	InformationSchemaPluginsTableID
-	InformationSchemaProcesslistTableID
-	InformationSchemaProfilingTableID
 	InformationSchemaReferentialConstraintsTableID
-	InformationSchemaResourceGroupsTableID
-	InformationSchemaRoleColumnGrantsTableID
-	InformationSchemaRoleRoutineGrantsTableID
 	InformationSchemaRoleTableGrantsID
-	InformationSchemaRoleUdtGrantsTableID
-	InformationSchemaRoleUsageGrantsTableID
-	InformationSchemaRoutinePrivilegesTableID
 	InformationSchemaRoutineTableID
-	InformationSchemaSQLFeaturesTableID
-	InformationSchemaSQLImplementationInfoTableID
-	InformationSchemaSQLPartsTableID
-	InformationSchemaSQLSizingTableID
-	InformationSchemaSchemataExtensionsTableID
 	InformationSchemaSchemataTableID
 	InformationSchemaSchemataTablePrivilegesID
-	InformationSchemaSequencesID
 	InformationSchemaSessionVariables
-	InformationSchemaStGeometryColumnsTableID
-	InformationSchemaStSpatialReferenceSystemsTableID
-	InformationSchemaStUnitsOfMeasureTableID
+	InformationSchemaSequencesID
 	InformationSchemaStatisticsTableID
 	InformationSchemaTableConstraintTableID
-	InformationSchemaTableConstraintsExtensionsTableID
 	InformationSchemaTablePrivilegesID
-	InformationSchemaTablesExtensionsTableID
 	InformationSchemaTablesTableID
-	InformationSchemaTablespacesExtensionsTableID
-	InformationSchemaTablespacesTableID
-	InformationSchemaTransformsTableID
-	InformationSchemaTriggeredUpdateColumnsTableID
-	InformationSchemaTriggersTableID
 	InformationSchemaTypePrivilegesID
-	InformationSchemaUdtPrivilegesTableID
-	InformationSchemaUsagePrivilegesTableID
-	InformationSchemaUserAttributesTableID
-	InformationSchemaUserDefinedTypesTableID
-	InformationSchemaUserMappingOptionsTableID
-	InformationSchemaUserMappingsTableID
-	InformationSchemaUserPrivilegesID
-	InformationSchemaViewColumnUsageTableID
-	InformationSchemaViewRoutineUsageTableID
-	InformationSchemaViewTableUsageTableID
 	InformationSchemaViewsTableID
+	InformationSchemaUserPrivilegesID
 	PgCatalogID
 	PgCatalogAggregateTableID
 	PgCatalogAmTableID
@@ -269,9 +146,7 @@ const (
 	PgCatalogIndexTableID
 	PgCatalogIndexesTableID
 	PgCatalogInheritsTableID
-	PgCatalogInitPrivsTableID
 	PgCatalogLanguageTableID
-	PgCatalogLargeobjectMetadataTableID
 	PgCatalogLargeobjectTableID
 	PgCatalogLocksTableID
 	PgCatalogMatViewsTableID
@@ -279,9 +154,7 @@ const (
 	PgCatalogOpclassTableID
 	PgCatalogOperatorTableID
 	PgCatalogOpfamilyTableID
-	PgCatalogPartitionedTableTableID
 	PgCatalogPoliciesTableID
-	PgCatalogPolicyTableID
 	PgCatalogPreparedStatementsTableID
 	PgCatalogPreparedXactsTableID
 	PgCatalogProcTableID
@@ -289,15 +162,12 @@ const (
 	PgCatalogPublicationTableID
 	PgCatalogPublicationTablesTableID
 	PgCatalogRangeTableID
-	PgCatalogReplicationOriginStatusTableID
 	PgCatalogReplicationOriginTableID
-	PgCatalogReplicationSlotsTableID
 	PgCatalogRewriteTableID
 	PgCatalogRolesTableID
 	PgCatalogRulesTableID
 	PgCatalogSecLabelsTableID
 	PgCatalogSecurityLabelTableID
-	PgCatalogSequenceTableID
 	PgCatalogSequencesTableID
 	PgCatalogSettingsTableID
 	PgCatalogShadowTableID
@@ -306,43 +176,7 @@ const (
 	PgCatalogShdependTableID
 	PgCatalogShmemAllocationsTableID
 	PgCatalogStatActivityTableID
-	PgCatalogStatAllIndexesTableID
-	PgCatalogStatAllTablesTableID
-	PgCatalogStatArchiverTableID
-	PgCatalogStatBgwriterTableID
-	PgCatalogStatDatabaseConflictsTableID
-	PgCatalogStatDatabaseTableID
-	PgCatalogStatGssapiTableID
-	PgCatalogStatProgressAnalyzeTableID
-	PgCatalogStatProgressBasebackupTableID
-	PgCatalogStatProgressClusterTableID
-	PgCatalogStatProgressCreateIndexTableID
-	PgCatalogStatProgressVacuumTableID
-	PgCatalogStatReplicationTableID
-	PgCatalogStatSlruTableID
-	PgCatalogStatSslTableID
-	PgCatalogStatSubscriptionTableID
-	PgCatalogStatSysIndexesTableID
-	PgCatalogStatSysTablesTableID
-	PgCatalogStatUserFunctionsTableID
-	PgCatalogStatUserIndexesTableID
-	PgCatalogStatUserTablesTableID
-	PgCatalogStatWalReceiverTableID
-	PgCatalogStatXactAllTablesTableID
-	PgCatalogStatXactSysTablesTableID
-	PgCatalogStatXactUserFunctionsTableID
-	PgCatalogStatXactUserTablesTableID
-	PgCatalogStatioAllIndexesTableID
-	PgCatalogStatioAllSequencesTableID
-	PgCatalogStatioAllTablesTableID
-	PgCatalogStatioSysIndexesTableID
-	PgCatalogStatioSysSequencesTableID
-	PgCatalogStatioSysTablesTableID
-	PgCatalogStatioUserIndexesTableID
-	PgCatalogStatioUserSequencesTableID
-	PgCatalogStatioUserTablesTableID
 	PgCatalogStatisticExtTableID
-	PgCatalogSubscriptionRelTableID
 	PgCatalogSubscriptionTableID
 	PgCatalogTablesTableID
 	PgCatalogTablespaceTableID
@@ -366,3 +200,7 @@ const (
 	PgExtensionSpatialRefSysTableID
 	MinVirtualID = PgExtensionSpatialRefSysTableID
 )
+
+// ValidationTelemetryKeyPrefix is the prefix of telemetry keys pertaining to
+// descriptor validation failures.
+const ValidationTelemetryKeyPrefix = "sql.schema.validation_errors."

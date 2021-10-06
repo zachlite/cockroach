@@ -86,16 +86,6 @@ $input
 =>
 (Null (BoolType))
 
-[SimplifyInSingleElement, Normalize]
-(In $left:* (Tuple [ $right:* ]))
-=>
-(Eq $left $right)
-
-[SimplifyNotInSingleElement, Normalize]
-(NotIn $left:* (Tuple [ $right:* ]))
-=>
-(Ne $left $right)
-
 # UnifyComparisonTypes takes a mixed-type comparison between a non-constant and
 # a constant and, if appropriate, converts the constant to the type of the
 # non-constant to allow constraints to be generated.
@@ -103,7 +93,7 @@ $input
 (Comparison
     $left:(Variable)
     $right:(Const) &
-        (Let ($result $ok):(UnifyComparison $left $right) $ok)
+        (Succeeded $result:(UnifyComparison $left $right))
 )
 =>
 ((OpName) $left $result)

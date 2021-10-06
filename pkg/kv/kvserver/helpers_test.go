@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	circuit "github.com/cockroachdb/circuitbreaker"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval/result"
@@ -50,10 +51,10 @@ func (s *Store) Transport() *RaftTransport {
 }
 
 func (s *Store) FindTargetAndTransferLease(
-	ctx context.Context, repl *Replica, desc *roachpb.RangeDescriptor, conf roachpb.SpanConfig,
+	ctx context.Context, repl *Replica, desc *roachpb.RangeDescriptor, zone *zonepb.ZoneConfig,
 ) (bool, error) {
 	transferStatus, err := s.replicateQueue.shedLease(
-		ctx, repl, desc, conf, transferLeaseOptions{},
+		ctx, repl, desc, zone, transferLeaseOptions{},
 	)
 	return transferStatus == transferOK, err
 }
@@ -204,8 +205,46 @@ func (s *Store) RaftSchedulerPriorityID() roachpb.RangeID {
 	return s.scheduler.PriorityID()
 }
 
+// ClearClosedTimestampStorage clears the closed timestamp storage of all
+// knowledge about closed timestamps.
+func (s *Store) ClearClosedTimestampStorage() {
+	s.cfg.ClosedTimestamp.Storage.Clear()
+}
+
+// RequestClosedTimestamp instructs the closed timestamp client to request the
+// relevant node to publish its MLAI for the provided range.
+func (s *Store) RequestClosedTimestamp(nodeID roachpb.NodeID, rangeID roachpb.RangeID) {
+	s.cfg.ClosedTimestamp.Clients.Request(nodeID, rangeID)
+}
+
+// AssertInvariants verifies that the store's bookkeping is self-consistent. It
+// is only valid to call this method when there is no in-flight traffic to the
+// store (e.g., after the store is shut down).
+func (s *Store) AssertInvariants() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	s.mu.replicas.Range(func(_ int64, p unsafe.Pointer) bool {
+		ctx := s.cfg.AmbientCtx.AnnotateCtx(context.Background())
+		repl := (*Replica)(p)
+		// We would normally need to hold repl.raftMu. Otherwise we can observe an
+		// initialized replica that is not in s.replicasByKey, e.g., if we race with
+		// a goroutine that is currently initializing repl. The lock ordering makes
+		// acquiring repl.raftMu challenging; instead we require that this method is
+		// called only when there is no in-flight traffic to the store, at which
+		// point acquiring repl.raftMu is unnecessary.
+		if repl.IsInitialized() {
+			if rbkRepl := s.mu.replicasByKey.LookupReplica(ctx, repl.Desc().StartKey); rbkRepl != repl {
+				log.Fatalf(ctx, "%v misplaced in replicasByKey; found %+v instead", repl, rbkRepl)
+			}
+		} else if _, ok := s.mu.uninitReplicas[repl.RangeID]; !ok {
+			log.Fatalf(ctx, "%v missing from uninitReplicas", repl)
+		}
+		return true // keep iterating
+	})
+}
+
 func NewTestStorePool(cfg StoreConfig) *StorePool {
-	TimeUntilStoreDead.Override(context.Background(), &cfg.Settings.SV, TestTimeUntilStoreDeadOff)
+	TimeUntilStoreDead.Override(&cfg.Settings.SV, TestTimeUntilStoreDeadOff)
 	return NewStorePool(
 		cfg.AmbientCtx,
 		cfg.Settings,
@@ -246,17 +285,15 @@ func (r *Replica) GetLastIndex() (uint64, error) {
 	return r.raftLastIndexLocked()
 }
 
-// LastAssignedLeaseIndexRLocked returns the last assigned lease index.
 func (r *Replica) LastAssignedLeaseIndex() uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.mu.proposalBuf.LastAssignedLeaseIndexRLocked()
 }
 
-// LastAssignedLeaseIndexRLocked is like LastAssignedLeaseIndex, but requires
-// b.mu to be held in read mode.
-func (b *propBuf) LastAssignedLeaseIndexRLocked() uint64 {
-	return b.assignedLAI
+// MaxClosed returns the maximum closed timestamp known to the Replica.
+func (r *Replica) MaxClosed(ctx context.Context) (_ hlc.Timestamp, ok bool) {
+	return r.maxClosed(ctx)
 }
 
 // SetQuotaPool allows the caller to set a replica's quota pool initialized to

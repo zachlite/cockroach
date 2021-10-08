@@ -256,24 +256,6 @@ func (*internalServer) Join(
 	panic("unimplemented")
 }
 
-func (*internalServer) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) GetSpanConfigs(
-	context.Context, *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) UpdateSpanConfigs(
-	context.Context, *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
 // TestInternalServerAddress verifies that RPCContext uses AdvertiseAddr, not Addr, to
 // determine whether to apply the local server optimization.
 //
@@ -675,7 +657,7 @@ func TestHeartbeatHealthTransport(t *testing.T) {
 	if err := stopper.RunAsyncTask(ctx, "busyloop-closer", func(ctx context.Context) {
 		for {
 			if _, err := closeConns(); err != nil {
-				log.Warningf(ctx, "%v", err)
+				log.Health.Warningf(ctx, "%v", err)
 			}
 			select {
 			case <-done:

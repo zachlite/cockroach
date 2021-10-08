@@ -289,7 +289,6 @@ var charts = []sectionDescription{
 					"distsender.rpc.admintransferlease.sent",
 					"distsender.rpc.adminunsplit.sent",
 					"distsender.rpc.adminverifyprotectedtimestamp.sent",
-					"distsender.rpc.barrier.sent",
 					"distsender.rpc.checkconsistency.sent",
 					"distsender.rpc.clearrange.sent",
 					"distsender.rpc.computechecksum.sent",
@@ -310,7 +309,6 @@ var charts = []sectionDescription{
 					"distsender.rpc.pushtxn.sent",
 					"distsender.rpc.put.sent",
 					"distsender.rpc.queryintent.sent",
-					"distsender.rpc.queryresolvedtimestamp.sent",
 					"distsender.rpc.querytxn.sent",
 					"distsender.rpc.rangestats.sent",
 					"distsender.rpc.recomputestats.sent",
@@ -323,7 +321,6 @@ var charts = []sectionDescription{
 					"distsender.rpc.reversescan.sent",
 					"distsender.rpc.revertrange.sent",
 					"distsender.rpc.scan.sent",
-					"distsender.rpc.scaninterleavedintents.sent",
 					"distsender.rpc.subsume.sent",
 					"distsender.rpc.transferlease.sent",
 					"distsender.rpc.truncatelog.sent",
@@ -354,11 +351,9 @@ var charts = []sectionDescription{
 					"distsender.rpc.err.invalidleaseerrtype",
 					"distsender.rpc.err.leaserejectederrtype",
 					"distsender.rpc.err.mergeinprogresserrtype",
-					"distsender.rpc.err.mintimestampboundunsatisfiableerrtype",
 					"distsender.rpc.err.nodeunavailableerrtype",
 					"distsender.rpc.err.notleaseholdererrtype",
 					"distsender.rpc.err.oprequirestxnerrtype",
-					"distsender.rpc.err.optimisticevalconflictserrtype",
 					"distsender.rpc.err.raftgroupdeletederrtype",
 					"distsender.rpc.err.rangefeedretryerrtype",
 					"distsender.rpc.err.rangekeymismatcherrtype",
@@ -589,8 +584,6 @@ var charts = []sectionDescription{
 					"kv.prober.planning_failures",
 					"kv.prober.read.attempts",
 					"kv.prober.read.failures",
-					"kv.prober.write.attempts",
-					"kv.prober.write.failures",
 				},
 				AxisLabel: "Probes",
 			},
@@ -598,7 +591,6 @@ var charts = []sectionDescription{
 				Title: "Latency",
 				Metrics: []string{
 					"kv.prober.read.latency",
-					"kv.prober.write.latency",
 				},
 			},
 		},
@@ -911,26 +903,8 @@ var charts = []sectionDescription{
 					"queue.gc.info.transactionresolvefailed",
 					"queue.gc.info.resolvefailed",
 					"intentresolver.finalized_txns.failed",
-					"intentresolver.intents.failed",
-				},
-			},
-		},
-	},
-	{
-		Organization: [][]string{{KVTransactionLayer, "Transactions", "LockTable"}},
-		Charts: []chartDescription{
-			{
-				Title: "Locks",
-				Metrics: []string{
-					"kv.concurrency.locks",
-					"kv.concurrency.locks_with_wait_queues",
-				},
-			},
-			{
-				Title: "Waiters",
-				Metrics: []string{
-					"kv.concurrency.lock_wait_queue_waiters",
-					"kv.concurrency.max_lock_wait_queue_waiters_for_lock",
+					"intents.resolve_conflicting.rejected",
+					"intents.finalized_txns.timed_out",
 				},
 			},
 		},
@@ -1027,7 +1001,6 @@ var charts = []sectionDescription{
 					"txn.restarts.serializable",
 					"txn.restarts.writetooold",
 					"txn.restarts.asyncwritefailure",
-					"txn.restarts.commitdeadlineexceeded",
 					"txn.restarts.readwithinuncertainty",
 					"txn.restarts.txnaborted",
 					"txn.restarts.txnpush",
@@ -1140,6 +1113,12 @@ var charts = []sectionDescription{
 				Title: "Min High Water",
 				Metrics: []string{
 					"changefeed.min_high_water",
+				},
+			},
+			{
+				Title: "Poll Request Time",
+				Metrics: []string{
+					"changefeed.poll_request_nanos",
 				},
 			},
 			{
@@ -1370,10 +1349,6 @@ var charts = []sectionDescription{
 			{
 				Title:   "Stuck Request Count",
 				Metrics: []string{"requests.slow.raft"},
-			},
-			{
-				Title:   "Heartbeat Timeouts",
-				Metrics: []string{"raft.timeoutcampaign"},
 			},
 			{
 				Title:   "Ticks Queued",
@@ -1750,83 +1725,6 @@ var charts = []sectionDescription{
 		},
 	},
 	{
-		Organization: [][]string{{SQLLayer, "SQL Stats"}},
-		Charts: []chartDescription{
-			{
-				Title:   "Memory usage for fingerprint storage",
-				Metrics: []string{"sql.stats.mem.max"},
-			},
-			{
-				Title:   "Current memory usage for fingerprint storage",
-				Metrics: []string{"sql.stats.mem.current"},
-			},
-			{
-				Title:   "Memory usage for reported fingerprint storage",
-				Metrics: []string{"sql.stats.reported.mem.max"},
-			},
-			{
-				Title:   "Current memory usage for reported fingerprint storage",
-				Metrics: []string{"sql.stats.reported.mem.current"},
-			},
-			{
-				Title:   "Number of fingerprint statistics being discarded",
-				Metrics: []string{"sql.stats.discarded.current"},
-			},
-			{
-				Title:   "Memory usage for internal fingerprint storage",
-				Metrics: []string{"sql.stats.mem.max.internal"},
-			},
-			{
-				Title:   "Current memory usage for internal fingerprint storage",
-				Metrics: []string{"sql.stats.mem.current.internal"},
-			},
-			{
-				Title:   "Memory usage for internal reported fingerprint storage",
-				Metrics: []string{"sql.stats.reported.mem.max.internal"},
-			},
-			{
-				Title:   "Current memory usage for internal reported fingerprint storage",
-				Metrics: []string{"sql.stats.reported.mem.current.internal"},
-			},
-			{
-				Title:   "Number of internal fingerprint statistics being discarded",
-				Metrics: []string{"sql.stats.discarded.current.internal"},
-			},
-			{
-				Title:   "Number of times SQL Stats are flushed to persistent storage",
-				Metrics: []string{"sql.stats.flush.count"},
-			},
-			{
-				Title:   "Number of errors encountered when flushing SQL Stats",
-				Metrics: []string{"sql.stats.flush.error"},
-			},
-			{
-				Title:   "Time took to complete SQL Stats flush",
-				Metrics: []string{"sql.stats.flush.duration"},
-			},
-			{
-				Title:   "Number of times internal SQL Stats are flushed to persistent storage",
-				Metrics: []string{"sql.stats.flush.count.internal"},
-			},
-			{
-				Title:   "Number of errors encountered when flushing internal SQL Stats",
-				Metrics: []string{"sql.stats.flush.error.internal"},
-			},
-			{
-				Title:   "Time took to complete internal SQL Stats flush",
-				Metrics: []string{"sql.stats.flush.duration.internal"},
-			},
-			{
-				Title:   "Number of stale statement/transaction roles removed by cleanup job",
-				Metrics: []string{"sql.stats.cleanup.rows_removed"},
-			},
-			{
-				Title:   "Number of internal stale statement/transaction roles removed by cleanup job",
-				Metrics: []string{"sql.stats.cleanup.rows_removed.internal"},
-			},
-		},
-	},
-	{
 		Organization: [][]string{{SQLLayer, "Bulk"}},
 		Charts: []chartDescription{
 			{
@@ -2048,13 +1946,6 @@ var charts = []sectionDescription{
 				Metrics: []string{
 					"sql.new_conns",
 				},
-			},
-			{
-				Title: "Connection Latency",
-				Metrics: []string{
-					"sql.conn.latency",
-				},
-				AxisLabel: "Latency",
 			},
 			{
 				Title: "Open Transactions",
@@ -2361,14 +2252,6 @@ var charts = []sectionDescription{
 				Metrics: []string{"rocksdb.estimated-pending-compaction"},
 			},
 			{
-				Title:   "L0 Sublevels",
-				Metrics: []string{"storage.l0-sublevels"},
-			},
-			{
-				Title:   "L0 Files",
-				Metrics: []string{"storage.l0-num-files"},
-			},
-			{
 				Title:   "Ingestion",
 				Metrics: []string{"rocksdb.ingested-bytes"},
 			},
@@ -2380,10 +2263,6 @@ var charts = []sectionDescription{
 					"rocksdb.flushed-bytes",
 				},
 				AxisLabel: "Bytes",
-			},
-			{
-				Title:   "Stalls",
-				Metrics: []string{"storage.write-stalls"},
 			},
 		},
 	},
@@ -2407,17 +2286,6 @@ var charts = []sectionDescription{
 				Metrics: []string{
 					"addsstable.delay.total",
 					"addsstable.delay.enginebackpressure",
-				},
-			},
-		},
-	},
-	{
-		Organization: [][]string{{DistributionLayer, "Bulk", "Egress"}},
-		Charts: []chartDescription{
-			{
-				Title: "Export Delays",
-				Metrics: []string{
-					"exportrequest.delay.total",
 				},
 			},
 		},
@@ -2522,6 +2390,7 @@ var charts = []sectionDescription{
 			{
 				Title: "Round",
 				Metrics: []string{
+
 					"schedules.round.schedules-ready-to-run",
 					"schedules.round.reschedule-skip",
 					"schedules.round.reschedule-wait",
@@ -2557,19 +2426,6 @@ var charts = []sectionDescription{
 		},
 	},
 	{
-		Organization: [][]string{{Jobs, "Schedules", "SQL Stats"}},
-		Charts: []chartDescription{
-			{
-				Title: "Counts",
-				Metrics: []string{
-					"schedules.scheduled-sql-stats-compaction-executor.started",
-					"schedules.scheduled-sql-stats-compaction-executor.succeeded",
-					"schedules.scheduled-sql-stats-compaction-executor.failed",
-				},
-			},
-		},
-	},
-	{
 		Organization: [][]string{{Jobs, "Execution"}},
 		Charts: []chartDescription{
 			{
@@ -2587,8 +2443,6 @@ var charts = []sectionDescription{
 					"jobs.typedesc_schema_change.currently_running",
 					"jobs.stream_ingestion.currently_running",
 					"jobs.migration.currently_running",
-					"jobs.auto_span_config_reconciliation.currently_running",
-					"jobs.auto_sql_stats_compaction.currently_running",
 				},
 			},
 			{
@@ -2731,117 +2585,6 @@ var charts = []sectionDescription{
 					"jobs.migration.resume_completed",
 					"jobs.migration.resume_failed",
 					"jobs.migration.resume_retry_error",
-				},
-			},
-			{
-				Title: "Auto Span Config Reconciliation",
-				Metrics: []string{
-					"jobs.auto_span_config_reconciliation.fail_or_cancel_completed",
-					"jobs.auto_span_config_reconciliation.fail_or_cancel_failed",
-					"jobs.auto_span_config_reconciliation.fail_or_cancel_retry_error",
-					"jobs.auto_span_config_reconciliation.resume_completed",
-					"jobs.auto_span_config_reconciliation.resume_failed",
-					"jobs.auto_span_config_reconciliation.resume_retry_error"},
-			},
-			{
-				Title: "SQL Stats Compaction",
-				Metrics: []string{
-					"jobs.auto_sql_stats_compaction.fail_or_cancel_completed",
-					"jobs.auto_sql_stats_compaction.fail_or_cancel_failed",
-					"jobs.auto_sql_stats_compaction.fail_or_cancel_retry_error",
-					"jobs.auto_sql_stats_compaction.resume_completed",
-					"jobs.auto_sql_stats_compaction.resume_failed",
-					"jobs.auto_sql_stats_compaction.resume_retry_error",
-				},
-			},
-		},
-	},
-	{
-		Organization: [][]string{{Jobs, "Registry"}},
-		Charts: []chartDescription{
-			{
-				Title: "Jobs Registry Stats",
-				Metrics: []string{
-					"jobs.adopt_iterations",
-					"jobs.claimed_jobs",
-					"jobs.resumed_claimed_jobs",
-				},
-				AxisLabel: "Count",
-			},
-		},
-	},
-	{
-		Organization: [][]string{{Process, "Node", "Admission"}},
-		Charts: []chartDescription{
-			{
-				Title: "Work Queue Admission Counter",
-				Metrics: []string{
-					"admission.requested.kv",
-					"admission.admitted.kv",
-					"admission.errored.kv",
-					"admission.requested.kv-stores",
-					"admission.admitted.kv-stores",
-					"admission.errored.kv-stores",
-					"admission.requested.sql-kv-response",
-					"admission.admitted.sql-kv-response",
-					"admission.errored.sql-kv-response",
-					"admission.requested.sql-sql-response",
-					"admission.admitted.sql-sql-response",
-					"admission.errored.sql-sql-response",
-					"admission.requested.sql-leaf-start",
-					"admission.admitted.sql-leaf-start",
-					"admission.errored.sql-leaf-start",
-					"admission.requested.sql-root-start",
-					"admission.admitted.sql-root-start",
-					"admission.errored.sql-root-start",
-				},
-			},
-			{
-				Title: "Work Queue Length",
-				Metrics: []string{
-					"admission.wait_queue_length.kv",
-					"admission.wait_queue_length.kv-stores",
-					"admission.wait_queue_length.sql-kv-response",
-					"admission.wait_queue_length.sql-sql-response",
-					"admission.wait_queue_length.sql-leaf-start",
-					"admission.wait_queue_length.sql-root-start",
-				},
-			},
-			{
-				Title: "Work Queue Admission Latency Sum",
-				Metrics: []string{
-					"admission.wait_sum.kv",
-					"admission.wait_sum.kv-stores",
-					"admission.wait_sum.sql-kv-response",
-					"admission.wait_sum.sql-sql-response",
-					"admission.wait_sum.sql-leaf-start",
-					"admission.wait_sum.sql-root-start",
-				},
-			},
-			{
-				Title: "Work Queue Latency Distribution",
-				Metrics: []string{
-					"admission.wait_durations.kv",
-					"admission.wait_durations.kv-stores",
-					"admission.wait_durations.sql-kv-response",
-					"admission.wait_durations.sql-sql-response",
-					"admission.wait_durations.sql-leaf-start",
-					"admission.wait_durations.sql-root-start",
-				},
-			},
-			{
-				Title: "Granter",
-				Metrics: []string{
-					"admission.granter.total_slots.kv",
-					"admission.granter.used_slots.kv",
-					"admission.granter.used_slots.sql-leaf-start",
-					"admission.granter.used_slots.sql-root-start",
-				},
-			},
-			{
-				Title: "IO Tokens Exhausted Duration Sum",
-				Metrics: []string{
-					"admission.granter.io_tokens_exhausted_duration.kv",
 				},
 			},
 		},

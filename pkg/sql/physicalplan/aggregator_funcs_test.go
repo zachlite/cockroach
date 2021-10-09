@@ -20,12 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -68,18 +67,21 @@ func runTestFlow(
 		Version:           execinfra.Version,
 		LeafTxnInputState: &leafInputState,
 		Flow: execinfrapb.FlowSpec{
-			FlowID:     execinfrapb.FlowID{UUID: uuid.FastMakeV4()},
+			FlowID:     execinfrapb.FlowID{UUID: uuid.MakeV4()},
 			Processors: procs,
 		},
 	}
 
 	var rowBuf distsqlutils.RowBuffer
 
-	ctx, flow, _, err := distSQLSrv.SetupLocalSyncFlow(context.Background(), distSQLSrv.ParentMemoryMonitor, &req, &rowBuf, nil /* batchOutput */, distsql.LocalState{})
+	ctx, flow, err := distSQLSrv.SetupSyncFlow(context.Background(), distSQLSrv.ParentMemoryMonitor, &req, &rowBuf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	flow.Run(ctx, func() {})
+	if err := flow.Start(ctx, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	flow.Wait()
 	flow.Cleanup(ctx)
 
 	if !rowBuf.ProducerClosed() {
@@ -90,7 +92,7 @@ func runTestFlow(
 	for {
 		row, meta := rowBuf.Next()
 		if meta != nil {
-			if meta.LeafTxnFinalState != nil || meta.Metrics != nil || meta.TraceData != nil {
+			if meta.LeafTxnFinalState != nil || meta.Metrics != nil {
 				continue
 			}
 			t.Fatalf("unexpected metadata: %v", meta)
@@ -115,27 +117,26 @@ func checkDistAggregationInfo(
 	ctx context.Context,
 	t *testing.T,
 	srv serverutils.TestServerInterface,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	colIdx int,
 	numRows int,
 	fn execinfrapb.AggregatorSpec_Func,
 	info DistAggregationInfo,
 ) {
-	colType := tableDesc.PublicColumns()[colIdx].GetType()
+	colType := tableDesc.Columns[colIdx].Type
 
 	makeTableReader := func(startPK, endPK int, streamID int) execinfrapb.ProcessorSpec {
 		tr := execinfrapb.TableReaderSpec{
-			Table:         *tableDesc.TableDesc(),
-			Spans:         make([]execinfrapb.TableReaderSpan, 1),
-			NeededColumns: []uint32{uint32(colIdx)},
+			Table: *tableDesc.TableDesc(),
+			Spans: make([]execinfrapb.TableReaderSpan, 1),
 		}
 
 		var err error
-		tr.Spans[0].Span.Key, err = randgen.TestingMakePrimaryIndexKey(tableDesc, startPK)
+		tr.Spans[0].Span.Key, err = rowenc.TestingMakePrimaryIndexKey(tableDesc, startPK)
 		if err != nil {
 			t.Fatal(err)
 		}
-		tr.Spans[0].Span.EndKey, err = randgen.TestingMakePrimaryIndexKey(tableDesc, endPK)
+		tr.Spans[0].Span.EndKey, err = rowenc.TestingMakePrimaryIndexKey(tableDesc, endPK)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,9 +153,35 @@ func checkDistAggregationInfo(
 					{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: execinfrapb.StreamID(streamID)},
 				},
 			}},
-			ResultTypes: []*types.T{colType},
 		}
 	}
+
+	txn := kv.NewTxn(ctx, srv.DB(), srv.NodeID())
+
+	// First run a flow that aggregates all the rows without any local stages.
+
+	rowsNonDist := runTestFlow(
+		t, srv, txn,
+		makeTableReader(1, numRows+1, 0),
+		execinfrapb.ProcessorSpec{
+			Input: []execinfrapb.InputSyncSpec{{
+				Type:        execinfrapb.InputSyncSpec_UNORDERED,
+				ColumnTypes: []*types.T{colType},
+				Streams: []execinfrapb.StreamEndpointSpec{
+					{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 0},
+				},
+			}},
+			Core: execinfrapb.ProcessorCoreUnion{Aggregator: &execinfrapb.AggregatorSpec{
+				Aggregations: []execinfrapb.AggregatorSpec_Aggregation{{Func: fn, ColIdx: []uint32{0}}},
+			}},
+			Output: []execinfrapb.OutputRouterSpec{{
+				Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
+				Streams: []execinfrapb.StreamEndpointSpec{
+					{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE},
+				},
+			}},
+		},
+	)
 
 	numIntermediary := len(info.LocalStage)
 	numFinal := len(info.FinalStage)
@@ -169,6 +196,11 @@ func checkDistAggregationInfo(
 		}
 	}
 
+	// Now run a flow with 4 separate table readers, each with its own local
+	// stage, all feeding into a single final stage.
+
+	numParallel := 4
+
 	// The type(s) outputted by the local stage can be different than the input type
 	// (e.g. DECIMAL instead of INT).
 	intermediaryTypes := make([]*types.T, numIntermediary)
@@ -179,6 +211,39 @@ func checkDistAggregationInfo(
 			t.Fatal(err)
 		}
 		intermediaryTypes[i] = returnTyp
+	}
+
+	localAggregations := make([]execinfrapb.AggregatorSpec_Aggregation, numIntermediary)
+	for i, fn := range info.LocalStage {
+		// Local aggregations have the same input.
+		localAggregations[i] = execinfrapb.AggregatorSpec_Aggregation{Func: fn, ColIdx: []uint32{0}}
+	}
+	finalAggregations := make([]execinfrapb.AggregatorSpec_Aggregation, numFinal)
+	for i, finalInfo := range info.FinalStage {
+		// Each local aggregation feeds into a final aggregation.
+		finalAggregations[i] = execinfrapb.AggregatorSpec_Aggregation{
+			Func:   finalInfo.Fn,
+			ColIdx: finalInfo.LocalIdxs,
+		}
+	}
+
+	if numParallel < numRows {
+		numParallel = numRows
+	}
+	finalProc := execinfrapb.ProcessorSpec{
+		Input: []execinfrapb.InputSyncSpec{{
+			Type:        execinfrapb.InputSyncSpec_UNORDERED,
+			ColumnTypes: intermediaryTypes,
+		}},
+		Core: execinfrapb.ProcessorCoreUnion{Aggregator: &execinfrapb.AggregatorSpec{
+			Aggregations: finalAggregations,
+		}},
+		Output: []execinfrapb.OutputRouterSpec{{
+			Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
+			Streams: []execinfrapb.StreamEndpointSpec{
+				{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE},
+			},
+		}},
 	}
 
 	// The type(s) outputted by the final stage can be different than the
@@ -200,90 +265,12 @@ func checkDistAggregationInfo(
 		varIdxs[i] = i
 	}
 
-	txn := kv.NewTxn(ctx, srv.DB(), srv.NodeID())
-
-	// First run a flow that aggregates all the rows without any local stages.
-	nonDistFinalOutputTypes := finalOutputTypes
-	if info.FinalRendering != nil {
-		h := tree.MakeTypesOnlyIndexedVarHelper(finalOutputTypes)
-		renderExpr, err := info.FinalRendering(&h, varIdxs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var expr execinfrapb.Expression
-		expr, err = MakeExpression(renderExpr, nil, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		nonDistFinalOutputTypes = []*types.T{expr.LocalExpr.ResolvedType()}
-	}
-	rowsNonDist := runTestFlow(
-		t, srv, txn,
-		makeTableReader(1, numRows+1, 0),
-		execinfrapb.ProcessorSpec{
-			Input: []execinfrapb.InputSyncSpec{{
-				Type:        execinfrapb.InputSyncSpec_PARALLEL_UNORDERED,
-				ColumnTypes: []*types.T{colType},
-				Streams: []execinfrapb.StreamEndpointSpec{
-					{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: 0},
-				},
-			}},
-			Core: execinfrapb.ProcessorCoreUnion{Aggregator: &execinfrapb.AggregatorSpec{
-				Aggregations: []execinfrapb.AggregatorSpec_Aggregation{{Func: fn, ColIdx: []uint32{0}}},
-			}},
-			Output: []execinfrapb.OutputRouterSpec{{
-				Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
-				Streams: []execinfrapb.StreamEndpointSpec{
-					{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE},
-				},
-			}},
-			ResultTypes: nonDistFinalOutputTypes,
-		},
-	)
-
-	// Now run a flow with 4 separate table readers, each with its own local
-	// stage, all feeding into a single final stage.
-
-	numParallel := 4
-	localAggregations := make([]execinfrapb.AggregatorSpec_Aggregation, numIntermediary)
-	for i, fn := range info.LocalStage {
-		// Local aggregations have the same input.
-		localAggregations[i] = execinfrapb.AggregatorSpec_Aggregation{Func: fn, ColIdx: []uint32{0}}
-	}
-	finalAggregations := make([]execinfrapb.AggregatorSpec_Aggregation, numFinal)
-	for i, finalInfo := range info.FinalStage {
-		// Each local aggregation feeds into a final aggregation.
-		finalAggregations[i] = execinfrapb.AggregatorSpec_Aggregation{
-			Func:   finalInfo.Fn,
-			ColIdx: finalInfo.LocalIdxs,
-		}
-	}
-	if numParallel < numRows {
-		numParallel = numRows
-	}
-	finalProc := execinfrapb.ProcessorSpec{
-		Input: []execinfrapb.InputSyncSpec{{
-			Type:        execinfrapb.InputSyncSpec_PARALLEL_UNORDERED,
-			ColumnTypes: intermediaryTypes,
-		}},
-		Core: execinfrapb.ProcessorCoreUnion{Aggregator: &execinfrapb.AggregatorSpec{
-			Aggregations: finalAggregations,
-		}},
-		Output: []execinfrapb.OutputRouterSpec{{
-			Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
-			Streams: []execinfrapb.StreamEndpointSpec{
-				{Type: execinfrapb.StreamEndpointSpec_SYNC_RESPONSE},
-			},
-		}},
-		ResultTypes: finalOutputTypes,
-	}
-
 	var procs []execinfrapb.ProcessorSpec
 	for i := 0; i < numParallel; i++ {
 		tr := makeTableReader(1+i*numRows/numParallel, 1+(i+1)*numRows/numParallel, 2*i)
 		agg := execinfrapb.ProcessorSpec{
 			Input: []execinfrapb.InputSyncSpec{{
-				Type:        execinfrapb.InputSyncSpec_PARALLEL_UNORDERED,
+				Type:        execinfrapb.InputSyncSpec_UNORDERED,
 				ColumnTypes: []*types.T{colType},
 				Streams: []execinfrapb.StreamEndpointSpec{
 					{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: execinfrapb.StreamID(2 * i)},
@@ -298,7 +285,6 @@ func checkDistAggregationInfo(
 					{Type: execinfrapb.StreamEndpointSpec_LOCAL, StreamID: execinfrapb.StreamID(2*i + 1)},
 				},
 			}},
-			ResultTypes: intermediaryTypes,
 		}
 		procs = append(procs, tr, agg)
 		finalProc.Input[0].Streams = append(finalProc.Input[0].Streams, execinfrapb.StreamEndpointSpec{
@@ -319,7 +305,7 @@ func checkDistAggregationInfo(
 			t.Fatal(err)
 		}
 		finalProc.Post.RenderExprs = []execinfrapb.Expression{expr}
-		finalProc.ResultTypes = []*types.T{expr.LocalExpr.ResolvedType()}
+
 	}
 
 	procs = append(procs, finalProc)
@@ -429,7 +415,6 @@ func TestDistAggregationTable(t *testing.T) {
 	// Create a table with a few columns:
 	//  - random integer values from 0 to numRows
 	//  - random integer values (with some NULLs)
-	//  - random integer values (with some NULLs) within int32 range
 	//  - random bool value (mostly false)
 	//  - random bool value (mostly true)
 	//  - random decimals
@@ -437,23 +422,19 @@ func TestDistAggregationTable(t *testing.T) {
 	rng, _ := randutil.NewPseudoRand()
 	sqlutils.CreateTable(
 		t, tc.ServerConn(0), "t",
-		"k INT PRIMARY KEY, int1 INT, int2 INT, int3 INT, bool1 BOOL, bool2 BOOL, dec1 DECIMAL, dec2 DECIMAL, float1 FLOAT, float2 FLOAT, b BYTES",
+		"k INT PRIMARY KEY, int1 INT, int2 INT, bool1 BOOL, bool2 BOOL, dec1 DECIMAL, dec2 DECIMAL, float1 FLOAT, float2 FLOAT, b BYTES",
 		numRows,
 		func(row int) []tree.Datum {
 			return []tree.Datum{
 				tree.NewDInt(tree.DInt(row)),
 				tree.NewDInt(tree.DInt(rng.Intn(numRows))),
-				randgen.RandDatum(rng, types.Int, true),
-				// Note that we use INT4 here, yet the table schema uses INT8 -
-				// this is ok since we want to limit the range of values but use
-				// the default INT type.
-				randgen.RandDatum(rng, types.Int4, true),
+				rowenc.RandDatum(rng, types.Int, true),
 				tree.MakeDBool(tree.DBool(rng.Intn(10) == 0)),
 				tree.MakeDBool(tree.DBool(rng.Intn(10) != 0)),
-				randgen.RandDatum(rng, types.Decimal, false),
-				randgen.RandDatum(rng, types.Decimal, true),
-				randgen.RandDatum(rng, types.Float, false),
-				randgen.RandDatum(rng, types.Float, true),
+				rowenc.RandDatum(rng, types.Decimal, false),
+				rowenc.RandDatum(rng, types.Decimal, true),
+				rowenc.RandDatum(rng, types.Float, false),
+				rowenc.RandDatum(rng, types.Float, true),
 				tree.NewDBytes(tree.DBytes(randutil.RandBytes(rng, 10))),
 			}
 		},
@@ -463,39 +444,30 @@ func TestDistAggregationTable(t *testing.T) {
 	desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 
 	for fn, info := range DistAggregationTable {
-		if fn == execinfrapb.AnyNotNull {
+		if fn == execinfrapb.AggregatorSpec_ANY_NOT_NULL {
 			// ANY_NOT_NULL only has a definite result if all rows have the same value
 			// on the relevant column; skip testing this trivial case.
 			continue
 		}
-		if fn == execinfrapb.CountRows {
+		if fn == execinfrapb.AggregatorSpec_COUNT_ROWS {
 			// COUNT_ROWS takes no arguments; skip it in this test.
 			continue
 		}
 		// We're going to test each aggregation function on every column that can be
 		// used as input for it.
 		foundCol := false
-		for _, col := range desc.PublicColumns() {
-			if col.Ordinal() == 0 {
-				continue
-			}
+		for colIdx := 1; colIdx < len(desc.Columns); colIdx++ {
 			// See if this column works with this function.
-			_, _, err := execinfrapb.GetAggregateInfo(fn, col.GetType())
+			_, _, err := execinfrapb.GetAggregateInfo(fn, desc.Columns[colIdx].Type)
 			if err != nil {
-				continue
-			}
-			if fn == execinfrapb.SumInt && col.Ordinal() == 2 {
-				// When using sum_int over int2 column we're likely to hit an
-				// integer out of range error since we insert random DInts into
-				// that column, so we'll skip such config.
 				continue
 			}
 			foundCol = true
 			for _, numRows := range []int{5, numRows / 10, numRows / 2, numRows} {
-				name := fmt.Sprintf("%s/%s/%d", fn, col.GetName(), numRows)
+				name := fmt.Sprintf("%s/%s/%d", fn, desc.Columns[colIdx].Name, numRows)
 				t.Run(name, func(t *testing.T) {
 					checkDistAggregationInfo(
-						context.Background(), t, tc.Server(0), desc, col.Ordinal(), numRows, fn, info)
+						context.Background(), t, tc.Server(0), desc, colIdx, numRows, fn, info)
 				})
 			}
 		}

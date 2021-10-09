@@ -11,7 +11,6 @@ package engineccl
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -22,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/baseccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl/enginepbccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -38,7 +36,6 @@ func TestEncryptedFS(t *testing.T) {
 
 	memFS := vfs.NewMem()
 
-	require.NoError(t, memFS.MkdirAll("/bar", os.ModePerm))
 	fileRegistry := &storage.PebbleFileRegistry{FS: memFS, DBDir: "/bar"}
 	require.NoError(t, fileRegistry.Load())
 
@@ -189,37 +186,6 @@ func TestEncryptedFS(t *testing.T) {
 	}
 }
 
-func TestEncryptedFSUnencryptedFiles(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	memFS := vfs.NewMem()
-	require.NoError(t, memFS.MkdirAll("/foo", os.ModeDir))
-
-	fileRegistry := &storage.PebbleFileRegistry{FS: memFS, DBDir: "/foo"}
-	require.NoError(t, fileRegistry.Load())
-
-	keyManager := &StoreKeyManager{fs: memFS, activeKeyFilename: "plain", oldKeyFilename: "plain"}
-	require.NoError(t, keyManager.Load(context.Background()))
-
-	streamCreator := &FileCipherStreamCreator{keyManager: keyManager, envType: enginepb.EnvType_Store}
-
-	fs := &encryptedFS{FS: memFS, fileRegistry: fileRegistry, streamCreator: streamCreator}
-
-	var filesCreated []string
-	for i := 0; i < 5; i++ {
-		filename := fmt.Sprintf("file%d", i)
-		f, err := fs.Create(filename)
-		require.NoError(t, err)
-		filesCreated = append(filesCreated, filename)
-		require.NoError(t, f.Close())
-	}
-
-	// The file registry should be empty since we only created unencrypted files.
-	for _, filename := range filesCreated {
-		require.Nil(t, fileRegistry.GetFileEntry(filename))
-	}
-}
-
 // Minimal test that creates an encrypted Pebble that exercises creation and reading of encrypted
 // files, rereading data after reopening the engine, and stats code.
 func TestPebbleEncryption(t *testing.T) {
@@ -246,11 +212,10 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				Settings:          cluster.MakeTestingClusterSettings(),
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts,
 		})
@@ -276,11 +241,11 @@ func TestPebbleEncryption(t *testing.T) {
 	require.Equal(t, int32(enginepbccl.EncryptionType_AES128_CTR), stats.EncryptionType)
 	t.Logf("EnvStats:\n%+v\n\n", *stats)
 
-	batch := db.NewUnindexedBatch(true /* writeOnly */)
-	require.NoError(t, batch.PutUnversioned(roachpb.Key("a"), []byte("a")))
+	batch := db.NewWriteOnlyBatch()
+	require.NoError(t, batch.Put(storage.MVCCKey{Key: roachpb.Key("a")}, []byte("a")))
 	require.NoError(t, batch.Commit(true))
 	require.NoError(t, db.Flush())
-	val, err := db.MVCCGet(storage.MVCCKey{Key: roachpb.Key("a")})
+	val, err := db.Get(storage.MVCCKey{Key: roachpb.Key("a")})
 	require.NoError(t, err)
 	require.Equal(t, "a", string(val))
 	db.Close()
@@ -294,25 +259,25 @@ func TestPebbleEncryption(t *testing.T) {
 		context.Background(),
 		storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Attrs:             roachpb.Attributes{},
-				MaxSize:           512 << 20,
-				UseFileRegistry:   true,
-				EncryptionOptions: encOptionsBytes,
+				Attrs:           roachpb.Attributes{},
+				MaxSize:         512 << 20,
+				UseFileRegistry: true,
+				ExtraOptions:    encOptionsBytes,
 			},
 			Opts: opts2,
 		})
 	require.NoError(t, err)
-	val, err = db.MVCCGet(storage.MVCCKey{Key: roachpb.Key("a")})
+	val, err = db.Get(storage.MVCCKey{Key: roachpb.Key("a")})
 	require.NoError(t, err)
 	require.Equal(t, "a", string(val))
 
 	// Flushing should've created a new sstable under the active key.
 	stats, err = db.GetEnvStats()
 	require.NoError(t, err)
-	t.Logf("EnvStats:\n%+v\n\n", *stats)
 	require.Equal(t, uint64(5), stats.TotalFiles)
-	require.LessOrEqual(t, uint64(5), stats.ActiveKeyFiles)
+	require.Equal(t, uint64(5), stats.ActiveKeyFiles)
 	require.Equal(t, stats.TotalBytes, stats.ActiveKeyBytes)
+	t.Logf("EnvStats:\n%+v\n\n", *stats)
 
 	db.Close()
 }
@@ -334,16 +299,16 @@ func TestPebbleEncryption2(t *testing.T) {
 		}
 
 		foundUnknown := false
-		kvFunc := func(kv roachpb.KeyValue) error {
+		kvFunc := func(kv roachpb.KeyValue) (bool, error) {
 			key := kv.Key
 			val := kv.Value
 			expected := keysCopy[string(key)]
 			if !expected || len(val.RawBytes) == 0 {
 				foundUnknown = true
-				return nil
+				return false, nil
 			}
 			delete(keysCopy, string(key))
-			return nil
+			return false, nil
 		}
 
 		_, err := storage.MVCCIterate(
@@ -382,10 +347,10 @@ func TestPebbleEncryption2(t *testing.T) {
 			context.Background(),
 			storage.PebbleConfig{
 				StorageConfig: base.StorageConfig{
-					Attrs:             roachpb.Attributes{},
-					MaxSize:           512 << 20,
-					UseFileRegistry:   true,
-					EncryptionOptions: encOptionsBytes,
+					Attrs:           roachpb.Attributes{},
+					MaxSize:         512 << 20,
+					UseFileRegistry: true,
+					ExtraOptions:    encOptionsBytes,
 				},
 				Opts: opts,
 			})
@@ -413,24 +378,4 @@ func TestPebbleEncryption2(t *testing.T) {
 	addKeyAndValidate("b", "b", "plain", "16v1.key")
 	addKeyAndValidate("c", "c", "16v2.key", "plain")
 	addKeyAndValidate("d", "d", "plain", "16v2.key")
-}
-
-func TestCanRegistryElide(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	var entry *enginepb.FileEntry = nil
-	require.True(t, canRegistryElide(entry))
-
-	entry = &enginepb.FileEntry{EnvType: enginepb.EnvType_Store}
-	settings := &enginepbccl.EncryptionSettings{EncryptionType: enginepbccl.EncryptionType_Plaintext}
-	b, err := protoutil.Marshal(settings)
-	require.NoError(t, err)
-	entry.EncryptionSettings = b
-	require.True(t, canRegistryElide(entry))
-
-	settings = &enginepbccl.EncryptionSettings{EncryptionType: enginepbccl.EncryptionType_AES128_CTR}
-	b, err = protoutil.Marshal(settings)
-	require.NoError(t, err)
-	entry.EncryptionSettings = b
-	require.False(t, canRegistryElide(entry))
 }

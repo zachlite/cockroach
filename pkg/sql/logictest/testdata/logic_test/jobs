@@ -16,18 +16,14 @@ CREATE TABLE t(x INT); INSERT INTO t(x) VALUES (1); CREATE INDEX ON t(x)
 query TTT
 SELECT job_type, description, user_name FROM [SHOW JOBS] WHERE user_name = 'root'
 ----
-SCHEMA CHANGE  updating version for users table         root
-SCHEMA CHANGE  updating version for role options table  root
-SCHEMA CHANGE  updating privileges for database 52      root
-SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)        root
+SCHEMA CHANGE  updating privileges for database 52  root
+SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)    root
 
 query TTT
 SELECT job_type, description, user_name FROM crdb_internal.jobs WHERE user_name = 'root'
 ----
-SCHEMA CHANGE  updating version for users table         root
-SCHEMA CHANGE  updating version for role options table  root
-SCHEMA CHANGE  updating privileges for database 52      root
-SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)        root
+SCHEMA CHANGE  updating privileges for database 52  root
+SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)    root
 
 user testuser
 
@@ -64,20 +60,16 @@ user root
 query TTT
 SELECT job_type, description, user_name FROM [SHOW JOBS] WHERE user_name IN ('root', 'testuser')
 ----
-SCHEMA CHANGE  updating version for users table         root
-SCHEMA CHANGE  updating version for role options table  root
-SCHEMA CHANGE  updating privileges for database 52      root
-SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)        root
-SCHEMA CHANGE  CREATE INDEX ON test.public.u (x)        testuser
+SCHEMA CHANGE  updating privileges for database 52  root
+SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)    root
+SCHEMA CHANGE  CREATE INDEX ON test.public.u (x)    testuser
 
 query TTT
 SELECT job_type, description, user_name FROM crdb_internal.jobs WHERE user_name IN ('root', 'testuser')
 ----
-SCHEMA CHANGE  updating version for users table         root
-SCHEMA CHANGE  updating version for role options table  root
-SCHEMA CHANGE  updating privileges for database 52      root
-SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)        root
-SCHEMA CHANGE  CREATE INDEX ON test.public.u (x)        testuser
+SCHEMA CHANGE  updating privileges for database 52  root
+SCHEMA CHANGE  CREATE INDEX ON test.public.t (x)    root
+SCHEMA CHANGE  CREATE INDEX ON test.public.u (x)    testuser
 
 statement ok
 CREATE USER testuser2
@@ -138,14 +130,3 @@ user testuser
 # testuser should no longer have the ability to control jobs.
 statement error pq: user testuser does not have CONTROLJOB privilege
 PAUSE JOB (SELECT job_id FROM [SHOW JOBS] WHERE user_name = 'testuser2' AND job_type = 'SCHEMA CHANGE GC')
-
-user root
-
-# Validate that the schema_change_successful metric
-query T
-SELECT feature_name FROM crdb_internal.feature_usage
-WHERE feature_name in ('job.schema_change.successful') AND
-usage_count > 0
-ORDER BY feature_name DESC
-----
-job.schema_change.successful

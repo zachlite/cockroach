@@ -97,19 +97,13 @@ CREATE TABLE interleave_root (a INT PRIMARY KEY) PARTITION BY LIST (a) (
     PARTITION p0 VALUES IN (0)
 )
 
-statement notice NOTICE: creation of new interleaved tables or interleaved indexes is no longer supported and will be ignored. For details, see https://www.cockroachlabs.com/docs/releases/v20.2.0#deprecations
+statement ok
 CREATE TABLE interleave_child (a INT PRIMARY KEY) INTERLEAVE IN PARENT interleave_root (a)
 
-statement notice NOTICE: creation of new interleaved tables or interleaved indexes is no longer supported and will be ignored. For details, see https://www.cockroachlabs.com/docs/releases/v20.2.0#deprecations
+statement error cannot set a zone config for interleaved index primary; set it on the root of the interleaved hierarchy instead
 CREATE TABLE t (a INT PRIMARY KEY) INTERLEAVE IN PARENT interleave_root (a) PARTITION BY LIST (a) (
     PARTITION p0 VALUES IN (0)
 )
-
-statement ok
-DROP TABLE interleave_child
-
-statement ok
-DROP TABLE t;
 
 statement error PARTITION p1: partition has 1 columns but 2 values were supplied
 CREATE TABLE t (a INT, b INT, c INT, PRIMARY KEY (a, b)) PARTITION BY LIST (a) (
@@ -431,16 +425,12 @@ TABLE ok1
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           └── p2
-                └── partition by list prefixes
-                     └── (2)
+      └── partition by list prefixes
+           ├── (1)
+           └── (2)
 scan ok1
 
 statement ok
@@ -479,16 +469,12 @@ TABLE ok2
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           └── p2
-                └── partition by list prefixes
-                     └── (2)
+      └── partition by list prefixes
+           ├── (1)
+           └── (2)
 scan ok2
 
 statement ok
@@ -527,16 +513,11 @@ TABLE ok3
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           └── p2
-                └── partition by list prefixes
-                     └── ()
+      └── partition by list prefixes
+           └── (1)
 scan ok3
 
 statement ok
@@ -579,22 +560,13 @@ TABLE ok4
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1, 1)
-           ├── p2
-           │    └── partition by list prefixes
-           │         └── (1)
-           ├── p3
-           │    └── partition by list prefixes
-           │         └── (2, 3)
-           └── p4
-                └── partition by list prefixes
-                     └── ()
+      └── partition by list prefixes
+           ├── (1, 1)
+           ├── (1)
+           └── (2, 3)
 scan ok4
 
 statement ok
@@ -628,19 +600,12 @@ TABLE ok5
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           ├── p2
-           │    └── partition by list prefixes
-           │         └── (2)
-           └── p3
-                └── partition by list prefixes
-                     └── ()
+      └── partition by list prefixes
+           ├── (1)
+           └── (2)
 scan ok5
 
 query TT
@@ -700,7 +665,7 @@ TABLE ok6
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       └── b int not null
 scan ok6
@@ -737,7 +702,7 @@ TABLE ok7
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       └── b int not null
 scan ok7
@@ -780,7 +745,7 @@ TABLE ok8
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       └── b int not null
 scan ok8
@@ -825,7 +790,7 @@ TABLE ok9
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       └── b int not null
 scan ok9
@@ -872,7 +837,7 @@ TABLE ok10
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       └── b int not null
 scan ok10
@@ -928,17 +893,13 @@ TABLE ok11
  ├── c int not null
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
       ├── c int not null
-      └── partitions
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           └── p2
-                └── partition by list prefixes
-                     └── (6)
+      └── partition by list prefixes
+           ├── (1)
+           └── (6)
 scan ok11
 
 statement ok
@@ -979,19 +940,13 @@ TABLE ok12
  ├── c int
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- └── PRIMARY INDEX primary
+ └── INDEX primary
       ├── a int not null
       ├── b int not null
-      └── partitions
-           ├── pu
-           │    └── partition by list prefixes
-           │         └── (NULL)
-           ├── p1
-           │    └── partition by list prefixes
-           │         └── (1)
-           └── p2
-                └── partition by list prefixes
-                     └── (2)
+      └── partition by list prefixes
+           ├── (NULL)
+           ├── (1)
+           └── (2)
 scan ok12
 
 # Verify that creating a partition that includes NULL does not change the
@@ -1191,26 +1146,3 @@ gc.ttlseconds = 90000,
 num_replicas = 5,
 constraints = '[]',
 lease_preferences = '[]'
-
-statement ok
-CREATE TABLE partition_by_nothing (
-  pk INT PRIMARY KEY,
-  a INT,
-  UNIQUE(b) PARTITION BY NOTHING,
-  b INT,
-  INDEX(b) PARTITION BY NOTHING,
-  FAMILY (pk, a, b)
-) PARTITION BY NOTHING
-
-query T
-SELECT create_statement FROM [SHOW CREATE TABLE partition_by_nothing]
-----
-CREATE TABLE public.partition_by_nothing (
-   pk INT8 NOT NULL,
-   a INT8 NULL,
-   b INT8 NULL,
-   CONSTRAINT "primary" PRIMARY KEY (pk ASC),
-   UNIQUE INDEX partition_by_nothing_b_key (b ASC),
-   INDEX partition_by_nothing_b_idx (b ASC),
-   FAMILY fam_0_pk_a_b (pk, a, b)
-)

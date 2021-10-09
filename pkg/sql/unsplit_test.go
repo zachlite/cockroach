@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
@@ -207,7 +208,7 @@ func TestUnsplitAt(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !rng.GetStickyBit().IsEmpty() {
+				if (rng.GetStickyBit() != hlc.Timestamp{}) {
 					t.Fatalf("%s: expected range sticky bit to be hlc.MinTimestamp, got %s", tt.unsplitStmt, rng.GetStickyBit())
 				}
 			}

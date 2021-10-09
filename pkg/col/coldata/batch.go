@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
 
@@ -44,8 +43,8 @@ type Batch interface {
 	// ColVecs returns all of the underlying Vecs in this batch.
 	ColVecs() []Vec
 	// Selection, if not nil, returns the selection vector on this batch: a
-	// densely-packed list of the *increasing* indices in each column that have
-	// not been filtered out by a previous step.
+	// densely-packed list of the indices in each column that have not been
+	// filtered out by a previous step.
 	Selection() []int
 	// SetSelection sets whether this batch is using its selection vector or not.
 	SetSelection(bool)
@@ -67,8 +66,7 @@ type Batch interface {
 	// ResetInternalBatch resets a batch and its underlying Vecs for reuse. It's
 	// important for callers to call ResetInternalBatch if they own internal
 	// batches that they reuse as not doing this could result in correctness
-	// or memory blowup issues. It unsets the selection and sets the length to
-	// 0.
+	// or memory blowup issues.
 	ResetInternalBatch()
 	// String returns a pretty representation of this batch.
 	String() string
@@ -81,15 +79,9 @@ var _ Batch = &MemBatch{}
 // confirmed to be very good using tpchvec/bench benchmark on TPC-H queries
 // (the best number according to that benchmark was 1280, but it was negligibly
 // better, so we decided to keep 1024 as it is a power of 2).
-var defaultBatchSize = int64(util.ConstantWithMetamorphicTestRange(
-	"coldata-batch-size",
-	1024, /* defaultValue */
-	// min is set to 3 to match colexec's minBatchSize setting.
-	3, /* min */
-	MaxBatchSize,
-))
+const defaultBatchSize = 1024
 
-var batchSize = defaultBatchSize
+var batchSize int64 = defaultBatchSize
 
 // BatchSize is the maximum number of tuples that fit in a column batch.
 func BatchSize() int {
@@ -109,6 +101,12 @@ func SetBatchSizeForTests(newBatchSize int) error {
 	return nil
 }
 
+// ResetBatchSizeForTests resets the batchSize variable to the default batch
+// size. It should only be used in tests.
+func ResetBatchSizeForTests() {
+	atomic.SwapInt64(&batchSize, defaultBatchSize)
+}
+
 // NewMemBatch allocates a new in-memory Batch.
 // TODO(jordan): pool these allocations.
 func NewMemBatch(typs []*types.T, factory ColumnFactory) Batch {
@@ -121,8 +119,8 @@ func NewMemBatchWithCapacity(typs []*types.T, capacity int, factory ColumnFactor
 	b := NewMemBatchNoCols(typs, capacity).(*MemBatch)
 	for i, t := range typs {
 		b.b[i] = NewMemColumn(t, capacity, factory)
-		if b.b[i].IsBytesLike() {
-			b.bytesVecIdxs.Add(i)
+		if b.b[i].CanonicalTypeFamily() == types.BytesFamily {
+			b.bytesVecIdxs = append(b.bytesVecIdxs, i)
 		}
 	}
 	return b
@@ -198,7 +196,7 @@ type MemBatch struct {
 	// vectors require special handling, so rather than iterating over all
 	// vectors and checking whether they are of Bytes type we store this slice
 	// separately.
-	bytesVecIdxs util.FastIntSet
+	bytesVecIdxs []int
 	useSel       bool
 	// sel is - if useSel is true - a selection vector from upstream. A
 	// selection vector is a list of selected tuple indices in this memBatch's
@@ -253,21 +251,27 @@ func (m *MemBatch) SetLength(length int) {
 		// offsets up to the element with the largest index that can be accessed
 		// by the batch.
 		maxIdx := length - 1
-		if m.useSel {
+		if m.useSel && m.sel[length-1] > maxIdx {
 			// Note that here we rely on the fact that selection vectors are
 			// increasing sequences.
+			//
+			// This assumption is only enforced by the invariantsChecker
+			// starting from 21.1 branches, so we have a "safe" conditional to
+			// not have a correctness regression, yet we deliberately do not
+			// want to iterate over the selection vector to find the largest
+			// index since that could be a performance regression.
 			maxIdx = m.sel[length-1]
 		}
-		for i, ok := m.bytesVecIdxs.Next(0); ok; i, ok = m.bytesVecIdxs.Next(i + 1) {
-			UpdateOffsetsToBeNonDecreasing(m.b[i], maxIdx+1)
+		for _, bytesVecIdx := range m.bytesVecIdxs {
+			m.b[bytesVecIdx].Bytes().UpdateOffsetsToBeNonDecreasing(maxIdx + 1)
 		}
 	}
 }
 
 // AppendCol implements the Batch interface.
 func (m *MemBatch) AppendCol(col Vec) {
-	if col.IsBytesLike() {
-		m.bytesVecIdxs.Add(len(m.b))
+	if col.CanonicalTypeFamily() == types.BytesFamily {
+		m.bytesVecIdxs = append(m.bytesVecIdxs, len(m.b))
 	}
 	m.b = append(m.b, col)
 }
@@ -305,28 +309,31 @@ func (m *MemBatch) Reset(typs []*types.T, length int, factory ColumnFactory) {
 	// Note that we're intentionally not calling m.SetLength() here because
 	// that would update offsets in the bytes vectors which is not necessary
 	// since those will get reset in ResetInternalBatch anyway.
+	m.length = length
 	m.b = m.b[:len(typs)]
+	for i := range m.b {
+		m.b[i].SetLength(length)
+	}
 	m.sel = m.sel[:length]
-	for i, ok := m.bytesVecIdxs.Next(0); ok; i, ok = m.bytesVecIdxs.Next(i + 1) {
-		if i >= len(typs) {
-			m.bytesVecIdxs.Remove(i)
+	for i, idx := range m.bytesVecIdxs {
+		if idx >= len(typs) {
+			m.bytesVecIdxs = m.bytesVecIdxs[:i]
+			break
 		}
 	}
 	m.ResetInternalBatch()
-	m.SetLength(length)
 }
 
 // ResetInternalBatch implements the Batch interface.
 func (m *MemBatch) ResetInternalBatch() {
-	m.SetLength(0 /* length */)
 	m.SetSelection(false)
 	for _, v := range m.b {
 		if v.CanonicalTypeFamily() != types.UnknownFamily {
 			v.Nulls().UnsetNulls()
 		}
 	}
-	for i, ok := m.bytesVecIdxs.Next(0); ok; i, ok = m.bytesVecIdxs.Next(i + 1) {
-		Reset(m.b[i])
+	for _, bytesVecIdx := range m.bytesVecIdxs {
+		m.b[bytesVecIdx].Bytes().Reset()
 	}
 }
 
@@ -335,17 +342,16 @@ func (m *MemBatch) String() string {
 	if m.Length() == 0 {
 		return "[zero-length batch]"
 	}
-	if VecsToStringWithRowPrefix == nil {
-		panic("need to inject the implementation from sql/colconv package")
+	var builder strings.Builder
+	strs := make([]string, len(m.ColVecs()))
+	for i := 0; i < m.Length(); i++ {
+		builder.WriteString("\n[")
+		for colIdx, v := range m.ColVecs() {
+			strs[colIdx] = fmt.Sprintf("%v", GetValueAt(v, i))
+		}
+		builder.WriteString(strings.Join(strs, ", "))
+		builder.WriteString("]")
 	}
-	return strings.Join(VecsToStringWithRowPrefix(m.ColVecs(), m.Length(), m.Selection(), "" /* prefix */), "\n")
+	builder.WriteString("\n")
+	return builder.String()
 }
-
-// VecsToStringWithRowPrefix returns a pretty representation of the vectors.
-// This method will convert all vectors to datums in order to print everything
-// in the same manner as the tree.Datum representation does. Each row is printed
-// in a separate string.
-//
-// The implementation lives in colconv package and is injected during the
-// initialization.
-var VecsToStringWithRowPrefix func(vecs []Vec, length int, sel []int, prefix string) []string

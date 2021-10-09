@@ -13,7 +13,6 @@ package opt_test
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -118,23 +117,11 @@ func TestMetadata(t *testing.T) {
 		t.Fatalf("expected constraints to be copied")
 	}
 
-	compColsPtr := reflect.ValueOf(tabMeta.ComputedCols).Pointer()
-	newCompColsPtr := reflect.ValueOf(tabMetaNew.ComputedCols).Pointer()
-	if newCompColsPtr == compColsPtr {
-		t.Fatalf("expected computed columns map to be copied, not shared")
-	}
-
 	if tabMetaNew.ComputedCols[cmpID] == scalar {
 		t.Fatalf("expected computed column expression to be copied")
 	}
 
-	partialIdxPredPtr := reflect.ValueOf(tabMeta.PartialIndexPredicatesUnsafe()).Pointer()
-	newPartialIdxPredPtr := reflect.ValueOf(tabMetaNew.PartialIndexPredicatesUnsafe()).Pointer()
-	if newPartialIdxPredPtr == partialIdxPredPtr {
-		t.Fatalf("expected partial index predicates map to be copied, not shared")
-	}
-
-	if tabMetaNew.PartialIndexPredicatesUnsafe()[0] == scalar {
+	if tabMetaNew.PartialIndexPredicates[0] == scalar {
 		t.Fatalf("expected partial index predicate to be copied")
 	}
 
@@ -238,19 +225,16 @@ func TestMetadataTables(t *testing.T) {
 
 	mkCol := func(ordinal int, name string) cat.Column {
 		var c cat.Column
-		c.Init(
+		c.InitNonVirtual(
 			ordinal,
 			cat.StableID(ordinal+1),
 			tree.Name(name),
 			cat.Ordinary,
 			types.Int,
 			false, /* nullable */
-			cat.Visible,
-			nil, /* defaultExpr */
-			nil, /* computedExpr */
-			nil, /* onUpdateExpr */
-			cat.NotGeneratedAsIdentity,
-			nil, /* generatedAsIdentitySequenceOption */
+			false, /* hidden */
+			nil,   /* defaultExpr */
+			nil,   /* computedExpr */
 		)
 		return c
 	}
@@ -337,7 +321,7 @@ func TestIndexColumns(t *testing.T) {
 // TestDuplicateTable tests that we can extract a set of columns from an index ordinal.
 func TestDuplicateTable(t *testing.T) {
 	cat := testcat.New()
-	_, err := cat.ExecuteDDL("CREATE TABLE a (b BOOL, b2 BOOL, INDEX (b2) WHERE b)")
+	_, err := cat.ExecuteDDL("CREATE TABLE a (b BOOL, b2 BOOL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,22 +372,11 @@ func TestDuplicateTable(t *testing.T) {
 		t.Errorf("expected computed column to reference new column ID %d, got %d", dupB, col)
 	}
 
-	pred, isPartialIndex := dupTabMeta.PartialIndexPredicate(1)
-	if !isPartialIndex {
+	if dupTabMeta.PartialIndexPredicates == nil || dupTabMeta.PartialIndexPredicates[1] == nil {
 		t.Fatalf("expected partial index predicates to be duplicated")
 	}
 
-	colMeta := md.ColumnMeta(dupB)
-	if colMeta.Table != dupA {
-		t.Fatalf("expected new column to reference new table ID")
-	}
-
-	colMeta = md.ColumnMeta(dupB2)
-	if colMeta.Table != dupA {
-		t.Fatalf("expected new column to reference new table ID")
-	}
-
-	col = pred.(*memo.VariableExpr).Col
+	col = dupTabMeta.PartialIndexPredicates[1].(*memo.VariableExpr).Col
 	if col == b {
 		t.Errorf("expected partial index predicate to reference new column ID %d, got %d", dupB, col)
 	}

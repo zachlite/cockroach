@@ -11,100 +11,103 @@
 package tenantrate
 
 import (
-	"runtime"
-
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 )
 
-// Config contains the configuration of the rate limiter.
-//
-// We limit the rate of KV operations using the tenant cost model which can
-// map these operations to "Request Units".
-type Config struct {
-	// Rate defines the "sustained" rate limit in Request Units per second.
-	Rate float64
-	// Burst defines the "burst" limit in Request Units. Unused units accumulate
-	// up to this limit.
-	Burst float64
+// Limit defines a rate in units per second.
+type Limit float64
 
-	CostModel tenantcostmodel.Config
+// LimitConfig configures the rate limit and burst limit for a given resource.
+type LimitConfig struct {
+	Rate  Limit
+	Burst int64
 }
 
-// Settings for the rate limiter. These determine the values for a Config,
-// though not directly (the settings have user-friendlier units).
-//
-// The settings are designed so that there is one important "knob" to turn:
-// kv.tenant_rate_limiter.rate_limit.
-//
-// The burst limit setting is defined as a multiplier of the rate (i.e. in
-// seconds), so it doesn't need to be adjusted in concert with the rate.
-var (
-	// ruRateLimit was initially set to an absolute value in RU/s, with the
-	// intention of throttling free tier tenants.
-	//
-	// We now use it to disallow a single tenant from harnessing a large fraction
-	// of a KV node, in order to avoid very significant fluctuations in
-	// performance depending on what other tenants are using the same KV node.
-	// In this mode, a value of -200 means that we allow 200 RU/s per CPU, or
-	// roughly
-	// 20% of the machine (by design 1 RU roughly maps to 1 CPU-millisecond).
-	ruRateLimit = settings.RegisterFloatSetting(
-		"kv.tenant_rate_limiter.rate_limit",
-		"per-tenant rate limit in Request Units per second if positive, "+
-			"or Request Units per second per CPU if negative",
-		-200,
-		func(v float64) error {
-			if v == 0 {
-				return errors.New("cannot set to zero value")
-			}
-			return nil
+// LimitConfigs configures the rate limits.
+// It is exported for convenience and testing.
+// The values are derived from cluster settings.
+type LimitConfigs struct {
+	ReadRequests  LimitConfig
+	WriteRequests LimitConfig
+	ReadBytes     LimitConfig
+	WriteBytes    LimitConfig
+}
+
+// LimitConfigsFromSettings constructs LimitConfigs from the values stored in
+// the settings.
+func LimitConfigsFromSettings(settings *cluster.Settings) LimitConfigs {
+	return LimitConfigs{
+		ReadRequests: LimitConfig{
+			Rate:  Limit(readRequestRateLimit.Get(&settings.SV)),
+			Burst: readRequestBurstLimit.Get(&settings.SV),
 		},
-	)
+		WriteRequests: LimitConfig{
+			Rate:  Limit(writeRequestRateLimit.Get(&settings.SV)),
+			Burst: writeRequestBurstLimit.Get(&settings.SV),
+		},
+		ReadBytes: LimitConfig{
+			Rate:  Limit(readRateLimit.Get(&settings.SV)),
+			Burst: readBurstLimit.Get(&settings.SV),
+		},
+		WriteBytes: LimitConfig{
+			Rate:  Limit(writeRateLimit.Get(&settings.SV)),
+			Burst: writeBurstLimit.Get(&settings.SV),
+		},
+	}
+}
 
-	ruBurstLimitSeconds = settings.RegisterFloatSetting(
-		"kv.tenant_rate_limiter.burst_limit_seconds",
-		"per-tenant burst limit as a multiplier of the rate",
-		10,
-		settings.PositiveFloat,
-	)
+var (
+	readRequestRateLimit = settings.RegisterPositiveFloatSetting(
+		"kv.tenant_rate_limiter.read_requests.rate_limit",
+		"per-tenant read request rate limit in requests per second",
+		128)
 
-	// List of config settings, used to set up "on change" notifiers.
-	configSettings = [...]settings.WritableSetting{
-		ruRateLimit,
-		ruBurstLimitSeconds,
+	readRequestBurstLimit = settings.RegisterPositiveIntSetting(
+		"kv.tenant_rate_limiter.read_requests.burst_limit",
+		"per-tenant read request burst limit in requests",
+		512)
+
+	writeRequestRateLimit = settings.RegisterPositiveFloatSetting(
+		"kv.tenant_rate_limiter.write_requests.rate_limit",
+		"per-tenant write request rate limit in requests per second",
+		128)
+
+	writeRequestBurstLimit = settings.RegisterPositiveIntSetting(
+		"kv.tenant_rate_limiter.write_requests.burst_limit",
+		"per-tenant write request burst limit in requests",
+		512)
+
+	readRateLimit = settings.RegisterByteSizeSetting(
+		"kv.tenant_rate_limiter.read_bytes.rate_limit",
+		"per-tenant read rate limit in bytes per second",
+		1<<20 /* 1 MiB */)
+
+	readBurstLimit = settings.RegisterByteSizeSetting(
+		"kv.tenant_rate_limiter.read_bytes.burst_limit",
+		"per-tenant read burst limit in bytes",
+		16<<20 /* 16 MiB */)
+
+	writeRateLimit = settings.RegisterByteSizeSetting(
+		"kv.tenant_rate_limiter.write_bytes.rate_limit",
+		"per-tenant write rate limit in bytes per second",
+		512<<10 /* 512 KiB */)
+
+	writeBurstLimit = settings.RegisterByteSizeSetting(
+		"kv.tenant_rate_limiter.write_bytes.burst_limit",
+		"per-tenant write burst limit in bytes",
+		8<<20 /* 8 MiB */)
+
+	// settingsSetOnChangeFuncs are the functions used to register the factory to
+	// be notified of changes to any of the settings which configure it.
+	settingsSetOnChangeFuncs = [...]func(*settings.Values, func()){
+		readRequestRateLimit.SetOnChange,
+		readRequestBurstLimit.SetOnChange,
+		writeRequestRateLimit.SetOnChange,
+		writeRequestBurstLimit.SetOnChange,
+		readRateLimit.SetOnChange,
+		readBurstLimit.SetOnChange,
+		writeRateLimit.SetOnChange,
+		writeBurstLimit.SetOnChange,
 	}
 )
-
-// absoluteRateFromConfigValue returns an absolute rate (in RU/s) from a value
-// of the kv.tenant_rate_limiter.rate_limit setting.
-func absoluteRateFromConfigValue(value float64) float64 {
-	if value < 0 {
-		// We use GOMAXPROCS instead of NumCPU because the former could be adjusted
-		// based on cgroup limits (see cgroups.AdjustMaxProcs).
-		return -value * float64(runtime.GOMAXPROCS(0))
-	}
-	return value
-}
-
-// ConfigFromSettings constructs a Config using the cluster setting values.
-func ConfigFromSettings(sv *settings.Values) Config {
-	rate := absoluteRateFromConfigValue(ruRateLimit.Get(sv))
-	return Config{
-		Rate:      rate,
-		Burst:     rate * ruBurstLimitSeconds.Get(sv),
-		CostModel: tenantcostmodel.ConfigFromSettings(sv),
-	}
-}
-
-// DefaultConfig returns the configuration that corresponds to the default
-// setting values.
-func DefaultConfig() Config {
-	rate := absoluteRateFromConfigValue(ruRateLimit.Default())
-	return Config{
-		Rate:      rate,
-		Burst:     rate * ruBurstLimitSeconds.Default(),
-		CostModel: tenantcostmodel.DefaultConfig(),
-	}
-}

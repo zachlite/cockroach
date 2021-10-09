@@ -73,14 +73,14 @@ func (s *Store) insertRangeLogEvent(
 		s.metrics.RangeSplits.Inc(1)
 	case kvserverpb.RangeLogEventType_merge:
 		s.metrics.RangeMerges.Inc(1)
-	case kvserverpb.RangeLogEventType_add_voter:
+	case kvserverpb.RangeLogEventType_add:
 		s.metrics.RangeAdds.Inc(1)
-	case kvserverpb.RangeLogEventType_remove_voter:
+	case kvserverpb.RangeLogEventType_remove:
 		s.metrics.RangeRemoves.Inc(1)
 	}
 
 	rows, err := s.cfg.SQLExecutor.ExecEx(ctx, "log-range-event", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		insertEventTableStmt, args...)
 	if err != nil {
 		return err
@@ -160,32 +160,16 @@ func (s *Store) logChange(
 	var logType kvserverpb.RangeLogEventType
 	var info kvserverpb.RangeLogEvent_Info
 	switch changeType {
-	case roachpb.ADD_VOTER:
-		logType = kvserverpb.RangeLogEventType_add_voter
+	case roachpb.ADD_REPLICA:
+		logType = kvserverpb.RangeLogEventType_add
 		info = kvserverpb.RangeLogEvent_Info{
 			AddedReplica: &replica,
 			UpdatedDesc:  &desc,
 			Reason:       reason,
 			Details:      details,
 		}
-	case roachpb.REMOVE_VOTER:
-		logType = kvserverpb.RangeLogEventType_remove_voter
-		info = kvserverpb.RangeLogEvent_Info{
-			RemovedReplica: &replica,
-			UpdatedDesc:    &desc,
-			Reason:         reason,
-			Details:        details,
-		}
-	case roachpb.ADD_NON_VOTER:
-		logType = kvserverpb.RangeLogEventType_add_non_voter
-		info = kvserverpb.RangeLogEvent_Info{
-			AddedReplica: &replica,
-			UpdatedDesc:  &desc,
-			Reason:       reason,
-			Details:      details,
-		}
-	case roachpb.REMOVE_NON_VOTER:
-		logType = kvserverpb.RangeLogEventType_remove_non_voter
+	case roachpb.REMOVE_REPLICA:
+		logType = kvserverpb.RangeLogEventType_remove
 		info = kvserverpb.RangeLogEvent_Info{
 			RemovedReplica: &replica,
 			UpdatedDesc:    &desc,
@@ -214,7 +198,7 @@ func (s *Store) logChange(
 // *are* the first action in a transaction, and we must elect to use the store's
 // physical time instead.
 func selectEventTimestamp(s *Store, input hlc.Timestamp) time.Time {
-	if input.IsEmpty() {
+	if input == (hlc.Timestamp{}) {
 		return s.Clock().PhysicalTime()
 	}
 	return input.GoTime()

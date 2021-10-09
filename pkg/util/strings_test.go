@@ -11,7 +11,6 @@
 package util
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -113,31 +112,4 @@ func TestRemoveTrailingSpaces(t *testing.T) {
 			t.Errorf("expected:\n%s\ngot:\n%s", tc.expected, output)
 		}
 	}
-}
-
-func TestStringListBuilder(t *testing.T) {
-	var buf bytes.Buffer
-	var b StringListBuilder
-	expect := func(exp string) {
-		t.Helper()
-		if buf.String() != exp {
-			t.Errorf("expected `%s`, got `%s`", exp, buf.String())
-		}
-		buf.Reset()
-	}
-
-	b = MakeStringListBuilder("(", ",", ")")
-	b.Finish(&buf)
-	expect("")
-
-	b = MakeStringListBuilder("(", ",", ")")
-	b.Add(&buf, "one")
-	b.Finish(&buf)
-	expect("(one)")
-
-	b = MakeStringListBuilder("[", ", ", "]")
-	b.Add(&buf, "one")
-	b.Addf(&buf, "%s", "two")
-	b.Finish(&buf)
-	expect("[one, two]")
 }

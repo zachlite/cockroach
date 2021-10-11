@@ -103,7 +103,7 @@ func checkVersion(ctx context.Context, st *cluster.Settings, peerVersion roachpb
 		!roachpb.IsSystemTenantID(tenantID.ToUint64()) {
 		minVersion = st.Version.BinaryMinSupportedVersion()
 	}
-	if peerVersion.Less(minVersion) {
+	if peerVersion.Less(minVersion) && !clusterversion.Is21Dot1Dot8Equiv(peerVersion, minVersion) {
 		return errors.Errorf(
 			"cluster requires at least version %s, but peer has version %s",
 			minVersion, peerVersion)
@@ -116,8 +116,8 @@ func checkVersion(ctx context.Context, st *cluster.Settings, peerVersion roachpb
 // The requester should also estimate its offset from this server along
 // with the requester's address.
 func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingResponse, error) {
-	if log.ExpensiveLogEnabled(ctx, 2) {
-		log.Dev.Infof(ctx, "received heartbeat: %+v vs local cluster %+v node %+v", args, hs.clusterID, hs.nodeID)
+	if log.V(2) {
+		log.Health.Infof(ctx, "received heartbeat: %+v vs local cluster %+v node %+v", args, hs.clusterID, hs.nodeID)
 	}
 	// Check that cluster IDs match.
 	clusterID := hs.clusterID.Get()
@@ -174,6 +174,11 @@ func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingR
 		}
 	}
 
+	version := hs.settings.Version.BinaryVersion()
+	if version.Equal(clusterversion.V21Dot1) {
+		version = clusterversion.V21Dot1Dot8
+	}
+
 	serverOffset := args.Offset
 	// The server offset should be the opposite of the client offset.
 	serverOffset.Offset = -serverOffset.Offset
@@ -181,7 +186,7 @@ func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingR
 	return &PingResponse{
 		Pong:                           args.Ping,
 		ServerTime:                     hs.clock.PhysicalNow(),
-		ServerVersion:                  hs.settings.Version.BinaryVersion(),
+		ServerVersion:                  version,
 		ClusterName:                    hs.clusterName,
 		DisableClusterNameVerification: hs.disableClusterNameVerification,
 	}, nil

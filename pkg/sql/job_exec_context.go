@@ -13,7 +13,6 @@ package sql
 import (
 	"github.com/cockroachdb/cockroach/pkg/migration"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -58,9 +57,6 @@ func (e *plannerJobExecContext) User() security.SQLUsername      { return e.p.Us
 func (e *plannerJobExecContext) MigrationJobDeps() migration.JobDeps {
 	return e.p.MigrationJobDeps()
 }
-func (e *plannerJobExecContext) SpanConfigReconciliationJobDeps() spanconfig.ReconciliationDependencies {
-	return e.p.SpanConfigReconciliationJobDeps()
-}
 
 // JobExecContext provides the execution environment for a job. It is what is
 // passed to the Resume/OnFailOrCancel/OnPauseRequested methods of a jobs's
@@ -80,5 +76,4 @@ type JobExecContext interface {
 	LeaseMgr() *lease.Manager
 	User() security.SQLUsername
 	MigrationJobDeps() migration.JobDeps
-	SpanConfigReconciliationJobDeps() spanconfig.ReconciliationDependencies
 }

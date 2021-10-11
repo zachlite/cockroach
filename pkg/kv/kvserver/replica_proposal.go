@@ -34,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -58,11 +57,10 @@ type ProposalData struct {
 	sp *tracing.Span
 
 	// idKey uniquely identifies this proposal.
-	// TODO(andrei): idKey is legacy at this point: We could easily key commands
-	// by their MaxLeaseIndex, and doing so should be ok with a stop- the-world
-	// migration. However, various test facilities depend on the command ID for
-	// e.g. replay protection. Later edit: the MaxLeaseIndex assignment has,
-	// however, moved to happen later, at proposal time.
+	// TODO(andreimatei): idKey is legacy at this point: We could easily key
+	// commands by their MaxLeaseIndex, and doing so should be ok with a stop-
+	// the-world migration. However, various test facilities depend on the
+	// command ID for e.g. replay protection.
 	idKey kvserverbase.CmdIDKey
 
 	// proposedAtTicks is the (logical) time at which this command was
@@ -82,6 +80,9 @@ type ProposalData struct {
 	// raftMu. Once the proposal comes out of Raft, ownerwhip of this quota is
 	// passed to r.mu.quotaReleaseQueue.
 	quotaAlloc *quotapool.IntAlloc
+
+	// tmpFooter is used to avoid an allocation.
+	tmpFooter kvserverpb.MaxLeaseFooter
 
 	// ec.done is called after command application to update the timestamp
 	// cache and optionally release latches and exits lock wait-queues.
@@ -442,7 +443,7 @@ func (r *Replica) leasePostApplyLocked(
 
 	// Inform the propBuf about the new lease so that it can initialize its closed
 	// timestamp tracking.
-	r.mu.proposalBuf.OnLeaseChangeLocked(iAmTheLeaseHolder, r.mu.state.RaftClosedTimestamp, r.mu.state.LeaseAppliedIndex)
+	r.mu.proposalBuf.OnLeaseChangeLocked(iAmTheLeaseHolder, r.mu.state.RaftClosedTimestamp)
 
 	// Ordering is critical here. We only install the new lease after we've
 	// checked for an in-progress merge and updated the timestamp cache. If the
@@ -515,6 +516,11 @@ func (r *Replica) leasePostApplyLocked(
 			if err := r.MaybeGossipNodeLivenessRaftMuLocked(ctx, keys.NodeLivenessSpan); err != nil {
 				log.Errorf(ctx, "%v", err)
 			}
+
+			// Emit an MLAI on the leaseholder replica, as follower will be looking
+			// for one and if we went on to quiesce, they wouldn't necessarily get
+			// one otherwise (unless they ask for it, which adds latency).
+			r.EmitMLAI()
 		})
 		if leaseChangingHands && log.V(1) {
 			// This logging is useful to troubleshoot incomplete drains.
@@ -534,11 +540,6 @@ func (r *Replica) leasePostApplyLocked(
 		r.leaseHistory.add(*newLease)
 	}
 }
-
-var addSSTPreApplyWarn = struct {
-	threshold time.Duration
-	log.EveryN
-}{30 * time.Second, log.Every(5 * time.Second)}
 
 func addSSTablePreApply(
 	ctx context.Context,
@@ -564,19 +565,7 @@ func addSSTablePreApply(
 		log.Fatalf(ctx, "sideloaded SSTable at term %d, index %d is missing", term, index)
 	}
 
-	tBegin := timeutil.Now()
-	var tEndDelayed time.Time
-	defer func() {
-		if dur := timeutil.Since(tBegin); dur > addSSTPreApplyWarn.threshold && addSSTPreApplyWarn.ShouldLog() {
-			log.Infof(ctx,
-				"ingesting SST of size %s at index %d took %.2fs (%.2fs on which in PreIngestDelay)",
-				humanizeutil.IBytes(int64(len(sst.Data))), index, dur.Seconds(), tEndDelayed.Sub(tBegin).Seconds(),
-			)
-		}
-	}()
-
 	eng.PreIngestDelay(ctx)
-	tEndDelayed = timeutil.Now()
 
 	copied := false
 	if eng.InMem() {
@@ -634,9 +623,7 @@ func addSSTablePreApply(
 	return copied
 }
 
-func (r *Replica) handleReadWriteLocalEvalResult(
-	ctx context.Context, lResult result.LocalResult, raftMuHeld bool,
-) {
+func (r *Replica) handleReadWriteLocalEvalResult(ctx context.Context, lResult result.LocalResult) {
 	// Fields for which no action is taken in this method are zeroed so that
 	// they don't trigger an assertion at the end of the method (which checks
 	// that all fields were handled).
@@ -702,19 +689,7 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 		lResult.MaybeAddToSplitQueue = false
 	}
 
-	// The following three triggers require the raftMu to be held. If a
-	// trigger is present, acquire the mutex if it is not held already.
-	maybeAcquireRaftMu := func() func() {
-		if raftMuHeld {
-			return func() {}
-		}
-		raftMuHeld = true
-		r.raftMu.Lock()
-		return r.raftMu.Unlock
-	}
-
 	if lResult.MaybeGossipSystemConfig {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipSystemConfigRaftMuLocked(ctx); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -722,7 +697,6 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 	}
 
 	if lResult.MaybeGossipSystemConfigIfHaveFailure {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipSystemConfigIfHaveFailureRaftMuLocked(ctx); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -730,7 +704,6 @@ func (r *Replica) handleReadWriteLocalEvalResult(
 	}
 
 	if lResult.MaybeGossipNodeLiveness != nil {
-		defer maybeAcquireRaftMu()()
 		if err := r.MaybeGossipNodeLivenessRaftMuLocked(ctx, *lResult.MaybeGossipNodeLiveness); err != nil {
 			log.Errorf(ctx, "%v", err)
 		}
@@ -832,11 +805,9 @@ func (r *Replica) evaluateProposal(
 	// 2. the request had an impact on the MVCCStats. NB: this is possible
 	//    even with an empty write batch when stats are recomputed.
 	// 3. the request has replicated side-effects.
-	// 4. the request is of a type that requires consensus (eg. Barrier).
 	needConsensus := !batch.Empty() ||
 		ms != (enginepb.MVCCStats{}) ||
-		!res.Replicated.IsZero() ||
-		ba.RequiresConsensus()
+		!res.Replicated.IsZero()
 
 	if needConsensus {
 		// Set the proposal's WriteBatch, which is the serialized representation of
@@ -862,6 +833,13 @@ func (r *Replica) evaluateProposal(
 		// This is the result of a migration. See the field for more details.
 		if res.Replicated.Delta.ContainsEstimates > 0 {
 			res.Replicated.Delta.ContainsEstimates *= 2
+		}
+
+		// If the cluster version doesn't track abort span size in MVCCStats, we
+		// zero it out to prevent inconsistencies in MVCCStats across nodes in a
+		// possibly mixed-version cluster.
+		if !r.ClusterSettings().Version.IsActive(ctx, clusterversion.AbortSpanBytes) {
+			res.Replicated.Delta.AbortSpanBytes = 0
 		}
 
 		// If the RangeAppliedState key is not being used and the cluster version is

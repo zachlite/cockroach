@@ -16,11 +16,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/rand"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,7 +34,6 @@ import (
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -421,32 +418,29 @@ func TestPebbleSeparatorSuccessor(t *testing.T) {
 
 }
 
-func TestPebbleMetricEventListener(t *testing.T) {
+func TestPebbleDiskSlowEmit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 
 	settings := cluster.MakeTestingClusterSettings()
-	MaxSyncDurationFatalOnExceeded.Override(ctx, &settings.SV, false)
-	p, err := Open(ctx, InMemory(), CacheSize(1<<20 /* 1 MiB */), Settings(settings))
-	require.NoError(t, err)
+	MaxSyncDurationFatalOnExceeded.Override(&settings.SV, false)
+	p := newPebbleInMem(
+		context.Background(),
+		roachpb.Attributes{},
+		1<<20,   /* cacheSize */
+		512<<20, /* storeSize */
+		settings,
+	)
 	defer p.Close()
 
-	require.Equal(t, int64(0), p.writeStallCount)
-	require.Equal(t, int64(0), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
-	p.eventListener.WriteStallBegin(pebble.WriteStallBeginInfo{})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(0), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
+	require.Equal(t, uint64(0), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
 	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 1 * time.Second})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(1), p.diskSlowCount)
-	require.Equal(t, int64(0), p.diskStallCount)
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
 	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 70 * time.Second})
-	require.Equal(t, int64(1), p.writeStallCount)
-	require.Equal(t, int64(1), p.diskSlowCount)
-	require.Equal(t, int64(1), p.diskStallCount)
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(1), p.diskStallCount)
 }
 
 func TestPebbleIterConsistency(t *testing.T) {
@@ -462,14 +456,10 @@ func TestPebbleIterConsistency(t *testing.T) {
 
 	roEngine := eng.NewReadOnly()
 	batch := eng.NewBatch()
-	roEngine2 := eng.NewReadOnly()
-	batch2 := eng.NewBatch()
 
 	require.False(t, eng.ConsistentIterators())
 	require.True(t, roEngine.ConsistentIterators())
 	require.True(t, batch.ConsistentIterators())
-	require.True(t, roEngine2.ConsistentIterators())
-	require.True(t, batch2.ConsistentIterators())
 
 	// Since an iterator is created on pebbleReadOnly, pebbleBatch before
 	// writing a newer version of "a", the newer version will not be visible to
@@ -477,9 +467,6 @@ func TestPebbleIterConsistency(t *testing.T) {
 	roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
 	batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
 	eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("a")}).Close()
-	// Pin the state for iterators.
-	require.Nil(t, roEngine2.PinEngineStateForIterators())
-	require.Nil(t, batch2.PinEngineStateForIterators())
 
 	// Write a newer version of "a"
 	require.NoError(t, eng.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
@@ -518,41 +505,26 @@ func TestPebbleIterConsistency(t *testing.T) {
 	checkMVCCIter(roEngine.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
 	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
 	checkMVCCIter(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(roEngine2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkMVCCIter(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{Prefix: true}))
 
 	checkEngineIter(roEngine.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
 	checkEngineIter(roEngine.NewEngineIterator(IterOptions{Prefix: true}))
 	checkEngineIter(batch.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
 	checkEngineIter(batch.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(roEngine2.NewEngineIterator(IterOptions{Prefix: true}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{UpperBound: []byte("b")}))
-	checkEngineIter(batch2.NewEngineIterator(IterOptions{Prefix: true}))
 
-	checkIterSeesBothValues := func(iter MVCCIterator) {
-		iter.SeekGE(MVCCKey{Key: []byte("a")})
-		count := 0
-		for ; ; iter.Next() {
-			valid, err := iter.Valid()
-			require.NoError(t, err)
-			if !valid {
-				break
-			}
-			count++
-		}
-		require.Equal(t, 2, count)
-		iter.Close()
-	}
 	// The eng iterator will see both values.
-	checkIterSeesBothValues(eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	// The indexed batches will see 2 values since the second one is written to the batch.
-	require.NoError(t, batch.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	require.NoError(t, batch2.PutMVCC(MVCCKey{[]byte("a"), ts2}, []byte("a2")))
-	checkIterSeesBothValues(batch.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
-	checkIterSeesBothValues(batch2.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")}))
+	iter := eng.NewMVCCIterator(MVCCKeyIterKind, IterOptions{UpperBound: []byte("b")})
+	defer iter.Close()
+	iter.SeekGE(MVCCKey{Key: []byte("a")})
+	count := 0
+	for ; ; iter.Next() {
+		valid, err := iter.Valid()
+		require.NoError(t, err)
+		if !valid {
+			break
+		}
+		count++
+	}
+	require.Equal(t, 2, count)
 }
 
 func BenchmarkMVCCKeyCompare(b *testing.B) {
@@ -635,9 +607,8 @@ func TestSstExportFailureIntentBatching(t *testing.T) {
 
 			require.NoError(t, fillInData(ctx, engine, data))
 
-			destination := &MemFile{}
-			_, _, _, err := engine.ExportMVCCToSst(ctx, key(10), key(20000), ts(999), ts(2000), hlc.Timestamp{},
-				true, 0, 0, false, true, destination)
+			_, _, _, err := engine.ExportMVCCToSst(key(10), key(20000), ts(999), ts(2000),
+				true, 0, 0, true)
 			if len(expectedIntentIndices) == 0 {
 				require.NoError(t, err)
 			} else {
@@ -664,154 +635,4 @@ func TestSstExportFailureIntentBatching(t *testing.T) {
 		expectedErrors[i] = i*2 + 1
 	}
 	t.Run("Receive no more than limit intents", checkReportedErrors(testData, expectedErrors[:MaxIntentsPerWriteIntentError.Default()]))
-}
-
-// TestExportSplitMidKey verifies that split mid key in exports will omit
-// resume timestamps where they are unnecessary e.g. when we split at the
-// new key. In this case we can safely use the SST as is without the need
-// to merge with the remaining versions of the key.
-func TestExportSplitMidKey(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	ctx := context.Background()
-
-	engine := createTestPebbleEngine()
-	defer engine.Close()
-
-	const keyValueSize = 11
-
-	var testData = []testValue{
-		value(key(1), "value1", ts(1000)),
-		value(key(2), "value2", ts(1000)),
-		value(key(2), "value3", ts(2000)),
-		value(key(3), "value4", ts(2000)),
-	}
-	require.NoError(t, fillInData(ctx, engine, testData))
-
-	for _, test := range []struct {
-		exportAll    bool
-		useTBI       bool
-		stopMidKey   bool
-		useMaxSize   bool
-		resumeCount  int
-		resumeWithTs int
-	}{
-		{false, true, false, false, 3, 0},
-		{true, true, false, false, 3, 0},
-		{false, true, true, false, 3, 0},
-		// No resume timestamps since we fall under max size criteria
-		{true, true, true, false, 3, 0},
-		{true, true, true, true, 4, 1},
-		{false, false, false, false, 3, 0},
-		{true, false, false, false, 3, 0},
-		{false, false, true, false, 3, 0},
-		// No resume timestamps since we fall under max size criteria
-		{true, false, true, false, 3, 0},
-		{true, false, true, true, 4, 1},
-	} {
-		t.Run(
-			fmt.Sprintf(
-				"exportAll=%t,useTBI=%t,stopMidKey=%t,useMaxSize=%t",
-				test.exportAll, test.useTBI, test.stopMidKey, test.useMaxSize),
-			func(t *testing.T) {
-				firstKeyTS := hlc.Timestamp{}
-				resumeKey := key(1)
-				resumeWithTs := 0
-				resumeCount := 0
-				var maxSize uint64 = 0
-				if test.useMaxSize {
-					maxSize = keyValueSize * 2
-				}
-				for !resumeKey.Equal(roachpb.Key{}) {
-					dest := &MemFile{}
-					_, resumeKey, firstKeyTS, _ = engine.ExportMVCCToSst(
-						ctx, resumeKey, key(3).Next(), hlc.Timestamp{}, hlc.Timestamp{WallTime: 9999},
-						firstKeyTS, test.exportAll, 1, maxSize, test.stopMidKey, test.useTBI, dest)
-					if !firstKeyTS.IsEmpty() {
-						resumeWithTs++
-					}
-					resumeCount++
-				}
-				require.Equal(t, test.resumeCount, resumeCount)
-				require.Equal(t, test.resumeWithTs, resumeWithTs)
-			})
-	}
-}
-
-// nonFatalLogger implements pebble.Logger by recording that a fatal log event
-// was encountered at least once. Fatal log events are downgraded to Info level.
-type nonFatalLogger struct {
-	pebble.Logger
-	t      *testing.T
-	caught atomic.Value
-}
-
-func (l *nonFatalLogger) Fatalf(format string, args ...interface{}) {
-	l.caught.Store(true)
-	l.t.Logf(format, args...)
-}
-
-func TestPebbleKeyValidationFunc(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	// Capture fatal errors by swapping out the logger.
-	l := &nonFatalLogger{t: t}
-	opt := func(cfg *engineConfig) error {
-		cfg.Opts.Logger = l
-		return nil
-	}
-	engine := createTestPebbleEngine(opt).(*Pebble)
-	defer engine.Close()
-
-	// Write a key with an invalid version length (=1) to simulate
-	// programmer-error.
-	ek := EngineKey{
-		Key:     roachpb.Key("foo"),
-		Version: make([]byte, 1),
-	}
-
-	// Sanity check: the key should fail validation.
-	err := ek.Validate()
-	require.Error(t, err)
-
-	err = engine.PutEngineKey(ek, []byte("bar"))
-	require.NoError(t, err)
-
-	// Force a flush to trigger the compaction error.
-	err = engine.Flush()
-	require.NoError(t, err)
-
-	// A fatal error was captured by the logger.
-	require.True(t, l.caught.Load().(bool))
-}
-
-func TestPebbleBackgroundError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	loc := Location{
-		dir: "",
-		fs: &errorFS{
-			FS:         vfs.NewMem(),
-			errorCount: 3,
-		},
-	}
-	eng, err := Open(context.Background(), loc)
-	require.NoError(t, err)
-	defer eng.Close()
-
-	require.NoError(t, eng.PutMVCC(MVCCKey{[]byte("a"), hlc.Timestamp{WallTime: 1}}, []byte("a")))
-	require.NoError(t, eng.db.Flush())
-}
-
-type errorFS struct {
-	vfs.FS
-	errorCount int32
-}
-
-func (fs *errorFS) Create(name string) (vfs.File, error) {
-	if filepath.Ext(name) == ".sst" && atomic.AddInt32(&fs.errorCount, -1) >= 0 {
-		return nil, errors.New("background error")
-	}
-	return fs.FS.Create(name)
 }

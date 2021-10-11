@@ -110,11 +110,11 @@ type MutableExpr interface {
 
 // ComparisonOpMap maps from a semantic tree comparison operator type to an
 // optimizer operator type.
-var ComparisonOpMap [tree.NumComparisonOperatorSymbols]Operator
+var ComparisonOpMap [tree.NumComparisonOperators]Operator
 
 // ComparisonOpReverseMap maps from an optimizer operator type to a semantic
 // tree comparison operator type.
-var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
+var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperator{
 	EqOp:             tree.EQ,
 	LtOp:             tree.LT,
 	GtOp:             tree.GT,
@@ -136,7 +136,6 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
 	IsOp:             tree.IsNotDistinctFrom,
 	IsNotOp:          tree.IsDistinctFrom,
 	ContainsOp:       tree.Contains,
-	ContainedByOp:    tree.ContainedBy,
 	JsonExistsOp:     tree.JSONExists,
 	JsonSomeExistsOp: tree.JSONSomeExists,
 	JsonAllExistsOp:  tree.JSONAllExists,
@@ -147,7 +146,7 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
 
 // BinaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // binary operator type.
-var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
+var BinaryOpReverseMap = map[Operator]tree.BinaryOperator{
 	BitandOp:        tree.Bitand,
 	BitorOp:         tree.Bitor,
 	BitxorOp:        tree.Bitxor,
@@ -169,12 +168,11 @@ var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
 
 // UnaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // unary operator type.
-var UnaryOpReverseMap = map[Operator]tree.UnaryOperatorSymbol{
+var UnaryOpReverseMap = map[Operator]tree.UnaryOperator{
 	UnaryMinusOp:      tree.UnaryMinus,
 	UnaryComplementOp: tree.UnaryComplement,
 	UnarySqrtOp:       tree.UnarySqrt,
 	UnaryCbrtOp:       tree.UnaryCbrt,
-	UnaryPlusOp:       tree.UnaryPlus,
 }
 
 // AggregateOpReverseMap maps from an optimizer operator type to the name of an

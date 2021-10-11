@@ -397,12 +397,13 @@ var specs = []stmtSpec{
 	},
 	{
 		name:   "alter_role_stmt",
-		inline: []string{"role_or_group_or_user", "opt_role_options", "opt_in_database", "set_or_reset_clause", "opt_with", "role_options", "set_rest", "generic_set", "var_list", "to_or_eq"},
+		inline: []string{"role_or_group_or_user", "opt_role_options"},
 		replace: map[string]string{
-			"'ROLE_ALL'":            "'ROLE'",
-			"'USER_ALL'":            "'USER'",
-			"string_or_placeholder": "'role_name'",
-		},
+			"string_or_placeholder":             "name",
+			"opt_role_options":                  "OPTIONS",
+			"string_or_placeholder  'PASSWORD'": "name 'PASSWORD'",
+			"'PASSWORD' string_or_placeholder":  "'PASSWORD' password"},
+		unlink: []string{"name", "password"},
 	},
 	{
 		name:    "alter_schema",
@@ -1190,17 +1191,21 @@ var specs = []stmtSpec{
 		nosplit: true,
 	},
 	{
-		name: "set_session_stmt",
-		stmt: "set_session_stmt",
+		name:   "set_var",
+		stmt:   "preparable_set_stmt",
+		inline: []string{"set_session_stmt", "set_rest_more", "generic_set", "var_list", "to_or_eq"},
 		exclude: []*regexp.Regexp{
-			regexp.MustCompile("'CHARACTERISTICS' 'AS' 'TRANSACTION' transaction_mode_list"),
+			regexp.MustCompile(`'SET' . 'TRANSACTION'`),
+			regexp.MustCompile(`'SET' 'TRANSACTION'`),
+			regexp.MustCompile(`'SET' 'SESSION' var_name`),
+			regexp.MustCompile(`'SET' 'SESSION' 'TRANSACTION'`),
+			regexp.MustCompile(`'SET' 'SESSION' 'CHARACTERISTICS'`),
+			regexp.MustCompile("'SET' 'CLUSTER'"),
 		},
-		inline: []string{"set_rest_more", "set_rest", "generic_set", "var_list", "to_or_eq"},
-	},
-	{
-		name:   "set_local_stmt",
-		stmt:   "set_local_stmt",
-		inline: []string{"set_rest", "generic_set", "var_list", "to_or_eq"},
+		replace: map[string]string{
+			"'=' 'DEFAULT'":  "'=' 'DEFAULT' | 'SET' 'TIME' 'ZONE' ( var_value | 'DEFAULT' | 'LOCAL' )",
+			"'SET' var_name": "'SET' ( 'SESSION' | ) var_name",
+		},
 	},
 	{
 		name:   "set_cluster_setting",
@@ -1263,10 +1268,6 @@ var specs = []stmtSpec{
 	{
 		name: "show_enums",
 		stmt: "show_enums_stmt",
-	},
-	{
-		name: "show_full_scans",
-		stmt: "show_full_scans_stmt",
 	},
 	{
 		name:   "show_backup",
@@ -1357,9 +1358,6 @@ var specs = []stmtSpec{
 		name:   "show_schedules",
 		stmt:   "show_schedules_stmt",
 		inline: []string{"schedule_state", "opt_schedule_executor_type"},
-	},
-	{
-		name: "show_create_schedules_stmt",
 	},
 	{
 		name: "show_schemas",

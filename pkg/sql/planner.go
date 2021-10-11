@@ -452,7 +452,6 @@ func internalExtendedEvalCtx(
 			TxnImplicit:        true,
 			Settings:           execCfg.Settings,
 			Codec:              execCfg.Codec,
-			Tracer:             execCfg.AmbientCtx.Tracer,
 			Context:            ctx,
 			Mon:                plannerMon,
 			TestingKnobs:       evalContextTestingKnobs,

@@ -67,8 +67,6 @@ type SQLStats struct {
 	// reset interval, the SQLStats will dump all of the stats into if it is not
 	// nil.
 	flushTarget Sink
-
-	knobs *sqlstats.TestingKnobs
 }
 
 func newSQLStats(
@@ -80,7 +78,6 @@ func newSQLStats(
 	parentMon *mon.BytesMonitor,
 	resetInterval *settings.DurationSetting,
 	flushTarget Sink,
-	knobs *sqlstats.TestingKnobs,
 ) *SQLStats {
 	monitor := mon.NewMonitor(
 		"SQLStats",
@@ -97,7 +94,6 @@ func newSQLStats(
 		uniqueTxnFingerprintLimit:  uniqueTxnFingerprintLimit,
 		resetInterval:              resetInterval,
 		flushTarget:                flushTarget,
-		knobs:                      knobs,
 	}
 	s.mu.apps = make(map[string]*ssmemstorage.Container)
 	s.mu.mon = monitor
@@ -134,7 +130,6 @@ func (s *SQLStats) getStatsForApplication(appName string) *ssmemstorage.Containe
 		&s.atomic.uniqueTxnFingerprintCount,
 		s.mu.mon,
 		appName,
-		s.knobs,
 	)
 	s.mu.apps[appName] = a
 	return a

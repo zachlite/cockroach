@@ -93,8 +93,8 @@ type TestServerInterface interface {
 	// The real return type is sql.ExecutorConfig.
 	ExecutorConfig() interface{}
 
-	// TracerI returns a *tracing.Tracer as an interface{}.
-	TracerI() interface{}
+	// Tracer returns a *tracing.Tracer as an interface{}.
+	Tracer() interface{}
 
 	// GossipI returns the gossip used by the TestServer.
 	// The real return type is *gossip.Gossip.

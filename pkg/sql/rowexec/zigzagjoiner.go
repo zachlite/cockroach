@@ -55,7 +55,7 @@ import (
 //
 // To see how this query would be executed, consider the equivalent query:
 //
-// SELECT t1.* FROM abcd@c_idx AS t1 JOIN abcd@d_idx AS t2 ON t1.a = t2.a AND
+// SELECT t1.* FROM abcd@c_idx AS t1 JOIN abcd@d_idx ON t1.a = t2.a AND
 // t1.b = t2.b WHERE t1.c = 2 AND t2.d = 3;
 //
 // A zigzag joiner takes 2 sides as input. In the example above, the join would
@@ -247,8 +247,6 @@ type zigzagJoiner struct {
 
 	rowAlloc           rowenc.EncDatumRowAlloc
 	fetchedInititalRow bool
-
-	scanStats execinfra.ScanStats
 }
 
 // zigzagJoinerBatchSize is a parameter which determines how many rows should
@@ -464,15 +462,6 @@ func (z *zigzagJoiner) setupInfo(
 	// Add the equality columns.
 	for _, col := range info.eqColumns {
 		neededCols.Add(int(col))
-	}
-
-	// Add columns needed by OnExpr.
-	for _, v := range z.onCond.Vars.GetIndexedVars() {
-		// We only include the columns that come from this side (all such
-		// columns have the ordinals in [colOffset, maxCol) range).
-		if v.Idx >= colOffset && v.Idx < maxCol {
-			neededCols.Add(v.Idx - colOffset)
-		}
 	}
 
 	// Setup the RowContainers.
@@ -1002,13 +991,10 @@ func (z *zigzagJoiner) ConsumerClosed() {
 
 // execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
 func (z *zigzagJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
-	z.scanStats = execinfra.GetScanStats(z.Ctx)
-
 	kvStats := execinfrapb.KVStats{
 		BytesRead:      optional.MakeUint(uint64(z.getBytesRead())),
 		ContentionTime: optional.MakeTimeValue(execinfra.GetCumulativeContentionTime(z.Ctx)),
 	}
-	execinfra.PopulateKVMVCCStats(&kvStats, &z.scanStats)
 	for i := range z.infos {
 		fis, ok := getFetcherInputStats(z.infos[i].fetcher)
 		if !ok {

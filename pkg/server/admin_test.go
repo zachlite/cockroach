@@ -317,7 +317,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	ts := s.(*TestServer)
 
-	ac := log.AmbientContext{Tracer: ts.Tracer()}
+	ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 
@@ -647,7 +647,7 @@ func TestAdminAPITableDetails(t *testing.T) {
 			tblName := tc.tblName
 			schemaName := "testschema"
 
-			ac := log.AmbientContext{Tracer: ts.Tracer()}
+			ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 			ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 			defer span.Finish()
 
@@ -793,7 +793,7 @@ func TestAdminAPIZoneDetails(t *testing.T) {
 	ts := s.(*TestServer)
 
 	// Create database and table.
-	ac := log.AmbientContext{Tracer: ts.Tracer()}
+	ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 	setupQueries := []string{
@@ -1570,13 +1570,6 @@ func TestAdminAPIJobs(t *testing.T) {
 				expected = testCase.expectedIDsViaNonAdmin
 			}
 
-			sort.Slice(expected, func(i, j int) bool {
-				return expected[i] < expected[j]
-			})
-
-			sort.Slice(resIDs, func(i, j int) bool {
-				return resIDs[i] < resIDs[j]
-			})
 			if e, a := expected, resIDs; !reflect.DeepEqual(e, a) {
 				t.Errorf("%d: expected job IDs %v, but got %v", i, e, a)
 			}

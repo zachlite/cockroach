@@ -811,7 +811,6 @@ func init() {
 
 		intFlag(f, &demoCtx.NumNodes, cliflags.DemoNodes)
 		boolFlag(f, &demoCtx.RunWorkload, cliflags.RunDemoWorkload)
-		intFlag(f, &demoCtx.WorkloadMaxQPS, cliflags.DemoWorkloadMaxQPS)
 		varFlag(f, &demoCtx.Localities, cliflags.DemoNodeLocality)
 		boolFlag(f, &demoCtx.GeoPartitionedReplicas, cliflags.DemoGeoPartitionedReplicas)
 		varFlag(f, demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)

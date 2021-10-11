@@ -266,7 +266,7 @@ func TestDistSQLReceiverUpdatesCaches(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
-	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper, st.Tracer)
+	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper)
 	r := MakeDistSQLReceiver(
 		ctx,
 		&errOnlyResultWriter{}, /* resultWriter */

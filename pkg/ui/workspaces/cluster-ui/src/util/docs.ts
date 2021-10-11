@@ -61,9 +61,6 @@ export const statementsTimeInterval = docsURL(
 export const readFromDisk = docsURL(
   "architecture/life-of-a-distributed-transaction.html#reads-from-the-storage-layer",
 );
-export const writtenToDisk = docsURL(
-  "architecture/life-of-a-distributed-transaction.html#write-operations",
-);
 export const planningExecutionTime = docsURL(
   "architecture/sql-layer#sql-parser-planner-executor",
 );

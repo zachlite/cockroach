@@ -9,6 +9,7 @@
 package tenantcostclient_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl" // ccl init hooks
 	"github.com/cockroachdb/cockroach/pkg/ccl/multitenantccl/tenantcostclient"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
@@ -27,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slinstance"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -70,8 +73,8 @@ type testState struct {
 	controller multitenant.TenantSideCostController
 
 	// external usage values, accessed using atomic.
-	cpuUsage    time.Duration
-	pgwireBytes int64
+	cpuUsage          time.Duration
+	pgwireEgressBytes int64
 
 	requestDoneCh map[string]chan struct{}
 
@@ -142,8 +145,8 @@ func (ts *testState) start(t *testing.T) {
 	}
 	externalUsageFn := func(context.Context) multitenant.ExternalUsage {
 		return multitenant.ExternalUsage{
-			CPUSecs:     time.Duration(atomic.LoadInt64((*int64)(&ts.cpuUsage))).Seconds(),
-			PGWireBytes: uint64(atomic.LoadInt64(&ts.pgwireBytes)),
+			CPUSecs:           time.Duration(atomic.LoadInt64((*int64)(&ts.cpuUsage))).Seconds(),
+			PGWireEgressBytes: uint64(atomic.LoadInt64(&ts.pgwireEgressBytes)),
 		}
 	}
 	nextLiveInstanceIDFn := func(ctx context.Context) base.SQLInstanceID {
@@ -202,7 +205,7 @@ var testStateCommands = map[string]func(
 	"wait-for-event": (*testState).waitForEvent,
 	"timers":         (*testState).timers,
 	"cpu":            (*testState).cpu,
-	"pgwire":         (*testState).pgwire,
+	"pgwire-egress":  (*testState).pgwireEgress,
 	"usage":          (*testState).usage,
 	"configure":      (*testState).configure,
 }
@@ -415,14 +418,14 @@ func (ts *testState) cpu(t *testing.T, d *datadriven.TestData, args cmdArgs) str
 	return ""
 }
 
-// pgwire adds PGWire usage which will be observed by the controller on the next
+// pgwire adds PGWire egress usage which will be observed by the controller on the next
 // main loop tick.
-func (ts *testState) pgwire(t *testing.T, d *datadriven.TestData, args cmdArgs) string {
+func (ts *testState) pgwireEgress(t *testing.T, d *datadriven.TestData, args cmdArgs) string {
 	bytes, err := strconv.Atoi(d.Input)
 	if err != nil {
 		d.Fatalf(t, "error parsing pgwire bytes value: %v", err)
 	}
-	atomic.AddInt64(&ts.pgwireBytes, int64(bytes))
+	atomic.AddInt64(&ts.pgwireEgressBytes, int64(bytes))
 	return ""
 }
 
@@ -449,14 +452,14 @@ func (ts *testState) usage(t *testing.T, d *datadriven.TestData, args cmdArgs) s
 		"Reads:  %d requests (%d bytes)\n"+
 		"Writes:  %d requests (%d bytes)\n"+
 		"SQL Pods CPU seconds:  %.2f\n"+
-		"PGWire: %d bytes\n",
+		"PGWire egress:  %d bytes\n",
 		c.RU,
 		c.ReadRequests,
 		c.ReadBytes,
 		c.WriteRequests,
 		c.WriteBytes,
 		c.SQLPodsCPUSeconds,
-		c.PGWireBytes,
+		c.PGWireEgressBytes,
 	)
 }
 
@@ -561,6 +564,7 @@ func (tp *testProvider) TokenBucket(
 // TestConsumption verifies consumption reporting from a tenant server process.
 func TestConsumption(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	hostServer, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer hostServer.Stopper().Stop(context.Background())
@@ -616,9 +620,72 @@ func TestConsumption(t *testing.T) {
 		if c.SQLPodsCPUSeconds == 0 {
 			return errors.New("no CPU usage reported")
 		}
-		if c.PGWireBytes == 0 {
-			return errors.New("no pgwire bytes reported")
+		if c.PGWireEgressBytes == 0 {
+			return errors.New("no pgwire egress bytes reported")
 		}
 		return nil
 	})
+}
+
+// TestSQLLivenessExemption verifies that the operations done by the sqlliveness
+// subsystem are exempt from cost control.
+func TestSQLLivenessExemption(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	hostServer, hostDB, hostKV := serverutils.StartServer(t, base.TestServerArgs{})
+	defer hostServer.Stopper().Stop(context.Background())
+
+	tenantID := serverutils.TestTenantID()
+
+	// Create a tenant with ridiculously low resource limits.
+	host := sqlutils.MakeSQLRunner(hostDB)
+	host.Exec(t, "SELECT crdb_internal.create_tenant($1)", tenantID.ToUint64())
+	host.Exec(t, "SELECT crdb_internal.update_tenant_resource_limits($1, 0, 0.001, 0, now(), 0)", tenantID.ToUint64())
+
+	st := cluster.MakeTestingClusterSettings()
+	// Make the tenant heartbeat like crazy.
+	ctx := context.Background()
+	//slinstance.DefaultTTL.Override(ctx, &st.SV, 20*time.Millisecond)
+	slinstance.DefaultHeartBeat.Override(ctx, &st.SV, time.Millisecond)
+
+	_, tenantDB := serverutils.StartTenant(t, hostServer, base.TestTenantArgs{
+		Existing:                    true,
+		TenantID:                    tenantID,
+		Settings:                    st,
+		AllowSettingClusterSettings: true,
+	})
+
+	r := sqlutils.MakeSQLRunner(tenantDB)
+	_ = r
+
+	codec := keys.MakeSQLCodec(tenantID)
+	key := codec.IndexPrefix(keys.SqllivenessID, 1)
+
+	// livenessValue returns the KV value for the one row in the
+	// system.sqlliveness table. The value contains the session expiration time
+	// which changes with every heartbeat.
+	livenessValue := func() []byte {
+		kvs, err := hostKV.Scan(ctx, key, key.PrefixEnd(), 1)
+		if err != nil {
+			t.Fatalf("%+v", err)
+		}
+		if len(kvs) != 1 {
+			t.Fatal("no entry in system.liveness")
+		}
+		return kvs[0].Value.RawBytes
+	}
+
+	// Verify that heartbeats can go through and update the expiration time.
+	val := livenessValue()
+	time.Sleep(2 * time.Millisecond)
+	testutils.SucceedsSoon(
+		t,
+		func() error {
+			if newValue := livenessValue(); bytes.Equal(val, newValue) {
+				return errors.New("liveness row did not change)")
+			}
+			return nil
+		},
+	)
 }

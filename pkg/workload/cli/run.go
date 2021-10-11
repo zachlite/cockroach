@@ -464,14 +464,11 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 		for i, workFn := range ops.WorkerFns {
 			go func(i int, workFn func(context.Context) error) {
 				// If a ramp period was specified, start all of the workers
-				// gradually with a new context.
+				// gradually.
 				if rampCtx != nil {
 					rampPerWorker := *ramp / time.Duration(len(ops.WorkerFns))
 					time.Sleep(time.Duration(i) * rampPerWorker)
-					workerRun(rampCtx, errCh, nil /* wg */, limiter, workFn)
 				}
-
-				// Start worker again, this time with the main context.
 				workerRun(workersCtx, errCh, &wg, limiter, workFn)
 			}(i, workFn)
 		}
@@ -509,15 +506,6 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 			return err
 		}
 		jsonEnc = json.NewEncoder(jsonF)
-		defer func() {
-			if err := jsonF.Sync(); err != nil {
-				log.Warningf(ctx, "histogram: %v", err)
-			}
-
-			if err := jsonF.Close(); err != nil {
-				log.Warningf(ctx, "histogram: %v", err)
-			}
-		}()
 	}
 
 	everySecond := log.Every(*displayEvery)
@@ -538,9 +526,7 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 			reg.Tick(func(t histogram.Tick) {
 				formatter.outputTick(startElapsed, t)
 				if jsonEnc != nil && rampDone == nil {
-					if err := jsonEnc.Encode(t.Snapshot()); err != nil {
-						log.Warningf(ctx, "histogram: %v", err)
-					}
+					_ = jsonEnc.Encode(t.Snapshot())
 				}
 			})
 
@@ -569,9 +555,7 @@ func runRun(gen workload.Generator, urls []string, dbName string) error {
 					// Note that we're outputting the delta from the last tick. The
 					// cumulative histogram can be computed by merging all of the
 					// per-tick histograms.
-					if err := jsonEnc.Encode(t.Snapshot()); err != nil {
-						log.Warningf(ctx, "histogram: %v", err)
-					}
+					_ = jsonEnc.Encode(t.Snapshot())
 				}
 				if ops.ResultHist == `` || ops.ResultHist == t.Name {
 					if resultTick.Cumulative == nil {

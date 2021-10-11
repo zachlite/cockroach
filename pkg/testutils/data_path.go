@@ -11,7 +11,6 @@
 package testutils
 
 import (
-	"os"
 	"path"
 	"path/filepath"
 	"testing"
@@ -27,15 +26,14 @@ import (
 // file using TestDataPath(t, "a.txt").
 func TestDataPath(t testing.TB, relative ...string) string {
 	relative = append([]string{"testdata"}, relative...)
-	// dev notifies the library that the test is running in a subdirectory of the
-	// workspace with the environment variable below.
-	if bazel.BuiltWithBazel() && os.Getenv("YOU_ARE_IN_THE_WORKSPACE") != "" {
+	if bazel.BuiltWithBazel() {
 		runfiles, err := bazel.RunfilesPath()
 		require.NoError(t, err)
 		return path.Join(runfiles, bazel.RelativeTestTargetPath(), path.Join(relative...))
 	}
 
-	// Otherwise we're in the package directory and can just return a relative path.
+	// If we're not running in Bazel, we're in the package directory and can
+	// just return a relative path.
 	ret := path.Join(relative...)
 	ret, err := filepath.Abs(ret)
 	require.NoError(t, err)

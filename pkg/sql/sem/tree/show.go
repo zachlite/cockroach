@@ -442,18 +442,13 @@ func (node *ShowTransactions) Format(ctx *FmtCtx) {
 
 // ShowConstraints represents a SHOW CONSTRAINTS statement.
 type ShowConstraints struct {
-	Table       *UnresolvedObjectName
-	WithComment bool
+	Table *UnresolvedObjectName
 }
 
 // Format implements the NodeFormatter interface.
 func (node *ShowConstraints) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CONSTRAINTS FROM ")
 	ctx.FormatNode(node.Table)
-
-	if node.WithComment {
-		ctx.WriteString(" WITH COMMENT")
-	}
 }
 
 // ShowGrants represents a SHOW GRANTS statement.
@@ -524,14 +519,6 @@ func (node *ShowCreate) Format(ctx *FmtCtx) {
 		ctx.WriteString("DATABASE ")
 	}
 	ctx.FormatNode(node.Name)
-}
-
-// ShowCreateAllSchemas represents a SHOW CREATE ALL SCHEMAS statement.
-type ShowCreateAllSchemas struct{}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowCreateAllSchemas) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CREATE ALL SCHEMAS")
 }
 
 // ShowCreateAllTables represents a SHOW CREATE ALL TABLES statement.

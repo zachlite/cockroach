@@ -33,7 +33,6 @@ import {
   formatNumberForDisplay,
   calculateTotalWorkload,
   unique,
-  summarize,
   queryByName,
   aggregatedTsAttr,
 } from "src/util";
@@ -78,6 +77,7 @@ interface SingleStatementStatistics {
   database: string;
   distSQL: Fraction;
   vec: Fraction;
+  opt: Fraction;
   implicit_txn: Fraction;
   failed: Fraction;
   node_id: number[];
@@ -440,6 +440,7 @@ export class StatementDetails extends React.Component<
       app,
       distSQL,
       vec,
+      opt,
       failed,
       implicit_txn,
       database,
@@ -518,9 +519,6 @@ export class StatementDetails extends React.Component<
         <span className={cx("tooltip-info")}>unavailable</span>
       </Tooltip>
     );
-    const summary = summarize(statement);
-    const showRowsWritten =
-      stats.sql_type === "TypeDML" && summary.statement !== "select";
 
     // If the aggregatedTs is unset, we are aggregating over the whole date range.
     const aggregatedTs = queryByName(this.props.location, aggregatedTsAttr);
@@ -596,19 +594,6 @@ export class StatementDetails extends React.Component<
                       )}
                       {unavailableTooltip}
                     </div>
-                    {showRowsWritten && (
-                      <div
-                        className={summaryCardStylesCx("summary--card__item")}
-                      >
-                        <Text>Mean rows written</Text>
-                        <Text>
-                          {formatNumberForDisplay(
-                            stats.rows_written?.mean,
-                            formatTwoPlaces,
-                          )}
-                        </Text>
-                      </div>
-                    )}
                     <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Max memory usage</Text>
                       {statementSampled && (
@@ -696,6 +681,10 @@ export class StatementDetails extends React.Component<
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Failed?</Text>
                   <Text>{renderBools(failed)}</Text>
+                </div>
+                <div className={summaryCardStylesCx("summary--card__item")}>
+                  <Text>Used cost-based optimizer?</Text>
+                  <Text>{renderBools(opt)}</Text>
                 </div>
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Distributed execution?</Text>
@@ -863,11 +852,6 @@ export class StatementDetails extends React.Component<
                   format: Bytes,
                 },
                 {
-                  name: "Rows Written",
-                  value: stats.rows_written,
-                  bar: genericBarChart(stats.rows_written, stats.count),
-                },
-                {
                   name: "Network Bytes Sent",
                   value: stats.exec_stats.network_bytes,
                   bar: genericBarChart(
@@ -879,10 +863,9 @@ export class StatementDetails extends React.Component<
                 },
               ].filter(function(r) {
                 if (
-                  (r.name === "Network Bytes Sent" &&
-                    r.value &&
-                    r.value.mean === 0) ||
-                  (r.name === "Rows Written" && !showRowsWritten)
+                  r.name === "Network Bytes Sent" &&
+                  r.value &&
+                  r.value.mean === 0
                 ) {
                   // Omit if empty.
                   return false;

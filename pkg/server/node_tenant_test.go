@@ -21,15 +21,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/logtags"
+	ptypes "github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
 )
 
-// TestMaybeRedactRecording verifies that redactRecordingForTenant strips
+// TestMaybeRedactRecording verifies that maybeRedactRecording strips
 // sensitive details for recordings consumed by tenants.
 //
 // See kvccl.TestTenantTracesAreRedacted for an end-to-end test of this.
-func TestRedactRecordingForTenant(t *testing.T) {
+func TestMaybeRedactRecording(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	const (
@@ -49,7 +49,7 @@ func TestRedactRecordingForTenant(t *testing.T) {
 		sp.SetVerbose(true)
 
 		log.Eventf(ctx, "%s %s", msgSensitive, log.Safe(msgNotSensitive))
-		sp.SetTag("all_span_tags_are_stripped", attribute.StringValue("because_no_redactability"))
+		sp.SetTag("all_span_tags_are_stripped", "because_no_redactability")
 		sp.Finish()
 		rec := sp.GetRecording()
 		require.Len(t, rec, 1)
@@ -58,10 +58,10 @@ func TestRedactRecordingForTenant(t *testing.T) {
 
 	t.Run("regular-tenant", func(t *testing.T) {
 		rec := mkRec()
-		require.NoError(t, redactRecordingForTenant(roachpb.MakeTenantID(100), rec))
+		maybeRedactRecording(roachpb.MakeTenantID(100), rec)
 		require.Zero(t, rec[0].Tags)
 		require.Len(t, rec[0].Logs, 1)
-		msg := rec[0].Logs[0].Msg().StripMarkers()
+		msg := rec[0].Logs[0].Fields[0].Value
 		t.Log(msg)
 		require.NotContains(t, msg, msgSensitive)
 		require.NotContains(t, msg, tagSensitive)
@@ -71,7 +71,7 @@ func TestRedactRecordingForTenant(t *testing.T) {
 
 	t.Run("system-tenant", func(t *testing.T) {
 		rec := mkRec()
-		require.NoError(t, redactRecordingForTenant(roachpb.SystemTenantID, rec))
+		maybeRedactRecording(roachpb.SystemTenantID, rec)
 		require.Equal(t, map[string]string{
 			"_verbose":                   "1",
 			"all_span_tags_are_stripped": "because_no_redactability",
@@ -79,7 +79,7 @@ func TestRedactRecordingForTenant(t *testing.T) {
 			"tag_sensitive":              tagSensitive,
 		}, rec[0].Tags)
 		require.Len(t, rec[0].Logs, 1)
-		msg := rec[0].Logs[0].Msg().StripMarkers()
+		msg := rec[0].Logs[0].Fields[0].Value
 		t.Log(msg)
 		require.Contains(t, msg, msgSensitive)
 		require.Contains(t, msg, tagSensitive)
@@ -92,21 +92,22 @@ func TestRedactRecordingForTenant(t *testing.T) {
 		// you're here to see why this test failed to compile, ensure that the
 		// change you're making to RecordedSpan does not include new sensitive data
 		// that may leak from the KV layer to tenants. If it does, update
-		// redactRecordingForTenant appropriately.
+		// maybeRedactRecording appropriately.
 		type calcifiedRecordedSpan struct {
-			TraceID           uint64
-			SpanID            uint64
-			ParentSpanID      uint64
-			Operation         string
-			Baggage           map[string]string
-			Tags              map[string]string
-			StartTime         time.Time
-			Duration          time.Duration
-			RedactableLogs    bool
-			Logs              []tracingpb.LogRecord
-			GoroutineID       uint64
-			Finished          bool
-			StructuredRecords []tracingpb.StructuredRecord
+			TraceID                      uint64
+			SpanID                       uint64
+			ParentSpanID                 uint64
+			Operation                    string
+			Baggage                      map[string]string
+			Tags                         map[string]string
+			StartTime                    time.Time
+			Duration                     time.Duration
+			RedactableLogs               bool
+			Logs                         []tracingpb.LogRecord
+			DeprecatedInternalStructured []*ptypes.Any
+			GoroutineID                  uint64
+			Finished                     bool
+			StructuredRecords            []tracingpb.StructuredRecord
 		}
 		_ = (*calcifiedRecordedSpan)((*tracingpb.RecordedSpan)(nil))
 	})

@@ -691,7 +691,7 @@ func (nl *NodeLiveness) Start(ctx context.Context, opts NodeLivenessStartOptions
 	nl.mu.engines = opts.Engines
 	nl.mu.Unlock()
 
-	_ = opts.Stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "liveness-hb", SpanOpt: stop.SterileRootSpan}, func(context.Context) {
+	_ = opts.Stopper.RunAsyncTask(ctx, "liveness-hb", func(context.Context) {
 		ambient := nl.ambientCtx
 		ambient.AddLogTag("liveness-hb", nil)
 		ctx, cancel := opts.Stopper.WithCancelOnQuiesce(context.Background())
@@ -1213,7 +1213,8 @@ func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 // on commit.
 //
 // updateLiveness terminates certain errors that are expected to occur
-// sporadically, such as ambiguous results.
+// sporadically, such as TransactionStatusError (due to the 1PC requirement of
+// the liveness txn, and ambiguous results).
 //
 // If the CPut is successful (i.e. no error is returned and handleCondFailed is
 // not called), the value that has been written is returned as a Record.
@@ -1222,7 +1223,12 @@ func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 func (nl *NodeLiveness) updateLiveness(
 	ctx context.Context, update livenessUpdate, handleCondFailed func(actual Record) error,
 ) (Record, error) {
-	for r := retry.StartWithCtx(ctx, base.DefaultRetryOptions()); r.Next(); {
+	for {
+		// Before each attempt, ensure that the context has not expired.
+		if err := ctx.Err(); err != nil {
+			return Record{}, err
+		}
+
 		nl.mu.RLock()
 		engines := nl.mu.engines
 		nl.mu.RUnlock()
@@ -1245,10 +1251,6 @@ func (nl *NodeLiveness) updateLiveness(
 		}
 		return written, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return Record{}, err
-	}
-	panic("unreachable; should retry until ctx canceled")
 }
 
 func (nl *NodeLiveness) updateLivenessAttempt(
@@ -1318,19 +1320,8 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 				return Record{}, errors.Wrapf(err, "couldn't update node liveness from CPut actual value")
 			}
 			return Record{}, handleCondFailed(Record{Liveness: actualLiveness, raw: tErr.ActualValue.TagAndDataBytes()})
-		} else if errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
-			// We generally want to retry ambiguous errors immediately, except if the
-			// ctx is canceled - in which case the ambiguous error is probably caused
-			// by the cancellation (and in any case it's pointless to retry with a
-			// canceled ctx).
-			if ctx.Err() != nil {
-				return Record{}, err
-			}
-			return Record{}, &errRetryLiveness{err}
-		} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) {
-			// 21.2 nodes can return a TransactionStatusError when they should have
-			// returned an AmbiguousResultError.
-			// TODO(andrei): Remove this in 22.2.
+		} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) ||
+			errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
 			return Record{}, &errRetryLiveness{err}
 		}
 		return Record{}, err

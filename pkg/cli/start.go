@@ -397,7 +397,7 @@ func runStart(cmd *cobra.Command, args []string, startSingleNode bool) (returnEr
 	// that the process continues to exit with the Disk Full exit code. A
 	// flapping exit code can affect alerting, including the alerting
 	// performed within CockroachCloud.
-	if err := exitIfDiskFull(vfs.Default, serverCfg.Stores.Specs); err != nil {
+	if err := exitIfDiskFull(serverCfg.Stores.Specs); err != nil {
 		return err
 	}
 
@@ -413,7 +413,7 @@ func runStart(cmd *cobra.Command, args []string, startSingleNode bool) (returnEr
 	// This span concludes when the startup goroutine started below
 	// has completed.
 	// TODO(andrei): we don't close the span on the early returns below.
-	tracer := serverCfg.Tracer
+	tracer := serverCfg.Settings.Tracer
 	startupSpan := tracer.StartSpan("server start")
 	ctx = tracing.ContextWithSpan(ctx, startupSpan)
 
@@ -1043,21 +1043,21 @@ func maybeWarnMemorySizes(ctx context.Context) {
 	}
 }
 
-func exitIfDiskFull(fs vfs.FS, specs []base.StoreSpec) error {
+func exitIfDiskFull(specs []base.StoreSpec) error {
 	var cause error
 	var ballastPaths []string
 	var ballastMissing bool
 	for _, spec := range specs {
-		isDiskFull, err := storage.IsDiskFull(fs, spec)
+		isDiskFull, err := storage.IsDiskFull(vfs.Default, spec)
 		if err != nil {
 			return err
 		}
 		if !isDiskFull {
 			continue
 		}
-		path := base.EmergencyBallastFile(fs.PathJoin, spec.Path)
+		path := base.EmergencyBallastFile(vfs.Default.PathJoin, spec.Path)
 		ballastPaths = append(ballastPaths, path)
-		if _, err := fs.Stat(path); oserror.IsNotExist(err) {
+		if _, err := vfs.Default.Stat(path); oserror.IsNotExist(err) {
 			ballastMissing = true
 		}
 		cause = errors.CombineErrors(cause, errors.Newf(`store %s: out of disk space`, spec.Path))
@@ -1183,7 +1183,7 @@ func getClientGRPCConn(
 	stopper := stop.NewStopper()
 	rpcContext := rpc.NewContext(rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: cfg.Tracer},
+		AmbientCtx: log.AmbientContext{Tracer: cfg.Settings.Tracer},
 		Config:     cfg.Config,
 		Clock:      clock,
 		Stopper:    stopper,

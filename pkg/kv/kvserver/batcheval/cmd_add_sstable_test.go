@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -62,12 +61,11 @@ func TestDBAddSSTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	t.Run("store=in-memory", func(t *testing.T) {
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
-		s := si.(*server.TestServer)
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 
-		tr := s.Tracer()
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, nil)
 	})
 	t.Run("store=on-disk", func(t *testing.T) {
@@ -77,11 +75,10 @@ func TestDBAddSSTable(t *testing.T) {
 		storeSpec := base.DefaultTestStoreSpec
 		storeSpec.InMemory = false
 		storeSpec.Path = dir
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{
 			Insecure:   true,
 			StoreSpecs: []base.StoreSpec{storeSpec},
 		})
-		s := si.(*server.TestServer)
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 		store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
@@ -89,7 +86,7 @@ func TestDBAddSSTable(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		tr := s.TracerI().(*tracing.Tracer)
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, store)
 	})
 }

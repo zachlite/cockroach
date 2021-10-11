@@ -213,12 +213,11 @@ func testStoreConfig(clock *hlc.Clock, version roachpb.Version) StoreConfig {
 		clock = hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	}
 	st := cluster.MakeTestingClusterSettingsWithVersions(version, version, true)
-	tracer := tracing.NewTracerWithOpt(context.TODO(), tracing.WithClusterSettings(&st.SV))
 	sc := StoreConfig{
 		DefaultSpanConfig:           zonepb.DefaultZoneConfigRef().AsSpanConfig(),
 		DefaultSystemSpanConfig:     zonepb.DefaultSystemZoneConfigRef().AsSpanConfig(),
 		Settings:                    st,
-		AmbientCtx:                  log.AmbientContext{Tracer: tracer},
+		AmbientCtx:                  log.AmbientContext{Tracer: st.Tracer},
 		Clock:                       clock,
 		CoalescedHeartbeatsInterval: 50 * time.Millisecond,
 		ScanInterval:                10 * time.Minute,
@@ -840,18 +839,11 @@ func NewStore(
 		ctSender: cfg.ClosedTimestampSender,
 	}
 	if cfg.RPCContext != nil {
-		s.allocator = MakeAllocator(
-			cfg.StorePool,
-			cfg.RPCContext.RemoteClocks.Latency,
-			cfg.TestingKnobs.AllocatorKnobs,
-		)
+		s.allocator = MakeAllocator(cfg.StorePool, cfg.RPCContext.RemoteClocks.Latency)
 	} else {
-		s.allocator = MakeAllocator(
-			cfg.StorePool, func(string) (time.Duration, bool) {
-				return 0, false
-			},
-			cfg.TestingKnobs.AllocatorKnobs,
-		)
+		s.allocator = MakeAllocator(cfg.StorePool, func(string) (time.Duration, bool) {
+			return 0, false
+		})
 	}
 	s.replRankings = newReplicaRankings()
 
@@ -1654,6 +1646,22 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 		rate := consistencyCheckRate.Get(&s.ClusterSettings().SV)
 		s.consistencyLimiter.UpdateLimit(quotapool.Limit(rate), rate*consistencyCheckRateBurstFactor)
 	})
+
+	// Storing suggested compactions in the store itself was deprecated with
+	// the removal of the Compactor in 21.1. See discussion in
+	// https://github.com/cockroachdb/cockroach/pull/55893
+	//
+	// TODO(bilal): Remove this code in versions after 21.1.
+	err = s.engine.MVCCIterate(
+		keys.StoreSuggestedCompactionKeyPrefix(),
+		keys.StoreSuggestedCompactionKeyPrefix().PrefixEnd(),
+		storage.MVCCKeyIterKind,
+		func(res storage.MVCCKeyValue) error {
+			return s.engine.ClearUnversioned(res.Key.Key)
+		})
+	if err != nil {
+		log.Warningf(ctx, "error when clearing compactor keys: %s", err)
+	}
 
 	// Set the started flag (for unittests).
 	atomic.StoreInt32(&s.started, 1)
@@ -2749,7 +2757,7 @@ func (s *Store) ComputeStatsForKeySpan(startKey, endKey roachpb.RKey) (StoreKeyS
 // carrying out any changes, returning all trace messages collected along the way.
 // Intended to help power a debug endpoint.
 func (s *Store) AllocatorDryRun(ctx context.Context, repl *Replica) (tracing.Recording, error) {
-	ctx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, s.cfg.AmbientCtx.Tracer, "allocator dry run")
+	ctx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, s.ClusterSettings().Tracer, "allocator dry run")
 	defer cancel()
 	canTransferLease := func(ctx context.Context, repl *Replica) bool { return true }
 	_, err := s.replicateQueue.processOneChange(
@@ -2801,7 +2809,7 @@ func (s *Store) ManuallyEnqueue(
 	}
 
 	ctx, collect, cancel := tracing.ContextWithRecordingSpan(
-		ctx, s.cfg.AmbientCtx.Tracer, fmt.Sprintf("manual %s queue run", queueName))
+		ctx, s.ClusterSettings().Tracer, fmt.Sprintf("manual %s queue run", queueName))
 	defer cancel()
 
 	if !skipShouldQueue {
@@ -2956,4 +2964,9 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestingDefaultSpanConfig exposes the default span config for testing purposes.
+func TestingDefaultSpanConfig() roachpb.SpanConfig {
+	return zonepb.DefaultZoneConfigRef().AsSpanConfig()
 }

@@ -18,9 +18,6 @@ import (
 	"sync/atomic"
 )
 
-// DeadlockEnabled is true if the deadlock detector is enabled.
-const DeadlockEnabled = false
-
 // A Mutex is a mutual exclusion lock.
 type Mutex struct {
 	mu      sync.Mutex

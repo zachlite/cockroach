@@ -339,18 +339,6 @@ func (f *vectorizedFlow) Cleanup(ctx context.Context) {
 	f.Release()
 }
 
-// CleanupBeforeRun is part of the Flow interface.
-func (f *vectorizedFlow) CleanupBeforeRun(ctx context.Context) {
-	// TODO(yuzefovich): Cleanup() does more things. Some of them are probably
-	// relevant even if the flow was not started. For now, this code does the
-	// minimum to avoid obvious leaks.
-
-	// This cleans up all the memory and disk monitoring of the vectorized flow.
-	f.creator.cleanup(ctx)
-	// Among other things, this finishes the flow's span.
-	f.FlowBase.Cleanup(ctx)
-}
-
 // wrapWithVectorizedStatsCollectorBase creates a new
 // colexecop.VectorizedStatsCollector that wraps op and connects the newly
 // created wrapper with those corresponding to operators in inputs (the latter
@@ -1175,6 +1163,7 @@ func (s *vectorizedFlowCreator) setupFlow(
 				ExprHelper:           s.exprHelper,
 				Factory:              factory,
 			}
+			args.TestingKnobs.PlanInvariantsCheckers = util.CrdbTestBuild
 			var result *colexecargs.NewColOperatorResult
 			result, err = colbuilder.NewColOperator(ctx, flowCtx, args)
 			if result != nil {

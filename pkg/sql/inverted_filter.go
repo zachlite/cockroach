@@ -14,18 +14,15 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 type invertedFilterNode struct {
-	input           planNode
-	expression      *inverted.SpanExpression
-	preFiltererExpr tree.TypedExpr
-	preFiltererType *types.T
-	invColumn       int
-	resultColumns   colinfo.ResultColumns
+	input         planNode
+	expression    *invertedexpr.SpanExpression
+	invColumn     int
+	resultColumns colinfo.ResultColumns
 }
 
 func (n *invertedFilterNode) startExec(params runParams) error {

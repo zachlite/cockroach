@@ -59,17 +59,12 @@ func TestBootstrapCluster(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	e := storage.NewDefaultInMemForTesting()
+	e := storage.NewDefaultInMem()
 	defer e.Close()
 	require.NoError(t, kvserver.WriteClusterVersion(ctx, e, clusterversion.TestingClusterVersion))
-
-	initCfg := initServerCfg{
-		binaryMinSupportedVersion: clusterversion.TestingBinaryMinSupportedVersion,
-		binaryVersion:             clusterversion.TestingBinaryVersion,
-		defaultSystemZoneConfig:   *zonepb.DefaultZoneConfigRef(),
-		defaultZoneConfig:         *zonepb.DefaultSystemZoneConfigRef(),
-	}
-	if _, err := bootstrapCluster(ctx, []storage.Engine{e}, initCfg); err != nil {
+	if _, err := bootstrapCluster(
+		ctx, []storage.Engine{e}, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -242,19 +237,15 @@ func TestCorruptedClusterID(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	e := storage.NewDefaultInMemForTesting()
+	e := storage.NewDefaultInMem()
 	defer e.Close()
 
 	cv := clusterversion.TestingClusterVersion
-	require.NoError(t, kvserver.WriteClusterVersion(ctx, e, cv))
 
-	initCfg := initServerCfg{
-		binaryMinSupportedVersion: clusterversion.TestingBinaryMinSupportedVersion,
-		binaryVersion:             clusterversion.TestingBinaryVersion,
-		defaultSystemZoneConfig:   *zonepb.DefaultZoneConfigRef(),
-		defaultZoneConfig:         *zonepb.DefaultSystemZoneConfigRef(),
-	}
-	if _, err := bootstrapCluster(ctx, []storage.Engine{e}, initCfg); err != nil {
+	require.NoError(t, kvserver.WriteClusterVersion(ctx, e, cv))
+	if _, err := bootstrapCluster(
+		ctx, []storage.Engine{e}, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,7 +629,7 @@ func TestNodeSendUnknownBatchRequest(t *testing.T) {
 		Requests: make([]roachpb.RequestUnion, 1),
 	}
 	n := &Node{}
-	br, err := n.batchInternal(context.Background(), roachpb.SystemTenantID, &ba)
+	br, err := n.batchInternal(context.Background(), &ba)
 	if err != nil {
 		t.Fatal(err)
 	}

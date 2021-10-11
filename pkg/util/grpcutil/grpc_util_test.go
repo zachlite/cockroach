@@ -77,7 +77,7 @@ func TestRequestDidNotStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = conn.Close() // nolint:grpcconnclose
+		_ = conn.Close()
 	}()
 	client := healthpb.NewHealthClient(conn)
 

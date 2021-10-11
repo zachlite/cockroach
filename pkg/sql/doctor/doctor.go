@@ -14,7 +14,6 @@ package doctor
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -25,10 +24,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/sortkeys"
 )
 
 // DescriptorTableRow represents a descriptor from table `system.descriptor`.
@@ -47,60 +48,40 @@ type NamespaceTableRow struct {
 	ID int64
 }
 
-// NamespaceTable represents data read from `system.namespace`.
+// NamespaceTable represents data read from `system.namespace2`.
 type NamespaceTable []NamespaceTableRow
+
+// namespaceReverseMap is the inverse of the namespace map stored in table
+// `system.namespace`.
+type namespaceReverseMap map[int64][]descpb.NameInfo
 
 // JobsTable represents data read from `system.jobs`.
 type JobsTable []jobs.JobMetadata
 
-// GetJobMetadata implements the jobs.JobMetadataGetter interface.
-func (jt JobsTable) GetJobMetadata(jobID jobspb.JobID) (*jobs.JobMetadata, error) {
-	for i := range jt {
-		md := &jt[i]
-		if md.ID == jobID {
-			return md, nil
+func newDescGetter(ctx context.Context, rows []DescriptorTableRow) (catalog.MapDescGetter, error) {
+	pg := catalog.MapDescGetter{}
+	for _, r := range rows {
+		var d descpb.Descriptor
+		if err := protoutil.Unmarshal(r.DescBytes, &d); err != nil {
+			return nil, errors.Errorf("failed to unmarshal descriptor %d: %v", r.ID, err)
 		}
+		descpb.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &d, r.ModTime)
+		pg[descpb.ID(r.ID)] = catalogkv.UnwrapDescriptorRaw(ctx, &d)
 	}
-	return nil, errors.Newf("job %d not found", jobID)
+	return pg, nil
 }
 
-func newDescGetter(
-	ctx context.Context, stdout io.Writer, descRows []DescriptorTableRow, nsRows []NamespaceTableRow,
-) (catalog.MapDescGetter, error) {
-	ddg := catalog.MapDescGetter{
-		Descriptors: make(map[descpb.ID]catalog.Descriptor, len(descRows)),
-		Namespace:   make(map[descpb.NameInfo]descpb.ID, len(nsRows)),
-	}
-	// Build the descGetter first with un-upgraded descriptors.
-	for _, r := range descRows {
-		var d descpb.Descriptor
-		if err := protoutil.Unmarshal(r.DescBytes, &d); err != nil {
-			return ddg, errors.Wrapf(err, "failed to unmarshal descriptor %d", r.ID)
-		}
-		b := catalogkv.NewBuilderWithMVCCTimestamp(&d, r.ModTime)
-		if b != nil {
-			ddg.Descriptors[descpb.ID(r.ID)] = b.BuildImmutable()
+func newNamespaceMap(rows []NamespaceTableRow) namespaceReverseMap {
+	res := make(namespaceReverseMap)
+	for _, r := range rows {
+		l, ok := res[r.ID]
+		if !ok {
+			res[r.ID] = []descpb.NameInfo{r.NameInfo}
+		} else {
+			res[r.ID] = append(l, r.NameInfo)
 		}
 	}
-	// Rebuild the descGetter with upgrades.
-	for _, r := range descRows {
-		var d descpb.Descriptor
-		if err := protoutil.Unmarshal(r.DescBytes, &d); err != nil {
-			return ddg, errors.Wrapf(err, "failed to unmarshal descriptor %d", r.ID)
-		}
-		b := catalogkv.NewBuilderWithMVCCTimestamp(&d, r.ModTime)
-		if b != nil {
-			if err := b.RunPostDeserializationChanges(ctx, ddg); err != nil {
-				descReport(stdout, ddg.Descriptors[descpb.ID(r.ID)], "failed to upgrade descriptor: %v", err)
-			} else {
-				ddg.Descriptors[descpb.ID(r.ID)] = b.BuildImmutable()
-			}
-		}
-	}
-	for _, r := range nsRows {
-		ddg.Namespace[r.NameInfo] = descpb.ID(r.ID)
-	}
-	return ddg, nil
+	return res
 }
 
 // Examine runs a suite of consistency checks over system tables.
@@ -112,7 +93,7 @@ func Examine(
 	verbose bool,
 	stdout io.Writer,
 ) (ok bool, err error) {
-	descOk, err := ExamineDescriptors(ctx, descTable, namespaceTable, jobsTable, verbose, stdout)
+	descOk, err := ExamineDescriptors(ctx, descTable, namespaceTable, verbose, stdout)
 	if err != nil {
 		return false, err
 	}
@@ -128,94 +109,143 @@ func ExamineDescriptors(
 	ctx context.Context,
 	descTable DescriptorTable,
 	namespaceTable NamespaceTable,
-	jobsTable JobsTable,
 	verbose bool,
 	stdout io.Writer,
 ) (ok bool, err error) {
 	fmt.Fprintf(
 		stdout, "Examining %d descriptors and %d namespace entries...\n",
 		len(descTable), len(namespaceTable))
-	ddg, err := newDescGetter(ctx, stdout, descTable, namespaceTable)
+	descGetter, err := newDescGetter(ctx, descTable)
 	if err != nil {
 		return false, err
 	}
-	var problemsFound bool
+	nMap := newNamespaceMap(namespaceTable)
 
+	var problemsFound bool
 	for _, row := range descTable {
-		desc, ok := ddg.Descriptors[descpb.ID(row.ID)]
+		desc, ok := descGetter[descpb.ID(row.ID)]
 		if !ok {
 			// This should never happen as ids are parsed and inserted from descTable.
 			log.Fatalf(ctx, "Descriptor id %d not found", row.ID)
 		}
 
 		if int64(desc.GetID()) != row.ID {
-			descReport(stdout, desc, "different id in descriptor table: %d", row.ID)
+			fmt.Fprint(stdout, reportMsg(desc, "different id in descriptor table: %d", row.ID))
 			problemsFound = true
 			continue
 		}
-		ve := catalog.ValidateWithRecover(ctx, ddg, catalog.ValidationLevelAllPreTxnCommit, desc)
-		for _, err := range ve.Errors() {
+
+		_, parentExists := descGetter[desc.GetParentID()]
+		_, parentSchemaExists := descGetter[desc.GetParentSchemaID()]
+		switch d := desc.(type) {
+		case catalog.TableDescriptor:
+			if err := d.Validate(ctx, descGetter); err != nil {
+				problemsFound = true
+				fmt.Fprint(stdout, reportMsg(desc, "%s", err))
+			}
+			// Table has been already validated.
+			parentExists = true
+			parentSchemaExists = true
+		case catalog.TypeDescriptor:
+			typ := typedesc.NewImmutable(*d.TypeDesc())
+			if err := typ.Validate(ctx, descGetter); err != nil {
+				problemsFound = true
+				fmt.Fprint(stdout, reportMsg(desc, "%s", err))
+			}
+		case catalog.SchemaDescriptor:
+			// parent schema id is always 0.
+			parentSchemaExists = true
+		}
+		if desc.GetParentID() != descpb.InvalidID && !parentExists {
 			problemsFound = true
-			descReport(stdout, desc, "%s", err)
+			fmt.Fprint(stdout, reportMsg(desc, "invalid parent id %d", desc.GetParentID()))
+		}
+		if desc.GetParentSchemaID() != descpb.InvalidID &&
+			desc.GetParentSchemaID() != keys.PublicSchemaID &&
+			!parentSchemaExists {
+			problemsFound = true
+			fmt.Fprint(stdout, reportMsg(desc, "invalid parent schema id %d", desc.GetParentSchemaID()))
 		}
 
-		jobs.ValidateJobReferencesInDescriptor(desc, jobsTable, func(err error) {
-			problemsFound = true
-			descReport(stdout, desc, "%s", err)
-		})
+		// Process namespace entries pointing to this descriptor.
+		names, ok := nMap[row.ID]
+		if !ok {
+			if !desc.Dropped() {
+				fmt.Fprint(stdout, reportMsg(desc, "not being dropped but no namespace entry found"))
+				problemsFound = true
+			}
+			continue
+		}
+		// We delete all pointed descriptors to leave what is missing in the
+		// descriptor table.
+		delete(nMap, row.ID)
 
+		drainingNames := desc.GetDrainingNames()
+		var found bool
+		for _, n := range names {
+			if n.Name == desc.GetName() &&
+				n.ParentSchemaID == desc.GetParentSchemaID() &&
+				n.ParentID == desc.GetParentID() {
+				found = true
+				continue
+			}
+			var foundInDraining bool
+			for i, drain := range drainingNames {
+				// If the namespace entry does not correspond to the current descriptor
+				// name then it must be found in the descriptor draining names.
+				if drain.Name == n.Name &&
+					drain.ParentID == n.ParentID &&
+					drain.ParentSchemaID == n.ParentSchemaID {
+					// Delete this draining names entry from the list.
+					last := len(drainingNames) - 1
+					drainingNames[last], drainingNames[i] = drainingNames[i], drainingNames[last]
+					drainingNames = drainingNames[:last]
+					foundInDraining = true
+					break
+				}
+			}
+			if !foundInDraining {
+				fmt.Fprint(
+					stdout,
+					reportMsg(desc, "namespace entry %+v not found in draining names", n),
+				)
+				problemsFound = true
+			}
+		}
+		if !found {
+			fmt.Fprint(stdout, reportMsg(desc, "could not find name in namespace table"))
+			problemsFound = true
+			continue
+		}
+		if len(drainingNames) > 0 {
+			fmt.Fprint(stdout, reportMsg(desc, "extra draining names found %+v", drainingNames))
+			problemsFound = true
+		}
 		if verbose {
-			descReport(stdout, desc, "processed")
+			fmt.Fprint(stdout, reportMsg(desc, "processed"))
 		}
 	}
 
-	for _, row := range namespaceTable {
-		desc := ddg.Descriptors[descpb.ID(row.ID)]
-		err := validateNamespaceRow(row, desc)
-		if err != nil {
-			nsReport(stdout, row, err.Error())
+	// Now go over all namespace entries that don't point to descriptors in the
+	// descriptor table.
+	for id, ni := range nMap {
+		if id == keys.PublicSchemaID {
+			continue
+		}
+		if descpb.ID(id) == descpb.InvalidID {
+			fmt.Fprintf(stdout, "Row(s) %+v: NULL value found\n", ni)
 			problemsFound = true
-		} else if verbose {
-			nsReport(stdout, row, "processed")
+			continue
 		}
+		if strings.HasPrefix(ni[0].Name, "pg_temp_") {
+			// Temporary schemas have namespace entries but not descriptors.
+			continue
+		}
+		fmt.Fprintf(
+			stdout, "Descriptor %d: has namespace row(s) %+v but no descriptor\n", id, ni)
+		problemsFound = true
 	}
-
 	return !problemsFound, err
-}
-
-func validateNamespaceRow(row NamespaceTableRow, desc catalog.Descriptor) error {
-	id := descpb.ID(row.ID)
-	if id == keys.PublicSchemaID {
-		// The public schema doesn't have a descriptor.
-		return nil
-	}
-	isSchema := row.ParentID != keys.RootNamespaceID && row.ParentSchemaID == keys.RootNamespaceID
-	if isSchema && strings.HasPrefix(row.Name, "pg_temp_") {
-		// Temporary schemas have namespace entries but not descriptors.
-		return nil
-	}
-	if id == descpb.InvalidID {
-		return errors.New("invalid descriptor ID")
-	}
-	if desc == nil {
-		return catalog.ErrDescriptorNotFound
-	}
-	for _, dn := range desc.GetDrainingNames() {
-		if dn == row.NameInfo {
-			return nil
-		}
-	}
-	if desc.Dropped() {
-		return errors.Newf("no matching name info in draining names of dropped %s",
-			desc.DescriptorType())
-	}
-	if row.ParentID == desc.GetParentID() &&
-		row.ParentSchemaID == desc.GetParentSchemaID() &&
-		row.Name == desc.GetName() {
-		return nil
-	}
-	return errors.Newf("no matching name info found in non-dropped %s %q",
-		desc.DescriptorType(), desc.GetName())
 }
 
 // ExamineJobs runs a suite of consistency checks over the system.jobs table.
@@ -226,8 +256,8 @@ func ExamineJobs(
 	verbose bool,
 	stdout io.Writer,
 ) (ok bool, err error) {
-	fmt.Fprintf(stdout, "Examining %d jobs...\n", len(jobsTable))
-	ddg, err := newDescGetter(ctx, stdout, descTable, nil)
+	fmt.Fprintf(stdout, "Examining %d running jobs...\n", len(jobsTable))
+	descGetter, err := newDescGetter(ctx, descTable)
 	if err != nil {
 		return false, err
 	}
@@ -236,134 +266,42 @@ func ExamineJobs(
 		if verbose {
 			fmt.Fprintf(stdout, "Processing job %d\n", j.ID)
 		}
-		jobs.ValidateDescriptorReferencesInJob(j, ddg.Descriptors, func(err error) {
+		if j.Payload.Type() != jobspb.TypeSchemaChangeGC {
+			continue
+		}
+		missingTables := make([]int64, 0)
+		for _, table := range j.Progress.GetSchemaChangeGC().Tables {
+			if table.Status == jobspb.SchemaChangeGCProgress_DELETED {
+				continue
+			}
+			_, tableExists := descGetter[table.ID]
+			if !tableExists {
+				missingTables = append(missingTables, int64(table.ID))
+			}
+		}
+		if len(missingTables) > 0 {
 			problemsFound = true
-			fmt.Fprintf(stdout, "job %d: %s.\n", j.ID, err)
-		})
+			sortkeys.Int64s(missingTables)
+			fmt.Fprintf(stdout, "job %d: schema change GC refers to missing table descriptor(s) %+v\n",
+				j.ID, missingTables)
+		}
 	}
 	return !problemsFound, nil
 }
 
-func nsReport(stdout io.Writer, row NamespaceTableRow, format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(stdout, "  ParentID %3d, ParentSchemaID %2d: namespace entry %q (%d): %s\n",
-		row.ParentID, row.ParentSchemaID, row.Name, row.ID, msg)
-}
-
-func descReport(stdout io.Writer, desc catalog.Descriptor, format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	// Add descriptor-identifying prefix if it isn't there already.
-	// The prefix has the same format as the validation error wrapper.
-	msgPrefix := fmt.Sprintf("%s %q (%d): ", desc.DescriptorType(), desc.GetName(), desc.GetID())
-	if strings.HasPrefix(msg, msgPrefix) {
-		msgPrefix = ""
-	}
-	_, _ = fmt.Fprintf(stdout, "  ParentID %3d, ParentSchemaID %2d: %s%s\n",
-		desc.GetParentID(), desc.GetParentSchemaID(), msgPrefix, msg)
-}
-
-// DumpSQL dumps SQL statements to an io.Writer to load the descriptor and
-// namespace table contents into an empty cluster. System tables are not
-// included. The descriptors themselves are as they were in the source cluster,
-// with the possible exception of the version counter and the modification time
-// timestamp.
-func DumpSQL(out io.Writer, descTable DescriptorTable, namespaceTable NamespaceTable) error {
-	// Print first transaction, which removes all predefined user descriptors.
-	fmt.Fprintln(out, `BEGIN;`)
-	// Add a query which triggers a divide-by-zero error when the txn runs on a
-	// non-empty cluster (excluding predefined user descriptors).
-	fmt.Fprintf(out,
-		"SELECT 1/(1-sign(count(*))) FROM system.descriptor WHERE id >= %d;\n",
-		keys.MinNonPredefinedUserDescID)
-	// Delete predefined user descriptors.
-	fmt.Fprintf(out,
-		"SELECT crdb_internal.unsafe_delete_descriptor(id, true) FROM system.descriptor WHERE id >= %d;\n",
-		keys.MinUserDescID)
-	// Delete predefined user descriptor namespace entries.
-	fmt.Fprintf(out,
-		"SELECT crdb_internal.unsafe_delete_namespace_entry(\"parentID\", \"parentSchemaID\", name, id) "+
-			"FROM system.namespace WHERE id >= %d;\n",
-		keys.MinUserDescID)
-	fmt.Fprintln(out, `COMMIT;`)
-	// Print second transaction, which inserts namespace and descriptor entries.
-	fmt.Fprintln(out, `BEGIN;`)
-	reverseNamespace := make(map[int64][]NamespaceTableRow, len(descTable))
-	for _, row := range namespaceTable {
-		reverseNamespace[row.ID] = append(reverseNamespace[row.ID], row)
-	}
-	for _, descRow := range descTable {
-		if descRow.ID < keys.MinUserDescID {
-			// Skip system descriptors.
-			continue
-		}
-		// Update the descriptor representation to make it safe to insert:
-		// - set the version to 1,
-		// - unset the descriptor modification time,
-		// - unset the descriptor create-as-of time, for table descriptors.
-		updatedDescBytes, err := descriptorModifiedForInsert(descRow)
-		if err != nil {
-			return err
-		}
-		if updatedDescBytes == nil {
-			continue
-		}
-		fmt.Fprintf(out,
-			"SELECT crdb_internal.unsafe_upsert_descriptor(%d, decode('%s', 'hex'), true);\n",
-			descRow.ID, hex.EncodeToString(updatedDescBytes))
-		for _, namespaceRow := range reverseNamespace[descRow.ID] {
-			fmt.Fprintf(out,
-				"SELECT crdb_internal.unsafe_upsert_namespace_entry(%d, %d, '%s', %d, true);\n",
-				namespaceRow.ParentID, namespaceRow.ParentSchemaID, namespaceRow.Name, namespaceRow.ID)
-		}
-	}
-	// Handle dangling namespace entries.
-	for _, namespaceRow := range namespaceTable {
-		if namespaceRow.ParentID == descpb.InvalidID && namespaceRow.ID < keys.MinUserDescID {
-			// Skip system database entries.
-			continue
-		}
-		if namespaceRow.ParentID != descpb.InvalidID && namespaceRow.ParentID < keys.MinUserDescID {
-			// Skip non-database entries with system parent database.
-			continue
-		}
-		if _, found := reverseNamespace[namespaceRow.ID]; found {
-			// Skip entries for existing descriptors.
-			continue
-		}
-		fmt.Fprintf(out,
-			"SELECT crdb_internal.unsafe_upsert_namespace_entry(%d, %d, '%s', %d, true);\n",
-			namespaceRow.ParentID, namespaceRow.ParentSchemaID, namespaceRow.Name, namespaceRow.ID)
-	}
-	fmt.Fprintln(out, `COMMIT;`)
-	return nil
-}
-
-func descriptorModifiedForInsert(r DescriptorTableRow) ([]byte, error) {
-	var descProto descpb.Descriptor
-	if err := protoutil.Unmarshal(r.DescBytes, &descProto); err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal descriptor %d", r.ID)
-	}
-	b := catalogkv.NewBuilderWithMVCCTimestamp(&descProto, r.ModTime)
-	if b == nil {
-		return nil, nil
-	}
-	mut := b.BuildCreatedMutable()
-	switch d := mut.(type) {
-	case catalog.DatabaseDescriptor:
-		d.DatabaseDesc().ModificationTime = hlc.Timestamp{}
-		d.DatabaseDesc().Version = 1
-	case catalog.SchemaDescriptor:
-		d.SchemaDesc().ModificationTime = hlc.Timestamp{}
-		d.SchemaDesc().Version = 1
+func reportMsg(desc catalog.Descriptor, format string, args ...interface{}) string {
+	var header string
+	switch desc.(type) {
 	case catalog.TypeDescriptor:
-		d.TypeDesc().ModificationTime = hlc.Timestamp{}
-		d.TypeDesc().Version = 1
+		header = "    Type"
 	case catalog.TableDescriptor:
-		d.TableDesc().ModificationTime = hlc.Timestamp{}
-		d.TableDesc().CreateAsOfTime = hlc.Timestamp{}
-		d.TableDesc().Version = 1
-	default:
-		return nil, nil
+		header = "   Table"
+	case catalog.SchemaDescriptor:
+		header = "  Schema"
+	case catalog.DatabaseDescriptor:
+		header = "Database"
 	}
-	return protoutil.Marshal(mut.DescriptorProto())
+	return fmt.Sprintf("%s %3d: ParentID %3d, ParentSchemaID %2d, Name '%s': ",
+		header, desc.GetID(), desc.GetParentID(), desc.GetParentSchemaID(), desc.GetName()) +
+		fmt.Sprintf(format, args...) + "\n"
 }

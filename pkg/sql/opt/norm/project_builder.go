@@ -32,9 +32,7 @@ type projectBuilder struct {
 }
 
 func (pb *projectBuilder) init(f *Factory) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*pb = projectBuilder{f: f}
+	pb.f = f
 }
 
 // empty returns true if there are no synthesized columns (and hence a

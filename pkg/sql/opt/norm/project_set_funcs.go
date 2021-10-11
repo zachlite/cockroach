@@ -50,10 +50,6 @@ func (c *CustomFuncs) CanConstructValuesFromZips(zip memo.ZipExpr) bool {
 			// Argument is not an ArrayExpr or ConstExpr wrapping a DArray or DJSON.
 			return false
 		}
-		if fn.Overload.GeneratorWithExprs != nil {
-			// ConstructValuesFromZips does not handle GeneratorWithExprs.
-			return false
-		}
 	}
 	return true
 }
@@ -117,9 +113,6 @@ func (c *CustomFuncs) ConstructValuesFromZips(zip memo.ZipExpr) memo.RelExpr {
 			// Use a ValueGenerator to retrieve values from the datums wrapped
 			// in the ConstExpr. These generators are used at runtime to unnest
 			// values from regular and JSON arrays.
-			if function.Overload.GeneratorWithExprs != nil {
-				panic(errors.AssertionFailedf("unexpected GeneratorWithExprs"))
-			}
 			generator, err := function.Overload.Generator(c.f.evalCtx, tree.Datums{t.Value})
 			if err != nil {
 				panic(errors.AssertionFailedf("generator retrieval failed: %v", err))
@@ -148,7 +141,7 @@ func (c *CustomFuncs) ConstructValuesFromZips(zip memo.ZipExpr) memo.RelExpr {
 				val := c.f.ConstructConstVal(vals[0], vals[0].ResolvedType())
 				addValToOutRows(val, j, i)
 			}
-			generator.Close(c.f.evalCtx.Context)
+			generator.Close()
 
 		default:
 			panic(errors.AssertionFailedf("invalid parameter type"))

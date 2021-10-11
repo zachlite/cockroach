@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -27,7 +28,7 @@ import (
 type planDependencyInfo struct {
 	// desc is a reference to the descriptor for the table being
 	// depended on.
-	desc catalog.TableDescriptor
+	desc *tabledesc.Immutable
 	// deps is the list of ways in which the current plan depends on
 	// that table. There can be more than one entries when the same
 	// table is used in different places. The entries can also be
@@ -48,8 +49,7 @@ type planDependencies map[descpb.ID]planDependencyInfo
 func (d planDependencies) String() string {
 	var buf bytes.Buffer
 	for id, deps := range d {
-		name := deps.desc.GetName()
-		fmt.Fprintf(&buf, "%d (%q):", id, tree.ErrNameStringP(&name))
+		fmt.Fprintf(&buf, "%d (%q):", id, tree.ErrNameStringP(&deps.desc.Name))
 		for _, dep := range deps.deps {
 			buf.WriteString(" [")
 			if dep.IndexID != 0 {
@@ -61,10 +61,6 @@ func (d planDependencies) String() string {
 	}
 	return buf.String()
 }
-
-// typeDependencies contains a set of the IDs of types that
-// this view depends on.
-type typeDependencies map[descpb.ID]struct{}
 
 // checkViewMatchesMaterialized ensures that if a view is required, then the view
 // is materialized or not as desired.

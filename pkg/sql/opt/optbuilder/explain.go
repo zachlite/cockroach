@@ -18,26 +18,40 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/errors"
 )
 
 func (b *Builder) buildExplain(explain *tree.Explain, inScope *scope) (outScope *scope) {
-	if _, ok := explain.Statement.(*tree.Execute); ok {
-		panic(pgerror.New(
-			pgcode.FeatureNotSupported, "EXPLAIN EXECUTE is not supported; use EXPLAIN ANALYZE",
-		))
-	}
+	b.pushWithFrame()
 
-	stmtScope := b.buildStmtAtRoot(explain.Statement, nil /* desiredTypes */)
+	// We don't allow the statement under Explain to reference outer columns, so we
+	// pass a "blank" scope rather than inScope.
+	stmtScope := b.buildStmtAtRoot(explain.Statement, nil /* desiredTypes */, b.allocScope())
 
+	b.popWithFrame(stmtScope)
 	outScope = inScope.push()
 
+	var cols colinfo.ResultColumns
 	switch explain.Mode {
 	case tree.ExplainPlan:
 		telemetry.Inc(sqltelemetry.ExplainPlanUseCounter)
+		if explain.Flags[tree.ExplainFlagVerbose] || explain.Flags[tree.ExplainFlagTypes] {
+			cols = colinfo.ExplainPlanVerboseColumns
+		} else {
+			cols = colinfo.ExplainPlanColumns
+		}
 
 	case tree.ExplainDistSQL:
-		telemetry.Inc(sqltelemetry.ExplainDistSQLUseCounter)
+		analyze := explain.Flags[tree.ExplainFlagAnalyze]
+		if analyze {
+			telemetry.Inc(sqltelemetry.ExplainAnalyzeUseCounter)
+		} else {
+			telemetry.Inc(sqltelemetry.ExplainDistSQLUseCounter)
+		}
+		if analyze && tree.IsStmtParallelized(explain.Statement) {
+			panic(pgerror.Newf(pgcode.FeatureNotSupported,
+				"EXPLAIN ANALYZE does not support RETURNING NOTHING statements"))
+		}
+		cols = colinfo.ExplainDistSQLColumns
 
 	case tree.ExplainOpt:
 		if explain.Flags[tree.ExplainFlagVerbose] {
@@ -45,27 +59,24 @@ func (b *Builder) buildExplain(explain *tree.Explain, inScope *scope) (outScope 
 		} else {
 			telemetry.Inc(sqltelemetry.ExplainOptUseCounter)
 		}
+		cols = colinfo.ExplainOptColumns
 
 	case tree.ExplainVec:
 		telemetry.Inc(sqltelemetry.ExplainVecUseCounter)
-	case tree.ExplainDDL:
-		if explain.Flags[tree.ExplainFlagDeps] {
-			telemetry.Inc(sqltelemetry.ExplainDDLDeps)
-		} else {
-			telemetry.Inc(sqltelemetry.ExplainDDLStages)
-		}
+		cols = colinfo.ExplainVecColumns
 
 	default:
-		panic(errors.Errorf("EXPLAIN mode %s not supported", explain.Mode))
+		panic(pgerror.Newf(pgcode.FeatureNotSupported,
+			"EXPLAIN ANALYZE does not support RETURNING NOTHING statements"))
 	}
-	b.synthesizeResultColumns(outScope, colinfo.ExplainPlanColumns)
+	b.synthesizeResultColumns(outScope, cols)
 
 	input := stmtScope.expr.(memo.RelExpr)
 	private := memo.ExplainPrivate{
 		Options:  explain.ExplainOptions,
 		ColList:  colsToColList(outScope.cols),
 		Props:    stmtScope.makePhysicalProps(),
-		StmtType: explain.Statement.StatementReturnType(),
+		StmtType: explain.Statement.StatementType(),
 	}
 	outScope.expr = b.factory.ConstructExplain(input, &private)
 	return outScope

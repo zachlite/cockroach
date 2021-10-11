@@ -12,11 +12,11 @@ package kvserver
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	crdberrors "github.com/cockroachdb/errors"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -35,31 +36,9 @@ type raftRequestInfo struct {
 type raftRequestQueue struct {
 	syncutil.Mutex
 	infos []raftRequestInfo
-}
-
-func (q *raftRequestQueue) drain() ([]raftRequestInfo, bool) {
-	q.Lock()
-	defer q.Unlock()
-	if len(q.infos) == 0 {
-		return nil, false
-	}
-	infos := q.infos
-	q.infos = nil
-	return infos, true
-}
-
-func (q *raftRequestQueue) recycle(processed []raftRequestInfo) {
-	if cap(processed) > 4 {
-		return // cap recycled slice lengths
-	}
-	q.Lock()
-	defer q.Unlock()
-	if q.infos == nil {
-		for i := range processed {
-			processed[i] = raftRequestInfo{}
-		}
-		q.infos = processed[:0]
-	}
+	// TODO(nvanbenschoten): consider recycling []raftRequestInfo slices. This
+	// could be done without any new mutex locking by storing two slices here
+	// and swapping them under lock in processRequestQueue.
 }
 
 // HandleSnapshot reads an incoming streaming snapshot and applies it if
@@ -214,6 +193,7 @@ func (s *Store) withReplicaForRequest(
 		return roachpb.NewError(err)
 	}
 	defer r.raftMu.Unlock()
+	ctx = r.AnnotateCtx(ctx)
 	r.setLastReplicaDescriptors(req)
 	return f(ctx, r)
 }
@@ -269,61 +249,65 @@ func (s *Store) processRaftRequestWithReplica(
 // handle any updated Raft Ready state. It also adds and later removes the
 // (potentially) necessary placeholder to protect against concurrent access to
 // the keyspace encompassed by the snapshot but not yet guarded by the replica.
-//
-// If (and only if) no error is returned, the placeholder (if any) in inSnap
-// will have been removed.
 func (s *Store) processRaftSnapshotRequest(
 	ctx context.Context, snapHeader *SnapshotRequest_Header, inSnap IncomingSnapshot,
 ) *roachpb.Error {
 	if snapHeader.IsPreemptive() {
-		return roachpb.NewError(errors.AssertionFailedf(`expected a raft or learner snapshot`))
+		return roachpb.NewError(crdberrors.AssertionFailedf(`expected a raft or learner snapshot`))
 	}
 
 	return s.withReplicaForRequest(ctx, &snapHeader.RaftMessageRequest, func(
 		ctx context.Context, r *Replica,
 	) (pErr *roachpb.Error) {
-		ctx = r.AnnotateCtx(ctx)
 		if snapHeader.RaftMessageRequest.Message.Type != raftpb.MsgSnap {
 			log.Fatalf(ctx, "expected snapshot: %+v", snapHeader.RaftMessageRequest)
 		}
 
-		var stats handleRaftReadyStats
-		typ := removePlaceholderFailed
-		defer func() {
-			// In the typical case, handleRaftReadyRaftMuLocked calls through to
-			// applySnapshot which will apply the snapshot and also converts the
-			// placeholder entry (if any) to the now-initialized replica. However we
-			// may also error out below, or raft may also ignore the snapshot, and so
-			// the placeholder would remain.
-			//
-			// NB: it's unclear in which case we could actually get raft to ignore a
-			// snapshot attached to a placeholder. A placeholder existing implies that
-			// the snapshot is targeting an uninitialized replica. The only known reason
-			// for raft to ignore a snapshot is if it doesn't move the applied index
-			// forward, but an uninitialized replica's applied index is zero (and a
-			// snapshot's is at least raftInitialLogIndex).
-			if inSnap.placeholder != nil {
-				if _, err := s.removePlaceholder(ctx, inSnap.placeholder, typ); err != nil {
-					log.Fatalf(ctx, "unable to remove placeholder: %s", err)
-				}
+		// Check to see if a snapshot can be applied. Snapshots can always be applied
+		// to initialized replicas. Note that if we add a placeholder we need to
+		// already be holding Replica.raftMu in order to prevent concurrent
+		// raft-ready processing of uninitialized replicas.
+		var addedPlaceholder bool
+		var removePlaceholder bool
+		if err := func() error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			placeholder, err := s.canApplySnapshotLocked(ctx, snapHeader)
+			if err != nil {
+				// If the storage cannot accept the snapshot, return an
+				// error before passing it to RawNode.Step, since our
+				// error handling options past that point are limited.
+				log.Infof(ctx, "cannot apply snapshot: %s", err)
+				return err
 			}
-		}()
 
-		if snapHeader.RaftMessageRequest.Message.From == snapHeader.RaftMessageRequest.Message.To {
-			// This is a special case exercised during recovery from loss of quorum.
-			// In this case, a forged snapshot will be sent to the replica and will
-			// hit this code path (if we make up a non-existent follower, Raft will
-			// drop the message, hence we are forced to make the receiver the sender).
-			//
-			// Unfortunately, at the time of writing, Raft assumes that a snapshot
-			// is always received from the leader (of the given term), which plays
-			// poorly with these forged snapshots. However, a zero sender works just
-			// fine as the value zero represents "no known leader".
-			//
-			// We prefer not to introduce a zero origin of the message as throughout
-			// our code we rely on it being present. Instead, we reset the origin
-			// that raft looks at just before handing the message off.
-			snapHeader.RaftMessageRequest.Message.From = 0
+			if placeholder != nil {
+				// NB: The placeholder added here is either removed below after a
+				// preemptive snapshot is applied or after the next call to
+				// Replica.handleRaftReady. Note that we can only get here if the
+				// replica doesn't exist or is uninitialized.
+				if err := s.addPlaceholderLocked(placeholder); err != nil {
+					log.Fatalf(ctx, "could not add vetted placeholder %s: %+v", placeholder, err)
+				}
+				addedPlaceholder = true
+			}
+			return nil
+		}(); err != nil {
+			return roachpb.NewError(err)
+		}
+
+		if addedPlaceholder {
+			// If we added a placeholder remove it before we return unless some other
+			// part of the code takes ownership of the removal (indicated by setting
+			// removePlaceholder to false).
+			removePlaceholder = true
+			defer func() {
+				if removePlaceholder {
+					if s.removePlaceholder(ctx, snapHeader.RaftMessageRequest.RangeID) {
+						atomic.AddInt32(&s.counts.removedPlaceholders, 1)
+					}
+				}
+			}()
 		}
 		// NB: we cannot get errRemoved here because we're promised by
 		// withReplicaForRequest that this replica is not currently being removed
@@ -331,25 +315,9 @@ func (s *Store) processRaftSnapshotRequest(
 		if err := r.stepRaftGroup(&snapHeader.RaftMessageRequest); err != nil {
 			return roachpb.NewError(err)
 		}
-
-		// We've handed the snapshot to Raft, which will typically apply it (in
-		// which case the placeholder, if any, is removed by the time
-		// handleRaftReadyRaftMuLocked returns. We handle the other case in a
-		// defer() above. Note that we could infer when the placeholder should still
-		// be there based on `stats.snap.applied`	but it is a questionable use of
-		// stats and more susceptible to bugs.
-		typ = removePlaceholderDropped
-		var expl string
-		var err error
-		stats, expl, err = r.handleRaftReadyRaftMuLocked(ctx, inSnap)
-		if !stats.snap.applied {
-			// This line would be hit if a snapshot was sent when it isn't necessary
-			// (i.e. follower was able to catch up via the log in the interim) or when
-			// multiple snapshots raced (as is possible when raft leadership changes
-			// and both the old and new leaders send snapshots).
-			log.Infof(ctx, "ignored stale snapshot at index %d", snapHeader.RaftMessageRequest.Message.Snapshot.Metadata.Index)
-		}
+		_, expl, err := r.handleRaftReadyRaftMuLocked(ctx, inSnap)
 		maybeFatalOnRaftReadyErr(ctx, expl, err)
+		removePlaceholder = false
 		return nil
 	})
 }
@@ -453,18 +421,19 @@ func (s *Store) processRequestQueue(ctx context.Context, rangeID roachpb.RangeID
 		return false
 	}
 	q := (*raftRequestQueue)(value)
-	infos, ok := q.drain()
-	if !ok {
+	q.Lock()
+	infos := q.infos
+	q.infos = nil
+	q.Unlock()
+	if len(infos) == 0 {
 		return false
 	}
-	defer q.recycle(infos)
 
 	var hadError bool
 	for i := range infos {
 		info := &infos[i]
 		if pErr := s.withReplicaForRequest(
 			ctx, info.req, func(ctx context.Context, r *Replica) *roachpb.Error {
-				ctx = r.raftSchedulerCtx(ctx)
 				return s.processRaftRequestWithReplica(ctx, r, info.req)
 			},
 		); pErr != nil {
@@ -510,13 +479,12 @@ func (s *Store) processReady(ctx context.Context, rangeID roachpb.RangeID) {
 	}
 
 	r := (*Replica)(value)
-	ctx = r.raftSchedulerCtx(ctx)
+	ctx = r.AnnotateCtx(ctx)
 	start := timeutil.Now()
 	stats, expl, err := r.handleRaftReady(ctx, noSnap)
-	maybeFatalOnRaftReadyErr(ctx, expl, err)
+	removed := maybeFatalOnRaftReadyErr(ctx, expl, err)
 	elapsed := timeutil.Since(start)
 	s.metrics.RaftWorkingDurationNanos.Inc(elapsed.Nanoseconds())
-	s.metrics.RaftHandleReadyLatency.RecordValue(elapsed.Nanoseconds())
 	// Warn if Raft processing took too long. We use the same duration as we
 	// use for warning about excessive raft mutex lock hold times. Long
 	// processing time means we'll have starved local replicas of ticks and
@@ -525,6 +493,21 @@ func (s *Store) processReady(ctx context.Context, rangeID roachpb.RangeID) {
 		log.Warningf(ctx, "handle raft ready: %.1fs [applied=%d, batches=%d, state_assertions=%d]",
 			elapsed.Seconds(), stats.entriesProcessed, stats.batchesProcessed, stats.stateAssertions)
 	}
+	if !removed && !r.IsInitialized() {
+		// Only an uninitialized replica can have a placeholder since, by
+		// definition, an initialized replica will be present in the
+		// replicasByKey map. While the replica will usually consume the
+		// placeholder itself, that isn't guaranteed and so this invocation
+		// here is crucial (i.e. don't remove it).
+		//
+		// We need to hold raftMu here to prevent removing a placeholder that is
+		// actively being used by Store.processRaftRequest.
+		r.raftMu.Lock()
+		if s.removePlaceholder(ctx, r.RangeID) {
+			atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
+		}
+		r.raftMu.Unlock()
+	}
 }
 
 func (s *Store) processTick(ctx context.Context, rangeID roachpb.RangeID) bool {
@@ -532,12 +515,11 @@ func (s *Store) processTick(ctx context.Context, rangeID roachpb.RangeID) bool {
 	if !ok {
 		return false
 	}
-	livenessMap, _ := s.livenessMap.Load().(liveness.IsLiveMap)
+	livenessMap, _ := s.livenessMap.Load().(IsLiveMap)
 
 	start := timeutil.Now()
 	r := (*Replica)(value)
-	ctx = r.raftSchedulerCtx(ctx)
-	exists, err := r.tick(ctx, livenessMap)
+	exists, err := r.tick(livenessMap)
 	if err != nil {
 		log.Errorf(ctx, "%v", err)
 	}
@@ -561,7 +543,7 @@ func (s *Store) processTick(ctx context.Context, rangeID roachpb.RangeID) bool {
 // which may have a copy of the previous livenessMap where the now-live node is
 // down. Those instances should be rare, however, and we expect the newly live
 // node to eventually unquiesce the range.
-func (s *Store) nodeIsLiveCallback(l livenesspb.Liveness) {
+func (s *Store) nodeIsLiveCallback(l kvserverpb.Liveness) {
 	s.updateLivenessMap()
 
 	s.mu.replicas.Range(func(k int64, v unsafe.Pointer) bool {
@@ -585,34 +567,12 @@ func (s *Store) processRaft(ctx context.Context) {
 
 	s.scheduler.Start(ctx, s.stopper)
 	// Wait for the scheduler worker goroutines to finish.
-	if err := s.stopper.RunAsyncTask(ctx, "sched-wait", s.scheduler.Wait); err != nil {
-		s.scheduler.Wait(ctx)
-	}
+	s.stopper.RunWorker(ctx, s.scheduler.Wait)
 
-	_ = s.stopper.RunAsyncTask(ctx, "sched-tick-loop", s.raftTickLoop)
-	_ = s.stopper.RunAsyncTask(ctx, "coalesced-hb-loop", s.coalescedHeartbeatsLoop)
+	s.stopper.RunWorker(ctx, s.raftTickLoop)
+	s.stopper.RunWorker(ctx, s.coalescedHeartbeatsLoop)
 	s.stopper.AddCloser(stop.CloserFn(func() {
 		s.cfg.Transport.Stop(s.StoreID())
-	}))
-
-	// We'll want to cancel all in-flight proposals. Proposals embed tracing
-	// spans in them, and we don't want to be leaking any.
-	s.stopper.AddCloser(stop.CloserFn(func() {
-		s.VisitReplicas(func(r *Replica) (more bool) {
-			r.mu.Lock()
-			r.mu.proposalBuf.FlushLockedWithoutProposing(ctx)
-			for k, prop := range r.mu.proposals {
-				delete(r.mu.proposals, k)
-				prop.finishApplication(
-					context.Background(),
-					proposalResult{
-						Err: roachpb.NewError(roachpb.NewAmbiguousResultError("store is stopping")),
-					},
-				)
-			}
-			r.mu.Unlock()
-			return true
-		})
 	}))
 }
 
@@ -645,7 +605,7 @@ func (s *Store) raftTickLoop(ctx context.Context) {
 			s.scheduler.EnqueueRaftTicks(rangeIDs...)
 			s.metrics.RaftTicks.Inc(1)
 
-		case <-s.stopper.ShouldQuiesce():
+		case <-s.stopper.ShouldStop():
 			return
 		}
 	}
@@ -655,6 +615,8 @@ func (s *Store) updateLivenessMap() {
 	nextMap := s.cfg.NodeLiveness.GetIsLiveMap()
 	for nodeID, entry := range nextMap {
 		if entry.IsLive {
+			// Make sure we ask all live nodes for closed timestamp updates.
+			s.cfg.ClosedTimestamp.Clients.EnsureClient(nodeID)
 			continue
 		}
 		// Liveness claims that this node is down, but ConnHealth gets the last say
@@ -686,7 +648,7 @@ func (s *Store) coalescedHeartbeatsLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			s.sendQueuedHeartbeats(ctx)
-		case <-s.stopper.ShouldQuiesce():
+		case <-s.stopper.ShouldStop():
 			return
 		}
 	}

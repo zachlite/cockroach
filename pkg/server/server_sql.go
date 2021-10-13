@@ -351,7 +351,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	blobspb.RegisterBlobServer(cfg.grpcServer, blobService)
 
 	// Create trace service for inter-node sharing of inflight trace spans.
-	tracingService := service.New(cfg.Tracer)
+	tracingService := service.New(cfg.Settings.Tracer)
 	tracingservicepb.RegisterTracingServer(cfg.grpcServer, tracingService)
 
 	sqllivenessKnobs, _ := cfg.TestingKnobs.SQLLivenessKnobs.(*sqlliveness.TestingKnobs)
@@ -611,7 +611,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	// cluster.
 	var traceCollector *collector.TraceCollector
 	if hasNodeLiveness {
-		traceCollector = collector.New(cfg.nodeDialer, nodeLiveness, cfg.Tracer)
+		traceCollector = collector.New(cfg.nodeDialer, nodeLiveness, cfg.Settings.Tracer)
 	}
 
 	*execCfg = sql.ExecutorConfig{
@@ -835,9 +835,8 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	}
 
 	var spanConfigMgr *spanconfigmanager.Manager
-	if !codec.ForSystemTenant() || cfg.SpanConfigsEnabled {
-		// Instantiate a span config manager. If we're the host tenant we'll
-		// only do it if COCKROACH_EXPERIMENTAL_SPAN_CONFIGS is set.
+	if cfg.SpanConfigsEnabled {
+		// Instantiate a span config manager.
 		spanConfigKnobs, _ := cfg.TestingKnobs.SpanConfig.(*spanconfig.TestingKnobs)
 		spanConfigMgr = spanconfigmanager.New(
 			cfg.db,

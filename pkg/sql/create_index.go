@@ -423,17 +423,6 @@ func replaceExpressionElemsWithVirtualCols(
 			}
 
 			if !isInverted && !colinfo.ColumnTypeIsIndexable(typ) {
-				if colinfo.ColumnTypeIsInvertedIndexable(typ) {
-					return errors.WithHint(
-						pgerror.Newf(
-							pgcode.InvalidTableDefinition,
-							"index element %s of type %s is not indexable in a non-inverted index",
-							elem.Expr.String(),
-							typ.Name(),
-						),
-						"you may want to create an inverted index instead. See the documentation for inverted indexes: "+docs.URL("inverted-indexes.html"),
-					)
-				}
 				return pgerror.Newf(
 					pgcode.InvalidTableDefinition,
 					"index element %s of type %s is not indexable",
@@ -614,9 +603,12 @@ var interleavedTableDisabledError = errors.WithIssueLink(
 	errors.IssueLink{IssueURL: build.MakeIssueURL(52009)},
 )
 
-var interleavedTableDisabledMigrationError = pgnotice.Newf(
-	"creation of new interleaved tables or interleaved indexes is no longer supported and will be ignored." +
-		" For details, see https://www.cockroachlabs.com/docs/releases/v20.2.0#deprecations")
+var interleavedTableDisabledMigrationError = errors.WithIssueLink(
+	pgerror.New(pgcode.WarningDeprecatedFeature,
+		"creation of new interleaved tables or interleaved indexes is no longer supported and will be ignored."+
+			" For details, see https://www.cockroachlabs.com/docs/releases/v20.2.0#deprecations"),
+	errors.IssueLink{IssueURL: build.MakeIssueURL(52009)},
+)
 
 // interleavedTableDeprecationAction either returns an error, if interleaved
 // tables are disabled, or sends a notice, if they're not. Returns any error

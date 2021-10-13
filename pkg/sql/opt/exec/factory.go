@@ -91,9 +91,6 @@ type Subquery struct {
 	// Root is the root Node of the plan for this subquery. This Node returns
 	// results as required for the specific Type.
 	Root Node
-	// RowCount is the estimated number of rows that Root will output, negative
-	// if the stats weren't available to make a good estimate.
-	RowCount int64
 }
 
 // SubqueryMode indicates how the results of the subquery are to be processed.
@@ -322,11 +319,6 @@ type ExecutionStats struct {
 	KVContentionTime optional.Duration
 	KVBytesRead      optional.Uint
 	KVRowsRead       optional.Uint
-
-	StepCount         optional.Uint
-	InternalStepCount optional.Uint
-	SeekCount         optional.Uint
-	InternalSeekCount optional.Uint
 
 	// Nodes on which this operator was executed.
 	Nodes []string

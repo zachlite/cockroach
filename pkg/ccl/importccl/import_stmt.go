@@ -49,14 +49,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/gcjob"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -2157,7 +2155,7 @@ func (r *importResumer) Resume(ctx context.Context, execCtx interface{}) error {
 		return err
 	}
 
-	if err := r.publishTables(ctx, p.ExecCfg(), res); err != nil {
+	if err := r.publishTables(ctx, p.ExecCfg()); err != nil {
 		return err
 	}
 
@@ -2306,10 +2304,9 @@ func (r *importResumer) publishSchemas(ctx context.Context, execCfg *sql.Executo
 }
 
 // checkForUDTModification checks whether any of the types referenced by the
-// table being imported into have been modified incompatibly since they were
-// read during import planning. If they have, it may be unsafe to continue
-// with the import since we could be ingesting data that is no longer valid
-// for the type.
+// table being imported into have been modified since they were read during
+// import planning. If they have, it may be unsafe to continue with the import
+// since we could be ingesting data that is no longer valid for the type.
 //
 // Egs: Renaming an enum value mid import could result in the import ingesting a
 // value that is no longer valid.
@@ -2317,11 +2314,7 @@ func (r *importResumer) publishSchemas(ctx context.Context, execCfg *sql.Executo
 // TODO(SQL Schema): This method might be unnecessarily aggressive in failing
 // the import. The semantics of what concurrent type changes are/are not safe
 // during an IMPORT still need to be ironed out. Once they are, we can make this
-// method more conservative in what it uses to deem a type change dangerous. At
-// the time of writing, changes to privileges and back-references are supported.
-// Additions of new values could be supported but are not. Renaming of logical
-// enum values or removal of enum values will need to forever remain
-// incompatible.
+// method more conservative in what it uses to deem a type change dangerous.
 func (r *importResumer) checkForUDTModification(
 	ctx context.Context, execCfg *sql.ExecutorConfig,
 ) error {
@@ -2329,131 +2322,32 @@ func (r *importResumer) checkForUDTModification(
 	if details.Types == nil {
 		return nil
 	}
-	// typeDescsAreEquivalent returns true if a and b are the same types save
-	// for the version, modification time, privileges, or the set of referencing
-	// descriptors.
-	typeDescsAreEquivalent := func(a, b *descpb.TypeDescriptor) (bool, error) {
-		clearIgnoredFields := func(d *descpb.TypeDescriptor) *descpb.TypeDescriptor {
-			d = protoutil.Clone(d).(*descpb.TypeDescriptor)
-			d.ModificationTime = hlc.Timestamp{}
-			d.Privileges = nil
-			d.Version = 0
-			d.ReferencingDescriptorIDs = nil
-			return d
-		}
-		aData, err := protoutil.Marshal(clearIgnoredFields(a))
-		if err != nil {
-			return false, err
-		}
-		bData, err := protoutil.Marshal(clearIgnoredFields(b))
-		if err != nil {
-			return false, err
-		}
-		return bytes.Equal(aData, bData), nil
-	}
-	// checkTypeIsEquivalent checks that the current version of the type as
-	// retrieved from the collection is equivalent to the previously saved
-	// type descriptor used by the import.
-	checkTypeIsEquivalent := func(
-		ctx context.Context, txn *kv.Txn, col *descs.Collection,
-		savedTypeDesc *descpb.TypeDescriptor,
-	) error {
-		typeDesc, err := catalogkv.MustGetTypeDescByID(
-			ctx, txn, execCfg.Codec, savedTypeDesc.GetID(),
-		)
-		if err != nil {
-			return errors.Wrap(err, "resolving type descriptor when checking version mismatch")
-		}
-		if typeDesc.GetModificationTime() == savedTypeDesc.GetModificationTime() {
-			return nil
-		}
-		equivalent, err := typeDescsAreEquivalent(typeDesc.TypeDesc(), savedTypeDesc)
-		if err != nil {
-			return errors.NewAssertionErrorWithWrappedErrf(
-				err, "failed to check for type descriptor equivalence for type %q (%d)",
-				typeDesc.GetName(), typeDesc.GetID())
-		}
-		if equivalent {
-			return nil
-		}
-		return errors.WithHint(
-			errors.Newf(
-				"type descriptor %q (%d) has been modified, potentially incompatibly,"+
-					" since import planning; aborting to avoid possible corruption",
-				typeDesc.GetName(), typeDesc.GetID(),
-			),
-			"retrying the IMPORT operation may succeed if the operation concurrently"+
-				" modifying the descriptor does not reoccur during the retry attempt",
-		)
-	}
-	checkTypesAreEquivalent := func(
-		ctx context.Context, txn *kv.Txn, col *descs.Collection,
-	) error {
+	return sql.DescsTxn(ctx, execCfg, func(ctx context.Context, txn *kv.Txn,
+		col *descs.Collection) error {
 		for _, savedTypeDesc := range details.Types {
-			if err := checkTypeIsEquivalent(
-				ctx, txn, col, savedTypeDesc.Desc,
-			); err != nil {
-				return err
+			typeDesc, err := catalogkv.MustGetTypeDescByID(ctx, txn, execCfg.Codec,
+				savedTypeDesc.Desc.GetID())
+			if err != nil {
+				return errors.Wrap(err, "resolving type descriptor when checking version mismatch")
+			}
+			if typeDesc.GetModificationTime() != savedTypeDesc.Desc.GetModificationTime() {
+				return errors.Newf("type descriptor %d has a different modification time than what"+
+					" was saved during import planning; unsafe to import since the type"+
+					" has changed during the course of the import",
+					typeDesc.GetID())
 			}
 		}
 		return nil
-	}
-	return sql.DescsTxn(ctx, execCfg, checkTypesAreEquivalent)
-}
-
-// writeStubStatisticsForImportedTables writes "stub" statistics for new tables
-// created during an import.
-func (r *importResumer) writeStubStatisticsForImportedTables(
-	ctx context.Context, execCfg *sql.ExecutorConfig, res roachpb.BulkOpSummary,
-) {
-	details := r.job.Details().(jobspb.ImportDetails)
-	for _, tbl := range details.Tables {
-		if tbl.IsNew {
-			desc := tabledesc.NewBuilder(tbl.Desc).BuildImmutableTable()
-			id := roachpb.BulkOpSummaryID(uint64(desc.GetID()), uint64(desc.GetPrimaryIndexID()))
-			rowCount := uint64(res.EntryCounts[id])
-			// TODO(michae2): collect distinct and null counts during import.
-			distinctCount := uint64(float64(rowCount) * memo.UnknownDistinctCountRatio)
-			nullCount := uint64(float64(rowCount) * memo.UnknownNullCountRatio)
-			// Because we don't yet have real distinct and null counts, only produce
-			// single-column stats to avoid the appearance of perfectly correlated
-			// columns.
-			multiColEnabled := false
-			statistics, err := sql.StubTableStats(desc, jobspb.ImportStatsName, multiColEnabled)
-			if err == nil {
-				for _, statistic := range statistics {
-					statistic.RowCount = rowCount
-					statistic.DistinctCount = distinctCount
-					statistic.NullCount = nullCount
-				}
-				// TODO(michae2): parallelize insertion of statistics.
-				err = stats.InsertNewStats(ctx, execCfg.InternalExecutor, nil /* txn */, statistics)
-			}
-			if err != nil {
-				// Failure to create statistics should not fail the entire import.
-				log.Warningf(
-					ctx, "error while creating statistics during import of %q: %v",
-					desc.GetName(), err,
-				)
-			}
-		}
-	}
+	})
 }
 
 // publishTables updates the status of imported tables from OFFLINE to PUBLIC.
-func (r *importResumer) publishTables(
-	ctx context.Context, execCfg *sql.ExecutorConfig, res roachpb.BulkOpSummary,
-) error {
+func (r *importResumer) publishTables(ctx context.Context, execCfg *sql.ExecutorConfig) error {
 	details := r.job.Details().(jobspb.ImportDetails)
 	// Tables should only be published once.
 	if details.TablesPublished {
 		return nil
 	}
-
-	// Write stub statistics for new tables created during the import. This should
-	// be sufficient until the CREATE STATISTICS run finishes.
-	r.writeStubStatisticsForImportedTables(ctx, execCfg, res)
-
 	log.Event(ctx, "making tables live")
 
 	err := sql.DescsTxn(ctx, execCfg, func(

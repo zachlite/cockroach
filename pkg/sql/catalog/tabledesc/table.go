@@ -227,12 +227,13 @@ func GetShardColumnName(colNames []string, buckets int32) string {
 	)
 }
 
-// GetConstraintInfo implements the TableDescriptor interface.
+// GetConstraintInfo returns a summary of all constraints on the table.
 func (desc *wrapper) GetConstraintInfo() (map[string]descpb.ConstraintDetail, error) {
 	return desc.collectConstraintInfo(nil)
 }
 
-// GetConstraintInfoWithLookup implements the TableDescriptor interface.
+// GetConstraintInfoWithLookup returns a summary of all constraints on the
+// table using the provided function to fetch a TableDescriptor from an ID.
 func (desc *wrapper) GetConstraintInfoWithLookup(
 	tableLookup catalog.TableLookupFn,
 ) (map[string]descpb.ConstraintDetail, error) {
@@ -495,19 +496,19 @@ func FindPublicColumnWithID(
 	return col, nil
 }
 
-// FindInvertedColumn returns a catalog.Column matching the inverted column
+// FindVirtualColumn returns a catalog.Column matching the virtual column
 // descriptor in `spec` if not nil, nil otherwise.
-func FindInvertedColumn(
-	desc catalog.TableDescriptor, invertedColDesc *descpb.ColumnDescriptor,
+func FindVirtualColumn(
+	desc catalog.TableDescriptor, virtualColDesc *descpb.ColumnDescriptor,
 ) catalog.Column {
-	if invertedColDesc == nil {
+	if virtualColDesc == nil {
 		return nil
 	}
-	found, err := desc.FindColumnWithID(invertedColDesc.ID)
+	found, err := desc.FindColumnWithID(virtualColDesc.ID)
 	if err != nil {
 		panic(errors.HandleAsAssertionFailure(err))
 	}
-	invertedColumn := found.DeepCopy()
-	*invertedColumn.ColumnDesc() = *invertedColDesc
-	return invertedColumn
+	virtualColumn := found.DeepCopy()
+	*virtualColumn.ColumnDesc() = *virtualColDesc
+	return virtualColumn
 }

@@ -11,62 +11,74 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 )
 
 // offsetOp is an operator that implements offset, returning everything
 // after the first n tuples in its input.
 type offsetOp struct {
-	colexecop.OneInputHelper
+	OneInputNode
 
-	offset uint64
+	offset int
 
 	// seen is the number of tuples seen so far.
-	seen uint64
+	seen int
 }
 
-var _ colexecop.Operator = &offsetOp{}
+var _ colexecbase.Operator = &offsetOp{}
 
 // NewOffsetOp returns a new offset operator with the given offset.
-func NewOffsetOp(input colexecop.Operator, offset uint64) colexecop.Operator {
-	return &offsetOp{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		offset:         offset,
+func NewOffsetOp(input colexecbase.Operator, offset int) colexecbase.Operator {
+	c := &offsetOp{
+		OneInputNode: NewOneInputNode(input),
+		offset:       offset,
 	}
+	return c
 }
 
-func (c *offsetOp) Next() coldata.Batch {
+func (c *offsetOp) Init() {
+	c.input.Init()
+}
+
+func (c *offsetOp) Next(ctx context.Context) coldata.Batch {
 	for {
-		bat := c.Input.Next()
+		bat := c.input.Next(ctx)
 		length := bat.Length()
 		if length == 0 {
 			return bat
 		}
 
-		c.seen += uint64(length)
+		c.seen += length
 
 		delta := c.seen - c.offset
 		// If the current batch encompasses the offset "boundary",
 		// add the elements after the boundary to the selection vector.
-		if delta > 0 && delta < uint64(length) {
+		if delta > 0 && delta < length {
 			sel := bat.Selection()
-			outputStartIdx := length - int(delta)
+			outputStartIdx := length - delta
 			if sel != nil {
 				copy(sel, sel[outputStartIdx:length])
 			} else {
 				bat.SetSelection(true)
 				sel = bat.Selection()[:delta] // slice for bounds check elimination
 				for i := range sel {
-					//gcassert:bce
 					sel[i] = outputStartIdx + i
 				}
 			}
-			bat.SetLength(int(delta))
+			bat.SetLength(delta)
 		}
 
 		if c.seen > c.offset {
 			return bat
 		}
 	}
+}
+
+// Reset resets the offsetOp for another run. Primarily used for
+// benchmarks.
+func (c *offsetOp) Reset() {
+	c.seen = 0
 }

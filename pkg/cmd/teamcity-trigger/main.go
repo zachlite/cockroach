@@ -67,9 +67,6 @@ func runTC(queueBuild func(string, map[string]string)) {
 		// By default, fail the stress run on the first test failure.
 		maxFails := 1
 
-		// By default, a single test times out after 40 minutes.
-		testTimeout := 40 * time.Minute
-
 		// The stress program by default runs as many instances in parallel as there
 		// are CPUs. Each instance itself can run tests in parallel. The amount of
 		// parallelism needs to be reduced, or we can run into OOM issues,
@@ -81,26 +78,20 @@ func runTC(queueBuild func(string, map[string]string)) {
 		// halve these values.
 		parallelism := 4
 
-		opts := map[string]string{
-			"env.PKG": importPath,
-		}
-
-		// Conditionally override settings.
+		// Conditionally override stressflags.
 		switch importPath {
 		case baseImportPath + "kv/kvnemesis":
 			// Disable -maxruns for kvnemesis. Run for the full 1h.
 			maxRuns = 0
-			opts["env.COCKROACH_KVNEMESIS_STEPS"] = "10000"
 		case baseImportPath + "sql/logictest":
 			// Stress logic tests with reduced parallelism (to avoid overloading the
 			// machine, see https://github.com/cockroachdb/cockroach/pull/10966).
 			parallelism /= 2
-			// Increase logic test timeout.
-			testTimeout = 2 * time.Hour
-			maxTime = 3 * time.Hour
 		}
 
-		opts["env.TESTTIMEOUT"] = testTimeout.String()
+		opts := map[string]string{
+			"env.PKG": importPath,
+		}
 
 		// Run non-race build.
 		opts["env.GOFLAGS"] = fmt.Sprintf("-parallel=%d", parallelism)
@@ -108,11 +99,11 @@ func runTC(queueBuild func(string, map[string]string)) {
 			maxRuns, maxTime, maxFails, parallelism)
 		queueBuild("Cockroach_Nightlies_Stress", opts)
 
-		// Run race build. With run with -p 1 to avoid overloading the machine.
-		noParallelism := 1
+		// Run race build. Reduce the parallelism to avoid overloading the machine.
+		parallelism /= 2
 		opts["env.GOFLAGS"] = fmt.Sprintf("-race -parallel=%d", parallelism)
 		opts["env.STRESSFLAGS"] = fmt.Sprintf("-maxruns %d -maxtime %s -maxfails %d -p %d",
-			maxRuns, maxTime, maxFails, noParallelism)
+			maxRuns, maxTime, maxFails, parallelism)
 		queueBuild("Cockroach_Nightlies_Stress", opts)
 	}
 }

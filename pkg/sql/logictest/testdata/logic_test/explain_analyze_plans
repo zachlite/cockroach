@@ -1,0 +1,101 @@
+# LogicTest: 5node 5node-spec-planning
+
+# These tests are different from explain_analyze because they require manual
+# data placement.
+
+statement ok
+CREATE TABLE kv (k INT PRIMARY KEY, v INT, FAMILY (k, v))
+
+statement ok
+INSERT INTO kv SELECT i, i FROM generate_series(1,5) AS g(i);
+
+statement ok
+CREATE TABLE kw (k INT PRIMARY KEY, w INT, FAMILY (k, w))
+
+statement ok
+INSERT INTO kw SELECT i, i FROM generate_series(1,5) AS g(i)
+
+# Split into 5 parts, each row from each table goes to one node.
+statement ok
+ALTER TABLE kv SPLIT AT SELECT i FROM generate_series(1,5) AS g(i)
+
+statement ok
+ALTER TABLE kw SPLIT AT SELECT i FROM generate_series(1,5) AS g(i)
+
+statement ok
+ALTER TABLE kv EXPERIMENTAL_RELOCATE SELECT ARRAY[i], i FROM generate_series(1, 5) as g(i)
+
+statement ok
+ALTER TABLE kw EXPERIMENTAL_RELOCATE SELECT ARRAY[i], i FROM generate_series(1, 5) as g(i)
+
+# Verify that EXPLAIN ANALYZE (DISTSQL) annotates plans with collected
+# statistics.
+
+# Verify data placement.
+query TTTI colnames,rowsort
+SELECT start_key, end_key, replicas, lease_holder from [SHOW RANGES FROM TABLE kv]
+----
+start_key  end_key  replicas  lease_holder
+NULL       /1       {1}       1
+/1         /2       {1}       1
+/2         /3       {2}       2
+/3         /4       {3}       3
+/4         /5       {4}       4
+/5         NULL     {5}       5
+
+# Verify data placement.
+query TTTI colnames,rowsort
+SELECT start_key, end_key, replicas, lease_holder from [SHOW RANGES FROM TABLE kw]
+----
+start_key  end_key  replicas  lease_holder
+NULL       /1       {5}       5
+/1         /2       {1}       1
+/2         /3       {2}       2
+/3         /4       {3}       3
+/4         /5       {4}       4
+/5         NULL     {5}       5
+
+# This query verifies stat collection for the tableReader, mergeJoiner, and
+# aggregator.
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT kv.k, avg(kw.k) FROM kv JOIN kw ON kv.k=kw.k GROUP BY kv.k]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzcml1v4rgXxu__n8LyFdWECXYCpUgjwX-2u2JEky4v0nZHqEqJFxA0YZ3Qzqjqd18FOiqEYjsETtzelbz-zpOTxyeP-oSjf-e4gXuXncuvfbTkc_R7171C3y__uu602g5qOa3Ozd-XqPRbu9fv_dk5Qy-Hzh4-zwzkPYxLs8fPs7P1abMH9M1tO2j2iFxndQj6gpL96I-uO7hG_79ZbRxiAwehzxzvnkW48R0TbGCKDWxhA9vYwFU8NPCChyMWRSFPDnlandD2f-BGxcDTYLGMk81DA49CznDjCcfTeM5wA_e9uznrMs9n3KxgA_ss9qbz1W1mD80Fn957_Cc2cG_hBVEDlc3kxu4ybqBmgnHnxaMJi1C4jBfJxuQS8XIx39iUHNZ2UTy9Zw1UibCBefgYIc48P9k5fDbw-tA1-C-wu59o4kWTbaRmcvzQwFHsjRlukGfjsEprqUofdys1iV610r21vl4n5D7jzE9f51NyY6Wj3pDtivEx-xZOA8ZNkuqQOfsnLjXJp7MvfDqerP98lcxoUnXV2A82WsbTMHgVb1utVyWsLE-9NR5zNvbikJukuiOwgd21GC-PuOXc3Dpu_9YZdDqlJkmK6Q2uSk2a_PXVHTj9l7-PVVW2HrDz9YBYHlrJJ09vcHXbTgSykl9dFviMr9oANanZtE7SClUFQZbBW5K8qYYTlsOFSVN9ooBdzYZd28Im6r5F5A5t0rJpaeRb5NBazxU8WrNa6d5aAT2a6OfRkqe-6dG1j-XRmXtA4tHkvXs0VTcAqmB2Vtm0NTIAcmitdQWz06xWurdWQLOj-pmd5Klvmt35xzK7zD0gMTv63s3OUjcAS8Hs7LJZ1cgAyKG1XiiYnWa10r21ApqdpZ_ZSZ76ptnVP5bZZe4BidlZ793sbHUDsBXMrlrW6PUnh1ZalVtd2STIC3xEUBhPGNeoarq3akDTs_UzPcnz3zS9i49lepl7QGJ69ns3PUn63GXRIgwilooe375yJVGL-WO2VjcKl3zErnk4Wt1m_dNdnbfKFXwWxeu9dP2jHfzaFcVerBpdVvaWnwWhXjwCsfIw7O-CTAwa6EBz6aDKQDJ0JC0CoV48QqojMzKodqSEQQMdaC4dVBlomqGyybCNUEmfbAkLsCGcRYxAKhBvtYShWjwD1UAHCqKDLeznFEL65KrwZFrbfhtOU0Ct-KFFjACyWIsR8g0tR2LQQId8Q4uqxZ4XP7SIEUAWazFCvqHlSAwa6JBvaFHtyLrQpy_EQ8vF6YYWVQ3FCPmGFlUNJQwgi7WYAWZokTCA6EB2vk1FU8uJPoiyfJueSocsH6fFMMCMHjKIXEocqyNglNj5QC0gMhEzwGQFYgaY-UMGkUsJ5baUdASMEjvfuluOTWzxDEJ2PlPhhxAJA0x0IoOAWfrEEDBziAwCZhARJyAwT0ODBETCALP86pCByCBgRrJTpiDKEBrEIBIGmOVXhyBEBgEzkp0yClGGEGchRBKGEA3SEAkD0CCiQx4igcg3iCi_4DokIlSDRISeMBE5EgPI8ithgBlEZBA6KAEziNATJiLKbalBIiJhgBlEZBA6KAH0jyTiRIRKEhGqQSIiYYAZRGQQMMuvDomIDAJmCCgiERk-_--_AAAA__92z6ud
+
+# This query verifies stats collection for the hashJoiner, distinct and sorter.
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT DISTINCT(kw.w) FROM kv JOIN kw ON kv.k = kw.w ORDER BY kw.w]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzMmV1v4kYXx--fTzGaq0SPWXvGNgSklZJuqMoqhS3kotsVFw6eBgtiU3sIu4ry3StDEbFN5ozXcOw7jF_4nxd-_p-ZF5r8s6Q9Ounf9T_dk3W8JL-OR7-Tb_0_v9zdDIbkZnhz9_WvPrm4HUzuJ3_cXZL_Lk2PB8NP9-Risfmwudzdtngmn0eDIVlsyGhIFs8fFuQjSc-T0fi2Pya_fN0eTalBw8gXQ-9JJLT3jTJqUE4NalODOtSgLp0adBVHM5EkUZxe8rK9YeB_pz3LoEG4Wsv066lBZ1EsaO-FykAuBe3Re-9hKcbC80VsWtSgvpBesNz-zOL5ehUHT178gxp0svLCpEdaZvrDo7XsketUxoMnZ3ORkGgtV-mX6SPkerV881V62WBEZPAkesRKqEHjaJOQWHh-enL6atDdpTvhe2EPP8jcS-ZZSdfp9VODJtJ7FLTHXo2fi7Sdi3RTjNRkb2PltcfK34318Jx1GMW-iIWfedI0vRO65EjCfvOS-ecoCEVsslxrLMXf8uKaXX6Mg8f59tPPZEp8F7O1DKLwkLBshg7R22UqfRskMghn0mRuIaWnE1eufE6F8qlC5NYZQzzId8vkfxLFUsQmL2T__2fR1tZI7bHEbgUdze4wakUr086lVkO5W055J6Oc6fOLwaQ2ecu0G8vqErF2NFidibVprGbIrGaNYjVQ6QOr2w1ldbnyKVnNamA1kP89qwvZx2A116cA1yCe3TKdxhKvRKxXGsTLxNo04nFk4vFGEQ-o9IF4nYYSr1z5lMTjNRAPyP-eeIXsYxDP1qeArUE8p2W6jSVeiVi7GsTLxNo04tnIxLMbRTyg0gfiXTWUeOXKpySeXQPxgPzviVfIPgbxHH0KOBrEc1uN5V2JSF2Ydy2TES_0CSORnIu4seRzkMnnNIp8QM0P5Os2lHzlyqckn1MD-YD878lXyD72SuQRbWORrKIwEfl_yNEnW2nqhf8odnVKonU8E1_iaLb9md3haHvfduL3RSJ3Z_nuYBDuTyXSk7rLmda74ZeR0K1fAnOraHi_C0pVgtWfB97B0MBKdCSvQ0K3fgm5jiypQbcjgUqw-vOQ68gzaeB5DdZbDXZGgpW_2VYG4GCQRS2BoZAF0IBCFrUGbjdAA8rbzlH2s6vuZ1d5czurP39zW_1PynaidZ7oO_U7HrUElB5QS6jmeE5UCRQuARoqcUmXz1f1Ox61BBTHo5ZQzfGcRgOO4wE0VHI8uh3ZVXKaWepXBFOPEZU8j7ZvBEa6SnDRNtCACJx5ChjqUGwPJALlnccKw0S2rTnQ1uo5oI3SUYB_REmjWgNOKYF5AsW_QMXAYQwgAocxhZGihkUbtQacVRu1BhwTAxWjkovRbktABMrCDVMPq6wNAL8wrtbgY9QacBZvIBEoUxIgAsnHACJwXn6FoTXb1ldAWxcmjBp8TGHCqMHHqDVUKuWJ8oDkY4Bi4DAGEIHiY3iZ7dBz7TaU2Q8909sb0IDjY6BioKzGQCJwNqDUgysHBldeGFzxfQygAcfHQCJwGKMWUc3HaP_BAREoPoYXRtdsWztAW6v3sVB8DC9MGKfzMSfSgFNKtQYcHwMVA4cxgAgcxgBjCoqHUGtAWY8BNCD5GKAYOD4GEIHjY9SDKwcGV67eGsPxMcA2JQ5jABE4jAE2KlHWYyARKEM8V2-X2sB2qV0YMRB8zPT1f_8GAAD___YPXUg=
+
+# This query verifies stats collection for WITH ORDINALITY and the hashJoiner.
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT * FROM kv WITH ORDINALITY AS a, kv WITH ORDINALITY AS b]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzEkV9v0zAQwN_5FNY9ATJq86c8-CkRK1pQaEYTCcaUBzc-bdZSO9jO2FT1u6Mkk9ZWbWmR0B59dz_f7-5WYH_VwCCfptNPBWlNTT7Ps6_kZvrjKo2TGYlncXr9c0reXiR5kX9L35Hn0vdD4f0D-Z4UlySbXySzOE2KaxLnhNMDiUUJFJQWOONLtMBuwIOSQmN0hdZq04VWfUEiHoGNKUjVtK4LlxQqbRDYCpx0NQKDgi9qnCMXaEZjoCDQcVn3394_RI2RS26egELecGUZ-QAUFtxVd2iJbl3TOkY6zLVNvRGaAIUkI04ukZGxBQpG_7bEIBddslxTGEqfrazjtwjMW9PTzTMjpOK1dE8jb1v8REF8xKp1UqsXz0Ni_jlimyv1X3ulwT-uNPjfKw0Pir34tEobgQbFlkzZkX8r2TPdJbd3X7RUaEbh9nRZ5x95NPJpFNAopNGERh9Pu4t_5tyTcw4yR9toZXF3_r0_j7uhUdzisESrW1PhldFV32Z4Zj3XBwRaN2S94ZGoIdUJbsLeUTjcgr1d2D8KB8c7B2d09nfh8Cg82elcrt_8CQAA__8pXOKU
+
+# Verify that EXPLAIN ANALYZE on an unsupported query doesn't return an error.
+statement ok
+EXPLAIN ANALYZE (DISTSQL) SHOW QUERIES;
+
+statement ok
+EXPLAIN ANALYZE (DISTSQL) EXPLAIN SELECT 1
+
+# This query verifies support for zeroNode in DistSQL.
+query T
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT sum(k) FROM kv WHERE FALSE]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyUkF9LwzAUxd_9FOE-dRBY42OenFqxsH-u8w-MPIT2WseyZuYmIpR-d2kj6ISJPt5zzzm_5LZArwYkFNk0u1qz4Ay7WS1mbJM9LaeTfM6S67xYF3fTEfu0UNgnu1F07d7Y4222ytizNoQKODS2wrneI4HcgADF4eBsiUTW9VI7GPLqHWTKYdscgu9lxaG0DkG24LfeIEh40CYgjVPgUKHXWzM0puySJSkrX0KzoxGojoMN_quFvK4RZNrxv5Mmde2w1t66sTimFfez5EKcxoj_YFZIB9sQHiFOf0BxwKrGeDSywZW4dLYcMHFcDLlBqJB83Io45E1c9Q_8Hha_hs9_hFV39hEAAP__TsavHw==
+
+# This query verifies stat collection for the tableReader and windower.
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT avg(k) OVER () FROM kv]
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJzElE2P2jAQhu_9FdacQDLKJz34tLSlFSqFLaDtxyoHbzyiEUmc2g7LCvHfKzurLlmxbXppjhnPO_M-M9EcQf_MgcF6Op--3ZBa5eT9avmJ3E6_Xs8nswWZLCbzb9-nZPButt6sP8-H5DGV77eD3ZAsb6YrMhg2qt0-AQqlFLjgBWpgtxAAhRAoREAhBgpjSChUSqaotVQ25egEM3EA5lPIyqo2NpxQSKVCYEcwmckRGGz4XY4r5AKV5wMFgYZnuWuz219VKiu4egAK64qXmpGRZxsva8PIlbVxx036AzWRtals0JYwdZWfhWzabElMViAjvgYKSt5ropAL-5icKDSpjw614VsEFpzoCxRP5utSKoEKRct4crrA-SUrhbxH5Y3bkJObD4OrYPgbKmz7s9na8Dw_91_wAymwkOqB1BoFI7FPPmZvuo3DVsQDprXJZPlU9aUxhK0xBN2XGfx9mV448qJe1hl25wg7cEQjL-6FI-rOEXXgiEfu9_z_HHF3jrgDx3jU-5G4QLFCXclS47Njcbmyb48Iii02F0fLWqV4rWTq2jSfS6dzAYHaNK9B8zEr3ZMzeC4O_ih-3RL7z8Xhv3R2KI6q6wIun6W2hah_C3H_FsY9WEhOr34FAAD__0TLsBE=
+
+# Very simple query to make it easier to spot regressions when rewriting results
+# in test files.
+query T
+SELECT url FROM [EXPLAIN ANALYZE (DISTSQL) SELECT k FROM kv WHERE k = 0];
+----
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyMkE9rs0AYxO_vp3iY99LCFvW6UEhoLRVsTDXQP8HDRh9S0bh2dw0twe9e1FxaKPQ4v5mdHZ4T7HsDiSyMw5sN9aahuzR5oG34vI6X0YqWq2X88hrSxW2UbbLH-JLO0XoO1kd6ug_TkGq6Jj-HQKtLXqkDW8gtAuQCndEFW6vNiE5TICo_IH2Bqu16N-JcoNCGIU9wlWsYEhu1azhlVbLxfAiU7FTVTLX1cdGZ6qDMJwSyTrVWkudfeb73HwJJ7yQtAgjslCve2JLuXTfCscb1XfMDRQm56sCSfIt8EJi98yzr1J4hg0H8fXrKttOt5W-rf2v2h1yAyz3P57G6NwWvjS6mb2aZTO8mULJ1sxvMImpna8iHf18BAAD__2zVkpI=

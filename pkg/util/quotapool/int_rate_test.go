@@ -160,13 +160,12 @@ func TestRateLimiterBasic(t *testing.T) {
 
 		// THis should need to wait one second for the bucket to fill up.
 		go doWait(30)
-		timer := ensureNotDone()
+		ensureNotDone()
 
 		// Adjust the rate and the burst down. This should move the current
 		// capacity down to 0 and lower the burst. It will now take 10 seconds
 		// before the bucket is full.
 		rl.UpdateLimit(1, 10)
-		waitForTimersNotEqual(timer)
 		mt.Advance(9 * time.Second)
 		ensureNotDone()
 		mt.Advance(time.Second)
@@ -233,35 +232,5 @@ func TestRateLimiterWithVerySmallDelta(t *testing.T) {
 
 	// Advance the clock by the nanosecond and ensure that we get notified.
 	mt.Advance(time.Nanosecond)
-	require.NoError(t, <-errCh)
-}
-
-// TestRateLimiterMinimumWait tests that the WithMinimumWait option works.
-func TestRateLimiterMinimumWait(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	t0 := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-	mt := timeutil.NewManualTime(t0)
-	rl := quotapool.NewRateLimiter("test", 2e9, 1e10,
-		quotapool.WithTimeSource(mt), quotapool.WithMinimumWait(time.Microsecond))
-	ctx := context.Background()
-	require.NoError(t, rl.WaitN(ctx, 1))
-	errCh := make(chan error)
-	// Attempt to acquire the entire quota, we should be 1 short.
-	// That means we need to acquire 1 and the rate is 2e9 so it'll happen in
-	// half a nanosecond. We want to see that we block for the minimum duration,
-	// 1us.
-	go func() { errCh <- rl.WaitN(ctx, 1e10) }()
-
-	// Ensure that we indeed block on a timer.
-	testutils.SucceedsSoon(t, func() error {
-		if len(mt.Timers()) == 0 {
-			return errors.Errorf("no timers found")
-		}
-		return nil
-	})
-	require.EqualValues(t, t0.Add(time.Microsecond), mt.Timers()[0])
-	// Advance the clock by the microsecond and ensure that we get notified.
-	mt.Advance(time.Microsecond)
 	require.NoError(t, <-errCh)
 }

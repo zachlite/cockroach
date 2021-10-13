@@ -96,9 +96,6 @@ type serializeNode struct {
 	rowIdx int
 }
 
-// serializeNode is not a mutationPlanNode itself, but it might wrap one.
-var _ mutationPlanNode = &serializeNode{}
-
 func (s *serializeNode) startExec(params runParams) error {
 	if f, ok := s.source.(planNodeFastPath); ok {
 		s.rowCount, s.fastPath = f.FastPathResults()
@@ -132,14 +129,6 @@ func (s *serializeNode) FastPathResults() (int, bool) {
 	return s.rowCount, s.fastPath
 }
 
-func (s *serializeNode) rowsWritten() int64 {
-	m, ok := s.source.(mutationPlanNode)
-	if !ok {
-		return 0
-	}
-	return m.rowsWritten()
-}
-
 // requireSpool implements the planNodeRequireSpool interface.
 func (s *serializeNode) requireSpool() {}
 
@@ -159,9 +148,6 @@ type rowCountNode struct {
 	source   batchedPlanNode
 	rowCount int
 }
-
-// rowCountNode is not a mutationPlanNode itself, but it might wrap one.
-var _ mutationPlanNode = &rowCountNode{}
 
 func (r *rowCountNode) startExec(params runParams) error {
 	done := false
@@ -185,11 +171,3 @@ func (r *rowCountNode) Close(ctx context.Context)           { r.source.Close(ctx
 
 // FastPathResults implements the planNodeFastPath interface.
 func (r *rowCountNode) FastPathResults() (int, bool) { return r.rowCount, true }
-
-func (r *rowCountNode) rowsWritten() int64 {
-	m, ok := r.source.(mutationPlanNode)
-	if !ok {
-		return 0
-	}
-	return m.rowsWritten()
-}

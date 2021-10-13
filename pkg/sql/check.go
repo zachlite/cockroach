@@ -21,10 +21,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -48,7 +48,7 @@ func validateCheckExpr(
 	if err != nil {
 		return err
 	}
-	colSelectors := tabledesc.ColumnsSelectors(tableDesc.PublicColumns())
+	colSelectors := tabledesc.ColumnsSelectors(tableDesc.Columns)
 	columns := tree.AsStringWithFlags(&colSelectors, tree.FmtSerializable)
 	queryStr := fmt.Sprintf(`SELECT %s FROM [%d AS t] WHERE NOT (%s) LIMIT 1`, columns, tableDesc.GetID(), exprStr)
 	log.Infof(ctx, "validating check constraint %q with query %q", expr, queryStr)
@@ -60,7 +60,7 @@ func validateCheckExpr(
 	if rows.Len() > 0 {
 		return pgerror.Newf(pgcode.CheckViolation,
 			"validation of CHECK %q failed on row: %s",
-			expr, labeledRowValues(tableDesc.PublicColumns(), rows))
+			expr, labeledRowValues(tableDesc.Columns, rows))
 	}
 	return nil
 }
@@ -87,17 +87,16 @@ func matchFullUnacceptableKeyQuery(
 
 	returnedCols := srcCols
 	for i := 0; i < nCols; i++ {
-		col, err := srcTbl.FindColumnWithID(fk.OriginColumnIDs[i])
+		col, err := srcTbl.FindColumnByID(fk.OriginColumnIDs[i])
 		if err != nil {
 			return "", nil, err
 		}
-		srcCols[i] = tree.NameString(col.GetName())
+		srcCols[i] = tree.NameString(col.Name)
 		srcNullExistsClause[i] = fmt.Sprintf("%s IS NULL", srcCols[i])
 		srcNotNullExistsClause[i] = fmt.Sprintf("%s IS NOT NULL", srcCols[i])
 	}
 
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		id := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for _, id := range srcTbl.GetPrimaryIndex().ColumnIDs {
 		alreadyPresent := false
 		for _, otherID := range fk.OriginColumnIDs {
 			if id == otherID {
@@ -106,11 +105,11 @@ func matchFullUnacceptableKeyQuery(
 			}
 		}
 		if !alreadyPresent {
-			col, err := tabledesc.FindPublicColumnWithID(srcTbl, id)
+			col, err := srcTbl.FindActiveColumnByID(id)
 			if err != nil {
 				return "", nil, err
 			}
-			returnedCols = append(returnedCols, col.GetName())
+			returnedCols = append(returnedCols, col.Name)
 		}
 	}
 
@@ -134,18 +133,17 @@ func matchFullUnacceptableKeyQuery(
 // values in the key are excluded from matching (for both MATCH FULL and MATCH
 // SIMPLE).
 //
-// For example, a FK constraint on columns (a_id, b_id) on the table "child",
-// referencing columns (a, b) on the table "parent", would require the following
-// query:
+// For example, a FK constraint on columns (a_id, b_id) with an index c_id on
+// the table "child", referencing columns (a, b) with an index p_id on the table
+// "parent", would require the following query:
 //
-// SELECT s.a_id, s.b_id, s.rowid
-//  FROM (
-//        SELECT a_id, b_id, rowid
-//          FROM [<ID of child> AS src]@{IGNORE_FOREIGN_KEYS}
-//         WHERE a_id IS NOT NULL AND b_id IS NOT NULL
-//       ) AS s
-//       LEFT JOIN [<id of parent> AS target] AS t ON s.a_id = t.a AND s.b_id = t.b
-// WHERE t.a IS NULL
+// SELECT
+//   s.a_id, s.b_id, s.pk1, s.pk2
+// FROM
+//   (SELECT * FROM child@c_idx WHERE a_id IS NOT NULL AND b_id IS NOT NULL) AS s
+//   LEFT OUTER JOIN parent@p_idx AS t ON s.a_id = t.a AND s.b_id = t.b
+// WHERE
+//   t.a IS NULL
 // LIMIT 1  -- if limitResults is set
 //
 // TODO(radu): change this to a query which executes as an anti-join when we
@@ -161,8 +159,7 @@ func nonMatchingRowQuery(
 		return "", nil, err
 	}
 	// Get primary key columns not included in the FK
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		pkColID := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for _, pkColID := range srcTbl.GetPrimaryIndex().ColumnIDs {
 		found := false
 		for _, id := range fk.OriginColumnIDs {
 			if pkColID == id {
@@ -171,11 +168,11 @@ func nonMatchingRowQuery(
 			}
 		}
 		if !found {
-			column, err := tabledesc.FindPublicColumnWithID(srcTbl, pkColID)
+			column, err := srcTbl.FindActiveColumnByID(pkColID)
 			if err != nil {
 				return "", nil, err
 			}
-			originColNames = append(originColNames, column.GetName())
+			originColNames = append(originColNames, column.Name)
 		}
 	}
 	srcCols := make([]string, len(originColNames))
@@ -210,7 +207,7 @@ func nonMatchingRowQuery(
 		`SELECT %[1]s FROM 
 		  (SELECT %[2]s FROM [%[3]d AS src]@{IGNORE_FOREIGN_KEYS} WHERE %[4]s) AS s
 			LEFT OUTER JOIN
-			[%[5]d AS target] AS t
+			(SELECT * FROM [%[5]d AS target]) AS t
 			ON %[6]s
 		 WHERE %[7]s IS NULL %[8]s`,
 		strings.Join(qualifiedSrcCols, ", "), // 1
@@ -229,7 +226,7 @@ func nonMatchingRowQuery(
 // have a matching row in their referenced table.
 //
 // It operates entirely on the current goroutine and is thus able to
-// reuse an existing kv.Txn safely.
+// reuse an existing client.Txn safely.
 func validateForeignKey(
 	ctx context.Context,
 	srcTable *tabledesc.Mutable,
@@ -238,10 +235,12 @@ func validateForeignKey(
 	txn *kv.Txn,
 	codec keys.SQLCodec,
 ) error {
-	targetTable, err := catalogkv.MustGetTableDescByID(ctx, txn, codec, fk.ReferencedTableID)
+	desc, err := catalogkv.GetDescriptorByID(ctx, txn, codec, fk.ReferencedTableID, catalogkv.Immutable,
+		catalogkv.TableDescriptorKind, true /* required */)
 	if err != nil {
 		return err
 	}
+	targetTable := desc.(catalog.TableDescriptor)
 	nCols := len(fk.OriginColumnIDs)
 
 	referencedColumnNames, err := targetTable.NamesForColumnIDs(fk.ReferencedColumnIDs)
@@ -272,10 +271,10 @@ func validateForeignKey(
 			return err
 		}
 		if values.Len() > 0 {
-			return pgerror.WithConstraintName(pgerror.Newf(pgcode.ForeignKeyViolation,
+			return pgerror.Newf(pgcode.ForeignKeyViolation,
 				"foreign key violation: MATCH FULL does not allow mixing of null and nonnull values %s for %s",
 				formatValues(colNames, values), fk.Name,
-			), fk.Name)
+			)
 		}
 	}
 	query, colNames, err := nonMatchingRowQuery(
@@ -297,118 +296,9 @@ func validateForeignKey(
 		return err
 	}
 	if values.Len() > 0 {
-		return pgerror.WithConstraintName(pgerror.Newf(pgcode.ForeignKeyViolation,
+		return pgerror.Newf(pgcode.ForeignKeyViolation,
 			"foreign key violation: %q row %s has no match in %q",
-			srcTable.Name, formatValues(colNames, values), targetTable.GetName()), fk.Name)
-	}
-	return nil
-}
-
-// duplicateRowQuery generates and returns a query for column values that
-// violate the specified unique constraint. Rows in the table with any null
-// values in the key are excluded from matching.
-//
-// For example, a unique constraint on columns (a, b) on the table "tbl" would
-// require the following query:
-//
-// SELECT a, b
-// FROM tbl
-// WHERE a IS NOT NULL AND b IS NOT NULL
-// GROUP BY a, b
-// HAVING count(*) > 1
-// LIMIT 1  -- if limitResults is set
-//
-// The pred argument is a partial unique constraint predicate, which filters the
-// subset of rows that are guaranteed unique by the constraint. If the unique
-// constraint is not partial, pred should be empty.
-func duplicateRowQuery(
-	srcTbl catalog.TableDescriptor, columnIDs []descpb.ColumnID, pred string, limitResults bool,
-) (sql string, colNames []string, _ error) {
-	colNames, err := srcTbl.NamesForColumnIDs(columnIDs)
-	if err != nil {
-		return "", nil, err
-	}
-
-	srcCols := make([]string, len(colNames))
-	for i, n := range colNames {
-		srcCols[i] = tree.NameString(n)
-	}
-
-	// There will be an expression in the WHERE clause for each of the columns,
-	// and possibly one for pred.
-	srcWhere := make([]string, 0, len(srcCols)+1)
-	for i := range srcCols {
-		srcWhere = append(srcWhere, fmt.Sprintf("%s IS NOT NULL", srcCols[i]))
-	}
-
-	// Wrap the predicate in parentheses.
-	if pred != "" {
-		srcWhere = append(srcWhere, fmt.Sprintf("(%s)", pred))
-	}
-
-	limit := ""
-	if limitResults {
-		limit = " LIMIT 1"
-	}
-	return fmt.Sprintf(
-		`SELECT %[1]s FROM [%[2]d AS tbl] WHERE %[3]s GROUP BY %[1]s HAVING count(*) > 1 %[4]s`,
-		strings.Join(srcCols, ", "),     // 1
-		srcTbl.GetID(),                  // 2
-		strings.Join(srcWhere, " AND "), // 3
-		limit,                           // 4
-	), colNames, nil
-}
-
-// validateUniqueConstraint verifies that all the rows in the srcTable
-// have unique values for the given columns.
-//
-// It operates entirely on the current goroutine and is thus able to
-// reuse an existing kv.Txn safely.
-func validateUniqueConstraint(
-	ctx context.Context,
-	srcTable catalog.TableDescriptor,
-	constraintName string,
-	columnIDs []descpb.ColumnID,
-	pred string,
-	ie *InternalExecutor,
-	txn *kv.Txn,
-) error {
-	query, colNames, err := duplicateRowQuery(
-		srcTable, columnIDs, pred, true, /* limitResults */
-	)
-	if err != nil {
-		return err
-	}
-
-	log.Infof(ctx, "validating unique constraint %q (%q [%v]) with query %q",
-		constraintName,
-		srcTable.GetName(),
-		colNames,
-		query,
-	)
-
-	values, err := ie.QueryRow(ctx, "validate unique constraint", txn, query)
-	if err != nil {
-		return err
-	}
-	if values.Len() > 0 {
-		valuesStr := make([]string, len(values))
-		for i := range values {
-			valuesStr[i] = values[i].String()
-		}
-		// Note: this error message mirrors the message produced by Postgres
-		// when it fails to add a unique index due to duplicated keys.
-		return errors.WithDetail(
-			pgerror.WithConstraintName(
-				pgerror.Newf(
-					pgcode.UniqueViolation, "could not create unique constraint %q", constraintName,
-				),
-				constraintName,
-			),
-			fmt.Sprintf(
-				"Key (%s)=(%s) is duplicated.", strings.Join(colNames, ","), strings.Join(valuesStr, ","),
-			),
-		)
+			srcTable.Name, formatValues(colNames, values), targetTable.GetName())
 	}
 	return nil
 }
@@ -425,7 +315,7 @@ func formatValues(colNames []string, values tree.Datums) string {
 }
 
 // checkSet contains a subset of checks, as ordinals into
-// immutable.ActiveChecks. These checks have boolean columns
+// Immutable.ActiveChecks. These checks have boolean columns
 // produced as input to mutations, indicating the result of evaluating the
 // check.
 //
@@ -471,11 +361,11 @@ func checkMutationInput(
 			if err != nil {
 				// If we ran into an error trying to read the check constraint, wrap it
 				// and return.
-				return pgerror.WithConstraintName(errors.Wrapf(err, "failed to satisfy CHECK constraint (%s)", checks[i].Expr), checks[i].Name)
+				return errors.Wrapf(err, "failed to satisfy CHECK constraint (%s)", checks[i].Expr)
 			}
-			return pgerror.WithConstraintName(pgerror.Newf(
+			return pgerror.Newf(
 				pgcode.CheckViolation, "failed to satisfy CHECK constraint (%s)", expr,
-			), checks[i].Name)
+			)
 		}
 		colIdx++
 	}

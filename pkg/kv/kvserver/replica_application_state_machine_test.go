@@ -60,7 +60,7 @@ func TestReplicaStateMachineChangeReplicas(t *testing.T) {
 
 				if deprecated {
 					trigger = roachpb.ChangeReplicasTrigger{
-						DeprecatedChangeType: roachpb.ADD_VOTER,
+						DeprecatedChangeType: roachpb.ADD_REPLICA,
 						DeprecatedReplica:    addedReplDesc,
 						DeprecatedUpdatedReplicas: []roachpb.ReplicaDescriptor{
 							replDesc,
@@ -77,7 +77,7 @@ func TestReplicaStateMachineChangeReplicas(t *testing.T) {
 
 				confChange = raftpb.ConfChange{
 					Type:   raftpb.ConfChangeAddNode,
-					NodeID: uint64(addedReplDesc.ReplicaID),
+					NodeID: uint64(addedReplDesc.NodeID),
 				}
 			} else {
 				// Remove ourselves from the Range.
@@ -86,7 +86,7 @@ func TestReplicaStateMachineChangeReplicas(t *testing.T) {
 
 				if deprecated {
 					trigger = roachpb.ChangeReplicasTrigger{
-						DeprecatedChangeType:      roachpb.REMOVE_VOTER,
+						DeprecatedChangeType:      roachpb.REMOVE_REPLICA,
 						DeprecatedReplica:         removedReplDesc,
 						DeprecatedUpdatedReplicas: []roachpb.ReplicaDescriptor{},
 						DeprecatedNextReplicaID:   replDesc.ReplicaID + 1,
@@ -100,7 +100,7 @@ func TestReplicaStateMachineChangeReplicas(t *testing.T) {
 
 				confChange = raftpb.ConfChange{
 					Type:   raftpb.ConfChangeRemoveNode,
-					NodeID: uint64(removedReplDesc.ReplicaID),
+					NodeID: uint64(removedReplDesc.NodeID),
 				}
 			}
 
@@ -123,7 +123,7 @@ func TestReplicaStateMachineChangeReplicas(t *testing.T) {
 						ReplicatedEvalResult: kvserverpb.ReplicatedEvalResult{
 							State:          &kvserverpb.ReplicaState{Desc: &newDesc},
 							ChangeReplicas: &kvserverpb.ChangeReplicas{ChangeReplicasTrigger: trigger},
-							WriteTimestamp: r.mu.state.GCThreshold.Add(1, 0),
+							Timestamp:      r.mu.state.GCThreshold.Add(1, 0),
 						},
 					},
 					confChange: &decodedConfChange{

@@ -12,16 +12,13 @@ package testcluster
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -29,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,7 +61,7 @@ func TestManualReplication(t *testing.T) {
 	kvDB := tc.Servers[0].DB()
 	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "test")
 
-	tableStartKey := keys.SystemSQLCodec.TablePrefix(uint32(tableDesc.GetID()))
+	tableStartKey := keys.SystemSQLCodec.TablePrefix(uint32(tableDesc.ID))
 	leftRangeDesc, tableRangeDesc, err := tc.SplitRange(tableStartKey)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +77,7 @@ func TestManualReplication(t *testing.T) {
 	}
 
 	// Replicate the table's range to all the nodes.
-	tableRangeDesc, err = tc.AddVoters(
+	tableRangeDesc, err = tc.AddReplicas(
 		tableRangeDesc.StartKey.AsRawKey(), tc.Target(1), tc.Target(2),
 	)
 	if err != nil {
@@ -146,7 +142,7 @@ func TestBasicManualReplication(t *testing.T) {
 	tc := StartTestCluster(t, 3, base.TestClusterArgs{ReplicationMode: base.ReplicationManual})
 	defer tc.Stopper().Stop(context.Background())
 
-	desc, err := tc.AddVoters(keys.MinKey, tc.Target(1), tc.Target(2))
+	desc, err := tc.AddReplicas(keys.MinKey, tc.Target(1), tc.Target(2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +159,7 @@ func TestBasicManualReplication(t *testing.T) {
 	// for the lease to timeout which takes ~9s. Testing leaseholder removal is
 	// not necessary because internal rebalancing avoids ever removing the
 	// leaseholder for the exact reason that it causes performance hiccups.
-	desc, err = tc.RemoveVoters(desc.StartKey.AsRawKey(), tc.Target(0))
+	desc, err = tc.RemoveReplicas(desc.StartKey.AsRawKey(), tc.Target(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +205,7 @@ func TestStopServer(t *testing.T) {
 
 	rpcContext := rpc.NewContext(rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: tc.Server(0).TracerI().(*tracing.Tracer)},
+		AmbientCtx: log.AmbientContext{Tracer: tc.Server(0).ClusterSettings().Tracer},
 		Config:     tc.Server(1).RPCContext().Config,
 		Clock:      tc.Server(1).Clock(),
 		Stopper:    tc.Stopper(),
@@ -264,73 +260,6 @@ func TestStopServer(t *testing.T) {
 	if err := httputil.GetJSON(httpClient1, url, &response); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestRestart(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	stickyEngineRegistry := server.NewStickyInMemEnginesRegistry()
-	defer stickyEngineRegistry.CloseAllStickyInMemEngines()
-
-	const numServers int = 3
-	stickyServerArgs := make(map[int]base.TestServerArgs)
-	for i := 0; i < numServers; i++ {
-		stickyServerArgs[i] = base.TestServerArgs{
-			StoreSpecs: []base.StoreSpec{
-				{
-					InMemory:               true,
-					StickyInMemoryEngineID: "TestRestart" + strconv.FormatInt(int64(i), 10),
-				},
-			},
-			Knobs: base.TestingKnobs{
-				Server: &server.TestingKnobs{
-					StickyEngineRegistry: stickyEngineRegistry,
-				},
-			},
-		}
-	}
-
-	ctx := context.Background()
-	tc := StartTestCluster(t, numServers,
-		base.TestClusterArgs{
-			ReplicationMode:   base.ReplicationAuto,
-			ServerArgsPerNode: stickyServerArgs,
-		})
-	defer tc.Stopper().Stop(ctx)
-	require.NoError(t, tc.WaitForFullReplication())
-
-	ids := make([]roachpb.ReplicationTarget, numServers)
-	for i := range tc.Servers {
-		ids[i] = tc.Target(i)
-	}
-
-	incArgs := &roachpb.IncrementRequest{
-		RequestHeader: roachpb.RequestHeader{
-			Key: roachpb.Key("b"),
-		},
-		Increment: 9,
-	}
-	if _, pErr := kv.SendWrapped(ctx, tc.GetFirstStoreFromServer(t, 0).DB().NonTransactionalSender(), incArgs); pErr != nil {
-		t.Fatal(pErr)
-	}
-	tc.WaitForValues(t, roachpb.Key("b"), []int64{9, 9, 9})
-
-	// First try to restart a single server.
-	tc.StopServer(1)
-	require.NoError(t, tc.RestartServer(1))
-	require.Equal(t, ids[1], tc.Target(1))
-	tc.WaitForValues(t, roachpb.Key("b"), []int64{9, 9, 9})
-
-	// Now restart the whole cluster.
-	require.NoError(t, tc.Restart())
-
-	// Validates that the NodeID and StoreID remain the same after a restart.
-	for i := range tc.Servers {
-		require.Equal(t, ids[i], tc.Target(i))
-	}
-
-	// Verify we can still read data.
-	tc.WaitForValues(t, roachpb.Key("b"), []int64{9, 9, 9})
 }
 
 func TestExpirationBasedLeases(t *testing.T) {

@@ -126,7 +126,7 @@ func runUnreplicatedTruncatedState(t *testing.T, tc unreplicatedTruncStateTest) 
 		FirstIndex: firstIndex,
 	}
 
-	eng := storage.NewDefaultInMemForTesting()
+	eng := storage.NewDefaultInMem()
 	defer eng.Close()
 
 	truncState := roachpb.RaftTruncatedState{

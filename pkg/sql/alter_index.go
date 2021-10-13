@@ -14,41 +14,37 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 )
 
 type alterIndexNode struct {
 	n         *tree.AlterIndex
 	tableDesc *tabledesc.Mutable
-	index     catalog.Index
+	indexDesc *descpb.IndexDescriptor
 }
 
 // AlterIndex applies a schema change on an index.
 // Privileges: CREATE on table.
 func (p *planner) AlterIndex(ctx context.Context, n *tree.AlterIndex) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"ALTER INDEX",
-	); err != nil {
-		return nil, err
-	}
-
-	tableDesc, index, err := p.getTableAndIndex(ctx, &n.Index, privilege.CREATE)
+	tableDesc, indexDesc, err := p.getTableAndIndex(ctx, &n.Index, privilege.CREATE)
 	if err != nil {
 		return nil, err
 	}
-	return &alterIndexNode{n: n, tableDesc: tableDesc, index: index}, nil
+	// As an artifact of finding the index by name, we get a pointer to a
+	// different copy than the one in the tableDesc. To make it easier for the
+	// code below, get a pointer to the index descriptor that's actually in
+	// tableDesc.
+	indexDesc, err = tableDesc.FindIndexByID(indexDesc.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &alterIndexNode{n: n, tableDesc: tableDesc, indexDesc: indexDesc}, nil
 }
 
 // ReadingOwnWrites implements the planNodeReadingOwnWrites interface.
@@ -67,76 +63,34 @@ func (n *alterIndexNode) startExec(params runParams) error {
 		switch t := cmd.(type) {
 		case *tree.AlterIndexPartitionBy:
 			telemetry.Inc(sqltelemetry.SchemaChangeAlterCounterWithExtra("index", "partition_by"))
-			if n.tableDesc.GetLocalityConfig() != nil {
-				return pgerror.Newf(
-					pgcode.FeatureNotSupported,
-					"cannot change the partitioning of an index if the table is part of a multi-region database",
-				)
-			}
-			if n.tableDesc.PartitionAllBy {
-				return pgerror.Newf(
-					pgcode.FeatureNotSupported,
-					"cannot change the partitioning of an index if the table has PARTITION ALL BY defined",
-				)
-			}
-			if n.index.GetPartitioning().NumImplicitColumns() > 0 {
-				return unimplemented.New(
-					"ALTER INDEX PARTITION BY",
-					"cannot ALTER INDEX PARTITION BY on an index which already has implicit column partitioning",
-				)
-			}
-			allowImplicitPartitioning := params.p.EvalContext().SessionData().ImplicitColumnPartitioningEnabled ||
-				n.tableDesc.IsLocalityRegionalByRow()
-			alteredIndexDesc := n.index.IndexDescDeepCopy()
-			newImplicitCols, newPartitioning, err := CreatePartitioning(
-				params.ctx,
-				params.extendedEvalCtx.Settings,
+			partitioning, err := CreatePartitioning(
+				params.ctx, params.extendedEvalCtx.Settings,
 				params.EvalContext(),
-				n.tableDesc,
-				alteredIndexDesc,
-				t.PartitionBy,
-				nil, /* allowedNewColumnNames */
-				allowImplicitPartitioning,
+				n.tableDesc, n.indexDesc, t.PartitionBy)
+			if err != nil {
+				return err
+			}
+			descriptorChanged = !proto.Equal(
+				&n.indexDesc.Partitioning,
+				&partitioning,
+			)
+			err = deleteRemovedPartitionZoneConfigs(
+				params.ctx, params.p.txn,
+				n.tableDesc, n.indexDesc,
+				&n.indexDesc.Partitioning, &partitioning,
+				params.extendedEvalCtx.ExecCfg,
 			)
 			if err != nil {
 				return err
 			}
-			if newPartitioning.NumImplicitColumns > 0 {
-				return unimplemented.New(
-					"ALTER INDEX PARTITION BY",
-					"cannot ALTER INDEX and change the partitioning to contain implicit columns",
-				)
-			}
-			isIndexAltered := tabledesc.UpdateIndexPartitioning(&alteredIndexDesc, n.index.Primary(), newImplicitCols, newPartitioning)
-			if isIndexAltered {
-				oldPartitioning := n.index.GetPartitioning().DeepCopy()
-				if n.index.Primary() {
-					n.tableDesc.SetPrimaryIndex(alteredIndexDesc)
-				} else {
-					n.tableDesc.SetPublicNonPrimaryIndex(n.index.Ordinal(), alteredIndexDesc)
-				}
-				n.index = n.tableDesc.ActiveIndexes()[n.index.Ordinal()]
-				descriptorChanged = true
-				if err := deleteRemovedPartitionZoneConfigs(
-					params.ctx,
-					params.p.txn,
-					n.tableDesc,
-					n.index.GetID(),
-					oldPartitioning,
-					n.index.GetPartitioning(),
-					params.extendedEvalCtx.ExecCfg,
-				); err != nil {
-					return err
-				}
-			}
+			n.indexDesc.Partitioning = partitioning
 		default:
 			return errors.AssertionFailedf(
 				"unsupported alter command: %T", cmd)
 		}
-
 	}
 
-	if err := n.tableDesc.AllocateIDs(params.ctx); err != nil {
+	if err := n.tableDesc.AllocateIDs(); err != nil {
 		return err
 	}
 
@@ -158,13 +112,23 @@ func (n *alterIndexNode) startExec(params runParams) error {
 	// Record this index alteration in the event log. This is an auditable log
 	// event and is recorded in the same transaction as the table descriptor
 	// update.
-	return params.p.logEvent(params.ctx,
-		n.tableDesc.ID,
-		&eventpb.AlterIndex{
-			TableName:  n.n.Index.Table.FQString(),
-			IndexName:  n.index.GetName(),
-			MutationID: uint32(mutationID),
-		})
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogAlterIndex,
+		int32(n.tableDesc.ID),
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			TableName  string
+			IndexName  string
+			Statement  string
+			User       string
+			MutationID uint32
+		}{
+			n.n.Index.Table.FQString(), n.indexDesc.Name, n.n.String(),
+			params.SessionData().User, uint32(mutationID),
+		},
+	)
 }
 
 func (n *alterIndexNode) Next(runParams) (bool, error) { return false, nil }

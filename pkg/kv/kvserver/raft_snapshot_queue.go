@@ -14,8 +14,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -38,10 +39,10 @@ type raftSnapshotQueue struct {
 }
 
 // newRaftSnapshotQueue returns a new instance of raftSnapshotQueue.
-func newRaftSnapshotQueue(store *Store) *raftSnapshotQueue {
+func newRaftSnapshotQueue(store *Store, g *gossip.Gossip) *raftSnapshotQueue {
 	rq := &raftSnapshotQueue{}
 	rq.baseQueue = newBaseQueue(
-		"raftsnapshot", rq, store,
+		"raftsnapshot", rq, store, g,
 		queueConfig{
 			maxSize: defaultQueueMaxSize,
 			// The Raft leader (which sends Raft snapshots) may not be the
@@ -61,8 +62,8 @@ func newRaftSnapshotQueue(store *Store) *raftSnapshotQueue {
 }
 
 func (rq *raftSnapshotQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ spanconfig.StoreReader,
-) (shouldQueue bool, priority float64) {
+	ctx context.Context, now hlc.Timestamp, repl *Replica, _ *config.SystemConfig,
+) (shouldQ bool, priority float64) {
 	// If a follower needs a snapshot, enqueue at the highest priority.
 	if status := repl.RaftStatus(); status != nil {
 		// raft.Status.Progress is only populated on the Raft group leader.
@@ -79,7 +80,7 @@ func (rq *raftSnapshotQueue) shouldQueue(
 }
 
 func (rq *raftSnapshotQueue) process(
-	ctx context.Context, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, repl *Replica, _ *config.SystemConfig,
 ) (processed bool, err error) {
 	// If a follower requires a Raft snapshot, perform it.
 	if status := repl.RaftStatus(); status != nil {
@@ -107,28 +108,25 @@ func (rq *raftSnapshotQueue) processRaftSnapshot(
 	if !ok {
 		return errors.Errorf("%s: replica %d not present in %v", repl, id, desc.Replicas())
 	}
-	snapType := SnapshotRequest_VIA_SNAPSHOT_QUEUE
-	skipSnapLogLimiter := log.Every(10 * time.Second)
+	snapType := SnapshotRequest_RAFT
 
-	if typ := repDesc.GetType(); typ == roachpb.LEARNER || typ == roachpb.NON_VOTER {
-		if fn := repl.store.cfg.TestingKnobs.RaftSnapshotQueueSkipReplica; fn != nil && fn() {
+	// A learner replica is either getting a snapshot of type LEARNER by the node
+	// that's adding it or it's been orphaned and it's about to be cleaned up by
+	// the replicate queue. Either way, no point in also sending it a snapshot of
+	// type RAFT.
+	if repDesc.GetType() == roachpb.LEARNER {
+		if fn := repl.store.cfg.TestingKnobs.ReplicaSkipLearnerSnapshot; fn != nil && fn() {
 			return nil
 		}
-		if index := repl.getAndGCSnapshotLogTruncationConstraints(
-			timeutil.Now(), repDesc.StoreID,
-		); index > 0 {
-			// There is a snapshot being transferred. It's probably an INITIAL snap,
-			// so bail for now and try again later.
+		snapType = SnapshotRequest_LEARNER
+		if index := repl.getAndGCSnapshotLogTruncationConstraints(timeutil.Now(), repDesc.StoreID); index > 0 {
+			// There is a snapshot being transferred. It's probably a LEARNER snap, so
+			// bail for now and try again later.
 			err := errors.Errorf(
-				"skipping snapshot; replica is likely a %s in the process of being added: %s",
-				typ,
-				repDesc,
-			)
-			if skipSnapLogLimiter.ShouldLog() {
-				log.Infof(ctx, "%v", err)
-			} else {
-				log.VEventf(ctx, 3, "%v", err)
-			}
+				"skipping snapshot; replica is likely a learner in the process of being added: %s", repDesc)
+			// TODO(knz): print the error instead when the error package
+			// knows how to expose redactable strings.
+			log.Infof(ctx, "skipping snapshot; replica is likely a learner in the process of being added: %s", repDesc)
 			// TODO(dan): This is super brittle and non-obvious. In the common case,
 			// this check avoids duplicate work, but in rare cases, we send the
 			// learner snap at an index before the one raft wanted here. The raft
@@ -140,7 +138,7 @@ func (rq *raftSnapshotQueue) processRaftSnapshot(
 			// sufficient, this message will be ignored, but if we hit the case
 			// described above, this will cause raft to keep asking for a snap and at
 			// some point the snapshot lock above will be released and we'll fall
-			// through to the logic below.
+			// through to the below.
 			repl.reportSnapshotStatus(ctx, repDesc.ReplicaID, err)
 			return nil
 		}

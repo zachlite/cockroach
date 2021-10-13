@@ -4,10 +4,6 @@ exec
 CREATE TABLE x (a INT PRIMARY KEY)
 ----
 
-exec
-CREATE TABLE y (a INT PRIMARY KEY, b JSONB, INVERTED INDEX (b))
-----
-
 # Tests for EXPLAIN counters.
 
 feature-allowlist
@@ -67,11 +63,6 @@ feature-usage
 SELECT a FROM (VALUES (1)) AS b(y) INNER LOOKUP JOIN x ON y = a
 ----
 sql.plan.hints.lookup-join
-
-feature-usage
-SELECT a FROM (VALUES ('{"a": "b"}'::jsonb)) AS a(z) INNER INVERTED JOIN y ON b @> z
-----
-sql.plan.hints.inverted-join
 
 feature-usage
 SELECT * FROM x@primary
@@ -216,17 +207,13 @@ sql.plan.ops.array.cons
 # Test a few sql.plan.opt.node counters.
 feature-allowlist
 sql.plan.opt.node.project-set
+sql.plan.opt.node.join.*
 ----
 
 feature-usage
 SELECT EXISTS(SELECT * FROM generate_series(1,2))
 ----
 sql.plan.opt.node.project-set
-
-feature-allowlist
-sql.plan.opt.node.join.algo.merge
-sql.plan.opt.node.join.type.inner
-----
 
 feature-usage
 SELECT *
@@ -240,6 +227,7 @@ sql.plan.opt.node.join.type.inner
 
 feature-allowlist
 sql.plan.opt.partial-index.scan
+sql.plan.opt.partial-index.lookup-join
 ----
 
 exec
@@ -250,11 +238,6 @@ feature-usage
 SELECT a FROM x@i WHERE a > 0
 ----
 sql.plan.opt.partial-index.scan
-
-feature-allowlist
-sql.plan.opt.partial-index.scan
-sql.plan.opt.partial-index.lookup-join
-----
 
 feature-usage
 SELECT x1.a FROM x x1 INNER LOOKUP JOIN x x2 ON x1.a = x2.a WHERE x2.a > 0

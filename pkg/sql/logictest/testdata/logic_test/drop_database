@@ -2,9 +2,6 @@ statement ok
 SET CLUSTER SETTING sql.cross_db_views.enabled = TRUE
 
 statement ok
-SET CLUSTER SETTING sql.cross_db_sequence_references.enabled = TRUE
-
-statement ok
 CREATE DATABASE "foo-bar"
 
 query TTTTT
@@ -41,10 +38,8 @@ test       root  NULL  {}  NULL
 query TT
 SELECT job_type, status FROM [SHOW JOBS] WHERE user_name = 'root'
 ----
-SCHEMA CHANGE     succeeded
-SCHEMA CHANGE     succeeded
-SCHEMA CHANGE     succeeded
-SCHEMA CHANGE GC  running
+SCHEMA CHANGE       succeeded
+SCHEMA CHANGE GC    running
 
 statement ok
 CREATE DATABASE "foo bar"

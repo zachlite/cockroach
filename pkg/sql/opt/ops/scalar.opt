@@ -95,8 +95,7 @@ define Variable {
 }
 
 # Const is a typed scalar constant value. The Value field is a tree.Datum value
-# having any datum type that's legal in the expression's context. Do NOT call
-# ConstructConst directly; use ConstructConstVal instead.
+# having any datum type that's legal in the expression's context.
 [Scalar, ConstValue]
 define Const {
     Value Datum
@@ -448,12 +447,6 @@ define Contains {
     Right ScalarExpr
 }
 
-[Scalar, Bool, Comparison, CompositeInsensitive]
-define ContainedBy {
-    Left ScalarExpr
-    Right ScalarExpr
-}
-
 [Scalar, Bool, Comparison]
 define JsonExists {
     Left ScalarExpr
@@ -607,11 +600,6 @@ define FetchTextPath {
 
 [Scalar, Unary, CompositeInsensitive]
 define UnaryMinus {
-    Input ScalarExpr
-}
-
-[Scalar, Unary, CompositeInsensitive]
-define UnaryPlus {
     Input ScalarExpr
 }
 
@@ -771,6 +759,13 @@ define Coalesce {
 define ColumnAccess {
     Input ScalarExpr
     Idx TupleOrdinal
+}
+
+# UnsupportedExpr is used for interfacing with the old planner code. It can
+# encapsulate a TypedExpr that is otherwise not supported by the optimizer.
+[Scalar]
+define UnsupportedExpr {
+    Value TypedExpr
 }
 
 [Scalar, Aggregate]
@@ -1219,6 +1214,6 @@ define KVOptionsItem {
 #
 # TODO(andyk): Consider adding Optgen syntax like:
 #                define ScalarList []ScalarExpr
-[Scalar, List, CompositeInsensitive]
+[Scalar, List]
 define ScalarList {
 }

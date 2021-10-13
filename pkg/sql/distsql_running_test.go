@@ -122,7 +122,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 
 	iter := 0
 	// We'll trace to make sure the test isn't fooling itself.
-	tr := s.TracerI().(*tracing.Tracer)
+	tr := s.Tracer().(*tracing.Tracer)
 	runningCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test")
 	defer cancel()
 	err = shortDB.Txn(runningCtx, func(ctx context.Context, txn *kv.Txn) error {
@@ -211,7 +211,8 @@ func TestDistSQLReceiverErrorRanking(t *testing.T) {
 
 	txn := kv.NewTxn(ctx, db, s.NodeID())
 
-	rw := &errOnlyResultWriter{}
+	// We're going to use a rowResultWriter to which only errors will be passed.
+	rw := newCallbackResultWriter(nil /* fn */)
 	recv := MakeDistSQLReceiver(
 		ctx,
 		rw,

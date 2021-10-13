@@ -17,7 +17,6 @@ import "gossip/gossip.proto";
 import "jobs/jobspb/jobs.proto";
 import "roachpb/app_stats.proto";
 import "roachpb/data.proto";
-import "roachpb/index_usage_stats.proto";
 import "roachpb/metadata.proto";
 import "server/diagnostics/diagnosticspb/diagnostics.proto";
 import "server/status/statuspb/status.proto";
@@ -131,181 +130,6 @@ message NodesResponse {
   ];
 }
 
-// NodesResponse describe the nodes in the cluster.
-// API: PUBLIC ALPHA
-message NodesResponseExternal {
-  // nodes carries the status payloads for all nodes in the cluster.
-  // API: PUBLIC ALPHA
-  repeated NodeResponse nodes = 1 [ (gogoproto.nullable) = false ];
-  // liveness_by_node_id maps each node ID to a liveness status.
-  map<int32, kv.kvserver.liveness.livenesspb.NodeLivenessStatus> liveness_by_node_id = 2 [
-    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID",
-    (gogoproto.nullable) = false,
-    (gogoproto.customname) = "LivenessByNodeID"
-  ];
-}
-
-// Locality is an ordered set of key value Tiers that describe a node's
-// location. The tier keys should be the same across all nodes.
-message Locality {
-  repeated Tier tiers = 1 [(gogoproto.nullable) = false];
-}
-
-// Tier represents one level of the locality hierarchy.
-message Tier {
-  // Key is the name of tier and should match all other nodes.
-  string key = 1;
-  // Value is node specific value corresponding to the key.
-  string value = 2;
-}
-
-message Version {
-  // The names "major" and "minor" are reserved in C in
-  // some platforms (e.g. FreeBSD).
-  int32 major_val = 1 [(gogoproto.customname) = "Major"];
-  int32 minor_val = 2 [(gogoproto.customname) = "Minor"];
-  // Note that patch is a placeholder and will always be zero.
-  int32 patch = 3;
-  // The internal version is used to introduce migrations during the development
-  // cycle. They are subversions that are never the end versions of a release,
-  // i.e. users of stable, public release will only use binaries with the
-  // internal version set to 0.
-  int32 internal = 4;
-}
-
-// NodeDescriptor holds details on node physical/network topology.
-message NodeDescriptor {
-  int32 node_id = 1 [(gogoproto.customname) = "NodeID", (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
-  // address should only be visible by the Admin role.
-  util.UnresolvedAddr address = 2 [(gogoproto.nullable) = false];
-  // attrs should only be visible by the Admin role.
-  cockroach.roachpb.Attributes attrs = 3 [(gogoproto.nullable) = false];
-  Locality locality = 4 [(gogoproto.nullable) = false];
-  Version ServerVersion = 5 [(gogoproto.nullable) = false];
-  string build_tag = 6;
-  int64 started_at = 7;
-  // locality_address should only be visible by the Admin role.
-  repeated cockroach.roachpb.LocalityAddress locality_address = 8 [(gogoproto.nullable) = false];
-  string cluster_name = 9;
-  // The SQL address. If empty, indicates that the base address field
-  // is also used to accept SQL connections.
-  // sql_address should only be visible by the Admin role.
-  util.UnresolvedAddr sql_address = 10 [(gogoproto.nullable) = false,
-    (gogoproto.customname) = "SQLAddress"];
-}
-
-// Percentiles contains a handful of hard-coded percentiles meant to summarize
-// a distribution.
-message Percentiles {
-  double p10 = 1;
-  double p25 = 2;
-  double p50 = 3;
-  double p75 = 4;
-  double p90 = 5;
-  double pMax = 6;
-}
-
-// StoreDescriptor holds store information including store attributes, node
-// descriptor and store capacity.
-message StoreDescriptor {
-  int32 store_id = 1 [(gogoproto.customname) = "StoreID", (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StoreID"];
-  roachpb.Attributes attrs = 2 [(gogoproto.nullable) = false];
-  NodeDescriptor node = 3 [(gogoproto.nullable) = false];
-  roachpb.StoreCapacity capacity = 4 [(gogoproto.nullable) = false];
-}
-
-// StoreStatus records the most recent values of metrics for a store.
-message StoreStatus {
-  // desc is the store descriptor.
-  StoreDescriptor desc = 1 [(gogoproto.nullable) = false];
-
-  // metrics contains the last sampled values for the node metrics.
-  map<string, double> metrics = 2;
-}
-
-// NodeStatus records the most recent values of metrics for a node.
-// API: PUBLIC ALPHA
-message NodeResponse {
-  // desc is the node descriptor.
-  NodeDescriptor desc = 1 [(gogoproto.nullable) = false];
-
-  // build_info describes the `cockroach` executable file.
-  // API: PUBLIC ALPHA
-  build.Info build_info = 2 [(gogoproto.nullable) = false];
-
-  // started_at is the unix timestamp at which the node process was
-  // last started.
-  // API: PUBLIC ALPHA
-  int64 started_at = 3;
-
-  // updated_at is the unix timestamp at which the node status record
-  // was last updated.
-  // API: PUBLIC ALPHA
-  int64 updated_at = 4;
-
-  // metrics contains the last sampled values for the node metrics.
-  map<string, double> metrics = 5;
-
-  // store_statuses provides the store status payloads for all
-  // the stores on that node.
-  repeated StoreStatus store_statuses = 6 [(gogoproto.nullable) = false];
-
-  // args is the list of command-line arguments used to last start the node.
-  // args should only be visible by the Admin role.
-  repeated string args = 7;
-
-  // env is the list of environment variables that influenced
-  // the node's configuration.
-  // env should only be visible by the Admin role.
-  repeated string env = 8;
-
-  // latencies is a map of nodeIDs to nanoseconds which is the latency
-  // between this node and the other node.
-  //
-  // NOTE: this is deprecated and is only set if the min supported
-  //       cluster version is >= VersionRPCNetworkStats.
-  map<int32, int64> latencies = 9 [
-    (gogoproto.nullable) = false,
-    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"
-  ];
-
-  message NetworkActivity {
-    int64 incoming = 1; // in bytes
-    int64 outgoing = 2; // in bytes
-    int64 latency = 3;  // in nanoseconds
-  }
-  // activity is a map of nodeIDs to network statistics from this node
-  // to other nodes.
-  map<int32, NetworkActivity> activity = 10 [
-    (gogoproto.nullable) = false,
-    (gogoproto.castkey) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"
-  ];
-
-  // total_system_memory is the total RAM available to the system
-  // (or, if detected, the memory available to the cgroup this process is in)
-  // in bytes.
-  // API: PUBLIC ALPHA
-  int64 total_system_memory = 11;
-
-  // num_cpus is the number of logical CPUs as reported by the operating system
-  // on the host where the `cockroach` process is running. Note that
-  // this does not report the number of CPUs actually used by `cockroach`;
-  // this parameter is controlled separately.
-  // API: PUBLIC ALPHA
-  int32 num_cpus = 12;
-}
-
-// RegionsRequest requests all available regions.
-message RegionsRequest {}
-
-// RegionsResponse describes the available regions.
-message RegionsResponse {
-  message Region {
-    repeated string zones = 1;
-  }
-  map<string, Region> regions = 1;
-}
-
 message NodeRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
@@ -336,7 +160,6 @@ message RaftState {
   uint64 lead_transferee = 7;
 }
 
-// RangeProblems describes issues reported by a range. For internal use only.
 message RangeProblems {
   bool unavailable = 1;
   bool leader_not_lease_holder = 2;
@@ -355,15 +178,10 @@ message RangeProblems {
   bool raft_log_too_large = 7;
 }
 
-// RangeStatistics describes statistics reported by a range. For internal use
-// only.
 message RangeStatistics {
-  // Queries per second served by this range.
-  //
   // Note that queries per second will only be known by the leaseholder.
   // All other replicas will report it as 0.
   double queries_per_second = 1;
-  // Writes per second served by this range.
   double writes_per_second = 2;
 }
 
@@ -392,24 +210,11 @@ message RangeInfo {
   repeated roachpb.Lease lease_history = 8 [ (gogoproto.nullable) = false ];
   RangeProblems problems = 9 [ (gogoproto.nullable) = false ];
   RangeStatistics stats = 10 [ (gogoproto.nullable) = false ];
-  reserved 11, 12;
+  kv.kvserver.storagepb.LatchManagerInfo latches_local = 11 [ (gogoproto.nullable) = false ];
+  kv.kvserver.storagepb.LatchManagerInfo latches_global = 12 [ (gogoproto.nullable) = false ];
   kv.kvserver.storagepb.LeaseStatus lease_status = 13 [ (gogoproto.nullable) = false ];
   bool quiescent = 14;
   bool ticking = 15;
-  int64 read_latches = 16;
-  int64 write_latches = 17;
-  int64 locks = 18;
-  int64 locks_with_wait_queues = 19;
-  int64 lock_wait_queue_waiters = 20;
-  message LockInfo {
-    string pretty_key = 1;
-    bytes key = 2 [ (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key" ];
-    bool held = 3;
-    int64 waiters = 4;
-    int64 waiting_readers = 5;
-    int64 waiting_writers = 6;
-  }
-  repeated LockInfo top_k_locks_by_wait_queue_waiters = 21 [ (gogoproto.nullable) = false ];
 }
 
 message RangesRequest {
@@ -531,10 +336,6 @@ message LogFilesListRequest {
 }
 
 message LogFilesListResponse {
-  // files is the list of log files under this node's configured logging
-  // directories. Note that the response does not contain detail about
-  // which directory contains which file. The location of each file
-  // is known to the server based on its name and the logging configuration.
   repeated cockroach.util.log.FileInfo files = 1
       [ (gogoproto.nullable) = false ];
 }
@@ -543,10 +344,6 @@ message LogFileRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
   string node_id = 1;
-  // file is the name of the log file to retrieve. Note that it
-  // must not be prefixed by a directory name. The full path to
-  // the file is computed by the server based on the base name
-  // and the logging configuration.
   string file = 2;
   // redact, if true, requests redaction of sensitive data away
   // from the retrieved log entries.
@@ -557,7 +354,7 @@ message LogFileRequest {
 
 enum StacksType {
   GOROUTINE_STACKS = 0;
-  reserved 1;
+  THREAD_STACKS = 1;
 }
 
 message StacksRequest {
@@ -609,18 +406,12 @@ message ProfileRequest {
 
   enum Type {
       HEAP = 0;
-      CPU = 1; // with labels on by default
-      GOROUTINE = 2;
-      THREADCREATE = 3;
-      ALLOCS = 4;
-      BLOCK = 5;
-      MUTEX = 6;
+      CPU = 1; // with labels on
   }
   // The type of profile to retrieve.
   Type type = 5;
 
   int32 seconds = 6; // applies only to Type=CPU, defaults to 30
-  bool labels = 7; // applies only to Type=CPU, defaults to false
 }
 
 message MetricsRequest {
@@ -740,12 +531,10 @@ message ActiveQuery {
   // phase stores the current phase of execution for this query.
   Phase phase = 5;
 
-  // progress is an estimate of the fraction of this query that has been
-  // processed.
   float progress = 6;
 
   // The SQL statement fingerprint, compatible with StatementStatisticsKey.
-  string sql_no_constants = 8;
+  string sql_anon = 8;
 }
 
 // Request object for ListSessions and ListLocalSessions.
@@ -790,7 +579,7 @@ message Session {
   TxnInfo active_txn = 12;
   // The SQL statement fingerprint of the last query executed on this session,
   // compatible with StatementStatisticsKey.
-  string last_active_query_no_constants = 13;
+  string last_active_query_anon = 13;
 }
 
 // An error wrapper object for ListSessionsResponse.
@@ -862,9 +651,7 @@ message CancelSessionResponse {
 message ListContentionEventsRequest {}
 
 // An error wrapper object for ListContentionEventsResponse and
-// ListDistSQLFlowsResponse. Similar to the Statements endpoint, when
-// implemented on a tenant, the `node_id` field refers to the instanceIDs that
-// identify individual tenant pods.
+// ListDistSQLFlowsResponse.
 message ListActivityError {
   // ID of node that was being contacted when this error occurred.
   int32 node_id = 1 [
@@ -1177,33 +964,21 @@ message StoresResponse {
   repeated StoreDetails stores = 1 [ (gogoproto.nullable) = false ];
 }
 
-// StatementsRequest is used by both tenant and node-level
-// implementations to serve fan-out requests across multiple nodes or
-// instances. When implemented on a node, the `node_id` field refers to
-// the cluster nodes by their nodeID. When implemented on a tenant, the
-// `node_id` field refers to the instanceIDs that identify individual
-// tenant pods.
 message StatementsRequest {
   string node_id = 1 [(gogoproto.customname) = "NodeID"];
-  // If this field is set we will use the combined statements API instead.
-  bool combined = 2;
-  // These fields are used for the combined statements API.
-  int64 start = 3 [(gogoproto.nullable) = true];
-  int64 end = 4 [(gogoproto.nullable) = true];
 }
 
 message StatementsResponse {
   message ExtendedStatementStatisticsKey {
     cockroach.sql.StatementStatisticsKey key_data = 1 [(gogoproto.nullable) = false];
     int32 node_id = 2 [(gogoproto.customname) = "NodeID",
-      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
-    google.protobuf.Timestamp aggregated_ts = 3 [(gogoproto.nullable) = false,  (gogoproto.stdtime) = true];
+                       (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
   }
 
   message CollectedStatementStatistics {
     ExtendedStatementStatisticsKey key = 1 [(gogoproto.nullable) = false];
     uint64 id = 3 [(gogoproto.customname) = "ID",
-      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtFingerprintID"];
+                   (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.StmtID"];
     cockroach.sql.StatementStatistics stats = 2 [(gogoproto.nullable) = false];
   }
 
@@ -1223,12 +998,6 @@ message StatementsResponse {
   // Transactions is transaction-level statistics for the collection of
   // statements in this response.
   repeated ExtendedCollectedTransactionStatistics transactions = 5 [(gogoproto.nullable) = false];
-}
-
-message CombinedStatementsStatsRequest {
-  // Unix time range for aggregated statements.
-  int64 start = 1 [(gogoproto.nullable) = true];
-  int64 end = 2 [(gogoproto.nullable) = true];
 }
 
 message StatementDiagnosticsReport {
@@ -1298,25 +1067,10 @@ message JobStatusResponse {
 // Request object for issuing a SQL stats reset request.
 message ResetSQLStatsRequest {
   string node_id = 1 [(gogoproto.customname) = "NodeID"];
-  // reset_persisted_stats specifies if the persisted SQL Stats will be reset
-  // along with the in-memory SQL stats.
-  bool reset_persisted_stats = 2;
 }
 
 // Response object returned by ResetSQLStats.
 message ResetSQLStatsResponse {
-}
-
-// Request object for issuing IndexUsageStatistics request.
-message IndexUsageStatisticsRequest {
-  // node_id is the ID of the node where the stats data shall be retrieved from.
-  // If this is left empty, the cluster-wide aggregated result will be returned.
-  string node_id = 1 [(gogoproto.customname) = "NodeID"];
-}
-
-// Response object returned by IndexUsageStatistics.
-message IndexUsageStatisticsResponse {
-  repeated cockroach.sql.CollectedIndexUsageStatistics statistics = 1 [(gogoproto.nullable) = false];
 }
 
 service Status {
@@ -1333,9 +1087,6 @@ service Status {
       get : "/_status/details/{node_id}"
     };
   }
-
-  // RegionsRequest retrieves all available regions.
-  rpc Regions(RegionsRequest) returns (RegionsResponse) {}
 
   // Nodes returns status info for all commissioned nodes. Decommissioned nodes
   // are not included, except in rare cases where the node doing the
@@ -1360,17 +1111,6 @@ service Status {
     };
   }
 
-  rpc NodesUI(NodesRequest) returns (NodesResponseExternal) {
-    option (google.api.http) = {
-      get : "/_status/nodes_ui"
-    };
-  }
-
-  rpc NodeUI(NodeRequest) returns (NodeResponse) {
-    option (google.api.http) = {
-      get : "/_status/nodes_ui/{node_id}"
-    };
-  }
 
   // RaftDebug requests internal details about Raft.
   rpc RaftDebug(RaftDebugRequest) returns (RaftDebugResponse) {
@@ -1615,13 +1355,6 @@ service Status {
       get: "/_status/statements"
     };
   }
-
-  // Retrieve the combined in-memory and persisted statement stats by date range.
-  rpc CombinedStatementStats(CombinedStatementsStatsRequest) returns (StatementsResponse) {
-    option (google.api.http) = {
-      get: "/_status/combinedstmts"
-    };
-  }
   rpc CreateStatementDiagnosticsReport(CreateStatementDiagnosticsReportRequest) returns (CreateStatementDiagnosticsReportResponse) {
     option (google.api.http) = {
       post: "/_status/stmtdiagreports"
@@ -1653,12 +1386,6 @@ service Status {
     option (google.api.http) = {
       post: "/_status/resetsqlstats"
       body: "*"
-    };
-  }
-
-  rpc IndexUsageStatistics(IndexUsageStatisticsRequest) returns (IndexUsageStatisticsResponse) {
-    option (google.api.http) = {
-      get: "/_status/indexusagestatistics"
     };
   }
 }

@@ -13,34 +13,29 @@ package pgwire
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -57,7 +52,7 @@ import (
 //
 // The "results_buffer_size" connection parameter can be used to override this
 // default for an individual connection.
-var connResultsBufferSize = settings.RegisterByteSizeSetting(
+var connResultsBufferSize = settings.RegisterPublicByteSizeSetting(
 	"sql.defaults.results_buffer.size",
 	"default size of the buffer that accumulates results for a statement or a batch "+
 		"of statements before they are sent to the client. This can be overridden on "+
@@ -69,17 +64,17 @@ var connResultsBufferSize = settings.RegisterByteSizeSetting(
 		"Updating the setting only affects new connections. "+
 		"Setting to 0 disables any buffering.",
 	16<<10, // 16 KiB
-).WithPublic()
+)
 
-var logConnAuth = settings.RegisterBoolSetting(
+var logConnAuth = settings.RegisterPublicBoolSetting(
 	sql.ConnAuditingClusterSettingName,
 	"if set, log SQL client connect and disconnect events (note: may hinder performance on loaded nodes)",
-	false).WithPublic()
+	false)
 
-var logSessionAuth = settings.RegisterBoolSetting(
+var logSessionAuth = settings.RegisterPublicBoolSetting(
 	sql.AuthAuditingClusterSettingName,
 	"if set, log SQL session login/disconnection events (note: may hinder performance on loaded nodes)",
-	false).WithPublic()
+	false)
 
 const (
 	// ErrSSLRequired is returned when a client attempts to connect to a
@@ -119,12 +114,6 @@ var (
 		Help:        "Number of sql bytes sent",
 		Measurement: "SQL Bytes",
 		Unit:        metric.Unit_BYTES,
-	}
-	MetaConnLatency = metric.Metadata{
-		Name:        "sql.conn.latency",
-		Help:        "Latency to establish and authenticate a SQL connection",
-		Measurement: "Nanoseconds",
-		Unit:        metric.Unit_NANOSECONDS,
 	}
 )
 
@@ -225,7 +214,6 @@ type ServerMetrics struct {
 	BytesOutCount  *metric.Counter
 	Conns          *metric.Gauge
 	NewConns       *metric.Counter
-	ConnLatency    *metric.Histogram
 	ConnMemMetrics sql.BaseMemoryMetrics
 	SQLMemMetrics  sql.MemoryMetrics
 }
@@ -238,7 +226,6 @@ func makeServerMetrics(
 		BytesOutCount:  metric.NewCounter(MetaBytesOut),
 		Conns:          metric.NewGauge(MetaConns),
 		NewConns:       metric.NewCounter(MetaNewConns),
-		ConnLatency:    metric.NewLatency(MetaConnLatency, histogramWindow),
 		ConnMemMetrics: sql.MakeBaseMemMetrics("conns", histogramWindow),
 		SQLMemMetrics:  sqlMemMetrics,
 	}
@@ -301,17 +288,12 @@ func MakeServer(
 	server.mu.Unlock()
 
 	connAuthConf.SetOnChange(&st.SV,
-		func(ctx context.Context) {
+		func() {
 			loadLocalAuthConfigUponRemoteSettingChange(
 				ambientCtx.AnnotateCtx(context.Background()), server, st)
 		})
 
 	return server
-}
-
-// BytesOut returns the total number of bytes transmitted from this server.
-func (s *Server) BytesOut() uint64 {
-	return uint64(s.metrics.BytesOutCount.Count())
 }
 
 // AnnotateCtxForIncomingConn annotates the provided context with a
@@ -362,13 +344,9 @@ func (s *Server) Metrics() (res []interface{}) {
 		&s.SQLServer.Metrics.StartedStatementCounters,
 		&s.SQLServer.Metrics.ExecutedStatementCounters,
 		&s.SQLServer.Metrics.EngineMetrics,
-		&s.SQLServer.Metrics.StatsMetrics,
-		&s.SQLServer.Metrics.GuardrailMetrics,
 		&s.SQLServer.InternalMetrics.StartedStatementCounters,
 		&s.SQLServer.InternalMetrics.ExecutedStatementCounters,
 		&s.SQLServer.InternalMetrics.EngineMetrics,
-		&s.SQLServer.InternalMetrics.StatsMetrics,
-		&s.SQLServer.InternalMetrics.GuardrailMetrics,
 	}
 }
 
@@ -479,7 +457,7 @@ func (s *Server) drainImpl(
 	// Wait for all connections to finish up to drainWait.
 	select {
 	case <-time.After(queryWait):
-		log.Ops.Warningf(ctx, "canceling all sessions after waiting %s", queryWait)
+		log.Warningf(ctx, "canceling all sessions after waiting %s", queryWait)
 	case <-allConnsDone:
 	}
 
@@ -561,21 +539,11 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	ctx, draining, onCloseFn := s.registerConn(ctx)
 	defer onCloseFn()
 
-	connDetails := eventpb.CommonConnectionDetails{
-		InstanceID:    int32(s.execCfg.NodeID.SQLInstanceID()),
-		Network:       conn.RemoteAddr().Network(),
-		RemoteAddress: conn.RemoteAddr().String(),
-	}
-
 	// Some bookkeeping, for security-minded administrators.
 	// This registers the connection to the authentication log.
 	connStart := timeutil.Now()
 	if s.connLogEnabled() {
-		ev := &eventpb.ClientConnectionStart{
-			CommonEventDetails:      eventpb.CommonEventDetails{Timestamp: connStart.UnixNano()},
-			CommonConnectionDetails: connDetails,
-		}
-		log.StructuredEvent(ctx, ev)
+		s.execCfg.AuthLogger.Logf(ctx, "received connection")
 	}
 	defer func() {
 		// The duration of the session is logged at the end so that the
@@ -583,13 +551,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 		// to find when the connection was opened. This is important
 		// because the log files may have been rotated since.
 		if s.connLogEnabled() {
-			endTime := timeutil.Now()
-			ev := &eventpb.ClientConnectionEnd{
-				CommonEventDetails:      eventpb.CommonEventDetails{Timestamp: endTime.UnixNano()},
-				CommonConnectionDetails: connDetails,
-				Duration:                endTime.Sub(connStart).Nanoseconds(),
-			}
-			log.StructuredEvent(ctx, ev)
+			s.execCfg.AuthLogger.Logf(ctx, "disconnected; duration: %s", timeutil.Now().Sub(connStart))
 		}
 	}()
 
@@ -602,29 +564,20 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 		return err
 	}
 
-	switch version {
-	case versionCancel:
+	if version == versionCancel {
 		// The cancel message is rather peculiar: it is sent without
 		// authentication, always over an unencrypted channel.
-		return handleCancel(conn)
-
-	case versionGSSENC:
-		// This is a request for an unsupported feature: GSS encryption.
-		// https://github.com/cockroachdb/cockroach/issues/52184
 		//
-		// Ensure the right SQLSTATE is sent to the SQL client.
-		err := pgerror.New(pgcode.ProtocolViolation, "GSS encryption is not yet supported")
-		// Annotate a telemetry key. These objects
-		// are treated specially by sendErr: they increase a
-		// telemetry counter to indicate an attempt was made
-		// to use this feature.
-		err = errors.WithTelemetry(err, "#52184")
-		return s.sendErr(ctx, conn, err)
+		// Since we don't support this, close the door in the client's
+		// face. Make a note of that use in telemetry.
+		telemetry.Inc(sqltelemetry.CancelRequestCounter)
+		_ = conn.Close()
+		return nil
 	}
 
 	// If the server is shutting down, terminate the connection early.
 	if draining {
-		log.Ops.Info(ctx, "rejecting new connection while server is draining")
+		log.Info(ctx, "rejecting new connection while server is draining")
 		return s.sendErr(ctx, conn, newAdminShutdownErr(ErrDrainingNewConn))
 	}
 
@@ -650,19 +603,10 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	case version30:
 		// Normal SQL connection. Proceed normally below.
 
-	case versionCancel:
-		// The PostgreSQL protocol definition says that cancel payloads
-		// must be sent *prior to upgrading the connection to use TLS*.
-		// Yet, we've found clients in the wild that send the cancel
-		// after the TLS handshake, for example at
-		// https://github.com/cockroachlabs/support/issues/600.
-		return handleCancel(conn)
-
 	default:
 		// We don't know this protocol.
-		err := pgerror.Newf(pgcode.ProtocolViolation, "unknown protocol version %d", version)
-		err = errors.WithTelemetry(err, fmt.Sprintf("protocol-version-%d", version))
-		return s.sendErr(ctx, conn, err)
+		return s.sendErr(ctx, conn,
+			pgerror.Newf(pgcode.ProtocolViolation, "unknown protocol version %d", version))
 	}
 
 	// Reserve some memory for this connection using the server's monitor. This
@@ -682,12 +626,10 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 		return s.sendErr(ctx, conn, err)
 	}
 
-	// Populate the client address field in the context tags and the
-	// shared struct for structured logging.
+	// Populate the client address field in the context tags.
 	// Only know do we know the remote client address for sure (it may have
 	// been overridden by a status parameter).
-	connDetails.RemoteAddress = sArgs.RemoteAddr.String()
-	ctx = logtags.AddTag(ctx, "client", connDetails.RemoteAddress)
+	ctx = logtags.AddTag(ctx, "client", sArgs.RemoteAddr.String())
 
 	// If a test is hooking in some authentication option, load it.
 	var testingAuthHook func(context.Context) error
@@ -700,23 +642,13 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	s.serveConn(
 		ctx, conn, sArgs,
 		reserved,
-		connStart,
 		authOptions{
 			connType:        connType,
-			connDetails:     connDetails,
 			insecure:        s.cfg.Insecure,
 			ie:              s.execCfg.InternalExecutor,
 			auth:            s.GetAuthenticationConfiguration(),
 			testingAuthHook: testingAuthHook,
 		})
-	return nil
-}
-
-func handleCancel(conn net.Conn) error {
-	// Since we don't support this, close the door in the client's
-	// face. Make a note of that use in telemetry.
-	telemetry.Inc(sqltelemetry.CancelRequestCounter)
-	_ = conn.Close()
 	return nil
 }
 
@@ -762,11 +694,7 @@ func parseClientProvidedSessionParameters(
 			// case-insensitive. Therefore we need to normalize the username
 			// here, so that further lookups for authentication have the correct
 			// identifier.
-			args.User, _ = security.MakeSQLUsernameFromUserInput(value, security.UsernameValidation)
-			// TODO(#sql-experience): we should retrieve the admin status during
-			// authentication using the roles cache, instead of using a simple/naive
-			// username match. See #69355.
-			args.IsSuperuser = args.User.IsRootUser()
+			args.User = tree.Name(value).Normalize()
 
 		case "results_buffer_size":
 			if args.ConnResultsBufferSize, err = humanizeutil.ParseBytes(value); err != nil {
@@ -803,21 +731,23 @@ func parseClientProvidedSessionParameters(
 			}
 			args.RemoteAddr = &net.TCPAddr{IP: ip, Port: port}
 
-		case "options":
-			opts, err := parseOptions(value)
-			if err != nil {
-				return sql.SessionArgs{}, err
-			}
-			for _, opt := range opts {
-				err = loadParameter(ctx, opt.key, opt.value, &args)
-				if err != nil {
-					return sql.SessionArgs{}, pgerror.Wrapf(err, pgerror.GetPGCode(err), "options")
-				}
-			}
 		default:
-			err = loadParameter(ctx, key, value, &args)
-			if err != nil {
-				return sql.SessionArgs{}, err
+			exists, configurable := sql.IsSessionVariableConfigurable(key)
+
+			switch {
+			case exists && configurable:
+				args.SessionDefaults[key] = value
+
+			case !exists:
+				if _, ok := sql.UnsupportedVars[key]; ok {
+					counter := sqltelemetry.UnimplementedClientStatusParameterCounter(key)
+					telemetry.Inc(counter)
+				}
+				log.Warningf(ctx, "unknown configuration parameter: %q", key)
+
+			case !configurable:
+				return sql.SessionArgs{}, pgerror.Newf(pgcode.CantChangeRuntimeParam,
+					"parameter %q cannot be changed", key)
 			}
 		}
 	}
@@ -827,151 +757,13 @@ func parseClientProvidedSessionParameters(
 		args.ConnResultsBufferSize = connResultsBufferSize.Get(sv)
 	}
 
-	// TODO(richardjcai): When connecting to the database, we'll want to
-	// check for CONNECT privilege on the database. #59875.
 	if _, ok := args.SessionDefaults["database"]; !ok {
 		// CockroachDB-specific behavior: if no database is specified,
 		// default to "defaultdb". In PostgreSQL this would be "postgres".
 		args.SessionDefaults["database"] = catalogkeys.DefaultDatabaseName
 	}
 
-	// The client might override the application name,
-	// which would prevent it from being counted in telemetry.
-	// We've decided that this noise in the data is acceptable.
-	if appName, ok := args.SessionDefaults["application_name"]; ok {
-		if appName == catconstants.ReportableAppNamePrefix+catconstants.InternalSQLAppName {
-			telemetry.Inc(sqltelemetry.CockroachShellCounter)
-		}
-	}
-
 	return args, nil
-}
-
-func loadParameter(ctx context.Context, key, value string, args *sql.SessionArgs) error {
-	exists, configurable := sql.IsSessionVariableConfigurable(key)
-
-	switch {
-	case exists && configurable:
-		args.SessionDefaults[key] = value
-
-	case !exists:
-		if _, ok := sql.UnsupportedVars[key]; ok {
-			counter := sqltelemetry.UnimplementedClientStatusParameterCounter(key)
-			telemetry.Inc(counter)
-		}
-		log.Warningf(ctx, "unknown configuration parameter: %q", key)
-
-	case !configurable:
-		return pgerror.Newf(pgcode.CantChangeRuntimeParam,
-			"parameter %q cannot be changed", key)
-	}
-	return nil
-}
-
-// option represents an option argument passed in the connection URL.
-type option struct {
-	key   string
-	value string
-}
-
-// parseOptions parses the given string into the options. The options must be
-// separated by space and have one of the following patterns:
-// '-c key=value', '-ckey=value', '--key=value'
-func parseOptions(optionsString string) ([]option, error) {
-	var res []option
-	optionsRaw, err := url.QueryUnescape(optionsString)
-	if err != nil {
-		return nil, pgerror.Newf(pgcode.ProtocolViolation, "failed to unescape options %q", optionsString)
-	}
-
-	lastWasDashC := false
-	opts := splitOptions(optionsRaw)
-
-	for i := 0; i < len(opts); i++ {
-		prefix := ""
-		if len(opts[i]) > 1 {
-			prefix = opts[i][:2]
-		}
-
-		switch {
-		case opts[i] == "-c":
-			lastWasDashC = true
-			continue
-		case lastWasDashC:
-			lastWasDashC = false
-			// if the last option was '-c' parse current option with no regard to
-			// the prefix
-			prefix = ""
-		case prefix == "--" || prefix == "-c":
-			lastWasDashC = false
-		default:
-			return nil, pgerror.Newf(pgcode.ProtocolViolation,
-				"option %q is invalid, must have prefix '-c' or '--'", opts[i])
-		}
-
-		opt, err := splitOption(opts[i], prefix)
-		if err != nil {
-			return nil, err
-		}
-		res = append(res, opt)
-	}
-	return res, nil
-}
-
-// splitOptions slices the given string into substrings separated by space
-// unless the space is escaped using backslashes '\\'. It also skips multiple
-// subsequent spaces.
-func splitOptions(options string) []string {
-	var res []string
-	var sb strings.Builder
-	i := 0
-	for i < len(options) {
-		sb.Reset()
-		// skip leading space
-		for i < len(options) && unicode.IsSpace(rune(options[i])) {
-			i++
-		}
-		if i == len(options) {
-			break
-		}
-
-		lastWasEscape := false
-
-		for i < len(options) {
-			if unicode.IsSpace(rune(options[i])) && !lastWasEscape {
-				break
-			}
-			if !lastWasEscape && options[i] == '\\' {
-				lastWasEscape = true
-			} else {
-				lastWasEscape = false
-				sb.WriteByte(options[i])
-			}
-			i++
-		}
-
-		res = append(res, sb.String())
-	}
-
-	return res
-}
-
-// splitOption splits the given opt argument into substrings separated by '='.
-// It returns an error if the given option does not comply with the pattern
-// "key=value" and the number of elements in the result is not two.
-// splitOption removes the prefix from the key and replaces '-' with '_' so
-// "--option-name=value" becomes [option_name, value].
-func splitOption(opt, prefix string) (option, error) {
-	kv := strings.Split(opt, "=")
-
-	if len(kv) != 2 {
-		return option{}, pgerror.Newf(pgcode.ProtocolViolation,
-			"option %q is invalid, check '='", opt)
-	}
-
-	kv[0] = strings.TrimPrefix(kv[0], prefix)
-
-	return option{key: strings.ReplaceAll(kv[0], "-", "_"), value: kv[1]}, nil
 }
 
 // Note: Usage of an env var here makes it possible to unconditionally

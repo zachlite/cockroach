@@ -363,8 +363,7 @@ func TestSendAndReceive(t *testing.T) {
 	if !transports[storeNodes[fromStoreID]].SendAsync(&expReqCopy, rpc.DefaultClass) {
 		t.Errorf("unable to send message from %d to %d", fromStoreID, toStoreID)
 	}
-	// NB: we can't use gogoproto's Equal() function here: it will panic
-	// here since it doesn't know about `gogoproto.casttype`.
+	// NB: proto.Equal will panic here since it doesn't know about `gogoproto.casttype`.
 	if req := <-channels[toStoreID].ch; !reflect.DeepEqual(req, expReq) {
 		t.Errorf("got unexpected message %v on channel %d", req, toStoreID)
 	}

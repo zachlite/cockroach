@@ -49,18 +49,14 @@ func (ds dataDistribution) setupTest(
 			break
 		}
 		if txn == nil {
-			if kv.Key.Timestamp.IsEmpty() {
-				require.NoError(t, eng.PutUnversioned(kv.Key.Key, kv.Value))
-			} else {
-				require.NoError(t, eng.PutMVCC(kv.Key, kv.Value))
-			}
+			require.NoError(t, eng.Put(kv.Key, kv.Value))
 		} else {
 			// TODO(ajwerner): Decide if using MVCCPut is worth it.
 			ts := kv.Key.Timestamp
-			if txn.ReadTimestamp.IsEmpty() {
+			if txn.ReadTimestamp == (hlc.Timestamp{}) {
 				txn.ReadTimestamp = ts
 			}
-			if txn.WriteTimestamp.IsEmpty() {
+			if txn.WriteTimestamp == (hlc.Timestamp{}) {
 				txn.WriteTimestamp = ts
 			}
 			err := storage.MVCCPut(ctx, eng, &ms, kv.Key.Key, ts,
@@ -136,9 +132,9 @@ func newDataDistribution(
 		var txn *roachpb.Transaction
 		if len(timestamps) == 0 && haveIntent {
 			txn = &roachpb.Transaction{
-				Status:                 roachpb.PENDING,
-				ReadTimestamp:          ts,
-				GlobalUncertaintyLimit: ts.Next().Next(),
+				Status:        roachpb.PENDING,
+				ReadTimestamp: ts,
+				MaxTimestamp:  ts.Next().Next(),
 			}
 			txn.ID = uuid.MakeV4()
 			txn.WriteTimestamp = ts

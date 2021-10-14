@@ -14,15 +14,15 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
 
@@ -40,7 +40,7 @@ type cleanupFunc func()
 // and then suspend until the next row has been requested.
 type rowPusher interface {
 	// pushRow pushes the input row to the receiver of the generator. It doesn't
-	// mutate the input row. It will block until the data has been received
+	// mutate the input row. It will block until the the data has been received
 	// and more data has been requested. Once pushRow returns, the caller is free
 	// to mutate the slice passed as input. The caller is not allowed to perform
 	// operations on a transaction while blocked on a call to pushRow.
@@ -67,8 +67,8 @@ type virtualTableGeneratorResponse struct {
 // * cleanup: Performs all cleanup. This function must be called exactly once
 //   to ensure that resources are cleaned up.
 func setupGenerator(
-	ctx context.Context, worker func(pusher rowPusher) error, stopper *stop.Stopper,
-) (next virtualTableGenerator, cleanup cleanupFunc, setupError error) {
+	ctx context.Context, worker func(pusher rowPusher) error,
+) (next virtualTableGenerator, cleanup cleanupFunc) {
 	var cancel func()
 	ctx, cancel = context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -82,12 +82,14 @@ func setupGenerator(
 	// computation through comm, and the generator places rows to consume
 	// back into comm.
 	comm := make(chan virtualTableGeneratorResponse)
+
 	addRow := func(datums ...tree.Datum) error {
 		select {
 		case <-ctx.Done():
 			return cancelchecker.QueryCanceledError
 		case comm <- virtualTableGeneratorResponse{datums: datums}:
 		}
+
 		// Block until the next call to cleanup() or next(). This allows us to
 		// avoid issues with concurrent transaction usage if the worker is using
 		// a transaction. Otherwise, worker could proceed running operations after
@@ -105,7 +107,7 @@ func setupGenerator(
 	}
 
 	wg.Add(1)
-	if setupError = stopper.RunAsyncTask(ctx, "sql.rowPusher: send rows", func(ctx context.Context) {
+	go func() {
 		defer wg.Done()
 		// We wait until a call to next before starting the worker. This prevents
 		// concurrent transaction usage during the startup phase. We also have to
@@ -123,19 +125,14 @@ func setupGenerator(
 		if errors.Is(err, cancelchecker.QueryCanceledError) {
 			return
 		}
+
 		// Notify that we are done sending rows.
 		select {
 		case <-ctx.Done():
 			return
 		case comm <- virtualTableGeneratorResponse{err: err}:
 		}
-	}); setupError != nil {
-		// The presence of an error means the goroutine never started,
-		// thus wg.Done() is never called, which can result in
-		// cleanup() being blocked indefinitely on wg.Wait(). We call
-		// wg.Done() manually here to account for this case.
-		wg.Done()
-	}
+	}()
 
 	next = func() (tree.Datums, error) {
 		// Notify the worker to begin computing a row.
@@ -144,6 +141,7 @@ func setupGenerator(
 		case <-ctx.Done():
 			return nil, cancelchecker.QueryCanceledError
 		}
+
 		// Wait for the row to be sent.
 		select {
 		case <-ctx.Done():
@@ -152,7 +150,7 @@ func setupGenerator(
 			return resp.datums, resp.err
 		}
 	}
-	return next, cleanup, setupError
+	return next, cleanup
 }
 
 // virtualTableNode is a planNode that constructs its rows by repeatedly
@@ -204,13 +202,13 @@ type vTableLookupJoinNode struct {
 	input planNode
 
 	dbName string
-	db     catalog.DatabaseDescriptor
-	table  catalog.TableDescriptor
-	index  catalog.Index
+	db     *dbdesc.Immutable
+	table  *tabledesc.Immutable
+	index  *descpb.IndexDescriptor
 	// eqCol is the single equality column ordinal into the lookup table. Virtual
 	// indexes only support a single indexed column currently.
 	eqCol             int
-	virtualTableEntry *virtualDefEntry
+	virtualTableEntry virtualDefEntry
 
 	joinType descpb.JoinType
 
@@ -256,9 +254,10 @@ func (v *vTableLookupJoinNode) startExec(params runParams) error {
 	)
 	v.run.indexKeyDatums = make(tree.Datums, len(v.columns))
 	var err error
-	db, err := params.p.Descriptors().GetImmutableDatabaseByName(
+	db, err := params.p.LogicalSchemaAccessor().GetDatabaseDesc(
 		params.ctx,
 		params.p.txn,
+		params.p.ExecCfg().Codec,
 		v.dbName,
 		tree.DatabaseLookupFlags{
 			Required: true, AvoidCached: params.p.avoidCachedDescriptors,
@@ -267,7 +266,7 @@ func (v *vTableLookupJoinNode) startExec(params runParams) error {
 	if err != nil {
 		return err
 	}
-	v.db = db
+	v.db = db.(*dbdesc.Immutable)
 	return err
 }
 
@@ -302,7 +301,7 @@ func (v *vTableLookupJoinNode) Next(params runParams) (bool, error) {
 		genFunc := v.virtualTableEntry.makeConstrainedRowsGenerator(params.ctx,
 			params.p, v.db, v.index,
 			v.run.indexKeyDatums,
-			catalog.ColumnIDToOrdinalMap(v.table.PublicColumns()),
+			v.table.ColumnIdxMap(),
 			&idxConstraint,
 			v.vtableCols,
 		)

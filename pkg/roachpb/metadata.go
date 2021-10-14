@@ -129,8 +129,10 @@ func (g RangeGeneration) String() string {
 func (g RangeGeneration) SafeValue() {}
 
 // NewRangeDescriptor returns a RangeDescriptor populated from the input.
-func NewRangeDescriptor(rangeID RangeID, start, end RKey, replicas ReplicaSet) *RangeDescriptor {
-	repls := append([]ReplicaDescriptor(nil), replicas.Descriptors()...)
+func NewRangeDescriptor(
+	rangeID RangeID, start, end RKey, replicas ReplicaDescriptors,
+) *RangeDescriptor {
+	repls := append([]ReplicaDescriptor(nil), replicas.All()...)
 	for i := range repls {
 		repls[i].ReplicaID = ReplicaID(i + 1)
 	}
@@ -140,7 +142,7 @@ func NewRangeDescriptor(rangeID RangeID, start, end RKey, replicas ReplicaSet) *
 		EndKey:        end,
 		NextReplicaID: ReplicaID(len(repls) + 1),
 	}
-	desc.SetReplicas(MakeReplicaSet(repls))
+	desc.SetReplicas(MakeReplicaDescriptors(repls))
 	return desc
 }
 
@@ -182,41 +184,9 @@ func (r *RangeDescriptor) Equal(other *RangeDescriptor) bool {
 	return true
 }
 
-// GetRangeID returns the RangeDescriptor's ID.
-// The method implements the batcheval.ImmutableRangeState interface.
-func (r *RangeDescriptor) GetRangeID() RangeID {
-	return r.RangeID
-}
-
-// GetStartKey returns the RangeDescriptor's start key.
-// The method implements the batcheval.ImmutableRangeState interface.
-func (r *RangeDescriptor) GetStartKey() RKey {
-	return r.StartKey
-}
-
 // RSpan returns the RangeDescriptor's resolved span.
 func (r *RangeDescriptor) RSpan() RSpan {
 	return RSpan{Key: r.StartKey, EndKey: r.EndKey}
-}
-
-// KeySpan returns the keys covered by this range. Local keys are not included.
-//
-// TODO(andrei): Consider if this logic should be lifted to
-// RangeDescriptor.RSpan(). Or better yet, see if we can changes things such
-// that the first range starts at LocalMax instead at starting at an empty key.
-func (r *RangeDescriptor) KeySpan() RSpan {
-	start := r.StartKey
-	if r.StartKey.Equal(RKeyMin) {
-		// The first range in the keyspace is declared to start at KeyMin (the
-		// lowest possible key). That is a lie, however, since the local key space
-		// ([LocalMin,LocalMax)) doesn't belong to this range; it doesn't belong to
-		// any range in particular.
-		start = RKey(LocalMax)
-	}
-	return RSpan{
-		Key:    start,
-		EndKey: r.EndKey,
-	}
 }
 
 // ContainsKey returns whether this RangeDescriptor contains the specified key.
@@ -239,13 +209,13 @@ func (r *RangeDescriptor) ContainsKeyRange(start, end RKey) bool {
 
 // Replicas returns the set of nodes/stores on which replicas of this range are
 // stored.
-func (r *RangeDescriptor) Replicas() ReplicaSet {
-	return MakeReplicaSet(r.InternalReplicas)
+func (r *RangeDescriptor) Replicas() ReplicaDescriptors {
+	return MakeReplicaDescriptors(r.InternalReplicas)
 }
 
 // SetReplicas overwrites the set of nodes/stores on which replicas of this
 // range are stored.
-func (r *RangeDescriptor) SetReplicas(replicas ReplicaSet) {
+func (r *RangeDescriptor) SetReplicas(replicas ReplicaDescriptors) {
 	r.InternalReplicas = replicas.AsProto()
 }
 
@@ -308,7 +278,7 @@ func (r *RangeDescriptor) RemoveReplica(nodeID NodeID, storeID StoreID) (Replica
 // GetReplicaDescriptor returns the replica which matches the specified store
 // ID.
 func (r *RangeDescriptor) GetReplicaDescriptor(storeID StoreID) (ReplicaDescriptor, bool) {
-	for _, repDesc := range r.Replicas().Descriptors() {
+	for _, repDesc := range r.Replicas().All() {
 		if repDesc.StoreID == storeID {
 			return repDesc, true
 		}
@@ -319,7 +289,7 @@ func (r *RangeDescriptor) GetReplicaDescriptor(storeID StoreID) (ReplicaDescript
 // GetReplicaDescriptorByID returns the replica which matches the specified store
 // ID.
 func (r *RangeDescriptor) GetReplicaDescriptorByID(replicaID ReplicaID) (ReplicaDescriptor, bool) {
-	for _, repDesc := range r.Replicas().Descriptors() {
+	for _, repDesc := range r.Replicas().All() {
 		if repDesc.ReplicaID == replicaID {
 			return repDesc, true
 		}
@@ -355,7 +325,7 @@ func (r *RangeDescriptor) Validate() error {
 	}
 	seen := map[ReplicaID]struct{}{}
 	stores := map[StoreID]struct{}{}
-	for i, rep := range r.Replicas().Descriptors() {
+	for i, rep := range r.Replicas().All() {
 		if err := rep.Validate(); err != nil {
 			return errors.Errorf("replica %d is invalid: %s", i, err)
 		}
@@ -391,7 +361,7 @@ func (r RangeDescriptor) SafeFormat(w redact.SafePrinter, _ rune) {
 	}
 	w.SafeString(" [")
 
-	if allReplicas := r.Replicas().Descriptors(); len(allReplicas) > 0 {
+	if allReplicas := r.Replicas().All(); len(allReplicas) > 0 {
 		for i, rep := range allReplicas {
 			if i > 0 {
 				w.SafeString(", ")
@@ -458,32 +428,6 @@ func (r ReplicaDescriptor) GetType() ReplicaType {
 
 // SafeValue implements the redact.SafeValue interface.
 func (r ReplicaType) SafeValue() {}
-
-// IsVoterOldConfig returns true if the replica is a voter in the outgoing
-// config (or, simply is a voter if the range is not in a joint-config state).
-// Can be used as a filter for
-// ReplicaDescriptors.Filter(ReplicaDescriptor.IsVoterOldConfig).
-func (r ReplicaDescriptor) IsVoterOldConfig() bool {
-	switch r.GetType() {
-	case VOTER_FULL, VOTER_OUTGOING, VOTER_DEMOTING_NON_VOTER, VOTER_DEMOTING_LEARNER:
-		return true
-	default:
-		return false
-	}
-}
-
-// IsVoterNewConfig returns true if the replica is a voter in the incoming
-// config (or, simply is a voter if the range is not in a joint-config state).
-// Can be used as a filter for
-// ReplicaDescriptors.Filter(ReplicaDescriptor.IsVoterOldConfig).
-func (r ReplicaDescriptor) IsVoterNewConfig() bool {
-	switch r.GetType() {
-	case VOTER_FULL, VOTER_INCOMING:
-		return true
-	default:
-		return false
-	}
-}
 
 // PercentilesFromData derives percentiles from a slice of data points.
 // Sorts the input data if it isn't already sorted.

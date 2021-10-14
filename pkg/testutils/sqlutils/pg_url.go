@@ -24,12 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/fileutil"
 )
 
-// PGUrl is like PGUrlE, but uses t.Fatal to handle errors.
-func PGUrl(t testing.TB, servingAddr, prefix string, user *url.Userinfo) (url.URL, func()) {
-	return PGUrlWithOptionalClientCerts(t, servingAddr, prefix, user, true /* withCerts */)
-}
-
-// PGUrlE returns a postgres connection url which connects to this server with the given user, and a
+// PGUrl returns a postgres connection url which connects to this server with the given user, and a
 // cleanup function which must be called after all connections created using the connection url have
 // been closed.
 //
@@ -41,50 +36,29 @@ func PGUrl(t testing.TB, servingAddr, prefix string, user *url.Userinfo) (url.UR
 //
 // Args:
 //  prefix: A prefix to be prepended to the temp file names generated, for debugging.
-func PGUrlE(servingAddr, prefix string, user *url.Userinfo) (url.URL, func(), error) {
-	return PGUrlWithOptionalClientCertsE(servingAddr, prefix, user, true /* withCerts */)
+func PGUrl(t testing.TB, servingAddr, prefix string, user *url.Userinfo) (url.URL, func()) {
+	return PGUrlWithOptionalClientCerts(t, servingAddr, prefix, user, true /* withCerts */)
 }
 
-// PGUrlWithOptionalClientCerts is like PGUrlWithOptionalClientCertsE, but uses t.Fatal to handle
-// errors.
+// PGUrlWithOptionalClientCerts is like PGUrl but the caller can
+// customize whether the client certificates are loaded on-disk and in the URL.
 func PGUrlWithOptionalClientCerts(
 	t testing.TB, servingAddr, prefix string, user *url.Userinfo, withClientCerts bool,
 ) (url.URL, func()) {
-	u, f, err := PGUrlWithOptionalClientCertsE(servingAddr, prefix, user, withClientCerts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u, f
-}
-
-// PGUrlWithOptionalClientCertsE is like PGUrlE but the caller can
-// customize whether the client certificates are loaded on-disk and in the URL.
-func PGUrlWithOptionalClientCertsE(
-	servingAddr, prefix string, user *url.Userinfo, withClientCerts bool,
-) (url.URL, func(), error) {
 	host, port, err := net.SplitHostPort(servingAddr)
 	if err != nil {
-		return url.URL{}, func() {}, err
+		t.Fatal(err)
 	}
 
 	// TODO(benesch): Audit usage of prefix and replace the following line with
 	// `testutils.TempDir(t)` if prefix can always be `t.Name()`.
 	tempDir, err := ioutil.TempDir("", fileutil.EscapeFilename(prefix))
 	if err != nil {
-		return url.URL{}, func() {}, err
+		t.Fatal(err)
 	}
 
-	// This CA is the one used by the SQL client driver to authenticate KV nodes on the host cluster.
 	caPath := filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCACert)
-	tempCAPath, err := securitytest.RestrictedCopy(caPath, tempDir, "ca")
-	if err != nil {
-		return url.URL{}, func() {}, err
-	}
-	// This CA is the one used by the SQL client driver to authenticate SQL tenant servers.
-	tenantCAPath := filepath.Join(security.EmbeddedCertsDir, security.EmbeddedTenantCACert)
-	if err := securitytest.AppendFile(tenantCAPath, tempCAPath); err != nil {
-		return url.URL{}, func() {}, err
-	}
+	tempCAPath := securitytest.RestrictedCopy(t, caPath, tempDir, "ca")
 	options := url.Values{}
 	options.Add("sslrootcert", tempCAPath)
 
@@ -94,14 +68,8 @@ func PGUrlWithOptionalClientCertsE(
 
 		// Copy these assets to disk from embedded strings, so this test can
 		// run from a standalone binary.
-		tempCertPath, err := securitytest.RestrictedCopy(certPath, tempDir, "cert")
-		if err != nil {
-			return url.URL{}, func() {}, err
-		}
-		tempKeyPath, err := securitytest.RestrictedCopy(keyPath, tempDir, "key")
-		if err != nil {
-			return url.URL{}, func() {}, err
-		}
+		tempCertPath := securitytest.RestrictedCopy(t, certPath, tempDir, "cert")
+		tempKeyPath := securitytest.RestrictedCopy(t, keyPath, tempDir, "key")
 		options.Add("sslcert", tempCertPath)
 		options.Add("sslkey", tempKeyPath)
 		options.Add("sslmode", "verify-full")
@@ -110,9 +78,14 @@ func PGUrlWithOptionalClientCertsE(
 	}
 
 	return url.URL{
-		Scheme:   "postgres",
-		User:     user,
-		Host:     net.JoinHostPort(host, port),
-		RawQuery: options.Encode(),
-	}, func() { _ = os.RemoveAll(tempDir) }, nil
+			Scheme:   "postgres",
+			User:     user,
+			Host:     net.JoinHostPort(host, port),
+			RawQuery: options.Encode(),
+		}, func() {
+			if err := os.RemoveAll(tempDir); err != nil {
+				// Not Fatal() because we might already be panicking.
+				t.Error(err)
+			}
+		}
 }

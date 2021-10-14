@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -29,10 +28,10 @@ import (
 // ColIDtoRowIndexFromCols groups a slice of ColumnDescriptors by their ID
 // field, returning a map from ID to the index of the column in the input slice.
 // It assumes there are no duplicate descriptors in the input.
-func ColIDtoRowIndexFromCols(cols []catalog.Column) catalog.TableColMap {
-	var colIDtoRowIndex catalog.TableColMap
+func ColIDtoRowIndexFromCols(cols []descpb.ColumnDescriptor) map[descpb.ColumnID]int {
+	colIDtoRowIndex := make(map[descpb.ColumnID]int, len(cols))
 	for i := range cols {
-		colIDtoRowIndex.Set(cols[i].GetID(), i)
+		colIDtoRowIndex[cols[i].ID] = i
 	}
 	return colIDtoRowIndex
 }
@@ -42,11 +41,11 @@ func ColIDtoRowIndexFromCols(cols []catalog.Column) catalog.TableColMap {
 //
 //   result[i] = j such that fromCols[i].ID == toCols[j].ID, or
 //                -1 if the column is not part of toCols.
-func ColMapping(fromCols, toCols []catalog.Column) []int {
+func ColMapping(fromCols, toCols []descpb.ColumnDescriptor) []int {
 	// colMap is a map from ColumnID to ordinal into fromCols.
 	var colMap util.FastIntMap
 	for i := range fromCols {
-		colMap.Set(int(fromCols[i].GetID()), i)
+		colMap.Set(int(fromCols[i].ID), i)
 	}
 
 	result := make([]int, len(fromCols))
@@ -57,7 +56,7 @@ func ColMapping(fromCols, toCols []catalog.Column) []int {
 
 	// Set the appropriate index values for the returning columns.
 	for toOrd := range toCols {
-		if fromOrd, ok := colMap.Get(int(toCols[toOrd].GetID())); ok {
+		if fromOrd, ok := colMap.Get(int(toCols[toOrd].ID)); ok {
 			result[fromOrd] = toOrd
 		}
 	}
@@ -94,11 +93,11 @@ func prepareInsertOrUpdateBatch(
 	batch putter,
 	helper *rowHelper,
 	primaryIndexKey []byte,
-	fetchedCols []catalog.Column,
+	fetchedCols []descpb.ColumnDescriptor,
 	values []tree.Datum,
-	valColIDMapping catalog.TableColMap,
+	valColIDMapping map[descpb.ColumnID]int,
 	marshaledValues []roachpb.Value,
-	marshaledColIDMapping catalog.TableColMap,
+	marshaledColIDMapping map[descpb.ColumnID]int,
 	kvKey *roachpb.Key,
 	kvValue *roachpb.Value,
 	rawValueBuf []byte,
@@ -110,7 +109,7 @@ func prepareInsertOrUpdateBatch(
 		family := &families[i]
 		update := false
 		for _, colID := range family.ColumnIDs {
-			if _, ok := marshaledColIDMapping.Get(colID); ok {
+			if _, ok := marshaledColIDMapping[colID]; ok {
 				update = true
 				break
 			}
@@ -139,7 +138,7 @@ func prepareInsertOrUpdateBatch(
 			// Storage optimization to store DefaultColumnID directly as a value. Also
 			// backwards compatible with the original BaseFormatVersion.
 
-			idx, ok := marshaledColIDMapping.Get(family.DefaultColumnID)
+			idx, ok := marshaledColIDMapping[family.DefaultColumnID]
 			if !ok {
 				continue
 			}
@@ -154,9 +153,6 @@ func prepareInsertOrUpdateBatch(
 				// We only output non-NULL values. Non-existent column keys are
 				// considered NULL during scanning and the row sentinel ensures we know
 				// the row exists.
-				if err := helper.checkRowSize(ctx, kvKey, &marshaledValues[idx], family.ID); err != nil {
-					return nil, err
-				}
 				putFn(ctx, batch, kvKey, &marshaledValues[idx], traceKV)
 			}
 
@@ -171,24 +167,24 @@ func prepareInsertOrUpdateBatch(
 			return nil, errors.AssertionFailedf("invalid family sorted column id map")
 		}
 		for _, colID := range familySortedColumnIDs {
-			idx, ok := valColIDMapping.Get(colID)
+			idx, ok := valColIDMapping[colID]
 			if !ok || values[idx] == tree.DNull {
 				// Column not being updated or inserted.
 				continue
 			}
 
-			if skip, err := helper.skipColumnNotInPrimaryIndexValue(colID, values[idx]); err != nil {
+			if skip, err := helper.skipColumnInPK(colID, family.ID, values[idx]); err != nil {
 				return nil, err
 			} else if skip {
 				continue
 			}
 
-			col := fetchedCols[idx]
-			if lastColID > col.GetID() {
-				return nil, errors.AssertionFailedf("cannot write column id %d after %d", col.GetID(), lastColID)
+			col := &fetchedCols[idx]
+			if lastColID > col.ID {
+				return nil, errors.AssertionFailedf("cannot write column id %d after %d", col.ID, lastColID)
 			}
-			colIDDiff := col.GetID() - lastColID
-			lastColID = col.GetID()
+			colIDDiff := col.ID - lastColID
+			lastColID = col.ID
 			var err error
 			rawValueBuf, err = rowenc.EncodeTableValue(rawValueBuf, colIDDiff, values[idx], nil)
 			if err != nil {
@@ -207,9 +203,6 @@ func prepareInsertOrUpdateBatch(
 			// a deep copy so rawValueBuf can be re-used by other calls to the
 			// function.
 			kvValue.SetTuple(rawValueBuf)
-			if err := helper.checkRowSize(ctx, kvKey, kvValue, family.ID); err != nil {
-				return nil, err
-			}
 			putFn(ctx, batch, kvKey, kvValue, traceKV)
 		}
 

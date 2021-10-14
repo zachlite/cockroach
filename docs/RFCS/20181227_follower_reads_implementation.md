@@ -1,5 +1,5 @@
 - Feature Name: Follower Reads Adoption
-- Implementation Status: completed
+- Implementation Status: draft
 - Start Date: 2018-12-27
 - Authors: Andrew Werner
 - RFC PR: #33474
@@ -13,7 +13,7 @@ historical reads. Historical reads include both `AS OF SYSTEM TIME` queries as
 well as transactions with a read timestamp sufficiently in the past (for example
 long-running analytics queries). Most of the required machinery to safely
 perform these reads was implemented in the [Follower Reads
-RFC](20180603_follower_reads.md). Follower reads can greatly improve query
+RFC](../20180603_follower_reads.md). Follower reads can greatly improve query
 performance by avoiding the need to make wide area RPCs and by reducing traffic
 on lease holders. This document proposes mechanisms to expose follower reads
 through a new SQL function to determine a reasonable read time stamp and the
@@ -107,13 +107,13 @@ lease holder.
 
 While these changes enable and ease performing individual SELECT queries against
 follower replicas, it does not enable running entire (read-only) transactions at
-a single point in time and thus benefitting from the performance gains offered
+a single point in time and thus benefitting from the performance gains offerred
 by follower reads. This document proposes an extension to the `SET TRANSACTION`
 and `BEGIN TRANSACTION` statements to allow a clause analagous to `AS OF SYSTEM
 TIME` for `SELECT` statements today. This change will ease the multi-statement
 historical reads, potentially enabling use of existing code which relies on a 
-transaction object, and will provide a mechanism to run historical reads with
-a HIGH transaction priority, eliminating the possibility of blocking on a
+transaction object, and will provide a mechnaism to run historical reads with
+a HIGH transaction priority, eliminating the posibility of blocking on a
 long-running read-write transaction. `SET TRANSACTION` must be the first
 statement following `BEGIN`. Note that `SET TRANSACTION AS OF SYSTEM
 TIME` implies `READ ONLY`. A historical read only transaction thus will look 
@@ -310,7 +310,7 @@ clause.
 
 While it might on some level seem reasonable to allow for arbitrary read-write
 queries to be performed at historical timestamps, due to the mechanisms of
-closed timestamps, write operations could never successfully commit. Because the
+closed timestamps, write operations could never succesfully commit. Because the
 MinProposalTracker would effectively block write operations, we'll enforce that
 `SET TRANSACTION AS OF SYSTEM TIME` implies `SET TRANSACTION READ ONLY`.
 
@@ -344,7 +344,7 @@ workload were to be shifted entirely such that all requests were forced to go to
 leaseholders it would not be capable of acceptably serving the traffic. If then,
 a burst of load or some other cluster event were to lead one or more replicas to
 fall behind in its ability to publish closed timestamps, all traffic which was
-spread over all of the replicas would begin receiving all of the load that had
+spread over all of the replicas would begin recieving all of the load that had
 been going to followers. It is possible that this concern is not realistic in
 most common cases.  Furthermore it seems straightforward to mitigate by
 increasing the target multiple. The problem seems worse as the replication

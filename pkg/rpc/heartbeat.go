@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -54,8 +53,6 @@ type HeartbeatService struct {
 	clusterName                    string
 	disableClusterNameVerification bool
 
-	onHandlePing func(*PingRequest) error // see ContextOptions.OnIncomingPing
-
 	// TestingAllowNamedRPCToAnonymousServer, when defined (in tests),
 	// disables errors in case a heartbeat requests a specific node ID but
 	// the remote node doesn't have a node ID yet. This testing knob is
@@ -75,7 +72,7 @@ func checkClusterName(clusterName string, peerName string) error {
 			err = errors.Errorf(
 				"local cluster name %q does not match peer cluster name %q", clusterName, peerName)
 		}
-		log.Ops.Shoutf(context.Background(), severity.ERROR, "%v", err)
+		log.Shoutf(context.Background(), log.Severity_ERROR, "%v", err)
 		return err
 	}
 	return nil
@@ -91,22 +88,9 @@ func checkVersion(ctx context.Context, st *cluster.Settings, peerVersion roachpb
 		return errors.Errorf(
 			"cluster requires at least version %s, but peer did not provide a version", activeVersion)
 	}
-
-	// KV nodes which are part of the system tenant *must* carry at least the
-	// version currently active in the cluster. Great care is taken to ensure
-	// that all nodes are broadcasting the new version before updating the active
-	// version. However, secondary tenants are allowed to lag the currently
-	// active cluster version. They are permitted to broadcast any version which
-	// is supported by this binary.
-	minVersion := activeVersion.Version
-	if tenantID, isTenant := roachpb.TenantFromContext(ctx); isTenant &&
-		!roachpb.IsSystemTenantID(tenantID.ToUint64()) {
-		minVersion = st.Version.BinaryMinSupportedVersion()
-	}
-	if peerVersion.Less(minVersion) {
+	if peerVersion.Less(activeVersion.Version) {
 		return errors.Errorf(
-			"cluster requires at least version %s, but peer has version %s",
-			minVersion, peerVersion)
+			"cluster requires at least version %s, but peer has version %s", activeVersion, peerVersion)
 	}
 	return nil
 }
@@ -117,7 +101,7 @@ func checkVersion(ctx context.Context, st *cluster.Settings, peerVersion roachpb
 // with the requester's address.
 func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingResponse, error) {
 	if log.ExpensiveLogEnabled(ctx, 2) {
-		log.Dev.Infof(ctx, "received heartbeat: %+v vs local cluster %+v node %+v", args, hs.clusterID, hs.nodeID)
+		log.Infof(ctx, "received heartbeat: %+v vs local cluster %+v node %+v", args, hs.clusterID, hs.nodeID)
 	}
 	// Check that cluster IDs match.
 	clusterID := hs.clusterID.Get()
@@ -139,7 +123,7 @@ func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingR
 	if hs.nodeID != nil {
 		nodeID = hs.nodeID.Get()
 	}
-	if args.TargetNodeID != 0 && (!hs.testingAllowNamedRPCToAnonymousServer || nodeID != 0) && args.TargetNodeID != nodeID {
+	if args.NodeID != 0 && (!hs.testingAllowNamedRPCToAnonymousServer || nodeID != 0) && args.NodeID != nodeID {
 		// If nodeID != 0, the situation is clear (we are checking that
 		// the other side is talking to the right node).
 		//
@@ -149,7 +133,7 @@ func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingR
 		// however we can still serve connections that don't need a node
 		// ID, e.g. during initial gossip.
 		return nil, errors.Errorf(
-			"client requested node ID %d doesn't match server node ID %d", args.TargetNodeID, nodeID)
+			"client requested node ID %d doesn't match server node ID %d", args.NodeID, nodeID)
 	}
 
 	// Check version compatibility.
@@ -162,22 +146,16 @@ func (hs *HeartbeatService) Ping(ctx context.Context, args *PingRequest) (*PingR
 	// This check is ignored if either offset is set to 0 (for unittests).
 	// Note that we validated this connection already. Different clusters
 	// could very well have different max offsets.
-	mo, amo := hs.clock.MaxOffset(), time.Duration(args.OriginMaxOffsetNanos)
+	mo, amo := hs.clock.MaxOffset(), time.Duration(args.MaxOffsetNanos)
 	if mo != 0 && amo != 0 && mo != amo {
 		panic(fmt.Sprintf("locally configured maximum clock offset (%s) "+
-			"does not match that of node %s (%s)", mo, args.OriginAddr, amo))
-	}
-
-	if fn := hs.onHandlePing; fn != nil {
-		if err := fn(args); err != nil {
-			return nil, err
-		}
+			"does not match that of node %s (%s)", mo, args.Addr, amo))
 	}
 
 	serverOffset := args.Offset
 	// The server offset should be the opposite of the client offset.
 	serverOffset.Offset = -serverOffset.Offset
-	hs.remoteClockMonitor.UpdateOffset(ctx, args.OriginAddr, serverOffset, 0 /* roundTripLatency */)
+	hs.remoteClockMonitor.UpdateOffset(ctx, args.Addr, serverOffset, 0 /* roundTripLatency */)
 	return &PingResponse{
 		Pong:                           args.Ping,
 		ServerTime:                     hs.clock.PhysicalNow(),

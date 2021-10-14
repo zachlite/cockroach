@@ -38,7 +38,7 @@ communication and discussion.<sup>[1](#sql-syntax)</sup>
 It is encouraged to develop a [prototype](PROTOTYPING.md) concurrently
 with writing the RFC. One of the significant benefits of an RFC is
 that it forces bigger picture thinking which reviewers can then
-dissect. In contrast, a prototype forces the details to be considered,
+disect. In contrast, a prototype forces the details to be considered,
 shedding light on the unknown unknowns and helping to ensure that the
 RFC focuses on the important design considerations.
 
@@ -56,19 +56,7 @@ guidance and to help shepherd your RFC through the process.
 
 2. Copy `00000000_template.md` to a new file and fill in the
    details. Commit this version in your own fork of the repository or
-   a branch. Your commit message (and corresponding pull request)
-   should include the prefix `rfc`. Eg: `rfc: edit RFC template`
-
-   If you are a creative person, you may prefer to start with this blank
-   slate, write your prose and then later check that all necessary topics
-   have been covered.
-
-   If you feel intimidated by a blank template, you can instead peruse
-   the list of requested topics and use the questions in there as
-   writing prompt.
-
-   The list of topics and questions that can serve as writing guide
-   can be found in the separate file [GUIDE.md](GUIDE.md).
+   a branch.
 
 3. Submit a pull request (PR) to add your new file to the main
    repository. Each RFC should get its own pull request; do not

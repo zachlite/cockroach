@@ -11,6 +11,7 @@
 package invertedidx_test
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"testing"
@@ -18,23 +19,24 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedidx"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTryJoinGeoIndex(t *testing.T) {
 	semaCtx := tree.MakeSemaContext()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 
 	tc := testcat.New()
 
@@ -283,14 +285,17 @@ func TestTryJoinGeoIndex(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Logf("test case: %v", tc)
-		filters := testutils.BuildFilters(t, &f, &semaCtx, evalCtx, tc.filters)
+		filters, err := buildFilters(tc.filters, &semaCtx, evalCtx, &f)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		var inputCols opt.ColSet
 		for i, n := 0, md.Table(tab1).ColumnCount(); i < n; i++ {
 			inputCols.Add(tab1.ColumnID(i))
 		}
 
-		actInvertedExpr := invertedidx.TryJoinInvertedIndex(
+		actInvertedExpr := invertedidx.TryJoinGeoIndex(
 			evalCtx.Context, &f, filters, tab2, md.Table(tab2).Index(tc.indexOrd), inputCols,
 		)
 
@@ -305,17 +310,20 @@ func TestTryJoinGeoIndex(t *testing.T) {
 			t.Fatalf("expected <nil>, got %v", actInvertedExpr)
 		}
 
-		expInvertedExpr := testutils.BuildScalar(t, &f, &semaCtx, evalCtx, tc.invertedExpr)
+		expInvertedExpr, err := buildScalar(tc.invertedExpr, &semaCtx, evalCtx, &f)
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		if actInvertedExpr.String() != expInvertedExpr.String() {
 			t.Errorf("expected %v, got %v", expInvertedExpr, actInvertedExpr)
 		}
 	}
 }
 
-func TestTryFilterGeoIndex(t *testing.T) {
+func TestTryConstrainGeoIndex(t *testing.T) {
 	semaCtx := tree.MakeSemaContext()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 
 	tc := testcat.New()
 	if _, err := tc.ExecuteDDL(
@@ -331,46 +339,31 @@ func TestTryFilterGeoIndex(t *testing.T) {
 	geomOrd, geogOrd := 1, 2
 
 	testCases := []struct {
-		filters             string
-		indexOrd            int
-		ok                  bool
-		preFilterExpr       string
-		preFilterCol        opt.ColumnID
-		preFilterTypeFamily types.Family
+		filters  string
+		indexOrd int
+		ok       bool
 	}{
 		{
-			filters:             "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
 			// Still works with arguments commuted.
-			filters:             "st_intersects(geom, 'LINESTRING ( 0 0, 0 2 )'::geometry)",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "st_intersects(geom, 'LINESTRING ( 0 0, 0 2 )'::geometry)",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "st_covers('SRID=4326;POINT(-40.23456 70.4567772)'::geography, geog)",
-			indexOrd:            geogOrd,
-			ok:                  true,
-			preFilterExpr:       "st_covers('SRID=4326;POINT(-40.23456 70.4567772)'::geography, geog)",
-			preFilterCol:        2,
-			preFilterTypeFamily: types.GeographyFamily,
+			filters:  "st_covers('SRID=4326;POINT(-40.23456 70.4567772)'::geography, geog)",
+			indexOrd: geogOrd,
+			ok:       true,
 		},
 		{
 			// Still works with arguments commuted.
-			filters:             "st_covers(geog, 'SRID=4326;POINT(-40.23456 70.4567772)'::geography)",
-			indexOrd:            geogOrd,
-			ok:                  true,
-			preFilterExpr:       "st_coveredby('SRID=4326;POINT(-40.23456 70.4567772)'::geography, geog)",
-			preFilterCol:        2,
-			preFilterTypeFamily: types.GeographyFamily,
+			filters:  "st_covers(geog, 'SRID=4326;POINT(-40.23456 70.4567772)'::geography)",
+			indexOrd: geogOrd,
+			ok:       true,
 		},
 		{
 			// Wrong index ordinal.
@@ -396,87 +389,57 @@ func TestTryFilterGeoIndex(t *testing.T) {
 			// We can constrain either index when the functions are AND-ed.
 			filters: "st_equals('LINESTRING ( 0 0, 0 2 )'::geometry, geom) AND " +
 				"st_coveredby(geog, 'SRID=4326;POINT(-40.23456 70.4567772)'::geography)",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_equals('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
 			// We can constrain either index when the functions are AND-ed.
 			filters: "st_equals('LINESTRING ( 0 0, 0 2 )'::geometry, geom) AND " +
 				"st_coveredby(geog, 'SRID=4326;POINT(-40.23456 70.4567772)'::geography)",
-			indexOrd:            geogOrd,
-			ok:                  true,
-			preFilterExpr:       "st_covers('SRID=4326;POINT(-40.23456 70.4567772)'::geography, geog)",
-			preFilterCol:        2,
-			preFilterTypeFamily: types.GeographyFamily,
+			indexOrd: geogOrd,
+			ok:       true,
 		},
 
 		// Bounding box operators.
 		{
-			filters:             "'BOX(1 2, 3 4)'::box2d ~ geom",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_covers('POLYGON (( 1 2, 1 4, 3 4, 3 2, 1 2))'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "'BOX(1 2, 3 4)'::box2d ~ geom",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "geom ~ 'BOX(1 2, 3 4)'::box2d",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_coveredby('POLYGON (( 1 2, 1 4, 3 4, 3 2, 1 2))'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "geom ~ 'BOX(1 2, 3 4)'::box2d",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "'LINESTRING ( 0 0, 0 2 )'::geometry ~ geom",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_covers('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "'LINESTRING ( 0 0, 0 2 )'::geometry ~ geom",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "geom ~ 'LINESTRING ( 0 0, 0 2 )'::geometry",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_coveredby('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "geom ~ 'LINESTRING ( 0 0, 0 2 )'::geometry",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "'BOX(1 2, 3 4)'::box2d && geom",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_intersects('POLYGON (( 1 2, 1 4, 3 4, 3 2, 1 2))'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "'BOX(1 2, 3 4)'::box2d && geom",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "geom && 'BOX(1 2, 3 4)'::box2d",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_intersects('POLYGON (( 1 2, 1 4, 3 4, 3 2, 1 2))'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "geom && 'BOX(1 2, 3 4)'::box2d",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "'LINESTRING ( 0 0, 0 2 )'::geometry && geom",
-			indexOrd:            geomOrd,
-			ok:                  true,
-			preFilterExpr:       "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
+			filters:  "'LINESTRING ( 0 0, 0 2 )'::geometry && geom",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
-			filters:             "geom && 'LINESTRING ( 0 0, 0 2 )'::geometry",
-			indexOrd:            geomOrd,
-			preFilterExpr:       "st_intersects('LINESTRING ( 0 0, 0 2 )'::geometry, geom)",
-			preFilterCol:        1,
-			preFilterTypeFamily: types.GeometryFamily,
-			ok:                  true,
+			filters:  "geom && 'LINESTRING ( 0 0, 0 2 )'::geometry",
+			indexOrd: geomOrd,
+			ok:       true,
 		},
 		{
 			// Wrong index ordinal.
@@ -488,46 +451,56 @@ func TestTryFilterGeoIndex(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Logf("test case: %v", tc)
-		filters := testutils.BuildFilters(t, &f, &semaCtx, evalCtx, tc.filters)
+		filters, err := buildFilters(tc.filters, &semaCtx, evalCtx, &f)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// We're not testing that the correct SpanExpression is returned here;
 		// that is tested elsewhere. This is just testing that we are constraining
 		// the index when we expect to.
-		spanExpr, _, remainingFilters, pfState, ok := invertedidx.TryFilterInvertedIndex(
-			evalCtx,
-			&f,
-			filters,
-			nil, /* optionalFilters */
-			tab,
-			md.Table(tab).Index(tc.indexOrd),
-			nil, /* computedColumns */
+		_, ok := invertedidx.TryConstrainGeoIndex(
+			evalCtx.Context, &f, filters, tab, md.Table(tab).Index(tc.indexOrd),
 		)
 		if tc.ok != ok {
 			t.Fatalf("expected %v, got %v", tc.ok, ok)
 		}
-
-		if ok {
-			if spanExpr.Unique {
-				t.Fatalf("span expressions for geospatial indexes should never have Unique=true")
-			}
-			if spanExpr.Tight {
-				t.Fatalf("span expressions for geospatial indexes should never have Tight=true")
-			}
-			if remainingFilters.String() != filters.String() {
-				t.Errorf("expected remainingFilters=%v, got %v", filters, remainingFilters)
-			}
-
-			if len(tc.preFilterExpr) == 0 {
-				require.Nil(t, pfState)
-			} else {
-				require.NotNil(t, pfState)
-				pfExpr := testutils.BuildScalar(t, &f, &semaCtx, evalCtx, tc.preFilterExpr)
-				require.Equal(t, pfExpr.String(), pfState.Expr.String())
-				require.Equal(t, tc.preFilterCol, pfState.Col)
-				require.Equal(t, tc.preFilterTypeFamily, pfState.Typ.Family())
-			}
-		}
 	}
+}
+
+func buildScalar(
+	input string, semaCtx *tree.SemaContext, evalCtx *tree.EvalContext, f *norm.Factory,
+) (opt.ScalarExpr, error) {
+	expr, err := parser.ParseExpr(input)
+	if err != nil {
+		return nil, errors.Newf("falsed to parse %s: %v", input, err)
+	}
+
+	b := optbuilder.NewScalar(context.Background(), semaCtx, evalCtx, f)
+	if err := b.Build(expr); err != nil {
+		return nil, err
+	}
+
+	return f.Memo().RootExpr().(opt.ScalarExpr), nil
+}
+
+func buildFilters(
+	input string, semaCtx *tree.SemaContext, evalCtx *tree.EvalContext, f *norm.Factory,
+) (memo.FiltersExpr, error) {
+	if input == "" {
+		return memo.TrueFilter, nil
+	}
+	root, err := buildScalar(input, semaCtx, evalCtx, f)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := root.(*memo.TrueExpr); ok {
+		return memo.TrueFilter, nil
+	}
+	filters := memo.FiltersExpr{f.ConstructFiltersItem(root)}
+	filters = f.CustomFuncs().SimplifyFilters(filters)
+	filters = f.CustomFuncs().ConsolidateFilters(filters)
+	return filters, nil
 }
 
 func TestPreFilterer(t *testing.T) {
@@ -667,7 +640,7 @@ func TestPreFilterer(t *testing.T) {
 			},
 		},
 	}
-	encodeInv := func(bbox geopb.BoundingBox) inverted.EncVal {
+	encodeInv := func(bbox geopb.BoundingBox) invertedexpr.EncInvertedVal {
 		var b []byte
 		b = encoding.EncodeGeoInvertedAscending(b)
 		// Arbitrary cellid
@@ -679,7 +652,7 @@ func TestPreFilterer(t *testing.T) {
 		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
 			filterer := invertedidx.NewPreFilterer(tc.typ, tc.relationship, tc.relationshipParams)
 			var toBind []tree.Datum
-			var toPreFilter []inverted.EncVal
+			var toPreFilter []invertedexpr.EncInvertedVal
 			includeBind := func(index int) bool {
 				for _, exclude := range tc.excludeFromPreFilters {
 					if exclude == index {

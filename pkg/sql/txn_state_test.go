@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/proto"
+	opentracing "github.com/opentracing/opentracing-go"
 )
 
 var noRewindExpected = CmdPos(-1)
@@ -42,7 +43,7 @@ type testContext struct {
 	clock       *hlc.Clock
 	mockDB      *kv.DB
 	mon         *mon.BytesMonitor
-	tracer      *tracing.Tracer
+	tracer      opentracing.Tracer
 	// ctx is mimicking the spirit of a client connection's context
 	ctx      context.Context
 	settings *cluster.Settings
@@ -81,7 +82,7 @@ func makeTestContext(stopper *stop.Stopper) testContext {
 // createOpenState returns a txnState initialized with an open txn.
 func (tc *testContext) createOpenState(typ txnType) (fsm.State, *txnState) {
 	sp := tc.tracer.StartSpan("createOpenState")
-	ctx := tracing.ContextWithSpan(tc.ctx, sp)
+	ctx := opentracing.ContextWithSpan(tc.ctx, sp)
 	ctx, cancel := context.WithCancel(ctx)
 
 	txnStateMon := mon.NewMonitor("test mon",
@@ -97,6 +98,7 @@ func (tc *testContext) createOpenState(typ txnType) (fsm.State, *txnState) {
 	ts := txnState{
 		Ctx:           ctx,
 		connCtx:       tc.ctx,
+		sp:            sp,
 		cancel:        cancel,
 		sqlTimestamp:  timeutil.Now(),
 		priority:      roachpb.NormalUserPriority,
@@ -169,9 +171,9 @@ type expKVTxn struct {
 	userPriority *roachpb.UserPriority
 	// For the timestamps we just check the physical part. The logical part is
 	// incremented every time the clock is read and so it's unpredictable.
-	writeTSNanos          *int64
-	readTSNanos           *int64
-	uncertaintyLimitNanos *int64
+	writeTSNanos *int64
+	readTSNanos  *int64
+	maxTSNanos   *int64
 }
 
 func checkTxn(txn *kv.Txn, exp expKVTxn) error {
@@ -196,9 +198,9 @@ func checkTxn(txn *kv.Txn, exp expKVTxn) error {
 		return errors.Errorf("expected ReadTimestamp: %d, but got: %s",
 			*exp.readTSNanos, readTimestamp)
 	}
-	if exp.uncertaintyLimitNanos != nil && *exp.uncertaintyLimitNanos != proto.GlobalUncertaintyLimit.WallTime {
-		return errors.Errorf("expected GlobalUncertaintyLimit: %d, but got: %s",
-			*exp.uncertaintyLimitNanos, proto.GlobalUncertaintyLimit)
+	if exp.maxTSNanos != nil && *exp.maxTSNanos != proto.MaxTimestamp.WallTime {
+		return errors.Errorf("expected MaxTimestamp: %d, but got: %s",
+			*exp.maxTSNanos, proto.MaxTimestamp)
 	}
 	return nil
 }
@@ -230,7 +232,7 @@ func TestTransitions(t *testing.T) {
 	txnName := sqlTxnName
 	now := testCon.clock.Now()
 	pri := roachpb.NormalUserPriority
-	uncertaintyLimit := testCon.clock.Now().Add(testCon.clock.MaxOffset().Nanoseconds(), 0 /* logical */)
+	maxTS := testCon.clock.Now().Add(testCon.clock.MaxOffset().Nanoseconds(), 0 /* logical */)
 	type test struct {
 		name string
 
@@ -279,11 +281,11 @@ func TestTransitions(t *testing.T) {
 				expEv:   txnStart,
 			},
 			expTxn: &expKVTxn{
-				debugName:             &txnName,
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
+				debugName:    &txnName,
+				userPriority: &pri,
+				writeTSNanos: &now.WallTime,
+				readTSNanos:  &now.WallTime,
+				maxTSNanos:   &maxTS.WallTime,
 			},
 		},
 		{
@@ -302,11 +304,11 @@ func TestTransitions(t *testing.T) {
 				expEv:   txnStart,
 			},
 			expTxn: &expKVTxn{
-				debugName:             &txnName,
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
+				debugName:    &txnName,
+				userPriority: &pri,
+				writeTSNanos: &now.WallTime,
+				readTSNanos:  &now.WallTime,
+				maxTSNanos:   &maxTS.WallTime,
 			},
 		},
 		//
@@ -324,8 +326,8 @@ func TestTransitions(t *testing.T) {
 				}
 				return s, ts, nil
 			},
-			ev:        eventTxnFinishCommitted{},
-			evPayload: nil,
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
 			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
@@ -345,8 +347,8 @@ func TestTransitions(t *testing.T) {
 				}
 				return s, ts, nil
 			},
-			ev:        eventTxnFinishCommitted{},
-			evPayload: nil,
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
 			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
@@ -550,8 +552,9 @@ func TestTransitions(t *testing.T) {
 				s, ts := testCon.createAbortedState()
 				return s, ts, nil
 			},
-			ev:       eventTxnFinishAborted{},
-			expState: stateNoTxn{},
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: false},
+			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
 				expEv:   txnRollback,
@@ -587,10 +590,10 @@ func TestTransitions(t *testing.T) {
 				expEv:   txnRestart,
 			},
 			expTxn: &expKVTxn{
-				userPriority:          &pri,
-				writeTSNanos:          &now.WallTime,
-				readTSNanos:           &now.WallTime,
-				uncertaintyLimitNanos: &uncertaintyLimit.WallTime,
+				userPriority: &pri,
+				writeTSNanos: &now.WallTime,
+				readTSNanos:  &now.WallTime,
+				maxTSNanos:   &maxTS.WallTime,
 			},
 		},
 		{
@@ -620,11 +623,12 @@ func TestTransitions(t *testing.T) {
 			init: func() (fsm.State, *txnState, error) {
 				return testCon.createCommitWaitState()
 			},
-			ev:       eventTxnFinishCommitted{},
-			expState: stateNoTxn{},
+			ev:        eventTxnFinish{},
+			evPayload: eventTxnFinishPayload{commit: true},
+			expState:  stateNoTxn{},
 			expAdv: expAdvance{
 				expCode: advanceOne,
-				expEv:   noEvent,
+				expEv:   txnCommit,
 			},
 			expTxn: nil,
 		},

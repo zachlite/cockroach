@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for vec_to_datum.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -22,10 +20,7 @@
 package colconv
 
 import (
-	"sync"
-
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -54,86 +49,14 @@ type VecToDatumConverter struct {
 	da               rowenc.DatumAlloc
 }
 
-var _ execinfra.Releasable = &VecToDatumConverter{}
-
-var vecToDatumConverterPool = sync.Pool{
-	New: func() interface{} {
-		return &VecToDatumConverter{}
-	},
-}
-
-// getNewVecToDatumConverter returns a new VecToDatumConverter that is able to
-// handle batchWidth number of columns. willRelease indicates whether the caller
-// will call Release() on the converter.
-func getNewVecToDatumConverter(batchWidth int, willRelease bool) *VecToDatumConverter {
-	var c *VecToDatumConverter
-	// Having willRelease knob (i.e. not defaulting to using the pool all the
-	// time) is justified by the following scenario: there is constant workload
-	// running against the cluster (e.g. TPCC) that has the same "access
-	// pattern", so all converters used by that workload can be reused very
-	// effectively - the width of the batches are the same, etc. However, when a
-	// random query comes in and picks up a converter from the sync.Pool, it'll
-	// use it once and discard it afterwards. It is likely that for this random
-	// query it's better to allocate a fresh converter and not touch the ones in
-	// the pool.
-	if willRelease {
-		c = vecToDatumConverterPool.Get().(*VecToDatumConverter)
-	} else {
-		c = &VecToDatumConverter{}
-	}
-	if cap(c.convertedVecs) < batchWidth {
-		c.convertedVecs = make([]tree.Datums, batchWidth)
-	} else {
-		c.convertedVecs = c.convertedVecs[:batchWidth]
-	}
-	return c
-}
-
 // NewVecToDatumConverter creates a new VecToDatumConverter.
 // - batchWidth determines the width of the batches that it will be converting.
 // - vecIdxsToConvert determines which vectors need to be converted.
-// - willRelease indicates whether the caller intends to call Release() on the
-//   converter.
-func NewVecToDatumConverter(
-	batchWidth int, vecIdxsToConvert []int, willRelease bool,
-) *VecToDatumConverter {
-	c := getNewVecToDatumConverter(batchWidth, willRelease)
-	c.vecIdxsToConvert = vecIdxsToConvert
-	return c
-}
-
-// NewAllVecToDatumConverter is like NewVecToDatumConverter except all of the
-// vectors in the batch will be converted.
-// NOTE: it is assumed that the caller will Release the returned converter.
-func NewAllVecToDatumConverter(batchWidth int) *VecToDatumConverter {
-	c := getNewVecToDatumConverter(batchWidth, true /* willRelease */)
-	if cap(c.vecIdxsToConvert) < batchWidth {
-		c.vecIdxsToConvert = make([]int, batchWidth)
-	} else {
-		c.vecIdxsToConvert = c.vecIdxsToConvert[:batchWidth]
+func NewVecToDatumConverter(batchWidth int, vecIdxsToConvert []int) *VecToDatumConverter {
+	return &VecToDatumConverter{
+		convertedVecs:    make([]tree.Datums, batchWidth),
+		vecIdxsToConvert: vecIdxsToConvert,
 	}
-	for i := 0; i < batchWidth; i++ {
-		c.vecIdxsToConvert[i] = i
-	}
-	return c
-}
-
-// Release is part of the execinfra.Releasable interface.
-func (c *VecToDatumConverter) Release() {
-	// Deeply reset the converted vectors so that we don't hold onto the old
-	// datums.
-	for _, vec := range c.convertedVecs {
-		for i := range vec {
-			//gcassert:bce
-			vec[i] = nil
-		}
-	}
-	*c = VecToDatumConverter{
-		convertedVecs: c.convertedVecs[:0],
-		// This slice is of integers, so there is no need to reset it deeply.
-		vecIdxsToConvert: c.vecIdxsToConvert[:0],
-	}
-	vecToDatumConverterPool.Put(c)
 }
 
 // ConvertBatchAndDeselect converts the selected vectors from the batch while
@@ -155,17 +78,17 @@ func (c *VecToDatumConverter) ConvertBatchAndDeselect(batch coldata.Batch) {
 		return
 	}
 	// Ensure that convertedVecs are of sufficient length.
-	for _, vecIdx := range c.vecIdxsToConvert {
-		if cap(c.convertedVecs[vecIdx]) < batchLength {
+	if cap(c.convertedVecs[c.vecIdxsToConvert[0]]) < batchLength {
+		for _, vecIdx := range c.vecIdxsToConvert {
 			c.convertedVecs[vecIdx] = make([]tree.Datum, batchLength)
-		} else {
-			c.convertedVecs[vecIdx] = c.convertedVecs[vecIdx][:batchLength]
 		}
-	}
-	if c.da.AllocSize < batchLength {
 		// Adjust the datum alloc according to the length of the batch since
 		// this batch is the longest we've seen so far.
 		c.da.AllocSize = batchLength
+	} else {
+		for _, vecIdx := range c.vecIdxsToConvert {
+			c.convertedVecs[vecIdx] = c.convertedVecs[vecIdx][:batchLength]
+		}
 	}
 	sel := batch.Selection()
 	vecs := batch.ColVecs()
@@ -186,11 +109,6 @@ func (c *VecToDatumConverter) ConvertBatchAndDeselect(batch coldata.Batch) {
 // GetDatumColumn(colIdx)[sel[tupleIdx]] and *NOT*
 // GetDatumColumn(colIdx)[tupleIdx].
 func (c *VecToDatumConverter) ConvertBatch(batch coldata.Batch) {
-	if c == nil {
-		// If the converter is nil, then it wasn't allocated because there are
-		// no vectors to convert, so exit early.
-		return
-	}
 	c.ConvertVecs(batch.ColVecs(), batch.Length(), batch.Selection())
 }
 
@@ -210,21 +128,25 @@ func (c *VecToDatumConverter) ConvertVecs(vecs []coldata.Vec, inputLen int, sel 
 	requiredLength := inputLen
 	if sel != nil {
 		// When sel is non-nil, it might be something like sel = [1023], so we
-		// need to allocate up to the largest index mentioned in sel. Here, we
-		// rely on the fact that selection vectors are increasing sequences.
-		requiredLength = sel[inputLen-1] + 1
-	}
-	for _, vecIdx := range c.vecIdxsToConvert {
-		if cap(c.convertedVecs[vecIdx]) < requiredLength {
-			c.convertedVecs[vecIdx] = make([]tree.Datum, requiredLength)
-		} else {
-			c.convertedVecs[vecIdx] = c.convertedVecs[vecIdx][:requiredLength]
+		// need to allocate up to the largest index mentioned in sel.
+		requiredLength = 0
+		for _, idx := range sel[:inputLen] {
+			if idx+1 > requiredLength {
+				requiredLength = idx + 1
+			}
 		}
 	}
-	if c.da.AllocSize < requiredLength {
+	if cap(c.convertedVecs[c.vecIdxsToConvert[0]]) < requiredLength {
+		for _, vecIdx := range c.vecIdxsToConvert {
+			c.convertedVecs[vecIdx] = make([]tree.Datum, requiredLength)
+		}
 		// Adjust the datum alloc according to the length of the batch since
 		// this batch is the longest we've seen so far.
 		c.da.AllocSize = requiredLength
+	} else {
+		for _, vecIdx := range c.vecIdxsToConvert {
+			c.convertedVecs[vecIdx] = c.convertedVecs[vecIdx][:requiredLength]
+		}
 	}
 	for _, vecIdx := range c.vecIdxsToConvert {
 		ColVecToDatum(
@@ -247,18 +169,15 @@ func (c *VecToDatumConverter) GetDatumColumn(colIdx int) tree.Datums {
 func ColVecToDatumAndDeselect(
 	converted []tree.Datum, col coldata.Vec, length int, sel []int, da *rowenc.DatumAlloc,
 ) {
-	if length == 0 {
-		return
-	}
 	if sel == nil {
 		ColVecToDatum(converted, col, length, sel, da)
 		return
 	}
 	if col.MaybeHasNulls() {
 		nulls := col.Nulls()
-		vecToDatum(converted, col, length, sel, da, true, true, true)
+		_VEC_TO_DATUM(converted, col, length, sel, da, true, true, true)
 	} else {
-		vecToDatum(converted, col, length, sel, da, false, true, true)
+		_VEC_TO_DATUM(converted, col, length, sel, da, false, true, true)
 	}
 }
 
@@ -269,75 +188,73 @@ func ColVecToDatumAndDeselect(
 func ColVecToDatum(
 	converted []tree.Datum, col coldata.Vec, length int, sel []int, da *rowenc.DatumAlloc,
 ) {
-	if length == 0 {
-		return
-	}
 	if col.MaybeHasNulls() {
 		nulls := col.Nulls()
 		if sel != nil {
-			vecToDatum(converted, col, length, sel, da, true, true, false)
+			_VEC_TO_DATUM(converted, col, length, sel, da, true, true, false)
 		} else {
-			vecToDatum(converted, col, length, sel, da, true, false, false)
+			_VEC_TO_DATUM(converted, col, length, sel, da, true, false, false)
 		}
 	} else {
 		if sel != nil {
-			vecToDatum(converted, col, length, sel, da, false, true, false)
+			_VEC_TO_DATUM(converted, col, length, sel, da, false, true, false)
 		} else {
-			vecToDatum(converted, col, length, sel, da, false, false, false)
+			_VEC_TO_DATUM(converted, col, length, sel, da, false, false, false)
 		}
 	}
 }
 
-// This template function is a small helper that updates destIdx based on
+// {{/*
+// This code snippet is a small helper that updates destIdx based on the fact
 // whether we want the deselection behavior.
-// execgen:inline
-// execgen:template<hasSel, deselect>
-func setDestIdx(destIdx int, idx int, sel []int, hasSel bool, deselect bool) {
-	if hasSel && !deselect {
-		//gcassert:bce
-		destIdx = sel[idx]
-	} else {
-		destIdx = idx
-	}
-}
+func _SET_DEST_IDX(destIdx, idx int, sel []int, _HAS_SEL bool, _DESELECT bool) { // */}}
+	// {{define "setDestIdx" -}}
+	// {{if and (.HasSel) (not .Deselect)}}
+	destIdx = sel[idx]
+	// {{else}}
+	destIdx = idx
+	// {{end}}
+	// {{end}}
+	// {{/*
+} // */}}
 
-// execgen:inline
-// execgen:template<hasSel>
-func setSrcIdx(srcIdx int, idx int, sel []int, hasSel bool) {
-	if hasSel {
-		//gcassert:bce
-		srcIdx = sel[idx]
-	} else {
-		srcIdx = idx
-	}
-}
+// {{/*
+// This code snippet is a small helper that updates srcIdx based on the fact
+// whether there is a selection vector or not.
+func _SET_SRC_IDX(srcIdx, idx int, sel []int, _HAS_SEL bool) { // */}}
+	// {{define "setSrcIdx" -}}
+	// {{if .HasSel}}
+	srcIdx = sel[idx]
+	// {{else}}
+	srcIdx = idx
+	// {{end}}
+	// {{end}}
+	// {{/*
+} // */}}
 
-// vecToDatum converts the columnar data in col to the corresponding
+// {{/*
+// This code snippet converts the columnar data in col to the corresponding
 // tree.Datum representation that is assigned to converted. length determines
 // how many columnar values need to be converted and sel is an optional
 // selection vector.
-// NOTE: if sel is non-nil, it might perform the deselection
+// NOTE: if sel is non-nil, this code snippet might perform the deselection
 // step meaning (that it will densely populate converted with only values that
-// are selected according to sel) based on deselect value.
+// are selected according to sel) based on _DESELECT value.
 // Note: len(converted) must be of sufficient length.
-// execgen:inline
-// execgen:template<hasNulls, hasSel, deselect>
-func vecToDatum(
+func _VEC_TO_DATUM(
 	converted []tree.Datum,
 	col coldata.Vec,
 	length int,
 	sel []int,
 	da *rowenc.DatumAlloc,
-	hasNulls bool,
-	hasSel bool,
-	deselect bool,
-) {
-	if !hasSel || deselect {
-		_ = converted[length-1]
-	}
-	if hasSel {
-		_ = sel[length-1]
-	}
+	_HAS_NULLS bool,
+	_HAS_SEL bool,
+	_DESELECT bool,
+) { // */}}
+	// {{define "vecToDatum" -}}
+	// {{if .HasSel}}
+	sel = sel[:length]
+	// {{end}}
 	var idx, destIdx, srcIdx int
 	switch ct := col.Type(); ct.Family() {
 	// {{/*
@@ -354,80 +271,50 @@ func vecToDatum(
 		bytes := col.Bytes()
 		if ct.Oid() == oid.T_name {
 			for idx = 0; idx < length; idx++ {
-				setDestIdx(destIdx, idx, sel, hasSel, deselect)
-				setSrcIdx(srcIdx, idx, sel, hasSel)
-				if hasNulls {
-					if nulls.NullAt(srcIdx) {
-						if !hasSel || deselect {
-							//gcassert:bce
-						}
-						converted[destIdx] = tree.DNull
-						continue
-					}
+				_SET_DEST_IDX(destIdx, idx, sel, _HAS_SEL, _DESELECT)
+				_SET_SRC_IDX(srcIdx, idx, sel, _HAS_SEL)
+				// {{if .HasNulls}}
+				if nulls.NullAt(srcIdx) {
+					converted[destIdx] = tree.DNull
+					continue
 				}
-				v := da.NewDName(tree.DString(bytes.Get(srcIdx)))
-				if !hasSel || deselect {
-					//gcassert:bce
-				}
-				converted[destIdx] = v
+				// {{end}}
+				converted[destIdx] = da.NewDName(tree.DString(bytes.Get(srcIdx)))
 			}
 			return
 		}
 		for idx = 0; idx < length; idx++ {
-			setDestIdx(destIdx, idx, sel, hasSel, deselect)
-			setSrcIdx(srcIdx, idx, sel, hasSel)
-			if hasNulls {
-				if nulls.NullAt(srcIdx) {
-					if !hasSel || deselect {
-						//gcassert:bce
-					}
-					converted[destIdx] = tree.DNull
-					continue
-				}
+			_SET_DEST_IDX(destIdx, idx, sel, _HAS_SEL, _DESELECT)
+			_SET_SRC_IDX(srcIdx, idx, sel, _HAS_SEL)
+			// {{if .HasNulls}}
+			if nulls.NullAt(srcIdx) {
+				converted[destIdx] = tree.DNull
+				continue
 			}
-			v := da.NewDString(tree.DString(bytes.Get(srcIdx)))
-			if !hasSel || deselect {
-				//gcassert:bce
-			}
-			converted[destIdx] = v
+			// {{end}}
+			converted[destIdx] = da.NewDString(tree.DString(bytes.Get(srcIdx)))
 		}
-	// {{range .}}
+	// {{range .Global}}
 	case _TYPE_FAMILY:
 		switch ct.Width() {
 		// {{range .Widths}}
 		case _TYPE_WIDTH:
 			typedCol := col._VEC_METHOD()
-			// {{if .Sliceable}}
-			if !hasSel {
-				_ = typedCol.Get(length - 1)
-			}
-			// {{end}}
 			for idx = 0; idx < length; idx++ {
-				setDestIdx(destIdx, idx, sel, hasSel, deselect)
-				setSrcIdx(srcIdx, idx, sel, hasSel)
-				if hasNulls {
-					if nulls.NullAt(srcIdx) {
-						if !hasSel || deselect {
-							//gcassert:bce
-						}
-						converted[destIdx] = tree.DNull
-						continue
-					}
-				}
-				// {{if .Sliceable}}
-				if !hasSel {
-					//gcassert:bce
+				_SET_DEST_IDX(destIdx, idx, sel, _HAS_SEL, _DESELECT)
+				_SET_SRC_IDX(srcIdx, idx, sel, _HAS_SEL)
+				// {{if _HAS_NULLS}}
+				if nulls.NullAt(srcIdx) {
+					converted[destIdx] = tree.DNull
+					continue
 				}
 				// {{end}}
-				v := typedCol.Get(srcIdx)
-				_ASSIGN_CONVERTED(_converted, v, da)
-				if !hasSel || deselect {
-					//gcassert:bce
-				}
-				converted[destIdx] = _converted
+				_ASSIGN_CONVERTED(converted[destIdx], typedCol, srcIdx, da)
 			}
 			// {{end}}
 		}
 		// {{end}}
 	}
-}
+	// {{end}}
+	// {{/*
+} // */}}

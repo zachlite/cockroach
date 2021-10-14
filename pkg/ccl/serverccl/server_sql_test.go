@@ -11,21 +11,18 @@ package serverccl
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl/licenseccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/lib/pq"
@@ -53,7 +50,7 @@ func TestSQLServer(t *testing.T) {
 	_, db := serverutils.StartTenant(
 		t,
 		tc.Server(0),
-		base.TestTenantArgs{TenantID: serverutils.TestTenantID()},
+		base.TestTenantArgs{TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0])},
 	)
 	defer db.Close()
 	r := sqlutils.MakeSQLRunner(db)
@@ -76,38 +73,13 @@ func TestTenantCannotSetClusterSetting(t *testing.T) {
 	defer tc.Stopper().Stop(ctx)
 
 	// StartTenant with the default permissions to
-	_, db := serverutils.StartTenant(t, tc.Server(0), base.TestTenantArgs{TenantID: serverutils.TestTenantID(), AllowSettingClusterSettings: false})
+	_, db := serverutils.StartTenant(t, tc.Server(0), base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), AllowSettingClusterSettings: false})
 	defer db.Close()
 	_, err := db.Exec(`SET CLUSTER SETTING sql.defaults.vectorize=off`)
-	require.NoError(t, err)
-	_, err = db.Exec(`SET CLUSTER SETTING kv.snapshot_rebalance.max_rate = '2MiB';`)
 	var pqErr *pq.Error
 	ok := errors.As(err, &pqErr)
 	require.True(t, ok, "expected err to be a *pq.Error but is of type %T. error is: %v", err)
 	require.Equal(t, pq.ErrorCode(pgcode.InsufficientPrivilege.String()), pqErr.Code, "err %v has unexpected code", err)
-}
-
-func TestTenantCanUseEnterpriseFeatures(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	license, _ := (&licenseccl.License{
-		Type: licenseccl.License_Enterprise,
-	}).Encode()
-
-	defer utilccl.TestingDisableEnterprise()()
-	defer envutil.TestSetEnv(t, "COCKROACH_TENANT_LICENSE", license)()
-
-	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(context.Background())
-
-	_, db := serverutils.StartTenant(t, tc.Server(0), base.TestTenantArgs{TenantID: serverutils.TestTenantID(), AllowSettingClusterSettings: false})
-	defer db.Close()
-
-	_, err := db.Exec(`BACKUP INTO 'userfile:///backup'`)
-	require.NoError(t, err)
-	_, err = db.Exec(`BACKUP INTO LATEST IN 'userfile:///backup'`)
-	require.NoError(t, err)
 }
 
 func TestTenantUnauthenticatedAccess(t *testing.T) {
@@ -118,18 +90,17 @@ func TestTenantUnauthenticatedAccess(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
-	_, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
-			TestingKnobs: base.TestingKnobs{
-				TenantTestingKnobs: &sql.TenantTestingKnobs{
-					// Configure the SQL server to access the wrong tenant keyspace.
-					TenantIDCodecOverride: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[1]),
-				},
+	_, err := tc.Server(0).StartTenant(base.TestTenantArgs{
+		TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
+		TestingKnobs: base.TestingKnobs{
+			TenantTestingKnobs: &sql.TenantTestingKnobs{
+				// Configure the SQL server to access the wrong tenant keyspace.
+				TenantIDCodecOverride: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[1]),
 			},
-		})
+		},
+	})
 	require.Error(t, err)
-	require.Regexp(t, `Unauthenticated desc = requested key .* not fully contained in tenant keyspace /Tenant/1{0-1}`, err)
+	require.Regexp(t, `Unauthenticated desc = requested key /Tenant/11/System/"system-version/" not fully contained in tenant keyspace /Tenant/1{0-1}`, err)
 }
 
 // TestTenantHTTP verifies that SQL tenant servers expose metrics and debugging endpoints.
@@ -141,17 +112,12 @@ func TestTenantHTTP(t *testing.T) {
 	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(ctx)
 
-	tenant, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID: serverutils.TestTenantID(),
-		})
+	tenant, err := tc.Server(0).StartTenant(base.TestTenantArgs{
+		TenantID: roachpb.MakeTenantID(security.EmbeddedTenantIDs()[0]),
+	})
 	require.NoError(t, err)
-
-	httpClient, err := tenant.RPCContext().GetHTTPClient()
-	require.NoError(t, err)
-
 	t.Run("prometheus", func(t *testing.T) {
-		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/_status/vars")
+		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/_status/vars")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -160,7 +126,7 @@ func TestTenantHTTP(t *testing.T) {
 		require.Contains(t, string(body), "sql_ddl_started_count_internal")
 	})
 	t.Run("pprof", func(t *testing.T) {
-		resp, err := httpClient.Get("https://" + tenant.HTTPAddr() + "/debug/pprof/goroutine?debug=2")
+		resp, err := httputil.Get(ctx, "http://"+tenant.HTTPAddr()+"/debug/pprof/goroutine?debug=2")
 		defer http.DefaultClient.CloseIdleConnections()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -169,59 +135,4 @@ func TestTenantHTTP(t *testing.T) {
 		require.Contains(t, string(body), "goroutine")
 	})
 
-}
-
-func TestNonExistentTenant(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	tc := serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-
-	_, err := tc.Server(0).StartTenant(ctx,
-		base.TestTenantArgs{
-			TenantID:        serverutils.TestTenantID(),
-			Existing:        true,
-			SkipTenantCheck: true,
-		})
-	require.Error(t, err)
-	require.Equal(t, "system DB uninitialized, check if tenant is non existent", err.Error())
-}
-
-// TestTenantRowIDs confirms `unique_rowid()` works as expected in a
-// multi-tenant setup.
-func TestTenantRowIDs(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	tc := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-	const numRows = 10
-	tenant, db := serverutils.StartTenant(
-		t,
-		tc.Server(0),
-		base.TestTenantArgs{TenantID: serverutils.TestTenantID()},
-	)
-	defer db.Close()
-	sqlDB := sqlutils.MakeSQLRunner(db)
-	sqlDB.Exec(t, `CREATE TABLE foo(key INT PRIMARY KEY DEFAULT unique_rowid(), val INT)`)
-	sqlDB.Exec(t, fmt.Sprintf("INSERT INTO foo (val) SELECT * FROM generate_series(1, %d)", numRows))
-
-	// Verify that the rows are inserted successfully and that the row ids
-	// are based on the SQL instance ID.
-	rows := sqlDB.Query(t, "SELECT key FROM foo")
-	defer rows.Close()
-	rowCount := 0
-	instanceID := int(tenant.SQLInstanceID())
-	for rows.Next() {
-		var key int
-		if err := rows.Scan(&key); err != nil {
-			t.Fatal(err)
-		}
-		require.Equal(t, instanceID, key&instanceID)
-		rowCount++
-	}
-	require.Equal(t, numRows, rowCount)
 }

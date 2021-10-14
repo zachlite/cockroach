@@ -91,12 +91,6 @@ func (a tenantAuthorizer) authorize(
 	case "/cockroach.server.serverpb.Status/IndexUsageStatistics":
 		return a.authTenant(tenID)
 
-	case "/cockroach.server.serverpb.Status/CancelSession":
-		return a.authTenant(tenID)
-
-	case "/cockroach.server.serverpb.Status/CancelLocalSession":
-		return a.authTenant(tenID)
-
 	case "/cockroach.roachpb.Internal/GetSpanConfigs":
 		return a.authGetSpanConfigs(tenID, req.(*roachpb.GetSpanConfigsRequest))
 

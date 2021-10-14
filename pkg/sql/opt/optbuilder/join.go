@@ -35,12 +35,14 @@ func (b *Builder) buildJoin(
 ) (outScope *scope) {
 	leftScope := b.buildDataSource(join.Left, nil /* indexFlags */, locking, inScope)
 
+	isLateral := false
 	inScopeRight := inScope
-	isLateral := b.exprIsLateral(join.Right)
-	if isLateral {
-		// If this is a lateral join, use leftScope as inScope for the right side.
-		// The right side scope of a LATERAL join includes the columns produced by
-		// the left side.
+	// If this is a lateral join, use leftScope as inScope for the right side.
+	// The right side scope of a LATERAL join includes the columns produced by
+	// the left side.
+	if t, ok := join.Right.(*tree.AliasedTableExpr); ok && t.Lateral {
+		telemetry.Inc(sqltelemetry.LateralJoinUseCounter)
+		isLateral = true
 		inScopeRight = leftScope
 		inScopeRight.context = exprKindLateralJoin
 	}
@@ -95,7 +97,7 @@ func (b *Builder) buildJoin(
 		outScope = inScope.push()
 
 		var jb usingJoinBuilder
-		jb.init(b, joinType, flags, isLateral, leftScope, rightScope, outScope)
+		jb.init(b, joinType, flags, leftScope, rightScope, outScope)
 
 		switch t := cond.(type) {
 		case tree.NaturalJoinCond:
@@ -295,7 +297,6 @@ type usingJoinBuilder struct {
 	joinType   descpb.JoinType
 	joinFlags  memo.JoinFlags
 	filters    memo.FiltersExpr
-	isLateral  bool
 	leftScope  *scope
 	rightScope *scope
 	outScope   *scope
@@ -314,7 +315,6 @@ func (jb *usingJoinBuilder) init(
 	b *Builder,
 	joinType descpb.JoinType,
 	flags memo.JoinFlags,
-	isLateral bool,
 	leftScope, rightScope, outScope *scope,
 ) {
 	// This initialization pattern ensures that fields are not unwittingly
@@ -323,7 +323,6 @@ func (jb *usingJoinBuilder) init(
 		b:          b,
 		joinType:   joinType,
 		joinFlags:  flags,
-		isLateral:  isLateral,
 		leftScope:  leftScope,
 		rightScope: rightScope,
 		outScope:   outScope,
@@ -407,7 +406,7 @@ func (jb *usingJoinBuilder) finishBuild() {
 		jb.rightScope.expr.(memo.RelExpr),
 		jb.filters,
 		&memo.JoinPrivate{Flags: jb.joinFlags},
-		jb.isLateral,
+		false, /* isLateral */
 	)
 
 	if !jb.ifNullCols.Empty() {

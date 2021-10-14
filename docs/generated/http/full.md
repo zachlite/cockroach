@@ -2416,53 +2416,6 @@ Support status: [reserved](#support-status)
 
 
 
-## CancelLocalSession
-
-`POST /_status/cancel_local_session`
-
-CancelLocalSession forcefully terminates a SQL session running on this node given its ID.
-
-Support status: [reserved](#support-status)
-
-#### Request Parameters
-
-
-
-
-
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| node_id | [string](#cockroach.server.serverpb.CancelSessionRequest-string) |  | TODO(abhimadan): use [(gogoproto.customname) = "NodeID"] below. Need to figure out how to teach grpc-gateway about custom names.<br><br>node_id is a string so that "local" can be used to specify that no forwarding is necessary. | [reserved](#support-status) |
-| session_id | [bytes](#cockroach.server.serverpb.CancelSessionRequest-bytes) |  |  | [reserved](#support-status) |
-| username | [string](#cockroach.server.serverpb.CancelSessionRequest-string) |  | Username of the user making this cancellation request. This may be omitted if the user is the same as the one issuing the CancelSessionRequest. The caller is responsiblef or case-folding and NFC normalization. | [reserved](#support-status) |
-
-
-
-
-
-
-
-#### Response Parameters
-
-
-
-
-
-
-
-| Field | Type | Label | Description | Support status |
-| ----- | ---- | ----- | ----------- | -------------- |
-| canceled | [bool](#cockroach.server.serverpb.CancelSessionResponse-bool) |  |  | [reserved](#support-status) |
-| error | [string](#cockroach.server.serverpb.CancelSessionResponse-string) |  |  | [reserved](#support-status) |
-
-
-
-
-
-
-
 ## SpanStats
 
 `POST /_status/span`
@@ -2581,7 +2534,6 @@ Support status: [reserved](#support-status)
 | node_id | [string](#cockroach.server.serverpb.ProfileRequest-string) |  | node_id is a string so that "local" can be used to specify that no forwarding is necessary. | [reserved](#support-status) |
 | type | [ProfileRequest.Type](#cockroach.server.serverpb.ProfileRequest-cockroach.server.serverpb.ProfileRequest.Type) |  | The type of profile to retrieve. | [reserved](#support-status) |
 | seconds | [int32](#cockroach.server.serverpb.ProfileRequest-int32) |  | applies only to Type=CPU, defaults to 30 | [reserved](#support-status) |
-| labels | [bool](#cockroach.server.serverpb.ProfileRequest-bool) |  | applies only to Type=CPU, defaults to false | [reserved](#support-status) |
 
 
 
@@ -2753,7 +2705,7 @@ Support status: [reserved](#support-status)
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
-| files | [cockroach.util.log.FileInfo](#cockroach.server.serverpb.LogFilesListResponse-cockroach.util.log.FileInfo) | repeated | files is the list of log files under this node's configured logging directories. Note that the response does not contain detail about which directory contains which file. The location of each file is known to the server based on its name and the logging configuration. | [reserved](#support-status) |
+| files | [cockroach.util.log.FileInfo](#cockroach.server.serverpb.LogFilesListResponse-cockroach.util.log.FileInfo) | repeated |  | [reserved](#support-status) |
 
 
 
@@ -2780,7 +2732,7 @@ Support status: [reserved](#support-status)
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
 | node_id | [string](#cockroach.server.serverpb.LogFileRequest-string) |  | node_id is a string so that "local" can be used to specify that no forwarding is necessary. | [reserved](#support-status) |
-| file | [string](#cockroach.server.serverpb.LogFileRequest-string) |  | file is the name of the log file to retrieve. Note that it must not be prefixed by a directory name. The full path to the file is computed by the server based on the base name and the logging configuration. | [reserved](#support-status) |
+| file | [string](#cockroach.server.serverpb.LogFileRequest-string) |  |  | [reserved](#support-status) |
 | redact | [bool](#cockroach.server.serverpb.LogFileRequest-bool) |  | redact, if true, requests redaction of sensitive data away from the retrieved log entries. Only admin users can send a request with redact = false. | [reserved](#support-status) |
 
 

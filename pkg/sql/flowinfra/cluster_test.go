@@ -35,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -53,8 +52,7 @@ func TestClusterFlow(t *testing.T) {
 	const numRows = 100
 
 	args := base.TestClusterArgs{ReplicationMode: base.ReplicationManual}
-	tci := serverutils.StartNewTestCluster(t, 3, args)
-	tc := tci.(*testcluster.TestCluster)
+	tc := serverutils.StartNewTestCluster(t, 3, args)
 	defer tc.Stopper().Stop(context.Background())
 
 	sumDigitsFn := func(row int) tree.Datum {
@@ -92,7 +90,7 @@ func TestClusterFlow(t *testing.T) {
 		// that doesn't matter for the purposes of this test.
 
 		// Start a span (useful to look at spans using Lightstep).
-		sp := tc.ServerTyped(0).Tracer().StartSpan("cluster test")
+		sp := tc.Server(0).ClusterSettings().Tracer.StartSpan("cluster test")
 		ctx := tracing.ContextWithSpan(context.Background(), sp)
 		defer sp.Finish()
 

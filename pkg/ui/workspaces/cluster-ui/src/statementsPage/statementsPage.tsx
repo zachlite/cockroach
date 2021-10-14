@@ -10,7 +10,7 @@
 
 import React from "react";
 import { RouteComponentProps } from "react-router-dom";
-import { isNil, merge } from "lodash";
+import { isNil, merge, forIn } from "lodash";
 import Helmet from "react-helmet";
 import moment, { Moment } from "moment";
 import classNames from "classnames/bind";
@@ -179,19 +179,19 @@ export class StatementsPage extends React.Component<
     };
   };
 
-  syncHistory = (params: Record<string, string | undefined>): void => {
+  syncHistory = (params: Record<string, string | undefined>) => {
     const { history } = this.props;
-    const nextSearchParams = new URLSearchParams(history.location.search);
+    const currentSearchParams = new URLSearchParams(history.location.search);
 
-    Object.entries(params).forEach(([key, value]) => {
+    forIn(params, (value, key) => {
       if (!value) {
-        nextSearchParams.delete(key);
+        currentSearchParams.delete(key);
       } else {
-        nextSearchParams.set(key, value);
+        currentSearchParams.set(key, value);
       }
     });
 
-    history.location.search = nextSearchParams.toString();
+    history.location.search = currentSearchParams.toString();
     history.replace(history.location);
   };
 
@@ -221,6 +221,17 @@ export class StatementsPage extends React.Component<
       moment.utc().subtract(1, "hours"),
       moment.utc().add(1, "minute"),
     );
+  };
+
+  selectApp = (value: string): void => {
+    if (value == "All") value = "";
+    const { history, onFilterChange } = this.props;
+    history.location.pathname = `/statements/${encodeURIComponent(value)}`;
+    history.replace(history.location);
+    this.resetPagination();
+    if (onFilterChange) {
+      onFilterChange(value);
+    }
   };
 
   resetPagination = (): void => {
@@ -296,6 +307,7 @@ export class StatementsPage extends React.Component<
       regions: filters.regions,
       nodes: filters.nodes,
     });
+    this.selectApp(filters.app);
   };
 
   onClearSearchField = (): void => {
@@ -322,6 +334,7 @@ export class StatementsPage extends React.Component<
       regions: undefined,
       nodes: undefined,
     });
+    this.selectApp("");
   };
 
   filteredStatementsData = (): AggregateStatistics[] => {
@@ -409,8 +422,8 @@ export class StatementsPage extends React.Component<
     const {
       statements,
       databases,
+      match,
       lastReset,
-      location,
       onDiagnosticsReportDownload,
       onStatementClick,
       resetSQLStats,
@@ -419,9 +432,9 @@ export class StatementsPage extends React.Component<
       nodeRegions,
       isTenant,
     } = this.props;
-    const appAttrValue = queryByName(location, appAttr);
+    const appAttrValue = getMatchParamByName(match, appAttr);
     const selectedApp = appAttrValue || "";
-    const appOptions = [{ value: "", label: "All" }];
+    const appOptions = [{ value: "all", label: "All" }];
     this.props.apps.forEach(app => appOptions.push({ value: app, label: app }));
     const data = this.filteredStatementsData();
     const totalWorkload = calculateTotalWorkload(data);

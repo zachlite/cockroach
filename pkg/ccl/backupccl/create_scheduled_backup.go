@@ -26,13 +26,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -350,7 +346,7 @@ func doCreateBackupSchedules(
 		if err != nil {
 			return errors.Wrapf(err, "failed to evaluate backup encryption_passphrase")
 		}
-		backupNode.Options.EncryptionPassphrase = tree.NewStrVal(pw)
+		backupNode.Options.EncryptionPassphrase = tree.NewDString(pw)
 	}
 
 	// Evaluate encryption KMS URIs if set.
@@ -364,7 +360,7 @@ func doCreateBackupSchedules(
 		}
 		for _, kmsURI := range kmsURIs {
 			backupNode.Options.EncryptionKMSURI = append(backupNode.Options.EncryptionKMSURI,
-				tree.NewStrVal(kmsURI))
+				tree.NewDString(kmsURI))
 		}
 	}
 
@@ -375,7 +371,7 @@ func doCreateBackupSchedules(
 	}
 
 	for _, dest := range destinations {
-		backupNode.To = append(backupNode.To, tree.NewStrVal(dest))
+		backupNode.To = append(backupNode.To, tree.NewDString(dest))
 	}
 
 	backupNode.Targets = eval.Targets
@@ -604,7 +600,10 @@ func makeBackupSchedule(
 
 	// We do not set backupNode.AsOf: this is done when the scheduler kicks off the backup.
 	// Serialize backup statement and set schedule executor and its args.
-	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtParsable|tree.FmtShowPasswords)
+	//
+	// TODO(bulkio): this serialization is erroneous, see issue
+	// https://github.com/cockroachdb/cockroach/issues/63216
+	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtSimple|tree.FmtShowPasswords)
 	any, err := pbtypes.MarshalAny(args)
 	if err != nil {
 		return nil, nil, err
@@ -694,110 +693,13 @@ func dryRunInvokeBackup(ctx context.Context, p sql.PlanHookState, backupNode *tr
 	return invokeBackup(ctx, backupFn)
 }
 
-func fullyQualifyScheduledBackupTargetTables(
-	ctx context.Context, p sql.PlanHookState, tables tree.TablePatterns,
-) ([]tree.TablePattern, error) {
-	fqTablePatterns := make([]tree.TablePattern, len(tables))
-	for i, target := range tables {
-		tablePattern, err := target.NormalizeTablePattern()
-		if err != nil {
-			return nil, err
-		}
-		switch tp := tablePattern.(type) {
-		case *tree.TableName:
-			if err := sql.DescsTxn(ctx, p.ExecCfg(), func(ctx context.Context, txn *kv.Txn,
-				col *descs.Collection) error {
-				// Resolve the table.
-				un := tp.ToUnresolvedObjectName()
-				found, _, tableDesc, err := resolver.ResolveExisting(ctx, un, p, tree.ObjectLookupFlags{},
-					p.CurrentDatabase(), p.CurrentSearchPath())
-				if err != nil {
-					return err
-				}
-				if !found {
-					return errors.Newf("target table %s could not be resolved", tp.String())
-				}
-
-				// Resolve the database.
-				found, dbDesc, err := col.GetImmutableDatabaseByID(ctx, txn, tableDesc.GetParentID(),
-					tree.DatabaseLookupFlags{Required: true})
-				if err != nil {
-					return err
-				}
-				if !found {
-					return errors.Newf("database of target table %s could not be resolved", tp.String())
-				}
-
-				// Resolve the schema.
-				schemaDesc, err := col.GetImmutableSchemaByID(ctx, txn, tableDesc.GetParentSchemaID(),
-					tree.SchemaLookupFlags{Required: true})
-				if err != nil {
-					return err
-				}
-				tn := tree.NewTableNameWithSchema(
-					tree.Name(dbDesc.GetName()),
-					tree.Name(schemaDesc.GetName()),
-					tree.Name(tableDesc.GetName()),
-				)
-				fqTablePatterns[i] = tn
-				return nil
-			}); err != nil {
-				return nil, err
-			}
-		case *tree.AllTablesSelector:
-			if !tp.ExplicitSchema {
-				tp.ExplicitSchema = true
-				tp.SchemaName = tree.Name(p.CurrentDatabase())
-			} else if tp.ExplicitSchema && !tp.ExplicitCatalog {
-				// The schema field could either be a schema or a database. If we can
-				// successfully resolve the schema, we will add the DATABASE prefix.
-				// Otherwise, no updates are needed since the schema field refers to the
-				// database.
-				var resolvedSchema bool
-				if err := sql.DescsTxn(ctx, p.ExecCfg(), func(ctx context.Context, txn *kv.Txn,
-					col *descs.Collection) error {
-					dbDesc, err := col.GetImmutableDatabaseByName(ctx, txn, p.CurrentDatabase(),
-						tree.DatabaseLookupFlags{Required: true})
-					if err != nil {
-						return err
-					}
-					resolvedSchema, _, err = catalogkv.ResolveSchemaID(ctx, txn, p.ExecCfg().Codec,
-						dbDesc.GetID(), tp.SchemaName.String())
-					return err
-				}); err != nil {
-					return nil, err
-				}
-
-				if resolvedSchema {
-					tp.ExplicitCatalog = true
-					tp.CatalogName = tree.Name(p.CurrentDatabase())
-				}
-			}
-			fqTablePatterns[i] = tp
-		}
-	}
-	return fqTablePatterns, nil
-}
-
 // makeScheduleBackupEval prepares helper scheduledBackupEval struct to assist in evaluation
 // of various schedule and backup specific components.
 func makeScheduledBackupEval(
 	ctx context.Context, p sql.PlanHookState, schedule *tree.ScheduledBackup,
 ) (*scheduledBackupEval, error) {
-	var err error
-	if schedule.Targets != nil && schedule.Targets.Tables != nil {
-		// Table backup targets must be fully qualified during scheduled backup
-		// planning. This is because the actual execution of the backup job occurs
-		// in a background, scheduled job session, that does not have the same
-		// resolution configuration as during planning.
-		schedule.Targets.Tables, err = fullyQualifyScheduledBackupTargetTables(ctx, p,
-			schedule.Targets.Tables)
-		if err != nil {
-			return nil, errors.Wrap(err, "qualifying backup target tables")
-		}
-	}
-
 	eval := &scheduledBackupEval{ScheduledBackup: schedule}
+	var err error
 
 	if schedule.ScheduleLabelSpec.Label != nil {
 		eval.scheduleLabel, err = p.TypeAsString(ctx, schedule.ScheduleLabelSpec.Label, scheduleBackupOp)
@@ -940,13 +842,9 @@ func createBackupScheduleHook(
 	return fn, scheduledBackupHeader, nil, false, nil
 }
 
-// MarshalJSONPB implements jsonpb.JSONPBMarshaller to provide a custom Marshaller
-// for jsonpb that redacts secrets in URI fields.
-func (m ScheduledBackupExecutionArgs) MarshalJSONPB(marshaller *jsonpb.Marshaler) ([]byte, error) {
-	if !protoreflect.ShouldRedact(marshaller) {
-		return json.Marshal(m)
-	}
-
+// MarshalJSONPB provides a custom Marshaller for jsonpb that redacts secrets in
+// URI fields.
+func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte, error) {
 	stmt, err := parser.ParseOne(m.BackupStatement)
 	if err != nil {
 		return nil, err

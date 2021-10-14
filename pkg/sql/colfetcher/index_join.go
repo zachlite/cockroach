@@ -168,13 +168,13 @@ func (s *ColIndexJoin) Next() coldata.Batch {
 			// Index joins will always return exactly one output row per input row.
 			s.rf.setEstimatedRowCount(uint64(rowCount))
 			if err := s.rf.StartScan(
-				s.Ctx,
 				s.flowCtx.Txn,
 				spans,
 				nil,   /* bsHeader */
 				false, /* limitBatches */
 				rowinfra.NoBytesLimit,
 				rowinfra.NoRowLimit,
+				s.flowCtx.TraceKV,
 				s.flowCtx.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 			); err != nil {
 				colexecerror.InternalError(err)
@@ -210,12 +210,7 @@ func (s *ColIndexJoin) Next() coldata.Batch {
 // result batches. TODO(drewk): once the Streamer work is finished, the fetcher
 // logic will be able to control result size without sacrificing parallelism, so
 // we can remove this limit.
-var inputBatchSizeLimit = int64(util.ConstantWithMetamorphicTestRange(
-	"ColIndexJoin-batch-size",
-	4<<20, /* 4 MB */
-	1,     /* min */
-	4<<20, /* max */
-))
+const inputBatchSizeLimit = 4 << 20 /* 4 MB */
 
 // findEndIndex returns an index endIdx into s.batch such that generating spans
 // for rows in the interval [s.startIdx, endIdx) will get as close to the memory
@@ -402,7 +397,7 @@ func NewColIndexJoin(
 		cols = table.DeletableColumns()
 	}
 	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
-	typs := catalog.ColumnTypes(cols)
+	typs := catalog.ColumnTypesWithVirtualCol(cols, nil /* virtualCol */)
 
 	// Add all requested system columns to the output.
 	if spec.HasSystemColumns {
@@ -442,7 +437,7 @@ func NewColIndexJoin(
 	}
 
 	fetcher, err := initCFetcher(
-		flowCtx, fetcherAllocator, table, index, neededColumns, columnIdxMap, nil, /* invertedColumn */
+		flowCtx, fetcherAllocator, table, index, neededColumns, columnIdxMap, nil, /* virtualColumn */
 		cFetcherArgs{
 			visibility:        spec.Visibility,
 			lockingStrength:   spec.LockingStrength,
@@ -519,11 +514,6 @@ func adjustMemEstimate(estimate int64) int64 {
 	return estimate*memEstimateMultiplier + memEstimateAdditive
 }
 
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *ColIndexJoin) GetScanStats() execinfra.ScanStats {
-	return execinfra.GetScanStats(s.Ctx)
-}
-
 // Release implements the execinfra.Releasable interface.
 func (s *ColIndexJoin) Release() {
 	s.rf.Release()
@@ -533,7 +523,6 @@ func (s *ColIndexJoin) Release() {
 
 // Close implements the colexecop.Closer interface.
 func (s *ColIndexJoin) Close() error {
-	s.rf.Close(s.EnsureCtx())
 	if s.tracingSpan != nil {
 		s.tracingSpan.Finish()
 		s.tracingSpan = nil

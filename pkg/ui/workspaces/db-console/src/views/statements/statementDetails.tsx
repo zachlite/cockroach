@@ -184,14 +184,11 @@ export const selectStatement = createSelector(
       statement,
       stats: combineStatementStats(results.map(s => s.stats)),
       byNode: coalesceNodeStats(results),
-      app: _.uniq(
-        results.map(s =>
-          s.app.startsWith(internalAppNamePrefix) ? "(internal)" : s.app,
-        ),
-      ),
+      app: _.uniq(results.map(s => s.app)),
       database: queryByName(props.location, databaseAttr),
       distSQL: fractionMatching(results, s => s.distSQL),
       vec: fractionMatching(results, s => s.vec),
+      opt: fractionMatching(results, s => s.opt),
       implicit_txn: fractionMatching(results, s => s.implicit_txn),
       full_scan: fractionMatching(results, s => s.full_scan),
       failed: fractionMatching(results, s => s.failed),

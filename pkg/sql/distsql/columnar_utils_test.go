@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -130,12 +129,16 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	testAllocator := colmem.NewAllocator(ctx, &acc, coldataext.NewExtendedColumnFactory(&evalCtx))
 	columnarizers := make([]colexecop.Operator, len(args.inputs))
 	for i, input := range inputsColOp {
-		columnarizers[i] = colexec.NewBufferingColumnarizer(testAllocator, flowCtx, int32(i)+1, input)
+		c, err := colexec.NewBufferingColumnarizer(ctx, testAllocator, flowCtx, int32(i)+1, input)
+		if err != nil {
+			return err
+		}
+		columnarizers[i] = c
 	}
 
 	constructorArgs := &colexecargs.NewColOperatorArgs{
 		Spec:                args.pspec,
-		Inputs:              colexectestutils.MakeInputs(columnarizers),
+		Inputs:              columnarizers,
 		StreamingMemAccount: &acc,
 		DiskQueueCfg: colcontainer.DiskQueueCfg{
 			FS:        tempFS,
@@ -166,12 +169,20 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 		}
 	}()
 
-	outColOp := colexec.NewMaterializer(
+	outColOp, err := colexec.NewMaterializer(
 		flowCtx,
 		int32(len(args.inputs))+2,
-		result.OpWithMetaInfo,
+		result.Op,
 		args.pspec.ResultTypes,
+		nil, /* output */
+		nil, /* getStats */
+		result.MetadataSources,
+		result.ToClose,
+		nil, /* cancelFlow */
 	)
+	if err != nil {
+		return err
+	}
 
 	outProc.Start(ctx)
 	outColOp.Start(ctx)

@@ -44,15 +44,14 @@ import (
 // both the inputs and the output have been properly closed.
 func emitHelper(
 	ctx context.Context,
-	output execinfra.RowReceiver,
-	procOutputHelper *execinfra.ProcOutputHelper,
+	output *execinfra.ProcOutputHelper,
 	row rowenc.EncDatumRow,
 	meta *execinfrapb.ProducerMetadata,
 	pushTrailingMeta func(context.Context),
 	inputs ...execinfra.RowSource,
 ) bool {
-	if output == nil {
-		panic("output RowReceiver is not set for emitting")
+	if output.Output() == nil {
+		panic("output RowReceiver not initialized for emitting")
 	}
 	var consumerStatus execinfra.ConsumerStatus
 	if meta != nil {
@@ -61,15 +60,15 @@ func emitHelper(
 		}
 		// Bypass EmitRow() and send directly to output.output.
 		foundErr := meta.Err != nil
-		consumerStatus = output.Push(nil /* row */, meta)
+		consumerStatus = output.Output().Push(nil /* row */, meta)
 		if foundErr {
 			consumerStatus = execinfra.ConsumerClosed
 		}
 	} else {
 		var err error
-		consumerStatus, err = procOutputHelper.EmitRow(ctx, row, output)
+		consumerStatus, err = output.EmitRow(ctx, row)
 		if err != nil {
-			output.Push(nil /* row */, &execinfrapb.ProducerMetadata{Err: err})
+			output.Output().Push(nil /* row */, &execinfrapb.ProducerMetadata{Err: err})
 			consumerStatus = execinfra.ConsumerClosed
 		}
 	}
@@ -78,14 +77,14 @@ func emitHelper(
 		return true
 	case execinfra.DrainRequested:
 		log.VEventf(ctx, 1, "no more rows required. drain requested.")
-		execinfra.DrainAndClose(ctx, output, nil /* cause */, pushTrailingMeta, inputs...)
+		execinfra.DrainAndClose(ctx, output.Output(), nil /* cause */, pushTrailingMeta, inputs...)
 		return false
 	case execinfra.ConsumerClosed:
 		log.VEventf(ctx, 1, "no more rows required. Consumer shut down.")
 		for _, input := range inputs {
 			input.ConsumerClosed()
 		}
-		output.ProducerDone()
+		output.Close()
 		return false
 	default:
 		log.Fatalf(ctx, "unexpected consumerStatus: %d", consumerStatus)
@@ -224,13 +223,18 @@ func NewProcessor(
 		if err := checkNumInOut(inputs, outputs, 1, 1); err != nil {
 			return nil, err
 		}
-		return newSamplerProcessor(flowCtx, processorID, core.Sampler, inputs[0], post, outputs[0])
+		return newSamplerProcessor(
+			flowCtx, processorID, core.Sampler, defaultMinSampleSize, inputs[0], post, outputs[0],
+		)
 	}
 	if core.SampleAggregator != nil {
 		if err := checkNumInOut(inputs, outputs, 1, 1); err != nil {
 			return nil, err
 		}
-		return newSampleAggregator(flowCtx, processorID, core.SampleAggregator, inputs[0], post, outputs[0])
+		return newSampleAggregator(
+			flowCtx, processorID, core.SampleAggregator, defaultMinSampleSize, inputs[0], post,
+			outputs[0],
+		)
 	}
 	if core.ReadImport != nil {
 		if err := checkNumInOut(inputs, outputs, 0, 1); err != nil {

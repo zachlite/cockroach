@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catformat"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -75,7 +74,7 @@ func ShowCreateTable(
 ) (string, error) {
 	a := &rowenc.DatumAlloc{}
 
-	f := p.ExtendedEvalContext().FmtCtx(tree.FmtSimple)
+	f := tree.NewFmtCtx(tree.FmtSimple)
 	f.WriteString("CREATE ")
 	if desc.IsTemporary() {
 		f.WriteString("TEMP ")
@@ -83,13 +82,12 @@ func ShowCreateTable(
 	f.WriteString("TABLE ")
 	f.FormatNode(tn)
 	f.WriteString(" (")
-	// Inaccessible columns are not displayed in SHOW CREATE TABLE.
-	for i, col := range desc.AccessibleColumns() {
+	for i, col := range desc.PublicColumns() {
 		if i != 0 {
 			f.WriteString(",")
 		}
 		f.WriteString("\n\t")
-		colstr, err := schemaexpr.FormatColumnForDisplay(ctx, desc, col, &p.RunParams(ctx).p.semaCtx)
+		colstr, err := schemaexpr.FormatColumnForDisplay(ctx, desc, col.ColumnDesc(), &p.RunParams(ctx).p.semaCtx)
 		if err != nil {
 			return "", err
 		}
@@ -100,7 +98,7 @@ func ShowCreateTable(
 		f.WriteString(",\n\tCONSTRAINT ")
 		formatQuoteNames(&f.Buffer, desc.GetPrimaryIndex().GetName())
 		f.WriteString(" ")
-		f.WriteString(tabledesc.PrimaryKeyString(desc))
+		f.WriteString(desc.PrimaryKeyString())
 	}
 
 	// TODO (lucy): Possibly include FKs in the mutations list here, or else
@@ -157,7 +155,7 @@ func ShowCreateTable(
 			// Build the PARTITION BY clause.
 			var partitionBuf bytes.Buffer
 			if err := ShowCreatePartitioning(
-				a, p.ExecCfg().Codec, desc, idx, idx.GetPartitioning(), &partitionBuf, 1 /* indent */, 0, /* colOffset */
+				a, p.ExecCfg().Codec, desc, idx.IndexDesc(), &idx.IndexDesc().Partitioning, &partitionBuf, 1 /* indent */, 0, /* colOffset */
 			); err != nil {
 				return "", err
 			}
@@ -168,7 +166,7 @@ func ShowCreateTable(
 			if includeInterleaveClause {
 				// TODO(mgartner): The logic in showCreateInterleave can be
 				// moved to catformat.IndexForDisplay.
-				if err := showCreateInterleave(idx, &interleaveBuf, dbPrefix, lCtx); err != nil {
+				if err := showCreateInterleave(idx.IndexDesc(), &interleaveBuf, dbPrefix, lCtx); err != nil {
 					return "", err
 				}
 			}
@@ -178,7 +176,7 @@ func ShowCreateTable(
 				ctx,
 				desc,
 				&descpb.AnonymousTable,
-				idx,
+				idx.IndexDesc(),
 				partitionBuf.String(),
 				interleaveBuf.String(),
 				p.RunParams(ctx).p.SemaCtx(),
@@ -197,11 +195,11 @@ func ShowCreateTable(
 		return "", err
 	}
 
-	if err := showCreateInterleave(desc.GetPrimaryIndex(), &f.Buffer, dbPrefix, lCtx); err != nil {
+	if err := showCreateInterleave(desc.GetPrimaryIndex().IndexDesc(), &f.Buffer, dbPrefix, lCtx); err != nil {
 		return "", err
 	}
 	if err := ShowCreatePartitioning(
-		a, p.ExecCfg().Codec, desc, desc.GetPrimaryIndex(), desc.GetPrimaryIndex().GetPartitioning(), &f.Buffer, 0 /* indent */, 0, /* colOffset */
+		a, p.ExecCfg().Codec, desc, desc.GetPrimaryIndex().IndexDesc(), &desc.GetPrimaryIndex().IndexDesc().Partitioning, &f.Buffer, 0 /* indent */, 0, /* colOffset */
 	); err != nil {
 		return "", err
 	}
@@ -250,7 +248,7 @@ func (p *planner) ShowCreate(
 	var err error
 	tn := tree.MakeUnqualifiedTableName(tree.Name(desc.GetName()))
 	if desc.IsView() {
-		stmt, err = ShowCreateView(ctx, &p.RunParams(ctx).p.semaCtx, &tn, desc)
+		stmt, err = ShowCreateView(ctx, &tn, desc)
 	} else if desc.IsSequence() {
 		stmt, err = ShowCreateSequence(ctx, &tn, desc)
 	} else {

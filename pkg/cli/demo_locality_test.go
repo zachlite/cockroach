@@ -8,22 +8,21 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build !race
 // +build !race
 
 package cli
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/cli/democluster"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func Example_demo_locality() {
-	c := NewCLITest(TestCLIParams{NoServer: true})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{noServer: true})
+	defer c.cleanup()
 
-	defer democluster.TestingForceRandomizeDemoPorts()()
+	defer func(b bool) { testingForceRandomizeDemoPorts = b }(testingForceRandomizeDemoPorts)
+	testingForceRandomizeDemoPorts = true
 
 	testData := [][]string{
 		{`demo`, `--nodes`, `3`, `-e`, `select node_id, locality from crdb_internal.gossip_nodes order by node_id`},

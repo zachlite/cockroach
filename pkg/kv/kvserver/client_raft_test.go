@@ -2499,7 +2499,7 @@ func TestReportUnreachableRemoveRace(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewTestPseudoRand()
 	t.Logf("seed is %d", seed)
 
 	ctx := context.Background()

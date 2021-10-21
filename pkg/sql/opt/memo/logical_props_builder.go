@@ -1065,39 +1065,17 @@ func (b *logicalPropsBuilder) buildExportProps(export *ExportExpr, rel *props.Re
 	b.buildBasicProps(export, export.Columns, rel)
 }
 
-func (b *logicalPropsBuilder) buildTopKProps(topK *TopKExpr, rel *props.Relational) {
-	// TopK has the same logical properties as limit.
-	b.buildLimitOrTopKProps(topK, rel, topK.K, true /* haveConstLimit */)
-
-	// Statistics
-	// ----------
-	if !b.disableStats {
-		b.sb.buildTopK(topK, rel)
-	}
-}
-
 func (b *logicalPropsBuilder) buildLimitProps(limit *LimitExpr, rel *props.Relational) {
+	BuildSharedProps(limit, &rel.Shared, b.evalCtx)
+
+	inputProps := limit.Input.Relational()
+
 	haveConstLimit := false
 	constLimit := int64(math.MaxUint32)
 	if cnst, ok := limit.Limit.(*ConstExpr); ok {
 		haveConstLimit = true
 		constLimit = int64(*cnst.Value.(*tree.DInt))
 	}
-	b.buildLimitOrTopKProps(limit, rel, constLimit, haveConstLimit)
-
-	// Statistics
-	// ----------
-	if !b.disableStats {
-		b.sb.buildLimit(limit, rel)
-	}
-}
-
-func (b *logicalPropsBuilder) buildLimitOrTopKProps(
-	limitNode RelExpr, rel *props.Relational, constLimit int64, haveConstLimit bool,
-) {
-	BuildSharedProps(limitNode, &rel.Shared, b.evalCtx)
-
-	inputProps := limitNode.Child(0).(RelExpr).Relational()
 
 	// Side Effects
 	// ------------
@@ -1137,6 +1115,12 @@ func (b *logicalPropsBuilder) buildLimitOrTopKProps(
 		rel.Cardinality = props.ZeroCardinality
 	} else if constLimit < math.MaxUint32 {
 		rel.Cardinality = rel.Cardinality.Limit(uint32(constLimit))
+	}
+
+	// Statistics
+	// ----------
+	if !b.disableStats {
+		b.sb.buildLimit(limit, rel)
 	}
 }
 
@@ -1571,9 +1555,9 @@ func BuildSharedProps(e opt.Expr, shared *props.Shared, evalCtx *tree.EvalContex
 		if c, ok := t.Right.(*ConstExpr); ok {
 			switch v := c.Value.(type) {
 			case *tree.DInt:
-				nonZero = *v != 0
+				nonZero = (*v != 0)
 			case *tree.DFloat:
-				nonZero = *v != 0.0
+				nonZero = (*v != 0.0)
 			case *tree.DDecimal:
 				nonZero = !v.IsZero()
 			}
@@ -1594,9 +1578,8 @@ func BuildSharedProps(e opt.Expr, shared *props.Shared, evalCtx *tree.EvalContex
 	case *FunctionExpr:
 		shared.VolatilitySet.Add(t.Overload.Volatility)
 
-	case *CastExpr, *AssignmentCastExpr:
-		from := e.Child(0).(opt.ScalarExpr).DataType()
-		to := e.Private().(*types.T)
+	case *CastExpr:
+		from, to := t.Input.DataType(), t.Typ
 		volatility, ok := tree.LookupCastVolatility(from, to, evalCtx.SessionData())
 		if !ok {
 			panic(errors.AssertionFailedf("no volatility for cast %s::%s", from, to))

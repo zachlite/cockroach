@@ -17,7 +17,7 @@ import {
   ExecutionStatistics,
   flattenStatementStats,
   formatDate,
-  queryByName,
+  getMatchParamByName,
   statementKey,
   StatementStatistics,
   TimestampToMoment,
@@ -33,9 +33,7 @@ import { AggregateStatistics } from "../statementsTable";
 type ICollectedStatementStatistics = cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
 export interface StatementsSummaryData {
   statement: string;
-  statementSummary: string;
   aggregatedTs: number;
-  aggregationInterval: number;
   implicitTxn: boolean;
   fullScan: boolean;
   database: string;
@@ -86,9 +84,7 @@ export const selectApps = createSelector(
       },
     );
     return []
-      .concat(
-        sawInternal ? [statementsState.data.internal_app_name_prefix] : [],
-      )
+      .concat(sawInternal ? ["(internal)"] : [])
       .concat(sawBlank ? ["(unset)"] : [])
       .concat(Object.keys(apps));
   },
@@ -148,7 +144,7 @@ export const selectStatements = createSelector(
       return null;
     }
     let statements = flattenStatementStats(state.data.statements);
-    const app = queryByName(props.location, appAttr);
+    const app = getMatchParamByName(props.match, appAttr);
     const isInternal = (statement: ExecutionStatistics) =>
       statement.app.startsWith(state.data.internal_app_name_prefix);
 
@@ -157,7 +153,7 @@ export const selectStatements = createSelector(
       let showInternal = false;
       if (criteria === "(unset)") {
         criteria = "";
-      } else if (criteria === state.data.internal_app_name_prefix) {
+      } else if (criteria === "(internal)") {
         showInternal = true;
       }
 
@@ -175,9 +171,7 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statement: stmt.statement,
-          statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
-          aggregationInterval: stmt.aggregation_interval,
           implicitTxn: stmt.implicit_txn,
           fullScan: stmt.full_scan,
           database: stmt.database,
@@ -191,9 +185,7 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         label: stmt.statement,
-        summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
-        aggregationInterval: stmt.aggregationInterval,
         implicitTxn: stmt.implicitTxn,
         fullScan: stmt.fullScan,
         database: stmt.database,

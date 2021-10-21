@@ -662,11 +662,23 @@ func (s *statusServer) Allocator(
 
 func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.TraceEvent {
 	var output []*serverpb.TraceEvent
+	var buf bytes.Buffer
 	for _, sp := range spans {
 		for _, entry := range sp.Logs {
 			event := &serverpb.TraceEvent{
-				Time:    entry.Time,
-				Message: entry.Msg().StripMarkers(),
+				Time: entry.Time,
+			}
+			if len(entry.Fields) == 1 {
+				event.Message = entry.Fields[0].Value
+			} else {
+				buf.Reset()
+				for i, f := range entry.Fields {
+					if i != 0 {
+						buf.WriteByte(' ')
+					}
+					fmt.Fprintf(&buf, "%s:%v", f.Key, f.Value)
+				}
+				event.Message = buf.String()
 			}
 			output = append(output, event)
 		}
@@ -994,24 +1006,6 @@ func checkFilePattern(pattern string) error {
 }
 
 // LogFilesList returns a list of available log files.
-//
-// Note that even though the FileInfo struct does not store the path
-// to the log file(s), each file can be mapped back to its directory
-// reliably via LogFile(), thanks to the unique file group names in
-// the log configuration. For example, consider the following config:
-//
-// file-groups:
-//    groupA:
-//      dir: dir1
-//    groupB:
-//      dir: dir2
-//
-// The result of ListLogFiles on this config will return the list
-// {cockroach-groupA.XXX.log, cockroach-groupB.XXX.log}, without
-// directory information. This can be mapped back to dir1 and dir2 via the
-// configuration. We know that groupA files cannot be in dir2 because
-// the group names are unique under file-groups and so there cannot be
-// two different groups with the same name and different directories.
 func (s *statusServer) LogFilesList(
 	ctx context.Context, req *serverpb.LogFilesListRequest,
 ) (*serverpb.LogFilesListResponse, error) {
@@ -1042,9 +1036,6 @@ func (s *statusServer) LogFilesList(
 }
 
 // LogFile returns a single log file.
-//
-// See the comment on LogfilesList() to understand why+how log file
-// names are mapped to their full path.
 func (s *statusServer) LogFile(
 	ctx context.Context, req *serverpb.LogFileRequest,
 ) (*serverpb.LogEntriesResponse, error) {
@@ -1074,7 +1065,7 @@ func (s *statusServer) LogFile(
 	log.Flush()
 
 	// Read the logs.
-	reader, err := log.GetLogReader(req.File)
+	reader, err := log.GetLogReader(req.File, true /* restricted */)
 	if err != nil {
 		return nil, errors.Wrapf(err, "log file %q could not be opened", req.File)
 	}
@@ -1249,8 +1240,7 @@ func (s *statusServer) Stacks(
 // TODO(tschottdorf): significant overlap with /debug/pprof/heap, except that
 // this one allows querying by NodeID.
 //
-// Profile returns a heap profile. This endpoint is used by the
-// `pprofui` package to satisfy local and remote pprof requests.
+// Profile returns a heap profile.
 func (s *statusServer) Profile(
 	ctx context.Context, req *serverpb.ProfileRequest,
 ) (*serverpb.JSONResponse, error) {
@@ -1274,20 +1264,20 @@ func (s *statusServer) Profile(
 		return status.Profile(ctx, req)
 	}
 
-	return profileLocal(ctx, req, s.st)
-}
-
-func profileLocal(
-	ctx context.Context, req *serverpb.ProfileRequest, st *cluster.Settings,
-) (*serverpb.JSONResponse, error) {
 	switch req.Type {
+	case serverpb.ProfileRequest_HEAP:
+		p := pprof.Lookup("heap")
+		if p == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: heap")
+		}
+		var buf bytes.Buffer
+		if err := p.WriteTo(&buf, 0); err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		}
+		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	case serverpb.ProfileRequest_CPU:
 		var buf bytes.Buffer
-		profileType := cluster.CPUProfileDefault
-		if req.Labels {
-			profileType = cluster.CPUProfileWithLabels
-		}
-		if err := debug.CPUProfileDo(st, profileType, func() error {
+		if err := debug.CPUProfileDo(s.st, cluster.CPUProfileWithLabels, func() error {
 			duration := 30 * time.Second
 			if req.Seconds != 0 {
 				duration = time.Duration(req.Seconds) * time.Second
@@ -1307,20 +1297,7 @@ func profileLocal(
 		}
 		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	default:
-		name, ok := serverpb.ProfileRequest_Type_name[int32(req.Type)]
-		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %d", req.Type)
-		}
-		name = strings.ToLower(name)
-		p := pprof.Lookup(name)
-		if p == nil {
-			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: %s", name)
-		}
-		var buf bytes.Buffer
-		if err := p.WriteTo(&buf, 0); err != nil {
-			return nil, status.Errorf(codes.Internal, err.Error())
-		}
-		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
+		return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %s", req.Type)
 	}
 }
 

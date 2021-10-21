@@ -126,7 +126,6 @@ func TestTestServerArgsForTransientCluster(t *testing.T) {
 			// We cannot compare these.
 			actual.Stopper = nil
 			actual.StoreSpecs = nil
-			actual.Knobs.JobsTestingKnobs = nil
 
 			assert.Equal(t, tc.expected, actual)
 		})
@@ -180,11 +179,7 @@ func TestTransientClusterSimulateLatencies(t *testing.T) {
 	require.NoError(t, c.Start(ctx, func(ctx context.Context, s *server.Server, _ bool, adminUser, adminPassword string) error {
 		return s.RunLocalSQL(ctx,
 			func(ctx context.Context, ie *sql.InternalExecutor) error {
-				_, err := ie.Exec(
-					ctx, "admin-user", nil,
-					fmt.Sprintf("CREATE USER %s WITH PASSWORD $1", adminUser),
-					adminPassword,
-				)
+				_, err := ie.Exec(ctx, "admin-user", nil, "CREATE USER $1 WITH PASSWORD $2", adminUser, adminPassword)
 				return err
 			})
 	}))

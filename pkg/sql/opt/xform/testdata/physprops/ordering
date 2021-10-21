@@ -1775,15 +1775,20 @@ sort
       │    ├── cardinality: [0 - 2]
       │    ├── volatile, mutations
       │    ├── key: (1-3)
-      │    └── top-k
+      │    └── limit
       │         ├── columns: x:6!null y:7!null z:8!null
       │         ├── internal-ordering: +7,+8
-      │         ├── k: 2
       │         ├── cardinality: [0 - 2]
       │         ├── key: (6-8)
-      │         └── scan xyz
-      │              ├── columns: x:6!null y:7!null z:8!null
-      │              └── key: (6-8)
+      │         ├── sort
+      │         │    ├── columns: x:6!null y:7!null z:8!null
+      │         │    ├── key: (6-8)
+      │         │    ├── ordering: +7,+8
+      │         │    ├── limit hint: 2.00
+      │         │    └── scan xyz
+      │         │         ├── columns: x:6!null y:7!null z:8!null
+      │         │         └── key: (6-8)
+      │         └── 2
       └── with-scan &1
            ├── columns: a:11!null b:12!null c:13!null
            ├── mapping:
@@ -2119,15 +2124,20 @@ sort
       │         │    │    ├── error: "UPSERT or INSERT...ON CONFLICT command cannot affect row a second time"
       │         │    │    ├── cardinality: [0 - 2]
       │         │    │    ├── key: (6-8)
-      │         │    │    └── top-k
+      │         │    │    └── limit
       │         │    │         ├── columns: x:6!null y:7!null z:8!null
       │         │    │         ├── internal-ordering: +7,+8
-      │         │    │         ├── k: 2
       │         │    │         ├── cardinality: [0 - 2]
       │         │    │         ├── key: (6-8)
-      │         │    │         └── scan xyz
-      │         │    │              ├── columns: x:6!null y:7!null z:8!null
-      │         │    │              └── key: (6-8)
+      │         │    │         ├── sort
+      │         │    │         │    ├── columns: x:6!null y:7!null z:8!null
+      │         │    │         │    ├── key: (6-8)
+      │         │    │         │    ├── ordering: +7,+8
+      │         │    │         │    ├── limit hint: 2.00
+      │         │    │         │    └── scan xyz
+      │         │    │         │         ├── columns: x:6!null y:7!null z:8!null
+      │         │    │         │         └── key: (6-8)
+      │         │    │         └── 2
       │         │    └── filters (true)
       │         └── projections
       │              ├── CASE WHEN abc.a:11 IS NULL THEN x:6 ELSE 10 END [as=upsert_a:17, outer=(6,11)]
@@ -2267,63 +2277,6 @@ sort
            └── filters
                 └── b:16 = c:17 [outer=(16,17), fd=(16)==(17), (17)==(16)]
 
-# --------------------------------------------------
-# With operator.
-# --------------------------------------------------
-
-# Verify that we can pass through the ordering requirement through the With
-# operator.
-opt
-WITH cte AS MATERIALIZED (SELECT x FROM xyz)
-SELECT * FROM abc ORDER BY a,b,c
-----
-with &1 (cte)
- ├── columns: a:6!null b:7!null c:8!null
- ├── materialized
- ├── key: (6-8)
- ├── ordering: +6,+7,+8
- ├── scan xyz
- │    └── columns: x:1!null
- └── scan abc
-      ├── columns: a:6!null b:7!null c:8!null
-      ├── key: (6-8)
-      └── ordering: +6,+7,+8
-
-opt
-WITH cte AS MATERIALIZED (SELECT x FROM xyz)
-SELECT * FROM abc INNER MERGE JOIN cte ON a = x ORDER BY a
-----
-with &1 (cte)
- ├── columns: a:6!null b:7!null c:8!null x:11!null
- ├── materialized
- ├── fd: (6)==(11), (11)==(6)
- ├── ordering: +(6|11) [actual: +6]
- ├── scan xyz
- │    └── columns: xyz.x:1!null
- └── inner-join (merge)
-      ├── columns: a:6!null b:7!null c:8!null x:11!null
-      ├── flags: force merge join
-      ├── left ordering: +6
-      ├── right ordering: +11
-      ├── fd: (6)==(11), (11)==(6)
-      ├── ordering: +(6|11) [actual: +6]
-      ├── scan abc
-      │    ├── columns: a:6!null b:7!null c:8!null
-      │    ├── key: (6-8)
-      │    └── ordering: +6
-      ├── sort
-      │    ├── columns: x:11!null
-      │    ├── ordering: +11
-      │    └── with-scan &1 (cte)
-      │         ├── columns: x:11!null
-      │         └── mapping:
-      │              └──  xyz.x:1 => x:11
-      └── filters (true)
-
-
-# --------------------------------------------------
-# Misc tests.
-# --------------------------------------------------
 
 # Regression test for #36219: lookup join with ON condition that imposes an
 # equality on two input columns (which isn't pushed down).

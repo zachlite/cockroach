@@ -1999,7 +1999,7 @@ func TestClearRange(t *testing.T) {
 		}
 	}
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	// Write four keys with values small enough to use individual deletions
 	// (sm1-sm4) and four keys with values large enough to require a range

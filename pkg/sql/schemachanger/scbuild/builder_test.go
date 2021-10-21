@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -50,7 +49,13 @@ func TestBuilderAlterTable(t *testing.T) {
 	ctx := context.Background()
 
 	datadriven.Walk(t, filepath.Join("testdata"), func(t *testing.T, path string) {
-		s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+		s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				SQLExecutor: &sql.ExecutorTestingKnobs{
+					AllowDeclarativeSchemaChanger: true,
+				},
+			},
+		})
 		defer s.Stopper().Stop(ctx)
 
 		tdb := sqlutils.MakeSQLRunner(sqlDB)
@@ -151,7 +156,7 @@ func marshalNodes(t *testing.T, nodes scpb.State) string {
 		entry.WriteString("- ")
 		entry.WriteString(node.Target.Direction.String())
 		entry.WriteString(" ")
-		entry.WriteString(screl.ElementString(node.Element()))
+		scpb.FormatAttributes(node.Element(), &entry)
 		entry.WriteString("\n")
 		entry.WriteString(indentText(fmt.Sprintf("state: %s\n", node.Status.String()), "  "))
 		entry.WriteString(indentText("details:\n", "  "))

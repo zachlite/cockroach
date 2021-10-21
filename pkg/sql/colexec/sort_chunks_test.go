@@ -197,7 +197,7 @@ func TestSortChunks(t *testing.T) {
 func TestSortChunksRandomized(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	nTups := 8
 	maxCols := 5
 	// TODO(yuzefovich): randomize types as well.
@@ -240,7 +240,7 @@ func TestSortChunksRandomized(t *testing.T) {
 
 func BenchmarkSortChunks(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 
 	sorterConstructors := []func(*colmem.Allocator, colexecop.Operator, []*types.T, []execinfrapb.Ordering_Column, int, int64) (colexecop.Operator, error){
@@ -271,7 +271,28 @@ func BenchmarkSortChunks(b *testing.B) {
 								}
 								batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 								batch.SetLength(coldata.BatchSize())
-								ordCols := generatePartiallyOrderedColumns(*rng, batch, nCols, matchLen, avgChunkSize)
+								ordCols := make([]execinfrapb.Ordering_Column, nCols)
+								for i := range ordCols {
+									ordCols[i].ColIdx = uint32(i)
+									if i < matchLen {
+										ordCols[i].Direction = execinfrapb.Ordering_Column_ASC
+									} else {
+										ordCols[i].Direction = execinfrapb.Ordering_Column_Direction(rng.Int() % 2)
+									}
+
+									col := batch.ColVec(i).Int64()
+									col[0] = 0
+									for j := 1; j < coldata.BatchSize(); j++ {
+										if i < matchLen {
+											col[j] = col[j-1]
+											if rng.Float64() < 1.0/float64(avgChunkSize) {
+												col[j]++
+											}
+										} else {
+											col[j] = rng.Int63() % int64((i*1024)+1)
+										}
+									}
+								}
 								b.ResetTimer()
 								for n := 0; n < b.N; n++ {
 									source := colexectestutils.NewFiniteChunksSource(testAllocator, batch, typs, nBatches, matchLen)

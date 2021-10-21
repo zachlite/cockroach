@@ -61,8 +61,6 @@ Stage 0
     TableID: 55
   *scop.UpdateRelationDeps
     TableID: 55
-  *scop.RemoveSequenceOwnedBy
-    TableID: 56
   *scop.RemoveColumnDefaultExpression
     ColumnID: 2
     TableID: 55
@@ -86,7 +84,7 @@ Stage 0
   *scop.RemoveRelationDependedOnBy
     DependedOnBy: 55
     TableID: 54
-Stage 1 (non-revertible)
+Stage 1
   *scop.MarkDescriptorAsDropped
     TableID: 57
   *scop.DrainDescriptorName
@@ -110,7 +108,7 @@ deps
 DROP TABLE defaultdb.shipments CASCADE;
 ----
 - from: [SequenceOwnedBy:{DescID: 56, ReferencedDescID: 55}, ABSENT]
-  to:   [Sequence:{DescID: 56}, ABSENT]
+  to:   [Sequence:{DescID: 56}, DELETE_ONLY]
 - from: [Table:{DescID: 55}, PUBLIC]
   to:   [DefaultExpression:{DescID: 55, ColumnID: 1}, ABSENT]
 - from: [Table:{DescID: 55}, PUBLIC]
@@ -122,9 +120,9 @@ DROP TABLE defaultdb.shipments CASCADE;
 - from: [Table:{DescID: 55}, PUBLIC]
   to:   [DefaultExpression:{DescID: 55, ColumnID: 5}, ABSENT]
 - from: [Table:{DescID: 55}, PUBLIC]
-  to:   [OutboundForeignKey:{DescID: 55, Name: fk_customers, ReferencedDescID: 52}, ABSENT]
+  to:   [OutboundForeignKey:{DescID: 55, ReferencedDescID: 52, ElementName: "fk_customers"}, ABSENT]
 - from: [Table:{DescID: 55}, PUBLIC]
-  to:   [OutboundForeignKey:{DescID: 55, Name: fk_orders, ReferencedDescID: 53}, ABSENT]
+  to:   [OutboundForeignKey:{DescID: 55, ReferencedDescID: 53, ElementName: "fk_orders"}, ABSENT]
 - from: [Table:{DescID: 55}, PUBLIC]
   to:   [RelationDependedOnBy:{DescID: 54, ReferencedDescID: 55}, ABSENT]
 - from: [Table:{DescID: 55}, PUBLIC]

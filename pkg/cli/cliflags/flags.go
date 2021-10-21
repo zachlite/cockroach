@@ -318,12 +318,6 @@ accidents. This can also be overridden in a session with SET
 sql_safe_updates = FALSE.`,
 	}
 
-	ReadOnly = FlagInfo{
-		Name: "read-only",
-		Description: `
-Set the session variable default_transaction_read_only to on.`,
-	}
-
 	Set = FlagInfo{
 		Name: "set",
 		Description: `
@@ -688,13 +682,6 @@ Instead, require the user to always specify access keys.`,
 		Name: "external-io-disabled",
 		Description: `
 Disable use of "external" IO, such as to S3, GCS, or the file system (nodelocal), or anything other than userfile.`,
-	}
-	ExternalIOEnableNonAdminImplicitAndArbitraryOutbound = FlagInfo{
-		Name: "external-io-enable-non-admin-implicit-access",
-		Description: `
-Allow non-admin users to specify arbitrary network addressses (e.g. https:// URIs or custom endpoints in s3:// URIs) and 
-implicit credentials (machine account/role providers) when running operations like IMPORT/EXPORT/BACKUP/etc. 
-Note: that --external-io-disable-http or --external-io-disable-implicit-credentials still apply, this only removes the admin-user requirement.`,
 	}
 
 	// KeySize, CertificateLifetime, AllowKeyReuse, and OverwriteFiles are used for
@@ -1180,11 +1167,6 @@ can also be specified (e.g. .25).`,
 	RunDemoWorkload = FlagInfo{
 		Name:        "with-load",
 		Description: `Run a demo workload against the pre-loaded database.`,
-	}
-
-	DemoWorkloadMaxQPS = FlagInfo{
-		Name:        "workload-max-qps",
-		Description: "The maximum QPS when a workload is running.",
 	}
 
 	DemoNodeLocality = FlagInfo{

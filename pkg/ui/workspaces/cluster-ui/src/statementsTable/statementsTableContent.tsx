@@ -29,7 +29,6 @@ import {
   propsToQueryString,
   summarize,
   TimestampToMoment,
-  aggregationIntervalAttr,
 } from "src/util";
 import { shortStatement } from "./statementsTable";
 import styles from "./statementsTableContent.module.scss";
@@ -49,9 +48,7 @@ export const StatementTableCell = {
   ) => (stmt: any) => (
     <StatementLink
       statement={stmt.label}
-      statementSummary={stmt.summary}
       aggregatedTs={stmt.aggregatedTs}
-      aggregationInterval={stmt.aggregationInterval}
       database={stmt.database}
       implicitTxn={stmt.implicitTxn}
       search={search}
@@ -135,7 +132,6 @@ export const StatementTableCell = {
 type StatementLinkTargetProps = {
   statement: string;
   aggregatedTs?: number;
-  aggregationInterval?: number;
   app: string;
   implicitTxn: boolean;
   statementNoConstants?: string;
@@ -154,7 +150,6 @@ export const StatementLinkTarget = (
     [databaseAttr]: props.database,
     [appAttr]: props.app,
     [aggregatedTsAttr]: props.aggregatedTs,
-    [aggregationIntervalAttr]: props.aggregationInterval,
   });
 
   return `${base}/${encodeURIComponent(linkStatement)}?${searchParams}`;
@@ -162,9 +157,7 @@ export const StatementLinkTarget = (
 
 interface StatementLinkProps {
   aggregatedTs?: number;
-  aggregationInterval?: number;
   statement: string;
-  statementSummary: string;
   app: string;
   implicitTxn: boolean;
   search: string;
@@ -175,9 +168,7 @@ interface StatementLinkProps {
 
 export const StatementLink = ({
   aggregatedTs,
-  aggregationInterval,
   statement,
-  statementSummary,
   app,
   implicitTxn,
   search,
@@ -186,13 +177,6 @@ export const StatementLink = ({
   onClick,
 }: StatementLinkProps): React.ReactElement => {
   const summary = summarize(statement);
-  // current statements that we support summaries for from the backend.
-  const summarizedStmts = new Set(["select", "insert", "upsert", "update"]);
-  const shortStmt =
-    statementSummary && summarizedStmts.has(summary.statement)
-      ? statementSummary
-      : shortStatement(summary, statement);
-
   const onStatementClick = React.useCallback(() => {
     if (onClick) {
       onClick(statement);
@@ -201,7 +185,6 @@ export const StatementLink = ({
 
   const linkProps = {
     aggregatedTs,
-    aggregationInterval,
     statement,
     app,
     implicitTxn,
@@ -221,7 +204,12 @@ export const StatementLink = ({
           }
         >
           <div className="cl-table-link__tooltip-hover-area">
-            {getHighlightedText(shortStmt, search, false, true)}
+            {getHighlightedText(
+              shortStatement(summary, statement),
+              search,
+              false,
+              true,
+            )}
           </div>
         </Tooltip>
       </div>

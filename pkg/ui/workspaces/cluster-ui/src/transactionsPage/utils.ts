@@ -27,7 +27,6 @@ import {
   TimestampToNumber,
   addStatementStats,
   flattenStatementStats,
-  DurationToNumber,
 } from "../util";
 
 type Statement = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -91,9 +90,7 @@ export const aggregateStatements = (
     if (!(key in statsKey)) {
       statsKey[key] = {
         label: s.statement,
-        summary: s.statement_summary,
         aggregatedTs: s.aggregated_ts,
-        aggregationInterval: s.aggregation_interval,
         implicitTxn: s.implicit_txn,
         database: s.database,
         fullScan: s.full_scan,
@@ -267,7 +264,7 @@ const withFingerprint = function(
 };
 
 // addTransactionStats adds together two stat objects into one using their counts to compute a new
-// average for the numeric statistics. It's modeled after the similar `addStatementStats` function
+// average for the numeric statistics. It's modeled after the similar `addStatementStats` functionj
 function addTransactionStats(
   a: TransactionStats,
   b: TransactionStats,
@@ -294,12 +291,6 @@ function addTransactionStats(
       countB,
     ),
     rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: aggregateNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     bytes_read: aggregateNumericStats(
       a.bytes_read,
       b.bytes_read,
@@ -350,8 +341,7 @@ export const aggregateAcrossNodeIDs = function(
       t =>
         t.fingerprint +
         t.stats_data.app +
-        TimestampToNumber(t.stats_data.aggregated_ts) +
-        DurationToNumber(t.stats_data.aggregation_interval),
+        TimestampToNumber(t.stats_data.aggregated_ts),
     )
     .mapValues(mergeTransactionStats)
     .values()

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -103,7 +102,6 @@ func TestSpillingQueue(t *testing.T) {
 					tuples.AppendTuples(b, 0 /* startIdx */, b.Length())
 				},
 			})
-			op.Init(ctx)
 			typs := op.Typs()
 
 			queueCfg.CacheMode = diskQueueCacheMode
@@ -174,14 +172,14 @@ func TestSpillingQueue(t *testing.T) {
 				// the desired value and restore it below.
 				numTuples := tuples.Length()
 				tuples.SetLength(numAlreadyDequeuedTuples + windowLen)
-				MakeWindowIntoBatch(windowedBatch, tuples, numAlreadyDequeuedTuples, numAlreadyDequeuedTuples+windowLen, typs)
+				MakeWindowIntoBatch(windowedBatch, tuples, numAlreadyDequeuedTuples, typs)
 				tuples.SetLength(numTuples)
 				numAlreadyDequeuedTuples += windowLen
 				return windowedBatch
 			}
 
 			for {
-				b = op.Next()
+				b = op.Next(ctx)
 				q.Enqueue(ctx, b)
 				if b.Length() == 0 {
 					break
@@ -271,13 +269,12 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 		BatchSize:         1 + rng.Intn(coldata.BatchSize()),
 		Nulls:             true,
 	})
-	op.Init(ctx)
 
 	typs := op.Typs()
 	// Choose a memory limit such that at most two batches can be kept in the
 	// in-memory buffer at a time (single batch is not enough because the queue
 	// delays the release of the memory by one batch).
-	memoryLimit := 2 * colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize())
+	memoryLimit := int64(2 * colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize()))
 	if memoryLimit < mon.DefaultPoolAllocationSize {
 		memoryLimit = mon.DefaultPoolAllocationSize
 	}
@@ -301,7 +298,7 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 	)
 
 	for {
-		b := op.Next()
+		b := op.Next(ctx)
 		q.Enqueue(ctx, b)
 		b, err := q.Dequeue(ctx)
 		require.NoError(t, err)
@@ -321,6 +318,8 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, len(directories))
 }
+
+const defaultMemoryLimit = 64 << 20 /* 64 MiB */
 
 // TestSpillingQueueMemoryAccounting is a simple check of the memory accounting
 // of the spilling queue that performs a series of Enqueue() and Dequeue()
@@ -359,7 +358,7 @@ func TestSpillingQueueMemoryAccounting(t *testing.T) {
 			newQueueArgs := &NewSpillingQueueArgs{
 				UnlimitedAllocator: spillingQueueUnlimitedAllocator,
 				Types:              typs,
-				MemoryLimit:        execinfra.DefaultMemoryLimit,
+				MemoryLimit:        defaultMemoryLimit,
 				DiskQueueCfg:       queueCfg,
 				FDSemaphore:        colexecop.NewTestingSemaphore(2),
 				DiskAcc:            testDiskAcc,

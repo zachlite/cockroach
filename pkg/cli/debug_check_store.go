@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
@@ -46,7 +45,7 @@ Capable of detecting the following errors:
 * MVCC stats that are inconsistent with the data within the range
 `,
 	Args: cobra.ExactArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runDebugCheckStoreCmd),
+	RunE: MaybeDecorateGRPCError(runDebugCheckStoreCmd),
 }
 
 var errCheckFoundProblem = errors.New("check-store found problems")

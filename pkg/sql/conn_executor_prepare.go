@@ -161,7 +161,7 @@ func (ex *connExecutor) prepare(
 
 	var flags planFlags
 	prepare := func(ctx context.Context, txn *kv.Txn) (err error) {
-		ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+		ex.statsCollector.reset(&ex.server.sqlStats, ex.appStats, &ex.phaseTimes)
 		p := &ex.planner
 		if origin != PreparedStatementOriginSQL {
 			// If the PREPARE command was issued as a SQL statement, then we
@@ -204,7 +204,7 @@ func (ex *connExecutor) prepare(
 			},
 		}
 		prepared.Statement = stmt.Statement
-		prepared.StatementNoConstants = stmt.StmtNoConstants
+		prepared.AnonymizedStr = stmt.AnonymizedStr
 
 		// Point to the prepared state, which can be further populated during query
 		// preparation.
@@ -231,11 +231,6 @@ func (ex *connExecutor) prepare(
 		if err := ex.server.cfg.DB.Txn(ctx, prepare); err != nil {
 			return nil, err
 		}
-		// Prepare with an implicit transaction will end up creating
-		// a new transaction. Once this transaction is complete,
-		// we can safely release the leases, otherwise we will
-		// incorrectly hold leases for later operations.
-		ex.extraTxnState.descCollection.ReleaseAll(ctx)
 	}
 
 	// Account for the memory used by this prepared statement.
@@ -262,17 +257,13 @@ func (ex *connExecutor) populatePrepared(
 	}
 	p.extendedEvalCtx.PrepareOnly = true
 
-	asOf, err := p.isAsOf(ctx, stmt.AST)
+	protoTS, err := p.isAsOf(ctx, stmt.AST)
 	if err != nil {
 		return 0, err
 	}
-	if asOf != nil {
-		p.extendedEvalCtx.AsOfSystemTime = asOf
-		if !asOf.BoundedStaleness {
-			if err := txn.SetFixedTimestamp(ctx, asOf.Timestamp); err != nil {
-				return 0, err
-			}
-		}
+	if protoTS != nil {
+		p.semaCtx.AsOfTimestamp = protoTS
+		txn.SetFixedTimestamp(ctx, *protoTS)
 	}
 
 	// PREPARE has a limited subset of statements it can be run with. Postgres
@@ -417,15 +408,6 @@ func (ex *connExecutor) execBind(
 		}
 	}
 
-	// This is a huge kludge to deal with the fact that we're resolving types
-	// using a planner with a committed transaction. This ends up being almost
-	// okay because the execution is going to re-acquire leases on these types.
-	// Regardless, holding this lease is worse than not holding it. Users might
-	// expect to get type mismatch errors if a rename of the type occurred.
-	if ex.getTransactionState() == NoTxnStateStr {
-		ex.planner.Descriptors().ReleaseAll(ctx)
-	}
-
 	// Create the new PreparedPortal.
 	if err := ex.addPortal(ctx, portalName, ps, qargs, columnFormatCodes); err != nil {
 		return retErr(err)
@@ -488,7 +470,7 @@ func (ex *connExecutor) deletePortal(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	portal.close(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
+	portal.decRef(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
 	delete(ex.extraTxnState.prepStmtsNamespace.portals, name)
 }
 

@@ -19,8 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	descpb "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -294,6 +292,9 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.NamespaceTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
+	systemschema.DeprecatedNamespaceTable.GetName(): {
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
+	},
 	systemschema.ProtectedTimestampsMetaTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
@@ -336,27 +337,6 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.MigrationsTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
-	systemschema.JoinTokensTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.StatementStatisticsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.TransactionStatisticsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.DatabaseRoleSettingsTable.GetName(): {
-		shouldIncludeInClusterBackup: optInToClusterBackup,
-	},
-	systemschema.TenantUsageTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.SQLInstancesTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.SpanConfigurationsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
 }
 
 // GetSystemTablesToIncludeInClusterBackup returns a set of system table names that
@@ -370,39 +350,6 @@ func GetSystemTablesToIncludeInClusterBackup() map[string]struct{} {
 	}
 
 	return systemTablesToInclude
-}
-
-// GetSystemTableIDsToExcludeFromClusterBackup returns a set of system table ids
-// that should be excluded from a cluster backup.
-func GetSystemTableIDsToExcludeFromClusterBackup(
-	ctx context.Context, execCfg *sql.ExecutorConfig,
-) (map[descpb.ID]struct{}, error) {
-	systemTableIDsToExclude := make(map[descpb.ID]struct{})
-	for systemTableName, backupConfig := range systemTableBackupConfiguration {
-		if backupConfig.shouldIncludeInClusterBackup == optOutOfClusterBackup {
-			err := sql.DescsTxn(ctx, execCfg, func(ctx context.Context, txn *kv.Txn, col *descs.Collection) error {
-				tn := tree.MakeTableNameWithSchema("system", tree.PublicSchemaName, tree.Name(systemTableName))
-				found, desc, err := col.GetMutableTableByName(ctx, txn, &tn, tree.ObjectLookupFlags{})
-				if err != nil {
-					return err
-				}
-				// Some system tables are not present when running inside a secondary
-				// tenant egs: `systemschema.TenantsTable`. In such situations we are
-				// print a warning and move on.
-				if !found {
-					log.Warningf(ctx, "could not find system table descriptor %s", systemTableName)
-					return nil
-				}
-				systemTableIDsToExclude[desc.ID] = struct{}{}
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return systemTableIDsToExclude, nil
 }
 
 // getSystemTablesToRestoreBeforeData returns the set of system tables that

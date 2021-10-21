@@ -71,13 +71,7 @@ func performGC(
 
 		// Drop database zone config when all the tables have been GCed.
 		if details.ParentID != descpb.InvalidID && isDoneGC(progress) {
-			if err := deleteDatabaseZoneConfig(
-				ctx,
-				execCfg.DB,
-				execCfg.Codec,
-				execCfg.Settings,
-				details.ParentID,
-			); err != nil {
+			if err := deleteDatabaseZoneConfig(ctx, execCfg.DB, execCfg.Codec, details.ParentID); err != nil {
 				return errors.Wrap(err, "deleting database zone config")
 			}
 		}
@@ -89,7 +83,7 @@ func performGC(
 func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) (err error) {
 	defer func() {
 		if err != nil && !r.isPermanentGCError(err) {
-			err = jobs.MarkAsRetryJobError(err)
+			err = errors.Mark(err, jobs.NewRetryJobError("gc"))
 		}
 	}()
 	p := execCtx.(sql.JobExecContext)
@@ -110,19 +104,14 @@ func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) 
 	if len(details.InterleavedIndexes) > 0 {
 		// Before deleting any indexes, ensure that old versions of the table
 		// descriptor are no longer in use.
-		_, err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, details.InterleavedTable.ID)
-		if err != nil {
+		if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, details.InterleavedTable.ID); err != nil {
 			return err
-		}
-		interleavedIndexIDs := make([]descpb.IndexID, len(details.InterleavedIndexes))
-		for i := range details.InterleavedIndexes {
-			interleavedIndexIDs[i] = details.InterleavedIndexes[i].ID
 		}
 		if err := sql.TruncateInterleavedIndexes(
 			ctx,
 			execCfg,
 			tabledesc.NewBuilder(details.InterleavedTable).BuildImmutableTable(),
-			interleavedIndexIDs,
+			details.InterleavedIndexes,
 		); err != nil {
 			return err
 		}

@@ -189,9 +189,10 @@ func EndTxn(
 	}
 	if args.Require1PC {
 		// If a 1PC txn was required and we're in EndTxn, we've failed to evaluate
-		// the batch as a 1PC. We shouldn't have gotten here; if we couldn't
-		// evaluate as 1PC, evaluateWriteBatch() was supposed to short-circuit.
-		return result.Result{}, errors.AssertionFailedf("unexpectedly trying to evaluate EndTxn with the Require1PC flag set")
+		// the batch as a 1PC. We're returning early instead of preferring a
+		// possible retriable error because we might want to leave locks behind in
+		// case of retriable errors - which Require1PC does not want.
+		return result.Result{}, roachpb.NewTransactionStatusError("could not commit in one phase as requested")
 	}
 	if args.Commit && args.Poison {
 		return result.Result{}, errors.AssertionFailedf("cannot poison during a committing EndTxn request")
@@ -201,12 +202,11 @@ func EndTxn(
 
 	// Fetch existing transaction.
 	var existingTxn roachpb.Transaction
-	recordAlreadyExisted, err := storage.MVCCGetProto(
+	if ok, err := storage.MVCCGetProto(
 		ctx, readWriter, key, hlc.Timestamp{}, &existingTxn, storage.MVCCGetOptions{},
-	)
-	if err != nil {
+	); err != nil {
 		return result.Result{}, err
-	} else if !recordAlreadyExisted {
+	} else if !ok {
 		// No existing transaction record was found - create one by writing it
 		// below in updateFinalizedTxn.
 		reply.Txn = h.Txn.Clone()
@@ -238,9 +238,7 @@ func EndTxn(
 			// meantime. The TransactionStatusError is going to be handled by the
 			// txnCommitter interceptor.
 			log.VEventf(ctx, 2, "transaction found to be already committed")
-			return result.Result{}, roachpb.NewTransactionStatusError(
-				roachpb.TransactionStatusError_REASON_TXN_COMMITTED,
-				"already committed")
+			return result.Result{}, roachpb.NewTransactionCommittedStatusError()
 
 		case roachpb.ABORTED:
 			if !args.Commit {
@@ -253,7 +251,7 @@ func EndTxn(
 					return result.Result{}, err
 				}
 				if err := updateFinalizedTxn(
-					ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
+					ctx, readWriter, ms, key, args, reply.Txn, externalLocks,
 				); err != nil {
 					return result.Result{}, err
 				}
@@ -332,9 +330,7 @@ func EndTxn(
 	if err != nil {
 		return result.Result{}, err
 	}
-	if err := updateFinalizedTxn(
-		ctx, readWriter, ms, key, args, reply.Txn, recordAlreadyExisted, externalLocks,
-	); err != nil {
+	if err := updateFinalizedTxn(ctx, readWriter, ms, key, args, reply.Txn, externalLocks); err != nil {
 		return result.Result{}, err
 	}
 
@@ -457,13 +453,6 @@ func resolveLocalLocks(
 		// These transactions rely on having their locks resolved synchronously.
 		resolveAllowance = math.MaxInt64
 	}
-	onlySeparatedIntents := false
-	st := evalCtx.ClusterSettings()
-	// Some tests have st == nil.
-	if st != nil {
-		onlySeparatedIntents = st.Version.ActiveVersionOrEmpty(ctx).IsActive(
-			clusterversion.PostSeparatedIntentsMigration)
-	}
 	for _, span := range args.LockSpans {
 		if err := func() error {
 			if resolveAllowance == 0 {
@@ -504,7 +493,7 @@ func resolveLocalLocks(
 			if inSpan != nil {
 				update.Span = *inSpan
 				num, resumeSpan, err := storage.MVCCResolveWriteIntentRange(
-					ctx, readWriter, ms, update, resolveAllowance, onlySeparatedIntents)
+					ctx, readWriter, ms, update, resolveAllowance)
 				if err != nil {
 					return err
 				}
@@ -566,18 +555,11 @@ func updateFinalizedTxn(
 	key []byte,
 	args *roachpb.EndTxnRequest,
 	txn *roachpb.Transaction,
-	recordAlreadyExisted bool,
 	externalLocks []roachpb.Span,
 ) error {
 	if txnAutoGC && len(externalLocks) == 0 {
 		if log.V(2) {
 			log.Infof(ctx, "auto-gc'ed %s (%d locks)", txn.Short(), len(args.LockSpans))
-		}
-		if !recordAlreadyExisted {
-			// Nothing to delete, so there's no use writing a deletion tombstone. This
-			// can help avoid sending a proposal through Raft, if nothing else in the
-			// BatchRequest writes.
-			return nil
 		}
 		return storage.MVCCDelete(ctx, readWriter, ms, key, hlc.Timestamp{}, nil /* txn */)
 	}
@@ -932,6 +914,15 @@ func splitTriggerHelper(
 		return enginepb.MVCCStats{}, result.Result{}, err
 	}
 
+	if !rec.ClusterSettings().Version.IsActive(ctx, clusterversion.AbortSpanBytes) {
+		// Since the stats here is used to seed the initial state for the RHS
+		// replicas, we need to be careful about zero-ing out the abort span
+		// bytes if the cluster version introducing it is not yet active. Not
+		// doing so can result in inconsistencies in MVCCStats across replicas
+		// in a mixed-version cluster.
+		h.AbsPostSplitRight().AbortSpanBytes = 0
+	}
+
 	// Note: we don't copy the queue last processed times. This means
 	// we'll process the RHS range in consistency and time series
 	// maintenance queues again possibly sooner than if we copied. The
@@ -958,8 +949,11 @@ func splitTriggerHelper(
 		// - node two becomes the lease holder for [c,e). Its timestamp cache does
 		//   not know about the read at 'd' which happened at the beginning.
 		// - node two can illegally propose a write to 'd' at a lower timestamp.
+		//
+		// TODO(tschottdorf): why would this use r.store.Engine() and not the
+		// batch? We do the same thing for other usages of the state loader.
 		sl := MakeStateLoader(rec)
-		leftLease, err := sl.LoadLease(ctx, batch)
+		leftLease, err := sl.LoadLease(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load lease")
 		}
@@ -976,7 +970,7 @@ func splitTriggerHelper(
 		}
 		rightLease := leftLease
 		rightLease.Replica = replica
-		gcThreshold, err := sl.LoadGCThreshold(ctx, batch)
+		gcThreshold, err := sl.LoadGCThreshold(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}
@@ -1007,7 +1001,7 @@ func splitTriggerHelper(
 			truncStateType = stateloader.TruncatedStateLegacyReplicated
 		}
 
-		replicaVersion, err := sl.LoadVersion(ctx, batch)
+		replicaVersion, err := sl.LoadVersion(ctx, rec.Engine())
 		if err != nil {
 			return enginepb.MVCCStats{}, result.Result{}, errors.Wrap(err, "unable to load GCThreshold")
 		}
@@ -1109,7 +1103,8 @@ func mergeTrigger(
 	// directly in this method. The primary reason why these are different is
 	// because the RHS's persistent read summary may not be up-to-date, as it is
 	// not updated by the SubsumeRequest.
-	if merge.RightReadSummary != nil {
+	readSumActive := rec.ClusterSettings().Version.IsActive(ctx, clusterversion.PriorReadSummaries)
+	if merge.RightReadSummary != nil && readSumActive {
 		mergedSum := merge.RightReadSummary.Clone()
 		if priorSum, err := readsummary.Load(ctx, batch, rec.GetRangeID()); err != nil {
 			return result.Result{}, err

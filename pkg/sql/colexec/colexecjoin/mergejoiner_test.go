@@ -60,7 +60,7 @@ func TestMergeJoinCrossProduct(t *testing.T) {
 	nTuples := 2*coldata.BatchSize() + 1
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int, types.Bytes, types.Decimal}
 	colsLeft := make([]coldata.Vec, len(typs))
 	colsRight := make([]coldata.Vec, len(typs))

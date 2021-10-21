@@ -73,6 +73,20 @@ func (p *planner) GetSerialSequenceNameFromColumn(
 	return nil, colinfo.NewUndefinedColumnError(string(columnName))
 }
 
+// IncrementSequence implements the tree.SequenceOperators interface.
+func (p *planner) IncrementSequence(ctx context.Context, seqName *tree.TableName) (int64, error) {
+	if p.EvalContext().TxnReadOnly {
+		return 0, readOnlyError("nextval()")
+	}
+
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return 0, err
+	}
+	return incrementSequenceHelper(ctx, p, descriptor)
+}
+
 // IncrementSequenceByID implements the tree.SequenceOperators interface.
 func (p *planner) IncrementSequenceByID(ctx context.Context, seqID int64) (int64, error) {
 	if p.EvalContext().TxnReadOnly {
@@ -116,7 +130,7 @@ func incrementSequenceHelper(
 		return 0, err
 	}
 
-	p.sessionDataMutatorIterator.applyOnEachMutator(
+	p.ExtendedEvalContext().SessionMutatorIterator.applyForEachMutator(
 		func(m sessionDataMutator) {
 			m.RecordLatestSequenceVal(uint32(descriptor.GetID()), val)
 		},
@@ -212,6 +226,18 @@ func boundsExceededError(descriptor catalog.TableDescriptor) error {
 		tree.ErrString((*tree.Name)(&name)), value)
 }
 
+// GetLatestValueInSessionForSequence implements the tree.SequenceOperators interface.
+func (p *planner) GetLatestValueInSessionForSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return 0, err
+	}
+	return getLatestValueInSessionForSequenceHelper(p, descriptor, seqName)
+}
+
 // GetLatestValueInSessionForSequenceByID implements the tree.SequenceOperators interface.
 func (p *planner) GetLatestValueInSessionForSequenceByID(
 	ctx context.Context, seqID int64,
@@ -245,6 +271,22 @@ func getLatestValueInSessionForSequenceHelper(
 	}
 
 	return val, nil
+}
+
+// SetSequenceValue implements the tree.SequenceOperators interface.
+func (p *planner) SetSequenceValue(
+	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
+) error {
+	if p.EvalContext().TxnReadOnly {
+		return readOnlyError("setval()")
+	}
+
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return err
+	}
+	return setSequenceValueHelper(ctx, p, descriptor, newVal, isCalled, seqName)
 }
 
 // SetSequenceValueByID implements the tree.SequenceOperators interface.
@@ -400,11 +442,15 @@ func assignSequenceOptions(
 		case tree.SeqOptNoCycle:
 			// Do nothing; this is the default.
 		case tree.SeqOptCache:
-			if v := *option.IntVal; v >= 1 {
-				opts.CacheSize = v
-			} else {
+			v := *option.IntVal
+			switch {
+			case v < 1:
 				return pgerror.Newf(pgcode.InvalidParameterValue,
 					"CACHE (%d) must be greater than zero", v)
+			case v == 1:
+				// Do nothing; this is the default.
+			case v > 1:
+				opts.CacheSize = *option.IntVal
 			}
 		case tree.SeqOptIncrement:
 			// Do nothing; this has already been set.
@@ -606,17 +652,6 @@ func maybeAddSequenceDependencies(
 		seqDesc, err := GetSequenceDescFromIdentifier(ctx, sc, seqIdentifier)
 		if err != nil {
 			return nil, err
-		}
-		// Check if this reference is cross DB.
-		if seqDesc.GetParentID() != tableDesc.GetParentID() &&
-			!allowCrossDatabaseSeqReferences.Get(&st.SV) {
-			return nil, errors.WithHintf(
-				pgerror.Newf(pgcode.FeatureNotSupported,
-					"sequence references cannot come from other databases; (see the '%s' cluster setting)",
-					allowCrossDatabaseSeqReferencesSetting),
-				crossDBReferenceDeprecationHint(),
-			)
-
 		}
 		seqNameToID[seqIdentifier.SeqName] = int64(seqDesc.ID)
 

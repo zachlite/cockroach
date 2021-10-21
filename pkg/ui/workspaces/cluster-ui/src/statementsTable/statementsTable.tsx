@@ -22,7 +22,6 @@ import {
   countBarChart,
   rowsReadBarChart,
   bytesReadBarChart,
-  rowsWrittenBarChart,
   latencyBarChart,
   contentionBarChart,
   maxMemUsageBarChart,
@@ -73,10 +72,6 @@ function makeCommonColumns(
   const countBar = countBarChart(statements, defaultBarChartOptions);
   const rowsReadBar = rowsReadBarChart(statements, defaultBarChartOptions);
   const bytesReadBar = bytesReadBarChart(statements, defaultBarChartOptions);
-  const rowsWrittenBar = rowsWrittenBarChart(
-    statements,
-    defaultBarChartOptions,
-  );
   const latencyBar = latencyBarChart(statements, defaultBarChartOptions);
   const contentionBar = contentionBarChart(
     statements,
@@ -130,14 +125,6 @@ function makeCommonColumns(
       cell: bytesReadBar,
       sort: (stmt: AggregateStatistics) =>
         FixLong(Number(stmt.stats.bytes_read.mean)),
-    },
-    {
-      name: "rowsWritten",
-      title: statisticsTableTitles.rowsWritten(statType),
-      cell: rowsWrittenBar,
-      sort: (stmt: AggregateStatistics) =>
-        FixLong(Number(stmt.stats.rows_written?.mean)),
-      showByDefault: false,
     },
     {
       name: "time",
@@ -203,9 +190,6 @@ function makeCommonColumns(
 export interface AggregateStatistics {
   // label is either shortStatement (StatementsPage) or nodeId (StatementDetails).
   label: string;
-  // summary exists only for SELECT/INSERT/UPSERT/UPDATE statements, and is
-  // replaced with shortStatement otherwise.
-  summary: string;
   aggregatedTs: number;
   implicitTxn: boolean;
   fullScan: boolean;

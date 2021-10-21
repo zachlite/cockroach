@@ -28,7 +28,10 @@ import {
 } from "../sortedtable";
 import { Pagination } from "../pagination";
 import { TableStatistics } from "../tableStatistics";
-import { statisticsClasses } from "./transactionsPageClasses";
+import {
+  baseHeadingClasses,
+  statisticsClasses,
+} from "./transactionsPageClasses";
 import {
   aggregateAcrossNodeIDs,
   generateRegionNode,
@@ -61,8 +64,6 @@ import {
   getLabel,
   StatisticTableColumnKeys,
 } from "../statsTableUtil/statsTableUtil";
-import ClearStats from "../sqlActivity/clearStats";
-import { commonStyles } from "../common";
 
 type IStatementsResponse = protos.cockroach.server.serverpb.IStatementsResponse;
 type TransactionStats = protos.cockroach.sql.ITransactionStatistics;
@@ -152,7 +153,7 @@ export class TransactionsPage extends React.Component<
     this.refreshData();
   }
 
-  syncHistory = (params: Record<string, string | undefined>): void => {
+  syncHistory = (params: Record<string, string | undefined>) => {
     const { history } = this.props;
     const currentSearchParams = new URLSearchParams(history.location.search);
 
@@ -269,9 +270,10 @@ export class TransactionsPage extends React.Component<
     );
   };
 
-  renderTransactionsList(): React.ReactElement {
+  renderTransactionsList() {
     return (
       <div className={cx("table-area")}>
+        <h3 className={baseHeadingClasses.tableName}>Transactions</h3>
         <Loading
           loading={!this.props?.data}
           error={this.props?.error}
@@ -411,12 +413,6 @@ export class TransactionsPage extends React.Component<
                       reset time
                     </button>
                   </PageConfigItem>
-                  <PageConfigItem className={commonStyles("separator")}>
-                    <ClearStats
-                      resetSQLStats={resetSQLStats}
-                      tooltipType="transaction"
-                    />
-                  </PageConfigItem>
                 </PageConfig>
                 <section className={statisticsClasses.tableContainerClass}>
                   <ColumnsSelector
@@ -425,11 +421,14 @@ export class TransactionsPage extends React.Component<
                   />
                   <TableStatistics
                     pagination={pagination}
+                    lastReset={this.lastReset()}
                     search={search}
                     totalCount={transactionsToDisplay.length}
                     arrayItemName="transactions"
+                    tooltipType="transaction"
                     activeFilters={activeFilters}
                     onClearFilters={this.onClearFilters}
+                    resetSQLStats={resetSQLStats}
                   />
                   <TransactionsTable
                     columns={displayColumns}
@@ -458,7 +457,7 @@ export class TransactionsPage extends React.Component<
     );
   }
 
-  renderTransactionDetails(): React.ReactElement {
+  renderTransactionDetails() {
     const { statements } = this.props.data;
     const {
       aggregatedTs,
@@ -491,7 +490,7 @@ export class TransactionsPage extends React.Component<
     );
   }
 
-  render(): React.ReactElement {
+  render() {
     const { statementFingerprintIds } = this.state;
     const renderTxDetailsView = !!statementFingerprintIds;
     return renderTxDetailsView

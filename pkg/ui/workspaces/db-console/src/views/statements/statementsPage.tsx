@@ -34,7 +34,7 @@ import { PrintTime } from "src/views/reports/containers/range/print";
 import { selectDiagnosticsReportsPerStatement } from "src/redux/statements/statementsSelectors";
 import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
 import { statementsDateRangeLocalSetting } from "src/redux/statementsDateRange";
-import { queryByName } from "src/util/query";
+import { getMatchParamByName } from "src/util/query";
 
 import { StatementsPage, AggregateStatistics } from "@cockroachlabs/cluster-ui";
 import {
@@ -57,7 +57,6 @@ type IStatementDiagnosticsReport = protos.cockroach.server.serverpb.IStatementDi
 
 interface StatementsSummaryData {
   statement: string;
-  statementSummary: string;
   aggregatedTs: number;
   implicitTxn: boolean;
   fullScan: boolean;
@@ -80,7 +79,7 @@ export const selectStatements = createSelector(
       return null;
     }
     let statements = flattenStatementStats(state.data.statements);
-    const app = queryByName(props.location, appAttr);
+    const app = getMatchParamByName(props.match, appAttr);
     const isInternal = (statement: ExecutionStatistics) =>
       statement.app.startsWith(state.data.internal_app_name_prefix);
 
@@ -89,7 +88,7 @@ export const selectStatements = createSelector(
       let showInternal = false;
       if (criteria === "(unset)") {
         criteria = "";
-      } else if (criteria === state.data.internal_app_name_prefix) {
+      } else if (criteria === "(internal)") {
         showInternal = true;
       }
 
@@ -107,7 +106,6 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statement: stmt.statement,
-          statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
           implicitTxn: stmt.implicit_txn,
           fullScan: stmt.full_scan,
@@ -122,7 +120,6 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         label: stmt.statement,
-        summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
         implicitTxn: stmt.implicitTxn,
         fullScan: stmt.fullScan,
@@ -163,7 +160,7 @@ export const selectApps = createSelector(
       },
     );
     return []
-      .concat(sawInternal ? [state.data.internal_app_name_prefix] : [])
+      .concat(sawInternal ? ["(internal)"] : [])
       .concat(sawBlank ? ["(unset)"] : [])
       .concat(Object.keys(apps));
   },

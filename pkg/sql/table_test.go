@@ -160,7 +160,7 @@ func TestMakeTableDescColumns(t *testing.T) {
 		},
 		{
 			`"char"`,
-			types.QChar,
+			types.MakeQChar(0),
 			true,
 		},
 		{
@@ -210,7 +210,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		{
 			"a INT PRIMARY KEY",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
+				Name:                tabledesc.PrimaryKeyIndexName,
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"a"},
@@ -224,7 +224,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		{
 			"a INT UNIQUE, b INT PRIMARY KEY",
 			descpb.IndexDescriptor{
-				Name:                "test_pkey",
+				Name:                "primary",
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"b"},
@@ -265,7 +265,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		{
 			"a INT, b INT, CONSTRAINT c UNIQUE (b), PRIMARY KEY (a, b)",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
+				Name:                "primary",
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"a", "b"},
@@ -290,7 +290,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		{
 			"a INT, b INT, PRIMARY KEY (a, b)",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
+				Name:                tabledesc.PrimaryKeyIndexName,
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"a", "b"},

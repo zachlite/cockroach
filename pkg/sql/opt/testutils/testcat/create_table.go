@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
@@ -423,9 +422,8 @@ func (tc *Catalog) resolveFK(tab *Table, d *tree.ForeignKeyConstraintTableDef) {
 
 	constraintName := string(d.Name)
 	if constraintName == "" {
-		constraintName = tabledesc.ForeignKeyConstraintName(
-			tab.TabName.Table(),
-			d.FromCols.ToStrings(),
+		constraintName = fmt.Sprintf(
+			"fk_%s_ref_%s", string(d.FromCols[0]), targetTable.TabName.Table(),
 		)
 	}
 
@@ -1010,20 +1008,17 @@ func (ti *Index) addColumn(
 // reused. Otherwise, a new column is added to the table.
 func columnForIndexElemExpr(tt *Table, expr tree.Expr) cat.Column {
 	exprStr := serializeTableDefExpr(expr)
-
 	// Add a new virtual computed column with a unique name.
-	prefix := "crdb_internal_idx_expr"
-	nameExistsFn := func(n tree.Name) bool {
+	var name tree.Name
+	for n, done := 1, false; !done; n++ {
+		done = true
+		name = tree.Name(fmt.Sprintf("crdb_internal_idx_expr_%d", n))
 		for _, col := range tt.Columns {
-			if col.ColName() == n {
-				return true
+			if col.ColName() == name {
+				done = false
+				break
 			}
 		}
-		return false
-	}
-	name := tree.Name(prefix)
-	for i := 1; nameExistsFn(name); i++ {
-		name = tree.Name(fmt.Sprintf("%s_%d", prefix, i))
 	}
 
 	typ := typeCheckTableExpr(expr, tt.Columns)

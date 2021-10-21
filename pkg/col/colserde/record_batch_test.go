@@ -251,7 +251,7 @@ func TestRecordBatchSerializer(t *testing.T) {
 func TestRecordBatchSerializerSerializeDeserializeRandom(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	const (
 		maxTypes   = 16
@@ -317,7 +317,7 @@ func TestRecordBatchSerializerDeserializeMemoryEstimate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	var err error
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := []*types.T{types.Bytes}
 	src := testAllocator.NewMemBatchWithMaxCapacity(typs)
@@ -354,7 +354,7 @@ func TestRecordBatchSerializerDeserializeMemoryEstimate(t *testing.T) {
 }
 
 func BenchmarkRecordBatchSerializerInt64(b *testing.B) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	var (
 		typs             = []*types.T{types.Int}

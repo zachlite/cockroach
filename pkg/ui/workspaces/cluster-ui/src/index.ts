@@ -15,7 +15,6 @@ export * from "./anchor";
 export * from "./badge";
 export * from "./barCharts";
 export * from "./button";
-export * from "./common";
 export * from "./databaseDetailsPage";
 export * from "./databaseTablePage";
 export * from "./databasesPage";

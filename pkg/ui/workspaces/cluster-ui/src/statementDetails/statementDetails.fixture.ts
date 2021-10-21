@@ -77,10 +77,6 @@ const statementStats: any = {
     mean: 7,
     squared_diffs: 1000000,
   },
-  rows_written: {
-    mean: 1,
-    squared_diffs: 10,
-  },
   last_exec_timestamp: {
     seconds: Long.fromInt(1599670292),
     nanos: 111613000,
@@ -152,7 +148,6 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
     byNode: [
       {
         label: "4",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
@@ -161,7 +156,6 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "3",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
@@ -170,7 +164,6 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "2",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
@@ -179,7 +172,6 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "1",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
         implicitTxn: true,
         database: "defaultdb",
@@ -193,6 +185,10 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       denominator: 36958,
     },
     vec: {
+      numerator: 36958,
+      denominator: 36958,
+    },
+    opt: {
       numerator: 36958,
       denominator: 36958,
     },

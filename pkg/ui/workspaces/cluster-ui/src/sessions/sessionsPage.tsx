@@ -113,7 +113,7 @@ export class SessionsPage extends React.Component<
     };
   };
 
-  syncHistory = (params: Record<string, string | undefined>): void => {
+  syncHistory = (params: Record<string, string | undefined>) => {
     const { history } = this.props;
     const currentSearchParams = new URLSearchParams(history.location.search);
     forIn(params, (value, key) => {
@@ -128,7 +128,7 @@ export class SessionsPage extends React.Component<
     history.replace(history.location);
   };
 
-  changeSortSetting = (ss: SortSetting): void => {
+  changeSortSetting = (ss: SortSetting) => {
     const { onSortingChange } = this.props;
     onSortingChange && onSortingChange(ss.columnTitle);
 
@@ -142,7 +142,7 @@ export class SessionsPage extends React.Component<
     });
   };
 
-  resetPagination = (): void => {
+  resetPagination = () => {
     this.setState(prevState => {
       return {
         pagination: {
@@ -153,27 +153,27 @@ export class SessionsPage extends React.Component<
     });
   };
 
-  componentDidMount(): void {
+  componentDidMount() {
     this.props.refreshSessions();
   }
 
-  componentDidUpdate = (__: SessionsPageProps, _: SessionsPageState): void => {
+  componentDidUpdate = (__: SessionsPageProps, _: SessionsPageState) => {
     this.props.refreshSessions();
   };
 
-  onChangePage = (current: number): void => {
+  onChangePage = (current: number) => {
     const { pagination } = this.state;
     this.setState({ pagination: { ...pagination, current } });
     this.props.onPageChanged(current);
   };
 
-  renderSessions = (): React.ReactElement => {
+  renderSessions = () => {
     const sessionsData = this.props.sessions;
     const { pagination } = this.state;
 
     return (
       <>
-        <section>
+        <section className={sortableTableCx("cl-table-container")}>
           <div className={statementsPageCx("cl-table-statistic")}>
             <h4 className={statementsPageCx("cl-count-title")}>
               <ResultsPerPageLabel
@@ -224,12 +224,13 @@ export class SessionsPage extends React.Component<
     );
   };
 
-  render(): React.ReactElement {
+  render() {
     const { match, cancelSession, cancelQuery } = this.props;
     const app = getMatchParamByName(match, appAttr);
     return (
       <div className={sessionsPageCx("sessions-page")}>
         <Helmet title={app ? `${app} App | Sessions` : "Sessions"} />
+        <h3 className={statementsPageCx("base-heading")}>Sessions</h3>
         <Loading
           loading={isNil(this.props.sessions)}
           error={this.props.sessionsError}

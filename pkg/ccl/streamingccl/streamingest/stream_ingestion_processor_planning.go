@@ -67,8 +67,7 @@ func distStreamIngestionPlanSpecs(
 	// Create a spec for the StreamIngestionFrontier processor on the coordinator
 	// node.
 	streamIngestionFrontierSpec := &execinfrapb.StreamIngestionFrontierSpec{
-		HighWaterAtStart: initialHighWater, TrackedSpans: trackedSpans, JobID: int64(jobID),
-	}
+		HighWaterAtStart: initialHighWater, TrackedSpans: trackedSpans}
 
 	return streamIngestionSpecs, streamIngestionFrontierSpec, nil
 }

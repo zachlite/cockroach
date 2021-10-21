@@ -578,21 +578,3 @@ func (*internalServer) Join(
 ) (*roachpb.JoinNodeResponse, error) {
 	panic("unimplemented")
 }
-
-func (*internalServer) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) GetSpanConfigs(
-	context.Context, *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) UpdateSpanConfigs(
-	context.Context, *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
-	panic("unimplemented")
-}

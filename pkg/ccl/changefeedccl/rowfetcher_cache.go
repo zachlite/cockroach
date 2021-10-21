@@ -11,13 +11,14 @@ package changefeedccl
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -51,14 +52,15 @@ type idVersion struct {
 func newRowFetcherCache(
 	ctx context.Context,
 	codec keys.SQLCodec,
+	settings *cluster.Settings,
 	leaseMgr *lease.Manager,
-	cf *descs.CollectionFactory,
+	hydratedTables *hydratedtables.Cache,
 	db *kv.DB,
 ) *rowFetcherCache {
 	return &rowFetcherCache{
 		codec:      codec,
 		leaseMgr:   leaseMgr,
-		collection: cf.NewCollection(nil /* TemporarySchemaProvider */),
+		collection: descs.NewCollection(settings, leaseMgr, hydratedTables),
 		db:         db,
 		fetchers:   make(map[idVersion]*row.Fetcher),
 	}
@@ -80,16 +82,18 @@ func (c *rowFetcherCache) TableDescForKey(
 
 		// Retrieve the target TableDescriptor from the lease manager. No caching
 		// is attempted because the lease manager does its own caching.
-		desc, err := c.leaseMgr.Acquire(ctx, ts, tableID)
+		desc, _, err := c.leaseMgr.Acquire(ctx, ts, tableID)
 		if err != nil {
 			// Manager can return all kinds of errors during chaos, but based on
 			// its usage, none of them should ever be terminal.
-			return nil, changefeedbase.MarkRetryableError(err)
+			return nil, MarkRetryableError(err)
 		}
-		tableDesc = desc.Underlying().(catalog.TableDescriptor)
 		// Immediately release the lease, since we only need it for the exact
 		// timestamp requested.
-		desc.Release(ctx)
+		if err := c.leaseMgr.Release(desc); err != nil {
+			return nil, err
+		}
+		tableDesc = desc.(catalog.TableDescriptor)
 		if tableDesc.ContainsUserDefinedTypes() {
 			// If the table contains user defined types, then use the descs.Collection
 			// to retrieve a TableDescriptor with type metadata hydrated. We open a
@@ -101,16 +105,14 @@ func (c *rowFetcherCache) TableDescForKey(
 			// descs.Collection directly here.
 			// TODO (SQL Schema): #53751.
 			if err := c.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				err := txn.SetFixedTimestamp(ctx, ts)
-				if err != nil {
-					return err
-				}
+				txn.SetFixedTimestamp(ctx, ts)
+				var err error
 				tableDesc, err = c.collection.GetImmutableTableByID(ctx, txn, tableID, tree.ObjectLookupFlags{})
 				return err
 			}); err != nil {
 				// Manager can return all kinds of errors during chaos, but based on
 				// its usage, none of them should ever be terminal.
-				return nil, changefeedbase.MarkRetryableError(err)
+				return nil, MarkRetryableError(err)
 			}
 			// Immediately release the lease, since we only need it for the exact
 			// timestamp requested.
@@ -118,7 +120,7 @@ func (c *rowFetcherCache) TableDescForKey(
 		}
 
 		// Skip over the column data.
-		for ; skippedCols < tableDesc.GetPrimaryIndex().NumKeyColumns(); skippedCols++ {
+		for ; skippedCols < tableDesc.GetPrimaryIndex().NumColumns(); skippedCols++ {
 			l, err := encoding.PeekLength(remaining)
 			if err != nil {
 				return nil, err
@@ -161,11 +163,14 @@ func (c *rowFetcherCache) RowFetcherForTableDesc(
 	rfArgs := row.FetcherTableArgs{
 		Spans:            tableDesc.AllIndexSpans(c.codec),
 		Desc:             tableDesc,
-		Index:            tableDesc.GetPrimaryIndex(),
+		Index:            tableDesc.GetPrimaryIndex().IndexDesc(),
 		ColIdxMap:        colIdxMap,
 		IsSecondaryIndex: false,
-		Cols:             tableDesc.PublicColumns(),
+		Cols:             make([]descpb.ColumnDescriptor, len(tableDesc.PublicColumns())),
 		ValNeededForCol:  valNeededForCol,
+	}
+	for i, col := range tableDesc.PublicColumns() {
+		rfArgs.Cols[i] = *col.ColumnDesc()
 	}
 	if err := rf.Init(
 		context.TODO(),
@@ -173,7 +178,6 @@ func (c *rowFetcherCache) RowFetcherForTableDesc(
 		false, /* reverse */
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		0,     /* lockTimeout */
 		false, /* isCheck */
 		&c.a,
 		nil, /* memMonitor */

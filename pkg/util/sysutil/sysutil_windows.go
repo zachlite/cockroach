@@ -8,15 +8,17 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build windows
 // +build windows
 
 package sysutil
 
 import (
 	"fmt"
+	"os"
 	"os/user"
 	"syscall"
+
+	"github.com/cockroachdb/errors"
 )
 
 // ProcessIdentity returns a string describing the user and group that this
@@ -27,6 +29,18 @@ func ProcessIdentity() string {
 		return "<unknown>"
 	}
 	return fmt.Sprintf("uid %s, gid %s", u.Uid, u.Gid)
+}
+
+// StatFS returns an FSInfo describing the named filesystem. It is only
+// supported on Unix-like platforms.
+func StatFS(path string) (*FSInfo, error) {
+	return nil, errors.New("unsupported on Windows")
+}
+
+// StatAndLinkCount wraps os.Stat, returning its result and a zero link count.
+func StatAndLinkCount(path string) (os.FileInfo, int64, error) {
+	stat, err := os.Stat(path)
+	return stat, 0, err
 }
 
 // IsCrossDeviceLinkErrno checks whether the given error object (as

@@ -13,17 +13,15 @@ package tabledesc
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -70,24 +68,6 @@ func MakeColumnDefDescs(
 	col := &descpb.ColumnDescriptor{
 		Name:     string(d.Name),
 		Nullable: d.Nullable.Nullability != tree.NotNull && !d.PrimaryKey.IsPrimaryKey,
-		Virtual:  d.IsVirtual(),
-		Hidden:   d.Hidden,
-	}
-
-	if d.GeneratedIdentity.IsGeneratedAsIdentity {
-		switch d.GeneratedIdentity.GeneratedAsIdentityType {
-		case tree.GeneratedAlways:
-			col.GeneratedAsIdentityType = descpb.GeneratedAsIdentityType_GENERATED_ALWAYS
-		case tree.GeneratedByDefault:
-			col.GeneratedAsIdentityType = descpb.GeneratedAsIdentityType_GENERATED_BY_DEFAULT
-		default:
-			return nil, nil, nil, errors.AssertionFailedf(
-				"column %s is of invalid generated as identity type (neither ALWAYS nor BY DEFAULT)", string(d.Name))
-		}
-		if genSeqOpt := d.GeneratedIdentity.SeqOptions; genSeqOpt != nil {
-			s := tree.Serialize(&d.GeneratedIdentity.SeqOptions)
-			col.GeneratedAsIdentitySequenceOption = &s
-		}
 	}
 
 	// Validate and assign column type.
@@ -121,48 +101,18 @@ func MakeColumnDefDescs(
 		}
 	}
 
-	if d.HasOnUpdateExpr() {
-		// Verify that we're on an ON UPDATE supported version before continuing.
-		if !evalCtx.Settings.Version.IsActive(
-			ctx,
-			clusterversion.OnUpdateExpressions,
-		) {
-			return nil, nil, nil, pgerror.Newf(pgcode.FeatureNotSupported,
-				"version %v must be finalized to use ON UPDATE",
-				clusterversion.ByKey(clusterversion.OnUpdateExpressions))
-		}
-
-		// Verify the on update expression type is compatible with the column type
-		// and does not contain invalid functions.
-		var err error
-		if typedExpr, err = schemaexpr.SanitizeVarFreeExpr(
-			ctx, d.OnUpdateExpr.Expr, resType, "ON UPDATE", semaCtx, tree.VolatilityVolatile,
-		); err != nil {
-			return nil, nil, nil, err
-		}
-
-		d.OnUpdateExpr.Expr = typedExpr
-		s := tree.Serialize(d.OnUpdateExpr.Expr)
-		col.OnUpdateExpr = &s
-	}
-
 	if d.IsComputed() {
-		// Note: We do not validate the computed column expression here because
-		// it may reference columns that have not yet been added to a table
-		// descriptor. Callers must validate the expression with
-		// schemaexpr.ValidateComputedColumnExpression once all possible
-		// reference columns are part of the table descriptor.
 		s := tree.Serialize(d.Computed.Expr)
 		col.ComputeExpr = &s
 	}
 
 	var idx *descpb.IndexDescriptor
-	if d.PrimaryKey.IsPrimaryKey || (d.Unique.IsUnique && !d.Unique.WithoutIndex) {
+	if d.PrimaryKey.IsPrimaryKey || d.Unique {
 		if !d.PrimaryKey.Sharded {
 			idx = &descpb.IndexDescriptor{
-				Unique:              true,
-				KeyColumnNames:      []string{string(d.Name)},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				Unique:           true,
+				ColumnNames:      []string{string(d.Name)},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 			}
 		} else {
 			buckets, err := EvalShardBucketCount(ctx, semaCtx, evalCtx, d.PrimaryKey.ShardBuckets)
@@ -171,9 +121,9 @@ func MakeColumnDefDescs(
 			}
 			shardColName := GetShardColumnName([]string{string(d.Name)}, buckets)
 			idx = &descpb.IndexDescriptor{
-				Unique:              true,
-				KeyColumnNames:      []string{shardColName, string(d.Name)},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				Unique:           true,
+				ColumnNames:      []string{shardColName, string(d.Name)},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
 				Sharded: descpb.ShardedDescriptor{
 					IsSharded:    true,
 					Name:         shardColName,
@@ -182,8 +132,8 @@ func MakeColumnDefDescs(
 				},
 			}
 		}
-		if d.Unique.ConstraintName != "" {
-			idx.Name = string(d.Unique.ConstraintName)
+		if d.UniqueConstraintName != "" {
+			idx.Name = string(d.UniqueConstraintName)
 		}
 	}
 
@@ -195,7 +145,7 @@ func MakeColumnDefDescs(
 func EvalShardBucketCount(
 	ctx context.Context, semaCtx *tree.SemaContext, evalCtx *tree.EvalContext, shardBuckets tree.Expr,
 ) (int32, error) {
-	const invalidBucketCountMsg = `BUCKET_COUNT must be a 32-bit integer greater than 1, got %v`
+	const invalidBucketCountMsg = `BUCKET_COUNT must be an integer greater than 1`
 	typedExpr, err := schemaexpr.SanitizeVarFreeExpr(
 		ctx, shardBuckets, types.Int, "BUCKET_COUNT", semaCtx, tree.VolatilityVolatile,
 	)
@@ -204,14 +154,11 @@ func EvalShardBucketCount(
 	}
 	d, err := typedExpr.Eval(evalCtx)
 	if err != nil {
-		return 0, pgerror.Wrapf(err, pgcode.InvalidParameterValue, invalidBucketCountMsg, typedExpr)
+		return 0, pgerror.Wrap(err, pgcode.InvalidParameterValue, invalidBucketCountMsg)
 	}
 	buckets := tree.MustBeDInt(d)
 	if buckets < 2 {
-		return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, buckets)
-	}
-	if buckets > math.MaxInt32 {
-		return 0, pgerror.Newf(pgcode.InvalidParameterValue, invalidBucketCountMsg, buckets)
+		return 0, pgerror.New(pgcode.InvalidParameterValue, invalidBucketCountMsg)
 	}
 	return int32(buckets), nil
 }
@@ -227,13 +174,22 @@ func GetShardColumnName(colNames []string, buckets int32) string {
 	)
 }
 
-// GetConstraintInfo implements the TableDescriptor interface.
-func (desc *wrapper) GetConstraintInfo() (map[string]descpb.ConstraintDetail, error) {
-	return desc.collectConstraintInfo(nil)
+// GetConstraintInfo returns a summary of all constraints on the table.
+func (desc *Immutable) GetConstraintInfo(
+	ctx context.Context, dg catalog.DescGetter,
+) (map[string]descpb.ConstraintDetail, error) {
+	var tableLookup catalog.TableLookupFn
+	if dg != nil {
+		tableLookup = func(id descpb.ID) (catalog.TableDescriptor, error) {
+			return catalog.GetTableDescFromID(ctx, dg, id)
+		}
+	}
+	return desc.collectConstraintInfo(tableLookup)
 }
 
-// GetConstraintInfoWithLookup implements the TableDescriptor interface.
-func (desc *wrapper) GetConstraintInfoWithLookup(
+// GetConstraintInfoWithLookup returns a summary of all constraints on the
+// table using the provided function to fetch a TableDescriptor from an ID.
+func (desc *Immutable) GetConstraintInfoWithLookup(
 	tableLookup catalog.TableLookupFn,
 ) (map[string]descpb.ConstraintDetail, error) {
 	return desc.collectConstraintInfo(tableLookup)
@@ -241,21 +197,21 @@ func (desc *wrapper) GetConstraintInfoWithLookup(
 
 // CheckUniqueConstraints returns a non-nil error if a descriptor contains two
 // constraints with the same name.
-func (desc *wrapper) CheckUniqueConstraints() error {
+func (desc *Immutable) CheckUniqueConstraints() error {
 	_, err := desc.collectConstraintInfo(nil)
 	return err
 }
 
 // if `tableLookup` is non-nil, provide a full summary of constraints, otherwise just
 // check that constraints have unique names.
-func (desc *wrapper) collectConstraintInfo(
+func (desc *Immutable) collectConstraintInfo(
 	tableLookup catalog.TableLookupFn,
 ) (map[string]descpb.ConstraintDetail, error) {
 	info := make(map[string]descpb.ConstraintDetail)
 
-	// Indexes provide PK and Unique constraints that are enforced by an index.
-	for _, indexI := range desc.NonDropIndexes() {
-		index := indexI.IndexDesc()
+	// Indexes provide PK and Unique constraints.
+	indexes := desc.AllNonDropIndexes()
+	for _, index := range indexes {
 		if index.ID == desc.PrimaryIndex.ID {
 			if _, ok := info[index.Name]; ok {
 				return nil, pgerror.Newf(pgcode.DuplicateObject,
@@ -270,7 +226,7 @@ func (desc *wrapper) collectConstraintInfo(
 			// This prevents the auto-created rowid primary key index from showing up
 			// in show constraints.
 			hidden := true
-			for _, id := range index.KeyColumnIDs {
+			for _, id := range index.ColumnIDs {
 				if !colHiddenMap[id] {
 					hidden = false
 					break
@@ -280,7 +236,7 @@ func (desc *wrapper) collectConstraintInfo(
 				continue
 			}
 			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypePK}
-			detail.Columns = index.KeyColumnNames
+			detail.Columns = index.ColumnNames
 			detail.Index = index
 			info[index.Name] = detail
 		} else if index.Unique {
@@ -289,30 +245,10 @@ func (desc *wrapper) collectConstraintInfo(
 					"duplicate constraint name: %q", index.Name)
 			}
 			detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeUnique}
-			detail.Columns = index.KeyColumnNames
+			detail.Columns = index.ColumnNames
 			detail.Index = index
 			info[index.Name] = detail
 		}
-	}
-
-	// Get the unique constraints that are not enforced by an index.
-	ucs := desc.AllActiveAndInactiveUniqueWithoutIndexConstraints()
-	for _, uc := range ucs {
-		if _, ok := info[uc.Name]; ok {
-			return nil, pgerror.Newf(pgcode.DuplicateObject,
-				"duplicate constraint name: %q", uc.Name)
-		}
-		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeUnique}
-		// Constraints in the Validating state are considered Unvalidated for this
-		// purpose.
-		detail.Unvalidated = uc.Validity != descpb.ConstraintValidity_Validated
-		var err error
-		detail.Columns, err = desc.NamesForColumnIDs(uc.ColumnIDs)
-		if err != nil {
-			return nil, err
-		}
-		detail.UniqueWithoutIndexConstraint = uc
-		info[uc.Name] = detail
 	}
 
 	fks := desc.AllActiveAndInactiveForeignKeys()
@@ -322,8 +258,7 @@ func (desc *wrapper) collectConstraintInfo(
 				"duplicate constraint name: %q", fk.Name)
 		}
 		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeFK}
-		// Constraints in the Validating state are considered Unvalidated for this
-		// purpose.
+		// Constraints in the Validating state are considered Unvalidated for this purpose
 		detail.Unvalidated = fk.Validity != descpb.ConstraintValidity_Validated
 		var err error
 		detail.Columns, err = desc.NamesForColumnIDs(fk.OriginColumnIDs)
@@ -355,8 +290,7 @@ func (desc *wrapper) collectConstraintInfo(
 				"duplicate constraint name: %q", c.Name)
 		}
 		detail := descpb.ConstraintDetail{Kind: descpb.ConstraintTypeCheck}
-		// Constraints in the Validating state are considered Unvalidated for this
-		// purpose.
+		// Constraints in the Validating state are considered Unvalidated for this purpose
 		detail.Unvalidated = c.Validity != descpb.ConstraintValidity_Validated
 		detail.CheckConstraint = c
 		detail.Details = c.Expr
@@ -367,12 +301,12 @@ func (desc *wrapper) collectConstraintInfo(
 					"error computing columns used in check constraint %q", c.Name)
 			}
 			for _, colID := range colsUsed {
-				col, err := desc.FindColumnWithID(colID)
+				col, err := desc.FindColumnByID(colID)
 				if err != nil {
 					return nil, errors.NewAssertionErrorWithWrappedErrf(err,
 						"error finding column %d in table %s", log.Safe(colID), desc.Name)
 				}
-				detail.Columns = append(detail.Columns, col.GetName())
+				detail.Columns = append(detail.Columns, col.Name)
 			}
 		}
 		info[c.Name] = detail
@@ -380,45 +314,91 @@ func (desc *wrapper) collectConstraintInfo(
 	return info, nil
 }
 
-// FindFKReferencedUniqueConstraint finds the first index in the supplied
-// referencedTable that can satisfy a foreign key of the supplied column ids.
-// If no such index exists, attempts to find a unique constraint on the supplied
-// column ids. If neither an index nor unique constraint is found, returns an
-// error.
-func FindFKReferencedUniqueConstraint(
+// FindFKReferencedIndex finds the first index in the supplied referencedTable
+// that can satisfy a foreign key of the supplied column ids.
+func FindFKReferencedIndex(
 	referencedTable catalog.TableDescriptor, referencedColIDs descpb.ColumnIDs,
-) (descpb.UniqueConstraint, error) {
+) (*descpb.IndexDescriptor, error) {
 	// Search for a unique index on the referenced table that matches our foreign
 	// key columns.
 	primaryIndex := referencedTable.GetPrimaryIndex()
-	if primaryIndex.IsValidReferencedUniqueConstraint(referencedColIDs) {
-		return primaryIndex.IndexDesc(), nil
+	if primaryIndex.IsValidReferencedIndex(referencedColIDs) {
+		return primaryIndex, nil
 	}
 	// If the PK doesn't match, find the index corresponding to the referenced column.
-	for _, idx := range referencedTable.PublicNonPrimaryIndexes() {
-		if idx.IsValidReferencedUniqueConstraint(referencedColIDs) {
-			return idx.IndexDesc(), nil
-		}
-	}
-	// As a last resort, try to find a unique constraint with matching columns.
-	uniqueWithoutIndexConstraints := referencedTable.GetUniqueWithoutIndexConstraints()
-	for i := range uniqueWithoutIndexConstraints {
-		c := &uniqueWithoutIndexConstraints[i]
-
-		// A partial unique constraint cannot be a reference constraint for a
-		// FK.
-		if c.IsPartial() {
-			continue
-		}
-
-		if c.IsValidReferencedUniqueConstraint(referencedColIDs) {
-			return c, nil
+	indexes := referencedTable.GetPublicNonPrimaryIndexes()
+	for i := range indexes {
+		idx := &indexes[i]
+		if idx.IsValidReferencedIndex(referencedColIDs) {
+			return idx, nil
 		}
 	}
 	return nil, pgerror.Newf(
 		pgcode.ForeignKeyViolation,
 		"there is no unique constraint matching given keys for referenced table %s",
 		referencedTable.GetName(),
+	)
+}
+
+// FindFKOriginIndex finds the first index in the supplied originTable
+// that can satisfy an outgoing foreign key of the supplied column ids.
+func FindFKOriginIndex(
+	originTable catalog.TableDescriptor, originColIDs descpb.ColumnIDs,
+) (*descpb.IndexDescriptor, error) {
+	// Search for an index on the origin table that matches our foreign
+	// key columns.
+	if primaryIndex := originTable.GetPrimaryIndex(); primaryIndex.IsValidOriginIndex(originColIDs) {
+		return primaryIndex, nil
+	}
+	// If the PK doesn't match, find the index corresponding to the origin column.
+	indexes := originTable.GetPublicNonPrimaryIndexes()
+	for i := range indexes {
+		idx := &indexes[i]
+		if idx.IsValidOriginIndex(originColIDs) {
+			return idx, nil
+		}
+	}
+	return nil, pgerror.Newf(
+		pgcode.ForeignKeyViolation,
+		"there is no index matching given keys for referenced table %s",
+		originTable.GetName(),
+	)
+}
+
+// FindFKOriginIndexInTxn finds the first index in the supplied originTable
+// that can satisfy an outgoing foreign key of the supplied column ids.
+// It returns either an index that is active, or an index that was created
+// in the same transaction that is currently running.
+func FindFKOriginIndexInTxn(
+	originTable *Mutable, originColIDs descpb.ColumnIDs,
+) (*descpb.IndexDescriptor, error) {
+	// Search for an index on the origin table that matches our foreign
+	// key columns.
+	if originTable.PrimaryIndex.IsValidOriginIndex(originColIDs) {
+		return &originTable.PrimaryIndex, nil
+	}
+	// If the PK doesn't match, find the index corresponding to the origin column.
+	for i := range originTable.Indexes {
+		idx := &originTable.Indexes[i]
+		if idx.IsValidOriginIndex(originColIDs) {
+			return idx, nil
+		}
+	}
+	currentMutationID := originTable.ClusterVersion.NextMutationID
+	for i := range originTable.Mutations {
+		mut := &originTable.Mutations[i]
+		if idx := mut.GetIndex(); idx != nil &&
+			mut.MutationID == currentMutationID &&
+			mut.Direction == descpb.DescriptorMutation_ADD {
+			if idx.IsValidOriginIndex(originColIDs) {
+				return idx, nil
+			}
+		}
+	}
+	return nil, pgerror.Newf(
+		pgcode.ForeignKeyViolation,
+		"there is no index matching given keys for referenced table %s",
+		originTable.Name,
 	)
 }
 
@@ -431,7 +411,7 @@ func InitTableDescriptor(
 	persistence tree.Persistence,
 ) Mutable {
 	return Mutable{
-		wrapper: wrapper{
+		Immutable: Immutable{
 			TableDescriptor: descpb.TableDescriptor{
 				ID:                      id,
 				Name:                    name,
@@ -446,97 +426,4 @@ func InitTableDescriptor(
 			},
 		},
 	}
-}
-
-// FindPublicColumnsWithNames is a convenience function which behaves exactly
-// like FindPublicColumnWithName applied repeatedly to the names in the
-// provided list, returning early at the first encountered error.
-func FindPublicColumnsWithNames(
-	desc catalog.TableDescriptor, names tree.NameList,
-) ([]catalog.Column, error) {
-	cols := make([]catalog.Column, len(names))
-	for i, name := range names {
-		c, err := FindPublicColumnWithName(desc, name)
-		if err != nil {
-			return nil, err
-		}
-		cols[i] = c
-	}
-	return cols, nil
-}
-
-// FindPublicColumnWithName is a convenience function which behaves exactly
-// like desc.FindColumnWithName except it ignores column mutations.
-func FindPublicColumnWithName(
-	desc catalog.TableDescriptor, name tree.Name,
-) (catalog.Column, error) {
-	col, err := desc.FindColumnWithName(name)
-	if err != nil {
-		return nil, err
-	}
-	if !col.Public() {
-		return nil, colinfo.NewUndefinedColumnError(string(name))
-	}
-	return col, nil
-}
-
-// FindPublicColumnWithID is a convenience function which behaves exactly
-// like desc.FindColumnWithID except it ignores column mutations.
-func FindPublicColumnWithID(
-	desc catalog.TableDescriptor, id descpb.ColumnID,
-) (catalog.Column, error) {
-	col, err := desc.FindColumnWithID(id)
-	if err != nil {
-		return nil, err
-	}
-	if !col.Public() {
-		return nil, fmt.Errorf("column-id \"%d\" does not exist", id)
-	}
-	return col, nil
-}
-
-// FindInvertedColumn returns a catalog.Column matching the inverted column
-// descriptor in `spec` if not nil, nil otherwise.
-func FindInvertedColumn(
-	desc catalog.TableDescriptor, invertedColDesc *descpb.ColumnDescriptor,
-) catalog.Column {
-	if invertedColDesc == nil {
-		return nil
-	}
-	found, err := desc.FindColumnWithID(invertedColDesc.ID)
-	if err != nil {
-		panic(errors.HandleAsAssertionFailure(err))
-	}
-	invertedColumn := found.DeepCopy()
-	*invertedColumn.ColumnDesc() = *invertedColDesc
-	return invertedColumn
-}
-
-// PrimaryKeyString returns the pretty-printed primary key declaration for a
-// table descriptor.
-func PrimaryKeyString(desc catalog.TableDescriptor) string {
-	primaryIdx := desc.GetPrimaryIndex()
-	f := tree.NewFmtCtx(tree.FmtSimple)
-	f.WriteString("PRIMARY KEY (")
-	startIdx := primaryIdx.ExplicitColumnStartIdx()
-	for i, n := startIdx, primaryIdx.NumKeyColumns(); i < n; i++ {
-		if i > startIdx {
-			f.WriteString(", ")
-		}
-		// Primary key columns cannot be inaccessible computed columns, so it is
-		// safe to always print the column name. For secondary indexes, we have
-		// to print inaccessible computed column expressions. See
-		// catformat.FormatIndexElements.
-		name := primaryIdx.GetKeyColumnName(i)
-		f.FormatNameP(&name)
-		f.WriteByte(' ')
-		f.WriteString(primaryIdx.GetKeyColumnDirection(i).String())
-	}
-	f.WriteByte(')')
-	if primaryIdx.IsSharded() {
-		f.WriteString(
-			fmt.Sprintf(" USING HASH WITH BUCKET_COUNT = %v", primaryIdx.GetSharded().ShardBuckets),
-		)
-	}
-	return f.CloseAndGetString()
 }

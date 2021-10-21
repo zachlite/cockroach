@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
@@ -202,31 +201,30 @@ func TestJobSchedulerDaemonInitialScanDelay(t *testing.T) {
 
 func getScopedSettings() (*settings.Values, func()) {
 	sv := &settings.Values{}
-	sv.Init(context.Background(), nil)
+	sv.Init(nil)
 	return sv, settings.TestingSaveRegistry()
 }
 
 func TestJobSchedulerDaemonGetWaitPeriod(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 
 	sv, cleanup := getScopedSettings()
 	defer cleanup()
 
-	schedulerEnabledSetting.Override(ctx, sv, false)
+	schedulerEnabledSetting.Override(sv, false)
 
 	// When disabled, we wait 5 minutes before rechecking.
 	require.EqualValues(t, 5*time.Minute, getWaitPeriod(sv, nil))
-	schedulerEnabledSetting.Override(ctx, sv, true)
+	schedulerEnabledSetting.Override(sv, true)
 
 	// When pace is too low, we use something more reasonable.
-	schedulerPaceSetting.Override(ctx, sv, time.Nanosecond)
+	schedulerPaceSetting.Override(sv, time.Nanosecond)
 	require.EqualValues(t, minPacePeriod, getWaitPeriod(sv, nil))
 
 	// Otherwise, we use user specified setting.
 	pace := 42 * time.Second
-	schedulerPaceSetting.Override(ctx, sv, pace)
+	schedulerPaceSetting.Override(sv, pace)
 	require.EqualValues(t, pace, getWaitPeriod(sv, nil))
 }
 
@@ -247,7 +245,7 @@ func (n *recordScheduleExecutor) ExecuteJob(
 
 func (n *recordScheduleExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus Status,
 	_ jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
@@ -260,16 +258,6 @@ func (n *recordScheduleExecutor) NotifyJobTermination(
 
 func (n *recordScheduleExecutor) Metrics() metric.Struct {
 	return nil
-}
-
-func (n *recordScheduleExecutor) GetCreateScheduleStatement(
-	ctx context.Context,
-	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	sj *ScheduledJob,
-	ex sqlutil.InternalExecutor,
-) (string, error) {
-	return "", errors.AssertionFailedf("unimplemented method: 'GetCreateScheduleStatement'")
 }
 
 var _ ScheduledJobExecutor = &recordScheduleExecutor{}
@@ -299,7 +287,7 @@ func TestJobSchedulerCanBeDisabledWhileSleeping(t *testing.T) {
 
 	knobs := fastDaemonKnobs(func() time.Duration {
 		// Disable daemon
-		schedulerEnabledSetting.Override(ctx, &h.cfg.Settings.SV, false)
+		schedulerEnabledSetting.Override(&h.cfg.Settings.SV, false)
 
 		// Before we return, create a job which should not be executed
 		// (since the daemon is disabled).  We use our special executor
@@ -314,7 +302,7 @@ func TestJobSchedulerCanBeDisabledWhileSleeping(t *testing.T) {
 		// Notify main thread and return some small delay for daemon to sleep.
 		select {
 		case getWaitPeriodCalled <- struct{}{}:
-		case <-stopper.ShouldQuiesce():
+		case <-stopper.ShouldStop():
 		}
 
 		return 10 * time.Millisecond
@@ -433,7 +421,7 @@ func TestJobSchedulerDaemonHonorsMaxJobsLimit(t *testing.T) {
 	// Advance our fake time 1 hour forward (plus a bit) so that the daemon finds matching jobs.
 	h.env.AdvanceTime(time.Hour + time.Second)
 	const jobsPerIteration = 2
-	schedulerMaxJobsPerIterationSetting.Override(ctx, &h.cfg.Settings.SV, jobsPerIteration)
+	schedulerMaxJobsPerIterationSetting.Override(&h.cfg.Settings.SV, jobsPerIteration)
 
 	// Make daemon execute initial scan immediately, but block subsequent scans.
 	h.cfg.TestingKnobs = fastDaemonKnobs(overridePaceSetting(time.Hour))
@@ -471,7 +459,7 @@ func (e *returnErrorExecutor) ExecuteJob(
 
 func (e *returnErrorExecutor) NotifyJobTermination(
 	_ context.Context,
-	_ jobspb.JobID,
+	_ int64,
 	_ Status,
 	_ jobspb.Details,
 	_ scheduledjobs.JobSchedulerEnv,
@@ -484,16 +472,6 @@ func (e *returnErrorExecutor) NotifyJobTermination(
 
 func (e *returnErrorExecutor) Metrics() metric.Struct {
 	return nil
-}
-
-func (e *returnErrorExecutor) GetCreateScheduleStatement(
-	ctx context.Context,
-	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	sj *ScheduledJob,
-	ex sqlutil.InternalExecutor,
-) (string, error) {
-	return "", errors.AssertionFailedf("unimplemented method: 'GetCreateScheduleStatement'")
 }
 
 var _ ScheduledJobExecutor = &returnErrorExecutor{}
@@ -599,7 +577,7 @@ func TestJobSchedulerDaemonUsesSystemTables(t *testing.T) {
 	// Create a one off job which writes some values into 'foo' table.
 	schedule := NewScheduledJob(scheduledjobs.ProdJobSchedulerEnv)
 	schedule.SetScheduleLabel("test schedule")
-	schedule.SetOwner(security.TestUserName())
+	schedule.SetOwner("test")
 	schedule.SetNextRun(timeutil.Now())
 	any, err := types.MarshalAny(
 		&jobspb.SqlStatementExecutionArg{Statement: "INSERT INTO defaultdb.foo VALUES (1), (2), (3)"})
@@ -654,7 +632,7 @@ func (e *txnConflictExecutor) ExecuteJob(
 
 func (e *txnConflictExecutor) NotifyJobTermination(
 	ctx context.Context,
-	jobID jobspb.JobID,
+	jobID int64,
 	jobStatus Status,
 	details jobspb.Details,
 	env scheduledjobs.JobSchedulerEnv,
@@ -667,16 +645,6 @@ func (e *txnConflictExecutor) NotifyJobTermination(
 
 func (e *txnConflictExecutor) Metrics() metric.Struct {
 	return nil
-}
-
-func (e *txnConflictExecutor) GetCreateScheduleStatement(
-	ctx context.Context,
-	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	sj *ScheduledJob,
-	ex sqlutil.InternalExecutor,
-) (string, error) {
-	return "", errors.AssertionFailedf("unimplemented method: 'GetCreateScheduleStatement'")
 }
 
 var _ ScheduledJobExecutor = (*txnConflictExecutor)(nil)
@@ -704,7 +672,7 @@ INSERT INTO defaultdb.foo VALUES(1, 1)
 	// Setup schedule with our test executor.
 	schedule := NewScheduledJob(h.env)
 	schedule.SetScheduleLabel("test schedule")
-	schedule.SetOwner(security.TestUserName())
+	schedule.SetOwner("test")
 	nextRun := h.env.Now().Add(time.Hour)
 	schedule.SetNextRun(nextRun)
 	schedule.SetExecutionDetails(execName, jobspb.ExecutionArguments{})

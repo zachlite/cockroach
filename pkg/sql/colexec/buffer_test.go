@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -26,14 +25,15 @@ func TestBufferOp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	inputTuples := colexectestutils.Tuples{{int64(1)}, {int64(2)}, {int64(3)}}
-	input := colexectestutils.NewOpTestInput(testAllocator, coldata.BatchSize(), inputTuples, []*types.T{types.Int})
+	ctx := context.Background()
+	inputTuples := tuples{{int64(1)}, {int64(2)}, {int64(3)}}
+	input := newOpTestInput(coldata.BatchSize(), inputTuples, []*types.T{types.Int})
 	buffer := NewBufferOp(input).(*bufferOp)
-	buffer.Init(context.Background())
+	buffer.Init()
 
 	t.Run("TestBufferReturnsInputCorrectly", func(t *testing.T) {
-		buffer.advance()
-		b := buffer.Next()
+		buffer.advance(ctx)
+		b := buffer.Next(ctx)
 		require.Nil(t, b.Selection())
 		require.Equal(t, len(inputTuples), b.Length())
 		for i, val := range inputTuples {
@@ -41,7 +41,7 @@ func TestBufferOp(t *testing.T) {
 		}
 
 		// We've read over the batch, so we now should get a zero-length batch.
-		b = buffer.Next()
+		b = buffer.Next(ctx)
 		require.Nil(t, b.Selection())
 		require.Equal(t, 0, b.Length())
 	})

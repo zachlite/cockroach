@@ -38,7 +38,7 @@ import (
 type scheduledJobRecord struct {
 	ScheduleID      int64                     `col:"schedule_id"`
 	ScheduleLabel   string                    `col:"schedule_name"`
-	Owner           security.SQLUsername      `col:"owner"`
+	Owner           string                    `col:"owner"`
 	NextRun         time.Time                 `col:"next_run"`
 	ScheduleState   jobspb.ScheduleState      `col:"schedule_state"`
 	ScheduleExpr    string                    `col:"schedule_expr"`
@@ -76,23 +76,6 @@ func NewScheduledJob(env scheduledjobs.JobSchedulerEnv) *ScheduledJob {
 	}
 }
 
-// scheduledJobNotFoundError is returned from load when the scheduled job does
-// not exist.
-type scheduledJobNotFoundError struct {
-	scheduleID int64
-}
-
-// Error makes scheduledJobNotFoundError an error.
-func (e *scheduledJobNotFoundError) Error() string {
-	return fmt.Sprintf("scheduled job with ID %d does not exist", e.scheduleID)
-}
-
-// HasScheduledJobNotFoundError returns true if the error contains a
-// scheduledJobNotFoundError.
-func HasScheduledJobNotFoundError(err error) bool {
-	return errors.HasType(err, (*scheduledJobNotFoundError)(nil))
-}
-
 // LoadScheduledJob loads scheduled job record from the database.
 func LoadScheduledJob(
 	ctx context.Context,
@@ -101,20 +84,23 @@ func LoadScheduledJob(
 	ex sqlutil.InternalExecutor,
 	txn *kv.Txn,
 ) (*ScheduledJob, error) {
-	row, cols, err := ex.QueryRowExWithCols(ctx, "lookup-schedule", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+	rows, cols, err := ex.QueryWithCols(ctx, "lookup-schedule", txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf("SELECT * FROM %s WHERE schedule_id = %d",
 			env.ScheduledJobsTableName(), id))
 
 	if err != nil {
-		return nil, errors.CombineErrors(err, &scheduledJobNotFoundError{scheduleID: id})
+		return nil, err
 	}
-	if row == nil {
-		return nil, &scheduledJobNotFoundError{scheduleID: id}
+
+	if len(rows) != 1 {
+		return nil, errors.Newf(
+			"expected to find 1 schedule, found %d with schedule_id=%d",
+			len(rows), id)
 	}
 
 	j := NewScheduledJob(env)
-	if err := j.InitFromDatums(row, cols); err != nil {
+	if err := j.InitFromDatums(rows[0], cols); err != nil {
 		return nil, err
 	}
 	return j, nil
@@ -137,12 +123,12 @@ func (j *ScheduledJob) SetScheduleLabel(label string) {
 }
 
 // Owner returns schedule owner.
-func (j *ScheduledJob) Owner() security.SQLUsername {
+func (j *ScheduledJob) Owner() string {
 	return j.rec.Owner
 }
 
 // SetOwner updates schedule owner.
-func (j *ScheduledJob) SetOwner(owner security.SQLUsername) {
+func (j *ScheduledJob) SetOwner(owner string) {
 	j.rec.Owner = owner
 	j.markDirty("owner")
 }
@@ -325,25 +311,8 @@ func (j *ScheduledJob) InitFromDatums(datums []tree.Datum, cols []colinfo.Result
 			// But, be paranoid and double check.
 			rv := reflect.ValueOf(native)
 			if !rv.Type().AssignableTo(field.Type()) {
-				// Is this the owner field? This needs special treatment.
-				ok := false
-				if col.Name == "owner" {
-					// The owner field has type SQLUsername, but the datum is a
-					// simple string.  So we need to convert.
-					//
-					// TODO(someone): We need a more generic mechanism than this
-					// naive go reflect stuff here.
-					var s string
-					s, ok = native.(string)
-					if ok {
-						// Replace the value by one of the right type.
-						rv = reflect.ValueOf(security.MakeSQLUsernameFromPreNormalizedString(s))
-					}
-				}
-				if !ok {
-					return errors.Newf("value of type %T cannot be assigned to %s",
-						native, field.Type().String())
-				}
+				return errors.Newf("value of type %T cannot be assigned to %s",
+					native, field.Type().String())
 			}
 			field.Set(rv)
 		}
@@ -376,21 +345,22 @@ func (j *ScheduledJob) Create(ctx context.Context, ex sqlutil.InternalExecutor, 
 		return err
 	}
 
-	row, retCols, err := ex.QueryRowExWithCols(ctx, "sched-create", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+	rows, retCols, err := ex.QueryWithCols(ctx, "sched-create", txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf("INSERT INTO %s (%s) VALUES(%s) RETURNING schedule_id",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","), generatePlaceholders(len(qargs))),
 		qargs...,
 	)
 
 	if err != nil {
-		return errors.Wrapf(err, "failed to create new schedule")
+		return err
 	}
-	if row == nil {
+
+	if len(rows) != 1 {
 		return errors.New("failed to create new schedule")
 	}
 
-	return j.InitFromDatums(row, retCols)
+	return j.InitFromDatums(rows[0], retCols)
 }
 
 // Update saves changes made to this schedule.
@@ -414,7 +384,7 @@ func (j *ScheduledJob) Update(ctx context.Context, ex sqlutil.InternalExecutor, 
 	}
 
 	n, err := ex.ExecEx(ctx, "sched-update", txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		fmt.Sprintf("UPDATE %s SET (%s) = (%s) WHERE schedule_id = %d",
 			j.env.ScheduledJobsTableName(), strings.Join(cols, ","),
 			generatePlaceholders(len(qargs)), j.ScheduleID()),
@@ -448,7 +418,7 @@ func (j *ScheduledJob) marshalChanges() ([]string, []interface{}, error) {
 		case `schedule_name`:
 			arg = tree.NewDString(j.rec.ScheduleLabel)
 		case `owner`:
-			arg = tree.NewDString(j.rec.Owner.Normalized())
+			arg = tree.NewDString(j.rec.Owner)
 		case `next_run`:
 			if (j.rec.NextRun == time.Time{}) {
 				arg = tree.DNull

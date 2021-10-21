@@ -40,15 +40,12 @@ func Scan(
 	var err error
 
 	opts := storage.MVCCScanOptions{
-		Inconsistent:          h.ReadConsistency != roachpb.CONSISTENT,
-		Txn:                   h.Txn,
-		LocalUncertaintyLimit: cArgs.LocalUncertaintyLimit,
-		MaxKeys:               h.MaxSpanRequestKeys,
-		MaxIntents:            storage.MaxIntentsPerWriteIntentError.Get(&cArgs.EvalCtx.ClusterSettings().SV),
-		TargetBytes:           h.TargetBytes,
-		FailOnMoreRecent:      args.KeyLocking != lock.None,
-		Reverse:               false,
-		MemoryAccount:         cArgs.EvalCtx.GetResponseMemoryAccount(),
+		Inconsistent:     h.ReadConsistency != roachpb.CONSISTENT,
+		Txn:              h.Txn,
+		MaxKeys:          h.MaxSpanRequestKeys,
+		TargetBytes:      h.TargetBytes,
+		FailOnMoreRecent: args.KeyLocking != lock.None,
+		Reverse:          false,
 	}
 
 	switch args.ScanFormat {
@@ -75,7 +72,7 @@ func Scan(
 
 	if scanRes.ResumeSpan != nil {
 		reply.ResumeSpan = scanRes.ResumeSpan
-		reply.ResumeReason = scanRes.ResumeReason
+		reply.ResumeReason = roachpb.RESUME_KEY_LIMIT
 	}
 
 	if h.ReadConsistency == roachpb.READ_UNCOMMITTED {

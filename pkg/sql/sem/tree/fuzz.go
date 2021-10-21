@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build gofuzz
 // +build gofuzz
 
 package tree
@@ -28,7 +27,7 @@ func FuzzParseDDecimal(data []byte) int {
 }
 
 func FuzzParseDDate(data []byte) int {
-	_, _, err := ParseDDate(timeCtx, string(data))
+	_, err := ParseDDate(timeCtx, string(data))
 	if err != nil {
 		return 0
 	}

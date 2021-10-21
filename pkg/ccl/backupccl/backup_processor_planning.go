@@ -11,25 +11,23 @@ package backupccl
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
 func distBackupPlanSpecs(
-	ctx context.Context,
 	planCtx *sql.PlanningCtx,
-	execCtx sql.JobExecContext,
+	phs sql.PlanHookState,
 	dsp *sql.DistSQLPlanner,
 	spans roachpb.Spans,
 	introducedSpans roachpb.Spans,
@@ -40,13 +38,103 @@ func distBackupPlanSpecs(
 	mvccFilter roachpb.MVCCFilter,
 	startTime, endTime hlc.Timestamp,
 ) (map[roachpb.NodeID]*execinfrapb.BackupDataSpec, error) {
-	var span *tracing.Span
-	ctx, span = tracing.ChildSpan(ctx, "backup-plan-specs")
-	_ = ctx // ctx is currently unused, but this new ctx should be used below in the future.
-	defer span.Finish()
-	user := execCtx.User()
-	execCfg := execCtx.ExecCfg()
+	return makeBackupDataProcessorSpecs(
+		planCtx,
+		dsp,
+		spans,
+		introducedSpans,
+		pkIDs,
+		defaultURI,
+		urisByLocalityKV,
+		mvccFilter,
+		encryption,
+		startTime, endTime,
+		phs.User(),
+		phs.ExecCfg(),
+	)
+}
 
+// distBackup is used to plan the processors for a distributed backup. It
+// streams back progress updates over progCh, which is used to incrementally
+// build up the BulkOpSummary.
+func distBackup(
+	ctx context.Context,
+	phs sql.PlanHookState,
+	planCtx *sql.PlanningCtx,
+	dsp *sql.DistSQLPlanner,
+	progCh chan *execinfrapb.RemoteProducerMetadata_BulkProcessorProgress,
+	backupSpecs map[roachpb.NodeID]*execinfrapb.BackupDataSpec,
+) error {
+	ctx = logtags.AddTag(ctx, "backup-distsql", nil)
+	evalCtx := phs.ExtendedEvalContext()
+	var noTxn *kv.Txn
+
+	if len(backupSpecs) == 0 {
+		return nil
+	}
+
+	// Setup a one-stage plan with one proc per input spec.
+	corePlacement := make([]physicalplan.ProcessorCorePlacement, len(backupSpecs))
+	i := 0
+	for node, spec := range backupSpecs {
+		corePlacement[i].NodeID = node
+		corePlacement[i].Core.BackupData = spec
+		i++
+	}
+
+	gatewayNodeID, err := evalCtx.ExecCfg.NodeID.OptionalNodeIDErr(47970)
+	if err != nil {
+		return err
+	}
+	p := sql.MakePhysicalPlan(gatewayNodeID)
+	// All of the progress information is sent through the metadata stream, so we
+	// have an empty result stream.
+	p.AddNoInputStage(corePlacement, execinfrapb.PostProcessSpec{}, []*types.T{}, execinfrapb.Ordering{})
+	p.PlanToStreamColMap = []int{}
+
+	dsp.FinalizePlan(planCtx, &p)
+
+	metaFn := func(_ context.Context, meta *execinfrapb.ProducerMetadata) error {
+		if meta.BulkProcessorProgress != nil {
+			// Send the progress up a level to be written to the manifest.
+			progCh <- meta.BulkProcessorProgress
+		}
+		return nil
+	}
+
+	rowResultWriter := sql.NewRowResultWriter(nil)
+
+	recv := sql.MakeDistSQLReceiver(
+		ctx,
+		sql.NewMetadataCallbackWriter(rowResultWriter, metaFn),
+		tree.Rows,
+		nil,   /* rangeCache */
+		noTxn, /* txn - the flow does not read or write the database */
+		func(ts hlc.Timestamp) {},
+		evalCtx.Tracing,
+	)
+	defer recv.Release()
+
+	// Copy the evalCtx, as dsp.Run() might change it.
+	evalCtxCopy := *evalCtx
+	dsp.Run(planCtx, noTxn, &p, recv, &evalCtxCopy, nil /* finishedSetupFn */)()
+	return rowResultWriter.Err()
+}
+
+func makeBackupDataProcessorSpecs(
+	planCtx *sql.PlanningCtx,
+	dsp *sql.DistSQLPlanner,
+	spans roachpb.Spans,
+	introducedSpans roachpb.Spans,
+	pkIDs map[uint64]bool,
+	defaultURI string,
+	urisByLocalityKV map[string]string,
+	mvccFilter roachpb.MVCCFilter,
+	encryption *jobspb.BackupEncryptionOptions,
+	startTime, endTime hlc.Timestamp,
+	user string,
+	execCfg *sql.ExecutorConfig,
+) (map[roachpb.NodeID]*execinfrapb.BackupDataSpec, error) {
 	var spanPartitions []sql.SpanPartition
 	var introducedSpanPartitions []sql.SpanPartition
 	var err error
@@ -99,7 +187,7 @@ func distBackupPlanSpecs(
 			PKIDs:            pkIDs,
 			BackupStartTime:  startTime,
 			BackupEndTime:    endTime,
-			UserProto:        user.EncodeProto(),
+			User:             user,
 		}
 		nodeToSpec[partition.Node] = spec
 	}
@@ -120,90 +208,11 @@ func distBackupPlanSpecs(
 				PKIDs:            pkIDs,
 				BackupStartTime:  startTime,
 				BackupEndTime:    endTime,
-				UserProto:        user.EncodeProto(),
+				User:             user,
 			}
 			nodeToSpec[partition.Node] = spec
 		}
 	}
 
-	backupPlanningTraceEvent := BackupProcessorPlanningTraceEvent{
-		NodeToNumSpans: make(map[int32]int64),
-	}
-	for node, spec := range nodeToSpec {
-		numSpans := int64(len(spec.Spans) + len(spec.IntroducedSpans))
-		backupPlanningTraceEvent.NodeToNumSpans[int32(node)] = numSpans
-		backupPlanningTraceEvent.TotalNumSpans += numSpans
-	}
-	span.RecordStructured(&backupPlanningTraceEvent)
-
 	return nodeToSpec, nil
-}
-
-// distBackup is used to plan the processors for a distributed backup. It
-// streams back progress updates over progCh, which is used to incrementally
-// build up the BulkOpSummary.
-func distBackup(
-	ctx context.Context,
-	execCtx sql.JobExecContext,
-	planCtx *sql.PlanningCtx,
-	dsp *sql.DistSQLPlanner,
-	progCh chan *execinfrapb.RemoteProducerMetadata_BulkProcessorProgress,
-	backupSpecs map[roachpb.NodeID]*execinfrapb.BackupDataSpec,
-) error {
-	ctx, span := tracing.ChildSpan(ctx, "backup-distsql")
-	defer span.Finish()
-	ctx = logtags.AddTag(ctx, "backup-distsql", nil)
-	evalCtx := execCtx.ExtendedEvalContext()
-	var noTxn *kv.Txn
-
-	if len(backupSpecs) == 0 {
-		close(progCh)
-		return nil
-	}
-
-	// Setup a one-stage plan with one proc per input spec.
-	corePlacement := make([]physicalplan.ProcessorCorePlacement, len(backupSpecs))
-	i := 0
-	for node, spec := range backupSpecs {
-		corePlacement[i].NodeID = node
-		corePlacement[i].Core.BackupData = spec
-		i++
-	}
-
-	p := planCtx.NewPhysicalPlan()
-	// All of the progress information is sent through the metadata stream, so we
-	// have an empty result stream.
-	p.AddNoInputStage(corePlacement, execinfrapb.PostProcessSpec{}, []*types.T{}, execinfrapb.Ordering{})
-	p.PlanToStreamColMap = []int{}
-
-	dsp.FinalizePlan(planCtx, p)
-
-	metaFn := func(_ context.Context, meta *execinfrapb.ProducerMetadata) error {
-		if meta.BulkProcessorProgress != nil {
-			// Send the progress up a level to be written to the manifest.
-			progCh <- meta.BulkProcessorProgress
-		}
-		return nil
-	}
-
-	rowResultWriter := sql.NewRowResultWriter(nil)
-
-	recv := sql.MakeDistSQLReceiver(
-		ctx,
-		sql.NewMetadataCallbackWriter(rowResultWriter, metaFn),
-		tree.Rows,
-		nil,   /* rangeCache */
-		noTxn, /* txn - the flow does not read or write the database */
-		nil,   /* clockUpdater */
-		evalCtx.Tracing,
-		evalCtx.ExecCfg.ContentionRegistry,
-		nil, /* testingPushCallback */
-	)
-	defer recv.Release()
-
-	defer close(progCh)
-	// Copy the evalCtx, as dsp.Run() might change it.
-	evalCtxCopy := *evalCtx
-	dsp.Run(planCtx, noTxn, p, recv, &evalCtxCopy, nil /* finishedSetupFn */)()
-	return rowResultWriter.Err()
 }

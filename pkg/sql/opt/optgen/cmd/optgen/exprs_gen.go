@@ -43,7 +43,6 @@ func (g *exprsGen) generate(compiled *lang.CompiledExpr, w io.Writer) {
 	fmt.Fprintf(g.w, "  \"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical\"\n")
 	fmt.Fprintf(g.w, "  \"github.com/cockroachdb/cockroach/pkg/sql/sem/tree\"\n")
 	fmt.Fprintf(g.w, "  \"github.com/cockroachdb/cockroach/pkg/sql/types\"\n")
-	fmt.Fprintf(g.w, "  \"github.com/cockroachdb/cockroach/pkg/sql/inverted\"\n")
 	fmt.Fprintf(g.w, "  \"github.com/cockroachdb/errors\"\n")
 	fmt.Fprintf(g.w, ")\n\n")
 
@@ -208,7 +207,7 @@ func (g *exprsGen) genExprStruct(define *lang.DefineExpr) {
 				fmt.Fprintf(g.w, "  scalar props.Scalar\n")
 			}
 		} else {
-			fmt.Fprintf(g.w, "  rank opt.ScalarRank\n")
+			fmt.Fprintf(g.w, "  id opt.ScalarID\n")
 		}
 	} else if define.Tags.Contains("Enforcer") {
 		fmt.Fprintf(g.w, "  Input RelExpr\n")
@@ -233,11 +232,11 @@ func (g *exprsGen) genExprFuncs(define *lang.DefineExpr) {
 		fmt.Fprintf(g.w, "var _ opt.ScalarExpr = &%s{}\n\n", opTyp.name)
 
 		// Generate the ID method.
-		fmt.Fprintf(g.w, "func (e *%s) Rank() opt.ScalarRank {\n", opTyp.name)
+		fmt.Fprintf(g.w, "func (e *%s) ID() opt.ScalarID {\n", opTyp.name)
 		if define.Tags.Contains("ListItem") {
-			fmt.Fprintf(g.w, "  panic(errors.AssertionFailedf(\"list items have no rank\"))")
+			fmt.Fprintf(g.w, "  return 0\n")
 		} else {
-			fmt.Fprintf(g.w, "  return e.rank\n")
+			fmt.Fprintf(g.w, "  return e.id\n")
 		}
 		fmt.Fprintf(g.w, "}\n\n")
 	} else {
@@ -519,8 +518,8 @@ func (g *exprsGen) genListExprFuncs(define *lang.DefineExpr) {
 	fmt.Fprintf(g.w, "var _ opt.ScalarExpr = &%s{}\n\n", opTyp.name)
 
 	// Generate the ID method.
-	fmt.Fprintf(g.w, "func (e *%s) Rank() opt.ScalarRank {\n", opTyp.name)
-	fmt.Fprintf(g.w, "  panic(errors.AssertionFailedf(\"lists have no rank\"))")
+	fmt.Fprintf(g.w, "func (e *%s) ID() opt.ScalarID {\n", opTyp.name)
+	fmt.Fprintf(g.w, "  panic(errors.AssertionFailedf(\"lists have no id\"))")
 	fmt.Fprintf(g.w, "}\n\n")
 
 	// Generate the Op method.
@@ -619,7 +618,7 @@ func (g *exprsGen) genMemoizeFuncs() {
 		}
 
 		if define.Tags.Contains("Scalar") {
-			fmt.Fprintf(g.w, "   rank: m.NextRank(),\n")
+			fmt.Fprintf(g.w, "   id: m.NextID(),\n")
 			fmt.Fprintf(g.w, "  }\n")
 			if g.needsDataTypeField(define) {
 				fmt.Fprintf(g.w, "  e.Typ = InferType(m, e)\n")

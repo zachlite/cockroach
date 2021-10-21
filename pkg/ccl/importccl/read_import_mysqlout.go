@@ -15,13 +15,12 @@ import (
 	"io"
 	"unicode"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/errors"
 )
@@ -34,18 +33,16 @@ type mysqloutfileReader struct {
 var _ inputConverter = &mysqloutfileReader{}
 
 func newMysqloutfileReader(
-	semaCtx *tree.SemaContext,
 	opts roachpb.MySQLOutfileOptions,
 	kvCh chan row.KVBatch,
 	walltime int64,
 	parallelism int,
-	tableDesc catalog.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	targetCols tree.NameList,
 	evalCtx *tree.EvalContext,
 ) (*mysqloutfileReader, error) {
 	return &mysqloutfileReader{
 		importCtx: &parallelImportContext{
-			semaCtx:    semaCtx,
 			walltime:   walltime,
 			numWorkers: parallelism,
 			evalCtx:    evalCtx,
@@ -66,7 +63,7 @@ func (d *mysqloutfileReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user security.SQLUsername,
+	user string,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, d.readFile, makeExternalStorage, user)
 }
@@ -254,7 +251,7 @@ func (d *delimitedConsumer) FillDatums(
 			if err != nil {
 				col := conv.VisibleCols[datumIdx]
 				return newImportRowError(
-					fmt.Errorf("error %s while parse %q as %s", err, col.GetName(), col.GetType().SQLString()),
+					fmt.Errorf("error %s while parse %q as %s", err, col.Name, col.Type.SQLString()),
 					string(data), rowNum)
 			}
 		}
@@ -361,7 +358,6 @@ func (d *mysqloutfileReader) readFile(
 		source:   inputIdx,
 		skip:     resumePos,
 		rejected: rejected,
-		rowLimit: d.opts.RowLimit,
 	}
 
 	return runParallelImport(ctx, d.importCtx, fileCtx, producer, consumer)

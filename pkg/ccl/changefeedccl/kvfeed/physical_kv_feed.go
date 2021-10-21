@@ -11,25 +11,22 @@ package kvfeed
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // physicalFeedFactory constructs a physical feed which writes into sink and
 // runs until the group's context expires.
 type physicalFeedFactory interface {
-	Run(ctx context.Context, sink kvevent.Writer, cfg physicalConfig) error
+	Run(ctx context.Context, sink EventBufferWriter, cfg physicalConfig) error
 }
 
 type physicalConfig struct {
 	Spans     []roachpb.Span
 	Timestamp hlc.Timestamp
 	WithDiff  bool
-	Knobs     TestingKnobs
 }
 
 type rangefeedFactory func(
@@ -41,12 +38,14 @@ type rangefeedFactory func(
 ) error
 
 type rangefeed struct {
-	memBuf kvevent.Writer
+	memBuf EventBufferWriter
 	cfg    physicalConfig
 	eventC chan *roachpb.RangeFeedEvent
 }
 
-func (p rangefeedFactory) Run(ctx context.Context, sink kvevent.Writer, cfg physicalConfig) error {
+func (p rangefeedFactory) Run(
+	ctx context.Context, sink EventBufferWriter, cfg physicalConfig,
+) error {
 	// To avoid blocking raft, RangeFeed puts all entries in a server side
 	// buffer. But to keep things simple, it's a small fixed-sized buffer. This
 	// means we need to ingest everything we get back as quickly as possible, so
@@ -61,7 +60,7 @@ func (p rangefeedFactory) Run(ctx context.Context, sink kvevent.Writer, cfg phys
 	// Specifically, when a schema change happens, we need a barrier where we
 	// flush out every change before the schema change timestamp before we start
 	// emitting any changes from after the schema change. The KVFeed's
-	// `SchemaFeed` is responsible for detecting and enforcing these , but the
+	// `schemaFeed` is responsible for detecting and enforcing these , but the
 	// after-KVFeed buffer doesn't have access to any of this state. A cleanup is
 	// in order.
 	feed := rangefeed{
@@ -92,10 +91,7 @@ func (p *rangefeed) addEventsToBuffer(ctx context.Context) error {
 				if p.cfg.WithDiff {
 					prevVal = t.PrevValue
 				}
-				if err := p.memBuf.Add(
-					ctx,
-					kvevent.MakeKVEvent(kv, prevVal, backfillTimestamp),
-				); err != nil {
+				if err := p.memBuf.AddKV(ctx, kv, prevVal, backfillTimestamp); err != nil {
 					return err
 				}
 			case *roachpb.RangeFeedCheckpoint:
@@ -105,14 +101,11 @@ func (p *rangefeed) addEventsToBuffer(ctx context.Context) error {
 					// Changefeeds don't care about these at all, so throw them out.
 					continue
 				}
-				if err := p.memBuf.Add(
-					ctx,
-					kvevent.MakeResolvedEvent(t.Span, t.ResolvedTS, jobspb.ResolvedSpan_NONE),
-				); err != nil {
+				if err := p.memBuf.AddResolved(ctx, t.Span, t.ResolvedTS, false); err != nil {
 					return err
 				}
 			default:
-				return errors.Errorf("unexpected RangeFeedEvent variant %v", t)
+				log.Fatalf(ctx, "unexpected RangeFeedEvent variant %v", t)
 			}
 		case <-ctx.Done():
 			return ctx.Err()

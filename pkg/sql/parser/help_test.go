@@ -49,7 +49,6 @@ func TestContextualHelp(t *testing.T) {
 		{`ALTER TYPE t ADD VALUE ??`, `ALTER TYPE`},
 		{`ALTER TYPE t SET ??`, `ALTER TYPE`},
 		{`ALTER TYPE t RENAME ??`, `ALTER TYPE`},
-		{`ALTER TYPE t DROP VALUE ??`, `ALTER TYPE`},
 
 		{`ALTER INDEX foo@bar RENAME ??`, `ALTER INDEX`},
 		{`ALTER INDEX foo@bar RENAME TO blih ??`, `ALTER INDEX`},
@@ -85,8 +84,6 @@ func TestContextualHelp(t *testing.T) {
 		{`ALTER PARTITION ??`, `ALTER PARTITION`},
 		{`ALTER PARTITION p OF INDEX tbl@idx ??`, `ALTER PARTITION`},
 
-		{`ALTER DEFAULT PRIVILEGES ??`, `ALTER DEFAULT PRIVILEGES`},
-
 		{`ANALYZE ??`, `ANALYZE`},
 		{`ANALYZE blah ??`, `ANALYZE`},
 		{`ANALYSE ??`, `ANALYZE`},
@@ -107,7 +104,6 @@ func TestContextualHelp(t *testing.T) {
 		{`CANCEL SESSIONS ??`, `CANCEL SESSIONS`},
 		{`CANCEL SESSIONS IF ??`, `CANCEL SESSIONS`},
 		{`CANCEL SESSIONS IF EXISTS ??`, `CANCEL SESSIONS`},
-		{`CANCEL ALL ??`, `CANCEL ALL JOBS`},
 
 		{`CREATE UNIQUE ??`, `CREATE`},
 		{`CREATE UNIQUE INDEX ??`, `CREATE INDEX`},
@@ -247,18 +243,12 @@ func TestContextualHelp(t *testing.T) {
 		{`PAUSE JOBS ??`, `PAUSE JOBS`},
 		{`PAUSE SCHEDULE ??`, `PAUSE SCHEDULES`},
 		{`PAUSE SCHEDULES ??`, `PAUSE SCHEDULES`},
-		{`PAUSE ALL ??`, `PAUSE ALL JOBS`},
-
-		{`REASSIGN OWNED BY ?? TO ??`, `REASSIGN OWNED BY`},
-		{`REASSIGN OWNED BY foo, bar TO ??`, `REASSIGN OWNED BY`},
-		{`DROP OWNED BY ??`, `DROP OWNED BY`},
 
 		{`RESUME ??`, `RESUME`},
 		{`RESUME JOB ??`, `RESUME JOBS`},
 		{`RESUME JOBS ??`, `RESUME JOBS`},
 		{`RESUME SCHEDULE ??`, `RESUME SCHEDULES`},
 		{`RESUME SCHEDULES ??`, `RESUME SCHEDULES`},
-		{`RESUME ALL ??`, `RESUME ALL JOBS`},
 
 		{`REVOKE ALL ??`, `REVOKE`},
 		{`REVOKE ALL ON foo FROM ??`, `REVOKE`},
@@ -290,11 +280,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`SHOW HISTOGRAM ??`, `SHOW HISTOGRAM`},
 
-		{`SHOW QUERIES ??`, `SHOW STATEMENTS`},
-		{`SHOW LOCAL QUERIES ??`, `SHOW STATEMENTS`},
-
-		{`SHOW STATEMENTS ??`, `SHOW STATEMENTS`},
-		{`SHOW LOCAL STATEMENTS ??`, `SHOW STATEMENTS`},
+		{`SHOW QUERIES ??`, `SHOW QUERIES`},
+		{`SHOW LOCAL QUERIES ??`, `SHOW QUERIES`},
 
 		{`SHOW TRACE ??`, `SHOW TRACE`},
 		{`SHOW TRACE FOR SESSION ??`, `SHOW TRACE`},
@@ -323,12 +310,7 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW CREATE VIEW blah ??`, `SHOW CREATE`},
 		{`SHOW CREATE SEQUENCE blah ??`, `SHOW CREATE`},
 
-		{`SHOW CREATE SCHEDULE blah ??`, `SHOW CREATE SCHEDULES`},
-		{`SHOW CREATE ALL SCHEDULES ??`, `SHOW CREATE SCHEDULES`},
-
 		{`SHOW DATABASES ??`, `SHOW DATABASES`},
-
-		{`SHOW DEFAULT PRIVILEGES ??`, `SHOW DEFAULT PRIVILEGES`},
 
 		{`SHOW ENUMS ??`, `SHOW ENUMS`},
 		{`SHOW TYPES ??`, `SHOW TYPES`},
@@ -347,8 +329,6 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW INDEXES FROM blah ??`, `SHOW INDEXES`},
 
 		{`SHOW PARTITIONS FROM ??`, `SHOW PARTITIONS`},
-
-		{`SHOW REGIONS ??`, `SHOW REGIONS`},
 
 		{`SHOW ROLES ??`, `SHOW ROLES`},
 
@@ -375,8 +355,6 @@ func TestContextualHelp(t *testing.T) {
 
 		{`SHOW USERS ??`, `SHOW USERS`},
 
-		{`SHOW ZONE CONFIGURATION FROM ??`, `SHOW ZONE CONFIGURATION`},
-
 		{`TRUNCATE foo ??`, `TRUNCATE`},
 		{`TRUNCATE foo, ??`, `TRUNCATE`},
 
@@ -402,8 +380,6 @@ func TestContextualHelp(t *testing.T) {
 		{`SET SESSION TIME ZONE 'UTC' ??`, `SET SESSION`},
 		{`SET SESSION blah TO ??`, `SET SESSION`},
 		{`SET SESSION blah TO 42 ??`, `SET SESSION`},
-		{`SET LOCAL TIME ??`, `SET LOCAL`},
-		{`SET LOCAL TIME ZONE 'UTC' ??`, `SET LOCAL`},
 
 		{`SET TRANSACTION ??`, `SET TRANSACTION`},
 		{`SET TRANSACTION ISOLATION LEVEL SNAPSHOT ??`, `SET TRANSACTION`},

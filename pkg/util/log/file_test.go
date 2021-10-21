@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -30,9 +29,8 @@ func TestLogFilenameParsing(t *testing.T) {
 		timeutil.Now().AddDate(0, 0, -1),
 	}
 
-	gen := makeFileNameGenerator("")
 	for i, testCase := range testCases {
-		filename, _ := gen.logName(testCase)
+		filename, _ := logName(program, testCase)
 		details, err := ParseLogFilename(filename)
 		if err != nil {
 			t.Fatal(err)
@@ -46,17 +44,16 @@ func TestLogFilenameParsing(t *testing.T) {
 // TestSelectFiles checks that selectFiles correctly filters and orders
 // filesInfos.
 func TestSelectFiles(t *testing.T) {
-	testFiles := []logpb.FileInfo{}
+	testFiles := []FileInfo{}
 	year2000 := time.Date(2000, time.January, 1, 1, 0, 0, 0, time.UTC)
 	year2050 := time.Date(2050, time.January, 1, 1, 0, 0, 0, time.UTC)
 	year2200 := time.Date(2200, time.January, 1, 1, 0, 0, 0, time.UTC)
-	gen := makeFileNameGenerator("")
 	for i := 0; i < 100; i++ {
 		fileTime := year2000.AddDate(i, 0, 0)
-		name, _ := gen.logName(fileTime)
-		testfile := logpb.FileInfo{
+		name, _ := logName(program, fileTime)
+		testfile := FileInfo{
 			Name: name,
-			Details: logpb.FileDetails{
+			Details: FileDetails{
 				Time: fileTime.UnixNano(),
 			},
 		}

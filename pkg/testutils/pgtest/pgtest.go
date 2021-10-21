@@ -66,22 +66,10 @@ func NewPGTest(ctx context.Context, addr, user string) (*PGTest, error) {
 	}
 	msgs, err := p.Until(false /* keepErrMsg */, &pgproto3.ReadyForQuery{})
 	foundCrdb := false
-	var backendKeyData *pgproto3.BackendKeyData
 	for _, msg := range msgs {
 		if s, ok := msg.(*pgproto3.ParameterStatus); ok && s.Name == "crdb_version" {
 			foundCrdb = true
 		}
-		if d, ok := msg.(*pgproto3.BackendKeyData); ok {
-			// We inspect the BackendKeyData outside of the loop since we only
-			// want to do the assertions if foundCrdb==true.
-			backendKeyData = d
-		}
-	}
-	if backendKeyData == nil {
-		return nil, errors.Errorf("did not receive BackendKeyData")
-	}
-	if foundCrdb && (backendKeyData.ProcessID != 0 || backendKeyData.SecretKey != 0) {
-		return nil, errors.Errorf("unexpected BackendKeyData: %+v", d)
 	}
 	p.isCockroachDB = foundCrdb
 	success = err == nil
@@ -103,18 +91,11 @@ func (p *PGTest) SendOneLine(line string) error {
 		msgBytes := []byte(sp[1])
 		switch msg := msg.(type) {
 		case *pgproto3.CopyData:
-			var data struct {
-				Data       string
-				BinaryData []byte
-			}
+			var data struct{ Data string }
 			if err := json.Unmarshal(msgBytes, &data); err != nil {
 				return err
 			}
-			if data.BinaryData != nil {
-				msg.Data = data.BinaryData
-			} else {
-				msg.Data = []byte(data.Data)
-			}
+			msg.Data = []byte(data.Data)
 		default:
 			if err := json.Unmarshal(msgBytes, msg); err != nil {
 				return err
@@ -124,7 +105,7 @@ func (p *PGTest) SendOneLine(line string) error {
 	return p.Send(msg.(pgproto3.FrontendMessage))
 }
 
-// Send sends msg to the server.
+// Send sends msg to the serrver.
 func (p *PGTest) Send(msg pgproto3.FrontendMessage) error {
 	if testing.Verbose() {
 		fmt.Printf("SEND %T: %+[1]v\n", msg)

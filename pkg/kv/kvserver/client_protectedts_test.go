@@ -53,10 +53,7 @@ func TestProtectedTimestamps(t *testing.T) {
 	skip.UnderShort(t)
 
 	args := base.TestClusterArgs{}
-	args.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{
-		DisableGCQueue:            true,
-		DisableLastProcessedCheck: true,
-	}
+	args.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{DisableGCQueue: true}
 	tc := testcluster.StartTestCluster(t, 3, args)
 	defer tc.Stopper().Stop(ctx)
 	s0 := tc.Server(0)

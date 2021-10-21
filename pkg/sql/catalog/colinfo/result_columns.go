@@ -11,7 +11,6 @@
 package colinfo
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -37,15 +36,25 @@ type ResultColumn struct {
 // describe the column types of a table.
 type ResultColumns []ResultColumn
 
-// ResultColumnsFromColumns converts []catalog.Column to []ResultColumn.
-func ResultColumnsFromColumns(tableID descpb.ID, columns []catalog.Column) ResultColumns {
-	return ResultColumnsFromColDescs(tableID, len(columns), func(i int) *descpb.ColumnDescriptor {
-		return columns[i].ColumnDesc()
+// ResultColumnsFromColDescs converts []descpb.ColumnDescriptor to []ResultColumn.
+func ResultColumnsFromColDescs(
+	tableID descpb.ID, colDescs []descpb.ColumnDescriptor,
+) ResultColumns {
+	return resultColumnsFromColDescs(tableID, len(colDescs), func(i int) *descpb.ColumnDescriptor {
+		return &colDescs[i]
 	})
 }
 
-// ResultColumnsFromColDescs is used by ResultColumnsFromColumns and by tests.
-func ResultColumnsFromColDescs(
+// ResultColumnsFromColDescPtrs converts []*descpb.ColumnDescriptor to []ResultColumn.
+func ResultColumnsFromColDescPtrs(
+	tableID descpb.ID, colDescs []*descpb.ColumnDescriptor,
+) ResultColumns {
+	return resultColumnsFromColDescs(tableID, len(colDescs), func(i int) *descpb.ColumnDescriptor {
+		return colDescs[i]
+	})
+}
+
+func resultColumnsFromColDescs(
 	tableID descpb.ID, numCols int, getColDesc func(int) *descpb.ColumnDescriptor,
 ) ResultColumns {
 	cols := make(ResultColumns, numCols)
@@ -137,9 +146,63 @@ func (r ResultColumns) String(printTypes bool, showHidden bool) string {
 	return f.CloseAndGetString()
 }
 
-// ExplainPlanColumns are the result columns of various EXPLAIN variants.
+// ExplainPlanColumns are the result columns of an EXPLAIN (PLAN) ...
+// statement.
 var ExplainPlanColumns = ResultColumns{
-	{Name: "info", Typ: types.String},
+	// Tree shows the node type with the tree structure.
+	{Name: "tree", Typ: types.String},
+	// Field is the part of the node that a row of output pertains to.
+	{Name: "field", Typ: types.String},
+	// Description contains details about the field.
+	{Name: "description", Typ: types.String},
+}
+
+// ExplainPlanVerboseColumns are the result columns of an
+// EXPLAIN (PLAN, ...) ...
+// statement when a flag like VERBOSE or TYPES is passed.
+var ExplainPlanVerboseColumns = ResultColumns{
+	// Tree shows the node type with the tree structure.
+	{Name: "tree", Typ: types.String},
+	// Level is the depth of the node in the tree. Hidden by default; can be
+	// retrieved using:
+	//   SELECT level FROM [ EXPLAIN (VERBOSE) ... ].
+	{Name: "level", Typ: types.Int, Hidden: true},
+	// Type is the node type. Hidden by default.
+	{Name: "node_type", Typ: types.String, Hidden: true},
+	// Field is the part of the node that a row of output pertains to.
+	{Name: "field", Typ: types.String},
+	// Description contains details about the field.
+	{Name: "description", Typ: types.String},
+	// Columns is the type signature of the data source.
+	{Name: "columns", Typ: types.String},
+	// Ordering indicates the known ordering of the data from this source.
+	{Name: "ordering", Typ: types.String},
+}
+
+// ExplainDistSQLColumns are the result columns of an
+// EXPLAIN (DISTSQL) statement.
+var ExplainDistSQLColumns = ResultColumns{
+	{Name: "automatic", Typ: types.Bool},
+	{Name: "url", Typ: types.String},
+	{Name: "json", Typ: types.String, Hidden: true},
+}
+
+// ExplainOptColumns are the result columns of an
+// EXPLAIN (OPT) statement.
+var ExplainOptColumns = ResultColumns{
+	{Name: "text", Typ: types.String},
+}
+
+// ExplainVecColumns are the result columns of an
+// EXPLAIN (VEC) statement.
+var ExplainVecColumns = ResultColumns{
+	{Name: "text", Typ: types.String},
+}
+
+// ExplainAnalyzeDebugColumns are the result columns of an
+// EXPLAIN ANALYZE (DEBUG) statement.
+var ExplainAnalyzeDebugColumns = ResultColumns{
+	{Name: "text", Typ: types.String},
 }
 
 // ShowTraceColumns are the result columns of a SHOW [KV] TRACE statement.
@@ -184,6 +247,15 @@ var ShowReplicaTraceColumns = ResultColumns{
 var ShowSyntaxColumns = ResultColumns{
 	{Name: "field", Typ: types.String},
 	{Name: "message", Typ: types.String},
+}
+
+// ShowLastQueryStatisticsColumns are the columns of a
+// SHOW LAST QUERY STATISTICS statement.
+var ShowLastQueryStatisticsColumns = ResultColumns{
+	{Name: "parse_latency", Typ: types.Interval},
+	{Name: "plan_latency", Typ: types.Interval},
+	{Name: "exec_latency", Typ: types.Interval},
+	{Name: "service_latency", Typ: types.Interval},
 }
 
 // ShowFingerprintsColumns are the result columns of a

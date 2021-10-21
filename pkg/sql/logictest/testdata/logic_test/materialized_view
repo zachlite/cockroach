@@ -107,7 +107,7 @@ CREATE MATERIALIZED VIEW v_dup AS SELECT x FROM dup;
 CREATE UNIQUE INDEX i ON v_dup (x);
 INSERT INTO dup VALUES (1), (1);
 
-statement error pq: duplicate key value violates unique constraint "i"\nDETAIL: Key \(x\)=\(1\) already exists\.
+statement error pq: duplicate key value \(x\)=\(1\) violates unique constraint "i"
 REFRESH MATERIALIZED VIEW v_dup
 
 # We shouldn't be able to mix materialized and non materialized views in DDLs.
@@ -160,54 +160,4 @@ query I rowsort
 SELECT * FROM t57108_v
 ----
 NULL
-1
-
-user testuser
-
-# testuser should not be able to refresh the materialized view without
-# ownership.
-statement error pq: must be owner of materialized view with_options
-REFRESH MATERIALIZED VIEW with_options WITH NO DATA
-
-user root
-
-statement ok
-GRANT root TO testuser
-
-user testuser
-
-# testuser should now be able to refresh the materialized view as a member of
-# root.
-statement ok
-REFRESH MATERIALIZED VIEW with_options WITH NO DATA
-
-statement ok
-REVOKE root FROM testuser
-
-user root
-
-statement ok
-GRANT CREATE ON DATABASE test TO testuser
-
-statement ok
-ALTER MATERIALIZED VIEW with_options OWNER TO testuser
-
-# root should still be able to refresh the view.
-statement ok
-REFRESH MATERIALIZED VIEW with_options WITH NO DATA
-
-user testuser
-
-# testuser should now be able to refresh the materialized view as the owner.
-statement ok
-REFRESH MATERIALIZED VIEW with_options WITH NO DATA
-
-# Test CREATE MATERIALIZED VIEW referring to a sequence.
-statement ok
-CREATE SEQUENCE seq;
-CREATE MATERIALIZED VIEW view_from_seq AS (SELECT nextval('seq'))
-
-query I
-SELECT * FROM view_from_seq
-----
 1

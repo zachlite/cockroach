@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build acceptance
 // +build acceptance
 
 // Acceptance tests are comparatively slow to run, so we use the above build
@@ -52,7 +51,13 @@ func RunTests(m *testing.M) int {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt)
 		<-sig
-		stopper.Stop(ctx)
+		select {
+		case <-stopper.ShouldStop():
+		default:
+			// There is a very tiny race here: the cluster might be closing
+			// the stopper simultaneously.
+			stopper.Stop(ctx)
+		}
 	}()
 	return m.Run()
 }

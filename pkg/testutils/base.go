@@ -19,11 +19,11 @@ import (
 // embedded certs and the default node user. The default node user has both
 // server and client certificates.
 func NewNodeTestBaseContext() *base.Config {
-	return NewTestBaseContext(security.NodeUserName())
+	return NewTestBaseContext(security.NodeUser)
 }
 
 // NewTestBaseContext creates a secure base context for user.
-func NewTestBaseContext(user security.SQLUsername) *base.Config {
+func NewTestBaseContext(user string) *base.Config {
 	cfg := &base.Config{
 		Insecure: false,
 		User:     user,

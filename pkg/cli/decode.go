@@ -26,7 +26,7 @@ import (
 )
 
 func runDebugDecodeProto(_ *cobra.Command, _ []string) error {
-	if isatty.IsTerminal(os.Stdin.Fd()) {
+	if isatty.IsTerminal(stdin.Fd()) {
 		fmt.Fprintln(stderr,
 			`# Reading proto-encoded pieces of data from stdin.
 # Press Ctrl+C or Ctrl+D to terminate.`,
@@ -42,9 +42,7 @@ func runDebugDecodeProto(_ *cobra.Command, _ []string) error {
 // the result of `fn` on `out`.
 // Errors returned by `fn` are emitted on `out` with a "warning" prefix.
 func streamMap(out io.Writer, in io.Reader, fn func(string) (bool, string, error)) error {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(nil, 128<<20 /* 128 MiB */)
-	for sc.Scan() {
+	for sc := bufio.NewScanner(in); sc.Scan(); {
 		for _, field := range strings.Fields(sc.Text()) {
 			ok, value, err := fn(field)
 			if err != nil {
@@ -60,7 +58,7 @@ func streamMap(out io.Writer, in io.Reader, fn func(string) (bool, string, error
 		}
 		fmt.Fprintln(out, "")
 	}
-	return sc.Err()
+	return nil
 }
 
 // tryDecodeValue tries to decode the given string with the given proto name
@@ -78,7 +76,7 @@ func tryDecodeValue(s, protoName string, emitDefaults bool) (ok bool, val string
 	if err != nil {
 		return false, "", nil //nolint:returnerrcheck
 	}
-	j, err := protoreflect.MessageToJSON(msg, protoreflect.FmtFlags{EmitDefaults: emitDefaults})
+	j, err := protoreflect.MessageToJSON(msg, emitDefaults)
 	if err != nil {
 		// Unexpected error: the data was valid protobuf, but does not
 		// reflect back to JSON. We report the protobuf struct in the

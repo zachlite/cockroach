@@ -17,8 +17,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -28,8 +28,8 @@ import (
 // Inserter abstracts the key/value operations for inserting table rows.
 type Inserter struct {
 	Helper                rowHelper
-	InsertCols            []catalog.Column
-	InsertColIDtoRowIndex catalog.TableColMap
+	InsertCols            []descpb.ColumnDescriptor
+	InsertColIDtoRowIndex map[descpb.ColumnID]int
 
 	// For allocation avoidance.
 	marshaled []roachpb.Value
@@ -40,33 +40,25 @@ type Inserter struct {
 
 // MakeInserter creates a Inserter for the given table.
 //
-// insertCols must contain every column in the primary key. Virtual columns must
-// be present if they are part of any index.
+// insertCols must contain every column in the primary key.
 func MakeInserter(
 	ctx context.Context,
 	txn *kv.Txn,
 	codec keys.SQLCodec,
-	tableDesc catalog.TableDescriptor,
-	insertCols []catalog.Column,
+	tableDesc *tabledesc.Immutable,
+	insertCols []descpb.ColumnDescriptor,
 	alloc *rowenc.DatumAlloc,
-	sv *settings.Values,
-	internal bool,
-	metrics *Metrics,
 ) (Inserter, error) {
 	ri := Inserter{
-		Helper: newRowHelper(
-			codec, tableDesc, tableDesc.WritableNonPrimaryIndexes(), sv, internal, metrics,
-		),
-
+		Helper:                newRowHelper(codec, tableDesc, tableDesc.WritableIndexes()),
 		InsertCols:            insertCols,
 		InsertColIDtoRowIndex: ColIDtoRowIndexFromCols(insertCols),
 		marshaled:             make([]roachpb.Value, len(insertCols)),
 	}
 
-	for i := 0; i < tableDesc.GetPrimaryIndex().NumKeyColumns(); i++ {
-		colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(i)
-		if _, ok := ri.InsertColIDtoRowIndex.Get(colID); !ok {
-			return Inserter{}, fmt.Errorf("missing %q primary key column", tableDesc.GetPrimaryIndex().GetKeyColumnName(i))
+	for i, col := range tableDesc.PrimaryIndex.ColumnIDs {
+		if _, ok := ri.InsertColIDtoRowIndex[col]; !ok {
+			return Inserter{}, fmt.Errorf("missing %q primary key column", tableDesc.PrimaryIndex.ColumnNames[i])
 		}
 	}
 
@@ -146,7 +138,7 @@ func (ri *Inserter) InsertRow(
 	for i, val := range values {
 		// Make sure the value can be written to the column before proceeding.
 		var err error
-		if ri.marshaled[i], err = rowenc.MarshalColumnValue(ri.InsertCols[i], val); err != nil {
+		if ri.marshaled[i], err = rowenc.MarshalColumnValue(&ri.InsertCols[i], val); err != nil {
 			return err
 		}
 	}

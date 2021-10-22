@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/col/colserde"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -29,11 +29,11 @@ import (
 
 func randomBatch(allocator *colmem.Allocator) ([]*types.T, coldata.Batch) {
 	const maxTyps = 16
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := make([]*types.T, rng.Intn(maxTyps)+1)
 	for i := range typs {
-		typs[i] = randgen.RandType(rng)
+		typs[i] = rowenc.RandType(rng)
 	}
 
 	capacity := rng.Intn(coldata.BatchSize()) + 1
@@ -87,7 +87,7 @@ func roundTripBatch(
 func TestRecordBatchRoundtripThroughBytes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for run := 0; run < 10; run++ {
 		var typs []*types.T
 		var src coldata.Batch
@@ -137,7 +137,7 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 	// to in order to reduce benchmark noise.
 	const fixedLen = 64
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := []*types.T{
 		types.Bool,
@@ -145,7 +145,6 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		types.Decimal,
 		types.Int,
 		types.Timestamp,
-		types.Interval,
 	}
 	// numBytes corresponds 1:1 to typs and specifies how many bytes we are
 	// converting on one iteration of the benchmark for the corresponding type in
@@ -155,7 +154,6 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		fixedLen * int64(coldata.BatchSize()),
 		0, // The number of bytes for decimals will be set below.
 		8 * int64(coldata.BatchSize()),
-		3 * 8 * int64(coldata.BatchSize()),
 		3 * 8 * int64(coldata.BatchSize()),
 	}
 	// Run a benchmark on every type we care about.

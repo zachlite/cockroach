@@ -23,7 +23,6 @@ import { SummaryCard, SummaryCardItem } from "src/summaryCard";
 import * as format from "src/util/format";
 
 import styles from "./databaseTablePage.module.scss";
-import { commonStyles } from "src/common";
 import { baseHeadingClasses } from "src/transactionsPage/transactionsPageClasses";
 const cx = classNames.bind(styles);
 
@@ -201,7 +200,7 @@ export class DatabaseTablePage extends React.Component<
         </section>
 
         <section className={baseHeadingClasses.wrapper}>
-          <Tabs className={commonStyles("cockroach--tabs")}>
+          <Tabs className={cx("cockroach--tabs")}>
             <TabPane tab="Overview" key="overview">
               <Row>
                 <Col>

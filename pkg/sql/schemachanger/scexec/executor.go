@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec/descriptorutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec/scmutationexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -84,7 +85,7 @@ func (*NewSchemaChangerTestingKnobs) ModuleTestingKnobs() {}
 // schema change that is used by the testing knobs.
 type TestingKnobMetadata struct {
 	Statements []string
-	Phase      scop.Phase
+	Phase      scplan.Phase
 }
 
 // ExecuteOps executes the provided ops. The ops must all be of the same type.

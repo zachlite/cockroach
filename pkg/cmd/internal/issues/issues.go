@@ -482,9 +482,8 @@ type PostRequest struct {
 	// Mention is a slice of Github handles (@foo, @cockroachdb/some-team, etc)
 	// that should be mentioned in the message.
 	Mention []string
-	// A help section of the issue, for example with links to documentation or
-	// instructions on how to reproduce the issue.
-	HelpCommand func(*Renderer)
+	// The instructions to reproduce the failure.
+	ReproductionCommand func(*Renderer)
 	// Additional labels that will be added to the issue. They will be created
 	// as necessary (as a side effect of creating an issue with them). An
 	// existing issue may be adopted even if it does not have these labels.
@@ -512,7 +511,7 @@ func Post(ctx context.Context, formatter IssueFormatter, req PostRequest) error 
 }
 
 // ReproductionCommandFromString returns a value for the
-// PostRequest.HelpCommand field that is a command to run. It is
+// PostRequest.ReproductionCommand field that is a command to run. It is
 // formatted as a bash code block.
 func ReproductionCommandFromString(repro string) func(*Renderer) {
 	if repro == "" {
@@ -524,9 +523,9 @@ func ReproductionCommandFromString(repro string) func(*Renderer) {
 	}
 }
 
-// HelpCommandAsLink returns a value for the PostRequest.HelpCommand field
+// ReproductionAsLink returns a value for the PostRequest.ReproductionCommand field
 // that prints a link to documentation to refer to.
-func HelpCommandAsLink(title, href string) func(r *Renderer) {
+func ReproductionAsLink(title, href string) func(r *Renderer) {
 	return func(r *Renderer) {
 		// Bit of weird formatting here but apparently markdown links don't work inside
 		// of a line that also has a <p> tag. Putting it on its own line makes it work.

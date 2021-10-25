@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -48,8 +47,8 @@ import (
 type ColBatchScan struct {
 	colexecop.ZeroInputNode
 	colexecop.InitHelper
-	execinfra.SpansWithCopy
 
+	spans           roachpb.Spans
 	flowCtx         *execinfra.FlowCtx
 	bsHeader        *roachpb.BoundedStalenessHeader
 	rf              *cFetcher
@@ -93,13 +92,13 @@ func (s *ColBatchScan) Init(ctx context.Context) {
 	s.Ctx, s.tracingSpan = execinfra.ProcessorSpan(s.Ctx, "colbatchscan")
 	limitBatches := !s.parallelize
 	if err := s.rf.StartScan(
-		s.Ctx,
 		s.flowCtx.Txn,
-		s.Spans,
+		s.spans,
 		s.bsHeader,
 		limitBatches,
 		s.batchBytesLimit,
 		s.limitHint,
+		s.flowCtx.TraceKV,
 		s.flowCtx.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 	); err != nil {
 		colexecerror.InternalError(err)
@@ -127,7 +126,7 @@ func (s *ColBatchScan) DrainMeta() []execinfrapb.ProducerMetadata {
 	if !s.flowCtx.Local {
 		nodeID, ok := s.flowCtx.NodeID.OptionalNodeID()
 		if ok {
-			ranges := execinfra.MisplannedRanges(s.Ctx, s.SpansCopy, nodeID, s.flowCtx.Cfg.RangeCache)
+			ranges := execinfra.MisplannedRanges(s.Ctx, s.spans, nodeID, s.flowCtx.Cfg.RangeCache)
 			if ranges != nil {
 				trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{Ranges: ranges})
 			}
@@ -170,11 +169,6 @@ func (s *ColBatchScan) GetCumulativeContentionTime() time.Duration {
 	return execinfra.GetCumulativeContentionTime(s.Ctx)
 }
 
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *ColBatchScan) GetScanStats() execinfra.ScanStats {
-	return execinfra.GetScanStats(s.Ctx)
-}
-
 var colBatchScanPool = sync.Pool{
 	New: func() interface{} {
 		return &ColBatchScan{}
@@ -185,7 +179,6 @@ var colBatchScanPool = sync.Pool{
 func NewColBatchScan(
 	ctx context.Context,
 	allocator *colmem.Allocator,
-	kvFetcherMemAcc *mon.BoundAccount,
 	flowCtx *execinfra.FlowCtx,
 	evalCtx *tree.EvalContext,
 	spec *execinfrapb.TableReaderSpec,
@@ -207,32 +200,32 @@ func NewColBatchScan(
 	// just setting the ID and Version in the spec or something like that and
 	// retrieving the hydrated immutable from cache.
 	table := spec.BuildTableDescriptor()
-	invertedColumn := tabledesc.FindInvertedColumn(table, spec.InvertedColumn)
-	tableArgs, err := populateTableArgs(
-		ctx, flowCtx, evalCtx, table, table.ActiveIndexes()[spec.IndexIdx],
-		invertedColumn, spec.Visibility, spec.HasSystemColumns,
-	)
+	virtualColumn := tabledesc.FindVirtualColumn(table, spec.VirtualColumn)
+	typs, columnIdxMap, err := retrieveTypsAndColOrds(
+		ctx, flowCtx, evalCtx, table, virtualColumn, spec.Visibility, spec.HasSystemColumns)
 	if err != nil {
 		return nil, err
 	}
 
+	var neededColumns util.FastIntSet
 	for _, neededColumn := range spec.NeededColumns {
-		tableArgs.ValNeededForCol.Add(int(neededColumn))
+		neededColumns.Add(int(neededColumn))
 	}
 
-	fetcher := cFetcherPool.Get().(*cFetcher)
-	fetcher.cFetcherArgs = cFetcherArgs{
-		spec.LockingStrength,
-		spec.LockingWaitPolicy,
-		flowCtx.EvalCtx.SessionData().LockTimeout,
-		execinfra.GetWorkMemLimit(flowCtx),
-		estimatedRowCount,
-		spec.Reverse,
-		flowCtx.TraceKV,
-	}
-
-	if err = fetcher.Init(flowCtx.Codec(), allocator, kvFetcherMemAcc, tableArgs); err != nil {
-		fetcher.Release()
+	fetcher, err := initCFetcher(
+		flowCtx, allocator, table, table.ActiveIndexes()[spec.IndexIdx],
+		neededColumns, columnIdxMap, virtualColumn,
+		cFetcherArgs{
+			visibility:        spec.Visibility,
+			lockingStrength:   spec.LockingStrength,
+			lockingWaitPolicy: spec.LockingWaitPolicy,
+			hasSystemColumns:  spec.HasSystemColumns,
+			reverse:           spec.Reverse,
+			memoryLimit:       execinfra.GetWorkMemLimit(flowCtx),
+			estimatedRowCount: estimatedRowCount,
+		},
+	)
+	if err != nil {
 		return nil, err
 	}
 
@@ -254,17 +247,11 @@ func NewColBatchScan(
 	}
 
 	s := colBatchScanPool.Get().(*ColBatchScan)
-	s.Spans = s.Spans[:0]
+	spans := s.spans[:0]
 	specSpans := spec.Spans
 	for i := range specSpans {
 		//gcassert:bce
-		s.Spans = append(s.Spans, specSpans[i].Span)
-	}
-	if !flowCtx.Local {
-		// Make a copy of the spans so that we could get the misplanned ranges
-		// info.
-		allocator.AdjustMemoryUsage(s.Spans.MemUsage())
-		s.MakeSpansCopy()
+		spans = append(spans, specSpans[i].Span)
 	}
 
 	if spec.LimitHint > 0 || spec.BatchBytesLimit > 0 {
@@ -281,97 +268,43 @@ func NewColBatchScan(
 	}
 
 	*s = ColBatchScan{
-		SpansWithCopy:   s.SpansWithCopy,
+		spans:           spans,
 		flowCtx:         flowCtx,
 		bsHeader:        bsHeader,
 		rf:              fetcher,
 		limitHint:       limitHint,
 		batchBytesLimit: batchBytesLimit,
 		parallelize:     spec.Parallelize,
-		ResultTypes:     tableArgs.typs,
+		ResultTypes:     typs,
 	}
 	return s, nil
 }
 
-type cFetcherTableArgs struct {
-	desc  catalog.TableDescriptor
-	index catalog.Index
-	// ColIdxMap is a mapping from ColumnID of each column to its ordinal.
-	ColIdxMap        catalog.TableColMap
-	isSecondaryIndex bool
-	// cols are all columns of the table.
-	cols []catalog.Column
-	// The indexes (0 to # of columns - 1) of the columns to return.
-	ValNeededForCol util.FastIntSet
-	// typs are types of all columns of the table.
-	typs []*types.T
-}
-
-var cFetcherTableArgsPool = sync.Pool{
-	New: func() interface{} {
-		return &cFetcherTableArgs{}
-	},
-}
-
-func (a *cFetcherTableArgs) Release() {
-	oldCols := a.cols
-	for i := range oldCols {
-		oldCols[i] = nil
-	}
-	*a = cFetcherTableArgs{
-		// The types are small objects, so we don't bother deeply resetting this
-		// slice.
-		typs: a.typs[:0],
-	}
-	a.cols = oldCols[:0]
-	cFetcherTableArgsPool.Put(a)
-}
-
-// populateTableArgs fills all fields of the cFetcherTableArgs except for
-// ValNeededForCol.
-func populateTableArgs(
+// retrieveTypsAndColOrds extracts logic that retrieves a slice with the column
+// types and a map between column IDs and ordinal positions for the columns from
+// the given table.
+func retrieveTypsAndColOrds(
 	ctx context.Context,
 	flowCtx *execinfra.FlowCtx,
 	evalCtx *tree.EvalContext,
 	table catalog.TableDescriptor,
-	index catalog.Index,
-	invertedCol catalog.Column,
+	virtualCol catalog.Column,
 	visibility execinfrapb.ScanVisibility,
 	hasSystemColumns bool,
-) (*cFetcherTableArgs, error) {
-	args := cFetcherTableArgsPool.Get().(*cFetcherTableArgs)
-	cols := args.cols[:0]
+) ([]*types.T, catalog.TableColMap, error) {
+	cols := table.PublicColumns()
 	if visibility == execinfra.ScanVisibilityPublicAndNotPublic {
-		cols = append(cols, table.ReadableColumns()...)
-	} else {
-		cols = append(cols, table.PublicColumns()...)
+		cols = table.DeletableColumns()
 	}
-	if invertedCol != nil {
-		for i, col := range cols {
-			if col.GetID() == invertedCol.GetID() {
-				cols[i] = invertedCol
-				break
-			}
-		}
-	}
-	if hasSystemColumns {
-		cols = append(cols, table.SystemColumns()...)
-	}
+	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
+	typs := catalog.ColumnTypesWithVirtualCol(cols, virtualCol)
 
-	*args = cFetcherTableArgs{
-		desc:             table,
-		index:            index,
-		ColIdxMap:        catalog.ColumnIDToOrdinalMap(cols),
-		isSecondaryIndex: !index.Primary(),
-		cols:             cols,
-	}
-	if cap(args.typs) < len(cols) {
-		args.typs = make([]*types.T, len(cols))
-	} else {
-		args.typs = args.typs[:len(cols)]
-	}
-	for i := range cols {
-		args.typs[i] = cols[i].GetType()
+	// Add all requested system columns to the output.
+	if hasSystemColumns {
+		for _, sysCol := range table.SystemColumns() {
+			typs = append(typs, sysCol.GetType())
+			columnIdxMap.Set(sysCol.GetID(), columnIdxMap.Len())
+		}
 	}
 
 	// Before we can safely use types from the table descriptor, we need to
@@ -379,23 +312,28 @@ func populateTableArgs(
 	// the processor initialization, but neither ColBatchScan nor cFetcher are
 	// processors, so we need to do the hydration ourselves.
 	resolver := flowCtx.TypeResolverFactory.NewTypeResolver(evalCtx.Txn)
-	return args, resolver.HydrateTypeSlice(ctx, args.typs)
+	if err := resolver.HydrateTypeSlice(ctx, typs); err != nil {
+		return nil, catalog.TableColMap{}, err
+	}
+
+	return typs, columnIdxMap, nil
 }
 
 // Release implements the execinfra.Releasable interface.
 func (s *ColBatchScan) Release() {
 	s.rf.Release()
 	// Deeply reset the spans so that we don't hold onto the keys of the spans.
-	s.SpansWithCopy.Reset()
+	for i := range s.spans {
+		s.spans[i] = roachpb.Span{}
+	}
 	*s = ColBatchScan{
-		SpansWithCopy: s.SpansWithCopy,
+		spans: s.spans[:0],
 	}
 	colBatchScanPool.Put(s)
 }
 
 // Close implements the colexecop.Closer interface.
 func (s *ColBatchScan) Close() error {
-	s.rf.Close(s.EnsureCtx())
 	if s.tracingSpan != nil {
 		s.tracingSpan.Finish()
 		s.tracingSpan = nil

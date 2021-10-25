@@ -297,7 +297,7 @@ TestXXA - 1.00s
 					var actRepro, expRepro string
 					{
 						r := &issues.Renderer{}
-						req.HelpCommand(r)
+						req.ReproductionCommand(r)
 						actRepro = r.String()
 					}
 					{

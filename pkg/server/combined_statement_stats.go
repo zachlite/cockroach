@@ -117,12 +117,11 @@ func collectCombinedStatements(
 				aggregated_ts,
 				metadata,
 				statistics,
-				sampled_plan,
-				aggregation_interval
+				sampled_plan
 			FROM crdb_internal.statement_statistics
 			%s`, whereClause)
 
-	const expectedNumDatums = 7
+	const expectedNumDatums = 6
 
 	it, err := ie.QueryIteratorEx(ctx, "combined-stmts-by-interval", nil,
 		sessiondata.InternalExecutorOverride{
@@ -180,13 +179,10 @@ func collectCombinedStatements(
 		}
 		metadata.Stats.SensitiveInfo.MostRecentPlanDescription = *plan
 
-		aggInterval := tree.MustBeDInterval(row[6]).Duration
-
 		stmt := serverpb.StatementsResponse_CollectedStatementStatistics{
 			Key: serverpb.StatementsResponse_ExtendedStatementStatisticsKey{
-				KeyData:             metadata.Key,
-				AggregatedTs:        aggregatedTs,
-				AggregationInterval: time.Duration(aggInterval.Nanos()),
+				KeyData:      metadata.Key,
+				AggregatedTs: aggregatedTs,
 			},
 			ID:    roachpb.StmtFingerprintID(statementFingerprintID),
 			Stats: metadata.Stats,
@@ -214,12 +210,11 @@ func collectCombinedTransactions(
 				aggregated_ts,
 				fingerprint_id,
 				metadata,
-				statistics,
-				aggregation_interval
+				statistics
 			FROM crdb_internal.transaction_statistics
 			%s`, whereClause)
 
-	const expectedNumDatums = 6
+	const expectedNumDatums = 5
 
 	it, err := ie.QueryIteratorEx(ctx, "combined-txns-by-interval", nil,
 		sessiondata.InternalExecutorOverride{
@@ -267,15 +262,12 @@ func collectCombinedTransactions(
 			return nil, err
 		}
 
-		aggInterval := tree.MustBeDInterval(row[5]).Duration
-
 		txnStats := serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics{
 			StatsData: roachpb.CollectedTransactionStatistics{
 				StatementFingerprintIDs:  metadata.StatementFingerprintIDs,
 				App:                      app,
 				Stats:                    metadata.Stats,
 				AggregatedTs:             aggregatedTs,
-				AggregationInterval:      time.Duration(aggInterval.Nanos()),
 				TransactionFingerprintID: roachpb.TransactionFingerprintID(fingerprintID),
 			},
 		}

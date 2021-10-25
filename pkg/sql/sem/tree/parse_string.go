@@ -11,8 +11,6 @@
 package tree
 
 import (
-	"strings"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -42,13 +40,13 @@ func ParseAndRequireString(
 	case types.DateFamily:
 		d, dependsOnContext, err = ParseDDate(ctx, s)
 	case types.DecimalFamily:
-		d, err = ParseDDecimal(strings.TrimSpace(s))
+		d, err = ParseDDecimal(s)
 	case types.FloatFamily:
-		d, err = ParseDFloat(strings.TrimSpace(s))
+		d, err = ParseDFloat(s)
 	case types.INetFamily:
 		d, err = ParseDIPAddrFromINetString(s)
 	case types.IntFamily:
-		d, err = ParseDInt(strings.TrimSpace(s))
+		d, err = ParseDInt(s)
 	case types.IntervalFamily:
 		itm, typErr := t.IntervalTypeMetadata()
 		if typErr != nil {

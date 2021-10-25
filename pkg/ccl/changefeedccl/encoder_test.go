@@ -215,7 +215,7 @@ func TestEncoders(t *testing.T) {
 			targets := jobspb.ChangefeedTargets{}
 			targets[tableDesc.GetID()] = target
 
-			e, err := getEncoder(o, targets)
+			e, err := getEncoder(context.Background(), o, targets)
 			if len(expected.err) > 0 {
 				require.EqualError(t, err, expected.err)
 				return
@@ -366,7 +366,7 @@ func TestAvroEncoderWithTLS(t *testing.T) {
 		targets := jobspb.ChangefeedTargets{}
 		targets[tableDesc.GetID()] = target
 
-		e, err := getEncoder(opts, targets)
+		e, err := getEncoder(context.Background(), opts, targets)
 		require.NoError(t, err)
 
 		rowInsert := encodeRow{
@@ -407,11 +407,9 @@ func TestAvroEncoderWithTLS(t *testing.T) {
 		defer noCertReg.Close()
 		opts[changefeedbase.OptConfluentSchemaRegistry] = noCertReg.URL()
 
-		enc, err := getEncoder(opts, targets)
-		require.NoError(t, err)
-		_, err = enc.EncodeKey(context.Background(), rowInsert)
-		require.EqualError(t, err, fmt.Sprintf("retryable changefeed error: "+
-			`contacting confluent schema registry: Post "%s/subjects/foo-key/versions": x509: certificate signed by unknown authority`,
+		_, err = getEncoder(context.Background(), opts, targets)
+		require.EqualError(t, err, fmt.Sprintf("schema registry unavailable: retryable changefeed error: "+
+			"Get \"%s/mode\": x509: certificate signed by unknown authority",
 			opts[changefeedbase.OptConfluentSchemaRegistry]))
 
 		wrongCert, _, err := cdctest.NewCACertBase64Encoded()
@@ -422,11 +420,9 @@ func TestAvroEncoderWithTLS(t *testing.T) {
 		defer wrongCertReg.Close()
 		opts[changefeedbase.OptConfluentSchemaRegistry] = wrongCertReg.URL()
 
-		enc, err = getEncoder(opts, targets)
-		require.NoError(t, err)
-		_, err = enc.EncodeKey(context.Background(), rowInsert)
-		require.EqualError(t, err, fmt.Sprintf("retryable changefeed error: "+
-			`contacting confluent schema registry: Post "%s/subjects/foo-key/versions": x509: certificate signed by unknown authority`,
+		_, err = getEncoder(context.Background(), opts, targets)
+		require.EqualError(t, err, fmt.Sprintf("schema registry unavailable: retryable changefeed error: "+
+			"Get \"%s/mode\": x509: certificate signed by unknown authority",
 			opts[changefeedbase.OptConfluentSchemaRegistry]))
 	})
 }

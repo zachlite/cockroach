@@ -11,8 +11,7 @@
 package tree
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 )
@@ -35,7 +34,7 @@ func (n *Name) Format(ctx *FmtCtx) {
 	if f.HasFlags(FmtAnonymize) && !isArityIndicatorString(string(*n)) {
 		ctx.WriteByte('_')
 	} else {
-		lexbase.EncodeRestrictedSQLIdent(&ctx.Buffer, string(*n), f.EncodeFlags())
+		lex.EncodeRestrictedSQLIdent(&ctx.Buffer, string(*n), f.EncodeFlags())
 	}
 }
 
@@ -67,7 +66,7 @@ func ErrNameString(s string) string {
 // Normalize normalizes to lowercase and Unicode Normalization Form C
 // (NFC).
 func (n Name) Normalize() string {
-	return lexbase.NormalizeName(string(n))
+	return lex.NormalizeName(string(n))
 }
 
 // An UnrestrictedName is a Name that does not need to be escaped when it
@@ -90,7 +89,7 @@ func (u *UnrestrictedName) Format(ctx *FmtCtx) {
 	if f.HasFlags(FmtAnonymize) {
 		ctx.WriteByte('_')
 	} else {
-		lexbase.EncodeUnrestrictedSQLIdent(&ctx.Buffer, string(*u), f.EncodeFlags())
+		lex.EncodeUnrestrictedSQLIdent(&ctx.Buffer, string(*u), f.EncodeFlags())
 	}
 }
 
@@ -104,20 +103,6 @@ func (l NameList) ToStrings() []string {
 		names[i] = string(n)
 	}
 	return names
-}
-
-// ToSQLUsernames converts a NameList containing SQL input of usernames,
-// normalizes the names and returns them as a list of SQLUsernames.
-func (l NameList) ToSQLUsernames() ([]security.SQLUsername, error) {
-	targetRoles := make([]security.SQLUsername, len(l))
-	for i, role := range l {
-		user, err := security.MakeSQLUsernameFromUserInput(string(role), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		targetRoles[i] = user
-	}
-	return targetRoles, nil
 }
 
 // A NameList is a list of identifiers.

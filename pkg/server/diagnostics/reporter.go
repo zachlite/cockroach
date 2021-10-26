@@ -1,4 +1,4 @@
-// Copyright 2021 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
 // Use of this software is governed by the Business Source License
 // included in the file licenses/BSL.txt.
@@ -14,9 +14,10 @@ import (
 	"bytes"
 	"context"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"reflect"
+	"runtime"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -26,8 +27,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/server/diagnostics/diagnosticspb"
-	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/server/diagnosticspb"
+	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -35,33 +36,30 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/cloudinfo"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/proto"
 	"github.com/mitchellh/reflectwalk"
-	"google.golang.org/protobuf/proto"
+	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/host"
+	"github.com/shirou/gopsutil/load"
+	"github.com/shirou/gopsutil/mem"
 )
 
-// NodeStatusGenerator abstracts the status.MetricRecorder for read access.
-type NodeStatusGenerator interface {
-
-	// GenerateNodeStatus returns a status summary message for the node. The summary
-	// includes the recent values of metrics for both the node and all of its
-	// component stores. When the node isn't initialized yet, nil is returned.
-	GenerateNodeStatus(ctx context.Context) *statuspb.NodeStatus
-}
-
-var reportFrequency = settings.RegisterDurationSetting(
+// ReportFrequency is the interval at which diagnostics data should be reported.
+var ReportFrequency = settings.RegisterPublicNonNegativeDurationSetting(
 	"diagnostics.reporting.interval",
 	"interval at which diagnostics data should be reported",
 	time.Hour,
-	settings.NonNegativeDuration,
-).WithPublic()
+)
+
+const updateCheckJitterSeconds = 120
 
 // Reporter is a helper struct that phones home to report usage and diagnostics.
 type Reporter struct {
@@ -81,20 +79,19 @@ type Reporter struct {
 	SQLServer     *sql.Server
 	InternalExec  *sql.InternalExecutor
 	DB            *kv.DB
-	Recorder      NodeStatusGenerator
+	Recorder      *status.MetricsRecorder
 
 	// Locality is a description of the topography of the server.
 	Locality roachpb.Locality
 
 	// TestingKnobs is used for internal test controls only.
-	TestingKnobs *TestingKnobs
+	TestingKnobs *diagnosticspb.TestingKnobs
 }
 
-// PeriodicallyReportDiagnostics starts a background worker that periodically
-// phones home to report usage and diagnostics.
+// PeriodicallyReportDiagnostics calls ReportDiagnostics on a regular schedule.
 func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *stop.Stopper) {
-	_ = stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "diagnostics", SpanOpt: stop.SterileRootSpan}, func(ctx context.Context) {
-		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &r.Settings.SV)
+	stopper.RunWorker(ctx, func(ctx context.Context) {
+		defer log.RecoverAndReportNonfatalPanic(ctx, &r.Settings.SV)
 		nextReport := r.StartTime
 
 		var timer timeutil.Timer
@@ -103,13 +100,16 @@ func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *s
 			// TODO(dt): we should allow tuning the reset and report intervals separately.
 			// Consider something like rand.Float() > resetFreq/reportFreq here to sample
 			// stat reset periods for reporting.
-			if logcrash.DiagnosticsReportingEnabled.Get(&r.Settings.SV) {
-				r.ReportDiagnostics(ctx)
-			}
+			// Always report diagnostics
+			//   1. In 20.2, this Reporter code only runs for tenants.
+			//   2. The diagnostics reporting cluster setting is disabled in
+			//      tenant clusters.
+			//   3. Tenant cluster settings cannot be changed in 20.2.
+			r.ReportDiagnostics(ctx)
 
-			nextReport = nextReport.Add(reportFrequency.Get(&r.Settings.SV))
+			nextReport = nextReport.Add(ReportFrequency.Get(&r.Settings.SV))
 
-			timer.Reset(addJitter(nextReport.Sub(timeutil.Now())))
+			timer.Reset(addJitter(nextReport.Sub(timeutil.Now()), updateCheckJitterSeconds))
 			select {
 			case <-stopper.ShouldQuiesce():
 				return
@@ -128,10 +128,16 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 	ctx, span := r.AmbientCtx.AnnotateCtxWithSpan(ctx, "usageReport")
 	defer span.Finish()
 
-	report := r.CreateReport(ctx, telemetry.ResetCounts)
+	report := r.getReportingInfo(ctx, telemetry.ResetCounts)
 
-	url := r.buildReportingURL(report)
-	if url == nil {
+	clusterInfo := diagnosticspb.ClusterInfo{
+		ClusterID:  r.ClusterID(),
+		TenantID:   r.TenantID,
+		IsInsecure: r.Config.Insecure,
+		IsInternal: sql.ClusterIsInternal(&r.Settings.SV),
+	}
+	reportingURL := diagnosticspb.BuildReportingURL(&clusterInfo, report, r.TestingKnobs)
+	if reportingURL == nil {
 		return
 	}
 
@@ -142,7 +148,7 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 	}
 
 	res, err := httputil.Post(
-		ctx, url.String(), "application/x-protobuf", bytes.NewReader(b),
+		ctx, reportingURL.String(), "application/x-protobuf", bytes.NewReader(b),
 	)
 	if err != nil {
 		if log.V(2) {
@@ -159,12 +165,10 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 			"error: %v", res.Status, b, err)
 		return
 	}
-	r.SQLServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
+	r.SQLServer.ResetReportedStats(ctx)
 }
 
-// CreateReport generates a new diagnostics report containing information about
-// the current node or tenant.
-func (r *Reporter) CreateReport(
+func (r *Reporter) getReportingInfo(
 	ctx context.Context, reset telemetry.ResetCounters,
 ) *diagnosticspb.DiagnosticReport {
 	info := diagnosticspb.DiagnosticReport{}
@@ -196,40 +200,31 @@ func (r *Reporter) CreateReport(
 	// Read the system.settings table to determine the settings for which we have
 	// explicitly set values -- the in-memory SV has the set and default values
 	// flattened for quick reads, but we'd rather only report the non-defaults.
-	if it, err := r.InternalExec.QueryIteratorEx(
+	if datums, err := r.InternalExec.QueryEx(
 		ctx, "read-setting", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"SELECT name FROM system.settings",
 	); err != nil {
 		log.Warningf(ctx, "failed to read settings: %s", err)
 	} else {
-		info.AlteredSettings = make(map[string]string)
-		var ok bool
-		for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-			row := it.Cur()
+		info.AlteredSettings = make(map[string]string, len(datums))
+		for _, row := range datums {
 			name := string(tree.MustBeDString(row[0]))
 			info.AlteredSettings[name] = settings.RedactedValue(name, &r.Settings.SV)
 		}
-		if err != nil {
-			// No need to clear AlteredSettings map since we only make best
-			// effort to populate it.
-			log.Warningf(ctx, "failed to read settings: %s", err)
-		}
 	}
 
-	if it, err := r.InternalExec.QueryIteratorEx(
+	if datums, err := r.InternalExec.QueryEx(
 		ctx,
 		"read-zone-configs",
 		nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"SELECT id, config FROM system.zones",
 	); err != nil {
 		log.Warningf(ctx, "%v", err)
 	} else {
 		info.ZoneConfigs = make(map[int64]zonepb.ZoneConfig)
-		var ok bool
-		for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
-			row := it.Cur()
+		for _, row := range datums {
 			id := int64(tree.MustBeDInt(row[0]))
 			var zone zonepb.ZoneConfig
 			if bytes, ok := row[1].(*tree.DBytes); !ok {
@@ -244,20 +239,9 @@ func (r *Reporter) CreateReport(
 			anonymizeZoneConfig(&anonymizedZone, zone, secret)
 			info.ZoneConfigs[id] = anonymizedZone
 		}
-		if err != nil {
-			// No need to clear ZoneConfigs map since we only make best effort
-			// to populate it.
-			log.Warningf(ctx, "%v", err)
-		}
 	}
 
-	info.SqlStats, err = r.SQLServer.GetScrubbedReportingStats(ctx)
-	if err != nil {
-		if log.V(2 /* level */) {
-			log.Warningf(ctx, "unexpected error encountered when getting scrubbed reporting stats: %s", err)
-		}
-	}
-
+	info.SqlStats = r.SQLServer.GetScrubbedReportingStats()
 	return &info
 }
 
@@ -304,6 +288,17 @@ func (r *Reporter) populateNodeInfo(
 		info.Node.Bytes += bytes
 		info.Stores[i].EncryptionAlgorithm = int64(r.Metrics["rocksdb.encryption.algorithm"])
 	}
+
+	// Fill in all deprecated NodeInfo fields with information that is now in
+	// other parts of the diagnostics report.
+	// TODO(andyk): Remove this code once the registration server gets this
+	// information from the other fields.
+	info.Node.Locality = info.Env.Locality
+	info.Node.Hardware = info.Env.Hardware
+	info.Node.Os = info.Env.Os
+	info.Node.Build = info.Env.Build
+	info.Node.LicenseType = info.Env.LicenseType
+	info.Node.Topology = info.Env.Topology
 }
 
 func (r *Reporter) populateSQLInfo(uptime int64, sql *diagnosticspb.SQLInstanceInfo) {
@@ -325,8 +320,7 @@ func (r *Reporter) collectSchemaInfo(ctx context.Context) ([]descpb.TableDescrip
 		if err := kv.ValueProto(&desc); err != nil {
 			return nil, errors.Wrapf(err, "%s: unable to unmarshal SQL descriptor", kv.Key)
 		}
-		t, _, _, _ := descpb.FromDescriptorWithMVCCTimestamp(&desc, kv.Value.Timestamp)
-		if t != nil && t.ID > keys.MaxReservedDescID {
+		if t := descpb.TableFromDescriptor(&desc, kv.Value.Timestamp); t != nil && t.ID > keys.MaxReservedDescID {
 			if err := reflectwalk.Walk(t, redactor); err != nil {
 				panic(err) // stringRedactor never returns a non-nil err
 			}
@@ -336,23 +330,6 @@ func (r *Reporter) collectSchemaInfo(ctx context.Context) ([]descpb.TableDescrip
 	return tables, nil
 }
 
-// buildReportingURL creates a URL to report diagnostics.
-// If an empty updates URL is set (via empty environment variable), returns nil.
-func (r *Reporter) buildReportingURL(report *diagnosticspb.DiagnosticReport) *url.URL {
-	clusterInfo := ClusterInfo{
-		ClusterID:  r.ClusterID(),
-		TenantID:   r.TenantID,
-		IsInsecure: r.Config.Insecure,
-		IsInternal: sql.ClusterIsInternal(&r.Settings.SV),
-	}
-
-	url := reportingURL
-	if r.TestingKnobs != nil && r.TestingKnobs.OverrideReportingURL != nil {
-		url = *r.TestingKnobs.OverrideReportingURL
-	}
-	return addInfoToURL(url, &clusterInfo, &report.Env, report.Node.NodeID, &report.SQL)
-}
-
 func getLicenseType(ctx context.Context, settings *cluster.Settings) string {
 	licenseType, err := base.LicenseType(settings)
 	if err != nil {
@@ -360,6 +337,42 @@ func getLicenseType(ctx context.Context, settings *cluster.Settings) string {
 		return ""
 	}
 	return licenseType
+}
+
+// populateHardwareInfo populates OS, CPU, memory, etc. information about the
+// environment in which CRDB is running.
+func populateHardwareInfo(ctx context.Context, e *diagnosticspb.Environment) {
+	if platform, family, version, err := host.PlatformInformation(); err == nil {
+		e.Os.Family = family
+		e.Os.Platform = platform
+		e.Os.Version = version
+	}
+
+	if virt, role, err := host.Virtualization(); err == nil && role == "guest" {
+		e.Hardware.Virtualization = virt
+	}
+
+	if m, err := mem.VirtualMemory(); err == nil {
+		e.Hardware.Mem.Available = m.Available
+		e.Hardware.Mem.Total = m.Total
+	}
+
+	e.Hardware.Cpu.Numcpu = int32(runtime.NumCPU())
+	if cpus, err := cpu.InfoWithContext(ctx); err == nil && len(cpus) > 0 {
+		e.Hardware.Cpu.Sockets = int32(len(cpus))
+		c := cpus[0]
+		e.Hardware.Cpu.Cores = c.Cores
+		e.Hardware.Cpu.Model = c.ModelName
+		e.Hardware.Cpu.Mhz = float32(c.Mhz)
+		e.Hardware.Cpu.Features = c.Flags
+	}
+
+	if l, err := load.AvgWithContext(ctx); err == nil {
+		e.Hardware.Loadavg15 = float32(l.Load15)
+	}
+
+	e.Hardware.Provider, e.Hardware.InstanceClass = cloudinfo.GetInstanceClass(ctx)
+	e.Topology.Provider, e.Topology.Region = cloudinfo.GetInstanceRegion(ctx)
 }
 
 func anonymizeZoneConfig(dst *zonepb.ZoneConfig, src zonepb.ZoneConfig, secret string) {
@@ -376,7 +389,6 @@ func anonymizeZoneConfig(dst *zonepb.ZoneConfig, src zonepb.ZoneConfig, secret s
 		dst.NumReplicas = proto.Int32(*src.NumReplicas)
 	}
 	dst.Constraints = make([]zonepb.ConstraintsConjunction, len(src.Constraints))
-	dst.InheritedConstraints = src.InheritedConstraints
 	for i := range src.Constraints {
 		dst.Constraints[i].NumReplicas = src.Constraints[i].NumReplicas
 		dst.Constraints[i].Constraints = make([]zonepb.Constraint, len(src.Constraints[i].Constraints))
@@ -390,23 +402,7 @@ func anonymizeZoneConfig(dst *zonepb.ZoneConfig, src zonepb.ZoneConfig, secret s
 			}
 		}
 	}
-	dst.VoterConstraints = make([]zonepb.ConstraintsConjunction, len(src.VoterConstraints))
-	dst.NullVoterConstraintsIsEmpty = src.NullVoterConstraintsIsEmpty
-	for i := range src.VoterConstraints {
-		dst.VoterConstraints[i].NumReplicas = src.VoterConstraints[i].NumReplicas
-		dst.VoterConstraints[i].Constraints = make([]zonepb.Constraint, len(src.VoterConstraints[i].Constraints))
-		for j := range src.VoterConstraints[i].Constraints {
-			dst.VoterConstraints[i].Constraints[j].Type = src.VoterConstraints[i].Constraints[j].Type
-			if key := src.VoterConstraints[i].Constraints[j].Key; key != "" {
-				dst.VoterConstraints[i].Constraints[j].Key = sql.HashForReporting(secret, key)
-			}
-			if val := src.VoterConstraints[i].Constraints[j].Value; val != "" {
-				dst.VoterConstraints[i].Constraints[j].Value = sql.HashForReporting(secret, val)
-			}
-		}
-	}
 	dst.LeasePreferences = make([]zonepb.LeasePreference, len(src.LeasePreferences))
-	dst.InheritedLeasePreferences = src.InheritedLeasePreferences
 	for i := range src.LeasePreferences {
 		dst.LeasePreferences[i].Constraints = make([]zonepb.Constraint, len(src.LeasePreferences[i].Constraints))
 		for j := range src.LeasePreferences[i].Constraints {
@@ -434,4 +430,10 @@ func (stringRedactor) Primitive(v reflect.Value) error {
 		v.Set(reflect.ValueOf("_").Convert(v.Type()))
 	}
 	return nil
+}
+
+// randomly shift `d` to be up to `jitterSec` shorter or longer.
+func addJitter(d time.Duration, jitterSec int) time.Duration {
+	j := time.Duration(rand.Intn(jitterSec*2)-jitterSec) * time.Second
+	return d + j
 }

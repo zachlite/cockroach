@@ -44,7 +44,7 @@ func TestManagerWithEmbedded(t *testing.T) {
 		t.Errorf("expected %d client certs, found %d", e, a)
 	}
 
-	if _, ok := clientCerts[security.RootUserName()]; !ok {
+	if _, ok := clientCerts[security.RootUser]; !ok {
 		t.Error("no client cert for root user found")
 	}
 
@@ -52,21 +52,19 @@ func TestManagerWithEmbedded(t *testing.T) {
 	if _, err := cm.GetServerTLSConfig(); err != nil {
 		t.Error(err)
 	}
-	if _, err := cm.GetClientTLSConfig(security.NodeUserName()); err != nil {
+	if _, err := cm.GetClientTLSConfig(security.NodeUser); err != nil {
 		t.Error(err)
 	}
-	if _, err := cm.GetClientTLSConfig(security.RootUserName()); err != nil {
+	if _, err := cm.GetClientTLSConfig(security.RootUser); err != nil {
 		t.Error(err)
 	}
-	if _, err := cm.GetClientTLSConfig(security.TestUserName()); err != nil {
+	if _, err := cm.GetClientTLSConfig("testuser"); err != nil {
 		t.Error(err)
 	}
-	if _, err := cm.GetClientTLSConfig(
-		security.MakeSQLUsernameFromPreNormalizedString("testuser2")); err != nil {
+	if _, err := cm.GetClientTLSConfig("testuser2"); err != nil {
 		t.Error(err)
 	}
-	if _, err := cm.GetClientTLSConfig(
-		security.MakeSQLUsernameFromPreNormalizedString("my-random-user")); err == nil {
+	if _, err := cm.GetClientTLSConfig("my-random-user"); err == nil {
 		t.Error("unexpected success")
 	}
 }
@@ -96,7 +94,7 @@ func TestManagerWithPrincipalMap(t *testing.T) {
 		certsDir, caKey, testKeySize, time.Hour*96, true, true,
 	))
 	require.NoError(t, security.CreateClientPair(
-		certsDir, caKey, testKeySize, time.Hour*48, true, security.TestUserName(), false,
+		certsDir, caKey, testKeySize, time.Hour*48, true, "testuser", false,
 	))
 	require.NoError(t, security.CreateNodePair(
 		certsDir, caKey, testKeySize, time.Hour*48, true, []string{"127.0.0.1", "foo"},
@@ -109,7 +107,7 @@ func TestManagerWithPrincipalMap(t *testing.T) {
 		_, err := security.NewCertificateManager(certsDir, security.CommandTLSSettings{})
 		return err
 	}
-	loadUserCert := func(user security.SQLUsername) error {
+	loadUserCert := func(user string) error {
 		cm, err := security.NewCertificateManager(certsDir, security.CommandTLSSettings{})
 		if err != nil {
 			return err
@@ -135,7 +133,7 @@ func TestManagerWithPrincipalMap(t *testing.T) {
 	// Mapping the "testuser" principal to a different name should result in an
 	// error as it no longer matches the file name.
 	setCertPrincipalMap("testuser:foo,node.crdb.io:node")
-	require.Regexp(t, `client certificate has principals \["foo"\], expected "testuser"`, loadUserCert(security.TestUserName()))
+	require.Regexp(t, `client certificate has principals \["foo"\], expected "testuser"`, loadUserCert("testuser"))
 
 	// Renaming "client.testuser.crt" to "client.foo.crt" allows us to load it
 	// under that name.
@@ -144,5 +142,5 @@ func TestManagerWithPrincipalMap(t *testing.T) {
 	require.NoError(t, os.Rename(filepath.Join(certsDir, "client.testuser.key"),
 		filepath.Join(certsDir, "client.foo.key")))
 	setCertPrincipalMap("testuser:foo,node.crdb.io:node")
-	require.NoError(t, loadUserCert(security.MakeSQLUsernameFromPreNormalizedString("foo")))
+	require.NoError(t, loadUserCert("foo"))
 }

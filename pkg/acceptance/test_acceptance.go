@@ -51,7 +51,13 @@ func RunTests(m *testing.M) int {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt)
 		<-sig
-		stopper.Stop(ctx)
+		select {
+		case <-stopper.ShouldStop():
+		default:
+			// There is a very tiny race here: the cluster might be closing
+			// the stopper simultaneously.
+			stopper.Stop(ctx)
+		}
 	}()
 	return m.Run()
 }

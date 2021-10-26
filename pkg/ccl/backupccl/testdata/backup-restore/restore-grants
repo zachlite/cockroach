@@ -49,7 +49,7 @@ CREATE TABLE testdb.testtable_greeting_owner (a testdb.greeting_owner);
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR user1;
 ----
-testdb user1 ALL
+testdb public user1 ALL
 
 query-sql
 SHOW GRANTS ON SCHEMA public FOR user1;
@@ -74,7 +74,7 @@ SHOW GRANTS ON TABLE testdb.testtable_simple FOR user1;
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR testuser;
 ----
-testdb testuser ALL
+testdb public testuser ALL
 
 query-sql
 SHOW GRANTS ON SCHEMA public FOR testuser;
@@ -153,9 +153,9 @@ RESTORE testdb.sc.othertable, testdb.testtable_greeting_usage FROM 'nodelocal://
 query-sql
 SHOW GRANTS ON DATABASE testuser_db;
 ----
-testuser_db admin ALL
-testuser_db root ALL
-testuser_db testuser CREATE
+testuser_db public admin ALL
+testuser_db public root ALL
+testuser_db public testuser CREATE
 
 query-sql
 SHOW GRANTS ON SCHEMA public;
@@ -177,14 +177,14 @@ SHOW GRANTS ON testuser_db.sc.othertable
 ----
 testuser_db sc othertable admin ALL
 testuser_db sc othertable root ALL
-testuser_db sc othertable testuser ALL
+testuser_db sc othertable testuser CREATE
 
 query-sql
 SHOW GRANTS ON testuser_db.testtable_greeting_usage
 ----
 testuser_db public testtable_greeting_usage admin ALL
 testuser_db public testtable_greeting_usage root ALL
-testuser_db public testtable_greeting_usage testuser ALL
+testuser_db public testtable_greeting_usage testuser CREATE
 
 # testuser should be owner, and therefore have SELECT privs too.
 exec-sql user=testuser
@@ -291,17 +291,25 @@ SHOW GRANTS ON testdb.sc.othertable FOR testuser;
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR admin;
 ----
-testdb admin ALL
+testdb public admin ALL
+
+exec-sql
+USE testdb;
+----
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.public FOR admin;
+SHOW GRANTS ON SCHEMA public FOR admin;
 ----
 testdb public admin ALL
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.sc FOR admin;
+SHOW GRANTS ON SCHEMA sc FOR admin;
 ----
 testdb sc admin ALL
+
+exec-sql
+USE defaultdb;
+----
 
 query-sql
 SHOW GRANTS ON TABLE testdb.testtable_simple FOR admin;
@@ -382,17 +390,25 @@ SHOW GRANTS ON testdb.sc.othertable FOR testuser;
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR admin;
 ----
-testdb admin ALL
+testdb public admin ALL
+
+exec-sql
+USE testdb;
+----
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.public FOR admin;
+SHOW GRANTS ON SCHEMA public FOR admin;
 ----
 testdb public admin ALL
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.sc FOR admin;
+SHOW GRANTS ON SCHEMA sc FOR admin;
 ----
 testdb sc admin ALL
+
+exec-sql
+USE defaultdb;
+----
 
 query-sql
 SHOW GRANTS ON TABLE testdb.testtable_simple FOR admin;
@@ -428,17 +444,25 @@ RESTORE FROM 'nodelocal://0/test/';
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR user1;
 ----
-testdb user1 ALL
+testdb public user1 ALL
+
+exec-sql
+USE testdb;
+----
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.public FOR user1;
+SHOW GRANTS ON SCHEMA public FOR user1;
 ----
 testdb public user1 ALL
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.sc FOR user1;
+SHOW GRANTS ON SCHEMA sc FOR user1;
 ----
 testdb sc user1 USAGE
+
+exec-sql
+USE defaultdb;
+----
 
 query-sql
 SHOW GRANTS ON TABLE testdb.sc.othertable FOR user1;
@@ -453,15 +477,23 @@ SHOW GRANTS ON TABLE testdb.testtable_simple FOR user1;
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR testuser;
 ----
-testdb testuser ALL
+testdb public testuser ALL
+
+exec-sql
+USE testdb;
+----
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.public FOR testuser;
+SHOW GRANTS ON SCHEMA public FOR testuser;
 ----
 testdb public testuser ALL
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.sc FOR testuser;
+SHOW GRANTS ON SCHEMA sc FOR testuser;
+----
+
+exec-sql
+USE defaultdb;
 ----
 
 query-sql
@@ -491,17 +523,25 @@ ALTER TYPE testdb.greeting_owner ADD VALUE 'new' BEFORE 'howdy';
 query-sql
 SHOW GRANTS ON DATABASE testdb FOR admin;
 ----
-testdb admin ALL
+testdb public admin ALL
+
+exec-sql
+USE testdb;
+----
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.public FOR admin;
+SHOW GRANTS ON SCHEMA public FOR admin;
 ----
 testdb public admin ALL
 
 query-sql
-SHOW GRANTS ON SCHEMA testdb.sc FOR admin;
+SHOW GRANTS ON SCHEMA sc FOR admin;
 ----
 testdb sc admin ALL
+
+exec-sql
+USE defaultdb;
+----
 
 query-sql
 SHOW GRANTS ON TABLE testdb.testtable_simple FOR admin;

@@ -157,7 +157,7 @@ func (node *TransactionModes) Format(ctx *FmtCtx) {
 	if node.AsOf.Expr != nil {
 		ctx.WriteString(sep)
 		ctx.WriteString(" ")
-		ctx.FormatNode(&node.AsOf)
+		node.AsOf.Format(ctx)
 		sep = ","
 	}
 	if node.Deferrable != UnspecifiedDeferrableMode {
@@ -227,7 +227,7 @@ type BeginTransaction struct {
 // Format implements the NodeFormatter interface.
 func (node *BeginTransaction) Format(ctx *FmtCtx) {
 	ctx.WriteString("BEGIN TRANSACTION")
-	ctx.FormatNode(&node.Modes)
+	node.Modes.Format(ctx)
 }
 
 // CommitTransaction represents a COMMIT statement.
@@ -254,7 +254,7 @@ type Savepoint struct {
 // Format implements the NodeFormatter interface.
 func (node *Savepoint) Format(ctx *FmtCtx) {
 	ctx.WriteString("SAVEPOINT ")
-	ctx.FormatNode(&node.Name)
+	node.Name.Format(ctx)
 }
 
 // ReleaseSavepoint represents a RELEASE SAVEPOINT <name> statement.
@@ -265,7 +265,7 @@ type ReleaseSavepoint struct {
 // Format implements the NodeFormatter interface.
 func (node *ReleaseSavepoint) Format(ctx *FmtCtx) {
 	ctx.WriteString("RELEASE SAVEPOINT ")
-	ctx.FormatNode(&node.Savepoint)
+	node.Savepoint.Format(ctx)
 }
 
 // RollbackToSavepoint represents a ROLLBACK TO SAVEPOINT <name> statement.
@@ -276,5 +276,5 @@ type RollbackToSavepoint struct {
 // Format implements the NodeFormatter interface.
 func (node *RollbackToSavepoint) Format(ctx *FmtCtx) {
 	ctx.WriteString("ROLLBACK TRANSACTION TO SAVEPOINT ")
-	ctx.FormatNode(&node.Savepoint)
+	node.Savepoint.Format(ctx)
 }

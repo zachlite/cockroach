@@ -13,7 +13,6 @@ package debug
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -23,18 +22,15 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
-	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // regexpAsString wraps a *regexp.Regexp for better printing and
 // JSON unmarshaling.
 type regexpAsString struct {
 	re *regexp.Regexp
+	i  int64 // optional, populated if the regexp is an integer to match on goroutine ID
 }
 
 func (r regexpAsString) String() string {
@@ -48,6 +44,11 @@ func (r *regexpAsString) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
 		return err
+	}
+	if i, err := strconv.ParseInt(s, 10, 64); err != nil {
+		// Ignore.
+	} else {
+		r.i = i
 	}
 	var err error
 	(*r).re, err = regexp.Compile(s)
@@ -92,10 +93,9 @@ const (
 )
 
 type logSpyOptions struct {
-	Count          intAsString
-	Grep           regexpAsString
-	Flatten        intAsString
-	vmoduleOptions `json:",inline"`
+	Count    intAsString
+	Duration durationAsString
+	Grep     regexpAsString
 }
 
 func logSpyOptionsFromValues(values url.Values) (logSpyOptions, error) {
@@ -113,16 +113,19 @@ func logSpyOptionsFromValues(values url.Values) (logSpyOptions, error) {
 	if err := json.Unmarshal(data, &opts); err != nil {
 		return logSpyOptions{}, err
 	}
+	if opts.Duration == 0 {
+		opts.Duration = logSpyDefaultDuration
+	}
+
 	if opts.Count == 0 {
 		opts.Count = logSpyDefaultCount
 	}
-	opts.vmoduleOptions.setDefaults(values)
 	return opts, nil
 }
 
 type logSpy struct {
-	vsrv         *vmoduleServer
-	setIntercept func(ctx context.Context, f log.Interceptor) func()
+	active       int32 // updated atomically between 0 and 1
+	setIntercept func(ctx context.Context, f log.InterceptorFn)
 }
 
 func (spy *logSpy) handleDebugLogSpy(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +134,12 @@ func (spy *logSpy) handleDebugLogSpy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "while parsing options: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	if swapped := atomic.CompareAndSwapInt32(&spy.active, 0, 1); !swapped {
+		http.Error(w, "a log interception is already in progress", http.StatusInternalServerError)
+		return
+	}
+	defer atomic.StoreInt32(&spy.active, 0)
 
 	w.Header().Add("Content-type", "text/plain; charset=UTF-8")
 	ctx := r.Context()
@@ -144,82 +153,76 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(opts.Duration))
 	defer cancel()
 
-	// Note that in the code below, the channel in interceptor.jsonEntries
-	// is never closed. This is because we don't know when that is
-	// safe. This is sketchy in general but OK here since we don't have
-	// to guarantee that the channel is fully consumed.
-	interceptor := newLogSpyInterceptor(opts)
-
+	var countDropped int32
 	defer func() {
-		if dropped := atomic.LoadInt32(&interceptor.countDropped); dropped > 0 {
-			entry := log.MakeLegacyEntry(
-				ctx, severity.WARNING, channel.DEV,
-				0 /* depth */, true, /* redactable */
-				"%d messages were dropped", log.Safe(dropped))
-			err = errors.CombineErrors(err, interceptor.outputEntry(w, entry))
+		if err == nil {
+			if dropped := atomic.LoadInt32(&countDropped); dropped > 0 {
+				entry := log.MakeEntry(
+					ctx, log.Severity_WARNING, nil /* LogCounter */, 0 /* depth */, false, /* redactable */
+					"%d messages were dropped", log.Safe(dropped))
+				err = entry.Format(w) // modify return value
+			}
 		}
 	}()
 
-	cleanup := spy.setIntercept(ctx, interceptor)
-	defer cleanup()
+	// Note that in the code below, this channel is never closed. This is
+	// because we don't know when that is safe. This is sketchy in general but
+	// OK here since we don't have to guarantee that the channel is fully
+	// consumed.
+	entries := make(chan log.Entry, logSpyChanCap)
 
-	// This log message will be served through the interceptor
-	// AND it is also reported in other log sinks, so that
-	// administrators know the logspy was used.
-	log.Infof(ctx, "intercepting logs with options: %+v", opts)
-
-	// Set up the temporary vmodule config, if requested.
-	prevVModule := log.GetVModule()
-	if opts.hasVModule {
-		if err := spy.vsrv.lockVModule(ctx); err != nil {
-			fmt.Fprintf(w, "error: %v", err)
-			return err
-		}
-
-		log.Infof(ctx, "previous vmodule configuration: %s", prevVModule)
-		// Install the new configuration.
-		if err := log.SetVModule(opts.VModule); err != nil {
-			fmt.Fprintf(w, "error: %v", err)
-			return err
-		}
-		log.Infof(ctx, "new vmodule configuration (previous will be restored when logspy session completes): %s", redact.SafeString(opts.VModule))
-		defer func() {
-			// Restore the configuration.
-			err := log.SetVModule(prevVModule)
-
-			// Report the change in logs.
-			log.Infof(ctx, "restoring vmodule configuration (%q): %v", redact.SafeString(prevVModule), err)
-			spy.vsrv.unlockVModule(ctx)
-		}()
-	} else {
-		log.Infof(ctx, "current vmodule setting: %s", redact.SafeString(prevVModule))
+	{
+		entry := log.MakeEntry(
+			ctx, log.Severity_INFO, nil /* LogCounter */, 0 /* depth */, false, /* redactable */
+			"intercepting logs with options %+v", opts)
+		entries <- entry
 	}
+
+	spy.setIntercept(ctx, func(entry log.Entry) {
+		if re := opts.Grep.re; re != nil {
+			switch {
+			case re.MatchString(entry.Tags):
+			case re.MatchString(entry.Message):
+			case re.MatchString(entry.File):
+			case opts.Grep.i != 0 && opts.Grep.i == entry.Goroutine:
+			default:
+				return
+			}
+		}
+
+		select {
+		case entries <- entry:
+		default:
+			// Consumer fell behind, just drop the message.
+			atomic.AddInt32(&countDropped, 1)
+		}
+	})
+
+	defer spy.setIntercept(ctx, nil)
 
 	const flushInterval = time.Second
 	var flushTimer timeutil.Timer
 	defer flushTimer.Stop()
 	flushTimer.Reset(flushInterval)
 
-	numReportedEntries := 0
+	var count intAsString
+	var done <-chan struct{} // set later; helps always send header message
 	for {
 		select {
-		case <-ctx.Done():
-			err := ctx.Err()
-			if errors.Is(err, context.DeadlineExceeded) {
-				// Common case: timeout after the configured duration.
+		case <-done:
+
+			return
+		case entry := <-entries:
+			if err := entry.Format(w); err != nil {
+				return errors.Wrapf(err, "while writing entry %v", entry)
+			}
+			count++
+			if count >= opts.Count {
 				return nil
 			}
-			return err
-
-		case jsonEntry := <-interceptor.jsonEntries:
-			if err := interceptor.outputJSONEntry(w, jsonEntry); err != nil {
-				return errors.Wrapf(err, "while writing entry %s", jsonEntry)
+			if done == nil {
+				done = ctx.Done()
 			}
-			numReportedEntries++
-			if numReportedEntries >= int(opts.Count) {
-				return nil
-			}
-
 		case <-flushTimer.C:
 			flushTimer.Read = true
 			flushTimer.Reset(flushInterval)
@@ -228,60 +231,4 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 			}
 		}
 	}
-}
-
-type logSpyInterceptor struct {
-	opts         logSpyOptions
-	countDropped int32
-	jsonEntries  chan []byte
-}
-
-func newLogSpyInterceptor(opts logSpyOptions) *logSpyInterceptor {
-	return &logSpyInterceptor{
-		opts:        opts,
-		jsonEntries: make(chan []byte, logSpyChanCap),
-	}
-}
-
-func (i *logSpyInterceptor) Intercept(jsonEntry []byte) {
-	if re := i.opts.Grep.re; re != nil {
-		switch {
-		case re.Match(jsonEntry):
-		default:
-			return
-		}
-	}
-
-	// The log.Interceptor interface requires us to copy the buffer
-	// before we can send it to a different goroutine.
-	jsonCopy := make([]byte, len(jsonEntry))
-	copy(jsonCopy, jsonEntry)
-
-	select {
-	case i.jsonEntries <- jsonCopy:
-	default:
-		// Consumer fell behind, just drop the message.
-		atomic.AddInt32(&i.countDropped, 1)
-	}
-}
-
-func (i *logSpyInterceptor) outputEntry(w io.Writer, entry logpb.Entry) error {
-	if i.opts.Flatten > 0 {
-		return log.FormatLegacyEntry(entry, w)
-	}
-	j, _ := json.Marshal(entry)
-	return i.outputJSONEntry(w, j)
-}
-
-func (i *logSpyInterceptor) outputJSONEntry(w io.Writer, jsonEntry []byte) error {
-	if i.opts.Flatten == 0 {
-		_, err1 := w.Write(jsonEntry)
-		_, err2 := w.Write([]byte("\n"))
-		return errors.CombineErrors(err1, err2)
-	}
-	var legacyEntry logpb.Entry
-	if err := json.Unmarshal(jsonEntry, &legacyEntry); err != nil {
-		return errors.NewAssertionErrorWithWrappedErrf(err, "interceptor API does not seem to provide valid Entry payloads")
-	}
-	return i.outputEntry(w, legacyEntry)
 }

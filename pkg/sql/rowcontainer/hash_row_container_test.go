@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -37,7 +36,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
-	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, _, err := storage.NewTempEngine(ctx, storage.DefaultStorageEngine, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,17 +64,17 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 
 	const numRows = 10
 	const numCols = 1
-	rows := randgen.MakeIntRows(numRows, numCols)
+	rows := rowenc.MakeIntRows(numRows, numCols)
 	storedEqColumns := columns{0}
-	typs := types.OneIntCol
+	types := rowenc.OneIntCol
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(nil, &evalCtx, memoryMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			false, /* shouldMark */
-			typs,
+			types,
 			storedEqColumns,
 			true, /*encodeNull */
 		)
@@ -216,7 +215,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
+				rowenc.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -241,7 +240,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
+				rowenc.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -291,7 +290,7 @@ func TestHashDiskBackedRowContainer(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cmp, err := compareRows(
-				types.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
+				rowenc.OneIntCol, row, rows[counter], &evalCtx, &rowenc.DatumAlloc{}, ordering,
 			); err != nil {
 				t.Fatal(err)
 			} else if cmp != 0 {
@@ -322,7 +321,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
-	tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, _, err := storage.NewTempEngine(ctx, storage.DefaultStorageEngine, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,13 +350,13 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 	const numRowsInBucket = 4
 	const numRows = 12
 	const numCols = 2
-	rows := randgen.MakeRepeatedIntRows(numRowsInBucket, numRows, numCols)
+	rows := rowenc.MakeRepeatedIntRows(numRowsInBucket, numRows, numCols)
 	storedEqColumns := columns{0}
 	types := []*types.T{types.Int, types.Int}
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	getRowContainer := func() *HashDiskBackedRowContainer {
-		rc := NewHashDiskBackedRowContainer(&evalCtx, memoryMonitor, diskMonitor, tempEngine)
+		rc := NewHashDiskBackedRowContainer(nil, &evalCtx, memoryMonitor, diskMonitor, tempEngine)
 		err = rc.Init(
 			ctx,
 			true, /* shouldMark */
@@ -464,7 +463,7 @@ func TestHashDiskBackedRowContainerPreservesMatchesAndMarks(t *testing.T) {
 				} else if !ok {
 					break
 				}
-				if err := i.Mark(ctx); err != nil {
+				if err := i.Mark(ctx, true); err != nil {
 					t.Fatal(err)
 				}
 			}

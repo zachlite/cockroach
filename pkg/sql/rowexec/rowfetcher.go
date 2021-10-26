@@ -18,23 +18,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
-	"github.com/cockroachdb/errors"
 )
 
-// rowFetcher is an interface used to abstract a row.Fetcher so that a stat
+// rowFetcher is an interface used to abstract a row fetcher so that a stat
 // collector wrapper can be plugged in.
 type rowFetcher interface {
 	StartScan(
-		_ context.Context, _ *kv.Txn, _ roachpb.Spans, batchBytesLimit rowinfra.BytesLimit,
-		rowLimitHint rowinfra.RowLimit, traceKV bool, forceProductionKVBatchSize bool,
+		_ context.Context, _ *kv.Txn, _ roachpb.Spans, limitBatches bool, limitHint int64, traceKV bool,
 	) error
 	StartInconsistentScan(
 		_ context.Context,
@@ -42,14 +40,13 @@ type rowFetcher interface {
 		initialTimestamp hlc.Timestamp,
 		maxTimestampAge time.Duration,
 		spans roachpb.Spans,
-		batchBytesLimit rowinfra.BytesLimit,
-		rowLimitHint rowinfra.RowLimit,
+		limitBatches bool,
+		limitHint int64,
 		traceKV bool,
-		forceProductionKVBatchSize bool,
 	) error
 
 	NextRow(ctx context.Context) (
-		rowenc.EncDatumRow, catalog.TableDescriptor, catalog.Index, error)
+		rowenc.EncDatumRow, catalog.TableDescriptor, *descpb.IndexDescriptor, error)
 
 	// PartialKey is not stat-related but needs to be supported.
 	PartialKey(int) (roachpb.Key, error)
@@ -64,9 +61,9 @@ type rowFetcher interface {
 func initRowFetcher(
 	flowCtx *execinfra.FlowCtx,
 	fetcher *row.Fetcher,
-	desc catalog.TableDescriptor,
+	desc *tabledesc.Immutable,
 	indexIdx int,
-	colIdxMap catalog.TableColMap,
+	colIdxMap map[descpb.ColumnID]int,
 	reverseScan bool,
 	valNeededForCol util.FastIntSet,
 	isCheck bool,
@@ -75,23 +72,28 @@ func initRowFetcher(
 	scanVisibility execinfrapb.ScanVisibility,
 	lockStrength descpb.ScanLockingStrength,
 	lockWaitPolicy descpb.ScanLockingWaitPolicy,
-	withSystemColumns bool,
-	virtualColumn catalog.Column,
-) (index catalog.Index, isSecondaryIndex bool, err error) {
-	if indexIdx >= len(desc.ActiveIndexes()) {
-		return nil, false, errors.Errorf("invalid indexIdx %d", indexIdx)
+	systemColumns []descpb.ColumnDescriptor,
+) (index *descpb.IndexDescriptor, isSecondaryIndex bool, err error) {
+	index, isSecondaryIndex, err = desc.FindIndexByIndexIdx(indexIdx)
+	if err != nil {
+		return nil, false, err
 	}
-	index = desc.ActiveIndexes()[indexIdx]
-	isSecondaryIndex = !index.Primary()
 
+	cols := desc.Columns
+	if scanVisibility == execinfra.ScanVisibilityPublicAndNotPublic {
+		cols = desc.ReadableColumns
+	}
+	// Add on any requested system columns. We slice cols to avoid modifying
+	// the underlying table descriptor.
+	cols = append(cols[:len(cols):len(cols)], systemColumns...)
 	tableArgs := row.FetcherTableArgs{
 		Desc:             desc,
 		Index:            index,
 		ColIdxMap:        colIdxMap,
 		IsSecondaryIndex: isSecondaryIndex,
+		Cols:             cols,
 		ValNeededForCol:  valNeededForCol,
 	}
-	tableArgs.InitCols(desc, scanVisibility, withSystemColumns, virtualColumn)
 
 	if err := fetcher.Init(
 		flowCtx.EvalCtx.Context,
@@ -99,7 +101,6 @@ func initRowFetcher(
 		reverseScan,
 		lockStrength,
 		lockWaitPolicy,
-		flowCtx.EvalCtx.SessionData().LockTimeout,
 		isCheck,
 		alloc,
 		mon,

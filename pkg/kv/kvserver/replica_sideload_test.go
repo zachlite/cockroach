@@ -16,6 +16,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
@@ -33,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -40,9 +43,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 	"github.com/kr/pretty"
-	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"golang.org/x/time/rate"
 )
@@ -86,42 +87,44 @@ func TestSideloadingSideloadedStorage(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	t.Run("Mem", func(t *testing.T) {
-		eng := storage.NewDefaultInMemForTesting()
-		defer eng.Close()
-		testSideloadingSideloadedStorage(t, eng)
+		testSideloadingSideloadedStorage(t, newInMemSideloadStorage)
 	})
 	t.Run("Disk", func(t *testing.T) {
-		cleanup, eng := newOnDiskEngine(t)
-		defer cleanup()
-		defer eng.Close()
-		testSideloadingSideloadedStorage(t, eng)
+		maker := func(
+			s *cluster.Settings, rangeID roachpb.RangeID, rep roachpb.ReplicaID, name string, eng storage.Engine,
+		) (SideloadStorage, error) {
+			return newDiskSideloadStorage(s, rangeID, rep, name, rate.NewLimiter(rate.Inf, math.MaxInt64), eng)
+		}
+		testSideloadingSideloadedStorage(t, maker)
 	})
 }
 
-func newTestingSideloadStorage(t *testing.T, eng storage.Engine) *diskSideloadStorage {
-	st := cluster.MakeTestingClusterSettings()
-	ss, err := newDiskSideloadStorage(
-		st, 1, 2, filepath.Join(eng.GetAuxiliaryDir(), "fake", "testing", "dir"),
-		rate.NewLimiter(rate.Inf, math.MaxInt64), eng,
-	)
-	require.NoError(t, err)
-	return ss
-}
+func testSideloadingSideloadedStorage(
+	t *testing.T,
+	maker func(*cluster.Settings, roachpb.RangeID, roachpb.ReplicaID, string, storage.Engine) (SideloadStorage, error),
+) {
+	dir, cleanup := testutils.TempDir(t)
+	defer cleanup()
 
-func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 	ctx := context.Background()
-	ss := newTestingSideloadStorage(t, eng)
+	st := cluster.MakeTestingClusterSettings()
+
+	cleanup, eng := newEngine(t)
+	defer cleanup()
+	defer eng.Close()
+
+	ss, err := maker(st, 1, 2, dir, eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, isInMem := ss.(*inMemSideloadStorage) // some things don't make sense for inMem
 
 	assertCreated := func(isCreated bool) {
-		t.Helper()
-		if is := ss.dirCreated; is != isCreated {
-			t.Fatalf("assertion failed: expected dirCreated=%t, got %t", isCreated, is)
+		if isInMem {
+			return
 		}
-		_, err := ss.eng.Stat(ss.dir)
-		if !ss.dirCreated {
-			require.True(t, oserror.IsNotExist(err), "%v", err)
-		} else {
-			require.NoError(t, err)
+		if is := ss.(*diskSideloadStorage).dirCreated; is != isCreated {
+			t.Fatalf("assertion failed: expected dirCreated=%t, got %t", isCreated, is)
 		}
 	}
 
@@ -173,7 +176,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		{
 			err: errSideloadedFileNotFound,
 			fun: func() error {
-				_, err := ss.Get(ctx, 123, 456)
+				_, err = ss.Get(ctx, 123, 456)
 				return err
 			},
 		},
@@ -194,7 +197,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		{
 			err: nil,
 			fun: func() error {
-				_, err := ss.Filename(ctx, 123, 456)
+				_, err = ss.Filename(ctx, 123, 456)
 				return err
 			},
 		},
@@ -228,6 +231,17 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 		}
 	}
 
+	// Just for fun, recreate the original storage (unless it's the in-memory
+	// one), which shouldn't change anything about its state.
+	if !isInMem {
+		var err error
+		ss, err = maker(st, 1, 2, dir, eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCreated(false)
+	}
+
 	// Just a sanity check that for the overlapping terms, we see both entries.
 	for _, term := range []uint64{lowTerm, highTerm} {
 		index := payloads[0] // exists at both lowTerm and highTerm
@@ -237,7 +251,7 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 			t.Fatalf("got %q, wanted %q", c, exp)
 		}
 	}
-	assertCreated(true)
+	assertCreated(false) // Get() doesn't recreated nor check
 
 	for n := range payloads {
 		// Truncate indexes <= payloads[n] (payloads is sorted in increasing order).
@@ -262,58 +276,81 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 	}
 
 	func() {
+		if isInMem {
+			return
+		}
 		// First add a file that shouldn't be in the sideloaded storage to ensure
 		// sane behavior when directory can't be removed after full truncate.
-		nonRemovableFile := filepath.Join(ss.Dir(), "cantremove.xx")
+		nonRemovableFile := filepath.Join(ss.(*diskSideloadStorage).dir, "cantremove.xx")
 		f, err := eng.Create(nonRemovableFile)
 		if err != nil {
 			t.Fatalf("could not create non i*.t* file in sideloaded storage: %+v", err)
 		}
-		// We have to close the file right away, otherwise (at least with in-mem pebble)
-		// we will be prevented from removing it below.
-		require.NoError(t, f.Close())
+		defer f.Close()
 
 		_, _, err = ss.TruncateTo(ctx, math.MaxUint64)
-		// The sideloaded storage should not error out here; removing files
-		// is optional. But the file should still be there!
-		require.NoError(t, err)
-		{
-			_, err := eng.Stat(nonRemovableFile)
-			require.NoError(t, err)
+		if err == nil {
+			t.Fatalf("sideloaded directory should not have been removable due to extra file %s", nonRemovableFile)
+		}
+		if !strings.HasSuffix(strings.ToLower(err.Error()), "directory not empty") {
+			t.Fatalf("error truncating sideloaded storage: %+v", err)
+		}
+		// Now remove extra file and let truncation proceed to remove directory.
+		err = eng.Remove(nonRemovableFile)
+		if err != nil {
+			t.Fatalf("could not remove %s: %+v", nonRemovableFile, err)
 		}
 
-		// Now remove extra file and let truncation proceed to remove directory.
-		require.NoError(t, eng.Remove(nonRemovableFile))
-
 		// Test that directory is removed when filepath.Glob returns 0 matches.
-		_, _, err = ss.TruncateTo(ctx, math.MaxUint64)
-		require.NoError(t, err)
+		if _, _, err := ss.TruncateTo(ctx, math.MaxUint64); err != nil {
+			t.Fatal(err)
+		}
 		// Ensure directory is removed, now that all files should be gone.
-		_, err = eng.Stat(ss.Dir())
-		require.True(t, oserror.IsNotExist(err), "%v", err)
+		_, err = eng.Stat(ss.(*diskSideloadStorage).dir)
+		if err == nil {
+			t.Fatalf("expected %q to be removed after truncating full range", ss.(*diskSideloadStorage).dir)
+		}
+		if err != nil {
+			if !os.IsNotExist(err) {
+				t.Fatalf("expected %q to be removed: %+v", ss.(*diskSideloadStorage).dir, err)
+			}
+		}
 
 		// Repopulate with some random indexes to test deletion when there are a
 		// non-zero number of filepath.Glob matches.
 		payloads := []uint64{3, 5, 7, 9, 10}
 		for n := range rand.Perm(len(payloads)) {
 			i := payloads[n]
-			require.NoError(t, ss.Put(ctx, i, highTerm, file(i*highTerm)))
+			if err := ss.Put(ctx, i, highTerm, file(i*highTerm)); err != nil {
+				t.Fatalf("%d: %+v", i, err)
+			}
 		}
 		assertCreated(true)
-		_, _, err = ss.TruncateTo(ctx, math.MaxUint64)
-		require.NoError(t, err)
+		if _, _, err := ss.TruncateTo(ctx, math.MaxUint64); err != nil {
+			t.Fatal(err)
+		}
 		// Ensure directory is removed when all records are removed.
-		_, err = eng.Stat(ss.Dir())
-		require.True(t, oserror.IsNotExist(err), "%v", err)
+		_, err = eng.Stat(ss.(*diskSideloadStorage).dir)
+		if err == nil {
+			t.Fatalf("expected %q to be removed after truncating full range", ss.(*diskSideloadStorage).dir)
+		}
+		if err != nil {
+			if !os.IsNotExist(err) {
+				t.Fatalf("expected %q to be removed: %+v", ss.(*diskSideloadStorage).dir, err)
+			}
+		}
 	}()
 
-	require.NoError(t, ss.Clear(ctx))
+	if err := ss.Clear(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	assertCreated(false)
 
 	// Sanity check that we can call TruncateTo without the directory existing.
-	_, _, err := ss.TruncateTo(ctx, 1)
-	require.NoError(t, err)
+	if _, _, err := ss.TruncateTo(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
 
 	assertCreated(false)
 
@@ -324,7 +361,9 @@ func testSideloadingSideloadedStorage(t *testing.T, eng storage.Engine) {
 			continue
 		}
 		payload := []byte(strings.Repeat("x", 1+int(index)))
-		require.NoError(t, ss.Put(ctx, index, 10, payload))
+		if err := ss.Put(ctx, index, 10, payload); err != nil {
+			t.Fatalf("%d: %+v", index, err)
+		}
 	}
 
 	// Term too high and too low, respectively. Shouldn't delete anything.
@@ -414,14 +453,11 @@ func TestRaftSSTableSideloadingInline(t *testing.T) {
 	}
 
 	runOne := func(k string, test testCase) {
-		ctx, collect, cancel := tracing.ContextWithRecordingSpan(
-			context.Background(), tracing.NewTracer(), "test-recording")
+		ctx, collect, cancel := tracing.ContextWithRecordingSpan(context.Background(), "test-recording")
 		defer cancel()
 
-		eng := storage.NewDefaultInMemForTesting()
-		defer eng.Close()
-		ss := newTestingSideloadStorage(t, eng)
 		ec := raftentry.NewCache(1024) // large enough
+		ss := mustNewInMemSideloadStorage(rangeID, roachpb.ReplicaID(1), ".")
 		if test.setup != nil {
 			test.setup(ec, ss)
 		}
@@ -508,14 +544,14 @@ func TestRaftSSTableSideloadingSideload(t *testing.T) {
 			name:     "v2",
 			preEnts:  []raftpb.Entry{entV2SST, entV2Reg},
 			postEnts: []raftpb.Entry{entV2SSTStripped, entV2Reg},
-			ss:       []string{"i13.t99"},
+			ss:       []string{"i13t99"},
 			size:     int64(len(addSST.Data)),
 		},
 		{
 			name:     "mixed",
 			preEnts:  []raftpb.Entry{entV1Reg, entV1SST, entV2Reg, entV2SST},
 			postEnts: []raftpb.Entry{entV1Reg, entV1SST, entV2Reg, entV2SSTStripped},
-			ss:       []string{"i13.t99"},
+			ss:       []string{"i13t99"},
 			size:     int64(len(addSST.Data)),
 		},
 	}
@@ -523,9 +559,7 @@ func TestRaftSSTableSideloadingSideload(t *testing.T) {
 	for _, test := range testCases {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			eng := storage.NewDefaultInMemForTesting()
-			defer eng.Close()
-			sideloaded := newTestingSideloadStorage(t, eng)
+			sideloaded := mustNewInMemSideloadStorage(roachpb.RangeID(3), roachpb.ReplicaID(17), ".")
 			postEnts, size, err := maybeSideloadEntriesImpl(ctx, test.preEnts, sideloaded)
 			if err != nil {
 				t.Fatal(err)
@@ -539,12 +573,10 @@ func TestRaftSSTableSideloadingSideload(t *testing.T) {
 			if test.size != size {
 				t.Fatalf("expected %d sideloadedSize, but found %d", test.size, size)
 			}
-			actKeys, err := sideloaded.eng.List(sideloaded.Dir())
-			if oserror.IsNotExist(err) {
-				t.Log("swallowing IsNotExist")
-				err = nil
+			var actKeys []string
+			for k := range sideloaded.(*inMemSideloadStorage).m {
+				actKeys = append(actKeys, fmt.Sprintf("i%dt%d", k.index, k.term))
 			}
-			require.NoError(t, err)
 			sort.Strings(actKeys)
 			if !reflect.DeepEqual(actKeys, test.ss) {
 				t.Fatalf("expected %v, got %v", test.ss, actKeys)
@@ -553,38 +585,56 @@ func TestRaftSSTableSideloadingSideload(t *testing.T) {
 	}
 }
 
+func makeInMemSideloaded(repl *Replica) {
+	repl.raftMu.Lock()
+	repl.raftMu.sideloaded = mustNewInMemSideloadStorage(repl.RangeID, 0, repl.store.engine.GetAuxiliaryDir())
+	repl.raftMu.Unlock()
+}
+
 // TestRaftSSTableSideloadingProposal runs a straightforward application of an `AddSSTable` command.
 func TestRaftSSTableSideloadingProposal(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	testutils.RunTrueAndFalse(t, "InMem", func(t *testing.T, engineInMem bool) {
-		var eng storage.Engine
-		if engineInMem {
-			eng = storage.NewDefaultInMemForTesting()
-		} else {
-			var cleanup func()
-			cleanup, eng = newOnDiskEngine(t)
-			defer cleanup()
-		}
-		defer eng.Close()
-		testRaftSSTableSideloadingProposal(t, eng)
+	testutils.RunTrueAndFalse(t, "engineInMem", func(t *testing.T, engineInMem bool) {
+		testutils.RunTrueAndFalse(t, "mockSideloaded", func(t *testing.T, mockSideloaded bool) {
+			if engineInMem && !mockSideloaded {
+				skip.WithIssue(t, 31913)
+			}
+			testRaftSSTableSideloadingProposal(t, engineInMem, mockSideloaded)
+		})
 	})
 }
 
 // TestRaftSSTableSideloadingProposal runs a straightforward application of an `AddSSTable` command.
-func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
+func testRaftSSTableSideloadingProposal(t *testing.T, engineInMem, mockSideloaded bool) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	defer SetMockAddSSTable()()
 
+	dir, cleanup := testutils.TempDir(t)
+	defer cleanup()
 	stopper := stop.NewStopper()
 	tc := testContext{}
+	if !engineInMem {
+		cfg := storage.RocksDBConfig{
+			StorageConfig: base.StorageConfig{
+				Dir:      dir,
+				Settings: cluster.MakeTestingClusterSettings(),
+			},
+		}
+		var err error
+		cache := storage.NewRocksDBCache(1 << 20)
+		defer cache.Release()
+		tc.engine, err = storage.NewRocksDB(cfg, cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stopper.AddCloser(tc.engine)
+	}
 	defer stopper.Stop(context.Background())
 	tc.Start(t, stopper)
 
-	tr := tc.store.cfg.AmbientCtx.Tracer
-	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
-	ctx, collect, cancel := tracing.ContextWithRecordingSpan(context.Background(), tr, "test-recording")
+	ctx, collect, cancel := tracing.ContextWithRecordingSpan(context.Background(), "test-recording")
 	defer cancel()
 
 	const (
@@ -592,6 +642,10 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 		entrySize = 128
 	)
 	val := strings.Repeat("x", entrySize)
+
+	if mockSideloaded {
+		makeInMemSideloaded(tc.repl)
+	}
 
 	ts := hlc.Timestamp{Logical: 1}
 
@@ -623,6 +677,9 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 	func() {
 		tc.repl.raftMu.Lock()
 		defer tc.repl.raftMu.Unlock()
+		if ss, ok := tc.repl.raftMu.sideloaded.(*inMemSideloadStorage); ok && len(ss.m) < 1 {
+			t.Fatal("sideloaded storage is empty")
+		}
 
 		if err := testutils.MatchInOrder(
 			collect().String(), "sideloadable proposal detected", "ingested SSTable",
@@ -641,6 +698,10 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 		// depends on luck and the file system, so don't try to assert it. We should, however, see
 		// no more than one.
 		expMaxCopies := int64(1)
+		if engineInMem {
+			// We don't count in-memory env SST writes as copies.
+			expMaxCopies = 0
+		}
 		if n := tc.store.metrics.AddSSTableApplicationCopies.Count(); n > expMaxCopies {
 			t.Fatalf("expected metric to show <= %d AddSSTable copies, but got %d", expMaxCopies, n)
 		}
@@ -695,12 +756,14 @@ func (mr *mockSender) Recv() (*SnapshotResponse, error) {
 	return &SnapshotResponse{Status: status}, nil
 }
 
-func newOnDiskEngine(t *testing.T) (func(), storage.Engine) {
+func newEngine(t *testing.T) (func(), storage.Engine) {
 	dir, cleanup := testutils.TempDir(t)
-	eng, err := storage.Open(
-		context.Background(),
-		storage.Filesystem(dir),
-		storage.CacheSize(1<<20 /* 1 MiB */))
+	eng, err := storage.NewDefaultEngine(
+		1<<20,
+		base.StorageConfig{
+			Dir:       dir,
+			MustExist: false,
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +780,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 	ctx := context.Background()
 	tc := testContext{}
 
-	cleanup, eng := newOnDiskEngine(t)
+	cleanup, eng := newEngine(t)
 	tc.engine = eng
 	defer cleanup()
 	defer eng.Close()
@@ -753,7 +816,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 	// Run a happy case snapshot. Check that it properly inlines the payload in
 	// the contained log entries.
 	inlinedEntry := func() raftpb.Entry {
-		os, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_VIA_SNAPSHOT_QUEUE, tc.store.StoreID())
+		os, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_RAFT, tc.store.StoreID())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -762,6 +825,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 		mockSender := &mockSender{}
 		if err := sendSnapshot(
 			ctx,
+			&tc.store.cfg.RaftConfig,
 			tc.store.cfg.Settings,
 			mockSender,
 			&fakeStorePool{},
@@ -863,7 +927,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 	// (engine) snapshot. We didn't run this before because we wanted the file
 	// to stay in sideloaded storage for the previous test.
 	func() {
-		failingOS, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_VIA_SNAPSHOT_QUEUE, tc.store.StoreID())
+		failingOS, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_RAFT, tc.store.StoreID())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -883,6 +947,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 		mockSender := &mockSender{}
 		err = sendSnapshot(
 			ctx,
+			&tc.store.cfg.RaftConfig,
 			tc.store.cfg.Settings,
 			mockSender,
 			&fakeStorePool{},
@@ -906,6 +971,7 @@ func TestRaftSSTableSideloadingTruncation(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
 	tc.Start(t, stopper)
+	makeInMemSideloaded(tc.repl)
 	ctx := context.Background()
 
 	const count = 10
@@ -932,11 +998,14 @@ func TestRaftSSTableSideloadingTruncation(t *testing.T) {
 	addLastIndex()
 
 	fmtSideloaded := func() []string {
+		var r []string
 		tc.repl.raftMu.Lock()
 		defer tc.repl.raftMu.Unlock()
-		fs, _ := tc.repl.Engine().List(tc.repl.raftMu.sideloaded.Dir())
-		sort.Strings(fs)
-		return fs
+		for k := range tc.repl.raftMu.sideloaded.(*inMemSideloadStorage).m {
+			r = append(r, fmt.Sprintf("%v", k))
+		}
+		sort.Strings(r)
+		return r
 	}
 
 	// Check that when we truncate, the number of on-disk files changes in ways

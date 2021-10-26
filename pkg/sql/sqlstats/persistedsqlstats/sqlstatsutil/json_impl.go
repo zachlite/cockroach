@@ -92,10 +92,10 @@ func (s *stmtStatsMetadata) jsonFields() jsonFields {
 	return jsonFields{
 		{"stmtTyp", (*jsonString)(&s.Stats.SQLType)},
 		{"query", (*jsonString)(&s.Key.Query)},
-		{"querySummary", (*jsonString)(&s.Key.QuerySummary)},
 		{"db", (*jsonString)(&s.Key.Database)},
 		{"distsql", (*jsonBool)(&s.Key.DistSQL)},
 		{"failed", (*jsonBool)(&s.Key.Failed)},
+		{"opt", (*jsonBool)(&s.Key.Opt)},
 		{"implicitTxn", (*jsonBool)(&s.Key.ImplicitTxn)},
 		{"vec", (*jsonBool)(&s.Key.Vec)},
 		{"fullScan", (*jsonBool)(&s.Key.FullScan)},
@@ -207,7 +207,6 @@ func (t *innerTxnStats) jsonFields() jsonFields {
 		{"commitLat", (*numericStats)(&t.CommitLat)},
 		{"bytesRead", (*numericStats)(&t.BytesRead)},
 		{"rowsRead", (*numericStats)(&t.RowsRead)},
-		{"rowsWritten", (*numericStats)(&t.RowsWritten)},
 	}
 }
 
@@ -235,7 +234,6 @@ func (s *innerStmtStats) jsonFields() jsonFields {
 		{"ovhLat", (*numericStats)(&s.OverheadLat)},
 		{"bytesRead", (*numericStats)(&s.BytesRead)},
 		{"rowsRead", (*numericStats)(&s.RowsRead)},
-		{"rowsWritten", (*numericStats)(&s.RowsWritten)},
 		{"nodes", (*int64Array)(&s.Nodes)},
 	}
 }

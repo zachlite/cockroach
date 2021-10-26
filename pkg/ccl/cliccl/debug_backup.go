@@ -181,8 +181,9 @@ func init() {
 		Use:   "backup [command]",
 		Short: "debug backups",
 		Long:  "Shows information about a SQL backup.",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cli.UsageAndErr(cmd, args)
+			return cmd.Usage()
 		},
 	}
 

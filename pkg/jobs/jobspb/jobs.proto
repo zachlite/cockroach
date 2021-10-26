@@ -168,9 +168,6 @@ message RestoreDetails {
     // ToExisting represents whether this descriptor is being remapped to a
     // descriptor that already exists in the cluster.
     bool to_existing = 3;
-
-    // NewDBName represents the new name given to a restored database during a database restore
-    string new_db_name = 4 [(gogoproto.customname) = "NewDBName"];
   }
   message BackupLocalityInfo {
     map<string, string> uris_by_original_locality_kv = 1 [(gogoproto.customname) = "URIsByOriginalLocalityKV"];
@@ -818,7 +815,7 @@ message Progress {
     AutoSQLStatsCompactionProgress autoSQLStatsCompaction = 23;
   }
 
-  uint64 trace_id = 21 [(gogoproto.nullable) = false, (gogoproto.customname) = "TraceID", (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.TraceID"];
+  uint64 trace_id = 21 [(gogoproto.customname) = "TraceID"];
 }
 
 enum Type {

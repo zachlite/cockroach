@@ -109,6 +109,7 @@ export class TransactionDetails extends React.Component<
       transactionStats,
       handleDetails,
       error,
+      resetSQLStats,
       nodeRegions,
     } = this.props;
     return (
@@ -130,7 +131,12 @@ export class TransactionDetails extends React.Component<
           error={error}
           loading={!statements || !transactionStats}
           render={() => {
-            const { statements, transactionStats, isTenant } = this.props;
+            const {
+              statements,
+              transactionStats,
+              lastReset,
+              isTenant,
+            } = this.props;
             const { sortSetting, pagination } = this.state;
             const aggregatedStatements = aggregateStatements(statements);
             populateRegionNodeForStatements(
@@ -231,17 +237,6 @@ export class TransactionDetails extends React.Component<
                         <div
                           className={summaryCardStylesCx("summary--card__item")}
                         >
-                          <Text>Mean rows written</Text>
-                          <Text>
-                            {formatNumberForDisplay(
-                              transactionStats.rows_written?.mean,
-                              formatTwoPlaces,
-                            )}
-                          </Text>
-                        </div>
-                        <div
-                          className={summaryCardStylesCx("summary--card__item")}
-                        >
                           <Text>Max memory usage</Text>
                           {transactionSampled && (
                             <Text>
@@ -277,10 +272,13 @@ export class TransactionDetails extends React.Component<
                   <TableStatistics
                     pagination={pagination}
                     totalCount={statements.length}
+                    lastReset={lastReset}
                     arrayItemName={
                       "statement fingerprints for this transaction"
                     }
+                    tooltipType="transactionDetails"
                     activeFilters={0}
+                    resetSQLStats={resetSQLStats}
                   />
                   <div className={cx("table-area")}>
                     <SortedTable

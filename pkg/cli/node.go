@@ -648,7 +648,7 @@ var nodeCmd = &cobra.Command{
 	Use:   "node [command]",
 	Short: "list, inspect, drain or remove nodes\n",
 	Long:  "List, inspect, drain or remove nodes.",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 func init() {

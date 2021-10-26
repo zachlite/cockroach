@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -69,8 +68,7 @@ func EncodeIndexKey(
 	values []tree.Datum,
 	keyPrefix []byte,
 ) (key []byte, containsNull bool, err error) {
-	var colIDWithNullVal descpb.ColumnID
-	key, colIDWithNullVal, err = EncodePartialIndexKey(
+	return EncodePartialIndexKey(
 		tableDesc,
 		index,
 		index.NumKeyColumns(), /* encode all columns */
@@ -78,18 +76,6 @@ func EncodeIndexKey(
 		values,
 		keyPrefix,
 	)
-	containsNull = colIDWithNullVal != 0
-	if err == nil && containsNull && index.Primary() {
-		col, findErr := tableDesc.FindColumnWithID(colIDWithNullVal)
-		if findErr != nil {
-			return nil, true, errors.WithAssertionFailure(findErr)
-		}
-		if col.IsNullable() {
-			return nil, true, errors.AssertionFailedf("primary key column %q should not be nullable", col.GetName())
-		}
-		return nil, true, sqlerrors.NewNonNullViolationError(col.GetName())
-	}
-	return key, containsNull, err
 }
 
 // EncodePartialIndexSpan creates the minimal key span for the key specified by the
@@ -105,9 +91,7 @@ func EncodePartialIndexSpan(
 ) (span roachpb.Span, containsNull bool, err error) {
 	var key roachpb.Key
 	var endKey roachpb.Key
-	var colIDWithNullVal descpb.ColumnID
-	key, colIDWithNullVal, err = EncodePartialIndexKey(tableDesc, index, numCols, colMap, values, keyPrefix)
-	containsNull = colIDWithNullVal != 0
+	key, containsNull, err = EncodePartialIndexKey(tableDesc, index, numCols, colMap, values, keyPrefix)
 	if err != nil {
 		return span, containsNull, err
 	}
@@ -133,16 +117,16 @@ func EncodePartialIndexKey(
 	colMap catalog.TableColMap,
 	values []tree.Datum,
 	keyPrefix []byte,
-) (key []byte, colIDWithNullVal descpb.ColumnID, err error) {
-	var colIDs, keySuffixColIDs []descpb.ColumnID
+) (key []byte, containsNull bool, err error) {
+	var colIDs, extraColIDs []descpb.ColumnID
 	if numCols <= index.NumKeyColumns() {
 		colIDs = index.IndexDesc().KeyColumnIDs[:numCols]
 	} else {
 		if index.IsUnique() || numCols > index.NumKeyColumns()+index.NumKeySuffixColumns() {
-			return nil, colIDWithNullVal, errors.Errorf("encoding too many columns (%d)", numCols)
+			return nil, false, errors.Errorf("encoding too many columns (%d)", numCols)
 		}
 		colIDs = index.IndexDesc().KeyColumnIDs
-		keySuffixColIDs = index.IndexDesc().KeySuffixColumnIDs[:numCols-index.NumKeyColumns()]
+		extraColIDs = index.IndexDesc().KeySuffixColumnIDs[:numCols-index.NumKeyColumns()]
 	}
 
 	// We know we will append to the key which will cause the capacity to grow so
@@ -168,15 +152,17 @@ func EncodePartialIndexKey(
 				length = len(colIDs)
 				partial = true
 			}
-			key, colIDWithNullVal, err = EncodeColumns(colIDs[:length], dirs[:length], colMap, values, key)
+			var n bool
+			key, n, err = EncodeColumns(colIDs[:length], dirs[:length], colMap, values, key)
 			if err != nil {
-				return nil, colIDWithNullVal, err
+				return nil, false, err
 			}
+			containsNull = containsNull || n
 			if partial {
 				// Early stop. Note that if we had exactly SharedPrefixLen columns
 				// remaining, we want to append the next tableID/indexID pair because
 				// that results in a more specific key.
-				return key, colIDWithNullVal, nil
+				return key, containsNull, nil
 			}
 			colIDs, dirs = colIDs[length:], dirs[length:]
 			// Each ancestor is separated by an interleaved
@@ -187,23 +173,19 @@ func EncodePartialIndexKey(
 		key = EncodePartialTableIDIndexID(key, tableDesc.GetID(), index.GetID())
 	}
 
-	var keyColIDWithNullVal, keySuffixColIDWithNullVal descpb.ColumnID
-	key, keyColIDWithNullVal, err = EncodeColumns(colIDs, dirs, colMap, values, key)
-	if colIDWithNullVal == 0 {
-		colIDWithNullVal = keyColIDWithNullVal
-	}
+	var n bool
+	key, n, err = EncodeColumns(colIDs, dirs, colMap, values, key)
 	if err != nil {
-		return nil, colIDWithNullVal, err
+		return nil, false, err
 	}
+	containsNull = containsNull || n
 
-	key, keySuffixColIDWithNullVal, err = EncodeColumns(keySuffixColIDs, nil /* directions */, colMap, values, key)
-	if colIDWithNullVal == 0 {
-		colIDWithNullVal = keySuffixColIDWithNullVal
-	}
+	key, n, err = EncodeColumns(extraColIDs, nil /* directions */, colMap, values, key)
 	if err != nil {
-		return nil, colIDWithNullVal, err
+		return nil, false, err
 	}
-	return key, colIDWithNullVal, nil
+	containsNull = containsNull || n
+	return key, containsNull, nil
 }
 
 type directions []descpb.IndexDescriptor_Direction
@@ -1227,13 +1209,8 @@ func EncodeSecondaryIndex(
 
 	// Add the extra columns - they are encoded in ascending order which is done
 	// by passing nil for the encoding directions.
-	extraKey, _, err := EncodeColumns(
-		secondaryIndex.IndexDesc().KeySuffixColumnIDs,
-		nil, /* directions */
-		colMap,
-		values,
-		nil, /* keyPrefix */
-	)
+	extraKey, _, err := EncodeColumns(secondaryIndex.IndexDesc().KeySuffixColumnIDs, nil,
+		colMap, values, nil)
 	if err != nil {
 		return []IndexEntry{}, err
 	}
@@ -1874,24 +1851,24 @@ func EncodeColumns(
 	colMap catalog.TableColMap,
 	values []tree.Datum,
 	keyPrefix []byte,
-) (key []byte, colIDWithNullVal descpb.ColumnID, err error) {
+) (key []byte, containsNull bool, err error) {
 	key = keyPrefix
 	for colIdx, id := range columnIDs {
 		val := findColumnValue(id, colMap, values)
 		if val == tree.DNull {
-			colIDWithNullVal = id
+			containsNull = true
 		}
 
 		dir, err := directions.get(colIdx)
 		if err != nil {
-			return nil, colIDWithNullVal, err
+			return nil, containsNull, err
 		}
 
 		if key, err = EncodeTableKey(key, val, dir); err != nil {
-			return nil, colIDWithNullVal, err
+			return nil, containsNull, err
 		}
 	}
-	return key, colIDWithNullVal, nil
+	return key, containsNull, nil
 }
 
 // growKey returns a new key with  the same contents as the given key and with

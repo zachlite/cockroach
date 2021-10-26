@@ -146,7 +146,6 @@ type metaTestRunner struct {
 	pastTSGenerator *pastTSGenerator
 	nextTSGenerator *nextTSGenerator
 	floatGenerator  *floatGenerator
-	boolGenerator   *boolGenerator
 	openIters       map[iteratorID]iteratorInfo
 	openBatches     map[readWriterID]storage.ReadWriter
 	openTxns        map[txnID]*roachpb.Transaction
@@ -204,7 +203,6 @@ func (m *metaTestRunner) init() {
 		},
 	}
 	m.floatGenerator = &floatGenerator{rng: m.rng}
-	m.boolGenerator = &boolGenerator{rng: m.rng}
 
 	m.opGenerators = map[operandType]operandGenerator{
 		operandTransaction: m.txnGenerator,
@@ -215,7 +213,6 @@ func (m *metaTestRunner) init() {
 		operandValue:       m.valueGenerator,
 		operandIterator:    m.iterGenerator,
 		operandFloat:       m.floatGenerator,
-		operandBool:        m.boolGenerator,
 	}
 
 	m.nameToGenerator = make(map[string]*opGenerator)

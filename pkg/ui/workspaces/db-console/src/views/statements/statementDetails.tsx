@@ -67,7 +67,6 @@ interface Fraction {
 
 interface StatementDetailsData {
   nodeId: number;
-  summary: string;
   aggregatedTs: number;
   implicitTxn: boolean;
   fullScan: boolean;
@@ -85,7 +84,6 @@ function coalesceNodeStats(
     if (!(key in statsKey)) {
       statsKey[key] = {
         nodeId: stmt.node_id,
-        summary: stmt.statement_summary,
         aggregatedTs: stmt.aggregated_ts,
         implicitTxn: stmt.implicit_txn,
         fullScan: stmt.full_scan,
@@ -100,7 +98,6 @@ function coalesceNodeStats(
     const stmt = statsKey[key];
     return {
       label: stmt.nodeId.toString(),
-      summary: stmt.summary,
       aggregatedTs: stmt.aggregatedTs,
       implicitTxn: stmt.implicitTxn,
       fullScan: stmt.fullScan,
@@ -154,7 +151,7 @@ function filterByRouterParamsPredicate(
     app = "";
   }
 
-  if (app === internalAppNamePrefix) {
+  if (app === "(internal)") {
     return (stmt: ExecutionStatistics) =>
       filterByKeys(stmt) && stmt.app.startsWith(internalAppNamePrefix);
   }
@@ -187,16 +184,11 @@ export const selectStatement = createSelector(
       statement,
       stats: combineStatementStats(results.map(s => s.stats)),
       byNode: coalesceNodeStats(results),
-      app: _.uniq(
-        results.map(s =>
-          s.app.startsWith(internalAppNamePrefix)
-            ? internalAppNamePrefix
-            : s.app,
-        ),
-      ),
+      app: _.uniq(results.map(s => s.app)),
       database: queryByName(props.location, databaseAttr),
       distSQL: fractionMatching(results, s => s.distSQL),
       vec: fractionMatching(results, s => s.vec),
+      opt: fractionMatching(results, s => s.opt),
       implicit_txn: fractionMatching(results, s => s.implicit_txn),
       full_scan: fractionMatching(results, s => s.full_scan),
       failed: fractionMatching(results, s => s.failed),

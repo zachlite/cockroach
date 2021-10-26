@@ -52,7 +52,16 @@ type testInfra struct {
 }
 
 func setupTestInfra(t testing.TB) *testInfra {
-	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
+	knobs := base.TestingKnobs{
+		SQLExecutor: &sql.ExecutorTestingKnobs{
+			AllowDeclarativeSchemaChanger: true,
+		},
+	}
+	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
+		ServerArgs: base.TestServerArgs{
+			Knobs: knobs,
+		},
+	})
 	return &testInfra{
 		tc:       tc,
 		settings: tc.Server(0).ClusterSettings(),
@@ -294,9 +303,9 @@ func TestSchemaChanger(t *testing.T) {
 				},
 			}
 
-			for _, phase := range []scop.Phase{
-				scop.StatementPhase,
-				scop.PreCommitPhase,
+			for _, phase := range []scplan.Phase{
+				scplan.StatementPhase,
+				scplan.PreCommitPhase,
 			} {
 				sc, err := scplan.MakePlan(nodes, scplan.Params{
 					ExecutionPhase: phase,
@@ -325,7 +334,7 @@ func TestSchemaChanger(t *testing.T) {
 			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
 		) error {
 			sc, err := scplan.MakePlan(ts, scplan.Params{
-				ExecutionPhase: scop.PostCommitPhase,
+				ExecutionPhase: scplan.PostCommitPhase,
 			})
 			require.NoError(t, err)
 			for _, s := range sc.Stages {
@@ -390,9 +399,9 @@ func TestSchemaChanger(t *testing.T) {
 			outputNodes, err := scbuild.Build(ctx, buildDeps, nil, parsed[0].AST.(*tree.AlterTable))
 			require.NoError(t, err)
 
-			for _, phase := range []scop.Phase{
-				scop.StatementPhase,
-				scop.PreCommitPhase,
+			for _, phase := range []scplan.Phase{
+				scplan.StatementPhase,
+				scplan.PreCommitPhase,
 			} {
 				sc, err := scplan.MakePlan(outputNodes, scplan.Params{
 					ExecutionPhase: phase,
@@ -410,7 +419,7 @@ func TestSchemaChanger(t *testing.T) {
 			ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
 		) error {
 			sc, err := scplan.MakePlan(ts, scplan.Params{
-				ExecutionPhase: scop.PostCommitPhase,
+				ExecutionPhase: scplan.PostCommitPhase,
 			})
 			require.NoError(t, err)
 			for _, s := range sc.Stages {

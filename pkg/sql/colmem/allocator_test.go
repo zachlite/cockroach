@@ -187,7 +187,7 @@ func TestPerformAppend(t *testing.T) {
 	const resetChance = 0.5
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	st := cluster.MakeTestingClusterSettings()
 	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	defer testMemMonitor.Stop(ctx)
@@ -260,7 +260,7 @@ func TestSetAccountingHelper(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	st := cluster.MakeTestingClusterSettings()
 	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	defer testMemMonitor.Stop(ctx)

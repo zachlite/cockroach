@@ -83,12 +83,6 @@ export function addStatementStats(
     ),
     bytes_read: addNumericStats(a.bytes_read, b.bytes_read, countA, countB),
     rows_read: addNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: addNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     sensitive_info: coalesceSensitiveInfo(a.sensitive_info, b.sensitive_info),
     legacy_last_err: "",
     legacy_last_err_redacted: "",
@@ -188,12 +182,12 @@ export function aggregateStatementStats(
 
 export interface ExecutionStatistics {
   statement: string;
-  statement_summary: string;
   aggregated_ts: number;
   app: string;
   database: string;
   distSQL: boolean;
   vec: boolean;
+  opt: boolean;
   implicit_txn: boolean;
   full_scan: boolean;
   failed: boolean;
@@ -206,12 +200,12 @@ export function flattenStatementStats(
 ): ExecutionStatistics[] {
   return statementStats.map(stmt => ({
     statement: stmt.key.key_data.query,
-    statement_summary: stmt.key.key_data.query_summary,
     aggregated_ts: TimestampToNumber(stmt.key.aggregated_ts),
     app: stmt.key.key_data.app,
     database: stmt.key.key_data.database,
     distSQL: stmt.key.key_data.distSQL,
     vec: stmt.key.key_data.vec,
+    opt: stmt.key.key_data.opt,
     implicit_txn: stmt.key.key_data.implicit_txn,
     full_scan: stmt.key.key_data.full_scan,
     failed: stmt.key.key_data.failed,

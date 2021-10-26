@@ -41,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/syncmap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -70,10 +69,6 @@ const (
 	initialWindowSize     = defaultWindowSize * 32 // for an RPC
 	initialConnWindowSize = initialWindowSize * 16 // for a connection
 )
-
-// GRPC Dialer connection timeout. 20s matches default value that is
-// suppressed when backoff config is provided.
-const minConnectionTimeout = 20 * time.Second
 
 // sourceAddr is the environment-provided local address for outgoing
 // connections.
@@ -694,19 +689,6 @@ func (ctx *Context) removeConn(conn *Connection, keys ...connKey) {
 	}
 }
 
-// ConnHealth returns nil if we have an open connection of the request
-// class to the given node that succeeded on its most recent heartbeat.
-func (ctx *Context) ConnHealth(target string, nodeID roachpb.NodeID, class ConnectionClass) error {
-	// The local client is always considered healthy.
-	if ctx.GetLocalInternalClientForAddr(target, nodeID) != nil {
-		return nil
-	}
-	if value, ok := ctx.conns.Load(connKey{target, nodeID, class}); ok {
-		return value.(*Connection).Health()
-	}
-	return ErrNoConnection
-}
-
 // GRPCDialOptions returns the minimal `grpc.DialOption`s necessary to connect
 // to a server created with `NewServer`.
 //
@@ -781,7 +763,7 @@ func (ctx *Context) grpcDialOptions(
 		// is in setupSpanForIncomingRPC().
 		//
 		tagger := func(span *tracing.Span) {
-			span.SetTag("node", attribute.IntValue(int(ctx.NodeID.Get())))
+			span.SetTag("node", ctx.NodeID.Get().String())
 		}
 		unaryInterceptors = append(unaryInterceptors,
 			tracing.ClientInterceptor(tracer, tagger))
@@ -1013,9 +995,7 @@ func (ctx *Context) grpcDialRaw(
 	// ~second range.
 	backoffConfig := backoff.DefaultConfig
 	backoffConfig.MaxDelay = maxBackoff
-	dialOpts = append(dialOpts, grpc.WithConnectParams(grpc.ConnectParams{
-		Backoff:           backoffConfig,
-		MinConnectTimeout: minConnectionTimeout}))
+	dialOpts = append(dialOpts, grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoffConfig}))
 	dialOpts = append(dialOpts, grpc.WithKeepaliveParams(clientKeepalive))
 	dialOpts = append(dialOpts,
 		grpc.WithInitialWindowSize(initialWindowSize),
@@ -1155,10 +1135,6 @@ func (ctx *Context) NewBreaker(name string) *circuit.Breaker {
 // ErrNotHeartbeated is returned by ConnHealth when we have not yet performed
 // the first heartbeat.
 var ErrNotHeartbeated = errors.New("not yet heartbeated")
-
-// ErrNoConnection is returned by ConnHealth when no connection exists to
-// the node.
-var ErrNoConnection = errors.New("no connection found")
 
 func (ctx *Context) runHeartbeat(
 	conn *Connection, target string, redialChan <-chan struct{},

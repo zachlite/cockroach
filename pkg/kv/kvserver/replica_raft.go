@@ -86,7 +86,7 @@ func (r *Replica) evalAndPropose(
 ) (chan proposalResult, func(), kvserverbase.CmdIDKey, *roachpb.Error) {
 	defer tok.DoneIfNotMoved(ctx)
 	idKey := makeIDKey()
-	proposal, pErr := r.requestToProposal(ctx, idKey, ba, st, lul, g.LatchSpans())
+	proposal, pErr := r.requestToProposal(ctx, idKey, ba, st, lul, g.LatchSpans(), g.LockSpans())
 	log.Event(proposal.ctx, "evaluated request")
 
 	// If the request hit a server-side concurrency retry error, immediately
@@ -113,9 +113,13 @@ func (r *Replica) evalAndPropose(
 	// 2. pErr != nil corresponds to a failed proposal - the command resulted
 	//    in an error.
 	if proposal.command == nil {
+		if proposal.Local.RequiresRaft() {
+			return nil, nil, "", roachpb.NewError(errors.AssertionFailedf(
+				"proposal resulting from batch %s erroneously bypassed Raft", ba))
+		}
 		intents := proposal.Local.DetachEncounteredIntents()
 		endTxns := proposal.Local.DetachEndTxns(pErr != nil /* alwaysOnly */)
-		r.handleReadWriteLocalEvalResult(ctx, *proposal.Local, false /* raftMuHeld */)
+		r.handleReadWriteLocalEvalResult(ctx, *proposal.Local)
 
 		pr := proposalResult{
 			Reply:              proposal.Local.Reply,
@@ -126,15 +130,6 @@ func (r *Replica) evalAndPropose(
 		proposal.finishApplication(ctx, pr)
 		return proposalCh, func() {}, "", nil
 	}
-
-	log.VEventf(proposal.ctx, 2,
-		"proposing command to write %d new keys, %d new values, %d new intents, "+
-			"write batch size=%d bytes",
-		proposal.command.ReplicatedEvalResult.Delta.KeyCount,
-		proposal.command.ReplicatedEvalResult.Delta.ValCount,
-		proposal.command.ReplicatedEvalResult.Delta.IntentCount,
-		proposal.command.WriteBatch.Size(),
-	)
 
 	// If the request requested that Raft consensus be performed asynchronously,
 	// return a proposal result immediately on the proposal's done channel.
@@ -2003,7 +1998,7 @@ func (r *Replica) printRaftTail(
 			Key:   mvccKey,
 			Value: it.Value(),
 		}
-		sb.WriteString(truncateEntryString(SprintMVCCKeyValue(kv, true /* printKey */), 2000))
+		sb.WriteString(truncateEntryString(SprintKeyValue(kv, true /* printKey */), 2000))
 		sb.WriteRune('\n')
 
 		valid, err := it.PrevEngineKey()

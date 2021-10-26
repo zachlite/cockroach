@@ -642,8 +642,7 @@ var jsonShower = backupShower{
 	fn: func(manifests []BackupManifest) ([]tree.Datums, error) {
 		rows := make([]tree.Datums, len(manifests))
 		for i, manifest := range manifests {
-			j, err := protoreflect.MessageToJSON(
-				&manifest, protoreflect.FmtFlags{EmitDefaults: true, EmitRedacted: true})
+			j, err := protoreflect.MessageToJSON(&manifest, true)
 			if err != nil {
 				return nil, err
 			}

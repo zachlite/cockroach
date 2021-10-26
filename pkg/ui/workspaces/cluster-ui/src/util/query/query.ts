@@ -27,11 +27,7 @@ export function propsToQueryString(props: { [k: string]: any }): string {
   return params.toString();
 }
 
-export function queryToObj(
-  location: Location,
-  key: string,
-  value: string,
-): ParamsObj {
+export function queryToObj(location: Location, key: string, value: string) {
   const params = new URLSearchParams(location.search);
   const paramObj: ParamsObj = {};
 

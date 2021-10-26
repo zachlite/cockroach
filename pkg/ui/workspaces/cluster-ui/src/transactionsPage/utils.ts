@@ -90,7 +90,6 @@ export const aggregateStatements = (
     if (!(key in statsKey)) {
       statsKey[key] = {
         label: s.statement,
-        summary: s.statement_summary,
         aggregatedTs: s.aggregated_ts,
         implicitTxn: s.implicit_txn,
         database: s.database,
@@ -265,7 +264,7 @@ const withFingerprint = function(
 };
 
 // addTransactionStats adds together two stat objects into one using their counts to compute a new
-// average for the numeric statistics. It's modeled after the similar `addStatementStats` function
+// average for the numeric statistics. It's modeled after the similar `addStatementStats` functionj
 function addTransactionStats(
   a: TransactionStats,
   b: TransactionStats,
@@ -292,12 +291,6 @@ function addTransactionStats(
       countB,
     ),
     rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: aggregateNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     bytes_read: aggregateNumericStats(
       a.bytes_read,
       b.bytes_read,

@@ -10,7 +10,7 @@
 
 import React from "react";
 import { RouteComponentProps } from "react-router-dom";
-import { isNil, merge } from "lodash";
+import { isNil, merge, forIn } from "lodash";
 import Helmet from "react-helmet";
 import moment, { Moment } from "moment";
 import classNames from "classnames/bind";
@@ -32,6 +32,7 @@ import {
 
 import {
   appAttr,
+  getMatchParamByName,
   calculateTotalWorkload,
   unique,
   containAny,
@@ -63,8 +64,6 @@ import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
 import { UIConfigState } from "../store";
 import { StatementsRequest } from "src/api/statementsApi";
 import Long from "long";
-import ClearStats from "../sqlActivity/clearStats";
-import { commonStyles } from "../common";
 
 const cx = classNames.bind(styles);
 const sortableTableCx = classNames.bind(sortableTableStyles);
@@ -180,19 +179,19 @@ export class StatementsPage extends React.Component<
     };
   };
 
-  syncHistory = (params: Record<string, string | undefined>): void => {
+  syncHistory = (params: Record<string, string | undefined>) => {
     const { history } = this.props;
-    const nextSearchParams = new URLSearchParams(history.location.search);
+    const currentSearchParams = new URLSearchParams(history.location.search);
 
-    Object.entries(params).forEach(([key, value]) => {
+    forIn(params, (value, key) => {
       if (!value) {
-        nextSearchParams.delete(key);
+        currentSearchParams.delete(key);
       } else {
-        nextSearchParams.set(key, value);
+        currentSearchParams.set(key, value);
       }
     });
 
-    history.location.search = nextSearchParams.toString();
+    history.location.search = currentSearchParams.toString();
     history.replace(history.location);
   };
 
@@ -222,6 +221,17 @@ export class StatementsPage extends React.Component<
       moment.utc().subtract(1, "hours"),
       moment.utc().add(1, "minute"),
     );
+  };
+
+  selectApp = (value: string): void => {
+    if (value == "All") value = "";
+    const { history, onFilterChange } = this.props;
+    history.location.pathname = `/statements/${encodeURIComponent(value)}`;
+    history.replace(history.location);
+    this.resetPagination();
+    if (onFilterChange) {
+      onFilterChange(value);
+    }
   };
 
   resetPagination = (): void => {
@@ -297,6 +307,7 @@ export class StatementsPage extends React.Component<
       regions: filters.regions,
       nodes: filters.nodes,
     });
+    this.selectApp(filters.app);
   };
 
   onClearSearchField = (): void => {
@@ -323,6 +334,7 @@ export class StatementsPage extends React.Component<
       regions: undefined,
       nodes: undefined,
     });
+    this.selectApp("");
   };
 
   filteredStatementsData = (): AggregateStatistics[] => {
@@ -405,12 +417,13 @@ export class StatementsPage extends React.Component<
       );
   };
 
-  renderStatements = (): React.ReactElement => {
+  renderStatements = () => {
     const { pagination, search, filters, activeFilters } = this.state;
     const {
       statements,
       databases,
-      location,
+      match,
+      lastReset,
       onDiagnosticsReportDownload,
       onStatementClick,
       resetSQLStats,
@@ -419,9 +432,9 @@ export class StatementsPage extends React.Component<
       nodeRegions,
       isTenant,
     } = this.props;
-    const appAttrValue = queryByName(location, appAttr);
+    const appAttrValue = getMatchParamByName(match, appAttr);
     const selectedApp = appAttrValue || "";
-    const appOptions = [{ value: "", label: "All" }];
+    const appOptions = [{ value: "all", label: "All" }];
     this.props.apps.forEach(app => appOptions.push({ value: app, label: app }));
     const data = this.filteredStatementsData();
     const totalWorkload = calculateTotalWorkload(data);
@@ -520,9 +533,6 @@ export class StatementsPage extends React.Component<
               reset time
             </button>
           </PageConfigItem>
-          <PageConfigItem className={commonStyles("separator")}>
-            <ClearStats resetSQLStats={resetSQLStats} tooltipType="statement" />
-          </PageConfigItem>
         </PageConfig>
         <section className={sortableTableCx("cl-table-container")}>
           <div>
@@ -532,11 +542,14 @@ export class StatementsPage extends React.Component<
             />
             <TableStatistics
               pagination={pagination}
+              lastReset={lastReset}
               search={search}
               totalCount={totalCount}
               arrayItemName="statements"
+              tooltipType="statement"
               activeFilters={activeFilters}
               onClearFilters={this.onClearFilters}
+              resetSQLStats={resetSQLStats}
             />
           </div>
           <StatementsSortedTable
@@ -563,7 +576,7 @@ export class StatementsPage extends React.Component<
     );
   };
 
-  render(): React.ReactElement {
+  render() {
     const {
       location,
       refreshStatementDiagnosticsRequests,
@@ -574,6 +587,7 @@ export class StatementsPage extends React.Component<
     return (
       <div className={cx("root", "table-area")}>
         <Helmet title={app ? `${app} App | Statements` : "Statements"} />
+        <h3 className={cx("base-heading")}>Statements</h3>
         <Loading
           loading={isNil(this.props.statements)}
           error={this.props.statementsError}

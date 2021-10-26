@@ -574,7 +574,7 @@ func BenchmarkQueryCache(b *testing.B) {
 		for connIdx := 0; connIdx < numClients; connIdx++ {
 			c := h.conns[connIdx]
 			group.Go(func() error {
-				rng, _ := randutil.NewTestRand()
+				rng, _ := randutil.NewPseudoRand()
 				ctx := context.Background()
 				// We use a small or large range of values depending on the
 				// workload type.

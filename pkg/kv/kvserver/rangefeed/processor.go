@@ -182,13 +182,6 @@ func NewProcessor(cfg Config) *Processor {
 // from underneath a stopper task to ensure that the engine has not been closed.
 type IteratorConstructor func() storage.SimpleMVCCIterator
 
-// CatchUpIteratorConstructor is used to construct an iterator that
-// can be used for catchup-scans. It should be called from underneath
-// a stopper task to ensure that the engine has not been closed.
-//
-// The constructed iterator must have an UpperBound set.
-type CatchUpIteratorConstructor func() *CatchUpIterator
-
 // Start launches a goroutine to process rangefeed events and send them to
 // registrations.
 //
@@ -406,7 +399,7 @@ func (p *Processor) sendStop(pErr *roachpb.Error) {
 func (p *Processor) Register(
 	span roachpb.RSpan,
 	startTS hlc.Timestamp,
-	catchUpIterConstructor CatchUpIteratorConstructor,
+	catchUpIterConstructor IteratorConstructor,
 	withDiff bool,
 	stream Stream,
 	errC chan<- *roachpb.Error,

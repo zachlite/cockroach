@@ -1,7 +1,4 @@
-# LogicTest: multiregion-9node-3region-3azs multiregion-9node-3region-3azs-vec-off
-
-# Tests in this file assume no multi-region tenant setup as tenants have no
-# access to nodelocal.
+# LogicTest: multiregion-9node-3region-3azs
 
 query TTTT colnames
 SHOW REGIONS

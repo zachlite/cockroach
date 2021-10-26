@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -250,8 +249,8 @@ func (m *randomStreamClient) getDescriptorAndNamespaceKVForTableID(
 	}
 
 	// Generate namespace entry.
-	key := catalogkeys.MakePublicObjectNameKey(keys.TODOSQLCodec, 50, testTable.Name)
-	k := rekey(m.config.tenantID, key)
+	key := catalogkeys.NewTableKey(50, keys.PublicSchemaID, testTable.Name)
+	k := rekey(m.config.tenantID, key.Key(keys.TODOSQLCodec))
 	var value roachpb.Value
 	value.SetInt(int64(testTable.GetID()))
 	value.InitChecksum(k)
@@ -387,7 +386,7 @@ func (m *randomStreamClient) makeRandomKey(
 	r *rand.Rand, tableDesc *tabledesc.Mutable,
 ) roachpb.KeyValue {
 	// Create a key holding a random integer.
-	k, err := randgen.TestingMakePrimaryIndexKey(tableDesc, r.Intn(m.config.valueRange))
+	k, err := rowenc.TestingMakePrimaryIndexKey(tableDesc, r.Intn(m.config.valueRange))
 	if err != nil {
 		panic(err)
 	}

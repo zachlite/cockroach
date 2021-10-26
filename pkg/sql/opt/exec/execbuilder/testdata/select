@@ -357,7 +357,7 @@ vectorized: true
   columns: (x, y)
   estimated row count: 1 (missing stats)
   table: a@primary
-  spans: /2/0
+  spans: /2-/2/#
 
 query T
 EXPLAIN (VERBOSE) SELECT * FROM a WHERE x > 1 AND y < 30
@@ -538,9 +538,6 @@ t           c_idx       false       2             b            N/A        true  
 t           c_idx       false       3             d            N/A        true     false
 t           c_idx       false       4             a            ASC        false    true
 t           primary     false       1             a            ASC        false    false
-t           primary     false       2             b            N/A        true     false
-t           primary     false       3             c            N/A        true     false
-t           primary     false       4             d            N/A        true     false
 
 statement ok
 INSERT INTO t VALUES (1, 2, 3, 4)
@@ -865,7 +862,7 @@ DROP TABLE dt
 # Ensure that decimal values result in correct scan spans.
 # ------------------------------------------------------------------------------
 statement ok
-CREATE TABLE dec (d decimal, v decimal(3, 1), primary key (d, v), family(d, v))
+CREATE TABLE dec (d decimal, v decimal(3, 1), primary key (d, v))
 
 query T
 EXPLAIN (TYPES) SELECT * FROM dec WHERE d IS NaN and v IS NaN
@@ -877,23 +874,6 @@ vectorized: true
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
   table: dec@primary
-  spans: /NaN/NaN/0
-
-# Test again with separate column families.
-
-statement ok
-CREATE TABLE decfam (d decimal, v decimal(3, 1), primary key (d, v), family(d), family(v))
-
-query T
-EXPLAIN (TYPES) SELECT * FROM decfam WHERE d IS NaN and v IS NaN
-----
-distribution: local
-vectorized: true
-·
-• scan
-  columns: (d decimal, v decimal)
-  estimated row count: 1 (missing stats)
-  table: decfam@primary
   spans: /NaN/NaN-/NaN/NaN/#
 
 # The NaN suffix is decimalNaNDesc, not decimalNaN(Asc).
@@ -907,7 +887,7 @@ vectorized: true
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
   table: dec@primary
-  spans: /Infinity/Infinity/0
+  spans: /Infinity/Infinity-/Infinity/Infinity/#
 
 query T
 EXPLAIN (TYPES) SELECT * FROM dec WHERE d = '-Infinity' and v = '-Infinity'
@@ -919,7 +899,7 @@ vectorized: true
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
   table: dec@primary
-  spans: /-Infinity/-Infinity/0
+  spans: /-Infinity/-Infinity-/-Infinity/-Infinity/#
 
 statement ok
 DROP TABLE dec
@@ -1765,24 +1745,21 @@ SELECT * FROM a
 statement ok
 SET tracing = on; SELECT * FROM a WHERE a = 0 OR a = 10; SET tracing = off
 
-# The span "sending partial batch" means that the scan was parallelized. We're
-# seeing duplicate "querying next range" entries because we first use the range
-# cache to try to partition the spans in order to have parallel TableReaders (we
-# end up with a single partition though), and then we have a single TableReader
-# performing the scan of two spans in parallel.
+# The span "sending partial batch" means that the scan was parallelized.
 # If this test is failing and doesn't have that span, it means that the scanNode
 # was improperly configured to add a limit to the ScanRequest batch.
 # See #30943 for more details.
 query T
 SELECT message FROM [SHOW TRACE FOR SESSION]
-WHERE message LIKE 'querying next range at /Table/74/1%' OR
-      message = '=== SPAN START: kv.DistSender: sending partial batch ==='
+WHERE message IN
+    ('querying next range at /Table/73/1/0',
+     'querying next range at /Table/73/1/10',
+     '=== SPAN START: kv.DistSender: sending partial batch ==='
+    )
 ----
-querying next range at /Table/74/1/0/0
-querying next range at /Table/74/1/10/0
-querying next range at /Table/74/1/0/0
+querying next range at /Table/73/1/0
 === SPAN START: kv.DistSender: sending partial batch ===
-querying next range at /Table/74/1/10/0
+querying next range at /Table/73/1/10
 
 # Test for 42202 -- ensure filters can get pushed down through project-set.
 statement ok
@@ -1795,24 +1772,218 @@ EXPLAIN SELECT e.z, s.z, n FROM e, s, generate_series(0, s.z, 1000) as n WHERE e
 distribution: local
 vectorized: true
 ·
-• top-k
-│ order: +z
-│ k: 10
+• limit
+│ count: 10
 │
-└── • project set
+└── • sort
+    │ order: +z
     │
-    └── • hash join
-        │ equality: (y) = (y)
+    └── • project set
         │
-        ├── • scan
-        │     missing stats
-        │     table: e@primary
-        │     spans: FULL SCAN
+        └── • hash join
+            │ equality: (y) = (y)
+            │
+            ├── • scan
+            │     missing stats
+            │     table: e@primary
+            │     spans: FULL SCAN
+            │
+            └── • scan
+                  missing stats
+                  table: s@primary
+                  spans: FULL SCAN
+
+statement ok
+CREATE TABLE disjunction (
+  k INT PRIMARY KEY,
+  a STRING,
+  b STRING,
+  c STRING,
+  INDEX a_idx (a),
+  INDEX b_idx (b),
+  INDEX c_idx (c)
+)
+
+statement ok
+ALTER TABLE disjunction INJECT STATISTICS '[
+  {
+    "columns": ["a"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  },
+  {
+    "columns": ["b"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  },
+  {
+    "columns": ["c"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  }
+]'
+
+# Single disjunction. A plan with a UNION of two constrained scans is not selected
+# because the selectivity of the disjunction is not accurately estimated.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • filter
+    │ estimated row count: 3,333
+    │ filter: (a LIKE 'foo%') OR (b LIKE 'foo%')
+    │
+    └── • scan
+          estimated row count: 10,000 (100% of the table; stats collected <hidden> ago)
+          table: disjunction@primary
+          spans: FULL SCAN
+
+# More accurate estimation of the disjunction's selectivity leads to a plan with
+# a union of constrained scans. See #58744.
+statement ok
+SET optimizer_improve_disjunction_selectivity = true
+
+# Single disjunction.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • distinct
+    │ estimated row count: 40
+    │ distinct on: k
+    │
+    └── • union all
+        │ estimated row count: 40
         │
-        └── • scan
-              missing stats
-              table: s@primary
-              spans: FULL SCAN
+        ├── • index join
+        │   │ estimated row count: 20
+        │   │ table: disjunction@primary
+        │   │
+        │   └── • scan
+        │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+        │         table: disjunction@a_idx
+        │         spans: [/'foo' - /'fop')
+        │
+        └── • index join
+            │ estimated row count: 20
+            │ table: disjunction@primary
+            │
+            └── • scan
+                  estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                  table: disjunction@b_idx
+                  spans: [/'foo' - /'fop')
+
+# Multiple disjunctions.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' OR c LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • distinct
+    │ estimated row count: 60
+    │ distinct on: k
+    │
+    └── • union all
+        │ estimated row count: 60
+        │
+        ├── • index join
+        │   │ estimated row count: 20
+        │   │ table: disjunction@primary
+        │   │
+        │   └── • scan
+        │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+        │         table: disjunction@a_idx
+        │         spans: [/'foo' - /'fop')
+        │
+        └── • distinct
+            │ estimated row count: 40
+            │ distinct on: k
+            │
+            └── • union all
+                │ estimated row count: 40
+                │
+                ├── • index join
+                │   │ estimated row count: 20
+                │   │ table: disjunction@primary
+                │   │
+                │   └── • scan
+                │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                │         table: disjunction@c_idx
+                │         spans: [/'foo' - /'fop')
+                │
+                └── • index join
+                    │ estimated row count: 20
+                    │ table: disjunction@primary
+                    │
+                    └── • scan
+                          estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                          table: disjunction@b_idx
+                          spans: [/'foo' - /'fop')
+
+# The row count should not exceed the number of rows in the table when
+# disjunctions have high selectivity values.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a > 'fop' OR b > 'fop' OR c > 'fop' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • filter
+    │ estimated row count: 10,000
+    │ filter: ((a > 'fop') OR (b > 'fop')) OR (c > 'fop')
+    │
+    └── • scan
+          estimated row count: 10,000 (100% of the table; stats collected <hidden> ago)
+          table: disjunction@primary
+          spans: FULL SCAN
+
+statement ok
+SET optimizer_improve_disjunction_selectivity = false
 
 # Check that we have a sane row count estimate when there are a lot of null
 # values.

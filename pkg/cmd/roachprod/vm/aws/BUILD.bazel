@@ -32,7 +32,7 @@ genrule(
     cmd = """
       $(location //pkg/cmd/roachprod/vm/aws/terraformgen) -o $@
     """,
-    exec_tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
+    tools = ["//pkg/cmd/roachprod/vm/aws/terraformgen"],
 )
 
 bindata(
@@ -41,12 +41,6 @@ bindata(
         "config.json",
         "old.json",
     ],
-    extra_args = [
-        "-mode",
-        "0600",
-        "-modtime",
-        "1400000000",
-    ],
-    metadata = True,
+    extra_args = ["."],
     package = "aws",
 )

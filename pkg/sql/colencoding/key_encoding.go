@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -27,21 +28,131 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// DecodeKeyValsToCols decodes the values that are part of the key, writing the
-// result to the idx'th slot of the input slice of coldata.Vecs.
+// DecodeIndexKeyToCols decodes an index key into the idx'th position of the
+// provided slices of colexec.Vecs. The input index key must already have its
+// tenant id and first table id / index id prefix removed. If matches is false,
+// the key is from a different table, and the returned remainingKey indicates a
+// "seek prefix": the next key that might be part of the table being searched
+// for. The input key will also be mutated if matches is false. See the analog
+// in sqlbase/index_encoding.go.
 //
+// Sometimes it is necessary to determine if the value of a column is NULL even
+// though the value itself is not needed. If checkAllColsForNull is true, then
+// foundNull=true will be returned if any columns in the key are NULL,
+// regardless of whether or not indexColIdx indicates that the column should be
+// decoded.
+func DecodeIndexKeyToCols(
+	da *rowenc.DatumAlloc,
+	vecs []coldata.Vec,
+	idx int,
+	desc catalog.TableDescriptor,
+	index *descpb.IndexDescriptor,
+	indexColIdx []int,
+	checkAllColsForNull bool,
+	types []*types.T,
+	colDirs []descpb.IndexDescriptor_Direction,
+	key roachpb.Key,
+	invertedColIdx int,
+) (remainingKey roachpb.Key, matches bool, foundNull bool, _ error) {
+	var decodedTableID descpb.ID
+	var decodedIndexID descpb.IndexID
+	var err error
+
+	origKey := key
+
+	if len(index.Interleave.Ancestors) > 0 {
+		for i, ancestor := range index.Interleave.Ancestors {
+			// Our input key had its first table id / index id chopped off, so
+			// don't try to decode those for the first ancestor.
+			if i != 0 {
+				key, decodedTableID, decodedIndexID, err = rowenc.DecodePartialTableIDIndexID(key)
+				if err != nil {
+					return nil, false, false, err
+				}
+				if decodedTableID != ancestor.TableID || decodedIndexID != ancestor.IndexID {
+					// We don't match. Return a key with the table ID / index ID we're
+					// searching for, so the caller knows what to seek to.
+					curPos := len(origKey) - len(key)
+					key = rowenc.EncodePartialTableIDIndexID(origKey[:curPos], ancestor.TableID, ancestor.IndexID)
+					return key, false, false, nil
+				}
+			}
+
+			length := int(ancestor.SharedPrefixLen)
+			// We don't care about whether this call to DecodeKeyVals found a null or not, because
+			// it is a interleaving ancestor.
+			var isNull bool
+			key, isNull, err = DecodeKeyValsToCols(
+				da, vecs, idx, indexColIdx[:length], checkAllColsForNull, types[:length],
+				colDirs[:length], nil /* unseen */, key, invertedColIdx,
+			)
+			if err != nil {
+				return nil, false, false, err
+			}
+			indexColIdx, types, colDirs = indexColIdx[length:], types[length:], colDirs[length:]
+			foundNull = foundNull || isNull
+
+			// Consume the interleaved sentinel.
+			var ok bool
+			key, ok = encoding.DecodeIfInterleavedSentinel(key)
+			if !ok {
+				// We're expecting an interleaved sentinel but didn't find one. Append
+				// one so the caller can seek to it.
+				curPos := len(origKey) - len(key)
+				key = encoding.EncodeInterleavedSentinel(origKey[:curPos])
+				return key, false, false, nil
+			}
+		}
+
+		key, decodedTableID, decodedIndexID, err = rowenc.DecodePartialTableIDIndexID(key)
+		if err != nil {
+			return nil, false, false, err
+		}
+		if decodedTableID != desc.GetID() || decodedIndexID != index.ID {
+			// We don't match. Return a key with the table ID / index ID we're
+			// searching for, so the caller knows what to seek to.
+			curPos := len(origKey) - len(key)
+			key = rowenc.EncodePartialTableIDIndexID(origKey[:curPos], desc.GetID(), index.ID)
+			return key, false, false, nil
+		}
+	}
+
+	var isNull bool
+	key, isNull, err = DecodeKeyValsToCols(
+		da, vecs, idx, indexColIdx, checkAllColsForNull, types, colDirs, nil /* unseen */, key, invertedColIdx,
+	)
+	if err != nil {
+		return nil, false, false, err
+	}
+	foundNull = foundNull || isNull
+
+	// We're expecting a column family id next (a varint). If
+	// interleavedSentinel is actually next, then this key is for a child
+	// table.
+	if _, ok := encoding.DecodeIfInterleavedSentinel(key); ok {
+		curPos := len(origKey) - len(key)
+		key = encoding.EncodeNullDescending(origKey[:curPos])
+		return key, false, false, nil
+	}
+
+	return key, true, foundNull, nil
+}
+
+// DecodeKeyValsToCols decodes the values that are part of the key, writing the
+// result to the idx'th slot of the input slice of colexec.Vecs. If the
+// directions slice is nil, the direction used will default to
+// encoding.Ascending.
 // If the unseen int set is non-nil, upon decoding the column with ordinal i,
 // i will be removed from the set to facilitate tracking whether or not columns
 // have been observed during decoding.
+// See the analog in sqlbase/index_encoding.go.
+// DecodeKeyValsToCols additionally returns whether a NULL was encountered when decoding.
 //
-// See the analog in rowenc/index_encoding.go.
-//
-// DecodeKeyValsToCols additionally returns whether a NULL was encountered when
-// decoding. Sometimes it is necessary to determine if the value of a column is
-// NULL even though the value itself is not needed. If checkAllColsForNull is
-// true, then foundNull=true will be returned if any columns in the key are
-// NULL, regardless of whether or not indexColIdx indicates that the column
-// should be decoded.
+// Sometimes it is necessary to determine if the value of a column is NULL even
+// though the value itself is not needed. If checkAllColsForNull is true, then
+// foundNull=true will be returned if any columns in the key are NULL,
+// regardless of whether or not indexColIdx indicates that the column should be
+// decoded.
 func DecodeKeyValsToCols(
 	da *rowenc.DatumAlloc,
 	vecs []coldata.Vec,
@@ -53,9 +164,12 @@ func DecodeKeyValsToCols(
 	unseen *util.FastIntSet,
 	key []byte,
 	invertedColIdx int,
-	scratch []byte,
-) (remainingKey []byte, foundNull bool, retScratch []byte, _ error) {
+) (remainingKey []byte, foundNull bool, _ error) {
 	for j := range types {
+		enc := descpb.IndexDescriptor_ASC
+		if directions != nil {
+			enc = directions[j]
+		}
 		var err error
 		i := indexColIdx[j]
 		if i == -1 {
@@ -70,15 +184,15 @@ func DecodeKeyValsToCols(
 				unseen.Remove(i)
 			}
 			var isNull bool
-			isInverted := invertedColIdx == i
-			key, isNull, scratch, err = decodeTableKeyToCol(da, vecs[i], idx, types[j], key, directions[j], isInverted, scratch)
+			isVirtualInverted := invertedColIdx == i
+			key, isNull, err = decodeTableKeyToCol(da, vecs[i], idx, types[j], key, enc, isVirtualInverted)
 			foundNull = isNull || foundNull
 		}
 		if err != nil {
-			return nil, false, scratch, err
+			return nil, false, err
 		}
 	}
-	return key, foundNull, scratch, nil
+	return key, foundNull, nil
 }
 
 // decodeTableKeyToCol decodes a value encoded by EncodeTableKey, writing the result
@@ -92,27 +206,30 @@ func decodeTableKeyToCol(
 	valType *types.T,
 	key []byte,
 	dir descpb.IndexDescriptor_Direction,
-	isInverted bool,
-	scratch []byte,
-) (_ []byte, _ bool, retScratch []byte, _ error) {
+	isVirtualInverted bool,
+) ([]byte, bool, error) {
 	if (dir != descpb.IndexDescriptor_ASC) && (dir != descpb.IndexDescriptor_DESC) {
-		return nil, false, scratch, errors.AssertionFailedf("invalid direction: %d", log.Safe(dir))
+		return nil, false, errors.AssertionFailedf("invalid direction: %d", log.Safe(dir))
 	}
 	var isNull bool
 	if key, isNull = encoding.DecodeIfNull(key); isNull {
 		vec.Nulls().SetNull(idx)
-		return key, true, scratch, nil
+		return key, true, nil
 	}
+	// We might have read a NULL value in the interleaved child table which
+	// would update the nulls vector, so we need to explicitly unset the null
+	// value here.
+	vec.Nulls().UnsetNull(idx)
 
-	// Inverted columns should not be decoded, but should instead be
+	// Virtual inverted columns should not be decoded, but should instead be
 	// passed on as a DBytes datum.
-	if isInverted {
+	if isVirtualInverted {
 		keyLen, err := encoding.PeekLength(key)
 		if err != nil {
-			return nil, false, scratch, err
+			return nil, false, err
 		}
 		vec.Bytes().Set(idx, key[:keyLen])
-		return key[keyLen:], false, scratch, nil
+		return key[keyLen:], false, nil
 	}
 
 	var rkey []byte
@@ -152,26 +269,19 @@ func decodeTableKeyToCol(
 	case types.DecimalFamily:
 		var d apd.Decimal
 		if dir == descpb.IndexDescriptor_ASC {
-			rkey, d, err = encoding.DecodeDecimalAscending(key, scratch[:0])
+			rkey, d, err = encoding.DecodeDecimalAscending(key, nil)
 		} else {
-			rkey, d, err = encoding.DecodeDecimalDescending(key, scratch[:0])
+			rkey, d, err = encoding.DecodeDecimalDescending(key, nil)
 		}
 		vec.Decimal()[idx] = d
 	case types.BytesFamily, types.StringFamily, types.UuidFamily:
+		var r []byte
 		if dir == descpb.IndexDescriptor_ASC {
-			// We ask for the deep copy to be made so that scratch doesn't
-			// reference the memory of key - this allows us to return scratch
-			// to the caller to be reused. The deep copy additionally ensures
-			// that the memory of the BatchResponse (where key came from) can be
-			// GCed.
-			rkey, scratch, err = encoding.DecodeBytesAscendingDeepCopy(key, scratch[:0])
+			rkey, r, err = encoding.DecodeBytesAscending(key, nil)
 		} else {
-			rkey, scratch, err = encoding.DecodeBytesDescending(key, scratch[:0])
+			rkey, r, err = encoding.DecodeBytesDescending(key, nil)
 		}
-		// Set() performs a deep copy, so it is safe to return the scratch slice
-		// to the caller. Any modifications to the scratch slice made by the
-		// caller will not affect the value in the vector.
-		vec.Bytes().Set(idx, scratch)
+		vec.Bytes().Set(idx, r)
 	case types.TimestampFamily, types.TimestampTZFamily:
 		var t time.Time
 		if dir == descpb.IndexDescriptor_ASC {
@@ -188,13 +298,6 @@ func decodeTableKeyToCol(
 			rkey, d, err = encoding.DecodeDurationDescending(key)
 		}
 		vec.Interval()[idx] = d
-	case types.JsonFamily:
-		// Don't attempt to decode the JSON value. Instead, just return the
-		// remaining bytes of the key.
-		var jsonLen int
-		jsonLen, err = encoding.PeekLength(key)
-		vec.JSON().Bytes.Set(idx, key[:jsonLen])
-		rkey = key[jsonLen:]
 	default:
 		var d tree.Datum
 		encDir := encoding.Ascending
@@ -204,7 +307,7 @@ func decodeTableKeyToCol(
 		d, rkey, err = rowenc.DecodeTableKey(da, valType, key, encDir)
 		vec.Datum().Set(idx, d)
 	}
-	return rkey, false, scratch, err
+	return rkey, false, err
 }
 
 // UnmarshalColumnValueToCol decodes the value from a roachpb.Value using the
@@ -260,10 +363,6 @@ func UnmarshalColumnValueToCol(
 		var v duration.Duration
 		v, err = value.GetDuration()
 		vec.Interval()[idx] = v
-	case types.JsonFamily:
-		var v []byte
-		v, err = value.GetBytes()
-		vec.JSON().Bytes.Set(idx, v)
 	// Types backed by tree.Datums.
 	default:
 		var d tree.Datum

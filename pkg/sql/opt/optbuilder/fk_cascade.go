@@ -178,7 +178,7 @@ func tryNewOnDeleteFastCascadeBuilder(
 			return nil, false
 		}
 		var p props.Shared
-		memo.BuildSharedProps(&sel.Filters, &p, mutationInputScope.builder.evalCtx)
+		memo.BuildSharedProps(&sel.Filters, &p)
 		if p.VolatilitySet.HasVolatile() {
 			return nil, false
 		}
@@ -285,7 +285,7 @@ func (cb *onDeleteFastCascadeBuilder) Build(
 			tableOrdinals(cb.childTable, columnKinds{
 				includeMutations:       false,
 				includeSystem:          false,
-				includeInverted:        false,
+				includeVirtualInverted: false,
 				includeVirtualComputed: false,
 			}),
 			nil, /* indexFlags */
@@ -514,7 +514,7 @@ func (b *Builder) buildDeleteCascadeMutationInput(
 		tableOrdinals(childTable, columnKinds{
 			includeMutations:       false,
 			includeSystem:          false,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: fetchVirtualComputedCols,
 		}),
 		nil, /* indexFlags */
@@ -758,7 +758,7 @@ func (b *Builder) buildUpdateCascadeMutationInput(
 		tableOrdinals(childTable, columnKinds{
 			includeMutations:       false,
 			includeSystem:          false,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		nil, /* indexFlags */
@@ -871,12 +871,10 @@ func (b *Builder) buildUpdateCascadeMutationInput(
 		outScope.expr, mutationInput, on, memo.EmptyJoinPrivate,
 	)
 	// Append the columns from the right-hand side to the scope.
-	for i, col := range outCols {
+	for _, col := range outCols {
 		colMeta := md.ColumnMeta(col)
-		ord := fk.OriginColumnOrdinal(childTable, i%numFKCols)
-		c := childTable.Column(ord)
 		outScope.cols = append(outScope.cols, scopeColumn{
-			name: scopeColName(c.ColName()),
+			name: tree.Name(colMeta.Alias),
 			id:   col,
 			typ:  colMeta.Type,
 		})

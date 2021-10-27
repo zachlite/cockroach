@@ -37,11 +37,14 @@ func makeStorageConfig(path string) base.StorageConfig {
 }
 
 func createTestPebbleEngine(path string, seed int64) (storage.Engine, error) {
-	return storage.Open(
-		context.Background(),
-		storage.Filesystem(path),
-		storage.CacheSize(1<<20 /* 1 MiB */),
-		storage.Settings(cluster.MakeTestingClusterSettings()))
+	pebbleConfig := storage.PebbleConfig{
+		StorageConfig: makeStorageConfig(path),
+		Opts:          storage.DefaultPebbleOptions(),
+	}
+	pebbleConfig.Opts.Cache = pebble.NewCache(1 << 20)
+	defer pebbleConfig.Opts.Cache.Unref()
+
+	return storage.NewPebble(context.Background(), pebbleConfig)
 }
 
 func createTestPebbleManySSTs(path string, seed int64) (storage.Engine, error) {
@@ -146,7 +149,6 @@ type metaTestRunner struct {
 	pastTSGenerator *pastTSGenerator
 	nextTSGenerator *nextTSGenerator
 	floatGenerator  *floatGenerator
-	boolGenerator   *boolGenerator
 	openIters       map[iteratorID]iteratorInfo
 	openBatches     map[readWriterID]storage.ReadWriter
 	openTxns        map[txnID]*roachpb.Transaction
@@ -204,7 +206,6 @@ func (m *metaTestRunner) init() {
 		},
 	}
 	m.floatGenerator = &floatGenerator{rng: m.rng}
-	m.boolGenerator = &boolGenerator{rng: m.rng}
 
 	m.opGenerators = map[operandType]operandGenerator{
 		operandTransaction: m.txnGenerator,
@@ -215,7 +216,6 @@ func (m *metaTestRunner) init() {
 		operandValue:       m.valueGenerator,
 		operandIterator:    m.iterGenerator,
 		operandFloat:       m.floatGenerator,
-		operandBool:        m.boolGenerator,
 	}
 
 	m.nameToGenerator = make(map[string]*opGenerator)

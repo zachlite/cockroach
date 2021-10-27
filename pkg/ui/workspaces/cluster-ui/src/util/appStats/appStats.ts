@@ -10,12 +10,7 @@
 
 import _ from "lodash";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import {
-  FixLong,
-  TimestampToNumber,
-  DurationToNumber,
-  uniqueLong,
-} from "src/util";
+import { FixLong, TimestampToNumber, uniqueLong } from "src/util";
 
 export type StatementStatistics = protos.cockroach.sql.IStatementStatistics;
 export type ExecStats = protos.cockroach.sql.IExecStats;
@@ -156,12 +151,6 @@ export function addStatementStats(
       countB,
     ),
     rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: aggregateNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     sensitive_info: coalesceSensitiveInfo(a.sensitive_info, b.sensitive_info),
     legacy_last_err: "",
     legacy_last_err_redacted: "",
@@ -203,13 +192,12 @@ export function aggregateStatementStats(
 
 export interface ExecutionStatistics {
   statement: string;
-  statement_summary: string;
   aggregated_ts: number;
-  aggregation_interval: number;
   app: string;
   database: string;
   distSQL: boolean;
   vec: boolean;
+  opt: boolean;
   implicit_txn: boolean;
   full_scan: boolean;
   failed: boolean;
@@ -222,13 +210,12 @@ export function flattenStatementStats(
 ): ExecutionStatistics[] {
   return statementStats.map(stmt => ({
     statement: stmt.key.key_data.query,
-    statement_summary: stmt.key.key_data.query_summary,
     aggregated_ts: TimestampToNumber(stmt.key.aggregated_ts),
-    aggregation_interval: DurationToNumber(stmt.key.aggregation_interval),
     app: stmt.key.key_data.app,
     database: stmt.key.key_data.database,
     distSQL: stmt.key.key_data.distSQL,
     vec: stmt.key.key_data.vec,
+    opt: stmt.key.key_data.opt,
     implicit_txn: stmt.key.key_data.implicit_txn,
     full_scan: stmt.key.key_data.full_scan,
     failed: stmt.key.key_data.failed,
@@ -251,14 +238,9 @@ export const getSearchParams = (searchParams: string) => {
 
 // This function returns a key based on all parameters
 // that should be used to group statements.
-// Parameters being used: query, implicit_txn, database,
-// aggregated_ts and aggregation_interval.
+// Parameters being used: query, implicit_txn, database, and aggregated_ts.
 export function statementKey(stmt: ExecutionStatistics): string {
   return (
-    stmt.statement +
-    stmt.implicit_txn +
-    stmt.database +
-    stmt.aggregated_ts +
-    stmt.aggregation_interval
+    stmt.statement + stmt.implicit_txn + stmt.database + stmt.aggregated_ts
   );
 }

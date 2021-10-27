@@ -40,7 +40,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/migration"
@@ -1381,7 +1380,8 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 					ForceProductionBatchSizes:       serverArgs.forceProductionBatchSizes,
 				},
 				SQLExecutor: &sql.ExecutorTestingKnobs{
-					DeterministicExplain: true,
+					DeterministicExplain:          true,
+					AllowDeclarativeSchemaChanger: true,
 				},
 				SQLStatsKnobs: &sqlstats.TestingKnobs{
 					AOSTClause: "AS OF SYSTEM TIME '-1us'",
@@ -1494,7 +1494,8 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 				AllowSettingClusterSettings: true,
 				TestingKnobs: base.TestingKnobs{
 					SQLExecutor: &sql.ExecutorTestingKnobs{
-						DeterministicExplain: true,
+						DeterministicExplain:          true,
+						AllowDeclarativeSchemaChanger: true,
 					},
 					SQLStatsKnobs: &sqlstats.TestingKnobs{
 						AOSTClause: "AS OF SYSTEM TIME '-1us'",
@@ -1595,6 +1596,10 @@ func (t *logicTest) newCluster(serverArgs TestServerArgs) {
 			); err != nil {
 				t.Fatal(err)
 			}
+		}
+
+		if _, err := conn.Exec("SET CLUSTER SETTING sql.defaults.interleaved_tables.enabled = true"); err != nil {
+			t.Fatal(err)
 		}
 
 		// Update the default AS OF time for querying the system.table_statistics
@@ -2572,7 +2577,6 @@ func (t *logicTest) unexpectedError(sql string, pos string, err error) bool {
 }
 
 func (t *logicTest) execStatement(stmt logicStatement) (bool, error) {
-	t.noticeBuffer = nil
 	if *showSQL {
 		t.outf("%s;", stmt.sql)
 	}
@@ -3391,7 +3395,7 @@ func RunLogicTestWithDefaultConfig(
 							t.Parallel() // SAFE FOR TESTING (this comments satisfies the linter)
 						}
 					}
-					rng, _ := randutil.NewTestRand()
+					rng, _ := randutil.NewPseudoRand()
 					lt := logicTest{
 						rootT:           t,
 						verbose:         verbose,
@@ -3489,25 +3493,16 @@ func runSQLLiteLogicTest(t *testing.T, configOverride string, globs ...string) {
 		skip.IgnoreLint(t, "-bigtest flag must be specified to run this test")
 	}
 
-	var logicTestPath string
-	if bazel.BuiltWithBazel() {
-		runfilesPath, err := bazel.RunfilesPath()
+	logicTestPath := gobuild.Default.GOPATH + "/src/github.com/cockroachdb/sqllogictest"
+	if _, err := os.Stat(logicTestPath); oserror.IsNotExist(err) {
+		fullPath, err := filepath.Abs(logicTestPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		logicTestPath = filepath.Join(runfilesPath, "external", "com_github_cockroachdb_sqllogictest")
-	} else {
-		logicTestPath = gobuild.Default.GOPATH + "/src/github.com/cockroachdb/sqllogictest"
-		if _, err := os.Stat(logicTestPath); oserror.IsNotExist(err) {
-			fullPath, err := filepath.Abs(logicTestPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Fatalf("unable to find sqllogictest repo: %s\n"+
-				"git clone https://github.com/cockroachdb/sqllogictest %s",
-				logicTestPath, fullPath)
-			return
-		}
+		t.Fatalf("unable to find sqllogictest repo: %s\n"+
+			"git clone https://github.com/cockroachdb/sqllogictest %s",
+			logicTestPath, fullPath)
+		return
 	}
 
 	// Prefix the globs with the logicTestPath.

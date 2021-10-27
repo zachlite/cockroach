@@ -110,7 +110,7 @@ func runSampleAggregator(
 		},
 	}
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	rowPartitions := make([][][]int, numSamplers)
 	for _, row := range inputRows {
 		j := rng.Intn(numSamplers)

@@ -302,7 +302,6 @@ var nodeNames = [...]string{
 	simpleProjectOp:        "project",
 	serializingProjectOp:   "project",
 	sortOp:                 "sort",
-	topKOp:                 "top-k",
 	updateOp:               "update",
 	upsertOp:               "upsert",
 	valuesOp:               "", // This node does not have a fixed name.
@@ -370,35 +369,14 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		if s.KVBytesRead.HasValue() {
 			e.ob.AddField("KV bytes read", humanize.IBytes(s.KVBytesRead.Value()))
 		}
-		if e.ob.flags.Verbose {
-			if s.StepCount.HasValue() {
-				e.ob.AddField("MVCC step count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.StepCount.Value()), humanizeutil.Count(s.InternalStepCount.Value()),
-				))
-			}
-			if s.SeekCount.HasValue() {
-				e.ob.AddField("MVCC seek count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.SeekCount.Value()), humanizeutil.Count(s.InternalSeekCount.Value()),
-				))
-			}
-		}
 	}
 
 	if stats, ok := n.annotations[exec.EstimatedStatsID]; ok {
 		s := stats.(*exec.EstimatedStats)
 
-		var estimatedRowCountString string
-		if s.LimitHint > 0 && s.LimitHint != s.RowCount {
-			maxEstimatedRowCount := uint64(math.Ceil(math.Max(s.LimitHint, s.RowCount)))
-			minEstimatedRowCount := uint64(math.Ceil(math.Min(s.LimitHint, s.RowCount)))
-			estimatedRowCountString = fmt.Sprintf("%s - %s", humanizeutil.Count(minEstimatedRowCount), humanizeutil.Count(maxEstimatedRowCount))
-		} else {
-			estimatedRowCount := uint64(math.Round(s.RowCount))
-			estimatedRowCountString = humanizeutil.Count(estimatedRowCount)
-		}
-
 		// Show the estimated row count (except Values, where it is redundant).
 		if n.op != valuesOp && !e.ob.flags.OnlyShape {
+			count := uint64(math.Round(s.RowCount))
 			if s.TableStatsAvailable {
 				if n.op == scanOp && s.TableStatsRowCount != 0 {
 					percentage := s.RowCount / float64(s.TableStatsRowCount) * 100
@@ -428,16 +406,16 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 					}
 					e.ob.AddField("estimated row count", fmt.Sprintf(
 						"%s (%s%% of the table; stats collected %s ago)",
-						estimatedRowCountString, percentageStr,
+						humanizeutil.Count(count), percentageStr,
 						duration,
 					))
 				} else {
-					e.ob.AddField("estimated row count", estimatedRowCountString)
+					e.ob.AddField("estimated row count", humanizeutil.Count(count))
 				}
 			} else {
 				// No stats available.
 				if e.ob.flags.Verbose {
-					e.ob.Attrf("estimated row count", "%s (missing stats)", estimatedRowCountString)
+					e.ob.Attrf("estimated row count", "%s (missing stats)", humanizeutil.Count(count))
 				} else if n.op == scanOp {
 					// In non-verbose mode, don't show the row count (which is not based
 					// on reality); only show a "missing stats" field for scans. Don't
@@ -503,11 +481,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		if p := a.AlreadyOrderedPrefix; p > 0 {
 			ob.Attr("already ordered", colinfo.ColumnOrdering(a.Ordering[:p]).String(n.Columns()))
 		}
-
-	case topKOp:
-		a := n.args.(*topKArgs)
-		ob.Attr("order", colinfo.ColumnOrdering(a.Ordering).String(n.Columns()))
-		ob.Attr("k", a.K)
 
 	case unionAllOp:
 		a := n.args.(*unionAllArgs)
@@ -789,12 +762,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		}
 		e.emitSpans("spans", a.Table, a.Table.Index(cat.PrimaryIndex), params)
 
-	case recursiveCTEOp:
-		a := n.args.(*recursiveCTEArgs)
-		if e.ob.flags.Verbose && a.Deduplicate {
-			ob.Attrf("deduplicate", "")
-		}
-
 	case simpleProjectOp,
 		serializingProjectOp,
 		ordinalityOp,
@@ -815,6 +782,7 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		alterTableUnsplitOp,
 		alterTableUnsplitAllOp,
 		alterTableRelocateOp,
+		recursiveCTEOp,
 		controlJobsOp,
 		controlSchedulesOp,
 		cancelQueriesOp,

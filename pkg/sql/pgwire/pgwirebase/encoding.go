@@ -649,13 +649,6 @@ func DecodeDatum(
 			case 0xc000:
 				// https://github.com/postgres/postgres/blob/ffa4cbd623dd69f9fa99e5e92426928a5782cf1a/src/backend/utils/adt/numeric.c#L169
 				return tree.ParseDDecimal("NaN")
-			case 0xd000:
-				// https://github.com/postgres/postgres/blob/a57d312a7706321d850faa048a562a0c0c01b835/src/backend/utils/adt/numeric.c#L201
-				return tree.ParseDDecimal("Inf")
-
-			case 0xf000:
-				// https://github.com/postgres/postgres/blob/a57d312a7706321d850faa048a562a0c0c01b835/src/backend/utils/adt/numeric.c#L200
-				return tree.ParseDDecimal("-Inf")
 			default:
 				return nil, pgerror.Newf(pgcode.Syntax, "unsupported numeric sign: %d", alloc.pgNum.Sign)
 			}
@@ -795,17 +788,6 @@ func DecodeDatum(
 		// Trim the trailing spaces
 		sv := strings.TrimRight(string(b), " ")
 		return tree.NewDString(sv), nil
-	case oid.T_char:
-		sv := string(b)
-		// Always truncate to 1 byte, and handle the null byte specially.
-		if len(b) >= 1 {
-			if b[0] == 0 {
-				sv = ""
-			} else {
-				sv = string(b[:1])
-			}
-		}
-		return tree.NewDString(sv), nil
 	case oid.T_name:
 		if err := validateStringBytes(b); err != nil {
 			return nil, err
@@ -935,7 +917,7 @@ func decodeBinaryArray(
 		return nil, err
 	}
 	if t.Oid() != oid.Oid(hdr.ElemOid) {
-		return nil, pgerror.Newf(pgcode.ProtocolViolation, "wrong element type")
+		return nil, pgerror.Newf(pgcode.DatatypeMismatch, "wrong element type")
 	}
 	arr := tree.NewDArray(t)
 	if hdr.Ndims == 0 {

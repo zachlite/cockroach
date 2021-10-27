@@ -28,3 +28,5 @@ echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packa
 apt-get update -y
 apt-get install google-cloud-sdk awscli azure-cli -y
 rm -rf /var/lib/apt/lists/*
+
+go get github.com/cockroachdb/cockroach/pkg/cmd/roachprod

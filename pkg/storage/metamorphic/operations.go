@@ -124,25 +124,21 @@ func generateMVCCScan(
 	}
 	maxKeys := int64(m.floatGenerator.parse(args[3]) * 32)
 	targetBytes := int64(m.floatGenerator.parse(args[4]) * (1 << 20))
-	targetBytesAvoidExcess := m.boolGenerator.parse(args[5])
-	targetBytesAllowEmpty := m.boolGenerator.parse(args[6])
 	return &mvccScanOp{
-		m:                      m,
-		key:                    key.Key,
-		endKey:                 endKey.Key,
-		ts:                     ts,
-		txn:                    txn,
-		inconsistent:           inconsistent,
-		reverse:                reverse,
-		maxKeys:                maxKeys,
-		targetBytes:            targetBytes,
-		targetBytesAvoidExcess: targetBytesAvoidExcess,
-		targetBytesAllowEmpty:  targetBytesAllowEmpty,
+		m:            m,
+		key:          key.Key,
+		endKey:       endKey.Key,
+		ts:           ts,
+		txn:          txn,
+		inconsistent: inconsistent,
+		reverse:      reverse,
+		maxKeys:      maxKeys,
+		targetBytes:  targetBytes,
 	}
 }
 
 // Prints the key where an iterator is positioned, or valid = false if invalid.
-func printIterState(iter storage.MVCCIterator) string {
+func printIterState(iter storage.Iterator) string {
 	if ok, err := iter.Valid(); !ok || err != nil {
 		if err != nil {
 			return fmt.Sprintf("valid = %v, err = %s", ok, err.Error())
@@ -296,8 +292,7 @@ type mvccClearTimeRangeOp struct {
 
 func (m mvccClearTimeRangeOp) run(ctx context.Context) string {
 	writer := m.m.getReadWriter(m.writer)
-	span, err := storage.MVCCClearTimeRange(ctx, writer, &enginepb.MVCCStats{}, m.key, m.endKey,
-		m.startTime, m.endTime, math.MaxInt64, math.MaxInt64, true /* useTBI */)
+	span, err := storage.MVCCClearTimeRange(ctx, writer, nil, m.key, m.endKey, m.startTime, m.endTime, math.MaxInt64)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -345,17 +340,15 @@ func (m mvccFindSplitKeyOp) run(ctx context.Context) string {
 }
 
 type mvccScanOp struct {
-	m                      *metaTestRunner
-	key                    roachpb.Key
-	endKey                 roachpb.Key
-	ts                     hlc.Timestamp
-	txn                    txnID
-	inconsistent           bool
-	reverse                bool
-	maxKeys                int64
-	targetBytes            int64
-	targetBytesAvoidExcess bool
-	targetBytesAllowEmpty  bool
+	m            *metaTestRunner
+	key          roachpb.Key
+	endKey       roachpb.Key
+	ts           hlc.Timestamp
+	txn          txnID
+	inconsistent bool
+	reverse      bool
+	maxKeys      int64
+	targetBytes  int64
 }
 
 func (m mvccScanOp) run(ctx context.Context) string {
@@ -370,14 +363,12 @@ func (m mvccScanOp) run(ctx context.Context) string {
 	// we will try MVCCScanning on batches and produce diffs between runs on
 	// different engines that don't point to an actual issue.
 	result, err := storage.MVCCScan(ctx, m.m.engine, m.key, m.endKey, m.ts, storage.MVCCScanOptions{
-		Inconsistent:           m.inconsistent,
-		Tombstones:             true,
-		Reverse:                m.reverse,
-		Txn:                    txn,
-		MaxKeys:                m.maxKeys,
-		TargetBytes:            m.targetBytes,
-		TargetBytesAvoidExcess: m.targetBytesAvoidExcess,
-		TargetBytesAllowEmpty:  m.targetBytesAllowEmpty,
+		Inconsistent: m.inconsistent,
+		Tombstones:   true,
+		Reverse:      m.reverse,
+		Txn:          txn,
+		MaxKeys:      m.maxKeys,
+		TargetBytes:  m.targetBytes,
 	})
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
@@ -473,7 +464,7 @@ type iterOpenOp struct {
 
 func (i iterOpenOp) run(ctx context.Context) string {
 	rw := i.m.getReadWriter(i.rw)
-	iter := rw.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
+	iter := rw.NewIterator(storage.IterOptions{
 		Prefix:     false,
 		LowerBound: i.key,
 		UpperBound: i.endKey.Next(),
@@ -596,9 +587,9 @@ type clearRangeOp struct {
 }
 
 func (c clearRangeOp) run(ctx context.Context) string {
-	// ClearRange calls in Cockroach usually happen with boundaries demarcated
-	// using unversioned keys, so mimic the same behavior here.
-	err := c.m.engine.ClearMVCCRangeAndIntents(c.key, c.endKey)
+	// All ClearRange calls in Cockroach usually happen with metadata keys, so
+	// mimic the same behavior here.
+	err := c.m.engine.ClearRange(storage.MakeMVCCMetadataKey(c.key), storage.MakeMVCCMetadataKey(c.endKey))
 	if err != nil {
 		return fmt.Sprintf("error: %s", err.Error())
 	}
@@ -922,8 +913,6 @@ var opGenerators = []opGenerator{
 			operandTransaction,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -938,8 +927,6 @@ var opGenerators = []opGenerator{
 			operandPastTS,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -954,8 +941,6 @@ var opGenerators = []opGenerator{
 			operandTransaction,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -1222,7 +1207,7 @@ var opGenerators = []opGenerator{
 				key := m.keyGenerator.parse(arg)
 				// Don't put anything at the 0 timestamp; the MVCC code expects
 				// MVCCMetadata at those values.
-				if key.Timestamp.IsEmpty() {
+				if key.Timestamp == (hlc.Timestamp{}) {
 					key.Timestamp = key.Timestamp.Next()
 				}
 				keys = append(keys, key)

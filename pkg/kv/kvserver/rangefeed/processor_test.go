@@ -134,7 +134,7 @@ func rangeFeedCheckpoint(span roachpb.Span, ts hlc.Timestamp) *roachpb.RangeFeed
 const testProcessorEventCCap = 16
 
 func newTestProcessorWithTxnPusher(
-	rtsIter storage.SimpleMVCCIterator, txnPusher TxnPusher,
+	rtsIter storage.SimpleIterator, txnPusher TxnPusher,
 ) (*Processor, *stop.Stopper) {
 	stopper := stop.NewStopper()
 
@@ -154,18 +154,18 @@ func newTestProcessorWithTxnPusher(
 		EventChanCap:         testProcessorEventCCap,
 		CheckStreamsInterval: 10 * time.Millisecond,
 	})
-	p.Start(stopper, makeIntentScannerConstructor(rtsIter))
+	p.Start(stopper, makeIteratorConstructor(rtsIter))
 	return p, stopper
 }
 
-func makeIntentScannerConstructor(rtsIter storage.SimpleMVCCIterator) IntentScannerConstructor {
+func makeIteratorConstructor(rtsIter storage.SimpleIterator) IteratorConstructor {
 	if rtsIter == nil {
 		return nil
 	}
-	return func() IntentScanner { return NewLegacyIntentScanner(rtsIter) }
+	return func() storage.SimpleIterator { return rtsIter }
 }
 
-func newTestProcessor(rtsIter storage.SimpleMVCCIterator) (*Processor, *stop.Stopper) {
+func newTestProcessor(rtsIter storage.SimpleIterator) (*Processor, *stop.Stopper) {
 	return newTestProcessorWithTxnPusher(rtsIter, nil /* pusher */)
 }
 
@@ -432,9 +432,7 @@ func TestNilProcessor(t *testing.T) {
 
 	// The following should panic because they are not safe
 	// to call on a nil Processor.
-	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-	require.Panics(t, func() { p.Start(stopper, nil) })
+	require.Panics(t, func() { p.Start(stop.NewStopper(), nil) })
 	require.Panics(t, func() { p.Register(roachpb.RSpan{}, hlc.Timestamp{}, nil, false, nil, nil) })
 }
 
@@ -563,7 +561,7 @@ func TestProcessorInitializeResolvedTimestamp(t *testing.T) {
 		makeIntent("z", txn2, "txnKey2", 21),
 		makeProvisionalKV("z", "txnKey2", 21),
 		makeKV("z", "val11", 4),
-	}, nil)
+	})
 	rtsIter.block = make(chan struct{})
 
 	p, stopper := newTestProcessor(rtsIter)

@@ -15,10 +15,6 @@ user testuser
 statement error must be owner of schema "s"
 ALTER SCHEMA s OWNER TO testuser
 
-# other users must be owner to alter the owner to the current owner again
-statement error must be owner of schema "s"
-ALTER SCHEMA s OWNER TO root
-
 # Non-superusers also must be a member of the new owning role.
 user root
 
@@ -54,22 +50,3 @@ query T
 SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 's';
 ----
 testuser2
-
-statement ok
-ALTER SCHEMA s OWNER TO CURRENT_USER
-
-query T
-SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 's';
-----
-testuser
-
-statement ok
-ALTER SCHEMA s OWNER TO testuser2
-
-statement ok
-ALTER SCHEMA s OWNER TO SESSION_USER
-
-query T
-SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 's';
-----
-testuser

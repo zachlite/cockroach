@@ -15,9 +15,10 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -26,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -35,10 +37,18 @@ var insertFastPathNodePool = sync.Pool{
 	},
 }
 
+// Check that exec.InsertFastPathMaxRows does not exceed the default
+// mutations.MaxBatchSize.
+func init() {
+	if mutations.MaxBatchSize() < exec.InsertFastPathMaxRows {
+		panic("decrease exec.InsertFastPathMaxRows")
+	}
+}
+
 // insertFastPathNode is a faster implementation of inserting values in a table
 // and performing FK checks. It is used when all the foreign key checks can be
 // performed via a direct lookup in an index, and when the input is VALUES of
-// limited size (at most mutations.MaxBatchSize).
+// limited size (at most exec.InsertFastPathMaxRows).
 type insertFastPathNode struct {
 	// input values, similar to a valuesNode.
 	input [][]tree.TypedExpr
@@ -50,8 +60,6 @@ type insertFastPathNode struct {
 
 	run insertFastPathRun
 }
-
-var _ mutationPlanNode = &insertFastPathNode{}
 
 type insertFastPathRun struct {
 	insertRun
@@ -88,36 +96,37 @@ type insertFastPathFKSpanInfo struct {
 type insertFastPathFKCheck struct {
 	exec.InsertFastPathFKCheck
 
-	tabDesc     catalog.TableDescriptor
-	idx         catalog.Index
+	tabDesc     *tabledesc.Immutable
+	idxDesc     *descpb.IndexDescriptor
 	keyPrefix   []byte
-	colMap      catalog.TableColMap
+	colMap      map[descpb.ColumnID]int
 	spanBuilder *span.Builder
 }
 
 func (c *insertFastPathFKCheck) init(params runParams) error {
 	idx := c.ReferencedIndex.(*optIndex)
 	c.tabDesc = c.ReferencedTable.(*optTable).desc
-	c.idx = idx.idx
+	c.idxDesc = idx.desc
 
 	codec := params.ExecCfg().Codec
-	c.keyPrefix = rowenc.MakeIndexKeyPrefix(codec, c.tabDesc, c.idx.GetID())
-	c.spanBuilder = span.MakeBuilder(params.EvalContext(), codec, c.tabDesc, c.idx)
+	c.keyPrefix = rowenc.MakeIndexKeyPrefix(codec, c.tabDesc, c.idxDesc.ID)
+	c.spanBuilder = span.MakeBuilder(codec, c.tabDesc, c.idxDesc)
 
 	if len(c.InsertCols) > idx.numLaxKeyCols {
 		return errors.AssertionFailedf(
 			"%d FK cols, only %d cols in index", len(c.InsertCols), idx.numLaxKeyCols,
 		)
 	}
+	c.colMap = make(map[descpb.ColumnID]int, len(c.InsertCols))
 	for i, ord := range c.InsertCols {
 		var colID descpb.ColumnID
-		if i < c.idx.NumKeyColumns() {
-			colID = c.idx.GetKeyColumnID(i)
+		if i < len(c.idxDesc.ColumnIDs) {
+			colID = c.idxDesc.ColumnIDs[i]
 		} else {
-			colID = c.idx.GetKeySuffixColumnID(i - c.idx.NumKeyColumns())
+			colID = c.idxDesc.ExtraColumnIDs[i-len(c.idxDesc.ColumnIDs)]
 		}
 
-		c.colMap.Set(colID, int(ord))
+		c.colMap[colID] = int(ord)
 	}
 	return nil
 }
@@ -249,7 +258,7 @@ func (n *insertFastPathNode) startExec(params runParams) error {
 		}
 	}
 
-	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -267,6 +276,8 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 	if n.run.done {
 		return false, nil
 	}
+
+	tracing.AnnotateTrace()
 
 	// The fast path node does everything in one batch.
 
@@ -304,7 +315,6 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 		return false, err
 	}
 
-	n.run.ti.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
 	if err := n.run.ti.finalize(params.ctx); err != nil {
 		return false, err
 	}
@@ -312,7 +322,7 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 	n.run.done = true
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc, len(n.input))
+	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc.GetID(), len(n.input))
 
 	return true, nil
 }
@@ -329,10 +339,6 @@ func (n *insertFastPathNode) Close(ctx context.Context) {
 	insertFastPathNodePool.Put(n)
 }
 
-func (n *insertFastPathNode) rowsWritten() int64 {
-	return n.run.ti.rowsWritten
-}
-
 // See planner.autoCommit.
 func (n *insertFastPathNode) enableAutoCommit() {
 	n.run.ti.enableAutoCommit()
@@ -343,21 +349,23 @@ func (n *insertFastPathNode) enableAutoCommit() {
 // If colNum is not -1, only the colNum'th column in insertCols will be checked
 // for AlterColumnTypeInProgress, otherwise every column in insertCols will
 // be checked.
-func interceptAlterColumnTypeParseError(insertCols []catalog.Column, colNum int, err error) error {
+func interceptAlterColumnTypeParseError(
+	insertCols []descpb.ColumnDescriptor, colNum int, err error,
+) error {
 	// Only intercept the error if the column being inserted into
 	// is an actual column. This is to avoid checking on values that don't
 	// correspond to an actual column, for example a check constraint.
 	if colNum >= len(insertCols) {
 		return err
 	}
-	var insertCol catalog.Column
+	var insertCol descpb.ColumnDescriptor
 
 	// wrapParseError is a helper function that checks if an insertCol has the
 	// AlterColumnTypeInProgress flag and wraps the parse error msg stating
 	// that the error may be because the column is being altered.
 	// Returns if the error msg has been wrapped and the wrapped error msg.
-	wrapParseError := func(insertCol catalog.Column, colNum int, err error) (bool, error) {
-		if insertCol.ColumnDesc().AlterColumnTypeInProgress {
+	wrapParseError := func(insertCol descpb.ColumnDescriptor, colNum int, err error) (bool, error) {
+		if insertCol.AlterColumnTypeInProgress {
 			code := pgerror.GetPGCode(err)
 			if code == pgcode.InvalidTextRepresentation {
 				if colNum != -1 {

@@ -14,54 +14,33 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
-)
-
-// columnarizerMode indicates the mode of operation of the Columnarizer.
-type columnarizerMode int
-
-const (
-	// columnarizerBufferingMode is the mode of operation in which the
-	// Columnarizer will be buffering up rows (dynamically, up to
-	// coldata.BatchSize()) before emitting the output batch.
-	// TODO(jordan): evaluate whether it's more efficient to skip the buffer
-	// phase.
-	columnarizerBufferingMode columnarizerMode = iota
-	// columnarizerStreamingMode is the mode of operation in which the
-	// Columnarizer will always emit batches with a single tuple (until it is
-	// done).
-	columnarizerStreamingMode
 )
 
 // Columnarizer turns an execinfra.RowSource input into an Operator output, by
 // reading the input in chunks of size coldata.BatchSize() and converting each
 // chunk into a coldata.Batch column by column.
 type Columnarizer struct {
-	// Note that we consciously don't embed a colexecop.InitHelper here because
-	// we currently rely on the ProcessorBase to provide the same (and more)
-	// functionality.
-	// TODO(yuzefovich): consider whether embedding ProcessorBaseNoHelper into
-	// the columnarizers makes sense.
-	execinfra.ProcessorBaseNoHelper
-	colexecop.NonExplainable
+	execinfra.ProcessorBase
+	NonExplainable
 
-	mode      columnarizerMode
-	allocator *colmem.Allocator
-	input     execinfra.RowSource
-	da        rowenc.DatumAlloc
+	allocator  *colmem.Allocator
+	input      execinfra.RowSource
+	da         rowenc.DatumAlloc
+	initStatus OperatorInitStatus
 
 	buffered        rowenc.EncDatumRows
 	batch           coldata.Batch
 	maxBatchMemSize int64
 	accumulatedMeta []execinfrapb.ProducerMetadata
+	ctx             context.Context
 	typs            []*types.T
 
 	// removedFromFlow marks this Columnarizer as having been removed from the
@@ -70,154 +49,85 @@ type Columnarizer struct {
 	removedFromFlow bool
 }
 
-var _ colexecop.Operator = &Columnarizer{}
-var _ colexecop.VectorizedStatsCollector = &Columnarizer{}
+var _ colexecbase.Operator = &Columnarizer{}
 
-// NewBufferingColumnarizer returns a new Columnarizer that will be buffering up
-// rows before emitting them as output batches.
-func NewBufferingColumnarizer(
+// NewColumnarizer returns a new Columnarizer.
+func NewColumnarizer(
+	ctx context.Context,
 	allocator *colmem.Allocator,
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	input execinfra.RowSource,
-) *Columnarizer {
-	return newColumnarizer(allocator, flowCtx, processorID, input, columnarizerBufferingMode)
-}
-
-// NewStreamingColumnarizer returns a new Columnarizer that emits every input
-// row as a separate batch.
-func NewStreamingColumnarizer(
-	allocator *colmem.Allocator,
-	flowCtx *execinfra.FlowCtx,
-	processorID int32,
-	input execinfra.RowSource,
-) *Columnarizer {
-	return newColumnarizer(allocator, flowCtx, processorID, input, columnarizerStreamingMode)
-}
-
-// newColumnarizer returns a new Columnarizer.
-func newColumnarizer(
-	allocator *colmem.Allocator,
-	flowCtx *execinfra.FlowCtx,
-	processorID int32,
-	input execinfra.RowSource,
-	mode columnarizerMode,
-) *Columnarizer {
-	switch mode {
-	case columnarizerBufferingMode, columnarizerStreamingMode:
-	default:
-		colexecerror.InternalError(errors.AssertionFailedf("unexpected columnarizerMode %d", mode))
-	}
+) (*Columnarizer, error) {
+	var err error
 	c := &Columnarizer{
 		allocator:       allocator,
 		input:           input,
-		maxBatchMemSize: execinfra.GetWorkMemLimit(flowCtx),
-		mode:            mode,
+		maxBatchMemSize: execinfra.GetWorkMemLimit(flowCtx.Cfg),
+		ctx:             ctx,
 	}
-	c.ProcessorBaseNoHelper.Init(
-		nil, /* self */
+	if err = c.ProcessorBase.Init(
+		nil,
+		&execinfrapb.PostProcessSpec{},
+		input.OutputTypes(),
 		flowCtx,
-		flowCtx.EvalCtx,
 		processorID,
 		nil, /* output */
+		nil, /* memMonitor */
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{input},
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				// Close will call InternalClose(). Note that we don't return
-				// any trailing metadata here because the columnarizers
-				// propagate it in DrainMeta.
-				if err := c.Close(); util.CrdbTestBuild && err != nil {
-					// Close never returns an error.
-					colexecerror.InternalError(errors.AssertionFailedf("unexpected error %v from Columnarizer.Close", err))
-				}
+			TrailingMetaCallback: func(ctx context.Context) []execinfrapb.ProducerMetadata {
+				// Close never returns an error.
+				_ = c.Close(ctx)
 				return nil
 			}},
-	)
-	c.typs = c.input.OutputTypes()
-	return c
+	); err != nil {
+		return nil, err
+	}
+	c.typs = c.OutputTypes()
+	return c, nil
 }
 
-// Init is part of the colexecop.Operator interface.
-func (c *Columnarizer) Init(ctx context.Context) {
+// Init is part of the Operator interface.
+func (c *Columnarizer) Init() {
 	if c.removedFromFlow {
 		return
 	}
-	if c.Ctx != nil {
-		// Init has already been called.
-		return
-	}
-	c.accumulatedMeta = make([]execinfrapb.ProducerMetadata, 0, 1)
-	ctx = c.StartInternalNoSpan(ctx)
-	c.input.Start(ctx)
-	if execStatsHijacker, ok := c.input.(execinfra.ExecStatsForTraceHijacker); ok {
-		// The columnarizer is now responsible for propagating the execution
-		// stats of the wrapped processor.
-		//
-		// Note that this columnarizer cannot be removed from the flow because
-		// it will have a vectorized stats collector planned on top, so the
-		// optimization of wrapRowSources() in execplan.go will never trigger.
-		// We check this assumption with an assertion below in the test setting.
-		//
-		// Still, just to be safe, we delay the hijacking until Init so that in
-		// case the assumption is wrong, we still get the stats from the wrapped
-		// processor.
-		c.ExecStatsForTrace = execStatsHijacker.HijackExecStatsForTrace()
+	// We don't want to call Start on the input to columnarizer and allocating
+	// internal objects several times if Init method is called more than once, so
+	// we have this check in place.
+	if c.initStatus == OperatorNotInitialized {
+		c.accumulatedMeta = make([]execinfrapb.ProducerMetadata, 0, 1)
+		c.ctx = c.StartInternalNoSpan(c.ctx)
+		c.input.Start(c.ctx)
+		c.initStatus = OperatorInitialized
 	}
 }
 
-// GetStats is part of the colexecop.VectorizedStatsCollector interface.
-func (c *Columnarizer) GetStats() *execinfrapb.ComponentStats {
-	if c.removedFromFlow && util.CrdbTestBuild {
-		colexecerror.InternalError(errors.AssertionFailedf(
-			"unexpectedly the columnarizer was removed from the flow when stats are being collected",
-		))
-	}
-	componentID := c.FlowCtx.ProcessorComponentID(c.ProcessorID)
-	if c.removedFromFlow || c.ExecStatsForTrace == nil {
-		return &execinfrapb.ComponentStats{Component: componentID}
-	}
-	s := c.ExecStatsForTrace()
-	s.Component = componentID
-	return s
-}
-
-// Next is part of the colexecop.Operator interface.
-func (c *Columnarizer) Next() coldata.Batch {
+// Next is part of the Operator interface.
+func (c *Columnarizer) Next(context.Context) coldata.Batch {
 	if c.removedFromFlow {
 		return coldata.ZeroBatch
 	}
 	var reallocated bool
-	switch c.mode {
-	case columnarizerBufferingMode:
-		c.batch, reallocated = c.allocator.ResetMaybeReallocate(
-			c.typs, c.batch, 1 /* minDesiredCapacity */, c.maxBatchMemSize,
-		)
-	case columnarizerStreamingMode:
-		// Note that we're not using ResetMaybeReallocate because we will
-		// always have at most one tuple in the batch.
-		if c.batch == nil {
-			c.batch = c.allocator.NewMemBatchWithFixedCapacity(c.typs, 1 /* minCapacity */)
-			reallocated = true
-		} else {
-			c.batch.ResetInternalBatch()
-		}
-	}
+	c.batch, reallocated = c.allocator.ResetMaybeReallocate(
+		c.typs, c.batch, 1 /* minCapacity */, c.maxBatchMemSize,
+	)
 	if reallocated {
 		oldRows := c.buffered
-		newRows := make(rowenc.EncDatumRows, c.batch.Capacity())
-		_ = newRows[len(oldRows)]
-		for i := 0; i < len(oldRows); i++ {
-			//gcassert:bce
-			newRows[i] = oldRows[i]
+		c.buffered = make(rowenc.EncDatumRows, c.batch.Capacity())
+		for i := range c.buffered {
+			if len(oldRows) > 0 {
+				c.buffered[i] = oldRows[0]
+				oldRows = oldRows[1:]
+			} else {
+				c.buffered[i] = make(rowenc.EncDatumRow, len(c.typs))
+			}
 		}
-		for i := len(oldRows); i < len(newRows); i++ {
-			//gcassert:bce
-			newRows[i] = make(rowenc.EncDatumRow, len(c.typs))
-		}
-		c.buffered = newRows
 	}
-	// Buffer up rows up to the capacity of the batch.
+	// Buffer up n rows.
 	nRows := 0
+	columnTypes := c.OutputTypes()
 	for ; nRows < c.batch.Capacity(); nRows++ {
 		row, meta := c.input.Next()
 		if meta != nil {
@@ -232,6 +142,8 @@ func (c *Columnarizer) Next() coldata.Batch {
 		if row == nil {
 			break
 		}
+		// TODO(jordan): evaluate whether it's more efficient to skip the buffer
+		// phase.
 		copy(c.buffered[nRows], row)
 	}
 
@@ -242,9 +154,8 @@ func (c *Columnarizer) Next() coldata.Batch {
 	}
 
 	// Write each column into the output batch.
-	outputRows := c.buffered[:nRows]
-	for idx, ct := range c.typs {
-		err := EncDatumRowsToColVec(c.allocator, outputRows, c.batch.ColVec(idx), idx, ct, &c.da)
+	for idx, ct := range columnTypes {
+		err := EncDatumRowsToColVec(c.allocator, c.buffered[:nRows], c.batch.ColVec(idx), idx, ct, &c.da)
 		if err != nil {
 			colexecerror.InternalError(err)
 		}
@@ -253,22 +164,24 @@ func (c *Columnarizer) Next() coldata.Batch {
 	return c.batch
 }
 
+// Run is part of the execinfra.Processor interface.
+//
+// Columnarizers are not expected to be Run, so we prohibit calling this method
+// on them.
+func (c *Columnarizer) Run(context.Context) {
+	colexecerror.InternalError(errors.AssertionFailedf("Columnarizer should not be Run"))
+}
+
 var (
-	_ colexecop.DrainableOperator = &Columnarizer{}
-	_ colexecop.Closer            = &Columnarizer{}
+	_ colexecbase.Operator       = &Columnarizer{}
+	_ execinfrapb.MetadataSource = &Columnarizer{}
+	_ Closer                     = &Columnarizer{}
 )
 
-// DrainMeta is part of the colexecop.MetadataSource interface.
-func (c *Columnarizer) DrainMeta() []execinfrapb.ProducerMetadata {
+// DrainMeta is part of the MetadataSource interface.
+func (c *Columnarizer) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	if c.removedFromFlow {
 		return nil
-	}
-	if c.Ctx == nil {
-		// The columnarizer wasn't initialized, so the wrapped processors might
-		// not have been started leaving them in an unsafe to drain state, so
-		// we skip the draining. Mostly likely this happened because a panic was
-		// encountered in Init.
-		return c.accumulatedMeta
 	}
 	c.MoveToDraining(nil /* err */)
 	for {
@@ -281,8 +194,8 @@ func (c *Columnarizer) DrainMeta() []execinfrapb.ProducerMetadata {
 	return c.accumulatedMeta
 }
 
-// Close is part of the colexecop.ClosableOperator interface.
-func (c *Columnarizer) Close() error {
+// Close is part of the Operator interface.
+func (c *Columnarizer) Close(ctx context.Context) error {
 	if c.removedFromFlow {
 		return nil
 	}
@@ -290,7 +203,7 @@ func (c *Columnarizer) Close() error {
 	return nil
 }
 
-// ChildCount is part of the execinfra.OpNode interface.
+// ChildCount is part of the Operator interface.
 func (c *Columnarizer) ChildCount(verbose bool) int {
 	if _, ok := c.input.(execinfra.OpNode); ok {
 		return 1
@@ -298,7 +211,7 @@ func (c *Columnarizer) ChildCount(verbose bool) int {
 	return 0
 }
 
-// Child is part of the execinfra.OpNode interface.
+// Child is part of the Operator interface.
 func (c *Columnarizer) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		if n, ok := c.input.(execinfra.OpNode); ok {

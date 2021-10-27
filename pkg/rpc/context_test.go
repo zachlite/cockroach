@@ -162,65 +162,6 @@ func TestHeartbeatCB(t *testing.T) {
 	})
 }
 
-// TestPingInterceptors checks that OnOutgoingPing and OnIncomingPing can inject errors.
-func TestPingInterceptors(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
-
-	const (
-		blockedTargetNodeID = 5
-		blockedOriginNodeID = 123
-	)
-
-	errBoomSend := errors.Handled(errors.New("boom due to onSendPing"))
-	recvMsg := "boom due to onHandlePing"
-	errBoomRecv := status.Error(codes.FailedPrecondition, recvMsg)
-	opts := ContextOptions{
-		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
-		Config:     testutils.NewNodeTestBaseContext(),
-		Clock:      hlc.NewClock(hlc.UnixNano, 500*time.Millisecond),
-		Stopper:    stop.NewStopper(),
-		Settings:   cluster.MakeTestingClusterSettings(),
-		OnOutgoingPing: func(req *PingRequest) error {
-			if req.TargetNodeID == blockedTargetNodeID {
-				return errBoomSend
-			}
-			return nil
-		},
-		OnIncomingPing: func(req *PingRequest) error {
-			if req.OriginNodeID == blockedOriginNodeID {
-				return errBoomRecv
-			}
-			return nil
-		},
-	}
-	defer opts.Stopper.Stop(ctx)
-
-	rpcCtx := NewContext(opts)
-	{
-		_, err := rpcCtx.GRPCDialNode("unused:1234", 5, SystemClass).Connect(ctx)
-		require.Equal(t, errBoomSend, errors.Cause(err))
-	}
-
-	s := newTestServer(t, rpcCtx)
-	RegisterHeartbeatServer(s, rpcCtx.NewHeartbeatService())
-	rpcCtx.NodeID.Set(ctx, blockedOriginNodeID)
-	ln, err := netutil.ListenAndServeGRPC(rpcCtx.Stopper, s, util.TestAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	remoteAddr := ln.Addr().String()
-	{
-		_, err := rpcCtx.GRPCDialNode(remoteAddr, blockedOriginNodeID, SystemClass).Connect(ctx)
-		require.True(t, errors.HasType(err, errBoomRecv))
-		status, ok := status.FromError(errors.UnwrapAll(err))
-		require.True(t, ok)
-		require.Equal(t, codes.FailedPrecondition, status.Code())
-		require.Equal(t, recvMsg, status.Message())
-	}
-}
-
 var _ roachpb.InternalServer = &internalServer{}
 
 type internalServer struct{}
@@ -249,33 +190,9 @@ func (*internalServer) GossipSubscription(
 	panic("unimplemented")
 }
 
-func (*internalServer) ResetQuorum(
-	context.Context, *roachpb.ResetQuorumRequest,
-) (*roachpb.ResetQuorumResponse, error) {
-	panic("unimplemented")
-}
-
 func (*internalServer) Join(
 	context.Context, *roachpb.JoinNodeRequest,
 ) (*roachpb.JoinNodeResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) GetSpanConfigs(
-	context.Context, *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
-func (*internalServer) UpdateSpanConfigs(
-	context.Context, *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
 	panic("unimplemented")
 }
 
@@ -351,7 +268,7 @@ func TestHeartbeatHealth(t *testing.T) {
 			}
 
 			select {
-			case <-stopper.ShouldQuiesce():
+			case <-stopper.ShouldStop():
 				return
 			case heartbeat.ready <- err:
 			}
@@ -622,14 +539,14 @@ func TestHeartbeatHealthTransport(t *testing.T) {
 			}}
 	}()
 
-	_ = stopper.RunAsyncTask(ctx, "wait-quiesce", func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		<-stopper.ShouldQuiesce()
 		netutil.FatalIfUnexpected(ln.Close())
-		<-stopper.ShouldQuiesce()
+		<-stopper.ShouldStop()
 		s.Stop()
 	})
 
-	_ = stopper.RunAsyncTask(ctx, "serve", func(context.Context) {
+	stopper.RunWorker(ctx, func(context.Context) {
 		netutil.FatalIfUnexpected(s.Serve(ln))
 	})
 
@@ -1017,7 +934,7 @@ func TestRemoteOffsetUnhealthy(t *testing.T) {
 // that's what we're testing here. Likewise, serverside keepalive ensures that
 // if a ping is not seen within a timeout, the transport will also be closed.
 //
-// In this test we use a TestingHeartbeatStreamService as opposed to a standard
+// In this test we use a TestingHeartbeatStreamService as oppposed to a standard
 // HeartbeatService. This is important to test scenarios where the
 // client->server connection is partitioned but the server->client connection is
 // healthy, because a TestingHeartbeatStreamService will continue to respond on
@@ -1201,6 +1118,7 @@ func grpcRunKeepaliveTestCase(testCtx context.Context, c grpcKeepaliveTestCase) 
 	if err != nil {
 		return err
 	}
+	defer func() { _ = conn.Close() }()
 
 	// Create the heartbeat client.
 	log.Infof(ctx, "starting heartbeat client")
@@ -1814,8 +1732,7 @@ func TestRunHeartbeatSetsHeartbeatStateWhenExitingBeforeFirstHeartbeat(t *testin
 	if _, err = c.Connect(ctx); err != nil {
 		require.Regexp(t, "not yet heartbeated", err)
 	}
-	err = c.grpcConn.Close() // nolint:grpcconnclose
-	require.NoError(t, err)
+	require.NoError(t, c.grpcConn.Close())
 }
 
 func BenchmarkGRPCDial(b *testing.B) {

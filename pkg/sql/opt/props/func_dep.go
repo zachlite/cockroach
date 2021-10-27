@@ -324,7 +324,7 @@ import (
 // to have redundant columns that can be functionally determined from other
 // columns in the key. Of more value is the set of "candidate keys", which are
 // keys that contain no redundant columns. Removing any column from such a key
-// causes it to no longer be a key. It is possible to enumerate the set of
+// causes it to longer be a key. It is possible to enumerate the set of
 // candidate keys in polynomial rather than exponential time (see Wikipedia
 // "Candidate key" entry).
 //
@@ -469,8 +469,7 @@ const (
 // for more details.
 type funcDep struct {
 	// from is the determinant of the functional dependency (easier to read the
-	// code when "from" is used rather than "determinant"). If equiv is true,
-	// from may only consist of a single column.
+	// code when "from" is used rather than "determinant").
 	//
 	// This set is immutable; to update it, replace it with a different set
 	// containing the desired columns.
@@ -549,24 +548,6 @@ func (f *FuncDepSet) CopyFrom(fdset *FuncDepSet) {
 	f.deps = append(f.deps, fdset.deps...)
 	f.key = fdset.key
 	f.hasKey = fdset.hasKey
-}
-
-// RemapFrom copies the given FD into this FD, remapping column IDs according to
-// the from/to lists. Specifically, column from[i] is replaced with column
-// to[i] (see TranslateColSet).
-// Any columns not in the from list are removed from the FDs.
-func (f *FuncDepSet) RemapFrom(fdset *FuncDepSet, fromCols, toCols opt.ColList) {
-	f.CopyFrom(fdset)
-	colSet := f.ColSet()
-	fromSet := fromCols.ToSet()
-	if !colSet.SubsetOf(fromSet) {
-		f.ProjectCols(colSet.Intersection(fromSet))
-	}
-	for i := range f.deps {
-		f.deps[i].from = opt.TranslateColSetStrict(f.deps[i].from, fromCols, toCols)
-		f.deps[i].to = opt.TranslateColSetStrict(f.deps[i].to, fromCols, toCols)
-	}
-	f.key = opt.TranslateColSetStrict(f.key, fromCols, toCols)
 }
 
 // ColsAreStrictKey returns true if the given columns contain a strict key for the
@@ -677,9 +658,6 @@ func (f *FuncDepSet) ComputeClosure(cols opt.ColSet) opt.ColSet {
 
 // AreColsEquiv returns true if the two given columns are equivalent.
 func (f *FuncDepSet) AreColsEquiv(col1, col2 opt.ColumnID) bool {
-	if col1 == col2 {
-		return true
-	}
 	for i := range f.deps {
 		fd := &f.deps[i]
 
@@ -700,12 +678,11 @@ func (f *FuncDepSet) AreColsEquiv(col1, col2 opt.ColumnID) bool {
 //   (a)==(b)
 //   (b)==(c)
 //   (a)==(d)
-//   (e)==(f)
 //
-// The equivalence closure for (a,e) is (a,b,c,d,e,f) because all these columns
-// are transitively equal to either a or e. Therefore, all columns must have
-// equal non-NULL values, or else all must be NULL (see definition for NULL= in
-// the comment for FuncDepSet).
+// The equivalence closure for (a) is (a,b,c,d) because (a) is transitively
+// equivalent to all other columns. Therefore, all columns must have equal
+// non-NULL values, or else all must be NULL (see definition for NULL= in the
+// comment for FuncDepSet).
 func (f *FuncDepSet) ComputeEquivClosure(cols opt.ColSet) opt.ColSet {
 	// Don't need to get transitive closure, because equivalence closures are
 	// already maintained for every column.
@@ -786,51 +763,10 @@ func (f *FuncDepSet) AddLaxKey(keyCols, allCols opt.ColSet) {
 //
 //   ()-->(a,b)
 //
-// If f has equivalence dependencies of columns that are a subset of cols, those
-// dependencies are retained in f. This prevents losing additional information
-// about the columns, which a single FD with an empty key cannot describe. For
-// example:
-//
-//   f:      (a)-->(b,c), (a)==(b), (b)==(a), (a)==(c), (c)==(a)
-//   cols:   (a,c)
-//   result: ()-->(a,c), (a)==(c), (c)==(a)
-//
 func (f *FuncDepSet) MakeMax1Row(cols opt.ColSet) {
-	// Remove all FDs except for equivalency FDs with columns that are a subset
-	// of cols.
-	copyIdx := 0
-	for i := range f.deps {
-		fd := &f.deps[i]
-
-		// Skip non-equivalence dependencies.
-		if !fd.equiv {
-			continue
-		}
-
-		// If fd is an equivalence dependency, from has a single column.
-		fromCol, ok := fd.from.Next(0)
-		if !ok {
-			panic(errors.AssertionFailedf("equivalence dependency from cannot be empty"))
-		}
-
-		// Add a new equivalence dependency with the same from column and the to
-		// columns that are present in cols.
-		if cols.Contains(fromCol) && fd.to.Intersects(cols) {
-			f.deps[copyIdx] = funcDep{
-				from:   fd.from,
-				to:     fd.to.Intersection(cols),
-				strict: true,
-				equiv:  true,
-			}
-			copyIdx++
-		}
-	}
-	f.deps = f.deps[:copyIdx]
-
+	f.deps = f.deps[:0]
 	if !cols.Empty() {
 		f.deps = append(f.deps, funcDep{to: cols, strict: true})
-		// The constant FD must be the first in the set.
-		f.deps[0], f.deps[len(f.deps)-1] = f.deps[len(f.deps)-1], f.deps[0]
 	}
 	f.setKey(opt.ColSet{}, strictKey)
 }
@@ -891,8 +827,8 @@ func (f *FuncDepSet) AddEquivalency(a, b opt.ColumnID) {
 	f.addEquivalency(equiv)
 }
 
-// AddConstants adds a strict FD to the set that declares each given column as
-// having the same constant value for all rows. If a column is nullable, then
+// AddConstants adds a strict FD to the set that declares the given column as
+// having the same constant value for all rows. If the column is nullable, then
 // its value may be NULL, but then the column must be NULL for all rows. For
 // column "a", the FD looks like this:
 //
@@ -1023,8 +959,6 @@ func (f *FuncDepSet) ProjectCols(cols opt.ColSet) {
 			// Equivalence dependencies already maintain closure, so skip them.
 			if !fd.equiv {
 				fd.to = f.ComputeClosure(fd.to)
-				// Maintain the invariant that from and to columns don't overlap.
-				fd.to.DifferenceWith(fd.from)
 			}
 		}
 
@@ -1377,26 +1311,6 @@ func (f *FuncDepSet) MakeLeftOuter(
 	// leftKey because nullExtendRightRows can remove FDs, such that the closure
 	// of oldKey ends up missing some columns from the right.
 	f.ensureKeyClosure(leftCols.Union(rightCols))
-
-	// If the left input has at most one row, any columns that - when the join
-	// filters hold - are functionally dependent on the left columns are constant
-	// in the left join output:
-	//  - either the one left row has a match, and all output rows have the same
-	//    values for the left columns
-	//  - or the left row has no match, and there is a single output row (where
-	//    any functional dependencies hold trivially).
-	//
-	// This does not hold in general when the left equality column is
-	// constant but the left input has more than one row, for example:
-	//   ab contains (1, 1), (1, 2)
-	//   cd contains (1, 1)
-	//   ab JOIN cd ON (a=c AND b=d) contains (1, 1, 1, 1), (1, 2, NULL, NULL)
-	// Here a is constant in ab but c is not constant in the result.
-	if leftFDs.HasMax1Row() {
-		constCols := filtersFDs.ComputeClosure(leftCols)
-		constCols.IntersectionWith(rightCols)
-		f.AddConstants(constCols)
-	}
 }
 
 // MakeFullOuter modifies the cartesian product FD set to reflect the impact of

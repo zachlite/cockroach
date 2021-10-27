@@ -13,10 +13,9 @@ package execinfra
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -34,7 +33,29 @@ func LimitHint(specLimitHint int64, post *execinfrapb.PostProcessSpec) (limitHin
 	if post.Limit != 0 && post.Limit <= readerOverflowProtection {
 		limitHint = int64(post.Limit)
 	} else if specLimitHint != 0 && specLimitHint <= readerOverflowProtection {
-		limitHint = specLimitHint
+		// If it turns out that limiHint rows are sufficient for our consumer, we
+		// want to avoid asking for another batch. Currently, the only way for us to
+		// "stop" is if we block on sending rows and the consumer sets
+		// ConsumerDone() on the RowChannel while we block. So we want to block
+		// *after* sending all the rows in the limit hint; to do this, we request
+		// rowChannelBufSize + 1 more rows:
+		//  - rowChannelBufSize rows guarantee that we will fill the row channel
+		//    even after limitHint rows are consumed
+		//  - the extra row gives us chance to call Push again after we unblock,
+		//    which will notice that ConsumerDone() was called.
+		//
+		// This flimsy mechanism is only useful in the (optimistic) case that the
+		// processor that only needs this many rows is our direct, local consumer.
+		// If we have a chain of processors and RowChannels, or remote streams, this
+		// reasoning goes out the door.
+		//
+		// TODO(radu, andrei): work on a real mechanism for limits.
+		limitHint = specLimitHint + RowChannelBufSize + 1
+	}
+
+	if !post.Filter.Empty() {
+		// We have a filter so we will likely need to read more rows.
+		limitHint *= 2
 	}
 
 	return limitHint
@@ -44,10 +65,13 @@ func LimitHint(specLimitHint int64, post *execinfrapb.PostProcessSpec) (limitHin
 // returns the list of ranges whose leaseholder is not on the indicated node.
 // Ranges with unknown leases are not included in the result.
 func MisplannedRanges(
-	ctx context.Context, spans []roachpb.Span, nodeID roachpb.NodeID, rdc *rangecache.RangeCache,
+	ctx context.Context,
+	spans []roachpb.Span,
+	nodeID roachpb.NodeID,
+	rdc *kvcoord.RangeDescriptorCache,
 ) (misplannedRanges []roachpb.RangeInfo) {
 	log.VEvent(ctx, 2, "checking range cache to see if range info updates should be communicated to the gateway")
-	var misplanned map[roachpb.RangeID]struct{}
+	misplanned := make(map[roachpb.RangeID]struct{})
 	for _, sp := range spans {
 		rSpan, err := keys.SpanAddr(sp)
 		if err != nil {
@@ -65,63 +89,22 @@ func MisplannedRanges(
 			l := ri.Lease()
 			if l != nil && l.Replica.NodeID != nodeID {
 				misplannedRanges = append(misplannedRanges, roachpb.RangeInfo{
-					Desc:                  *ri.Desc(),
-					Lease:                 *l,
-					ClosedTimestampPolicy: ri.ClosedTimestampPolicy(),
+					Desc:  *ri.Desc(),
+					Lease: *l,
 				})
-
-				if misplanned == nil {
-					misplanned = make(map[roachpb.RangeID]struct{})
-				}
-				misplanned[ri.Desc().RangeID] = struct{}{}
 			}
 		}
 	}
 
-	if len(misplannedRanges) != 0 && log.ExpensiveLogEnabled(ctx, 2) {
-		var b strings.Builder
-		for i := range misplannedRanges {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			if i > 3 {
-				b.WriteString("...")
-				break
-			}
-			fmt.Fprintf(&b, "%+v", misplannedRanges[i])
+	if len(misplannedRanges) != 0 {
+		var msg string
+		if len(misplannedRanges) < 3 {
+			msg = fmt.Sprintf("%+v", misplannedRanges[0].Desc)
+		} else {
+			msg = fmt.Sprintf("%+v...", misplannedRanges[:3])
 		}
-		log.VEventf(ctx, 2, "misplanned ranges: %s", b.String())
+		log.VEventf(ctx, 2, "misplanned ranges: %s", msg)
 	}
 
 	return misplannedRanges
-}
-
-// SpansWithCopy tracks a set of spans (which can be modified) along with the
-// copy of the original one if needed.
-type SpansWithCopy struct {
-	Spans     roachpb.Spans
-	SpansCopy roachpb.Spans
-}
-
-// MakeSpansCopy makes a copy of s.Spans (which are assumed to have already been
-// set).
-func (s *SpansWithCopy) MakeSpansCopy() {
-	if cap(s.SpansCopy) >= len(s.Spans) {
-		s.SpansCopy = s.SpansCopy[:len(s.Spans)]
-	} else {
-		s.SpansCopy = make(roachpb.Spans, len(s.Spans))
-	}
-	copy(s.SpansCopy, s.Spans)
-}
-
-// Reset deeply resets s.
-func (s *SpansWithCopy) Reset() {
-	for i := range s.Spans {
-		s.Spans[i] = roachpb.Span{}
-	}
-	for i := range s.SpansCopy {
-		s.SpansCopy[i] = roachpb.Span{}
-	}
-	s.Spans = s.Spans[:0]
-	s.SpansCopy = s.SpansCopy[:0]
 }

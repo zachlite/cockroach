@@ -14,8 +14,6 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/errors"
 )
 
@@ -70,7 +68,7 @@ func unimplementedInternal(
 	// Create the issue link.
 	link := errors.IssueLink{Detail: detail}
 	if issue > 0 {
-		link.IssueURL = build.MakeIssueURL(issue)
+		link.IssueURL = MakeURL(issue)
 	}
 
 	// Instantiate the base error.
@@ -98,8 +96,10 @@ func unimplementedInternal(
 		// perform telemetry.
 		err = errors.WithTelemetry(err, detail)
 	}
-
-	// Wrap with the corresponding PG error for unimplemented.
-	err = pgerror.WithCandidateCode(err, pgcode.FeatureNotSupported)
 	return err
+}
+
+// MakeURL produces a URL to a CockroachDB issue.
+func MakeURL(issue int) string {
+	return fmt.Sprintf("https://go.crdb.dev/issue-v/%d/%s", issue, build.VersionPrefix())
 }

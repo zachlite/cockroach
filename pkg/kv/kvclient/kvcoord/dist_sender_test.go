@@ -29,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip/simulation"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -41,18 +40,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/errutil"
-	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	grpcstatus "google.golang.org/grpc/status"
 )
 
 var (
@@ -133,11 +127,11 @@ func adaptSimpleTransport(fn simpleSendFn) TransportFactory {
 	return func(
 		_ SendOptions,
 		_ *nodedialer.Dialer,
-		replicas ReplicaSlice,
+		replicas []roachpb.ReplicaDescriptor,
 	) (Transport, error) {
 		return &simpleTransportAdapter{
 			fn:       fn,
-			replicas: replicas.Descriptors(),
+			replicas: replicas,
 		}, nil
 	}
 }
@@ -198,8 +192,6 @@ func (l *simpleTransportAdapter) MoveToFront(replica roachpb.ReplicaDescriptor) 
 	}
 }
 
-func (l *simpleTransportAdapter) Release() {}
-
 func makeGossip(t *testing.T, stopper *stop.Stopper, rpcContext *rpc.Context) *gossip.Gossip {
 	server := rpc.NewServer(rpcContext)
 
@@ -223,7 +215,7 @@ func newNodeDesc(nodeID roachpb.NodeID) *roachpb.NodeDescriptor {
 }
 
 // TestSendRPCOrder verifies that sendRPC correctly takes into account the
-// lease holder, attributes, and routing policy to determine where to send
+// lease holder, attributes and required consistency to determine where to send
 // remote requests.
 func TestSendRPCOrder(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -267,71 +259,74 @@ func TestSendRPCOrder(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name          string
-		routingPolicy roachpb.RoutingPolicy
-		tiers         []roachpb.Tier
-		leaseHolder   int32            // 0 for not caching a lease holder.
-		expReplica    []roachpb.NodeID // 0 elements ignored
+		args        roachpb.Request
+		tiers       []roachpb.Tier
+		expReplica  []roachpb.NodeID
+		leaseHolder int32 // 0 for not caching a lease holder.
+		// Naming is somewhat off, as eventually consistent reads usually
+		// do not have to go to the lease holder when a node has a read lease.
+		// Would really want CONSENSUS here, but that is not implemented.
+		// Likely a test setup here will never have a read lease, but good
+		// to keep in mind.
+		consistent bool
 	}{
+		// Inconsistent Scan without matching attributes.
 		{
-			name:          "route to leaseholder, without matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         []roachpb.Tier{},
-			// No ordering.
+			args:       &roachpb.ScanRequest{},
+			tiers:      []roachpb.Tier{},
 			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
 		},
+		// Inconsistent Scan with matching attributes.
+		// Should move the two nodes matching the attributes to the front and
+		// go stable.
 		{
-			name:          "route to leaseholder, with matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         nodeTiers[5],
-			// Order nearest first.
+			args:  &roachpb.ScanRequest{},
+			tiers: nodeTiers[5],
+			// Compare only the first two resulting addresses.
 			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
 		},
+
+		// Scan without matching attributes that requires but does not find
+		// a lease holder.
 		{
-			name:          "route to leaseholder, without matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         []roachpb.Tier{},
-			leaseHolder:   2,
-			// Order leaseholder first.
-			expReplica: []roachpb.NodeID{2, 0, 0, 0, 0},
+			args:       &roachpb.ScanRequest{},
+			tiers:      []roachpb.Tier{},
+			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
+			consistent: true,
 		},
+		// Put without matching attributes that requires but does not find lease holder.
+		// Should go random and not change anything.
 		{
-			name:          "route to leaseholder, with matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         nodeTiers[5],
-			leaseHolder:   2,
-			// Order leaseholder first, then nearest.
-			expReplica: []roachpb.NodeID{2, 5, 4, 0, 0},
-		},
-		{
-			name:          "route to nearest, without matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         []roachpb.Tier{},
-			// No ordering.
+			args:       &roachpb.PutRequest{},
+			tiers:      []roachpb.Tier{{Key: "nomatch", Value: ""}},
 			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
 		},
+		// Put with matching attributes but no lease holder.
+		// Should move the two nodes matching the attributes to the front.
 		{
-			name:          "route to nearest, with matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         nodeTiers[5],
-			// Order nearest first.
+			args:  &roachpb.PutRequest{},
+			tiers: append(nodeTiers[5], roachpb.Tier{Key: "irrelevant", Value: ""}),
+			// Compare only the first two resulting addresses.
 			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
 		},
+		// Put with matching attributes that finds the lease holder (node 2).
+		// Should address the lease holder and the two nodes matching the attributes
+		// (the last and second to last) in that order.
 		{
-			name:          "route to nearest, without matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         []roachpb.Tier{},
-			leaseHolder:   2,
-			// No ordering.
-			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
+			args:  &roachpb.PutRequest{},
+			tiers: append(nodeTiers[5], roachpb.Tier{Key: "irrelevant", Value: ""}),
+			// Compare only the first resulting address as we have a lease holder
+			// and that means we're only trying to send there.
+			expReplica:  []roachpb.NodeID{2, 0, 0, 0, 0},
+			leaseHolder: 2,
 		},
+		// Inconsistent Get without matching attributes but lease holder (node 3). Should just
+		// go random as the lease holder does not matter.
 		{
-			name:          "route to nearest, with matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         nodeTiers[5],
-			leaseHolder:   2,
-			// Order nearest first.
-			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
+			args:        &roachpb.GetRequest{},
+			tiers:       []roachpb.Tier{},
+			expReplica:  []roachpb.NodeID{1, 2, 3, 4, 5},
+			leaseHolder: 2,
 		},
 	}
 
@@ -360,9 +355,10 @@ func TestSendRPCOrder(t *testing.T) {
 	var verifyCall func(SendOptions, []roachpb.ReplicaDescriptor) error
 
 	var transportFactory TransportFactory = func(
-		opts SendOptions, dialer *nodedialer.Dialer, replicas ReplicaSlice,
+		opts SendOptions, dialer *nodedialer.Dialer, replicas []roachpb.ReplicaDescriptor,
 	) (Transport, error) {
-		reps := replicas.Descriptors()
+		reps := make([]roachpb.ReplicaDescriptor, len(replicas))
+		copy(reps, replicas)
 		if err := verifyCall(opts, reps); err != nil {
 			return nil, err
 		}
@@ -387,22 +383,23 @@ func TestSendRPCOrder(t *testing.T) {
 
 	ds := NewDistSender(cfg)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	for n, tc := range testCases {
+		t.Run("", func(t *testing.T) {
 			verifyCall = makeVerifier(tc.expReplica)
 
 			{
 				// The local node needs to get its attributes during sendRPC.
 				nd := &roachpb.NodeDescriptor{
 					NodeID:  6,
-					Address: util.MakeUnresolvedAddr("tcp", "invalid.invalid:6"),
+					Address: util.MakeUnresolvedAddr("tcp", fmt.Sprintf("invalid.invalid:6")),
 					Locality: roachpb.Locality{
 						Tiers: tc.tiers,
 					},
 				}
 				g.NodeID.Reset(nd.NodeID)
-				err := g.SetNodeDescriptor(nd)
-				require.NoError(t, err)
+				if err := g.SetNodeDescriptor(nd); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			ds.rangeCache.Clear()
@@ -415,17 +412,29 @@ func TestSendRPCOrder(t *testing.T) {
 				Lease: lease,
 			})
 
+			args := tc.args
+			{
+				header := args.Header()
+				header.Key = roachpb.Key("a")
+				args.SetHeader(header)
+			}
+			if roachpb.IsRange(args) {
+				header := args.Header()
+				header.EndKey = args.Header().Key.Next()
+				args.SetHeader(header)
+			}
+			consistency := roachpb.CONSISTENT
+			if !tc.consistent {
+				consistency = roachpb.INCONSISTENT
+			}
 			// Kill the cached NodeDescriptor, enforcing a lookup from Gossip.
 			ds.nodeDescriptor = nil
-
-			// Issue the request.
-			header := roachpb.Header{
-				RangeID:       rangeID, // Not used in this test, but why not.
-				RoutingPolicy: tc.routingPolicy,
+			if _, err := kv.SendWrappedWith(ctx, ds, roachpb.Header{
+				RangeID:         rangeID, // Not used in this test, but why not.
+				ReadConsistency: consistency,
+			}, args); err != nil {
+				t.Errorf("%d: %s", n, err)
 			}
-			req := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("b"), false)
-			_, pErr := kv.SendWrappedWith(ctx, ds, header, req)
-			require.Nil(t, pErr)
 		})
 	}
 }
@@ -458,12 +467,12 @@ func (mdb MockRangeDescriptorDB) FirstRange() (*roachpb.RangeDescriptor, error) 
 // that expect the RangeLookup for a user space descriptor to trigger a lookup
 // for a meta descriptor.
 func (mdb MockRangeDescriptorDB) withMetaRecursion(
-	rdc *rangecache.RangeCache,
+	rdc *RangeDescriptorCache,
 ) MockRangeDescriptorDB {
 	return func(key roachpb.RKey, useReverseScan bool) (rs, preRs []roachpb.RangeDescriptor, err error) {
 		metaKey := keys.RangeMetaKey(key)
 		if !metaKey.Equal(roachpb.RKeyMin) {
-			_, err := rdc.LookupWithEvictionToken(context.Background(), metaKey, rangecache.EvictionToken{}, useReverseScan)
+			_, err := rdc.LookupWithEvictionToken(context.Background(), metaKey, EvictionToken{}, useReverseScan)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -475,7 +484,7 @@ func (mdb MockRangeDescriptorDB) withMetaRecursion(
 // withMetaRecursion calls MockRangeDescriptorDB.withMetaRecursion on the
 // DistSender's RangeDescriptorDB.
 func (ds *DistSender) withMetaRecursion() *DistSender {
-	ds.rangeCache.TestingSetDB(ds.rangeCache.DB().(MockRangeDescriptorDB).withMetaRecursion(ds.rangeCache))
+	ds.rangeCache.db = ds.rangeCache.db.(MockRangeDescriptorDB).withMetaRecursion(ds.rangeCache)
 	return ds
 }
 
@@ -552,7 +561,7 @@ func TestImmutableBatchArgs(t *testing.T) {
 
 	// An optimization does copy-on-write if we haven't observed anything,
 	// so make sure we're not in that case.
-	txn.UpdateObservedTimestamp(1, hlc.MaxClockTimestamp)
+	txn.UpdateObservedTimestamp(1, hlc.MaxTimestamp)
 
 	put := roachpb.NewPut(roachpb.Key("don't"), roachpb.Value{})
 	if _, pErr := kv.SendWrappedWith(context.Background(), ds, roachpb.Header{
@@ -574,7 +583,7 @@ func TestRetryOnNotLeaseHolderError(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	recognizedLeaseHolder := testUserRangeDescriptor3Replicas.Replicas().VoterDescriptors()[1]
+	recognizedLeaseHolder := testUserRangeDescriptor3Replicas.Replicas().Voters()[1]
 	unrecognizedLeaseHolder := roachpb.ReplicaDescriptor{
 		NodeID:  99,
 		StoreID: 999,
@@ -630,7 +639,7 @@ func TestRetryOnNotLeaseHolderError(t *testing.T) {
 			clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 			rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 			g := makeGossip(t, stopper, rpcContext)
-			for _, n := range testUserRangeDescriptor3Replicas.Replicas().VoterDescriptors() {
+			for _, n := range testUserRangeDescriptor3Replicas.Replicas().Voters() {
 				require.NoError(t, g.AddInfoProto(
 					gossip.MakeNodeIDKey(n.NodeID),
 					newNodeDesc(n.NodeID),
@@ -709,8 +718,8 @@ func TestBackoffOnNotLeaseHolderErrorDuringTransfer(t *testing.T) {
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 	g := makeGossip(t, stopper, rpcContext)
-	repls := testUserRangeDescriptor3Replicas.InternalReplicas
-	for _, n := range repls {
+	leaseHolders := testUserRangeDescriptor3Replicas.InternalReplicas
+	for _, n := range leaseHolders {
 		if err := g.AddInfoProto(
 			gossip.MakeNodeIDKey(n.NodeID),
 			newNodeDesc(n.NodeID),
@@ -730,13 +739,13 @@ func TestBackoffOnNotLeaseHolderErrorDuringTransfer(t *testing.T) {
 			if seq > 0 {
 				lease = &roachpb.Lease{
 					Sequence: seq,
-					Replica:  repls[int(seq)%2],
+					Replica:  leaseHolders[int(seq)%2],
 				}
 			}
 			reply.Error = roachpb.NewError(
 				&roachpb.NotLeaseHolderError{
-					Replica:     repls[int(seq)%2],
-					LeaseHolder: &repls[(int(seq)+1)%2],
+					Replica:     leaseHolders[int(seq)%2],
+					LeaseHolder: &leaseHolders[(int(seq)+1)%2],
 					Lease:       lease,
 				})
 			return reply, nil
@@ -785,85 +794,6 @@ func TestBackoffOnNotLeaseHolderErrorDuringTransfer(t *testing.T) {
 	}
 }
 
-// TestNoBackoffOnNotLeaseHolderErrorFromFollowerRead verifies that the DistSender
-// does not back off immediately upon receiving a NotLeaseHolderErrors when having
-// attempted a follower read, even though the NotLeaseHolderError superficially
-// looks to the DistSender like the follower had a stale lease.
-func TestNoBackoffOnNotLeaseHolderErrorFromFollowerRead(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	stopper := stop.NewStopper()
-	ctx := context.Background()
-	defer stopper.Stop(ctx)
-
-	old := CanSendToFollower
-	defer func() { CanSendToFollower = old }()
-	CanSendToFollower = func(
-		_ uuid.UUID,
-		_ *cluster.Settings,
-		_ *hlc.Clock,
-		_ roachpb.RangeClosedTimestampPolicy,
-		ba roachpb.BatchRequest,
-	) bool {
-		return true
-	}
-
-	var sentTo []roachpb.NodeID
-	lease := roachpb.Lease{
-		Replica:  testUserRangeDescriptor3Replicas.InternalReplicas[1],
-		Sequence: 1,
-	}
-	testFn := func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, error) {
-		sentTo = append(sentTo, ba.Replica.NodeID)
-		br := ba.CreateReply()
-		if ba.Replica != lease.Replica {
-			br.Error = roachpb.NewError(&roachpb.NotLeaseHolderError{
-				Replica:     ba.Replica,
-				LeaseHolder: &lease.Replica,
-				Lease:       &lease,
-			})
-		}
-		return br, nil
-	}
-
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
-	g := makeGossip(t, stopper, rpcContext)
-	repls := testUserRangeDescriptor3Replicas.InternalReplicas
-	for _, n := range repls {
-		if err := g.AddInfoProto(
-			gossip.MakeNodeIDKey(n.NodeID),
-			newNodeDesc(n.NodeID),
-			gossip.NodeDescriptorTTL,
-		); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := DistSenderConfig{
-		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
-		Clock:      clock,
-		NodeDescs:  g,
-		RPCContext: rpcContext,
-		TestingKnobs: ClientTestingKnobs{
-			TransportFactory: adaptSimpleTransport(testFn),
-		},
-		RangeDescriptorDB: threeReplicaMockRangeDescriptorDB,
-		NodeDialer:        nodedialer.New(rpcContext, gossip.AddressResolver(g)),
-		Settings:          cluster.MakeTestingClusterSettings(),
-	}
-	ds := NewDistSender(cfg)
-	ds.rangeCache.Insert(ctx, roachpb.RangeInfo{
-		Desc:  testUserRangeDescriptor3Replicas,
-		Lease: lease,
-	})
-
-	get := roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */)
-	_, pErr := kv.SendWrapped(ctx, ds, get)
-	require.Nil(t, pErr)
-	require.Equal(t, []roachpb.NodeID{1, 2}, sentTo)
-	require.Equal(t, int64(0), ds.Metrics().InLeaseTransferBackoffs.Count())
-}
-
 // Test a scenario where a lease indicates a replica that, when contacted,
 // claims to not have the lease and instead returns an older lease. In this
 // scenario, the DistSender detects the fact that the node returned an old lease
@@ -890,7 +820,7 @@ func TestDistSenderMovesOnFromReplicaWithStaleLease(t *testing.T) {
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 	g := makeGossip(t, stopper, rpcContext)
-	for _, n := range testUserRangeDescriptor3Replicas.Replicas().VoterDescriptors() {
+	for _, n := range testUserRangeDescriptor3Replicas.Replicas().Voters() {
 		require.NoError(t, g.AddInfoProto(
 			gossip.MakeNodeIDKey(n.NodeID),
 			newNodeDesc(n.NodeID),
@@ -954,107 +884,12 @@ func TestDistSenderMovesOnFromReplicaWithStaleLease(t *testing.T) {
 		Lease: cachedLease,
 	})
 
-	get := roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */)
+	get := roachpb.NewGet(roachpb.Key("a"))
 	_, pErr := kv.SendWrapped(ctx, ds, get)
 	require.Nil(t, pErr)
 
 	require.Greater(t, callsToNode2, 0)
 	require.LessOrEqual(t, callsToNode2, 11)
-}
-
-func TestDistSenderRetryOnTransportErrors(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	skip.UnderShort(t)
-	ctx := context.Background()
-	stopper := stop.NewStopper()
-	defer stopper.Stop(ctx)
-
-	for _, spec := range []struct {
-		errorCode   codes.Code
-		shouldRetry bool
-	}{
-		{codes.FailedPrecondition, true},
-		{codes.PermissionDenied, false},
-		{codes.Unauthenticated, false},
-	} {
-		t.Run(fmt.Sprintf("retry_after_%v", spec.errorCode), func(t *testing.T) {
-			clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-			rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
-			g := makeGossip(t, stopper, rpcContext)
-			for _, n := range testUserRangeDescriptor3Replicas.Replicas().VoterDescriptors() {
-				require.NoError(t, g.AddInfoProto(
-					gossip.MakeNodeIDKey(n.NodeID),
-					newNodeDesc(n.NodeID),
-					gossip.NodeDescriptorTTL,
-				))
-			}
-
-			desc := roachpb.RangeDescriptor{
-				RangeID:    1,
-				Generation: 1,
-				StartKey:   roachpb.RKeyMin,
-				EndKey:     roachpb.RKeyMax,
-				InternalReplicas: []roachpb.ReplicaDescriptor{
-					{NodeID: 1, StoreID: 1, ReplicaID: 1},
-					{NodeID: 2, StoreID: 2, ReplicaID: 2},
-				},
-			}
-			cachedLease := roachpb.Lease{
-				Replica:  desc.InternalReplicas[1],
-				Sequence: 2,
-			}
-
-			// The cache starts with a lease on node 2, so the first request will be
-			// routed there. That replica mock will return grpc error code to test
-			// how transport errors are retried by dist sender.
-
-			secondReplicaTried := false
-			sendFn := func(ctx context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, error) {
-				if ba.Replica.NodeID == 2 {
-					return nil, errutil.WithMessage(
-						netutil.NewInitialHeartBeatFailedError(
-							grpcstatus.Errorf(spec.errorCode,
-								"n%d was permanently removed from the cluster; it is not allowed to rejoin the cluster",
-								ba.Replica.NodeID,
-							)), "failed to connect")
-				}
-				secondReplicaTried = true
-				require.Equal(t, ba.Replica.NodeID, roachpb.NodeID(1))
-				return ba.CreateReply(), nil
-			}
-
-			cfg := DistSenderConfig{
-				AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
-				Clock:      clock,
-				NodeDescs:  g,
-				RPCContext: rpcContext,
-				TestingKnobs: ClientTestingKnobs{
-					TransportFactory: adaptSimpleTransport(sendFn),
-				},
-				RangeDescriptorDB: threeReplicaMockRangeDescriptorDB,
-				NodeDialer:        nodedialer.New(rpcContext, gossip.AddressResolver(g)),
-				Settings:          cluster.MakeTestingClusterSettings(),
-			}
-			ds := NewDistSender(cfg)
-
-			ds.rangeCache.Insert(ctx, roachpb.RangeInfo{
-				Desc:  desc,
-				Lease: cachedLease,
-			})
-
-			get := roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */)
-			_, pErr := kv.SendWrapped(ctx, ds, get)
-			if spec.shouldRetry {
-				require.True(t, secondReplicaTried, "Second replica was not retried")
-				require.Nil(t, pErr, "Call should not fail")
-			} else {
-				require.False(t, secondReplicaTried, "DistSender did not abort retry loop")
-				require.NotNil(t, pErr, "Call should fail")
-			}
-		})
-	}
 }
 
 // This test verifies that when we have a cached leaseholder that is down
@@ -1104,7 +939,6 @@ func TestDistSenderDownNodeEvictLeaseholder(t *testing.T) {
 		case 1:
 			assert.Equal(t, desc.Generation, ba.ClientRangeInfo.DescriptorGeneration)
 			assert.Equal(t, lease1.Sequence, ba.ClientRangeInfo.LeaseSequence)
-			assert.Equal(t, roachpb.LEAD_FOR_GLOBAL_READS, ba.ClientRangeInfo.ClosedTimestampPolicy)
 			contacted1 = true
 			return nil, errors.New("mock RPC error")
 		case 2:
@@ -1112,16 +946,12 @@ func TestDistSenderDownNodeEvictLeaseholder(t *testing.T) {
 			// first RPC.
 			assert.Equal(t, desc.Generation, ba.ClientRangeInfo.DescriptorGeneration)
 			assert.Equal(t, roachpb.LeaseSequence(0), ba.ClientRangeInfo.LeaseSequence)
-			assert.Equal(t, roachpb.LEAD_FOR_GLOBAL_READS, ba.ClientRangeInfo.ClosedTimestampPolicy)
 			contacted2 = true
 			br := ba.CreateReply()
-			// Simulate the leaseholder returning updated lease info to the
-			// client. Also simulate a downgrade away from a global reads closed
-			// ts policy.
+			// Simulate the leaseholder returning updated lease info to the client.
 			br.RangeInfos = append(br.RangeInfos, roachpb.RangeInfo{
-				Desc:                  desc,
-				Lease:                 lease2,
-				ClosedTimestampPolicy: roachpb.LAG_BY_CLUSTER_SETTING,
+				Desc:  desc,
+				Lease: lease2,
 			})
 			return br, nil
 		default:
@@ -1144,9 +974,8 @@ func TestDistSenderDownNodeEvictLeaseholder(t *testing.T) {
 
 	ds := NewDistSender(cfg)
 	ds.rangeCache.Insert(ctx, roachpb.RangeInfo{
-		Desc:                  desc,
-		Lease:                 lease1,
-		ClosedTimestampPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
+		Desc:  desc,
+		Lease: lease1,
 	})
 
 	var ba roachpb.BatchRequest
@@ -1164,9 +993,7 @@ func TestDistSenderDownNodeEvictLeaseholder(t *testing.T) {
 	}
 
 	rng := ds.rangeCache.GetCached(ctx, testUserRangeDescriptor.StartKey, false /* inverted */)
-	require.Equal(t, desc, *rng.Desc())
 	require.Equal(t, roachpb.StoreID(2), rng.Lease().Replica.StoreID)
-	require.Equal(t, roachpb.LAG_BY_CLUSTER_SETTING, rng.ClosedTimestampPolicy())
 }
 
 // TestRetryOnDescriptorLookupError verifies that the DistSender retries a descriptor
@@ -1287,7 +1114,7 @@ func TestEvictOnFirstRangeGossip(t *testing.T) {
 
 	call := func() {
 		if _, err := ds.rangeCache.LookupWithEvictionToken(
-			context.Background(), rAnyKey, rangecache.EvictionToken{}, false,
+			context.Background(), rAnyKey, EvictionToken{}, false,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -1895,7 +1722,6 @@ func TestDistSenderDescriptorUpdatesOnSuccessfulRPCs(t *testing.T) {
 				Replica:  roachpb.ReplicaDescriptor{NodeID: 2, StoreID: 2, ReplicaID: 2},
 				Sequence: 1,
 			},
-			ClosedTimestampPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
 		}},
 		{{
 			Desc: descSplit1,
@@ -1939,7 +1765,7 @@ func TestDistSenderDescriptorUpdatesOnSuccessfulRPCs(t *testing.T) {
 
 			// Send a request that's going to receive a response with a RangeInfo.
 			k := roachpb.Key("a")
-			get := roachpb.NewGet(k, false /* forUpdate */)
+			get := roachpb.NewGet(k)
 			var ba roachpb.BatchRequest
 			ba.Add(get)
 			_, pErr := ds.Send(ctx, ba)
@@ -1953,11 +1779,9 @@ func TestDistSenderDescriptorUpdatesOnSuccessfulRPCs(t *testing.T) {
 				require.Equal(t, &ri.Desc, entry.Desc())
 				if ri.Lease.Empty() {
 					require.Nil(t, entry.Leaseholder())
-					require.Nil(t, entry.Lease())
 				} else {
 					require.Equal(t, &ri.Lease, entry.Lease())
 				}
-				require.Equal(t, ri.ClosedTimestampPolicy, entry.ClosedTimestampPolicy())
 			}
 		})
 	}
@@ -2052,7 +1876,7 @@ func TestSendRPCRangeNotFoundError(t *testing.T) {
 		Settings:          cluster.MakeTestingClusterSettings(),
 	}
 	ds = NewDistSender(cfg)
-	get := roachpb.NewGet(roachpb.Key("b"), false /* forUpdate */)
+	get := roachpb.NewGet(roachpb.Key("b"))
 	_, err := kv.SendWrapped(ctx, ds, get)
 	if err != nil {
 		t.Fatal(err)
@@ -2353,20 +2177,20 @@ func TestClockUpdateOnResponse(t *testing.T) {
 
 	// Prepare the test function
 	put := roachpb.NewPut(roachpb.Key("a"), roachpb.MakeValueFromString("value"))
-	doCheck := func(sender kv.Sender, fakeTime hlc.ClockTimestamp) {
+	doCheck := func(sender kv.Sender, fakeTime hlc.Timestamp) {
 		ds.transportFactory = SenderTransportFactory(tracing.NewTracer(), sender)
 		_, err := kv.SendWrapped(context.Background(), ds, put)
 		if err != nil && err != expectedErr {
 			t.Fatal(err)
 		}
-		newTime := ds.clock.NowAsClockTimestamp()
+		newTime := ds.clock.Now()
 		if newTime.Less(fakeTime) {
 			t.Fatalf("clock was not advanced: expected >= %s; got %s", fakeTime, newTime)
 		}
 	}
 
 	// Test timestamp propagation on valid BatchResults.
-	fakeTime := ds.clock.Now().Add(10000000000 /*10s*/, 0).UnsafeToClockTimestamp()
+	fakeTime := ds.clock.Now().Add(10000000000 /*10s*/, 0)
 	replyNormal := kv.SenderFunc(
 		func(_ context.Context, args roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 			rb := args.CreateReply()
@@ -2376,7 +2200,7 @@ func TestClockUpdateOnResponse(t *testing.T) {
 	doCheck(replyNormal, fakeTime)
 
 	// Test timestamp propagation on errors.
-	fakeTime = ds.clock.Now().Add(10000000000 /*10s*/, 0).UnsafeToClockTimestamp()
+	fakeTime = ds.clock.Now().Add(10000000000 /*10s*/, 0)
 	replyError := kv.SenderFunc(
 		func(_ context.Context, _ roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 			pErr := expectedErr
@@ -3183,7 +3007,7 @@ func TestSenderTransport(t *testing.T) {
 			) (r *roachpb.BatchResponse, e *roachpb.Error) {
 				return
 			},
-		))(SendOptions{}, &nodedialer.Dialer{}, ReplicaSlice{{}})
+		))(SendOptions{}, &nodedialer.Dialer{}, []roachpb.ReplicaDescriptor{{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3308,7 +3132,6 @@ func TestMultipleErrorsMerged(t *testing.T) {
 	retryErr := roachpb.NewTransactionRetryError(roachpb.RETRY_SERIALIZABLE, "test err")
 	abortErr := roachpb.NewTransactionAbortedError(roachpb.ABORT_REASON_ABORTED_RECORD_FOUND)
 	conditionFailedErr := &roachpb.ConditionFailedError{}
-	writeIntentErr := &roachpb.WriteIntentError{}
 	sendErr := sendError{}
 	ambiguousErr := &roachpb.AmbiguousResultError{}
 	randomErr := &roachpb.IntegerOverflowError{}
@@ -3376,22 +3199,6 @@ func TestMultipleErrorsMerged(t *testing.T) {
 		},
 		{
 			err1:   conditionFailedErr,
-			err2:   randomErr,
-			expErr: "results in overflow",
-		},
-		// WriteIntentError also has a low score since it's "not ambiguous".
-		{
-			err1:   writeIntentErr,
-			err2:   ambiguousErr,
-			expErr: "result is ambiguous",
-		},
-		{
-			err1:   writeIntentErr,
-			err2:   sendErr,
-			expErr: "failed to send RPC",
-		},
-		{
-			err1:   writeIntentErr,
 			err2:   randomErr,
 			expErr: "results in overflow",
 		},
@@ -3621,21 +3428,15 @@ func TestCanSendToFollower(t *testing.T) {
 	old := CanSendToFollower
 	defer func() { CanSendToFollower = old }()
 	canSend := true
-	CanSendToFollower = func(
-		_ uuid.UUID,
-		_ *cluster.Settings,
-		_ *hlc.Clock,
-		_ roachpb.RangeClosedTimestampPolicy,
-		ba roachpb.BatchRequest,
-	) bool {
+	CanSendToFollower = func(_ uuid.UUID, _ *cluster.Settings, ba roachpb.BatchRequest) bool {
 		return !ba.IsLocking() && canSend
 	}
 
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 	g := makeGossip(t, stopper, rpcContext)
-	repls := testUserRangeDescriptor3Replicas.InternalReplicas
-	for _, n := range repls {
+	leaseHolders := testUserRangeDescriptor3Replicas.InternalReplicas
+	for _, n := range leaseHolders {
 		if err := g.AddInfoProto(
 			gossip.MakeNodeIDKey(n.NodeID),
 			newNodeDesc(n.NodeID),
@@ -3684,19 +3485,19 @@ func TestCanSendToFollower(t *testing.T) {
 			roachpb.Header{
 				Txn: &roachpb.Transaction{},
 			},
-			roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */),
+			roachpb.NewGet(roachpb.Key("a")),
 			1,
 		},
 		{
 			true,
 			roachpb.Header{},
-			roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */),
+			roachpb.NewGet(roachpb.Key("a")),
 			1,
 		},
 		{
 			false,
 			roachpb.Header{},
-			roachpb.NewGet(roachpb.Key("a"), false /* forUpdate */),
+			roachpb.NewGet(roachpb.Key("a")),
 			2,
 		},
 	} {
@@ -3962,7 +3763,7 @@ func TestConnectionClass(t *testing.T) {
 	// created.
 	var class rpc.ConnectionClass
 	var transportFactory TransportFactory = func(
-		opts SendOptions, dialer *nodedialer.Dialer, replicas ReplicaSlice,
+		opts SendOptions, dialer *nodedialer.Dialer, replicas []roachpb.ReplicaDescriptor,
 	) (Transport, error) {
 		class = opts.class
 		return adaptSimpleTransport(
@@ -4097,7 +3898,7 @@ func TestEvictionTokenCoalesce(t *testing.T) {
 			if err := testutils.SucceedsSoonError(func() error {
 				// Since the previously fetched RangeDescriptor was ["a", "d"), the request keys
 				// would be coalesced to "a".
-				numCalls := ds.rangeCache.NumInFlight(fmt.Sprintf("a:false:%d", initGen))
+				numCalls := ds.rangeCache.lookupRequests.NumCalls(fmt.Sprintf("a:false:%d", initGen))
 				if numCalls != 2 {
 					return errors.Errorf("expected %d in-flight requests, got %d", 2, numCalls)
 				}
@@ -4155,22 +3956,18 @@ func TestDistSenderSlowLogMessage(t *testing.T) {
 	ba.Add(get)
 	br := &roachpb.BatchResponse{}
 	br.Error = roachpb.NewError(errors.New("boom"))
-	desc := &roachpb.RangeDescriptor{RangeID: 9, StartKey: roachpb.RKey("x"), EndKey: roachpb.RKey("z")}
+	desc := &roachpb.RangeDescriptor{RangeID: 9, StartKey: roachpb.RKey("x")}
 	{
-		exp := `have been waiting 8.16s (120 attempts) for RPC Get [‹"a"›,‹/Min›) to` +
-			` r9:‹{x-z}› [<no replicas>, next=0, gen=0]; resp: ‹(err: boom)›`
-		var s redact.StringBuilder
-		slowRangeRPCWarningStr(&s, ba, dur, attempts, desc, nil /* err */, br)
-		act := s.RedactableString()
-		require.EqualValues(t, exp, act)
+		exp := `have been waiting 8.16s (120 attempts) for RPC Get ["a",/Min) to` +
+			` r9:{-} [<no replicas>, next=0, gen=0]; resp: (err: boom)`
+		act := slowRangeRPCWarningStr(ba, dur, attempts, desc, nil /* err */, br)
+		require.Equal(t, exp, act)
 	}
 
 	{
 		exp := `slow RPC finished after 8.16s (120 attempts)`
-		var s redact.StringBuilder
-		slowRangeRPCReturnWarningStr(&s, dur, attempts)
-		act := s.RedactableString()
-		require.EqualValues(t, exp, act)
+		act := slowRangeRPCReturnWarningStr(dur, attempts)
+		require.Equal(t, exp, act)
 	}
 }
 
@@ -4284,7 +4081,7 @@ func TestRequestSubdivisionAfterDescriptorChange(t *testing.T) {
 
 	ds := NewDistSender(cfg)
 	switchToSplitDesc = func() {
-		ds.rangeCache.TestingSetDB(splitRDB)
+		ds.rangeCache.db = splitRDB
 	}
 
 	// We're going to send a batch with two gets, on different sides of the split.
@@ -4388,11 +4185,10 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := cluster.MakeTestingClusterSettings()
-			tr := tracing.NewTracer()
 			getRangeDescCacheSize := func() int64 {
 				return 1 << 20
 			}
-			rc := rangecache.NewRangeCache(st, nil /* db */, getRangeDescCacheSize, stopper, tr)
+			rc := NewRangeDescriptorCache(st, nil /* db */, getRangeDescCacheSize, stopper)
 			rc.Insert(ctx, roachpb.RangeInfo{
 				Desc: desc,
 				Lease: roachpb.Lease{
@@ -4403,7 +4199,11 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 			})
 			ent, err := rc.Lookup(ctx, roachpb.RKeyMin)
 			require.NoError(t, err)
-			tok := rc.MakeEvictionToken(&ent)
+			tok := EvictionToken{
+				rdc:   rc,
+				desc:  ent.(EvictionToken).desc,
+				lease: ent.(EvictionToken).lease,
+			}
 
 			var called bool
 			transportFn := func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, error) {
@@ -4433,7 +4233,7 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 			}
 
 			cfg := DistSenderConfig{
-				AmbientCtx: log.AmbientContext{Tracer: tr},
+				AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
 				Clock:      clock,
 				NodeDescs:  ns,
 				RPCContext: rpcContext,
@@ -4526,17 +4326,17 @@ func TestDistSenderDescEvictionAfterLeaseUpdate(t *testing.T) {
 		br := &roachpb.BatchResponse{}
 		switch call {
 		case 0:
-			expRepl := desc1.Replicas().Descriptors()[0]
+			expRepl := desc1.Replicas().All()[0]
 			require.Equal(t, expRepl, ba.Replica)
 			br.Error = roachpb.NewError(&roachpb.NotLeaseHolderError{
-				Lease: &roachpb.Lease{Replica: desc1.Replicas().Descriptors()[1]},
+				Lease: &roachpb.Lease{Replica: desc1.Replicas().All()[1]},
 			})
 		case 1:
-			expRep := desc1.Replicas().Descriptors()[1]
+			expRep := desc1.Replicas().All()[1]
 			require.Equal(t, ba.Replica, expRep)
 			br.Error = roachpb.NewError(roachpb.NewRangeNotFoundError(ba.RangeID, ba.Replica.StoreID))
 		case 2:
-			expRep := desc2.Replicas().Descriptors()[0]
+			expRep := desc2.Replicas().All()[0]
 			require.Equal(t, ba.Replica, expRep)
 			br = ba.CreateReply()
 		default:
@@ -4617,7 +4417,7 @@ func TestDistSenderRPCMetrics(t *testing.T) {
 		br := &roachpb.BatchResponse{}
 		if call == 0 {
 			br.Error = roachpb.NewError(&roachpb.NotLeaseHolderError{
-				Lease: &roachpb.Lease{Replica: desc.Replicas().Descriptors()[1]},
+				Lease: &roachpb.Lease{Replica: desc.Replicas().All()[1]},
 			})
 		} else {
 			br.Error = roachpb.NewError(&roachpb.ConditionFailedError{})
@@ -4646,7 +4446,7 @@ func TestDistSenderRPCMetrics(t *testing.T) {
 	ds.rangeCache.Insert(ctx, roachpb.RangeInfo{
 		Desc: desc,
 		Lease: roachpb.Lease{
-			Replica: desc.Replicas().Descriptors()[0],
+			Replica: desc.Replicas().All()[0],
 		},
 	})
 	var ba roachpb.BatchRequest

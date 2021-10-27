@@ -29,11 +29,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
@@ -105,14 +103,6 @@ type partitioningTest struct {
 
 		// subzones are the `configs` shorthand parsed into Subzones.
 		subzones []zonepb.Subzone
-
-		// generatedSpans are the `generatedSpans` with @primary replaced with
-		// the actual primary key name.
-		generatedSpans []string
-
-		// scans are the `scans` with @primary replaced with
-		// the actual primary key name.
-		scans map[string]string
 	}
 }
 
@@ -143,33 +133,20 @@ func (pt *partitioningTest) parse() error {
 		}
 		st := cluster.MakeTestingClusterSettings()
 		const parentID, tableID = keys.MinUserDescID, keys.MinUserDescID + 1
-		mutDesc, err := importccl.MakeTestingSimpleTableDescriptor(
+		mutDesc, err := importccl.MakeSimpleTableDescriptor(
 			ctx, &semaCtx, st, createTable, parentID, keys.PublicSchemaID, tableID, importccl.NoFKs, hlc.UnixNano())
 		if err != nil {
 			return err
 		}
 		pt.parsed.tableDesc = mutDesc
-		if err := catalog.ValidateSelf(pt.parsed.tableDesc); err != nil {
+		if err := pt.parsed.tableDesc.ValidateTable(); err != nil {
 			return err
 		}
-	}
-
-	replPK := func(s string) string {
-		return strings.ReplaceAll(s, "@primary", fmt.Sprintf("@%s_pkey", pt.parsed.tableDesc.Name))
-	}
-	pt.parsed.generatedSpans = make([]string, len(pt.generatedSpans))
-	for i, gs := range pt.generatedSpans {
-		pt.parsed.generatedSpans[i] = replPK(gs)
-	}
-	pt.parsed.scans = make(map[string]string, len(pt.scans))
-	for k, v := range pt.scans {
-		pt.parsed.scans[replPK(k)] = replPK(v)
 	}
 
 	var zoneConfigStmts bytes.Buffer
 	// TODO(dan): Can we run all the zoneConfigStmts in a txn?
 	for _, c := range pt.configs {
-		c = replPK(c)
 		var subzoneShort, constraints string
 		configParts := strings.Split(c, `:`)
 		switch len(configParts) {
@@ -189,7 +166,7 @@ func (pt *partitioningTest) parse() error {
 			indexName = subzoneParts[0]
 		case 2:
 			if subzoneParts[0] == "" {
-				indexName = fmt.Sprintf("@%s", pt.parsed.tableDesc.Name+"_pkey")
+				indexName = "@primary"
 			} else {
 				indexName = subzoneParts[0]
 			}
@@ -200,21 +177,21 @@ func (pt *partitioningTest) parse() error {
 		if !strings.HasPrefix(indexName, "@") {
 			panic(errors.Errorf("unsupported config: %s", c))
 		}
-		idx, err := pt.parsed.tableDesc.FindIndexWithName(indexName[1:])
+		idxDesc, _, err := pt.parsed.tableDesc.FindIndexByName(indexName[1:])
 		if err != nil {
 			return errors.Wrapf(err, "could not find index %s", indexName)
 		}
-		subzone.IndexID = uint32(idx.GetID())
+		subzone.IndexID = uint32(idxDesc.ID)
 		if len(constraints) > 0 {
 			if subzone.PartitionName == "" {
 				fmt.Fprintf(&zoneConfigStmts,
 					`ALTER INDEX %s@%s CONFIGURE ZONE USING constraints = '[%s]';`,
-					pt.parsed.tableName, idx.GetName(), constraints,
+					pt.parsed.tableName, idxDesc.Name, constraints,
 				)
 			} else {
 				fmt.Fprintf(&zoneConfigStmts,
 					`ALTER PARTITION %s OF INDEX %s@%s CONFIGURE ZONE USING constraints = '[%s]';`,
-					subzone.PartitionName, pt.parsed.tableName, idx.GetName(), constraints,
+					subzone.PartitionName, pt.parsed.tableName, idxDesc.Name, constraints,
 				)
 			}
 		}
@@ -241,7 +218,7 @@ func (pt *partitioningTest) verifyScansFn(
 	ctx context.Context, t *testing.T, db *gosql.DB,
 ) func() error {
 	return func() error {
-		for where, expectedNodes := range pt.parsed.scans {
+		for where, expectedNodes := range pt.scans {
 			query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s`, tree.NameStringP(&pt.name), where)
 			log.Infof(ctx, "query: %s", query)
 			if err := verifyScansOnNode(ctx, t, db, query, expectedNodes); err != nil {
@@ -894,9 +871,9 @@ func allPartitioningTests(rng *rand.Rand) []partitioningTest {
 			// Not indexable.
 			continue
 		case types.CollatedStringFamily:
-			typ = types.MakeCollatedString(types.String, *randgen.RandCollationLocale(rng))
+			typ = types.MakeCollatedString(types.String, *rowenc.RandCollationLocale(rng))
 		}
-		datum := randgen.RandDatum(rng, typ, false /* nullOk */)
+		datum := rowenc.RandDatum(rng, typ, false /* nullOk */)
 		if datum == tree.DNull {
 			// DNull is returned by RandDatum for types.UNKNOWN or if the
 			// column type is unimplemented in RandDatum. In either case, the
@@ -1138,9 +1115,6 @@ func verifyScansOnNode(
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return errors.Wrap(err, "unexpected error querying traces")
-	}
 	if len(scansWrongNode) > 0 {
 		err := errors.Newf("expected to scan on %s: %s", node, query)
 		err = errors.WithDetailf(err, "scans:\n%s", strings.Join(scansWrongNode, "\n"))
@@ -1211,7 +1185,7 @@ func TestInitialPartitioning(t *testing.T) {
 	skip.UnderStressRace(t)
 	skip.UnderShort(t)
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	testCases := allPartitioningTests(rng)
 
 	ctx := context.Background()
@@ -1285,10 +1259,7 @@ func TestSelectPartitionExprs(t *testing.T) {
 		{`p33p44,p335p445,p33dp44d`, `((a, b) = (3, 3)) OR ((a, b) = (4, 4))`},
 	}
 
-	evalCtx := &tree.EvalContext{
-		Codec:    keys.SystemSQLCodec,
-		Settings: cluster.MakeTestingClusterSettings(),
-	}
+	evalCtx := &tree.EvalContext{Codec: keys.SystemSQLCodec}
 	for _, test := range tests {
 		t.Run(test.partitions, func(t *testing.T) {
 			var partNames tree.NameList
@@ -1324,7 +1295,7 @@ func TestRepartitioning(t *testing.T) {
 	// race stress.
 	skip.UnderStressRace(t)
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	testCases, err := allRepartitioningTests(allPartitioningTests(rng))
 	if err != nil {
 		t.Fatalf("%+v", err)
@@ -1355,23 +1326,23 @@ func TestRepartitioning(t *testing.T) {
 				}
 				sqlDB.Exec(t, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", test.old.parsed.tableName, test.new.parsed.tableName))
 
-				testIndex, err := test.new.parsed.tableDesc.FindIndexWithName(test.index)
+				testIndex, _, err := test.new.parsed.tableDesc.FindIndexByName(test.index)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
 
 				var repartition bytes.Buffer
-				if testIndex.GetID() == test.new.parsed.tableDesc.GetPrimaryIndexID() {
+				if testIndex.ID == test.new.parsed.tableDesc.PrimaryIndex.ID {
 					fmt.Fprintf(&repartition, `ALTER TABLE %s `, test.new.parsed.tableName)
 				} else {
-					fmt.Fprintf(&repartition, `ALTER INDEX %s@%s `, test.new.parsed.tableName, testIndex.GetName())
+					fmt.Fprintf(&repartition, `ALTER INDEX %s@%s `, test.new.parsed.tableName, testIndex.Name)
 				}
-				if testIndex.GetPartitioning().NumColumns() == 0 {
+				if testIndex.Partitioning.NumColumns == 0 {
 					repartition.WriteString(`PARTITION BY NOTHING`)
 				} else {
 					if err := sql.ShowCreatePartitioning(
 						&rowenc.DatumAlloc{}, keys.SystemSQLCodec, test.new.parsed.tableDesc, testIndex,
-						testIndex.GetPartitioning(), &repartition, 0 /* indent */, 0, /* colOffset */
+						&testIndex.Partitioning, &repartition, 0 /* indent */, 0, /* colOffset */
 					); err != nil {
 						t.Fatalf("%+v", err)
 					}
@@ -1381,11 +1352,8 @@ func TestRepartitioning(t *testing.T) {
 				// Verify that repartitioning removes zone configs for partitions that
 				// have been removed.
 				newPartitionNames := map[string]struct{}{}
-				for _, index := range test.new.parsed.tableDesc.NonDropIndexes() {
-					_ = index.GetPartitioning().ForEachPartitionName(func(name string) error {
-						newPartitionNames[name] = struct{}{}
-						return nil
-					})
+				for _, name := range test.new.parsed.tableDesc.PartitionNames() {
+					newPartitionNames[name] = struct{}{}
 				}
 				for _, row := range sqlDB.QueryStr(
 					t, "SELECT partition_name FROM crdb_internal.zones WHERE partition_name IS NOT NULL") {
@@ -1445,7 +1413,7 @@ ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
 
 	// Get the zone config corresponding to the table.
 	table := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "t")
-	kv, err := kvDB.Get(ctx, config.MakeZoneKey(keys.SystemSQLCodec, table.GetID()))
+	kv, err := kvDB.Get(ctx, config.MakeZoneKey(config.SystemTenantObjectID(table.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1468,7 +1436,7 @@ ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
 	}
 
 	// Subzone spans have the table prefix omitted.
-	prefix := keys.SystemSQLCodec.TablePrefix(uint32(table.GetID()))
+	prefix := keys.SystemSQLCodec.TablePrefix(uint32(table.ID))
 	for i := range expectedSpans {
 		// Subzone spans have the table prefix omitted.
 		expected := bytes.TrimPrefix(expectedSpans[i], prefix)
@@ -1504,7 +1472,7 @@ func TestRemovePartitioningExpiredLicense(t *testing.T) {
 	)`)
 	sqlDB.Exec(t, `ALTER PARTITION p1 OF TABLE t CONFIGURE ZONE USING DEFAULT`)
 	sqlDB.Exec(t, `ALTER PARTITION p34 OF INDEX t@i CONFIGURE ZONE USING DEFAULT`)
-	sqlDB.Exec(t, `ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`)
+	sqlDB.Exec(t, `ALTER INDEX t@primary CONFIGURE ZONE USING DEFAULT`)
 	sqlDB.Exec(t, `ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`)
 
 	// Remove the enterprise license.
@@ -1522,18 +1490,18 @@ func TestRemovePartitioningExpiredLicense(t *testing.T) {
 	expectErr(`ALTER INDEX t@i PARTITION BY RANGE (a) (PARTITION p45 VALUES FROM (4) TO (5))`, partitionErr)
 	expectErr(`ALTER PARTITION p1 OF TABLE t CONFIGURE ZONE USING DEFAULT`, zoneErr)
 	expectErr(`ALTER PARTITION p34 OF INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
-	expectErr(`ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`, zoneErr)
+	expectErr(`ALTER INDEX t@primary CONFIGURE ZONE USING DEFAULT`, zoneErr)
 	expectErr(`ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
 
 	// But they can be removed.
 	sqlDB.Exec(t, `ALTER TABLE t PARTITION BY NOTHING`)
 	sqlDB.Exec(t, `ALTER INDEX t@i PARTITION BY NOTHING`)
-	sqlDB.Exec(t, `ALTER INDEX t@t_pkey CONFIGURE ZONE DISCARD`)
+	sqlDB.Exec(t, `ALTER INDEX t@primary CONFIGURE ZONE DISCARD`)
 	sqlDB.Exec(t, `ALTER INDEX t@i CONFIGURE ZONE DISCARD`)
 
 	// Once removed, they cannot be added back.
 	expectErr(`ALTER TABLE t PARTITION BY LIST (a) (PARTITION p2 VALUES IN (2))`, partitionErr)
 	expectErr(`ALTER INDEX t@i PARTITION BY RANGE (a) (PARTITION p45 VALUES FROM (4) TO (5))`, partitionErr)
-	expectErr(`ALTER INDEX t@t_pkey CONFIGURE ZONE USING DEFAULT`, zoneErr)
+	expectErr(`ALTER INDEX t@primary CONFIGURE ZONE USING DEFAULT`, zoneErr)
 	expectErr(`ALTER INDEX t@i CONFIGURE ZONE USING DEFAULT`, zoneErr)
 }

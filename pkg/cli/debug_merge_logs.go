@@ -24,41 +24,49 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
-	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/ttycolor"
 	"golang.org/x/sync/errgroup"
 )
 
 type logStream interface {
 	fileInfo() *fileInfo // FileInfo for the current entry available in peek.
-	peek() (logpb.Entry, bool)
-	pop() (logpb.Entry, bool) // If called after peek, must return the same values.
+	peek() (log.Entry, bool)
+	pop() (log.Entry, bool) // If called after peek, must return the same values.
 	error() error
 }
 
 // writeLogStream pops messages off of s and writes them to out prepending
 // prefix per message and filtering messages which match filter.
 func writeLogStream(
-	s logStream, out io.Writer, filter *regexp.Regexp, keepRedactable bool, cp ttycolor.Profile,
+	s logStream, out io.Writer, filter *regexp.Regexp, prefix string, keepRedactable bool,
 ) error {
 	const chanSize = 1 << 16        // 64k
 	const maxWriteBufSize = 1 << 18 // 256kB
 
+	prefixCache := map[*fileInfo][]byte{}
+	getPrefix := func(fi *fileInfo) ([]byte, error) {
+		if prefixBuf, ok := prefixCache[fi]; ok {
+			return prefixBuf, nil
+		}
+		prefixCache[fi] = fi.pattern.ExpandString(nil, prefix, fi.path, fi.matches)
+		return prefixCache[fi], nil
+	}
+
 	type entryInfo struct {
-		logpb.Entry
+		log.Entry
 		*fileInfo
 	}
 	render := func(ei entryInfo, w io.Writer) (err error) {
-		// TODO(postamar): add support for other output formats
-		// Currently, `render` applies the `crdb-v1-tty` format regardless of the
-		// output logging format defined for the stderr sink. It should instead
-		// apply the selected output format.
-		err = log.FormatLegacyEntryPrefix(ei.prefix, w, cp)
-		if err != nil {
+		var prefixBytes []byte
+		if prefixBytes, err = getPrefix(ei.fileInfo); err != nil {
 			return err
 		}
-		return log.FormatLegacyEntryWithOptionalColors(ei.Entry, w, cp)
+		if _, err = w.Write(prefixBytes); err != nil {
+			return err
+		}
+		if !keepRedactable {
+			ei.Redactable = false
+		}
+		return ei.Format(w)
 	}
 
 	g, ctx := errgroup.WithContext(context.Background())
@@ -164,8 +172,6 @@ func newMergedStreamFromPatterns(
 	filePattern, programFilter *regexp.Regexp,
 	from, to time.Time,
 	editMode log.EditSensitiveData,
-	format string,
-	prefixer filePrefixer,
 ) (logStream, error) {
 	paths, err := expandPatterns(patterns)
 	if err != nil {
@@ -176,9 +182,7 @@ func newMergedStreamFromPatterns(
 	if err != nil {
 		return nil, err
 	}
-
-	prefixer.PopulatePrefixes(files)
-	return newMergedStream(ctx, files, from, to, editMode, format)
+	return newMergedStream(ctx, files, from, to, editMode)
 }
 
 func groupIndex(re *regexp.Regexp, groupName string) int {
@@ -191,11 +195,7 @@ func groupIndex(re *regexp.Regexp, groupName string) int {
 }
 
 func newMergedStream(
-	ctx context.Context,
-	files []fileInfo,
-	from, to time.Time,
-	editMode log.EditSensitiveData,
-	format string,
+	ctx context.Context, files []fileInfo, from, to time.Time, editMode log.EditSensitiveData,
 ) (*mergedStream, error) {
 	// TODO(ajwerner): think about clock movement and PID
 	const maxConcurrentFiles = 256 // should be far less than the FD limit
@@ -206,7 +206,7 @@ func newMergedStream(
 		return func() error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			s, err := newFileLogStream(files[i], from, to, editMode, format)
+			s, err := newFileLogStream(files[i], from, to, editMode)
 			if s != nil {
 				res[i] = s
 			}
@@ -254,24 +254,24 @@ func (l *mergedStream) Pop() (v interface{}) {
 	return
 }
 
-func (l *mergedStream) peek() (logpb.Entry, bool) {
+func (l *mergedStream) peek() (log.Entry, bool) {
 	if len(*l) == 0 {
-		return logpb.Entry{}, false
+		return log.Entry{}, false
 	}
 	return (*l)[0].peek()
 }
 
-func (l *mergedStream) pop() (logpb.Entry, bool) {
+func (l *mergedStream) pop() (log.Entry, bool) {
 	e, ok := l.peek()
 	if !ok {
-		return logpb.Entry{}, false
+		return log.Entry{}, false
 	}
 	s := (*l)[0]
 	s.pop()
 	if _, stillOk := s.peek(); stillOk {
 		heap.Push(l, heap.Pop(l))
 	} else if err := s.error(); err != nil && err != io.EOF {
-		return logpb.Entry{}, false
+		return log.Entry{}, false
 	} else {
 		heap.Pop(l)
 	}
@@ -326,7 +326,6 @@ func getLogFileInfo(path string, filePattern *regexp.Regexp) (fileInfo, bool) {
 
 type fileInfo struct {
 	path    string
-	prefix  []byte
 	pattern *regexp.Regexp
 	matches []int
 }
@@ -334,38 +333,31 @@ type fileInfo struct {
 func findLogFiles(
 	paths []string, filePattern, programFilter *regexp.Regexp, programGroup int, to time.Time,
 ) ([]fileInfo, error) {
-	if programGroup == 0 || programFilter == nil {
-		programGroup = 0
-	}
 	to = to.Truncate(time.Second) // log files only have second resolution
-	var files []fileInfo
+	fileChan := make(chan fileInfo, len(paths))
+	var wg sync.WaitGroup
+	wg.Add(len(paths))
 	for _, p := range paths {
-		// NB: come go1.16, we should use WalkDir here as it is more efficient.
-		if err := filepath.Walk(p, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() {
-				// Don't act on the directory itself, Walk will visit it for us.
-				return nil
-			}
-			// We're looking at a file.
+		go func(p string) {
+			defer wg.Done()
 			fi, ok := getLogFileInfo(p, filePattern)
 			if !ok {
-				return nil
+				return
 			}
 			if programGroup > 0 {
 				program := fi.path[fi.matches[2*programGroup]:fi.matches[2*programGroup+1]]
 				if !programFilter.MatchString(program) {
-					return nil
+					return
 				}
 			}
-			files = append(files, fi)
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-
+			fileChan <- fi
+		}(p)
+	}
+	wg.Wait()
+	files := make([]fileInfo, 0, len(fileChan))
+	close(fileChan)
+	for f := range fileChan {
+		files = append(files, f)
 	}
 	return files, nil
 }
@@ -387,17 +379,17 @@ func newBufferedLogStream(ctx context.Context, g *errgroup.Group, s logStream) l
 type bufferedLogStream struct {
 	logStream
 	runOnce sync.Once
-	e       logpb.Entry
+	e       log.Entry
 	read    bool
 	ok      bool
-	c       chan logpb.Entry
+	c       chan log.Entry
 	ctx     context.Context
 	g       *errgroup.Group
 }
 
 func (bs *bufferedLogStream) run() {
 	const readChanSize = 512
-	bs.c = make(chan logpb.Entry, readChanSize)
+	bs.c = make(chan log.Entry, readChanSize)
 	bs.g.Go(func() error {
 		defer close(bs.c)
 		for {
@@ -417,7 +409,7 @@ func (bs *bufferedLogStream) run() {
 	})
 }
 
-func (bs *bufferedLogStream) peek() (logpb.Entry, bool) {
+func (bs *bufferedLogStream) peek() (log.Entry, bool) {
 	if bs.ok && !bs.read {
 		if bs.c == nil { // indicates that run has not been called
 			bs.runOnce.Do(bs.run)
@@ -426,12 +418,12 @@ func (bs *bufferedLogStream) peek() (logpb.Entry, bool) {
 		bs.read = true
 	}
 	if !bs.ok {
-		return logpb.Entry{}, false
+		return log.Entry{}, false
 	}
 	return bs.e, true
 }
 
-func (bs *bufferedLogStream) pop() (logpb.Entry, bool) {
+func (bs *bufferedLogStream) pop() (log.Entry, bool) {
 	e, ok := bs.peek()
 	bs.read = false
 	return e, ok
@@ -443,12 +435,11 @@ type fileLogStream struct {
 	prevTime int64
 	fi       fileInfo
 	f        *os.File
-	d        log.EntryDecoder
+	d        *log.EntryDecoder
 	read     bool
 	editMode log.EditSensitiveData
-	format   string
 
-	e   logpb.Entry
+	e   log.Entry
 	err error
 }
 
@@ -459,14 +450,13 @@ type fileLogStream struct {
 // file is always closed before returning from this constructor so the initial
 // peek does not consume resources.
 func newFileLogStream(
-	fi fileInfo, from, to time.Time, editMode log.EditSensitiveData, format string,
+	fi fileInfo, from, to time.Time, editMode log.EditSensitiveData,
 ) (logStream, error) {
 	s := &fileLogStream{
 		fi:       fi,
 		from:     from,
 		to:       to,
 		editMode: editMode,
-		format:   format,
 	}
 	if _, ok := s.peek(); !ok {
 		if err := s.error(); err != io.EOF {
@@ -489,36 +479,26 @@ func (s *fileLogStream) open() bool {
 	if s.f, s.err = os.Open(s.fi.path); s.err != nil {
 		return false
 	}
-	if s.format == "" {
-		if _, s.format, s.err = log.ReadFormatFromLogFile(s.f); s.err != nil {
-			return false
-		}
-		if _, s.err = s.f.Seek(0, io.SeekStart); s.err != nil {
-			return false
-		}
-	}
-	if s.err = seekToFirstAfterFrom(s.f, s.from, s.editMode, s.format); s.err != nil {
+	if s.err = seekToFirstAfterFrom(s.f, s.from, s.editMode); s.err != nil {
 		return false
 	}
-	if s.d, s.err = log.NewEntryDecoderWithFormat(bufio.NewReaderSize(s.f, readBufSize), s.editMode, s.format); s.err != nil {
-		return false
-	}
+	s.d = log.NewEntryDecoder(bufio.NewReaderSize(s.f, readBufSize), s.editMode)
 	return true
 }
 
-func (s *fileLogStream) peek() (logpb.Entry, bool) {
+func (s *fileLogStream) peek() (log.Entry, bool) {
 	for !s.read && s.err == nil {
 		justOpened := false
 		if s.d == nil {
 			if !s.open() {
-				return logpb.Entry{}, false
+				return log.Entry{}, false
 			}
 			justOpened = true
 		}
-		var e logpb.Entry
+		var e log.Entry
 		if s.err = s.d.Decode(&e); s.err != nil {
 			s.close()
-			s.e = logpb.Entry{}
+			s.e = log.Entry{}
 			break
 		}
 		// Upon re-opening the file, we'll read s.e again.
@@ -534,7 +514,7 @@ func (s *fileLogStream) peek() (logpb.Entry, bool) {
 		afterTo := !s.to.IsZero() && s.e.Time > s.to.UnixNano()
 		if afterTo {
 			s.close()
-			s.e = logpb.Entry{}
+			s.e = log.Entry{}
 			s.err = io.EOF
 		} else {
 			beforeFrom := !s.from.IsZero() && s.e.Time < s.from.UnixNano()
@@ -544,7 +524,7 @@ func (s *fileLogStream) peek() (logpb.Entry, bool) {
 	return s.e, s.err == nil
 }
 
-func (s *fileLogStream) pop() (e logpb.Entry, ok bool) {
+func (s *fileLogStream) pop() (e log.Entry, ok bool) {
 	if e, ok = s.peek(); !ok {
 		return
 	}
@@ -557,9 +537,7 @@ func (s *fileLogStream) error() error        { return s.err }
 
 // seekToFirstAfterFrom uses binary search to seek to an offset after all
 // entries which occur before from.
-func seekToFirstAfterFrom(
-	f *os.File, from time.Time, editMode log.EditSensitiveData, format string,
-) (err error) {
+func seekToFirstAfterFrom(f *os.File, from time.Time, editMode log.EditSensitiveData) (err error) {
 	if from.IsZero() {
 		return nil
 	}
@@ -577,70 +555,23 @@ func seekToFirstAfterFrom(
 		if _, err := f.Seek(int64(i), io.SeekStart); err != nil {
 			panic(err)
 		}
-		var e logpb.Entry
-		d, err := log.NewEntryDecoderWithFormat(f, editMode, format)
+		var e log.Entry
+		err := log.NewEntryDecoder(f, editMode).Decode(&e)
 		if err != nil {
-			panic(errors.WithMessagef(err, "error while processing file %s", f.Name()))
-		}
-		if err := d.Decode(&e); err != nil {
 			if err == io.EOF {
 				return true
 			}
-			panic(errors.WithMessagef(err, "error while processing file %s", f.Name()))
+			panic(err)
 		}
 		return e.Time >= from.UnixNano()
 	})
 	if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
 		return err
 	}
-	var e logpb.Entry
-	d, err := log.NewEntryDecoderWithFormat(f, editMode, format)
-	if err != nil {
-		return err
-	}
-	if err := d.Decode(&e); err != nil {
+	var e log.Entry
+	if err := log.NewEntryDecoder(f, editMode).Decode(&e); err != nil {
 		return err
 	}
 	_, err = f.Seek(int64(offset), io.SeekStart)
 	return err
-}
-
-type forceColor int
-
-const (
-	forceColorAuto forceColor = iota
-	forceColorOn
-	forceColorOff
-)
-
-// Type implements the pflag.Value interface.
-func (c *forceColor) Type() string { return "<true/false/auto>" }
-
-// String implements the pflag.Value interface.
-func (c *forceColor) String() string {
-	switch *c {
-	case forceColorAuto:
-		return "auto"
-	case forceColorOn:
-		return "true"
-	case forceColorOff:
-		return "false"
-	default:
-		panic(errors.AssertionFailedf("unknown value: %v", int(*c)))
-	}
-}
-
-// Set implements the pflag.Value interface.
-func (c *forceColor) Set(v string) error {
-	switch v {
-	case "on", "true":
-		*c = forceColorOn
-	case "off", "false":
-		*c = forceColorOff
-	case "auto":
-		*c = forceColorAuto
-	default:
-		return errors.Newf("unknown value: %v (supported: true/false/auto)", v)
-	}
-	return nil
 }

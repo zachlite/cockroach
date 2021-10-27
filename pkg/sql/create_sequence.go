@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -27,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 )
 
 type createSequenceNode struct {
@@ -36,16 +34,8 @@ type createSequenceNode struct {
 }
 
 func (p *planner) CreateSequence(ctx context.Context, n *tree.CreateSequence) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"CREATE SEQUENCE",
-	); err != nil {
-		return nil, err
-	}
-
 	un := n.Name.ToUnresolvedObjectName()
-	dbDesc, _, prefix, err := p.ResolveTargetObject(ctx, un)
+	dbDesc, prefix, err := p.ResolveTargetObject(ctx, un)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +59,7 @@ func (n *createSequenceNode) ReadingOwnWrites() {}
 func (n *createSequenceNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeCreateCounter("sequence"))
 
-	schemaDesc, err := getSchemaForCreateTable(params, n.dbDesc, n.n.Persistence, &n.n.Name,
+	_, schemaID, err := getTableCreateParams(params, n.dbDesc.GetID(), n.n.Persistence, &n.n.Name,
 		tree.ResolveRequireSequenceDesc, n.n.IfNotExists)
 	if err != nil {
 		if sqlerrors.IsRelationAlreadyExistsError(err) && n.n.IfNotExists {
@@ -79,7 +69,7 @@ func (n *createSequenceNode) startExec(params runParams) error {
 	}
 
 	return doCreateSequence(
-		params, n.dbDesc, schemaDesc, &n.n.Name, n.n.Persistence, n.n.Options,
+		params, n.n.String(), n.dbDesc, schemaID, &n.n.Name, n.n.Persistence, n.n.Options,
 		tree.AsStringWithFQNames(n.n, params.Ann()),
 	)
 }
@@ -88,8 +78,9 @@ func (n *createSequenceNode) startExec(params runParams) error {
 // context argument is a string to use in the event log.
 func doCreateSequence(
 	params runParams,
+	context string,
 	dbDesc catalog.DatabaseDescriptor,
-	scDesc catalog.SchemaDescriptor,
+	schemaID descpb.ID,
 	name *tree.TableName,
 	persistence tree.Persistence,
 	opts tree.SequenceOptions,
@@ -100,10 +91,7 @@ func doCreateSequence(
 		return err
 	}
 
-	privs := dbDesc.GetDefaultPrivilegeDescriptor().CreatePrivilegesFromDefaultPrivileges(
-		dbDesc.GetID(),
-		params.SessionData().User(), tree.Sequences, dbDesc.GetPrivileges(),
-	)
+	privs := CreateInheritedPrivilegesFromDBDesc(dbDesc, params.SessionData().User)
 
 	if persistence.IsTemporary() {
 		telemetry.Inc(sqltelemetry.CreateTempSequenceCounter)
@@ -116,26 +104,30 @@ func doCreateSequence(
 	// currently relied on in import and restore code and tests.
 	var creationTime hlc.Timestamp
 	desc, err := NewSequenceTableDesc(
-		params.ctx,
 		name.Object(),
 		opts,
 		dbDesc.GetID(),
-		scDesc.GetID(),
+		schemaID,
 		id,
 		creationTime,
 		privs,
 		persistence,
 		&params,
-		dbDesc.IsMultiRegion(),
 	)
 	if err != nil {
 		return err
 	}
 
 	// makeSequenceTableDesc already validates the table. No call to
-	// desc.ValidateSelf() needed here.
+	// desc.ValidateTable() needed here.
 
-	key := catalogkeys.MakeObjectNameKey(params.ExecCfg().Codec, dbDesc.GetID(), scDesc.GetID(), name.Object())
+	key := catalogkv.MakeObjectNameKey(
+		params.ctx,
+		params.ExecCfg().Settings,
+		dbDesc.GetID(),
+		schemaID,
+		name.Object(),
+	).Key(params.ExecCfg().Codec)
 	if err = params.p.createDescriptorWithID(
 		params.ctx, key, id, desc, params.EvalContext().Settings, jobDesc,
 	); err != nil {
@@ -150,17 +142,25 @@ func doCreateSequence(
 		return err
 	}
 
-	if err := validateDescriptor(params.ctx, params.p, desc); err != nil {
+	dg := catalogkv.NewOneLevelUncachedDescGetter(params.p.txn, params.ExecCfg().Codec)
+	if err := desc.Validate(params.ctx, dg); err != nil {
 		return err
 	}
 
 	// Log Create Sequence event. This is an auditable log event and is
 	// recorded in the same transaction as the table descriptor update.
-	return params.p.logEvent(params.ctx,
-		desc.ID,
-		&eventpb.CreateSequence{
-			SequenceName: name.FQString(),
-		})
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogCreateSequence,
+		int32(desc.ID),
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			SequenceName string
+			Statement    string
+			User         string
+		}{name.FQString(), context, params.SessionData().User},
+	)
 }
 
 func (*createSequenceNode) Next(runParams) (bool, error) { return false, nil }
@@ -169,7 +169,6 @@ func (*createSequenceNode) Close(context.Context)        {}
 
 // NewSequenceTableDesc creates a sequence descriptor.
 func NewSequenceTableDesc(
-	ctx context.Context,
 	sequenceName string,
 	sequenceOptions tree.SequenceOptions,
 	parentID descpb.ID,
@@ -179,7 +178,6 @@ func NewSequenceTableDesc(
 	privileges *descpb.PrivilegeDescriptor,
 	persistence tree.Persistence,
 	params *runParams,
-	isMultiRegion bool,
 ) (*tabledesc.Mutable, error) {
 	desc := tabledesc.InitTableDescriptor(
 		id,
@@ -199,15 +197,13 @@ func NewSequenceTableDesc(
 			Type: types.Int,
 		},
 	}
-	desc.SetPrimaryIndex(descpb.IndexDescriptor{
-		ID:                  keys.SequenceIndexID,
-		Name:                tabledesc.LegacyPrimaryKeyIndexName,
-		KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
-		KeyColumnNames:      []string{tabledesc.SequenceColumnName},
-		KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-		EncodingType:        descpb.PrimaryIndexEncoding,
-		Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-	})
+	desc.PrimaryIndex = descpb.IndexDescriptor{
+		ID:               keys.SequenceIndexID,
+		Name:             tabledesc.PrimaryKeyIndexName,
+		ColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
+		ColumnNames:      []string{tabledesc.SequenceColumnName},
+		ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+	}
 	desc.Families = []descpb.ColumnFamilyDescriptor{
 		{
 			ID:              keys.SequenceColumnFamilyID,
@@ -232,11 +228,7 @@ func NewSequenceTableDesc(
 	// immediately.
 	desc.State = descpb.DescriptorState_PUBLIC
 
-	if isMultiRegion {
-		desc.SetTableLocalityRegionalByTable(tree.PrimaryRegionNotSpecifiedName)
-	}
-
-	if err := catalog.ValidateSelf(&desc); err != nil {
+	if err := desc.ValidateTable(); err != nil {
 		return nil, err
 	}
 	return &desc, nil

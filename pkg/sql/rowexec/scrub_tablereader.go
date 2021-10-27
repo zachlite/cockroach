@@ -15,13 +15,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/scrub"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -48,7 +47,7 @@ var ScrubTypes = []*types.T{
 
 type scrubTableReader struct {
 	tableReader
-	tableDesc catalog.TableDescriptor
+	tableDesc tabledesc.Immutable
 	// fetcherResultToColIdx maps Fetcher results to the column index in
 	// the TableDescriptor. This is only initialized and used during scrub
 	// physical checks.
@@ -79,8 +78,8 @@ func newScrubTableReader(
 		indexIdx: int(spec.IndexIdx),
 	}
 
-	tr.tableDesc = spec.BuildTableDescriptor()
-	tr.limitHint = rowinfra.RowLimit(execinfra.LimitHint(spec.LimitHint, post))
+	tr.tableDesc = tabledesc.MakeImmutable(spec.Table)
+	tr.limitHint = execinfra.LimitHint(spec.LimitHint, post)
 
 	if err := tr.Init(
 		tr,
@@ -108,37 +107,36 @@ func newScrubTableReader(
 	// This is because the emitted schema is ScrubTypes so NeededColumns
 	// does not correctly represent the data being scanned.
 	if spec.IndexIdx == 0 {
-		neededColumns.AddRange(0, len(tr.tableDesc.PublicColumns())-1)
-		for i := range tr.tableDesc.PublicColumns() {
+		neededColumns.AddRange(0, len(spec.Table.Columns)-1)
+		for i := range spec.Table.Columns {
 			tr.fetcherResultToColIdx = append(tr.fetcherResultToColIdx, i)
 		}
 	} else {
-		colIdxMap := catalog.ColumnIDToOrdinalMap(tr.tableDesc.PublicColumns())
-		idx := tr.tableDesc.PublicNonPrimaryIndexes()[spec.IndexIdx-1]
-		colIDs := idx.CollectKeyColumnIDs()
-		colIDs.UnionWith(idx.CollectSecondaryStoredColumnIDs())
-		colIDs.UnionWith(idx.CollectKeySuffixColumnIDs())
-		colIDs.ForEach(func(colID descpb.ColumnID) {
-			neededColumns.Add(colIdxMap.GetDefault(colID))
+		colIdxMap := tr.tableDesc.ColumnIdxMap()
+		err := spec.Table.Indexes[spec.IndexIdx-1].RunOverAllColumns(func(id descpb.ColumnID) error {
+			neededColumns.Add(colIdxMap[id])
+			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var fetcher row.Fetcher
 	if _, _, err := initRowFetcher(
-		flowCtx, &fetcher, tr.tableDesc, int(spec.IndexIdx), catalog.ColumnIDToOrdinalMap(tr.tableDesc.PublicColumns()),
+		flowCtx, &fetcher, &tr.tableDesc, int(spec.IndexIdx), tr.tableDesc.ColumnIdxMap(),
 		spec.Reverse, neededColumns, true /* isCheck */, flowCtx.EvalCtx.Mon, &tr.alloc,
 		execinfra.ScanVisibilityPublic, spec.LockingStrength, spec.LockingWaitPolicy,
-		false /* withSystemColumns */, nil, /* virtualColumn */
+		nil, /* systemColumns */
 	); err != nil {
 		return nil, err
 	}
 	tr.fetcher = &fetcher
 
-	tr.Spans = make(roachpb.Spans, len(spec.Spans))
+	tr.spans = make(roachpb.Spans, len(spec.Spans))
 	for i, s := range spec.Spans {
-		tr.Spans[i] = s.Span
+		tr.spans[i] = s.Span
 	}
-	tr.MakeSpansCopy()
 
 	return tr, nil
 }
@@ -150,16 +148,21 @@ func (tr *scrubTableReader) generateScrubErrorRow(
 	row rowenc.EncDatumRow, scrubErr *scrub.Error,
 ) (rowenc.EncDatumRow, error) {
 	details := make(map[string]interface{})
-	index := tr.tableDesc.ActiveIndexes()[tr.indexIdx]
+	var index *descpb.IndexDescriptor
+	if tr.indexIdx == 0 {
+		index = &tr.tableDesc.PrimaryIndex
+	} else {
+		index = &tr.tableDesc.Indexes[tr.indexIdx-1]
+	}
 	// Collect all the row values into JSON
 	rowDetails := make(map[string]interface{})
 	for i, colIdx := range tr.fetcherResultToColIdx {
-		col := tr.tableDesc.PublicColumns()[colIdx]
+		col := tr.tableDesc.Columns[colIdx]
 		// TODO(joey): We should maybe try to get the underlying type.
-		rowDetails[col.GetName()] = row[i].String(col.GetType())
+		rowDetails[col.Name] = row[i].String(col.Type)
 	}
 	details["row_data"] = rowDetails
-	details["index_name"] = index.GetName()
+	details["index_name"] = index.Name
 	details["error_message"] = scrub.UnwrapScrubError(error(scrubErr)).Error()
 
 	detailsJSON, err := tree.MakeDJSON(details)
@@ -187,30 +190,30 @@ func (tr *scrubTableReader) generateScrubErrorRow(
 func (tr *scrubTableReader) prettyPrimaryKeyValues(
 	row rowenc.EncDatumRow, table *descpb.TableDescriptor,
 ) string {
-	var colIdxMap catalog.TableColMap
+	colIdxMap := make(map[descpb.ColumnID]int, len(table.Columns))
 	for i := range table.Columns {
 		id := table.Columns[i].ID
-		colIdxMap.Set(id, i)
+		colIdxMap[id] = i
 	}
-	var colIDToRowIdxMap catalog.TableColMap
+	colIDToRowIdxMap := make(map[descpb.ColumnID]int, len(table.Columns))
 	for rowIdx, colIdx := range tr.fetcherResultToColIdx {
-		colIDToRowIdxMap.Set(tr.tableDesc.PublicColumns()[colIdx].GetID(), rowIdx)
+		colIDToRowIdxMap[tr.tableDesc.Columns[colIdx].ID] = rowIdx
 	}
 	var primaryKeyValues bytes.Buffer
 	primaryKeyValues.WriteByte('(')
-	for i, id := range table.PrimaryIndex.KeyColumnIDs {
+	for i, id := range table.PrimaryIndex.ColumnIDs {
 		if i > 0 {
 			primaryKeyValues.WriteByte(',')
 		}
 		primaryKeyValues.WriteString(
-			row[colIDToRowIdxMap.GetDefault(id)].String(table.Columns[colIdxMap.GetDefault(id)].Type))
+			row[colIDToRowIdxMap[id]].String(table.Columns[colIdxMap[id]].Type))
 	}
 	primaryKeyValues.WriteByte(')')
 	return primaryKeyValues.String()
 }
 
 // Start is part of the RowSource interface.
-func (tr *scrubTableReader) Start(ctx context.Context) {
+func (tr *scrubTableReader) Start(ctx context.Context) context.Context {
 	if tr.FlowCtx.Txn == nil {
 		tr.MoveToDraining(errors.Errorf("scrubTableReader outside of txn"))
 	}
@@ -220,11 +223,13 @@ func (tr *scrubTableReader) Start(ctx context.Context) {
 	log.VEventf(ctx, 1, "starting")
 
 	if err := tr.fetcher.StartScan(
-		ctx, tr.FlowCtx.Txn, tr.Spans, rowinfra.DefaultBatchBytesLimit, tr.limitHint,
-		tr.FlowCtx.TraceKV, tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
+		ctx, tr.FlowCtx.Txn, tr.spans,
+		true /* limit batches */, tr.limitHint, tr.FlowCtx.TraceKV,
 	); err != nil {
 		tr.MoveToDraining(err)
 	}
+
+	return ctx
 }
 
 // Next is part of the RowSource interface.

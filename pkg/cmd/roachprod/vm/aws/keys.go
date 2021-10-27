@@ -21,7 +21,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/errors/oserror"
 )
 
 const sshPublicKeyFile = "${HOME}/.ssh/id_rsa.pub"
@@ -52,9 +51,9 @@ func (p *Provider) sshKeyExists(keyName string, region string) (bool, error) {
 // sshKeyImport takes the user's local, public SSH key and imports it into the ec2 region so that
 // we can create new hosts with it.
 func (p *Provider) sshKeyImport(keyName string, region string) error {
-	_, err := os.Stat(os.ExpandEnv(sshPublicKeyFile))
+	keyBytes, err := ioutil.ReadFile(os.ExpandEnv(sshPublicKeyFile))
 	if err != nil {
-		if oserror.IsNotExist(err) {
+		if os.IsNotExist(err) {
 			return errors.Wrapf(err, "please run ssh-keygen externally to create your %s file", sshPublicKeyFile)
 		}
 		return err
@@ -81,7 +80,7 @@ func (p *Provider) sshKeyImport(keyName string, region string) error {
 		"ec2", "import-key-pair",
 		"--region", region,
 		"--key-name", keyName,
-		"--public-key-material", fmt.Sprintf("fileb://%s", sshPublicKeyFile),
+		"--public-key-material", string(keyBytes),
 		"--tag-specifications", tagSpecs,
 	}
 	err = p.runJSONCommand(args, &data)
@@ -102,7 +101,7 @@ func (p *Provider) sshKeyName() (string, error) {
 
 	keyBytes, err := ioutil.ReadFile(os.ExpandEnv(sshPublicKeyFile))
 	if err != nil {
-		if oserror.IsNotExist(err) {
+		if os.IsNotExist(err) {
 			return "", errors.Wrapf(err, "please run ssh-keygen externally to create your %s file", sshPublicKeyFile)
 		}
 		return "", err

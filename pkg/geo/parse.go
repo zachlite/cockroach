@@ -16,16 +16,16 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
+	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 	"github.com/pierrre/geohash"
-	geom "github.com/twpayne/go-geom"
+	"github.com/twpayne/go-geom"
 	"github.com/twpayne/go-geom/encoding/ewkb"
 	"github.com/twpayne/go-geom/encoding/ewkbhex"
 	"github.com/twpayne/go-geom/encoding/geojson"
 	"github.com/twpayne/go-geom/encoding/wkb"
 	"github.com/twpayne/go-geom/encoding/wkbcommon"
-	"github.com/twpayne/go-geom/encoding/wkt"
 )
 
 // parseEWKBRaw creates a geopb.SpatialObject from an EWKB
@@ -171,12 +171,11 @@ func parseEWKT(
 		}
 	}
 
-	g, wktUnmarshalErr := wkt.Unmarshal(string(str))
-	if wktUnmarshalErr != nil {
-		return geopb.SpatialObject{}, wktUnmarshalErr
+	ewkb, err := geos.WKTToEWKB(geopb.WKT(str), srid)
+	if err != nil {
+		return geopb.SpatialObject{}, err
 	}
-	AdjustGeomTSRID(g, srid)
-	return spatialObjectFromGeomT(g, soType)
+	return parseEWKBRaw(soType, ewkb)
 }
 
 // hasPrefixIgnoreCase returns whether a given str begins with a prefix, ignoring case.
@@ -240,29 +239,4 @@ func parseGeoHash(g string, precision int) (geohash.Box, error) {
 		return geohash.Box{}, err
 	}
 	return box, nil
-}
-
-// GeometryToEncodedPolyline turns the provided geometry and precision into a Polyline ASCII
-func GeometryToEncodedPolyline(g Geometry, p int) (string, error) {
-	gt, err := g.AsGeomT()
-	if err != nil {
-		return "", errors.Wrap(err, "error parsing input geometry")
-	}
-	if gt.SRID() != 4326 {
-		return "", errors.New("only SRID 4326 is supported")
-	}
-
-	return encodePolylinePoints(gt.FlatCoords(), p), nil
-}
-
-// ParseEncodedPolyline takes the encoded polyline ASCII and precision, decodes the points and returns them as a geometry
-func ParseEncodedPolyline(encodedPolyline string, precision int) (Geometry, error) {
-	flatCoords := decodePolylinePoints(encodedPolyline, precision)
-	ls := geom.NewLineStringFlat(geom.XY, flatCoords).SetSRID(4326)
-
-	g, err := MakeGeometryFromGeomT(ls)
-	if err != nil {
-		return Geometry{}, errors.Wrap(err, "parsing geography error")
-	}
-	return g, nil
 }

@@ -49,30 +49,21 @@ func TestRemovePartitioningOSS(t *testing.T) {
 	tableKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID)
 
 	// Hack in partitions. Doing this properly requires a CCL binary.
-	{
-		primaryIndex := *tableDesc.GetPrimaryIndex().IndexDesc()
-		primaryIndex.Partitioning = descpb.PartitioningDescriptor{
-			NumColumns: 1,
-			Range: []descpb.PartitioningDescriptor_Range{{
-				Name:          "p1",
-				FromInclusive: encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 1),
-				ToExclusive:   encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 2),
-			}},
-		}
-		tableDesc.SetPrimaryIndex(primaryIndex)
+	tableDesc.PrimaryIndex.Partitioning = descpb.PartitioningDescriptor{
+		NumColumns: 1,
+		Range: []descpb.PartitioningDescriptor_Range{{
+			Name:          "p1",
+			FromInclusive: encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 1),
+			ToExclusive:   encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 2),
+		}},
 	}
-
-	{
-		secondaryIndex := *tableDesc.PublicNonPrimaryIndexes()[0].IndexDesc()
-		secondaryIndex.Partitioning = descpb.PartitioningDescriptor{
-			NumColumns: 1,
-			Range: []descpb.PartitioningDescriptor_Range{{
-				Name:          "p2",
-				FromInclusive: encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 1),
-				ToExclusive:   encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 2),
-			}},
-		}
-		tableDesc.SetPublicNonPrimaryIndex(1, secondaryIndex)
+	tableDesc.Indexes[0].Partitioning = descpb.PartitioningDescriptor{
+		NumColumns: 1,
+		Range: []descpb.PartitioningDescriptor_Range{{
+			Name:          "p2",
+			FromInclusive: encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 1),
+			ToExclusive:   encoding.EncodeIntValue(nil /* appendTo */, encoding.NoColumnID, 2),
+		}},
 	}
 	// Note that this is really a gross hack - it breaks planner caches, which
 	// assume that nothing is going to change out from under them like this. We
@@ -85,7 +76,7 @@ func TestRemovePartitioningOSS(t *testing.T) {
 	exp := `CREATE TABLE public.kv (
 	k INT8 NOT NULL,
 	v INT8 NULL,
-	CONSTRAINT kv_pkey PRIMARY KEY (k ASC),
+	CONSTRAINT "primary" PRIMARY KEY (k ASC),
 	INDEX foo (v ASC) PARTITION BY RANGE (v) (
 		PARTITION p2 VALUES FROM (1) TO (2)
 	),
@@ -104,12 +95,12 @@ func TestRemovePartitioningOSS(t *testing.T) {
 	zoneConfig := zonepb.ZoneConfig{
 		Subzones: []zonepb.Subzone{
 			{
-				IndexID:       uint32(tableDesc.GetPrimaryIndexID()),
+				IndexID:       uint32(tableDesc.PrimaryIndex.ID),
 				PartitionName: "p1",
 				Config:        s.(*server.TestServer).Cfg.DefaultZoneConfig,
 			},
 			{
-				IndexID:       uint32(tableDesc.PublicNonPrimaryIndexes()[0].GetID()),
+				IndexID:       uint32(tableDesc.Indexes[0].ID),
 				PartitionName: "p2",
 				Config:        s.(*server.TestServer).Cfg.DefaultZoneConfig,
 			},
@@ -121,7 +112,7 @@ func TestRemovePartitioningOSS(t *testing.T) {
 	}
 	sqlDB.Exec(t, `INSERT INTO system.zones VALUES ($1, $2)`, tableDesc.ID, zoneConfigBytes)
 	for _, p := range []string{
-		"PARTITION p1 OF INDEX t.public.kv@kv_pkey",
+		"PARTITION p1 OF INDEX t.public.kv@primary",
 		"PARTITION p2 OF INDEX t.public.kv@foo",
 	} {
 		if exists := sqlutils.ZoneConfigExists(t, sqlDB, p); !exists {
@@ -147,7 +138,7 @@ func TestRemovePartitioningOSS(t *testing.T) {
 	exp = `CREATE TABLE public.kv (
 	k INT8 NOT NULL,
 	v INT8 NULL,
-	CONSTRAINT kv_pkey PRIMARY KEY (k ASC),
+	CONSTRAINT "primary" PRIMARY KEY (k ASC),
 	INDEX foo (v ASC),
 	FAMILY fam_0_k (k),
 	FAMILY fam_1_v (v)

@@ -15,25 +15,21 @@ import (
 	"math/rand"
 	"net/url"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backupresolver"
+	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/docs"
-	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -44,26 +40,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	crdberrors "github.com/cockroachdb/errors"
 )
-
-// featureChangefeedEnabled is used to enable and disable the CHANGEFEED feature.
-var featureChangefeedEnabled = settings.RegisterBoolSetting(
-	"feature.changefeed.enabled",
-	"set to true to enable changefeeds, false to disable; default is true",
-	featureflag.FeatureFlagEnabledDefault,
-).WithPublic()
 
 func init() {
 	sql.AddPlanHook(changefeedPlanHook)
@@ -88,7 +78,6 @@ func changefeedPlanHook(
 	var header colinfo.ResultColumns
 	unspecifiedSink := changefeedStmt.SinkURI == nil
 	avoidBuffering := false
-
 	if unspecifiedSink {
 		// An unspecified sink triggers a fairly radical change in behavior.
 		// Instead of setting up a system.job to emit to a sink in the
@@ -122,23 +111,7 @@ func changefeedPlanHook(
 
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
-		defer span.Finish()
-
-		if err := featureflag.CheckEnabled(
-			ctx,
-			p.ExecCfg(),
-			featureChangefeedEnabled,
-			"CHANGEFEED",
-		); err != nil {
-			return err
-		}
-
-		// Changefeeds are based on the Rangefeed abstraction, which
-		// requires the `kv.rangefeed.enabled` setting to be true.
-		if !kvserver.RangefeedEnabled.Get(&p.ExecCfg().Settings.SV) {
-			return errors.Errorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
-				docs.URL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
-		}
+		defer tracing.FinishSpan(span)
 
 		ok, err := p.HasRoleOption(ctx, roleoption.CONTROLCHANGEFEED)
 		if err != nil {
@@ -163,21 +136,6 @@ func changefeedPlanHook(
 			return err
 		}
 
-		for key, value := range opts {
-			// if option is case insensitive then convert its value to lower case
-			if _, ok := changefeedbase.CaseInsensitiveOpts[key]; ok {
-				opts[key] = strings.ToLower(value)
-			}
-		}
-
-		if newFormat, ok := changefeedbase.NoLongerExperimental[opts[changefeedbase.OptFormat]]; ok {
-			p.BufferClientNotice(ctx, pgnotice.Newf(
-				`%[1]s is no longer experimental, use %[2]s=%[1]s`,
-				newFormat, changefeedbase.OptFormat),
-			)
-			// Still serialize the experimental_ form for backwards compatibility
-		}
-
 		jobDescription, err := changefeedJobDescription(p, changefeedStmt, sinkURI, opts)
 		if err != nil {
 			return err
@@ -188,13 +146,11 @@ func changefeedPlanHook(
 		}
 		var initialHighWater hlc.Timestamp
 		if cursor, ok := opts[changefeedbase.OptCursor]; ok {
-			asOfClause := tree.AsOfClause{Expr: tree.NewStrVal(cursor)}
+			asOf := tree.AsOfClause{Expr: tree.NewStrVal(cursor)}
 			var err error
-			asOf, err := p.EvalAsOfTimestamp(ctx, asOfClause)
-			if err != nil {
+			if initialHighWater, err = p.EvalAsOfTimestamp(ctx, asOf); err != nil {
 				return err
 			}
-			initialHighWater = asOf.Timestamp
 			statementTime = initialHighWater
 		}
 
@@ -216,22 +172,10 @@ func changefeedPlanHook(
 		}
 
 		// This grabs table descriptors once to get their ids.
-		targetDescs, _, err := backupresolver.ResolveTargetsToDescriptors(
+		targetDescs, _, err := backupccl.ResolveTargetsToDescriptors(
 			ctx, p, statementTime, &changefeedStmt.Targets)
 		if err != nil {
-			var m *backupresolver.MissingTableErr
-			if errors.As(err, &m) {
-				tableName := m.GetTableName()
-				err = errors.Errorf("table %q does not exist", tableName)
-			}
-			err = errors.Wrap(err, "failed to resolve targets in the CHANGEFEED stmt")
-			if !initialHighWater.IsEmpty() {
-				// We specified cursor -- it is possible the targets do not exist at that time.
-				// Give a bit more context in the error message.
-				err = errors.WithHintf(err,
-					"do the targets exist at the specified cursor time %s?", initialHighWater)
-			}
-			return err
+			return errors.Wrap(err, "failed to resolve targets in the CHANGEFEED stmt")
 		}
 
 		targets := make(jobspb.ChangefeedTargets, len(targetDescs))
@@ -241,14 +185,14 @@ func changefeedPlanHook(
 					return err
 				}
 				_, qualified := opts[changefeedbase.OptFullTableName]
-				name, err := getChangefeedTargetName(ctx, table, *p.ExecCfg(), p.ExtendedEvalContext().Txn, qualified)
+				name, err := getChangefeedTargetName(ctx, table, *p.ExecCfg(), p.Txn(), qualified)
 				if err != nil {
 					return err
 				}
 				targets[table.GetID()] = jobspb.ChangefeedTarget{
 					StatementTimeName: name,
 				}
-				if err := changefeedbase.ValidateTable(targets, table); err != nil {
+				if err := validateChangefeedTable(targets, table); err != nil {
 					return err
 				}
 			}
@@ -275,18 +219,14 @@ func changefeedPlanHook(
 		//   and `format` if the user didn't specify them.
 		// - Then `getEncoder` is run to return any configuration errors.
 		// - Then the changefeed is opted in to `OptKeyInValue` for any cloud
-		//   storage sink or webhook sink. Kafka etc have a key and value field in
-		//   each message but cloud storage sinks and webhook sinks don't have
-		//   anywhere to put the key. So if the key is not in the value, then for
-		//   DELETEs there is no way to recover which key was deleted. We could make
-		//   the user explicitly pass this option for every cloud storage sink/
-		//   webhook sink and error if they don't, but that seems user-hostile for
-		//   insufficient reason. We can't do this any earlier, because we might
-		//   return errors about `key_in_value` being incompatible which is
-		//   confusing when the user didn't type that option.
-		//   This is the same for the topic and webhook sink, which uses
-		//   `topic_in_value` to embed the topic in the value by default, since it
-		//   has no other avenue to express the topic.
+		//   storage sink. Kafka etc have a key and value field in each message but
+		//   cloud storage sinks don't have anywhere to put the key. So if the key
+		//   is not in the value, then for DELETEs there is no way to recover which
+		//   key was deleted. We could make the user explicitly pass this option for
+		//   every cloud storage sink and error if they don't, but that seems
+		//   user-hostile for insufficient reason. We can't do this any earlier,
+		//   because we might return errors about `key_in_value` being incompatible
+		//   which is confusing when the user didn't type that option.
 		// - Finally, we create a "canary" sink to test sink configuration and
 		//   connectivity. This has to go last because it is strange to return sink
 		//   connectivity errors before we've finished validating all the other
@@ -300,13 +240,6 @@ func changefeedPlanHook(
 		if err != nil {
 			return err
 		}
-		if newScheme, ok := changefeedbase.NoLongerExperimental[parsedSink.Scheme]; ok {
-			parsedSink.Scheme = newScheme // This gets munged anyway when building the sink
-			p.BufferClientNotice(ctx, pgnotice.Newf(`%[1]s is no longer experimental, use %[1]s://`,
-				newScheme),
-			)
-		}
-
 		if details, err = validateDetails(details); err != nil {
 			return err
 		}
@@ -314,20 +247,8 @@ func changefeedPlanHook(
 		if _, err := getEncoder(details.Opts, details.Targets); err != nil {
 			return err
 		}
-
-		if isCloudStorageSink(parsedSink) || isWebhookSink(parsedSink) {
+		if isCloudStorageSink(parsedSink) {
 			details.Opts[changefeedbase.OptKeyInValue] = ``
-		}
-		if isWebhookSink(parsedSink) {
-			details.Opts[changefeedbase.OptTopicInValue] = ``
-		}
-
-		if !unspecifiedSink && p.ExecCfg().ExternalIODirConfig.DisableOutbound {
-			return errors.Errorf("Outbound IO is disabled by configuration, cannot create changefeed into %s", parsedSink.Scheme)
-		}
-
-		if _, shouldProtect := details.Opts[changefeedbase.OptProtectDataFromGCOnPause]; shouldProtect && !p.ExecCfg().Codec.ForSystemTenant() {
-			return errorutil.UnsupportedWithMultiTenancy(67271)
 		}
 
 		// Feature telemetry
@@ -345,11 +266,18 @@ func changefeedPlanHook(
 			if err != nil {
 				telemetry.Count(`changefeed.core.error`)
 			}
-			return changefeedbase.MaybeStripRetryableErrorMarker(err)
+			return MaybeStripRetryableErrorMarker(err)
 		}
 
+		settings := p.ExecCfg().Settings
+		// Changefeeds are based on the Rangefeed abstraction, which requires the
+		// `kv.rangefeed.enabled` setting to be true.
+		if !kvserver.RangefeedEnabled.Get(&settings.SV) {
+			return errors.Errorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
+				docs.URL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
+		}
 		if err := utilccl.CheckEnterpriseEnabled(
-			p.ExecCfg().Settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "CHANGEFEED",
+			settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "CHANGEFEED",
 		); err != nil {
 			return err
 		}
@@ -362,17 +290,28 @@ func changefeedPlanHook(
 		// the CREATE CHANGEFEED statement. To do this, we create a "canary" sink,
 		// which will be immediately closed, only to check for errors.
 		{
+			nodeID, err := p.ExtendedEvalContext().NodeID.OptionalNodeIDErr(48274)
+			if err != nil {
+				return err
+			}
 			var nilOracle timestampLowerBoundOracle
 			canarySink, err := getSink(
-				ctx, &p.ExecCfg().DistSQLSrv.ServerConfig, details, nilOracle, p.User(), jobspb.InvalidJobID,
+				ctx, details.SinkURI, nodeID, details.Opts, details.Targets,
+				settings, nilOracle, p.ExecCfg().DistSQLSrv.ExternalStorageFromURI,
+				p.User(), mon.BoundAccount{},
 			)
 			if err != nil {
-				return changefeedbase.MaybeStripRetryableErrorMarker(err)
+				return MaybeStripRetryableErrorMarker(err)
 			}
 			if err := canarySink.Close(); err != nil {
 				return err
 			}
 		}
+
+		// Make a channel for runChangefeedFlow to signal once everything has
+		// been setup okay. This intentionally abuses what would normally be
+		// hooked up to resultsCh to avoid a bunch of extra plumbing.
+		startedCh := make(chan tree.Datums)
 
 		// The below block creates the job and if there's an initial scan, protects
 		// the data required for that scan. We protect the data here rather than in
@@ -383,20 +322,13 @@ func changefeedPlanHook(
 		// changeFrontier.manageProtectedTimestamps for more details on the handling of
 		// protected timestamps.
 		var sj *jobs.StartableJob
-		jobID := p.ExecCfg().JobRegistry.MakeJobID()
 		{
-
 			var protectedTimestampID uuid.UUID
 			var spansToProtect []roachpb.Span
-			var ptr *ptpb.Record
-
-			shouldProtectTimestamp := initialScanFromOptions(details.Opts) && p.ExecCfg().Codec.ForSystemTenant()
-			if shouldProtectTimestamp {
+			if hasInitialScan := initialScanFromOptions(details.Opts); hasInitialScan {
 				protectedTimestampID = uuid.MakeV4()
-				spansToProtect = makeSpansToProtect(p.ExecCfg().Codec, details.Targets)
+				spansToProtect = makeSpansToProtect(details.Targets)
 				progress.GetChangefeed().ProtectedTimestampRecord = protectedTimestampID
-				ptr = jobsprotectedts.MakeRecord(protectedTimestampID, int64(jobID), statementTime,
-					spansToProtect, jobsprotectedts.Jobs)
 			}
 
 			jr := jobs.Record{
@@ -411,16 +343,19 @@ func changefeedPlanHook(
 				Details:  details,
 				Progress: *progress.GetChangefeed(),
 			}
-
-			if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				if err := p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, &sj, jobID, txn, jr); err != nil {
+			createJobAndProtectedTS := func(ctx context.Context, txn *kv.Txn) (err error) {
+				sj, err = p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, jr, txn, startedCh)
+				if err != nil {
 					return err
 				}
-				if ptr != nil {
-					return p.ExecCfg().ProtectedTimestampProvider.Protect(ctx, txn, ptr)
+				if protectedTimestampID == uuid.Nil {
+					return nil
 				}
-				return nil
-			}); err != nil {
+				ptr := jobsprotectedts.MakeRecord(protectedTimestampID, *sj.ID(),
+					statementTime, spansToProtect)
+				return p.ExecCfg().ProtectedTimestampProvider.Protect(ctx, txn, ptr)
+			}
+			if err := p.ExecCfg().DB.Txn(ctx, createJobAndProtectedTS); err != nil {
 				if sj != nil {
 					if err := sj.CleanupOnRollback(ctx); err != nil {
 						log.Warningf(ctx, "failed to cleanup aborted job: %v", err)
@@ -443,20 +378,23 @@ func changefeedPlanHook(
 			}
 		}
 
-		// Start the job.
-		if err := sj.Start(ctx); err != nil {
+		// Start the job and wait for it to signal on startedCh.
+		errCh, err := sj.Start(ctx)
+		if err != nil {
 			return err
 		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case resultsCh <- tree.Datums{
-			tree.NewDInt(tree.DInt(jobID)),
-		}:
-			return nil
+		case err := <-errCh:
+			return err
+		case <-startedCh:
+			// The feed set up without error, return control to the user.
 		}
-
+		resultsCh <- tree.Datums{
+			tree.NewDInt(tree.DInt(*sj.ID())),
+		}
+		return nil
 	}
 	return fn, header, nil, avoidBuffering, nil
 }
@@ -464,7 +402,7 @@ func changefeedPlanHook(
 func changefeedJobDescription(
 	p sql.PlanHookState, changefeed *tree.CreateChangefeed, sinkURI string, opts map[string]string,
 ) (string, error) {
-	cleanedSinkURI, err := cloud.SanitizeExternalStorageURI(sinkURI, []string{changefeedbase.SinkParamSASLPassword})
+	cleanedSinkURI, err := cloudimpl.SanitizeExternalStorageURI(sinkURI, []string{changefeedbase.SinkParamSASLPassword})
 	if err != nil {
 		return "", err
 	}
@@ -473,9 +411,6 @@ func changefeedJobDescription(
 		SinkURI: tree.NewDString(cleanedSinkURI),
 	}
 	for k, v := range opts {
-		if k == changefeedbase.OptWebhookAuthHeader {
-			v = redactWebhookAuthHeader(v)
-		}
 		opt := tree.KVOption{Key: tree.Name(k)}
 		if len(v) > 0 {
 			opt.Value = tree.NewDString(v)
@@ -485,18 +420,6 @@ func changefeedJobDescription(
 	sort.Slice(c.Options, func(i, j int) bool { return c.Options[i].Key < c.Options[j].Key })
 	ann := p.ExtendedEvalContext().Annotations
 	return tree.AsStringWithFQNames(c, ann), nil
-}
-
-// validateNonNegativeDuration returns a nil error if optValue can be
-// parsed as a duration and is non-negative; otherwise, an error is
-// returned.
-func validateNonNegativeDuration(optName string, optValue string) error {
-	if d, err := time.ParseDuration(optValue); err != nil {
-		return err
-	} else if d < 0 {
-		return errors.Errorf("negative durations are not accepted: %s='%s'", optName, optValue)
-	}
-	return nil
 }
 
 func validateDetails(details jobspb.ChangefeedDetails) (jobspb.ChangefeedDetails, error) {
@@ -509,8 +432,11 @@ func validateDetails(details jobspb.ChangefeedDetails) (jobspb.ChangefeedDetails
 	{
 		const opt = changefeedbase.OptResolvedTimestamps
 		if o, ok := details.Opts[opt]; ok && o != `` {
-			if err := validateNonNegativeDuration(opt, o); err != nil {
+			if d, err := time.ParseDuration(o); err != nil {
 				return jobspb.ChangefeedDetails{}, err
+			} else if d < 0 {
+				return jobspb.ChangefeedDetails{}, errors.Errorf(
+					`negative durations are not accepted: %s='%s'`, opt, o)
 			}
 		}
 	}
@@ -568,28 +494,57 @@ func validateDetails(details jobspb.ChangefeedDetails) (jobspb.ChangefeedDetails
 		switch v := changefeedbase.FormatType(details.Opts[opt]); v {
 		case ``, changefeedbase.OptFormatJSON:
 			details.Opts[opt] = string(changefeedbase.OptFormatJSON)
-		case changefeedbase.OptFormatAvro, changefeedbase.DeprecatedOptFormatAvro:
+		case changefeedbase.OptFormatAvro:
 			// No-op.
 		default:
 			return jobspb.ChangefeedDetails{}, errors.Errorf(
 				`unknown %s: %s`, opt, v)
 		}
 	}
-	{
-		const opt = changefeedbase.OptOnError
-		switch v := changefeedbase.OnErrorType(details.Opts[opt]); v {
-		case ``, changefeedbase.OptOnErrorFail:
-			details.Opts[opt] = string(changefeedbase.OptOnErrorFail)
-		case changefeedbase.OptOnErrorPause:
-			// No-op.
-		default:
-			return jobspb.ChangefeedDetails{}, errors.Errorf(
-				`unknown %s: %s, valid values are '%s' and '%s'`, opt, v,
-				changefeedbase.OptOnErrorPause,
-				changefeedbase.OptOnErrorFail)
-		}
-	}
 	return details, nil
+}
+
+func validateChangefeedTable(
+	targets jobspb.ChangefeedTargets, tableDesc catalog.TableDescriptor,
+) error {
+	t, ok := targets[tableDesc.GetID()]
+	if !ok {
+		return errors.Errorf(`unwatched table: %s`, tableDesc.GetName())
+	}
+
+	// Technically, the only non-user table known not to work is system.jobs
+	// (which creates a cycle since the resolved timestamp high-water mark is
+	// saved in it), but there are subtle differences in the way many of them
+	// work and this will be under-tested, so disallow them all until demand
+	// dictates.
+	if tableDesc.GetID() < keys.MinUserDescID {
+		return errors.Errorf(`CHANGEFEEDs are not supported on system tables`)
+	}
+	if tableDesc.IsView() {
+		return errors.Errorf(`CHANGEFEED cannot target views: %s`, tableDesc.GetName())
+	}
+	if tableDesc.IsVirtualTable() {
+		return errors.Errorf(`CHANGEFEED cannot target virtual tables: %s`, tableDesc.GetName())
+	}
+	if tableDesc.IsSequence() {
+		return errors.Errorf(`CHANGEFEED cannot target sequences: %s`, tableDesc.GetName())
+	}
+	if families := tableDesc.GetFamilies(); len(families) != 1 {
+		return errors.Errorf(
+			`CHANGEFEEDs are currently supported on tables with exactly 1 column family: %s has %d`,
+			tableDesc.GetName(), len(families))
+	}
+
+	if tableDesc.GetState() == descpb.DescriptorState_DROP {
+		return errors.Errorf(`"%s" was dropped or truncated`, t.StatementTimeName)
+	}
+
+	// TODO(mrtracy): re-enable this when allow-backfill option is added.
+	// if tableDesc.HasColumnBackfillMutation() {
+	// 	return errors.Errorf(`CHANGEFEEDs cannot operate on tables being backfilled`)
+	// }
+
+	return nil
 }
 
 type changefeedResumer struct {
@@ -624,77 +579,16 @@ func generateChangefeedSessionID() string {
 	return string(buf)
 }
 
-func (b *changefeedResumer) setJobRunningStatus(
-	ctx context.Context, fmtOrMsg string, args ...interface{},
-) {
-	status := jobs.RunningStatus(fmt.Sprintf(fmtOrMsg, args...))
-	if err := b.job.RunningStatus(ctx, nil,
-		func(_ context.Context, _ jobspb.Details) (jobs.RunningStatus, error) {
-			return status, nil
-		},
-	); err != nil {
-		log.Warningf(ctx, "failed to set running status: %v", err)
-	}
-}
-
 // Resume is part of the jobs.Resumer interface.
-func (b *changefeedResumer) Resume(ctx context.Context, execCtx interface{}) error {
-	jobExec := execCtx.(sql.JobExecContext)
-	execCfg := jobExec.ExecCfg()
-	jobID := b.job.ID()
+func (b *changefeedResumer) Resume(
+	ctx context.Context, planHookState interface{}, startedCh chan<- tree.Datums,
+) error {
+	phs := planHookState.(sql.PlanHookState)
+	execCfg := phs.ExecCfg()
+	jobID := *b.job.ID()
 	details := b.job.Details().(jobspb.ChangefeedDetails)
 	progress := b.job.Progress()
 
-	err := b.resumeWithRetries(ctx, jobExec, jobID, details, progress, execCfg)
-	if err != nil {
-		return b.handleChangefeedError(ctx, err, details, jobExec)
-	}
-	return nil
-}
-
-func (b *changefeedResumer) handleChangefeedError(
-	ctx context.Context,
-	changefeedErr error,
-	details jobspb.ChangefeedDetails,
-	jobExec sql.JobExecContext,
-) error {
-	switch onError := changefeedbase.OnErrorType(details.Opts[changefeedbase.OptOnError]); onError {
-	// default behavior
-	case changefeedbase.OptOnErrorFail:
-		return changefeedErr
-	// pause instead of failing
-	case changefeedbase.OptOnErrorPause:
-		// note: we only want the job to pause here if a failure happens, not a
-		// user-initiated cancellation. if the job has been canceled, the ctx
-		// will handle it and the pause will return an error.
-		const errorFmt = "job failed (%v) but is being paused because of %s=%s"
-		errorMessage := fmt.Sprintf(errorFmt, changefeedErr,
-			changefeedbase.OptOnError, changefeedbase.OptOnErrorPause)
-		return b.job.PauseRequested(ctx, jobExec.ExtendedEvalContext().Txn, func(ctx context.Context,
-			planHookState interface{}, txn *kv.Txn, progress *jobspb.Progress) error {
-			err := b.OnPauseRequest(ctx, jobExec, txn, progress)
-			if err != nil {
-				return err
-			}
-			// directly update running status to avoid the running/reverted job status check
-			progress.RunningStatus = errorMessage
-			log.Warningf(ctx, errorFmt, changefeedErr, changefeedbase.OptOnError, changefeedbase.OptOnErrorPause)
-			return nil
-		}, errorMessage)
-	default:
-		return errors.Errorf("unrecognized option value: %s=%s",
-			changefeedbase.OptOnError, details.Opts[changefeedbase.OptOnError])
-	}
-}
-
-func (b *changefeedResumer) resumeWithRetries(
-	ctx context.Context,
-	jobExec sql.JobExecContext,
-	jobID jobspb.JobID,
-	details jobspb.ChangefeedDetails,
-	progress jobspb.Progress,
-	execCfg *sql.ExecutorConfig,
-) error {
 	// We'd like to avoid failing a changefeed unnecessarily, so when an error
 	// bubbles up to this level, we'd like to "retry" the flow if possible. This
 	// could be because the sink is down or because a cockroach node has crashed
@@ -705,25 +599,11 @@ func (b *changefeedResumer) resumeWithRetries(
 		MaxBackoff:     10 * time.Second,
 	}
 	var err error
-
 	for r := retry.StartWithCtx(ctx, opts); r.Next(); {
-		// startedCh is normally used to signal back to the creator of the job that
-		// the job has started; however, in this case nothing will ever receive
-		// on the channel, causing the changefeed flow to block. Replace it with
-		// a dummy channel.
-		startedCh := make(chan tree.Datums, 1)
-
-		if err = distChangefeedFlow(ctx, jobExec, jobID, details, progress, startedCh); err == nil {
+		if err = distChangefeedFlow(ctx, phs, jobID, details, progress, startedCh); err == nil {
 			return nil
 		}
-
-		if knobs, ok := execCfg.DistSQLSrv.TestingKnobs.Changefeed.(*TestingKnobs); ok {
-			if knobs != nil && knobs.HandleDistChangefeedError != nil {
-				err = knobs.HandleDistChangefeedError(err)
-			}
-		}
-
-		if !changefeedbase.IsRetryableError(err) {
+		if !IsRetryableError(err) {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -734,22 +614,20 @@ func (b *changefeedResumer) resumeWithRetries(
 				// retries will not help.
 				// Instead, we want to make sure that the changefeed job is not marked failed
 				// due to a transient, retryable error.
-				err = jobs.MarkAsRetryJobError(err)
-				b.setJobRunningStatus(ctx, "retryable flow error: %s", err)
+				err = jobs.NewRetryJobError(fmt.Sprintf("retryable flow error: %+v", err))
 			}
 
 			log.Warningf(ctx, `CHANGEFEED job %d returning with error: %+v`, jobID, err)
 			return err
 		}
 
-		log.Warningf(ctx, `WARNING: CHANGEFEED job %d encountered retryable error: %v`, jobID, err)
-		b.setJobRunningStatus(ctx, "retryable error: %s", err)
+		log.Warningf(ctx, `CHANGEFEED job %d encountered retryable error: %v`, jobID, err)
 		if metrics, ok := execCfg.JobRegistry.MetricsStruct().Changefeed.(*Metrics); ok {
 			metrics.ErrorRetries.Inc(1)
 		}
 		// Re-load the job in order to update our progress object, which may have
 		// been updated by the changeFrontier processor since the flow started.
-		reloadedJob, reloadErr := execCfg.JobRegistry.LoadClaimedJob(ctx, jobID)
+		reloadedJob, reloadErr := execCfg.JobRegistry.LoadJob(ctx, jobID)
 		if reloadErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -760,14 +638,22 @@ func (b *changefeedResumer) resumeWithRetries(
 		} else {
 			progress = reloadedJob.Progress()
 		}
+
+		// startedCh is normally used to signal back to the creator of the job that
+		// the job has started; however, in this case nothing will ever receive
+		// on the channel, causing the changefeed flow to block. Replace it with
+		// a dummy channel.
+		startedCh = make(chan tree.Datums, 1)
 	}
+	// We only hit this if `r.Next()` returns false, which right now only happens
+	// on context cancellation.
 	return errors.Wrap(err, `ran out of retries`)
 }
 
 // OnFailOrCancel is part of the jobs.Resumer interface.
-func (b *changefeedResumer) OnFailOrCancel(ctx context.Context, jobExec interface{}) error {
-	exec := jobExec.(sql.JobExecContext)
-	execCfg := exec.ExecCfg()
+func (b *changefeedResumer) OnFailOrCancel(ctx context.Context, planHookState interface{}) error {
+	phs := planHookState.(sql.PlanHookState)
+	execCfg := phs.ExecCfg()
 	progress := b.job.Progress()
 	b.maybeCleanUpProtectedTimestamp(ctx, execCfg.DB, execCfg.ProtectedTimestampProvider,
 		progress.GetChangefeed().ProtectedTimestampRecord)
@@ -778,8 +664,8 @@ func (b *changefeedResumer) OnFailOrCancel(ctx context.Context, jobExec interfac
 	) {
 		telemetry.Count(`changefeed.enterprise.cancel`)
 	} else {
+		phs.ExecCfg().JobRegistry.MetricsStruct().Changefeed.(*Metrics).Failures.Inc(1)
 		telemetry.Count(`changefeed.enterprise.fail`)
-		exec.ExecCfg().JobRegistry.MetricsStruct().Changefeed.(*Metrics).Failures.Inc(1)
 	}
 	return nil
 }
@@ -793,7 +679,7 @@ func (b *changefeedResumer) maybeCleanUpProtectedTimestamp(
 	}
 	if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		return pts.Release(ctx, txn, ptsID)
-	}); err != nil && !errors.Is(err, protectedts.ErrNotExists) {
+	}); err != nil && !crdberrors.Is(err, protectedts.ErrNotExists) {
 		// NB: The record should get cleaned up by the reconciliation loop.
 		// No good reason to cause more trouble by returning an error here.
 		// Log and move on.
@@ -807,10 +693,10 @@ var _ jobs.PauseRequester = (*changefeedResumer)(nil)
 // paused, we want to install a protected timestamp at the most recent high
 // watermark if there isn't already one.
 func (b *changefeedResumer) OnPauseRequest(
-	ctx context.Context, jobExec interface{}, txn *kv.Txn, progress *jobspb.Progress,
+	ctx context.Context, planHookState interface{}, txn *kv.Txn, progress *jobspb.Progress,
 ) error {
 	details := b.job.Details().(jobspb.ChangefeedDetails)
-	if _, shouldProtect := details.Opts[changefeedbase.OptProtectDataFromGCOnPause]; !shouldProtect {
+	if _, shouldPause := details.Opts[changefeedbase.OptProtectDataFromGCOnPause]; !shouldPause {
 		return nil
 	}
 
@@ -832,9 +718,8 @@ func (b *changefeedResumer) OnPauseRequest(
 		return nil
 	}
 
-	execCfg := jobExec.(sql.JobExecContext).ExecCfg()
-	pts := execCfg.ProtectedTimestampProvider
-	return createProtectedTimestampRecord(ctx, execCfg.Codec, pts, txn, b.job.ID(),
+	pts := planHookState.(sql.PlanHookState).ExecCfg().ProtectedTimestampProvider
+	return createProtectedTimestampRecord(ctx, pts, txn, *b.job.ID(),
 		details.Targets, *resolved, cp)
 }
 

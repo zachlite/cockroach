@@ -61,7 +61,7 @@ func main() {
 			switch stmt := stmt.(type) {
 			case *tree.CreateTable:
 				stmt.Interleave = nil
-				stmt.PartitionByTable = nil
+				stmt.PartitionBy = nil
 				var newdefs tree.TableDefs
 				for _, def := range stmt.Defs {
 					switch def := def.(type) {
@@ -89,7 +89,7 @@ func main() {
 								def.Columns[i].Direction = tree.DefaultDirection
 							}
 							// Unset Name here because
-							// constraint names cannot
+							// constaint names cannot
 							// be shared among tables,
 							// so multiple PK constraints
 							// named "primary" is an error.

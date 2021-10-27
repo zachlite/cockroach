@@ -13,10 +13,7 @@
 
 package serverutils
 
-import (
-	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
-)
+import "github.com/cockroachdb/cockroach/pkg/base"
 
 // TestTenantInterface defines SQL-only tenant functionality that tests need; it
 // is implemented by server.TestTenant.
@@ -35,25 +32,6 @@ type TestTenantInterface interface {
 	PGServer() interface{}
 
 	// DiagnosticsReporter returns the tenant's *diagnostics.Reporter as an
-	// interface{}. The DiagnosticsReporter periodically phones home to report
-	// diagnostics and usage.
+	// interface{}.
 	DiagnosticsReporter() interface{}
-
-	// StatusServer returns the tenant's *server.SQLStatusServer as an
-	// interface{}.
-	StatusServer() interface{}
-
-	// DistSQLServer returns the *distsql.ServerImpl as an
-	// interface{}.
-	DistSQLServer() interface{}
-
-	// JobRegistry returns the *jobs.Registry as an interface{}.
-	JobRegistry() interface{}
-
-	// TestingKnobs returns the TestingKnobs in use by the test
-	// tenant.
-	TestingKnobs() *base.TestingKnobs
-
-	// RPCContext returns the *rpc.Context
-	RPCContext() *rpc.Context
 }

@@ -12,20 +12,23 @@ package rowexec
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/optional"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // tableReader is the start of a computation flow; it performs KV operations to
@@ -34,13 +37,10 @@ import (
 // See docs/RFCS/distributed_sql.md
 type tableReader struct {
 	execinfra.ProcessorBase
-	execinfra.SpansWithCopy
 
-	limitHint       rowinfra.RowLimit
-	parallelize     bool
-	batchBytesLimit rowinfra.BytesLimit
-
-	scanStarted bool
+	spans       roachpb.Spans
+	limitHint   int64
+	parallelize bool
 
 	// See TableReaderSpec.MaxTimestampAgeNanos.
 	maxTimestampAge time.Duration
@@ -52,16 +52,16 @@ type tableReader struct {
 	fetcher rowFetcher
 	alloc   rowenc.DatumAlloc
 
-	scanStats execinfra.ScanStats
-
 	// rowsRead is the number of rows read and is tracked unconditionally.
 	rowsRead int64
 }
 
 var _ execinfra.Processor = &tableReader{}
 var _ execinfra.RowSource = &tableReader{}
+var _ execinfrapb.MetadataSource = &tableReader{}
 var _ execinfra.Releasable = &tableReader{}
 var _ execinfra.OpNode = &tableReader{}
+var _ execinfra.IOReader = &tableReader{}
 
 const tableReaderProcName = "table reader"
 
@@ -84,41 +84,27 @@ func newTableReader(
 		return nil, errors.Errorf("attempting to create a tableReader with uninitialized NodeID")
 	}
 
-	if spec.LimitHint > 0 || spec.BatchBytesLimit > 0 {
-		// Parallelize shouldn't be set when there's a limit hint, but double-check
-		// just in case.
-		spec.Parallelize = false
-	}
-	var batchBytesLimit rowinfra.BytesLimit
-	if !spec.Parallelize {
-		batchBytesLimit = rowinfra.BytesLimit(spec.BatchBytesLimit)
-		if batchBytesLimit == 0 {
-			batchBytesLimit = rowinfra.DefaultBatchBytesLimit
-		}
-	}
-
 	tr := trPool.Get().(*tableReader)
 
-	tr.limitHint = rowinfra.RowLimit(execinfra.LimitHint(spec.LimitHint, post))
-	tr.parallelize = spec.Parallelize
-	tr.batchBytesLimit = batchBytesLimit
+	tr.limitHint = execinfra.LimitHint(spec.LimitHint, post)
+	// Parallelize shouldn't be set when there's a limit hint, but double-check
+	// just in case.
+	tr.parallelize = spec.Parallelize && tr.limitHint == 0
 	tr.maxTimestampAge = time.Duration(spec.MaxTimestampAgeNanos)
 
-	tableDesc := spec.BuildTableDescriptor()
-	invertedColumn := tabledesc.FindInvertedColumn(tableDesc, spec.InvertedColumn)
-	cols := tableDesc.PublicColumns()
-	if spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic {
-		cols = tableDesc.DeletableColumns()
-	}
-	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
-	resultTypes := catalog.ColumnTypesWithInvertedCol(cols, invertedColumn)
+	tableDesc := tabledesc.NewImmutable(spec.Table)
+	returnMutations := spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic
+	resultTypes := tableDesc.ColumnTypesWithMutations(returnMutations)
+	columnIdxMap := tableDesc.ColumnIdxMapWithMutations(returnMutations)
 
 	// Add all requested system columns to the output.
+	var sysColDescs []descpb.ColumnDescriptor
 	if spec.HasSystemColumns {
-		for _, sysCol := range tableDesc.SystemColumns() {
-			resultTypes = append(resultTypes, sysCol.GetType())
-			columnIdxMap.Set(sysCol.GetID(), columnIdxMap.Len())
-		}
+		sysColDescs = colinfo.AllSystemColumnDescs
+	}
+	for i := range sysColDescs {
+		resultTypes = append(resultTypes, sysColDescs[i].Type)
+		columnIdxMap[sysColDescs[i].ID] = len(columnIdxMap)
 	}
 
 	tr.ignoreMisplannedRanges = flowCtx.Local
@@ -142,7 +128,7 @@ func newTableReader(
 		return nil, err
 	}
 
-	neededColumns := tr.OutputHelper.NeededColumns()
+	neededColumns := tr.Out.NeededColumns()
 
 	var fetcher row.Fetcher
 	if _, _, err := initRowFetcher(
@@ -159,30 +145,24 @@ func newTableReader(
 		spec.Visibility,
 		spec.LockingStrength,
 		spec.LockingWaitPolicy,
-		spec.HasSystemColumns,
-		invertedColumn,
+		sysColDescs,
 	); err != nil {
 		return nil, err
 	}
 
 	nSpans := len(spec.Spans)
-	if cap(tr.Spans) >= nSpans {
-		tr.Spans = tr.Spans[:nSpans]
+	if cap(tr.spans) >= nSpans {
+		tr.spans = tr.spans[:nSpans]
 	} else {
-		tr.Spans = make(roachpb.Spans, nSpans)
+		tr.spans = make(roachpb.Spans, nSpans)
 	}
 	for i, s := range spec.Spans {
-		tr.Spans[i] = s.Span
-	}
-	if !tr.ignoreMisplannedRanges {
-		// Make a copy of the spans so that we could get the misplanned ranges
-		// info.
-		tr.MakeSpansCopy()
+		tr.spans[i] = s.Span
 	}
 
-	if execinfra.ShouldCollectStats(flowCtx.EvalCtx.Ctx(), flowCtx) {
+	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
 		tr.fetcher = newRowFetcherStatCollector(&fetcher)
-		tr.ExecStatsForTrace = tr.execStatsForTrace
+		tr.FinishTrace = tr.outputStatsToTrace
 	} else {
 		tr.fetcher = &fetcher
 	}
@@ -190,64 +170,51 @@ func newTableReader(
 	return tr, nil
 }
 
-func (tr *tableReader) generateTrailingMeta() []execinfrapb.ProducerMetadata {
-	// We need to generate metadata before closing the processor because
-	// InternalClose() updates tr.Ctx to the "original" context.
-	trailingMeta := tr.generateMeta()
+func (tr *tableReader) generateTrailingMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
+	trailingMeta := tr.generateMeta(ctx)
 	tr.close()
 	return trailingMeta
 }
 
 // Start is part of the RowSource interface.
-func (tr *tableReader) Start(ctx context.Context) {
+func (tr *tableReader) Start(ctx context.Context) context.Context {
 	if tr.FlowCtx.Txn == nil {
 		log.Fatalf(ctx, "tableReader outside of txn")
 	}
 
-	// Keep ctx assignment so we remember StartInternal can make a new one.
 	ctx = tr.StartInternal(ctx, tableReaderProcName)
-	// Appease the linter.
-	_ = ctx
-}
 
-func (tr *tableReader) startScan(ctx context.Context) error {
 	limitBatches := !tr.parallelize
-	var bytesLimit rowinfra.BytesLimit
-	if !limitBatches {
-		bytesLimit = rowinfra.NoBytesLimit
-	} else {
-		bytesLimit = tr.batchBytesLimit
-	}
 	log.VEventf(ctx, 1, "starting scan with limitBatches %t", limitBatches)
 	var err error
 	if tr.maxTimestampAge == 0 {
 		err = tr.fetcher.StartScan(
-			ctx, tr.FlowCtx.Txn, tr.Spans, bytesLimit, tr.limitHint,
-			tr.FlowCtx.TraceKV,
-			tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
+			ctx, tr.FlowCtx.Txn, tr.spans,
+			limitBatches, tr.limitHint, tr.FlowCtx.TraceKV,
 		)
 	} else {
 		initialTS := tr.FlowCtx.Txn.ReadTimestamp()
 		err = tr.fetcher.StartInconsistentScan(
-			ctx, tr.FlowCtx.Cfg.DB, initialTS, tr.maxTimestampAge, tr.Spans,
-			bytesLimit, tr.limitHint, tr.FlowCtx.TraceKV,
-			tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
+			ctx, tr.FlowCtx.Cfg.DB, initialTS,
+			tr.maxTimestampAge, tr.spans,
+			limitBatches, tr.limitHint, tr.FlowCtx.TraceKV,
 		)
 	}
-	tr.scanStarted = true
-	return err
+
+	if err != nil {
+		tr.MoveToDraining(err)
+	}
+	return ctx
 }
 
 // Release releases this tableReader back to the pool.
 func (tr *tableReader) Release() {
 	tr.ProcessorBase.Reset()
 	tr.fetcher.Reset()
-	// Deeply reset the spans so that we don't hold onto the keys of the spans.
-	tr.SpansWithCopy.Reset()
 	*tr = tableReader{
 		ProcessorBase: tr.ProcessorBase,
-		SpansWithCopy: tr.SpansWithCopy,
 		fetcher:       tr.fetcher,
+		spans:         tr.spans[:0],
 		rowsRead:      0,
 	}
 	trPool.Put(tr)
@@ -266,13 +233,6 @@ func TestingSetScannedRowProgressFrequency(val int64) func() {
 // Next is part of the RowSource interface.
 func (tr *tableReader) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for tr.State == execinfra.StateRunning {
-		if !tr.scanStarted {
-			err := tr.startScan(tr.Ctx)
-			if err != nil {
-				tr.MoveToDraining(err)
-				break
-			}
-		}
 		// Check if it is time to emit a progress update.
 		if tr.rowsRead >= tableReaderProgressFrequency {
 			meta := execinfrapb.GetProducerMeta()
@@ -313,46 +273,75 @@ func (tr *tableReader) ConsumerClosed() {
 	tr.close()
 }
 
-// execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
-func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
-	is, ok := getFetcherInputStats(tr.fetcher)
-	if !ok {
-		return nil
-	}
-	tr.scanStats = execinfra.GetScanStats(tr.Ctx)
-	ret := &execinfrapb.ComponentStats{
-		KV: execinfrapb.KVStats{
-			BytesRead:      optional.MakeUint(uint64(tr.fetcher.GetBytesRead())),
-			TuplesRead:     is.NumTuples,
-			KVTime:         is.WaitTime,
-			ContentionTime: optional.MakeTimeValue(execinfra.GetCumulativeContentionTime(tr.Ctx)),
-		},
-		Output: tr.OutputHelper.Stats(),
-	}
-	execinfra.PopulateKVMVCCStats(&ret.KV, &tr.scanStats)
-	return ret
+var _ execinfrapb.DistSQLSpanStats = &TableReaderStats{}
+
+const tableReaderTagPrefix = "tablereader."
+
+// Stats implements the SpanStats interface.
+func (trs *TableReaderStats) Stats() map[string]string {
+	inputStatsMap := trs.InputStats.Stats(tableReaderTagPrefix)
+	inputStatsMap[tableReaderTagPrefix+bytesReadTagSuffix] = humanizeutil.IBytes(trs.BytesRead)
+	return inputStatsMap
 }
 
-func (tr *tableReader) generateMeta() []execinfrapb.ProducerMetadata {
+// StatsForQueryPlan implements the DistSQLSpanStats interface.
+func (trs *TableReaderStats) StatsForQueryPlan() []string {
+	return append(
+		trs.InputStats.StatsForQueryPlan("" /* prefix */),
+		fmt.Sprintf("%s: %s", bytesReadQueryPlanSuffix, humanizeutil.IBytes(trs.BytesRead)),
+	)
+}
+
+// outputStatsToTrace outputs the collected tableReader stats to the trace. Will
+// fail silently if the tableReader is not collecting stats.
+func (tr *tableReader) outputStatsToTrace() {
+	is, ok := getFetcherInputStats(tr.FlowCtx, tr.fetcher)
+	if !ok {
+		return
+	}
+	if sp := opentracing.SpanFromContext(tr.Ctx); sp != nil {
+		tracing.SetSpanStats(sp, &TableReaderStats{
+			InputStats: is,
+			BytesRead:  tr.GetBytesRead(),
+		})
+	}
+}
+
+// GetBytesRead is part of the execinfra.IOReader interface.
+func (tr *tableReader) GetBytesRead() int64 {
+	return tr.fetcher.GetBytesRead()
+}
+
+// GetRowsRead is part of the execinfra.IOReader interface.
+func (tr *tableReader) GetRowsRead() int64 {
+	return tr.rowsRead
+}
+
+func (tr *tableReader) generateMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	var trailingMeta []execinfrapb.ProducerMetadata
 	if !tr.ignoreMisplannedRanges {
 		nodeID, ok := tr.FlowCtx.NodeID.OptionalNodeID()
 		if ok {
-			ranges := execinfra.MisplannedRanges(tr.Ctx, tr.SpansCopy, nodeID, tr.FlowCtx.Cfg.RangeCache)
+			ranges := execinfra.MisplannedRanges(ctx, tr.spans, nodeID, tr.FlowCtx.Cfg.RangeCache)
 			if ranges != nil {
 				trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{Ranges: ranges})
 			}
 		}
 	}
-	if tfs := execinfra.GetLeafTxnFinalState(tr.Ctx, tr.FlowCtx.Txn); tfs != nil {
+	if tfs := execinfra.GetLeafTxnFinalState(ctx, tr.FlowCtx.Txn); tfs != nil {
 		trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{LeafTxnFinalState: tfs})
 	}
 
 	meta := execinfrapb.GetProducerMeta()
 	meta.Metrics = execinfrapb.GetMetricsMeta()
-	meta.Metrics.BytesRead = tr.fetcher.GetBytesRead()
-	meta.Metrics.RowsRead = tr.rowsRead
-	return append(trailingMeta, *meta)
+	meta.Metrics.BytesRead, meta.Metrics.RowsRead = tr.GetBytesRead(), tr.GetRowsRead()
+	trailingMeta = append(trailingMeta, *meta)
+	return trailingMeta
+}
+
+// DrainMeta is part of the MetadataSource interface.
+func (tr *tableReader) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
+	return tr.generateMeta(ctx)
 }
 
 // ChildCount is part of the execinfra.OpNode interface.

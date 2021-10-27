@@ -71,16 +71,16 @@ const (
 	// used by the rpc context.
 	defaultRPCHeartbeatInterval = 3 * time.Second
 
-	// defaultRangeLeaseRenewalFraction specifies what fraction the range lease
+	// rangeLeaseRenewalFraction specifies what fraction the range lease
 	// renewal duration should be of the range lease active time. For example,
 	// with a value of 0.2 and a lease duration of 10 seconds, leases would be
-	// eagerly renewed 8 seconds into each lease.
-	defaultRangeLeaseRenewalFraction = 0.5
+	// eagerly renewed 2 seconds into each lease.
+	rangeLeaseRenewalFraction = 0.5
 
 	// livenessRenewalFraction specifies what fraction the node liveness
 	// renewal duration should be of the node liveness duration. For example,
 	// with a value of 0.2 and a liveness duration of 10 seconds, each node's
-	// liveness record would be eagerly renewed after 8 seconds.
+	// liveness record would be eagerly renewed after 2 seconds.
 	livenessRenewalFraction = 0.5
 
 	// DefaultDescriptorLeaseDuration is the default mean duration a
@@ -127,7 +127,7 @@ var (
 	// is responsible for ensuring the raft log doesn't grow without bound by
 	// making sure the leader doesn't get too far ahead.
 	defaultRaftLogTruncationThreshold = envutil.EnvOrDefaultInt64(
-		"COCKROACH_RAFT_LOG_TRUNCATION_THRESHOLD", 16<<20 /* 16 MB */)
+		"COCKROACH_RAFT_LOG_TRUNCATION_THRESHOLD", 8<<20 /* 8 MB */)
 
 	// defaultRaftMaxSizePerMsg specifies the maximum aggregate byte size of Raft
 	// log entries that a leader will send to followers in a single MsgApp.
@@ -169,7 +169,7 @@ type Config struct {
 
 	// User running this process. It could be the user under which
 	// the server is running or the user passed in client calls.
-	User security.SQLUsername
+	User string
 
 	// Addr is the address the server is listening on.
 	Addr string
@@ -255,7 +255,7 @@ func (*Config) HistogramWindowInterval() time.Duration {
 // This is also used in tests to reset global objects.
 func (cfg *Config) InitDefaults() {
 	cfg.Insecure = defaultInsecure
-	cfg.User = security.MakeSQLUsernameFromPreNormalizedString(defaultUser)
+	cfg.User = defaultUser
 	cfg.Addr = defaultAddr
 	cfg.AdvertiseAddr = cfg.Addr
 	cfg.HTTPAddr = defaultHTTPAddr
@@ -305,13 +305,6 @@ type RaftConfig struct {
 	// RangeLeaseRaftElectionTimeoutMultiplier specifies what multiple the leader
 	// lease active duration should be of the raft election timeout.
 	RangeLeaseRaftElectionTimeoutMultiplier float64
-	// RangeLeaseRenewalFraction specifies what fraction the range lease renewal
-	// duration should be of the range lease active time. For example, with a
-	// value of 0.2 and a lease duration of 10 seconds, leases would be eagerly
-	// renewed 8 seconds into each lease. A value of zero means use the default
-	// and a value of -1 means never preemptively renew the lease. A value of 1
-	// means always renew.
-	RangeLeaseRenewalFraction float64
 
 	// RaftLogTruncationThreshold controls how large a single Range's Raft log
 	// can grow. When a Range's Raft log grows above this size, the Range will
@@ -379,15 +372,6 @@ func (cfg *RaftConfig) SetDefaults() {
 	if cfg.RangeLeaseRaftElectionTimeoutMultiplier == 0 {
 		cfg.RangeLeaseRaftElectionTimeoutMultiplier = defaultRangeLeaseRaftElectionTimeoutMultiplier
 	}
-	if cfg.RangeLeaseRenewalFraction == 0 {
-		cfg.RangeLeaseRenewalFraction = defaultRangeLeaseRenewalFraction
-	}
-	// TODO(andrei): -1 is a special value for RangeLeaseRenewalFraction which
-	// really means "0" (never renew), except that the zero value means "use
-	// default". We can't turn the -1 into 0 here because, unfortunately,
-	// SetDefaults is called multiple times (see NewStore()). So, we leave -1
-	// alone and ask all the users to handle it specially.
-
 	if cfg.RaftLogTruncationThreshold == 0 {
 		cfg.RaftLogTruncationThreshold = defaultRaftLogTruncationThreshold
 	}
@@ -442,11 +426,7 @@ func (cfg RaftConfig) RaftElectionTimeout() time.Duration {
 func (cfg RaftConfig) RangeLeaseDurations() (rangeLeaseActive, rangeLeaseRenewal time.Duration) {
 	rangeLeaseActive = time.Duration(cfg.RangeLeaseRaftElectionTimeoutMultiplier *
 		float64(cfg.RaftElectionTimeout()))
-	renewalFraction := cfg.RangeLeaseRenewalFraction
-	if renewalFraction == -1 {
-		renewalFraction = 0
-	}
-	rangeLeaseRenewal = time.Duration(float64(rangeLeaseActive) * renewalFraction)
+	rangeLeaseRenewal = time.Duration(float64(rangeLeaseActive) * rangeLeaseRenewalFraction)
 	return
 }
 
@@ -510,26 +490,14 @@ type StorageConfig struct {
 	// MaxSize is used for calculating free space and making rebalancing
 	// decisions. Zero indicates that there is no maximum size.
 	MaxSize int64
-	// BallastSize is the amount reserved by a ballast file for manual
-	// out-of-disk recovery.
-	BallastSize int64
 	// Settings instance for cluster-wide knobs.
 	Settings *cluster.Settings
 	// UseFileRegistry is true if the file registry is needed (eg: encryption-at-rest).
 	// This may force the store version to versionFileRegistry if currently lower.
 	UseFileRegistry bool
-	// DisableSeparatedIntents is true if separated intents should not be written
-	// by intent writers. Only true for tests.
-	DisableSeparatedIntents bool
-	// EncryptionOptions is a serialized protobuf set by Go CCL code and passed
-	// through to C CCL code to set up encryption-at-rest.  Must be set if and
-	// only if encryption is enabled, otherwise left empty.
-	EncryptionOptions []byte
-}
-
-// IsEncrypted returns whether the StorageConfig has encryption enabled.
-func (sc StorageConfig) IsEncrypted() bool {
-	return len(sc.EncryptionOptions) > 0
+	// ExtraOptions is a serialized protobuf set by Go CCL code and passed through
+	// to C CCL code.
+	ExtraOptions []byte
 }
 
 const (
@@ -558,8 +526,6 @@ type TempStorageConfig struct {
 	Mon *mon.BytesMonitor
 	// Spec stores the StoreSpec this TempStorageConfig will use.
 	Spec StoreSpec
-	// Settings stores the cluster.Settings this TempStoreConfig will use.
-	Settings *cluster.Settings
 }
 
 // ExternalIODirConfig describes various configuration options pertaining
@@ -576,19 +542,6 @@ type ExternalIODirConfig struct {
 	// This turns off implicit credentials, and requires the user to provide
 	// necessary access keys.
 	DisableImplicitCredentials bool
-
-	// DisableOutbound disables the use of any external-io that dials out such as
-	// to s3, gcs, or even `nodelocal` as it may need to dial another node.
-	DisableOutbound bool
-
-	// EnableNonAdminImplicitAndArbitraryOutbound removes the usual restriction to
-	// only admin users placed on usage of node-granted access, such as to the
-	// implicit auth via the machine account for the node or to arbitrary network
-	// addresses (which are accessed from the node and might otherwise not be
-	// reachable). Instead, all users can use implicit auth, http addresses and
-	// configure custom endpoints. This should only be used if all users with SQL
-	// access should have access to anything the node has access to.
-	EnableNonAdminImplicitAndArbitraryOutbound bool
 }
 
 // TempStorageConfigFromEnv creates a TempStorageConfig.
@@ -622,6 +575,30 @@ func TempStorageConfigFromEnv(
 		InMemory: inMem,
 		Mon:      monitor,
 		Spec:     useStore,
-		Settings: st,
+	}
+}
+
+// LeaseManagerConfig holds lease manager parameters.
+type LeaseManagerConfig struct {
+	// DescriptorLeaseDuration is the mean duration a lease will be
+	// acquired for.
+	DescriptorLeaseDuration time.Duration
+
+	// DescriptorLeaseJitterFraction is the factor that we use to
+	// randomly jitter the lease duration when acquiring a new lease and
+	// the lease renewal timeout.
+	DescriptorLeaseJitterFraction float64
+
+	// DefaultDescriptorLeaseRenewalTimeout is the default time
+	// before a lease expires when acquisition to renew the lease begins.
+	DescriptorLeaseRenewalTimeout time.Duration
+}
+
+// NewLeaseManagerConfig initializes a LeaseManagerConfig with default values.
+func NewLeaseManagerConfig() *LeaseManagerConfig {
+	return &LeaseManagerConfig{
+		DescriptorLeaseDuration:       DefaultDescriptorLeaseDuration,
+		DescriptorLeaseJitterFraction: DefaultDescriptorLeaseJitterFraction,
+		DescriptorLeaseRenewalTimeout: DefaultDescriptorLeaseRenewalTimeout,
 	}
 }

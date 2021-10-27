@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/gossip"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -68,30 +67,6 @@ func (n Node) Join(context.Context, *roachpb.JoinNodeRequest) (*roachpb.JoinNode
 	panic("unimplemented")
 }
 
-func (n Node) ResetQuorum(
-	context.Context, *roachpb.ResetQuorumRequest,
-) (*roachpb.ResetQuorumResponse, error) {
-	panic("unimplemented")
-}
-
-func (n Node) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	panic("unimplemented")
-}
-
-func (n Node) GetSpanConfigs(
-	_ context.Context, _ *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
-func (n Node) UpdateSpanConfigs(
-	_ context.Context, _ *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
 // TestSendToOneClient verifies that Send correctly sends a request
 // to one server using the heartbeat RPC.
 func TestSendToOneClient(t *testing.T) {
@@ -130,7 +105,7 @@ func TestSendToOneClient(t *testing.T) {
 // firstNErrorTransport is a mock transport that sends an error on
 // requests to the first N addresses, then succeeds.
 type firstNErrorTransport struct {
-	replicas  ReplicaSlice
+	replicas  []roachpb.ReplicaDescriptor
 	numErrors int
 	numSent   int
 }
@@ -138,8 +113,6 @@ type firstNErrorTransport struct {
 func (f *firstNErrorTransport) IsExhausted() bool {
 	return f.numSent >= len(f.replicas)
 }
-
-func (f *firstNErrorTransport) Release() {}
 
 func (f *firstNErrorTransport) SendNext(
 	_ context.Context, _ roachpb.BatchRequest,
@@ -159,7 +132,7 @@ func (f *firstNErrorTransport) NextInternalClient(
 }
 
 func (f *firstNErrorTransport) NextReplica() roachpb.ReplicaDescriptor {
-	return f.replicas[f.numSent].ReplicaDescriptor
+	return f.replicas[f.numSent]
 }
 
 func (f *firstNErrorTransport) SkipReplica() {
@@ -218,7 +191,7 @@ func TestComplexScenarios(t *testing.T) {
 			func(
 				_ SendOptions,
 				_ *nodedialer.Dialer,
-				replicas ReplicaSlice,
+				replicas []roachpb.ReplicaDescriptor,
 			) (Transport, error) {
 				return &firstNErrorTransport{
 					replicas:  replicas,
@@ -289,14 +262,10 @@ func TestSplitHealthy(t *testing.T) {
 	for _, td := range testData {
 		t.Run("", func(t *testing.T) {
 			replicas := make([]roachpb.ReplicaDescriptor, len(td.in))
-			var health util.FastIntMap
+			health := make(map[roachpb.ReplicaDescriptor]bool)
 			for i, r := range td.in {
 				replicas[i] = r.replica
-				if r.healthy {
-					health.Set(i, healthHealthy)
-				} else {
-					health.Set(i, healthUnhealthy)
-				}
+				health[replicas[i]] = r.healthy
 			}
 			splitHealthy(replicas, health)
 			if !reflect.DeepEqual(replicas, td.out) {
@@ -353,7 +322,7 @@ func sendBatch(
 		Desc:  *desc,
 		Lease: roachpb.Lease{},
 	})
-	routing, err := ds.getRoutingInfo(ctx, desc.StartKey, rangecache.EvictionToken{}, false /* useReverseScan */)
+	routing, err := ds.getRoutingInfo(ctx, desc.StartKey, EvictionToken{}, false /* useReverseScan */)
 	require.NoError(t, err)
 
 	return ds.sendToReplicas(ctx, roachpb.BatchRequest{}, routing, false /* withCommit */)

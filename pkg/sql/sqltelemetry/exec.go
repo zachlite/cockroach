@@ -33,17 +33,3 @@ func VecModeCounter(mode string) telemetry.Counter {
 // CascadesLimitReached is to be incremented whenever the limit of foreign key
 // cascade for a single query is exceeded.
 var CascadesLimitReached = telemetry.GetCounterOnce("sql.exec.cascade-limit-reached")
-
-// HashAggregationDiskSpillingDisabled is to be incremented whenever the disk
-// spilling of the vectorized hash aggregator is disabled.
-var HashAggregationDiskSpillingDisabled = telemetry.GetCounterOnce("sql.exec.hash-agg-spilling-disabled")
-
-// DistSQLFlowsScheduled is to be incremented whenever a remote DistSQL flow is
-// scheduled for running (regardless of whether it is being run right away or
-// queued).
-var DistSQLFlowsScheduled = telemetry.GetCounterOnce("sql.distsql.flows.scheduled")
-
-// DistSQLFlowsQueued is to be incremented whenever a remote DistSQL flow is
-// queued rather is run right away (because the node has reached
-// 'sql.distsql.max_running_flows' limit).
-var DistSQLFlowsQueued = telemetry.GetCounterOnce("sql.distsql.flows.queued")

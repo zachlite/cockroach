@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/opentracing/opentracing-go"
 )
 
 // A sample aggregator processor aggregates results from multiple sampler
@@ -85,6 +86,7 @@ func newSampleAggregator(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	spec *execinfrapb.SampleAggregatorSpec,
+	minSampleSize int,
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
@@ -108,7 +110,7 @@ func newSampleAggregator(
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will disable histogram collection if this limit is not
 	// enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "sample-aggregator-mem")
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "sample-aggregator-mem")
 	rankCol := len(input.OutputTypes()) - 7
 	s := &sampleAggregator{
 		spec:         spec,
@@ -144,8 +146,7 @@ func newSampleAggregator(
 	}
 
 	s.sr.Init(
-		int(spec.SampleSize), int(spec.MinSampleSize), input.OutputTypes()[:rankCol], &s.memAcc,
-		sampleCols,
+		int(spec.SampleSize), minSampleSize, input.OutputTypes()[:rankCol], &s.memAcc, sampleCols,
 	)
 	for i := range spec.InvertedSketches {
 		var sr stats.SampleReservoir
@@ -153,7 +154,7 @@ func newSampleAggregator(
 		// sent as a single DBytes column.
 		var srCols util.FastIntSet
 		srCols.Add(0)
-		sr.Init(int(spec.SampleSize), int(spec.MinSampleSize), bytesRowType, &s.memAcc, srCols)
+		sr.Init(int(spec.SampleSize), minSampleSize, bytesRowType, &s.memAcc, srCols)
 		col := spec.InvertedSketches[i].Columns[0]
 		s.invSr[col] = &sr
 		s.invSketch[col] = &sketchInfo{
@@ -167,7 +168,7 @@ func newSampleAggregator(
 	if err := s.Init(
 		nil, post, input.OutputTypes(), flowCtx, processorID, output, memMonitor,
 		execinfra.ProcStateOpts{
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
+			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
 				s.close()
 				return nil
 			},
@@ -179,21 +180,21 @@ func newSampleAggregator(
 }
 
 func (s *sampleAggregator) pushTrailingMeta(ctx context.Context) {
-	execinfra.SendTraceData(ctx, s.Output)
+	execinfra.SendTraceData(ctx, s.Out.Output())
 }
 
 // Run is part of the Processor interface.
 func (s *sampleAggregator) Run(ctx context.Context) {
-	ctx = s.StartInternal(ctx, sampleAggregatorProcName)
 	s.input.Start(ctx)
+	s.StartInternal(ctx, sampleAggregatorProcName)
 
-	earlyExit, err := s.mainLoop(ctx)
+	earlyExit, err := s.mainLoop(s.Ctx)
 	if err != nil {
-		execinfra.DrainAndClose(ctx, s.Output, err, s.pushTrailingMeta, s.input)
+		execinfra.DrainAndClose(s.Ctx, s.Out.Output(), err, s.pushTrailingMeta, s.input)
 	} else if !earlyExit {
-		s.pushTrailingMeta(ctx)
+		s.pushTrailingMeta(s.Ctx)
 		s.input.ConsumerClosed()
-		s.Output.ProducerDone()
+		s.Out.Close()
 	}
 	s.MoveToDraining(nil /* err */)
 }
@@ -226,10 +227,10 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 		// If it changed by less than 1%, just check for cancellation (which is more
 		// efficient).
 		if fractionCompleted < 1.0 && fractionCompleted < lastReportedFractionCompleted+0.01 {
-			return job.CheckStatus(ctx, nil /* txn */)
+			return job.CheckStatus(ctx)
 		}
 		lastReportedFractionCompleted = fractionCompleted
-		return job.FractionProgressed(ctx, nil /* txn */, jobs.FractionUpdater(fractionCompleted))
+		return job.FractionProgressed(ctx, jobs.FractionUpdater(fractionCompleted))
 	}
 
 	var rowsProcessed uint64
@@ -267,7 +268,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 						sr.Disable()
 					}
 				}
-			} else if !emitHelper(ctx, s.Output, &s.OutputHelper, nil /* row */, meta, s.pushTrailingMeta, s.input) {
+			} else if !emitHelper(ctx, &s.Out, nil /* row */, meta, s.pushTrailingMeta, s.input) {
 				// No cleanup required; emitHelper() took care of it.
 				return true, nil
 			}
@@ -412,10 +413,10 @@ func (s *sampleAggregator) sampleRow(
 func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// Turn off tracing so these writes don't affect the results of EXPLAIN
 	// ANALYZE.
-	if span := tracing.SpanFromContext(ctx); span != nil && span.IsVerbose() {
+	if span := opentracing.SpanFromContext(ctx); span != nil && tracing.IsRecording(span) {
 		// TODO(rytaft): this also hides writes in this function from SQL session
 		// traces.
-		ctx = tracing.ContextWithSpan(ctx, nil)
+		ctx = opentracing.ContextWithSpan(ctx, nil)
 	}
 
 	// TODO(andrei): This method would benefit from a session interface on the
@@ -424,6 +425,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// closure.
 	if err := s.FlowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		for _, si := range s.sketches {
+			distinctCount := int64(si.sketch.Estimate())
 			var histogram *stats.HistogramData
 			if si.spec.GenerateHistogram && len(s.sr.Get()) != 0 {
 				colIdx := int(si.spec.Columns[0])
@@ -436,7 +438,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 					colIdx,
 					typ,
 					si.numRows-si.numNulls,
-					s.getDistinctCount(&si, false /* includeNulls */),
+					distinctCount,
 					int(si.spec.HistogramMaxBuckets),
 				)
 				if err != nil {
@@ -454,7 +456,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				// by the existence of an inverted sketch on
 				// the column.
 
-				invDistinctCount := s.getDistinctCount(invSketch, false /* includeNulls */)
+				invDistinctCount := int64(invSketch.sketch.Estimate())
 				// Use 0 for the colIdx here because it refers
 				// to the column index of the samples, which
 				// only has a single bytes column with the
@@ -500,7 +502,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				si.spec.StatName,
 				columnIDs,
 				si.numRows,
-				s.getDistinctCount(&si, true /* includeNulls */),
+				distinctCount,
 				si.numNulls,
 				histogram,
 			); err != nil {
@@ -516,31 +518,11 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 		return err
 	}
 
+	if g, ok := s.FlowCtx.Cfg.Gossip.Optional(47925); ok {
+		// Gossip refresh of the stat caches for this table.
+		return stats.GossipTableStatAdded(g, s.tableID)
+	}
 	return nil
-}
-
-// getDistinctCount returns the number of distinct values in the given sketch,
-// optionally including null values.
-func (s *sampleAggregator) getDistinctCount(si *sketchInfo, includeNulls bool) int64 {
-	distinctCount := int64(si.sketch.Estimate())
-	if si.numNulls > 0 && !includeNulls {
-		// Nulls are included in the estimate, so reduce the count by 1 if nulls are
-		// not requested.
-		distinctCount--
-	}
-
-	// The maximum number of distinct values is the number of non-null rows plus 1
-	// if there are any nulls. It's possible that distinctCount was calculated to
-	// be greater than this number due to the approximate nature of HyperLogLog.
-	// If this is the case, set it equal to the max.
-	maxDistinctCount := si.numRows - si.numNulls
-	if si.numNulls > 0 && includeNulls {
-		maxDistinctCount++
-	}
-	if distinctCount > maxDistinctCount {
-		distinctCount = maxDistinctCount
-	}
-	return distinctCount
 }
 
 // generateHistogram returns a histogram (on a given column) from a set of

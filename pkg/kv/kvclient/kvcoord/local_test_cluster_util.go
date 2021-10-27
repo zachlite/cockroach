@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/opentracing/opentracing-go"
 )
 
 // localTestClusterTransport augments senderTransport with an optional
@@ -49,7 +49,7 @@ func (l *localTestClusterTransport) SendNext(
 func InitFactoryForLocalTestCluster(
 	st *cluster.Settings,
 	nodeDesc *roachpb.NodeDescriptor,
-	tracer *tracing.Tracer,
+	tracer opentracing.Tracer,
 	clock *hlc.Clock,
 	latency time.Duration,
 	stores kv.Sender,
@@ -58,7 +58,7 @@ func InitFactoryForLocalTestCluster(
 ) kv.TxnSenderFactory {
 	return NewTxnCoordSenderFactory(
 		TxnCoordSenderFactoryConfig{
-			AmbientCtx: log.AmbientContext{Tracer: tracer},
+			AmbientCtx: log.AmbientContext{Tracer: st.Tracer},
 			Settings:   st,
 			Clock:      clock,
 			Stopper:    stopper,
@@ -71,7 +71,7 @@ func InitFactoryForLocalTestCluster(
 func NewDistSenderForLocalTestCluster(
 	st *cluster.Settings,
 	nodeDesc *roachpb.NodeDescriptor,
-	tracer *tracing.Tracer,
+	tracer opentracing.Tracer,
 	clock *hlc.Clock,
 	latency time.Duration,
 	stores kv.Sender,
@@ -83,7 +83,7 @@ func NewDistSenderForLocalTestCluster(
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
 	senderTransportFactory := SenderTransportFactory(tracer, stores)
 	return NewDistSender(DistSenderConfig{
-		AmbientCtx:         log.AmbientContext{Tracer: tracer},
+		AmbientCtx:         log.AmbientContext{Tracer: st.Tracer},
 		Settings:           st,
 		Clock:              clock,
 		NodeDescs:          g,
@@ -96,7 +96,7 @@ func NewDistSenderForLocalTestCluster(
 			TransportFactory: func(
 				opts SendOptions,
 				nodeDialer *nodedialer.Dialer,
-				replicas ReplicaSlice,
+				replicas []roachpb.ReplicaDescriptor,
 			) (Transport, error) {
 				transport, err := senderTransportFactory(opts, nodeDialer, replicas)
 				if err != nil {

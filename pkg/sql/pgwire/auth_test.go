@@ -13,7 +13,6 @@ package pgwire_test
 import (
 	"context"
 	gosql "database/sql"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -39,13 +38,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/stdstrings"
-	"github.com/cockroachdb/redact"
 	"github.com/lib/pq"
 )
 
@@ -115,7 +111,6 @@ import (
 //
 func TestAuthenticationAndHBARules(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.UnderRace(t, "takes >1min under race")
 
 	testutils.RunTrueAndFalse(t, "insecure", func(t *testing.T, insecure bool) {
 		hbaRunTest(t, insecure)
@@ -151,39 +146,13 @@ func hbaRunTest(t *testing.T, insecure bool) {
 	if !insecure {
 		httpScheme = "https://"
 	}
-
 	datadriven.Walk(t, "testdata/auth", func(t *testing.T, path string) {
-		defer leaktest.AfterTest(t)()
-
 		maybeSocketDir, maybeSocketFile, cleanup := makeSocketFile(t)
 		defer cleanup()
 
 		// We really need to have the logs go to files, so that -show-logs
 		// does not break the "authlog" directives.
-		sc := log.ScopeWithoutShowLogs(t)
-		defer sc.Close(t)
-
-		// Enable logging channels.
-		log.TestingResetActive()
-		cfg := logconfig.DefaultConfig()
-		// Make a sink for just the session log.
-		bt := true
-		cfg.Sinks.FileGroups = map[string]*logconfig.FileSinkConfig{
-			"auth": {
-				FileDefaults: logconfig.FileDefaults{
-					CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
-				},
-				Channels: logconfig.SelectChannels(channel.SESSIONS),
-			}}
-		dir := sc.GetDirectory()
-		if err := cfg.Validate(&dir); err != nil {
-			t.Fatal(err)
-		}
-		cleanup, err := log.ApplyConfig(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cleanup()
+		defer log.ScopeWithoutShowLogs(t).Close(t)
 
 		s, conn, _ := serverutils.StartServer(t,
 			base.TestServerArgs{Insecure: insecure, SocketFile: maybeSocketFile})
@@ -203,7 +172,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		}
 		httpHBAUrl := httpScheme + s.HTTPAddr() + "/debug/hba_conf"
 
-		if _, err := conn.ExecContext(context.Background(), fmt.Sprintf(`CREATE USER %s`, security.TestUser)); err != nil {
+		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, server.TestUser); err != nil {
 			t.Fatal(err)
 		}
 
@@ -290,7 +259,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					var buf strings.Builder
 					if err := testutils.SucceedsSoonError(func() error {
 						buf.Reset()
-						// t.Logf("attempting to scan logs...")
+						t.Logf("attempting to scan logs...")
 
 						// Note: even though FetchEntriesFromFiles advertises a mechanism
 						// to filter entries by timestamp or just retrieve the last N entries,
@@ -298,7 +267,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 						// See: https://github.com/cockroachdb/cockroach/issues/45745
 						// So instead we need to do the filtering ourselves.
 						entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 10000, authLogFileRe,
-							log.WithMarkedSensitiveData)
+							log.WithFlattenedSensitiveData)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -312,31 +281,20 @@ func hbaRunTest(t *testing.T, insecure bool) {
 							}
 							for ; i >= 0; i-- {
 								entry := &entries[i]
-								// t.Logf("found log entry: %+v", *entry)
+								t.Logf("found log entry: %+v", *entry)
 
-								if entry.StructuredEnd == 0 {
-									t.Errorf("malformed structured message: %q", entry.Message)
+								// The tag part is going to contain a client address, with a random port number.
+								// To make the test deterministic, erase the random part.
+								tags := addrRe.ReplaceAllString(entry.Tags, ",client=XXX")
+								tags = peerRe.ReplaceAllString(tags, ",peer=XXX")
+								var maybeTags string
+								if len(tags) > 0 {
+									maybeTags = "[" + tags + "] "
 								}
+								// Ditto with the duration.
+								msg := durationRe.ReplaceAllString(entry.Message, "duration: XXX")
 
-								jsonPayload := []byte(entry.Message)
-								if entry.Redactable {
-									jsonPayload = redact.RedactableBytes(jsonPayload).StripMarkers()
-								}
-								var info map[string]interface{}
-								if err := json.Unmarshal(jsonPayload, &info); err != nil {
-									return errors.Wrapf(err, "unable to decode json: %q", jsonPayload)
-								}
-								// Erase non-deterministic fields.
-								info["Timestamp"] = "XXX"
-								info["RemoteAddress"] = "XXX"
-								if _, ok := info["Duration"]; ok {
-									info["Duration"] = "NNN"
-								}
-								msg, err := json.Marshal(info)
-								if err != nil {
-									t.Fatal(err)
-								}
-								fmt.Fprintf(&buf, "%d %s\n", entry.Counter, msg)
+								fmt.Fprintf(&buf, "%c: %s%s\n", entry.Severity.String()[0], maybeTags, msg)
 							}
 							lastLogMsg := entries[0].Message
 							if !re.MatchString(lastLogMsg) {
@@ -366,7 +324,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					// However, certs are only generated for users "root" and "testuser" specifically.
 					sqlURL, cleanupFn := sqlutils.PGUrlWithOptionalClientCerts(
 						t, s.ServingSQLAddr(), t.Name(), url.User(user),
-						user == security.RootUser || user == security.TestUser /* withClientCerts */)
+						user == security.RootUser || user == server.TestUser /* withClientCerts */)
 					defer cleanupFn()
 
 					var host, port string
@@ -453,7 +411,10 @@ func hbaRunTest(t *testing.T, insecure bool) {
 	})
 }
 
-var authLogFileRe = regexp.MustCompile(`"EventType":"client_`)
+var authLogFileRe = regexp.MustCompile(`pgwire/(auth|conn|server)\.go`)
+var addrRe = regexp.MustCompile(`,client(=[^\],]*)?`)
+var peerRe = regexp.MustCompile(`,peer(=[^\],]*)?`)
+var durationRe = regexp.MustCompile(`duration: \d.*s`)
 
 // fmtErr formats an error into an expected output.
 func fmtErr(err error) string {
@@ -492,12 +453,12 @@ func TestClientAddrOverride(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	pgURL, cleanupFunc := sqlutils.PGUrl(
-		t, s.ServingSQLAddr(), "testClientAddrOverride" /* prefix */, url.User(security.TestUser),
+		t, s.ServingSQLAddr(), "testClientAddrOverride" /* prefix */, url.User(server.TestUser),
 	)
 	defer cleanupFunc()
 
 	// Ensure the test user exists.
-	if _, err := db.Exec(fmt.Sprintf(`CREATE USER %s`, security.TestUser)); err != nil {
+	if _, err := db.Exec(`CREATE USER $1`, server.TestUser); err != nil {
 		t.Fatal(err)
 	}
 
@@ -527,7 +488,7 @@ func TestClientAddrOverride(t *testing.T) {
 				addr = addr[1 : len(addr)-1]
 				mask = "128"
 			}
-			hbaConf := "host all " + security.TestUser + " " + addr + "/" + mask + " reject\n" +
+			hbaConf := "host all " + server.TestUser + " " + addr + "/" + mask + " reject\n" +
 				"host all all all cert-password\n"
 			if _, err := db.Exec(
 				`SET CLUSTER SETTING server.host_based_authentication.configuration = $1`,
@@ -600,7 +561,7 @@ func TestClientAddrOverride(t *testing.T) {
 				testutils.SucceedsSoon(t, func() error {
 					log.Flush()
 					entries, err := log.FetchEntriesFromFiles(testStartTime.UnixNano(), math.MaxInt64, 10000, sessionTerminatedRe,
-						log.WithMarkedSensitiveData)
+						log.WithFlattenedSensitiveData)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -625,7 +586,7 @@ func TestClientAddrOverride(t *testing.T) {
 					t.Log(e.Tags)
 					if strings.Contains(e.Tags, "client=") {
 						seenClient = true
-						if !strings.Contains(e.Tags, "client="+string(redact.StartMarker())+tc.specialAddr+":"+tc.specialPort+string(redact.EndMarker())) {
+						if !strings.Contains(e.Tags, "client="+tc.specialAddr+":"+tc.specialPort) {
 							t.Fatalf("expected override addr in log tags, got %+v", e)
 						}
 					}
@@ -638,4 +599,4 @@ func TestClientAddrOverride(t *testing.T) {
 	}
 }
 
-var sessionTerminatedRe = regexp.MustCompile("client_session_end")
+var sessionTerminatedRe = regexp.MustCompile("session terminated")

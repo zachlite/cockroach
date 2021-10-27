@@ -15,11 +15,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
@@ -33,6 +30,7 @@ func (d *delegator) delegateShowGrants(n *tree.ShowGrants) (tree.Statement, erro
 
 	const dbPrivQuery = `
 SELECT database_name,
+       'public' AS schema_name,
        grantee,
        privilege_type
   FROM "".crdb_internal.cluster_database_privileges`
@@ -77,11 +75,11 @@ FROM "".information_schema.type_privileges`
 			if err != nil {
 				return nil, err
 			}
-			params = append(params, lexbase.EscapeSQLString(db))
+			params = append(params, lex.EscapeSQLString(db))
 		}
 
 		fmt.Fprint(&source, dbPrivQuery)
-		orderBy = "1,2,3"
+		orderBy = "1,2,3,4"
 		if len(params) == 0 {
 			// There are no rows, but we can't simply return emptyNode{} because
 			// the result columns must still be defined.
@@ -90,27 +88,32 @@ FROM "".information_schema.type_privileges`
 			fmt.Fprintf(&cond, `WHERE database_name IN (%s)`, strings.Join(params, ","))
 		}
 	} else if n.Targets != nil && len(n.Targets.Schemas) > 0 {
-		currDB := d.evalCtx.SessionData().Database
-
-		for _, schema := range n.Targets.Schemas {
-			_, _, err := d.catalog.ResolveSchema(d.ctx, cat.Flags{AvoidDescriptorCaches: true}, &schema)
+		schemaNames := n.Targets.Schemas.ToStrings()
+		for _, schema := range schemaNames {
+			name := cat.SchemaName{
+				SchemaName:     tree.Name(schema),
+				ExplicitSchema: true,
+			}
+			_, _, err := d.catalog.ResolveSchema(d.ctx, cat.Flags{AvoidDescriptorCaches: true}, &name)
 			if err != nil {
 				return nil, err
 			}
-			dbName := currDB
-			if schema.ExplicitCatalog {
-				dbName = schema.Catalog()
-			}
-			params = append(params, fmt.Sprintf("(%s,%s)", lexbase.EscapeSQLString(dbName), lexbase.EscapeSQLString(schema.Schema())))
+			params = append(params, lex.EscapeSQLString(schema))
 		}
-
+		dbNameClause := "true"
+		// If the current database is set, restrict the command to it.
+		if currDB := d.evalCtx.SessionData.Database; currDB != "" {
+			dbNameClause = fmt.Sprintf("database_name = %s", lex.EscapeSQLString(currDB))
+		}
 		fmt.Fprint(&source, schemaPrivQuery)
 		orderBy = "1,2,3,4"
-
-		if len(params) != 0 {
+		if len(params) == 0 {
+			cond.WriteString(fmt.Sprintf(`WHERE %s`, dbNameClause))
+		} else {
 			fmt.Fprintf(
 				&cond,
-				`WHERE (database_name, schema_name) IN (%s)`,
+				`WHERE %s AND schema_name IN (%s)`,
+				dbNameClause,
 				strings.Join(params, ","),
 			)
 		}
@@ -124,37 +127,36 @@ FROM "".information_schema.type_privileges`
 				params = append(
 					params,
 					fmt.Sprintf(
-						"(%s, %s, %s)",
-						lexbase.EscapeSQLString(t.TypeMeta.Name.Catalog),
-						lexbase.EscapeSQLString(t.TypeMeta.Name.Schema),
-						lexbase.EscapeSQLString(t.TypeMeta.Name.Name),
+						"(%s, %s)",
+						lex.EscapeSQLString(t.TypeMeta.Name.Schema),
+						lex.EscapeSQLString(t.TypeMeta.Name.Name),
 					),
 				)
 			} else {
 				params = append(
 					params,
 					fmt.Sprintf(
-						"(%s, 'pg_catalog', %s)",
-						lexbase.EscapeSQLString(t.TypeMeta.Name.Catalog),
-						lexbase.EscapeSQLString(t.TypeMeta.Name.Name),
+						"('pg_catalog', %s)",
+						lex.EscapeSQLString(t.TypeMeta.Name.Name),
 					),
 				)
 			}
 		}
 
+		dbNameClause := "true"
+		// If the current database is set, restrict the command to it.
+		if currDB := d.evalCtx.SessionData.Database; currDB != "" {
+			dbNameClause = fmt.Sprintf("database_name = %s", lex.EscapeSQLString(currDB))
+		}
 		fmt.Fprint(&source, typePrivQuery)
 		orderBy = "1,2,3,4,5"
 		if len(params) == 0 {
-			dbNameClause := "true"
-			// If the current database is set, restrict the command to it.
-			if currDB := d.evalCtx.SessionData().Database; currDB != "" {
-				dbNameClause = fmt.Sprintf("database_name = %s", lexbase.EscapeSQLString(currDB))
-			}
 			cond.WriteString(fmt.Sprintf(`WHERE %s`, dbNameClause))
 		} else {
 			fmt.Fprintf(
 				&cond,
-				`WHERE (database_name, schema_name, type_name) IN (%s)`,
+				`WHERE %s AND (schema_name, type_name) IN (%s)`,
+				dbNameClause,
 				strings.Join(params, ","),
 			)
 		}
@@ -174,7 +176,7 @@ FROM "".information_schema.type_privileges`
 				}
 				// We avoid the cache so that we can observe the grants taking
 				// a lease, like other SHOW commands.
-				tables, _, err := cat.ExpandDataSourceGlob(
+				tables, err := cat.ExpandDataSourceGlob(
 					d.ctx, d.catalog, cat.Flags{AvoidDescriptorCaches: true}, tableGlob,
 				)
 				if err != nil {
@@ -185,9 +187,9 @@ FROM "".information_schema.type_privileges`
 
 			for i := range allTables {
 				params = append(params, fmt.Sprintf("(%s,%s,%s)",
-					lexbase.EscapeSQLString(allTables[i].Catalog()),
-					lexbase.EscapeSQLString(allTables[i].Schema()),
-					lexbase.EscapeSQLString(allTables[i].Table())))
+					lex.EscapeSQLString(allTables[i].Catalog()),
+					lex.EscapeSQLString(allTables[i].Schema()),
+					lex.EscapeSQLString(allTables[i].Table())))
 			}
 
 			if len(params) == 0 {
@@ -218,8 +220,8 @@ FROM "".information_schema.type_privileges`
 			source.WriteString(typePrivQuery)
 			source.WriteByte(')')
 			// If the current database is set, restrict the command to it.
-			if currDB := d.evalCtx.SessionData().Database; currDB != "" {
-				fmt.Fprintf(&cond, ` WHERE database_name = %s`, lexbase.EscapeSQLString(currDB))
+			if currDB := d.evalCtx.SessionData.Database; currDB != "" {
+				fmt.Fprintf(&cond, ` WHERE database_name = %s`, lex.EscapeSQLString(currDB))
 			} else {
 				cond.WriteString(`WHERE true`)
 			}
@@ -228,34 +230,13 @@ FROM "".information_schema.type_privileges`
 
 	if n.Grantees != nil {
 		params = params[:0]
-		grantees, err := n.Grantees.ToSQLUsernames(d.evalCtx.SessionData(), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		for _, grantee := range grantees {
-			params = append(params, lexbase.EscapeSQLString(grantee.Normalized()))
+		for _, grantee := range n.Grantees.ToStrings() {
+			params = append(params, lex.EscapeSQLString(grantee))
 		}
 		fmt.Fprintf(&cond, ` AND grantee IN (%s)`, strings.Join(params, ","))
 	}
 	query := fmt.Sprintf(`
 		SELECT * FROM (%s) %s ORDER BY %s
 	`, source.String(), cond.String(), orderBy)
-
-	// Terminate on invalid users.
-	for _, p := range n.Grantees {
-
-		user, err := p.ToSQLUsername(d.evalCtx.SessionData(), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		userExists, err := d.catalog.RoleExists(d.ctx, user)
-		if err != nil {
-			return nil, err
-		}
-		if !userExists {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %q does not exist", user)
-		}
-	}
-
 	return parse(query)
 }

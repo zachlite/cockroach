@@ -19,16 +19,13 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,81 +34,81 @@ var sortAllTestCases []sortTestCase
 func init() {
 	sortAllTestCases = []sortTestCase{
 		{
-			tuples:   colexectestutils.Tuples{{1}, {2}, {nil}, {4}, {5}, {nil}},
-			expected: colexectestutils.Tuples{{nil}, {nil}, {1}, {2}, {4}, {5}},
+			tuples:   tuples{{1}, {2}, {nil}, {4}, {5}, {nil}},
+			expected: tuples{{nil}, {nil}, {1}, {2}, {4}, {5}},
 			typs:     []*types.T{types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1, 2}, {1, 1}, {1, nil}, {2, nil}, {2, 3}, {2, nil}, {5, 1}},
-			expected: colexectestutils.Tuples{{1, nil}, {1, 1}, {1, 2}, {2, nil}, {2, nil}, {2, 3}, {5, 1}},
+			tuples:   tuples{{1, 2}, {1, 1}, {1, nil}, {2, nil}, {2, 3}, {2, nil}, {5, 1}},
+			expected: tuples{{1, nil}, {1, 1}, {1, 2}, {2, nil}, {2, nil}, {2, 3}, {5, 1}},
 			typs:     []*types.T{types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}, {ColIdx: 1}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1, 2}, {1, 1}, {1, nil}, {2, nil}, {2, 3}, {2, nil}, {5, 1}},
-			expected: colexectestutils.Tuples{{5, 1}, {2, 3}, {2, nil}, {2, nil}, {1, 2}, {1, 1}, {1, nil}},
+			tuples:   tuples{{1, 2}, {1, 1}, {1, nil}, {2, nil}, {2, 3}, {2, nil}, {5, 1}},
+			expected: tuples{{5, 1}, {2, 3}, {2, nil}, {2, nil}, {1, 2}, {1, 1}, {1, nil}},
 			typs:     []*types.T{types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0, Direction: execinfrapb.Ordering_Column_DESC}, {ColIdx: 1, Direction: execinfrapb.Ordering_Column_DESC}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{nil, nil}, {nil, 3}, {1, nil}, {nil, 1}, {1, 2}, {nil, nil}, {5, nil}},
-			expected: colexectestutils.Tuples{{nil, nil}, {nil, nil}, {nil, 1}, {nil, 3}, {1, nil}, {1, 2}, {5, nil}},
+			tuples:   tuples{{nil, nil}, {nil, 3}, {1, nil}, {nil, 1}, {1, 2}, {nil, nil}, {5, nil}},
+			expected: tuples{{nil, nil}, {nil, nil}, {nil, 1}, {nil, 3}, {1, nil}, {1, 2}, {5, nil}},
 			typs:     []*types.T{types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}, {ColIdx: 1}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
-			expected: colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			tuples:   tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			expected: tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
 			typs:     []*types.T{types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
-			expected: colexectestutils.Tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
+			tuples:   tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
+			expected: tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
 			typs:     []*types.T{types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1, 1}, {3, 2}, {2, 3}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
-			expected: colexectestutils.Tuples{{1, 1}, {2, 3}, {3, 2}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
+			tuples:   tuples{{1, 1}, {3, 2}, {2, 3}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
+			expected: tuples{{1, 1}, {2, 3}, {3, 2}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
 			typs:     []*types.T{types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1, 1}, {5, 2}, {3, 3}, {7, 4}, {2, 5}, {6, 6}, {4, 7}},
-			expected: colexectestutils.Tuples{{1, 1}, {2, 5}, {3, 3}, {4, 7}, {5, 2}, {6, 6}, {7, 4}},
+			tuples:   tuples{{1, 1}, {5, 2}, {3, 3}, {7, 4}, {2, 5}, {6, 6}, {4, 7}},
+			expected: tuples{{1, 1}, {2, 5}, {3, 3}, {4, 7}, {5, 2}, {6, 6}, {7, 4}},
 			typs:     []*types.T{types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{1}, {5}, {3}, {3}, {2}, {6}, {4}},
-			expected: colexectestutils.Tuples{{1}, {2}, {3}, {3}, {4}, {5}, {6}},
+			tuples:   tuples{{1}, {5}, {3}, {3}, {2}, {6}, {4}},
+			expected: tuples{{1}, {2}, {3}, {3}, {4}, {5}, {6}},
 			typs:     []*types.T{types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{false}, {true}},
-			expected: colexectestutils.Tuples{{false}, {true}},
+			tuples:   tuples{{false}, {true}},
+			expected: tuples{{false}, {true}},
 			typs:     []*types.T{types.Bool},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{true}, {false}},
-			expected: colexectestutils.Tuples{{false}, {true}},
+			tuples:   tuples{{true}, {false}},
+			expected: tuples{{false}, {true}},
 			typs:     []*types.T{types.Bool},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 		{
-			tuples:   colexectestutils.Tuples{{3.2}, {2.0}, {2.4}, {math.NaN()}, {math.Inf(-1)}, {math.Inf(1)}},
-			expected: colexectestutils.Tuples{{math.NaN()}, {math.Inf(-1)}, {2.0}, {2.4}, {3.2}, {math.Inf(1)}},
+			tuples:   tuples{{3.2}, {2.0}, {2.4}, {math.NaN()}, {math.Inf(-1)}, {math.Inf(1)}},
+			expected: tuples{{math.NaN()}, {math.Inf(-1)}, {2.0}, {2.4}, {3.2}, {math.Inf(1)}},
 			typs:     []*types.T{types.Float},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 0}},
 		},
 
 		{
-			tuples:   colexectestutils.Tuples{{0, 1, 0}, {1, 2, 0}, {2, 3, 2}, {3, 7, 1}, {4, 2, 2}},
-			expected: colexectestutils.Tuples{{0, 1, 0}, {1, 2, 0}, {3, 7, 1}, {4, 2, 2}, {2, 3, 2}},
+			tuples:   tuples{{0, 1, 0}, {1, 2, 0}, {2, 3, 2}, {3, 7, 1}, {4, 2, 2}},
+			expected: tuples{{0, 1, 0}, {1, 2, 0}, {3, 7, 1}, {4, 2, 2}, {2, 3, 2}},
 			typs:     []*types.T{types.Int, types.Int, types.Int},
 			ordCols:  []execinfrapb.Ordering_Column{{ColIdx: 2}, {ColIdx: 1}},
 		},
@@ -120,14 +117,14 @@ func init() {
 			// ensure that sort partitions stack: make sure that a run of identical
 			// values in a later column doesn't get sorted if the run is broken up
 			// by previous columns.
-			tuples: colexectestutils.Tuples{
+			tuples: tuples{
 				{0, 1, 0},
 				{0, 1, 0},
 				{0, 1, 1},
 				{0, 0, 1},
 				{0, 0, 0},
 			},
-			expected: colexectestutils.Tuples{
+			expected: tuples{
 				{0, 0, 0},
 				{0, 0, 1},
 				{0, 1, 0},
@@ -144,9 +141,9 @@ func TestSort(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	for _, tc := range sortAllTestCases {
-		colexectestutils.RunTestsWithTyps(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, [][]*types.T{tc.typs}, tc.expected, colexectestutils.OrderedVerifier,
-			func(input []colexecop.Operator) (colexecop.Operator, error) {
-				return NewSorter(testAllocator, input[0], tc.typs, tc.ordCols, execinfra.DefaultMemoryLimit)
+		runTestsWithTyps(t, []tuples{tc.tuples}, [][]*types.T{tc.typs}, tc.expected, orderedVerifier,
+			func(input []colexecbase.Operator) (colexecbase.Operator, error) {
+				return NewSorter(testAllocator, input[0], tc.typs, tc.ordCols)
 			})
 	}
 }
@@ -154,10 +151,10 @@ func TestSort(t *testing.T) {
 func TestSortRandomized(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	nTups := coldata.BatchSize()*2 + 1
 	maxCols := 3
-	// TODO(yuzefovich/mgartner): randomize types as well.
+	// TODO(yuzefovich): randomize types as well.
 	typs := make([]*types.T, maxCols)
 	for i := range typs {
 		typs[i] = types.Int
@@ -166,21 +163,17 @@ func TestSortRandomized(t *testing.T) {
 		for nOrderingCols := 1; nOrderingCols <= nCols; nOrderingCols++ {
 			for _, k := range []int{0, rng.Intn(nTups) + 1} {
 				topK := k != 0
-				matchLen := 0
-				if topK {
-					matchLen = rng.Intn(nOrderingCols)
-				}
-				name := fmt.Sprintf("nCols=%d/nOrderingCols=%d/matchLen=%d/topK=%t", nCols, nOrderingCols, matchLen, topK)
+				name := fmt.Sprintf("nCols=%d/nOrderingCols=%d/topK=%t", nCols, nOrderingCols, topK)
 				log.Infof(context.Background(), "%s", name)
-				tups, expected, ordCols := generateRandomDataForTestSort(rng, nTups, nCols, nOrderingCols, matchLen)
+				tups, expected, ordCols := generateRandomDataForTestSort(rng, nTups, nCols, nOrderingCols)
 				if topK {
 					expected = expected[:k]
 				}
-				colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{tups}, expected, colexectestutils.OrderedVerifier, func(input []colexecop.Operator) (colexecop.Operator, error) {
+				runTests(t, []tuples{tups}, expected, orderedVerifier, func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 					if topK {
-						return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, matchLen, uint64(k), execinfra.DefaultMemoryLimit)
+						return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, k), nil
 					}
-					return NewSorter(testAllocator, input[0], typs[:nCols], ordCols, execinfra.DefaultMemoryLimit)
+					return NewSorter(testAllocator, input[0], typs[:nCols], ordCols)
 				})
 			}
 		}
@@ -193,13 +186,12 @@ func TestSortRandomized(t *testing.T) {
 // - expected - the same data but already sorted
 // - ordCols - ordering columns used in the sort operation.
 func generateRandomDataForTestSort(
-	rng *rand.Rand, nTups, nCols, nOrderingCols, matchLen int,
-) (tups, expected colexectestutils.Tuples, ordCols []execinfrapb.Ordering_Column) {
+	rng *rand.Rand, nTups, nCols, nOrderingCols int,
+) (tups, expected tuples, ordCols []execinfrapb.Ordering_Column) {
 	ordCols = generateColumnOrdering(rng, nCols, nOrderingCols)
-	partialOrdCols := ordCols[:matchLen]
-	tups = make(colexectestutils.Tuples, nTups)
+	tups = make(tuples, nTups)
 	for i := range tups {
-		tups[i] = make(colexectestutils.Tuple, nCols)
+		tups[i] = make(tuple, nCols)
 		for j := range tups[i] {
 			// Small range so we can test partitioning
 			if rng.Float64() < nullProbability {
@@ -213,8 +205,7 @@ func generateRandomDataForTestSort(
 		tups[i][ordCols[nOrderingCols-1].ColIdx] = int64(i)
 	}
 
-	sort.Slice(tups, less(tups, partialOrdCols))
-	expected = make(colexectestutils.Tuples, nTups)
+	expected = make(tuples, nTups)
 	copy(expected, tups)
 	sort.Slice(expected, less(expected, ordCols))
 	return tups, expected, ordCols
@@ -225,35 +216,35 @@ func TestAllSpooler(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	tcs := []struct {
-		tuples colexectestutils.Tuples
+		tuples tuples
 		typ    []*types.T
 	}{
 		{
-			tuples: colexectestutils.Tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
+			tuples: tuples{{1}, {2}, {3}, {4}, {5}, {6}, {7}},
 			typ:    []*types.T{types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
+			tuples: tuples{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}},
 			typ:    []*types.T{types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{{1, 1}, {3, 2}, {2, 3}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
+			tuples: tuples{{1, 1}, {3, 2}, {2, 3}, {4, 4}, {5, 5}, {6, 6}, {7, 7}},
 			typ:    []*types.T{types.Int, types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{{1, 1}, {5, 2}, {3, 3}, {7, 4}, {2, 5}, {6, 6}, {4, 7}},
+			tuples: tuples{{1, 1}, {5, 2}, {3, 3}, {7, 4}, {2, 5}, {6, 6}, {4, 7}},
 			typ:    []*types.T{types.Int, types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{{1}, {5}, {3}, {3}, {2}, {6}, {4}},
+			tuples: tuples{{1}, {5}, {3}, {3}, {2}, {6}, {4}},
 			typ:    []*types.T{types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{{0, 1, 0}, {1, 2, 0}, {2, 3, 2}, {3, 7, 1}, {4, 2, 2}},
+			tuples: tuples{{0, 1, 0}, {1, 2, 0}, {2, 3, 2}, {3, 7, 1}, {4, 2, 2}},
 			typ:    []*types.T{types.Int, types.Int, types.Int},
 		},
 		{
-			tuples: colexectestutils.Tuples{
+			tuples: tuples{
 				{0, 1, 0},
 				{0, 1, 0},
 				{0, 1, 1},
@@ -264,10 +255,10 @@ func TestAllSpooler(t *testing.T) {
 		},
 	}
 	for _, tc := range tcs {
-		colexectestutils.RunTestsWithFn(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, nil, func(t *testing.T, input []colexecop.Operator) {
+		runTestsWithFn(t, []tuples{tc.tuples}, nil /* typs */, func(t *testing.T, input []colexecbase.Operator) {
 			allSpooler := newAllSpooler(testAllocator, input[0], tc.typ)
-			allSpooler.init(context.Background())
-			allSpooler.spool()
+			allSpooler.init()
+			allSpooler.spool(context.Background())
 			if len(tc.tuples) != allSpooler.getNumTuples() {
 				t.Fatal(fmt.Sprintf("allSpooler spooled wrong number of tuples: expected %d, but received %d", len(tc.tuples), allSpooler.getNumTuples()))
 			}
@@ -288,10 +279,9 @@ func TestAllSpooler(t *testing.T) {
 }
 
 func BenchmarkSort(b *testing.B) {
-	defer log.Scope(b).Close(b)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
-	k := uint64(128)
+	k := 128
 
 	for _, nBatches := range []int{1 << 1, 1 << 4, 1 << 8} {
 		for _, nCols := range []int{1, 2, 4} {
@@ -319,87 +309,19 @@ func BenchmarkSort(b *testing.B) {
 					}
 					b.ResetTimer()
 					for n := 0; n < b.N; n++ {
-						source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
-						var sorter colexecop.Operator
-						var err error
+						source := newFiniteBatchSource(batch, typs, nBatches)
+						var sorter colexecbase.Operator
 						if topK {
-							sorter, err = NewTopKSorter(testAllocator, source, typs, ordCols, 0 /* matchLen */, k, execinfra.DefaultMemoryLimit)
+							sorter = NewTopKSorter(testAllocator, source, typs, ordCols, k)
 						} else {
-							sorter, err = NewSorter(testAllocator, source, typs, ordCols, execinfra.DefaultMemoryLimit)
-						}
-						if err != nil {
-							b.Fatal(err)
-						}
-						sorter.Init(ctx)
-						for out := sorter.Next(); out.Length() != 0; out = sorter.Next() {
-						}
-					}
-				})
-			}
-		}
-	}
-}
-
-func BenchmarkSortUUID(b *testing.B) {
-	rng, _ := randutil.NewTestRand()
-	ctx := context.Background()
-
-	for _, nBatches := range []int{1 << 1, 1 << 4, 1 << 8} {
-		for _, nCols := range []int{1, 2} {
-			for _, constAbbrPct := range []int{0, 50, 75, 90, 100} {
-				name := fmt.Sprintf("rows=%d/cols=%d/constAbbrPct=%d", nBatches*coldata.BatchSize(), nCols, constAbbrPct)
-				b.Run(name, func(b *testing.B) {
-					// 8 (bytes / int64) * nBatches (number of batches) * coldata.BatchSize() (rows /
-					// batch) * nCols (number of columns / row).
-					b.SetBytes(int64(8 * nBatches * coldata.BatchSize() * nCols))
-					typs := make([]*types.T, nCols)
-					for i := range typs {
-						typs[i] = types.Bytes
-					}
-					batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
-					batch.SetLength(coldata.BatchSize())
-					ordCols := make([]execinfrapb.Ordering_Column, nCols)
-					for i := range ordCols {
-						ordCols[i].ColIdx = uint32(i)
-						ordCols[i].Direction = execinfrapb.Ordering_Column_Direction(rng.Int() % 2)
-
-						col := batch.ColVec(i).Bytes()
-
-						// Make a constant prefix used for constAbbrPct% of
-						// UUIDs. This helps measure the overhead of abbreviated
-						// comparisons with varying cardinality. For example, if
-						// all abbreviated values are the same, then comparing
-						// them is unnecessary work because we must always fall
-						// back to full comparisons.
-						id, err := uuid.NewV4()
-						if err != nil {
-							b.Fatalf("unexpected error: %s", err)
-						}
-						constPrefix := id[:8]
-
-						for j := 0; j < coldata.BatchSize(); j++ {
-							id, err := uuid.NewV4()
+							var err error
+							sorter, err = NewSorter(testAllocator, source, typs, ordCols)
 							if err != nil {
-								b.Fatalf("unexpected error: %s", err)
+								b.Fatal(err)
 							}
-							idBytes := id[:16]
-							// Make the abbreviated bytes constant constAbbrPct% of
-							// the time.
-							if rng.Float32() < float32(constAbbrPct)/100 {
-								copy(idBytes, constPrefix)
-							}
-							col.Set(j, idBytes)
 						}
-					}
-					b.ResetTimer()
-					for n := 0; n < b.N; n++ {
-						source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
-						sorter, err := NewSorter(testAllocator, source, typs, ordCols, execinfra.DefaultMemoryLimit)
-						if err != nil {
-							b.Fatal(err)
-						}
-						sorter.Init(ctx)
-						for out := sorter.Next(); out.Length() != 0; out = sorter.Next() {
+						sorter.Init()
+						for out := sorter.Next(ctx); out.Length() != 0; out = sorter.Next(ctx) {
 						}
 					}
 				})
@@ -409,8 +331,7 @@ func BenchmarkSortUUID(b *testing.B) {
 }
 
 func BenchmarkAllSpooler(b *testing.B) {
-	defer log.Scope(b).Close(b)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 
 	for _, nBatches := range []int{1 << 1, 1 << 4, 1 << 8} {
@@ -433,19 +354,17 @@ func BenchmarkAllSpooler(b *testing.B) {
 				}
 				b.ResetTimer()
 				for n := 0; n < b.N; n++ {
-					source := colexectestutils.NewFiniteBatchSource(testAllocator, batch, typs, nBatches)
+					source := newFiniteBatchSource(batch, typs, nBatches)
 					allSpooler := newAllSpooler(testAllocator, source, typs)
-					allSpooler.init(ctx)
-					allSpooler.spool()
+					allSpooler.init()
+					allSpooler.spool(ctx)
 				}
 			})
 		}
 	}
 }
 
-func less(
-	tuples colexectestutils.Tuples, ordCols []execinfrapb.Ordering_Column,
-) func(i, j int) bool {
+func less(tuples tuples, ordCols []execinfrapb.Ordering_Column) func(i, j int) bool {
 	return func(i, j int) bool {
 		for _, col := range ordCols {
 			n1 := tuples[i][col.ColIdx] == nil

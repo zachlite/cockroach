@@ -25,8 +25,8 @@ import (
 // RevokeRoleNode removes entries from the system.role_members table.
 // This is called from REVOKE <ROLE>
 type RevokeRoleNode struct {
-	roles       []security.SQLUsername
-	members     []security.SQLUsername
+	roles       tree.NameList
+	members     tree.NameList
 	adminOption bool
 
 	run revokeRoleRun
@@ -45,7 +45,7 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 	sqltelemetry.IncIAMRevokeCounter(n.AdminOption)
 
 	ctx, span := tracing.ChildSpan(ctx, n.StatementTag())
-	defer span.Finish()
+	defer tracing.FinishSpan(span)
 
 	hasAdminRole, err := p.HasAdminRole(ctx)
 	if err != nil {
@@ -56,25 +56,15 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 	if err != nil {
 		return nil, err
 	}
-
-	inputRoles, err := n.Roles.ToSQLUsernames()
-	if err != nil {
-		return nil, err
-	}
-	inputMembers, err := n.Members.ToSQLUsernames(p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, r := range inputRoles {
+	for _, r := range n.Roles {
 		// If the user is an admin, don't check if the user is allowed to add/drop
 		// roles in the role. However, if the role being modified is the admin role, then
 		// make sure the user is an admin with the admin option.
-		if hasAdminRole && !r.IsAdminRole() {
+		if hasAdminRole && string(r) != security.AdminRole {
 			continue
 		}
-		if isAdmin, ok := allRoles[r]; !ok || !isAdmin {
-			if r.IsAdminRole() {
+		if isAdmin, ok := allRoles[string(r)]; !ok || !isAdmin {
+			if string(r) == security.AdminRole {
 				return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
 					"%s is not a role admin for role %s", p.User(), r)
 			}
@@ -91,21 +81,21 @@ func (p *planner) RevokeRoleNode(ctx context.Context, n *tree.RevokeRole) (*Revo
 		return nil, err
 	}
 
-	for _, r := range inputRoles {
-		if _, ok := roles[r]; !ok {
+	for _, r := range n.Roles {
+		if _, ok := roles[string(r)]; !ok {
 			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", r)
 		}
 	}
 
-	for _, m := range inputMembers {
-		if _, ok := roles[m]; !ok {
+	for _, m := range n.Members {
+		if _, ok := roles[string(m)]; !ok {
 			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", m)
 		}
 	}
 
 	return &RevokeRoleNode{
-		roles:       inputRoles,
-		members:     inputMembers,
+		roles:       n.Roles,
+		members:     n.Members,
 		adminOption: n.AdminOption,
 	}, nil
 }
@@ -125,7 +115,7 @@ func (n *RevokeRoleNode) startExec(params runParams) error {
 	var rowsAffected int
 	for _, r := range n.roles {
 		for _, m := range n.members {
-			if r.IsAdminRole() && m.IsRootUser() {
+			if string(r) == security.AdminRole && string(m) == security.RootUser {
 				// We use CodeObjectInUseError which is what happens if you tried to delete the current user in pg.
 				return pgerror.Newf(pgcode.ObjectInUse,
 					"role/user %s cannot be removed from role %s or lose the ADMIN OPTION",
@@ -135,9 +125,9 @@ func (n *RevokeRoleNode) startExec(params runParams) error {
 				params.ctx,
 				opName,
 				params.p.txn,
-				sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+				sessiondata.InternalExecutorOverride{User: security.RootUser},
 				memberStmt,
-				r.Normalized(), m.Normalized(),
+				r, m,
 			)
 			if err != nil {
 				return err

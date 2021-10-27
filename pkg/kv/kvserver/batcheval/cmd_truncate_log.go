@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -28,9 +29,13 @@ func init() {
 }
 
 func declareKeysTruncateLog(
-	rs ImmutableRangeState, _ roachpb.Header, req roachpb.Request, latchSpans, _ *spanset.SpanSet,
+	_ *roachpb.RangeDescriptor,
+	header roachpb.Header,
+	req roachpb.Request,
+	latchSpans, _ *spanset.SpanSet,
 ) {
-	prefix := keys.RaftLogPrefix(rs.GetRangeID())
+	latchSpans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{Key: keys.RaftTruncatedStateLegacyKey(header.RangeID)})
+	prefix := keys.RaftLogPrefix(header.RangeID)
 	latchSpans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()})
 }
 
@@ -50,6 +55,15 @@ func TruncateLog(
 		log.Infof(ctx, "attempting to truncate raft logs for another range: r%d. Normally this is due to a merge and can be ignored.",
 			args.RangeID)
 		return result.Result{}, nil
+	}
+
+	var legacyTruncatedState roachpb.RaftTruncatedState
+	legacyKeyFound, err := storage.MVCCGetProto(
+		ctx, readWriter, keys.RaftTruncatedStateLegacyKey(cArgs.EvalCtx.GetRangeID()),
+		hlc.Timestamp{}, &legacyTruncatedState, storage.MVCCGetOptions{},
+	)
+	if err != nil {
+		return result.Result{}, err
 	}
 
 	firstIndex, err := cArgs.EvalCtx.GetFirstIndex()
@@ -99,7 +113,7 @@ func TruncateLog(
 	// bugs that let it diverge. It might be easier to compute the stats
 	// from scratch, stopping when 4mb (defaultRaftLogTruncationThreshold)
 	// is reached as at that point we'll truncate aggressively anyway.
-	iter := readWriter.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{UpperBound: end})
+	iter := readWriter.NewIterator(storage.IterOptions{UpperBound: end})
 	defer iter.Close()
 	// We can pass zero as nowNanos because we're only interested in SysBytes.
 	ms, err := iter.ComputeStats(start, end, 0 /* nowNanos */)
@@ -119,5 +133,18 @@ func TruncateLog(
 	}
 
 	pd.Replicated.RaftLogDelta = ms.SysBytes
+
+	if legacyKeyFound {
+		// Time to migrate by deleting the legacy key. The downstream-of-Raft
+		// code will atomically rewrite the truncated state (supplied via the
+		// side effect) into the new unreplicated key.
+		if err := storage.MVCCDelete(
+			ctx, readWriter, cArgs.Stats, keys.RaftTruncatedStateLegacyKey(cArgs.EvalCtx.GetRangeID()),
+			hlc.Timestamp{}, nil, /* txn */
+		); err != nil {
+			return result.Result{}, err
+		}
+	}
+
 	return pd, nil
 }

@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -90,7 +90,7 @@ func (w *random) Tables() []workload.Table {
 	tables := make([]workload.Table, w.tables)
 	rng := rand.New(rand.NewSource(w.seed))
 	for i := 0; i < w.tables; i++ {
-		createTable := randgen.RandCreateTable(rng, "table", rng.Int())
+		createTable := rowenc.RandCreateTable(rng, "table", rng.Int())
 		ctx := tree.NewFmtCtx(tree.FmtParsable)
 		createTable.FormatBody(ctx)
 		tables[i] = workload.Table{
@@ -108,13 +108,12 @@ type col struct {
 	dataScale     int
 	cdefault      gosql.NullString
 	isNullable    bool
-	isComputed    bool
 }
 
 // Ops implements the Opser interface.
 func (w *random) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
-) (ql workload.QueryLoad, retErr error) {
+) (workload.QueryLoad, error) {
 	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -139,7 +138,7 @@ func (w *random) Ops(
 
 	rows, err := db.Query(
 		`
-SELECT attname, atttypid, adsrc, NOT attnotnull, attgenerated != ''
+SELECT attname, atttypid, adsrc, NOT attnotnull
 FROM pg_catalog.pg_attribute
 LEFT JOIN pg_catalog.pg_attrdef
 ON attrelid=adrelid AND attnum=adnum
@@ -147,17 +146,18 @@ WHERE attrelid=$1`, relid)
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, rows.Close()) }()
+
 	var cols []col
 	var numCols = 0
 
+	defer rows.Close()
 	for rows.Next() {
 		var c col
 		c.dataPrecision = 0
 		c.dataScale = 0
 
 		var typOid int
-		if err := rows.Scan(&c.name, &typOid, &c.cdefault, &c.isNullable, &c.isComputed); err != nil {
+		if err := rows.Scan(&c.name, &typOid, &c.cdefault, &c.isNullable); err != nil {
 			return workload.QueryLoad{}, err
 		}
 		datumType := types.OidToType[oid.Oid(typOid)]
@@ -176,10 +176,6 @@ WHERE attrelid=$1`, relid)
 		return workload.QueryLoad{}, errors.New("no columns detected")
 	}
 
-	if err = rows.Err(); err != nil {
-		return workload.QueryLoad{}, err
-	}
-
 	// insert on conflict requires the primary key. check information_schema if not specified on the command line
 	if strings.HasPrefix(w.method, "ioc") && w.primaryKey == "" {
 		rows, err := db.Query(
@@ -193,7 +189,7 @@ AND    i.indisprimary`, relid)
 		if err != nil {
 			return workload.QueryLoad{}, err
 		}
-		defer func() { retErr = errors.CombineErrors(retErr, rows.Close()) }()
+		defer rows.Close()
 		for rows.Next() {
 			var colname string
 
@@ -205,9 +201,6 @@ AND    i.indisprimary`, relid)
 			} else {
 				w.primaryKey += colname
 			}
-		}
-		if err = rows.Err(); err != nil {
-			return workload.QueryLoad{}, err
 		}
 	}
 
@@ -244,15 +237,8 @@ AND    i.indisprimary`, relid)
 		return workload.QueryLoad{}, errors.Errorf("%s DML method not valid", w.primaryKey)
 	}
 
-	var nonComputedCols []col
-	for _, c := range cols {
-		if !c.isComputed {
-			nonComputedCols = append(nonComputedCols, c)
-		}
-	}
-
 	fmt.Fprintf(&buf, `%s INTO %s.%s (`, dmlMethod, sqlDatabase, tableName)
-	for i, c := range nonComputedCols {
+	for i, c := range cols {
 		if i > 0 {
 			buf.WriteString(",")
 		}
@@ -260,13 +246,13 @@ AND    i.indisprimary`, relid)
 	}
 	buf.WriteString(`) VALUES `)
 
-	nCols := len(nonComputedCols)
+	nCols := len(cols)
 	for i := 0; i < w.batchSize; i++ {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
 		buf.WriteString("(")
-		for j := range nonComputedCols {
+		for j := range cols {
 			if j > 0 {
 				buf.WriteString(", ")
 			}
@@ -282,14 +268,14 @@ AND    i.indisprimary`, relid)
 		return workload.QueryLoad{}, err
 	}
 
-	ql = workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
 
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		op := randOp{
 			config:    w,
 			hists:     reg.GetHandle(),
 			db:        db,
-			cols:      nonComputedCols,
+			cols:      cols,
 			rng:       rand.New(rand.NewSource(w.seed + int64(i))),
 			writeStmt: writeStmt,
 		}
@@ -377,7 +363,7 @@ func (o *randOp) run(ctx context.Context) (err error) {
 			if c.isNullable && o.config.nullPct > 0 {
 				nullPct = 100 / o.config.nullPct
 			}
-			d := randgen.RandDatumWithNullChance(o.rng, c.dataType, nullPct)
+			d := rowenc.RandDatumWithNullChance(o.rng, c.dataType, nullPct)
 			params[k], err = DatumToGoSQL(d)
 			if err != nil {
 				return err

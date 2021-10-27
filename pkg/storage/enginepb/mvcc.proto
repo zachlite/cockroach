@@ -22,6 +22,7 @@ import "gogoproto/gogo.proto";
 // that key.
 message MVCCMetadata {
   option (gogoproto.goproto_stringer) = false;
+  option (gogoproto.equal) = true;
   option (gogoproto.populate) = true;
 
   // The transaction metadata. Present for intents, but not for inline
@@ -71,19 +72,6 @@ message MVCCMetadata {
   // This provides a measure of protection against replays caused by
   // Raft duplicating merge commands.
   optional util.hlc.LegacyTimestamp merge_timestamp = 7;
-
-  // Set to true iff we can guarantee that the transaction did not do more
-  // than one Put without an intervening Delete. We assume that it is common
-  // for this to be true. The default is false to accommodate code that did
-  // not track this state. It is nullable since MVCCMetadata is serialized
-  // below Raft in some cases and we can't change the byte representation when
-  // this is not set.
-  //
-  // This is used as an optimization when writing MVCCMetadata to the
-  // separated lock table key space, where the key for MVCCMetadata is unique
-  // per transaction. In that case, when this is true, one can optimize
-  // removal of the MVCCMetadata by doing a SingleDelete instead of Delete.
-  optional bool txn_did_not_update_meta = 9;
 }
 
 // A mirror of MVCCMetadata intended for serializing non-MVCC data that is
@@ -141,20 +129,8 @@ message MVCCStats {
   // contains_estimates indicates that the MVCCStats object contains values
   // which have been estimated. This means that the stats should not be used
   // where complete accuracy is required, and instead should be recomputed
-  // when necessary.
-  //
-  // This field used to be a bool; in #37583 we migrated it to int64. See #37120
-  // for the motivation for doing so. If zero, it's "false". If non-zero, it's
-  // "true".
-  //
-  // As a result of the migration, our usage of this int64 field is now a bit
-  // involved. When ContainsEstimates is 0 or 1, we behave like a boolean
-  // (i.e. `1+1=1` aka `true+true=true`). Downstream of raft, we use the
-  // boolean behavior for ContainsEstimates=1 and the additive behavior for
-  // anything else. If non-zero, we encode the fact that we're allowed to use
-  // regular arithmetic for this field by making sure it contains a value >1 (we
-  // multiply it by 2, and thus avoiding 1). This is then interpreted during
-  // command application.
+  // when necessary. See clusterversion.VersionContainsEstimatesCounter for
+  // details about the migration from bool to int64.
   optional int64 contains_estimates = 14 [(gogoproto.nullable) = false];
 
   // last_update_nanos is a timestamp at which the ages were last
@@ -195,18 +171,12 @@ message MVCCStats {
   // It is equal to the number of meta keys in the system with
   // a non-empty Transaction proto.
   optional sfixed64 intent_count = 11 [(gogoproto.nullable) = false];
-  // separated_intent_count is the number of intents that are in the separated
-  // lock table. It is <= intent_count. Separated intents will not be enabled
-  // in a cluster until all nodes in that cluster know how to read/write such
-  // intents, so mixed-version clusters with nodes preceding this knowledge
-  // will always have a 0 value for this field.
-  optional sfixed64 separated_intent_count = 16 [(gogoproto.nullable) = false];
 
   // sys_bytes is the number of bytes stored in system-local kv-pairs.
   // This tracks the same quantity as (key_bytes + val_bytes), but
   // for system-local metadata keys (which aren't counted in either
   // key_bytes or val_bytes). Each of the keys falling into this group
-  // is documented in keys/constants.go under the LocalPrefix constant
+  // is documented in keys/constants.go under the localPrefix constant
   // and is prefixed by either LocalRangeIDPrefix or LocalRangePrefix.
   optional sfixed64 sys_bytes = 12 [(gogoproto.nullable) = false];
   // sys_count is the number of meta keys tracked under sys_bytes.
@@ -217,4 +187,31 @@ message MVCCStats {
 
   // WARNING: Do not add any PII-holding fields here, as this
   // whole message is marked as safe for log redaction.
+}
+
+// MVCCStatsLegacyRepresentation is almost identical to MVCCStats, except
+// it does not have a field tracking abort span bytes.
+// The abort span bytes field in MVCCStats didn't exist in earlier versions,
+// and its addition of it to MVCCStats causes the struct to be larger than it was
+// previously. The discrepancy between the size of MVCCStats between versions
+// could cause incorrect sysbyte counts during version migration.
+// MVCCStatsLegacyRepresentation is the older version of MVCCStats, and allows
+// us to prevent this discrepancy during version migration.
+message MVCCStatsLegacyRepresentation {
+  option (gogoproto.equal) = true;
+  option (gogoproto.populate) = true;
+  optional int64 contains_estimates = 14 [(gogoproto.nullable) = false];
+  optional sfixed64 last_update_nanos = 1 [(gogoproto.nullable) = false];
+  optional sfixed64 intent_age = 2 [(gogoproto.nullable) = false];
+  optional sfixed64 gc_bytes_age = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "GCBytesAge"];
+  optional sfixed64 live_bytes = 4 [(gogoproto.nullable) = false];
+  optional sfixed64 live_count = 5 [(gogoproto.nullable) = false];
+  optional sfixed64 key_bytes = 6 [(gogoproto.nullable) = false];
+  optional sfixed64 key_count = 7 [(gogoproto.nullable) = false];
+  optional sfixed64 val_bytes = 8 [(gogoproto.nullable) = false];
+  optional sfixed64 val_count = 9 [(gogoproto.nullable) = false];
+  optional sfixed64 intent_bytes = 10 [(gogoproto.nullable) = false];
+  optional sfixed64 intent_count = 11 [(gogoproto.nullable) = false];
+  optional sfixed64 sys_bytes = 12 [(gogoproto.nullable) = false];
+  optional sfixed64 sys_count = 13 [(gogoproto.nullable) = false];
 }

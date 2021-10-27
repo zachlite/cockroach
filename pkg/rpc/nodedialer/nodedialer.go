@@ -18,7 +18,8 @@ import (
 	"unsafe"
 
 	circuit "github.com/cockroachdb/circuitbreaker"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
@@ -44,32 +45,11 @@ type AddressResolver func(roachpb.NodeID) (net.Addr, error)
 // it maintains a circuit breaker that prevents rapid connection attempts and
 // provides hints to the callers on whether to log the outcome of the operation.
 type Dialer struct {
-	rpcContext   *rpc.Context
-	resolver     AddressResolver
-	testingKnobs DialerTestingKnobs
+	rpcContext *rpc.Context
+	resolver   AddressResolver
 
 	breakers [rpc.NumConnectionClasses]syncutil.IntMap // map[roachpb.NodeID]*wrappedBreaker
 }
-
-// DialerOpt contains configuration options for a Dialer.
-type DialerOpt struct {
-	// TestingKnobs contains testing utilities.
-	TestingKnobs DialerTestingKnobs
-}
-
-// DialerTestingKnobs contains dialer testing options.
-type DialerTestingKnobs struct {
-	// TestingNoLocalClientOptimization, if set, disables the optimization about
-	// using a direct client for the local node instead of going through gRPC. For
-	// one, the behavior on cancellation of the client RPC ctx is different: when
-	// going through gRPC, the framework watches for client ctx cancellation and
-	// interrupts the RPC. When bypassing gRPC, the client ctx is passed directly
-	// to the RPC handler.
-	TestingNoLocalClientOptimization bool
-}
-
-// ModuleTestingKnobs implements the ModuleTestingKnobs interface.
-func (DialerTestingKnobs) ModuleTestingKnobs() {}
 
 // New initializes a Dialer.
 func New(rpcContext *rpc.Context, resolver AddressResolver) *Dialer {
@@ -77,13 +57,6 @@ func New(rpcContext *rpc.Context, resolver AddressResolver) *Dialer {
 		rpcContext: rpcContext,
 		resolver:   resolver,
 	}
-}
-
-// NewWithOpt initializes a Dialer and allows passing in configuration options.
-func NewWithOpt(rpcContext *rpc.Context, resolver AddressResolver, opt DialerOpt) *Dialer {
-	d := New(rpcContext, resolver)
-	d.testingKnobs = opt.TestingKnobs
-	return d
 }
 
 // Stopper returns this node dialer's Stopper.
@@ -152,19 +125,14 @@ func (n *Dialer) DialInternalClient(
 	if err != nil {
 		return nil, nil, err
 	}
+	if localClient := n.rpcContext.GetLocalInternalClientForAddr(addr.String(), nodeID); localClient != nil {
+		log.VEvent(ctx, 2, "sending request to local client")
 
-	{
-		// If we're dialing the local node, don't go through gRPC.
-		localClient := n.rpcContext.GetLocalInternalClientForAddr(addr.String(), nodeID)
-		if localClient != nil && !n.testingKnobs.TestingNoLocalClientOptimization {
-			log.VEvent(ctx, 2, kvbase.RoutingRequestLocallyMsg)
+		// Create a new context from the existing one with the "local request" field set.
+		// This tells the handler that this is an in-process request, bypassing ctx.Peer checks.
+		localCtx := grpcutil.NewLocalRequestContext(ctx)
 
-			// Create a new context from the existing one with the "local request" field set.
-			// This tells the handler that this is an in-process request, bypassing ctx.Peer checks.
-			localCtx := grpcutil.NewLocalRequestContext(ctx)
-
-			return localCtx, localClient, nil
-		}
+		return localCtx, localClient, nil
 	}
 	log.VEventf(ctx, 2, "sending request to %s", addr)
 	conn, err := n.dial(ctx, nodeID, addr, n.getBreaker(nodeID, class), true /* checkBreaker */, class)
@@ -195,7 +163,7 @@ func (n *Dialer) dial(
 	defer func() {
 		// Enforce a minimum interval between warnings for failed connections.
 		if err != nil && ctx.Err() == nil && breaker != nil && breaker.ShouldLog() {
-			log.Health.Warningf(ctx, "unable to connect to n%d: %s", nodeID, err)
+			log.Warningf(ctx, "unable to connect to n%d: %s", nodeID, err)
 		}
 	}()
 	conn, err := n.rpcContext.GRPCDialNode(addr.String(), nodeID, class).Connect(ctx)
@@ -295,21 +263,23 @@ func (n *Dialer) getBreaker(nodeID roachpb.NodeID, class rpc.ConnectionClass) *w
 	return (*wrappedBreaker)(value)
 }
 
-// Latency returns the exponentially weighted moving average latency to the
-// given node ID. Returns a latency of 0 with no error if we don't have enough
-// samples to compute a reliable average.
-func (n *Dialer) Latency(nodeID roachpb.NodeID) (time.Duration, error) {
-	if n == nil || n.resolver == nil {
-		return 0, errors.New("no node dialer configured")
-	}
-	addr, err := n.resolver(nodeID)
+type dialerAdapter Dialer
+
+func (da *dialerAdapter) Ready(nodeID roachpb.NodeID) bool {
+	return (*Dialer)(da).GetCircuitBreaker(nodeID, rpc.DefaultClass).Ready()
+}
+
+func (da *dialerAdapter) Dial(ctx context.Context, nodeID roachpb.NodeID) (ctpb.Client, error) {
+	c, err := (*Dialer)(da).Dial(ctx, nodeID, rpc.DefaultClass)
 	if err != nil {
-		// Don't trip the breaker.
-		return 0, err
+		return nil, err
 	}
-	latency, ok := n.rpcContext.RemoteClocks.Latency(addr.String())
-	if !ok {
-		latency = 0
-	}
-	return latency, nil
+	return ctpb.NewClosedTimestampClient(c).Get(ctx)
+}
+
+var _ closedts.Dialer = (*Dialer)(nil).CTDialer()
+
+// CTDialer wraps the NodeDialer into a closedts.Dialer.
+func (n *Dialer) CTDialer() closedts.Dialer {
+	return (*dialerAdapter)(n)
 }

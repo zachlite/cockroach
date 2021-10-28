@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -487,7 +486,7 @@ func (tc *TxnCoordSender) Send(
 		log.Fatalf(ctx, "cannot send transactional request through unbound TxnCoordSender")
 	}
 	if sp.IsVerbose() {
-		sp.SetTag("txnID", attribute.StringValue(tc.mu.txn.ID.String()))
+		sp.SetBaggageItem("txnID", tc.mu.txn.ID.String())
 		ctx = logtags.AddTag(ctx, "txn", uuid.ShortStringer(tc.mu.txn.ID))
 		if log.V(2) {
 			ctx = logtags.AddTag(ctx, "ts", tc.mu.txn.WriteTimestamp)
@@ -670,11 +669,7 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 			"Trying to execute: %s", ba.Summary())
 		stack := string(debug.Stack())
 		log.Errorf(ctx, "%s. stack:\n%s", msg, stack)
-		reason := roachpb.TransactionStatusError_REASON_UNKNOWN
-		if tc.mu.txn.Status == roachpb.COMMITTED {
-			reason = roachpb.TransactionStatusError_REASON_TXN_COMMITTED
-		}
-		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(reason, msg), &tc.mu.txn)
+		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(msg), &tc.mu.txn)
 	}
 
 	// Check the transaction proto state, along with any finalized transaction
@@ -1091,8 +1086,6 @@ func (tc *TxnCoordSender) IsSerializablePushAndRefreshNotPossible() bool {
 
 // Epoch is part of the client.TxnSender interface.
 func (tc *TxnCoordSender) Epoch() enginepb.TxnEpoch {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
 	return tc.mu.txn.Epoch
 }
 

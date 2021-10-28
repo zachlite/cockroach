@@ -42,6 +42,10 @@ func wrapCommonSetup(setupFn Setup) Setup {
 	return func(r *rand.Rand) string {
 		s := setupFn(r)
 		var sb strings.Builder
+		sb.WriteString(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
+`)
 		sb.WriteString(s)
 		return sb.String()
 	}
@@ -80,6 +84,7 @@ func randTablesN(r *rand.Rand, n int) string {
 	sb.WriteString(`
 		SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false;
 		SET CLUSTER SETTING sql.stats.histogram_collection.enabled = false;
+		SET CLUSTER SETTING sql.defaults.interleaved_tables.enabled = true;
 	`)
 
 	// Create the random tables.

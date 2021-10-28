@@ -84,9 +84,6 @@ func (b *Builder) buildUpdate(upd *tree.Update, inScope *scope) (outScope *scope
 	// Check Select permission as well, since existing values must be read.
 	b.checkPrivilege(depName, tab, privilege.SELECT)
 
-	// Check if this table has already been mutated in another subquery.
-	b.checkMultipleMutations(tab, false /* simpleInsert */)
-
 	var mb mutationBuilder
 	mb.init(b, "update", tab, alias)
 
@@ -233,7 +230,6 @@ func (mb *mutationBuilder) addUpdateCols(exprs tree.UpdateExprs) {
 		}
 
 		// Add new column to the projections scope.
-		// TODO(mgartner): Perform an assignment cast if necessary.
 		targetColMeta := mb.md.ColumnMeta(targetColID)
 		desiredType := targetColMeta.Type
 		texpr := inScope.resolveType(expr, desiredType)

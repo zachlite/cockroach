@@ -149,7 +149,7 @@ func generateScanSpans(
 ) (roachpb.Spans, error) {
 	sb := span.MakeBuilder(evalCtx, codec, tabDesc, index)
 	if params.InvertedConstraint != nil {
-		return sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint, nil /* scratch */)
+		return sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint)
 	}
 	return sb.SpansFromConstraint(params.IndexConstraint, params.NeededCols, false /* forDelete */)
 }
@@ -985,18 +985,6 @@ func (ef *execFactory) ConstructLimit(
 	}, nil
 }
 
-// ConstructTopK is part of the execFactory interface.
-func (ef *execFactory) ConstructTopK(
-	input exec.Node, k int64, ordering exec.OutputOrdering, alreadyOrderedPrefix int,
-) (exec.Node, error) {
-	return &topKNode{
-		plan:                 input.(planNode),
-		k:                    k,
-		ordering:             colinfo.ColumnOrdering(ordering),
-		alreadyOrderedPrefix: alreadyOrderedPrefix,
-	}, nil
-}
-
 // ConstructMax1Row is part of the exec.Factory interface.
 func (ef *execFactory) ConstructMax1Row(input exec.Node, errorText string) (exec.Node, error) {
 	plan := input.(planNode)
@@ -1029,13 +1017,12 @@ func (ef *execFactory) ConstructScanBuffer(ref exec.Node, label string) (exec.No
 
 // ConstructRecursiveCTE is part of the exec.Factory interface.
 func (ef *execFactory) ConstructRecursiveCTE(
-	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string, deduplicate bool,
+	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string,
 ) (exec.Node, error) {
 	return &recursiveCTENode{
 		initial:        initial.(planNode),
 		genIterationFn: fn,
 		label:          label,
-		deduplicate:    deduplicate,
 	}, nil
 }
 
@@ -1104,17 +1091,13 @@ func (ef *execFactory) ConstructWindow(root exec.Node, wi exec.WindowInfo) (exec
 
 // ConstructPlan is part of the exec.Factory interface.
 func (ef *execFactory) ConstructPlan(
-	root exec.Node,
-	subqueries []exec.Subquery,
-	cascades []exec.Cascade,
-	checks []exec.Node,
-	rootRowCount int64,
+	root exec.Node, subqueries []exec.Subquery, cascades []exec.Cascade, checks []exec.Node,
 ) (exec.Plan, error) {
 	// No need to spool at the root.
 	if spool, ok := root.(*spoolNode); ok {
 		root = spool.source
 	}
-	return constructPlan(ef.planner, root, subqueries, cascades, checks, rootRowCount)
+	return constructPlan(ef.planner, root, subqueries, cascades, checks)
 }
 
 // urlOutputter handles writing strings into an encoded URL for EXPLAIN (OPT,
@@ -1728,6 +1711,7 @@ func (ef *execFactory) ConstructDeleteRange(
 	table cat.Table,
 	needed exec.TableColumnOrdinalSet,
 	indexConstraint *constraint.Constraint,
+	interleavedTables []cat.Table,
 	autoCommit bool,
 ) (exec.Node, error) {
 	tabDesc := table.(*optTable).desc
@@ -1745,11 +1729,19 @@ func (ef *execFactory) ConstructDeleteRange(
 	}
 
 	dr := &deleteRangeNode{
-		spans:             spans,
-		desc:              tabDesc,
-		autoCommitEnabled: autoCommit,
+		interleavedFastPath: false,
+		spans:               spans,
+		desc:                tabDesc,
+		autoCommitEnabled:   autoCommit,
 	}
 
+	if len(interleavedTables) > 0 {
+		dr.interleavedFastPath = true
+		dr.interleavedDesc = make([]catalog.TableDescriptor, len(interleavedTables))
+		for i := range dr.interleavedDesc {
+			dr.interleavedDesc[i] = interleavedTables[i].(*optTable).desc
+		}
+	}
 	return dr, nil
 }
 
@@ -2052,10 +2044,11 @@ func (ef *execFactory) ConstructExplain(
 		return nil, errors.New("ENV only supported with (OPT) option")
 	}
 
-	plan, err := buildFn(&execFactory{
+	explainFactory := explain.NewFactory(&execFactory{
 		planner:   ef.planner,
 		isExplain: true,
 	})
+	plan, err := buildFn(explainFactory)
 	if err != nil {
 		return nil, err
 	}

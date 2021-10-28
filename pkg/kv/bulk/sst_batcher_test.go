@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -42,7 +43,7 @@ import (
 func makeIntTableKVs(numKeys, valueSize, maxRevisions int) []storage.MVCCKeyValue {
 	prefix := keys.SystemSQLCodec.IndexPrefix(100, 1)
 	kvs := make([]storage.MVCCKeyValue, numKeys)
-	r, _ := randutil.NewTestRand()
+	r, _ := randutil.NewPseudoRand()
 
 	var k int
 	for i := 0; i < numKeys; {
@@ -162,8 +163,7 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 			// splits to exercise that codepath, but we also want to make sure we
 			// still handle an unexpected split, so we make our own range cache and
 			// only populate it with one of our two splits.
-			mockCache := rangecache.NewRangeCache(s.ClusterSettings(), nil,
-				func() int64 { return 2 << 10 }, s.Stopper(), s.TracerI().(*tracing.Tracer))
+			mockCache := rangecache.NewRangeCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper())
 			addr, err := keys.Addr(key(0))
 			if err != nil {
 				t.Fatal(err)
@@ -196,7 +196,7 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 			// However we log an event when forced to retry (in case we need to debug)
 			// slow requests or something, so we can inspect the trace in the test to
 			// determine if requests required the expected number of retries.
-			tr := s.TracerI().(*tracing.Tracer)
+			tr := s.Tracer().(*tracing.Tracer)
 			addCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "add")
 			defer cancel()
 			expectedSplitRetries := 0
@@ -224,8 +224,14 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 				}
 			}
 			var splitRetries int
-			for _, sp := range getRec() {
-				splitRetries += tracing.CountLogMessages(sp, "SSTable cannot be added spanning range bounds")
+			for _, rec := range getRec() {
+				for _, l := range rec.Logs {
+					for _, line := range l.Fields {
+						if strings.Contains(line.Value, "SSTable cannot be added spanning range bounds") {
+							splitRetries++
+						}
+					}
+				}
 			}
 			if splitRetries != expectedSplitRetries {
 				t.Fatalf("expected %d split-caused retries, got %d", expectedSplitRetries, splitRetries)

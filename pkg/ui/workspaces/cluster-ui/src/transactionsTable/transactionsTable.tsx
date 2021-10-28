@@ -20,7 +20,6 @@ import {
   transactionsCountBarChart,
   transactionsRowsReadBarChart,
   transactionsBytesReadBarChart,
-  transactionsRowsWrittenBarChart,
   transactionsLatencyBarChart,
   transactionsContentionBarChart,
   transactionsMaxMemUsageBarChart,
@@ -28,23 +27,17 @@ import {
   transactionsRetryBarChart,
 } from "./transactionsBarCharts";
 import {
-  formatAggregationIntervalColumn,
+  formatStartIntervalColumn,
   statisticsTableTitles,
 } from "../statsTableUtil/statsTableUtil";
 import { tableClasses } from "./transactionsTableClasses";
 import { textCell } from "./transactionsCells";
-import {
-  FixLong,
-  longToInt,
-  TimestampToNumber,
-  DurationToNumber,
-} from "src/util";
+import { FixLong, longToInt, TimestampToNumber } from "src/util";
 import { SortSetting } from "../sortedtable";
 import {
   getStatementsByFingerprintIdAndTime,
   collectStatementsText,
   statementFingerprintIdsToText,
-  statementFingerprintIdsToSummarizedText,
 } from "../transactionsPage/utils";
 import classNames from "classnames/bind";
 import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
@@ -98,10 +91,6 @@ export function makeTransactionsColumns(
     transactions,
     defaultBarChartOptions,
   );
-  const rowsWrittenBar = transactionsRowsWrittenBarChart(
-    transactions,
-    defaultBarChartOptions,
-  );
   const latencyBar = transactionsLatencyBarChart(
     transactions,
     latencyClasses.barChart,
@@ -131,10 +120,6 @@ export function makeTransactionsColumns(
             item.stats_data.statement_fingerprint_ids,
             statements,
           ),
-          transactionSummary: statementFingerprintIdsToSummarizedText(
-            item.stats_data.statement_fingerprint_ids,
-            statements,
-          ),
           onClick: () => handleDetails(item),
           search,
         }),
@@ -149,12 +134,11 @@ export function makeTransactionsColumns(
       alwaysShow: true,
     },
     {
-      name: "aggregationInterval",
-      title: statisticsTableTitles.aggregationInterval("transaction"),
+      name: "intervalStartTime",
+      title: statisticsTableTitles.intervalStartTime("transaction"),
       cell: (item: TransactionInfo) =>
-        formatAggregationIntervalColumn(
+        formatStartIntervalColumn(
           TimestampToNumber(item.stats_data?.aggregated_ts),
-          DurationToNumber(item.stats_data?.aggregation_interval),
         ),
       sort: (item: TransactionInfo) =>
         TimestampToNumber(item.stats_data?.aggregated_ts),
@@ -181,15 +165,6 @@ export function makeTransactionsColumns(
       className: cx("statements-table__col-bytes-read"),
       sort: (item: TransactionInfo) =>
         FixLong(Number(item.stats_data.stats.bytes_read.mean)),
-    },
-    {
-      name: "rowsWritten",
-      title: statisticsTableTitles.rowsWritten(statType),
-      cell: rowsWrittenBar,
-      className: cx("statements-table__col-rows-written"),
-      sort: (item: TransactionInfo) =>
-        FixLong(Number(item.stats_data.stats.rows_written?.mean)),
-      showByDefault: false,
     },
     {
       name: "time",

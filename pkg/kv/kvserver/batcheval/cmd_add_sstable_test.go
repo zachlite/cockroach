@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -36,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"github.com/stretchr/testify/require"
 )
 
 var engineImpls = []struct {
@@ -63,12 +61,11 @@ func TestDBAddSSTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	t.Run("store=in-memory", func(t *testing.T) {
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
-		s := si.(*server.TestServer)
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 
-		tr := s.Tracer()
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, nil)
 	})
 	t.Run("store=on-disk", func(t *testing.T) {
@@ -78,11 +75,10 @@ func TestDBAddSSTable(t *testing.T) {
 		storeSpec := base.DefaultTestStoreSpec
 		storeSpec.InMemory = false
 		storeSpec.Path = dir
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{
 			Insecure:   true,
 			StoreSpecs: []base.StoreSpec{storeSpec},
 		})
-		s := si.(*server.TestServer)
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 		store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
@@ -90,7 +86,7 @@ func TestDBAddSSTable(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		tr := s.TracerI().(*tracing.Tracer)
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, store)
 	})
 }
@@ -1056,80 +1052,4 @@ func TestAddSSTableDisallowShadowing(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAddSSTableDisallowShadowingIntentResolution(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, _, db := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-
-	// Start a transaction that writes an intent at b.
-	txn := db.NewTxn(ctx, "intent")
-	require.NoError(t, txn.Put(ctx, "b", "intent"))
-
-	// Generate an SSTable that covers keys a, b, and c, and submit it with high
-	// priority. This is going to abort the transaction above, encounter its
-	// intent, and resolve it.
-	sst := makeSST(t, s.Clock().Now(), map[string]string{
-		"a": "1",
-		"b": "2",
-		"c": "3",
-	})
-	stats := sstStats(t, sst)
-
-	ba := roachpb.BatchRequest{}
-	ba.Header.UserPriority = roachpb.MaxUserPriority
-	ba.Add(&roachpb.AddSSTableRequest{
-		RequestHeader:     roachpb.RequestHeader{Key: roachpb.Key("a"), EndKey: roachpb.Key("d")},
-		Data:              sst,
-		MVCCStats:         stats,
-		DisallowShadowing: true,
-	})
-	_, pErr := db.NonTransactionalSender().Send(ctx, ba)
-	require.Nil(t, pErr)
-
-	// The transaction should now be aborted.
-	err := txn.Commit(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "TransactionRetryWithProtoRefreshError: TransactionAbortedError")
-}
-
-func makeSST(t *testing.T, ts hlc.Timestamp, kvs map[string]string) []byte {
-	t.Helper()
-
-	sstFile := &storage.MemFile{}
-	writer := storage.MakeBackupSSTWriter(sstFile)
-	defer writer.Close()
-
-	keys := make([]string, 0, len(kvs))
-	for key := range kvs {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		key := storage.MVCCKey{Key: roachpb.Key(k), Timestamp: ts}
-		value := roachpb.Value{}
-		value.SetString(kvs[k])
-		value.InitChecksum(key.Key)
-		require.NoError(t, writer.Put(key, value.RawBytes))
-	}
-	require.NoError(t, writer.Finish())
-	writer.Close()
-	return sstFile.Data()
-}
-
-func sstStats(t *testing.T, sst []byte) *enginepb.MVCCStats {
-	t.Helper()
-
-	iter, err := storage.NewMemSSTIterator(sst, true)
-	require.NoError(t, err)
-	defer iter.Close()
-
-	stats, err := storage.ComputeStatsForRange(iter, keys.MinKey, keys.MaxKey, 0)
-	require.NoError(t, err)
-	return &stats
 }

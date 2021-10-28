@@ -13,6 +13,7 @@ package tree
 import (
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
@@ -72,7 +73,6 @@ func (*AlterTableRenameColumn) alterTableCmd()       {}
 func (*AlterTableRenameConstraint) alterTableCmd()   {}
 func (*AlterTableSetAudit) alterTableCmd()           {}
 func (*AlterTableSetDefault) alterTableCmd()         {}
-func (*AlterTableSetOnUpdate) alterTableCmd()        {}
 func (*AlterTableSetVisible) alterTableCmd()         {}
 func (*AlterTableValidateConstraint) alterTableCmd() {}
 func (*AlterTablePartitionByTable) alterTableCmd()   {}
@@ -90,7 +90,6 @@ var _ AlterTableCmd = &AlterTableRenameColumn{}
 var _ AlterTableCmd = &AlterTableRenameConstraint{}
 var _ AlterTableCmd = &AlterTableSetAudit{}
 var _ AlterTableCmd = &AlterTableSetDefault{}
-var _ AlterTableCmd = &AlterTableSetOnUpdate{}
 var _ AlterTableCmd = &AlterTableSetVisible{}
 var _ AlterTableCmd = &AlterTableValidateConstraint{}
 var _ AlterTableCmd = &AlterTablePartitionByTable{}
@@ -410,35 +409,6 @@ func (node *AlterTableSetDefault) Format(ctx *FmtCtx) {
 	}
 }
 
-// AlterTableSetOnUpdate represents an ALTER COLUMN ON UPDATE SET
-// or DROP ON UPDATE command.
-type AlterTableSetOnUpdate struct {
-	Column Name
-	Expr   Expr
-}
-
-// GetColumn implements the ColumnMutationCmd interface.
-func (node *AlterTableSetOnUpdate) GetColumn() Name {
-	return node.Column
-}
-
-// TelemetryCounter implements the AlterTableCmd interface.
-func (node *AlterTableSetOnUpdate) TelemetryCounter() telemetry.Counter {
-	return sqltelemetry.SchemaChangeAlterCounterWithExtra("table", "set_on_update")
-}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterTableSetOnUpdate) Format(ctx *FmtCtx) {
-	ctx.WriteString(" ALTER COLUMN ")
-	ctx.FormatNode(&node.Column)
-	if node.Expr == nil {
-		ctx.WriteString(" DROP ON UPDATE")
-	} else {
-		ctx.WriteString(" SET ON UPDATE ")
-		ctx.FormatNode(node.Expr)
-	}
-}
-
 // AlterTableSetVisible represents an ALTER COLUMN SET VISIBLE or NOT VISIBLE command.
 type AlterTableSetVisible struct {
 	Column  Name
@@ -669,8 +639,10 @@ func (node *AlterTableSetSchema) TelemetryCounter() telemetry.Counter {
 
 // AlterTableOwner represents an ALTER TABLE OWNER TO command.
 type AlterTableOwner struct {
-	Name           *UnresolvedObjectName
-	Owner          RoleSpec
+	Name *UnresolvedObjectName
+	// TODO(solon): Adjust this, see
+	// https://github.com/cockroachdb/cockroach/issues/54696
+	Owner          security.SQLUsername
 	IfExists       bool
 	IsView         bool
 	IsMaterialized bool
@@ -704,7 +676,7 @@ func (node *AlterTableOwner) Format(ctx *FmtCtx) {
 	}
 	ctx.FormatNode(node.Name)
 	ctx.WriteString(" OWNER TO ")
-	ctx.FormatNode(&node.Owner)
+	ctx.FormatUsername(node.Owner)
 }
 
 // GetTableType returns a string representing the type of table the command

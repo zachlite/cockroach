@@ -214,7 +214,7 @@ func (p *Provider) Delete(vms vm.List) error {
 		if err != nil {
 			return err
 		}
-		future, err := client.Delete(ctx, parts.resourceGroup, parts.resourceName, nil)
+		future, err := client.Delete(ctx, parts.resourceGroup, parts.resourceName)
 		if err != nil {
 			return errors.Wrapf(err, "could not delete %s", vm.ProviderID)
 		}
@@ -385,7 +385,7 @@ func (p *Provider) List() (vm.List, error) {
 		return nil, err
 	}
 
-	it, err := client.ListAllComplete(ctx, "false")
+	it, err := client.ListAllComplete(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -498,11 +498,6 @@ func (p *Provider) createVM(
 	tags[tagLifetime] = to.StringPtr(opts.Lifetime.String())
 	tags[tagRoachprod] = to.StringPtr("true")
 
-	osVolumeSize := int32(opts.OsVolumeSize)
-	if osVolumeSize < 32 {
-		log.Print("WARNING: increasing the OS volume size to minimally allowed 32GB")
-		osVolumeSize = 32
-	}
 	// Derived from
 	// https://github.com/Azure-Samples/azure-sdk-for-go-samples/blob/79e3f3af791c3873d810efe094f9d61e93a6ccaa/compute/vm.go#L41
 	vm = compute.VirtualMachine{
@@ -514,24 +509,17 @@ func (p *Provider) createVM(
 				VMSize: compute.VirtualMachineSizeTypes(p.opts.machineType),
 			},
 			StorageProfile: &compute.StorageProfile{
-				// From https://discourse.ubuntu.com/t/find-ubuntu-images-on-microsoft-azure/18918
-				// You can find available versions by running the following command:
-				// az vm image list --all --publisher Canonical
-				// To get the latest 20.04 version:
-				// az vm image list --all --publisher Canonical | \
-				// jq '[.[] | select(.sku=="20_04-lts")] | max_by(.version)'
 				ImageReference: &compute.ImageReference{
 					Publisher: to.StringPtr("Canonical"),
-					Offer:     to.StringPtr("0001-com-ubuntu-server-focal"),
-					Sku:       to.StringPtr("20_04-lts"),
-					Version:   to.StringPtr("20.04.202109080"),
+					Offer:     to.StringPtr("UbuntuServer"),
+					Sku:       to.StringPtr("18.04-LTS"),
+					Version:   to.StringPtr("latest"),
 				},
 				OsDisk: &compute.OSDisk{
 					CreateOption: compute.DiskCreateOptionTypesFromImage,
 					ManagedDisk: &compute.ManagedDiskParameters{
 						StorageAccountType: compute.StorageAccountTypesStandardSSDLRS,
 					},
-					DiskSizeGB: to.Int32Ptr(osVolumeSize),
 				},
 			},
 			OsProfile: &compute.OSProfile{
@@ -653,7 +641,7 @@ func (p *Provider) createNIC(
 					Name: to.StringPtr("ipConfig"),
 					InterfaceIPConfigurationPropertiesFormat: &network.InterfaceIPConfigurationPropertiesFormat{
 						Subnet:                    &subnet,
-						PrivateIPAllocationMethod: network.IPAllocationMethodDynamic,
+						PrivateIPAllocationMethod: network.Dynamic,
 						PublicIPAddress:           &ip,
 					},
 				},
@@ -1052,7 +1040,7 @@ func (p *Provider) createVNetPeerings(ctx context.Context, vnets []network.Virtu
 				return err
 			}
 
-			future, err := client.CreateOrUpdate(ctx, outerParts.resourceGroup, *outer.Name, linkName, peering, network.SyncRemoteAddressSpaceTrue)
+			future, err := client.CreateOrUpdate(ctx, outerParts.resourceGroup, *outer.Name, linkName, peering)
 			if err != nil {
 				return errors.Wrapf(err, "creating vnet peering %s", linkName)
 			}
@@ -1095,8 +1083,8 @@ func (p *Provider) createIP(
 			Location: group.Location,
 			Zones:    to.StringSlicePtr([]string{p.opts.zone}),
 			PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
-				PublicIPAddressVersion:   network.IPVersionIPv4,
-				PublicIPAllocationMethod: network.IPAllocationMethodStatic,
+				PublicIPAddressVersion:   network.IPv4,
+				PublicIPAllocationMethod: network.Static,
 			},
 		})
 	if err != nil {
@@ -1241,11 +1229,11 @@ func (p *Provider) createUltraDisk(
 			Zones:    to.StringSlicePtr([]string{p.opts.zone}),
 			Location: group.Location,
 			Sku: &compute.DiskSku{
-				Name: compute.DiskStorageAccountTypesUltraSSDLRS,
+				Name: compute.UltraSSDLRS,
 			},
 			DiskProperties: &compute.DiskProperties{
 				CreationData: &compute.CreationData{
-					CreateOption: compute.DiskCreateOptionEmpty,
+					CreateOption: compute.Empty,
 				},
 				DiskSizeGB:        to.Int32Ptr(p.opts.networkDiskSize),
 				DiskIOPSReadWrite: to.Int64Ptr(p.opts.ultraDiskIOPS),

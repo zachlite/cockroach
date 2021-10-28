@@ -11,20 +11,41 @@
 package scplan
 
 import (
+	"reflect"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/deprules"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
+)
+
+// A Phase represents the context in which an op is executed within a schema
+// change. Different phases require different dependencies for the execution of
+// the ops to be plumbed in.
+//
+// Today, we support the phases corresponding to async schema changes initiated
+// and partially executed in the user transaction. This will change as we
+// transition to transactional schema changes.
+type Phase int
+
+const (
+	// StatementPhase refers to execution of ops occurring during statement
+	// execution during the user transaction.
+	StatementPhase Phase = iota
+	// PreCommitPhase refers to execution of ops occurring during the user
+	// transaction immediately before commit.
+	PreCommitPhase
+	// PostCommitPhase refers to execution of ops occurring after the user
+	// transaction has committed (i.e., in the async schema change job).
+	PostCommitPhase
 )
 
 // Params holds the arguments for planning.
 type Params struct {
 	// ExecutionPhase indicates the phase that the plan should be constructed for.
-	ExecutionPhase scop.Phase
+	ExecutionPhase Phase
 	// CreatedDescriptorIDs contains IDs for new descriptors created by the same
 	// schema changer (i.e., earlier in the same transaction). New descriptors
 	// can have most of their schema changes fully executed in the same
@@ -37,27 +58,26 @@ type Params struct {
 // A Plan is a schema change plan, primarily containing ops to be executed that
 // are partitioned into stages.
 type Plan struct {
-	Params  Params
-	Initial scpb.State
-	Graph   *scgraph.Graph
-	Stages  []Stage
+	Params       Params
+	InitialNodes []*scpb.Node
+	Graph        *scgraph.Graph
+	Stages       []Stage
 }
 
 // A Stage is a sequence of ops to be executed "together" as part of a schema
 // change.
 //
-// Stages also contain the state before and after the execution of the ops in
-// the stage, reflecting the fact that any set of ops can be thought of as a
-// transition from one state to another.
+// Stages also contain their corresponding targets and states before and after
+// the execution of the ops in the stage, reflecting the fact that any set of
+// ops can be thought of as a transition from a set of target states to another.
 type Stage struct {
-	Before, After scpb.State
+	Before, After []*scpb.Node
 	Ops           scop.Ops
-	Revertible    bool
 }
 
 // MakePlan generates a Plan for a particular phase of a schema change, given
-// the initial state for a set of targets.
-func MakePlan(initial scpb.State, params Params) (_ Plan, err error) {
+// the initial states for a set of targets.
+func MakePlan(initialStates []*scpb.Node, params Params) (_ Plan, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			rAsErr, ok := r.(error)
@@ -68,40 +88,36 @@ func MakePlan(initial scpb.State, params Params) (_ Plan, err error) {
 		}
 	}()
 
-	g, err := opgen.BuildGraph(params.ExecutionPhase, initial)
+	g, err := scgraph.New(initialStates)
 	if err != nil {
 		return Plan{}, err
 	}
-	if err := deprules.Apply(g); err != nil {
+	// TODO(ajwerner): Generate the stages for all of the phases as it will make
+	// debugging easier.
+	for _, ts := range initialStates {
+		p[reflect.TypeOf(ts.Element())].ops(g, ts.Target, ts.State, params)
+	}
+	if err := g.ForEachNode(func(n *scpb.Node) error {
+		d, ok := p[reflect.TypeOf(n.Element())]
+		if !ok {
+			return errors.Errorf("not implemented for %T", n.Target)
+		}
+		d.deps(g, n.Target, n.State)
+		return nil
+	}); err != nil {
 		return Plan{}, err
 	}
-
-	stages := buildStages(initial, g, params)
+	stages := buildStages(initialStates, g)
 	return Plan{
-		Params:  params,
-		Initial: initial,
-		Graph:   g,
-		Stages:  stages,
+		Params:       params,
+		InitialNodes: initialStates,
+		Graph:        g,
+		Stages:       stages,
 	}, nil
 }
 
-// validateStages sanity checks stages to ensure no
-// invalid execution plans are made.
-func validateStages(stages []Stage) {
-	revertibleAllowed := true
-	for idx, stage := range stages {
-		if !stage.Revertible {
-			revertibleAllowed = false
-		}
-		if stage.Revertible && !revertibleAllowed {
-			panic(errors.AssertionFailedf(
-				"invalid execution plan revertability flipped at stage (%d): %v", idx, stage))
-		}
-	}
-}
-
-func buildStages(init scpb.State, g *scgraph.Graph, params Params) []Stage {
-	// TODO(ajwerner): deal with the case where the target status was
+func buildStages(init []*scpb.Node, g *scgraph.Graph) []Stage {
+	// TODO(ajwerner): deal with the case where the target state was
 	// fulfilled by something that preceded the initial state.
 	cur := init
 	fulfilled := map[*scpb.Node]struct{}{}
@@ -152,30 +168,20 @@ func buildStages(init scpb.State, g *scgraph.Graph, params Params) []Stage {
 			return Stage{}, false
 		}
 		next := append(cur[:0:0], cur...)
-		isStageRevertible := true
 		var ops []scop.Op
-		for revertible := 1; revertible >= 0; revertible-- {
-			isStageRevertible = revertible == 1
-			for i, ts := range cur {
-				for _, e := range edges {
-					if e.From() == ts && isStageRevertible == e.Revertible() {
-						next[i] = e.To()
-						ops = append(ops, e.Op()...)
-						break
-					}
+		for i, ts := range cur {
+			for _, e := range edges {
+				if e.From() == ts {
+					next[i] = e.To()
+					ops = append(ops, e.Op())
+					break
 				}
-			}
-			// If we added non-revertible stages
-			// then this stage is done
-			if len(ops) != 0 {
-				break
 			}
 		}
 		return Stage{
-			Before:     cur,
-			After:      next,
-			Ops:        scop.MakeOps(ops...),
-			Revertible: isStageRevertible,
+			Before: cur,
+			After:  next,
+			Ops:    scop.MakeOps(ops...),
 		}, true
 	}
 
@@ -201,9 +207,7 @@ func buildStages(init scpb.State, g *scgraph.Graph, params Params) []Stage {
 		// Group the op edges a per-type basis.
 		opTypes := make(map[scop.Type][]*scgraph.OpEdge)
 		for _, oe := range opEdges {
-			for _, op := range oe.Op() {
-				opTypes[op.Type()] = append(opTypes[op.Type()], oe)
-			}
+			opTypes[oe.Op().Type()] = append(opTypes[oe.Op().Type()], oe)
 		}
 
 		// Greedily attempt to find a stage which can be executed. This is sane
@@ -222,133 +226,8 @@ func buildStages(init scpb.State, g *scgraph.Graph, params Params) []Stage {
 		if !didSomething {
 			break
 		}
-		// Sort ops based on graph dependencies.
-		sortOps(g, s.Ops.Slice())
 		stages = append(stages, s)
 		cur = s.After
 	}
-	validateStages(stages)
 	return stages
-}
-
-// Check if some route exists from curr to the
-// target node
-func doesPathExistToNode(graph *scgraph.Graph, start *scpb.Node, target *scpb.Node) bool {
-	nodesToVisit := []*scpb.Node{start}
-	visitedNodes := map[*scpb.Node]struct{}{}
-	for len(nodesToVisit) > 0 {
-		curr := nodesToVisit[0]
-		if curr == target {
-			return true
-		}
-		nodesToVisit = nodesToVisit[1:]
-		if _, ok := visitedNodes[curr]; !ok {
-			visitedNodes[curr] = struct{}{}
-			edges, ok := graph.GetDepEdgesFrom(curr)
-			if !ok {
-				return false
-			}
-			// Append all of the nodes to visit
-			for _, currEdge := range edges {
-				nodesToVisit = append(nodesToVisit, currEdge.To())
-			}
-		}
-	}
-	return false
-}
-
-// sortOps sorts the operations into order based on
-// graph dependencies
-func sortOps(graph *scgraph.Graph, ops []scop.Op) {
-	// Original implicit order of the ops will
-	// be kept to keep ordering of equal values.
-	implicitOrder := make([]int, 0, len(ops))
-	for i := range ops {
-		implicitOrder = append(implicitOrder, i)
-	}
-	// Unfortunately, we are forced to do an inefficient
-	// bubble sort, since with unrelated dependencies will
-	// be equal to each other. But, still have a relative order
-	// across the entire set of nodes.
-	for i := 0; i < len(ops); i++ {
-		for j := i + 1; j < len(ops); j++ {
-			if i == j {
-				continue
-			}
-			if !compareOps(graph, ops[i], ops[j], implicitOrder[i], implicitOrder[j]) &&
-				compareOps(graph, ops[j], ops[i], implicitOrder[j], implicitOrder[i]) {
-				tmpOrder := implicitOrder[i]
-				tmp := ops[i]
-				ops[i] = ops[j]
-				ops[j] = tmp
-				implicitOrder[i] = implicitOrder[j]
-				implicitOrder[j] = tmpOrder
-			}
-		}
-	}
-	// Sanity: Graph order is sane across all the ops.
-	for i := 0; i < len(ops); i++ {
-		for j := i + 1; j < len(ops); j++ {
-			// Validate that the list is sorted by checking
-			// 1) i is always less than j.
-			//   1a) If it is not less than its equal based on the opposite comparison.
-			// 2) j should always be greater or equal to i, so our comparison
-			//    should never be true.
-			// Note: We will intentionally ignore the implicit order for the
-			// validation phase because we will have non-comparable items.
-			if !compareOps(graph, ops[i], ops[j], 1, 0) &&
-				compareOps(graph, ops[j], ops[i], 1, 0) {
-				panic(errors.AssertionFailedf("Operators are not completely sorted %d %d, "+
-					"not strictly increasing", i, j))
-			} else if compareOps(graph, ops[j], ops[i], 1, 0) {
-				panic(errors.AssertionFailedf("Operators are not completely sorted %d %d", i, j))
-			}
-		}
-	}
-}
-
-// compareOps compares operations and orders them based on
-// followed by the graph dependencies.
-func compareOps(
-	graph *scgraph.Graph, firstOp,
-	secondOp scop.Op, firstImplicitOrder, secondImplicitOrder int,
-) (less bool) {
-	// Otherwise, lets compare attributes
-	firstNode := graph.GetNodeFromOp(firstOp)
-	secondNode := graph.GetNodeFromOp(secondOp)
-	if firstNode == secondNode {
-		// Equal, only implicit order determines which is first.
-		return firstImplicitOrder < secondImplicitOrder
-	}
-	firstExists := doesPathExistToNode(graph, firstNode, secondNode)
-	secondExists := doesPathExistToNode(graph, secondNode, firstNode)
-
-	// If both paths exist, then we care about the direction of nodes,
-	// otherwise we have a cycle, and we can't sort.
-	if firstExists && secondExists {
-		if firstNode.Target.Direction == scpb.Target_DROP {
-			return false
-		} else if secondNode.Target.Direction == scpb.Target_DROP {
-			return true
-		} else {
-			panic(errors.AssertionFailedf("A potential cycle exists in plan the graph, without any"+
-				"nodes transitioning in opposite directions\n %s\n%s\n",
-				firstNode,
-				secondNode))
-		}
-	}
-	// If a path exists from first to second, then the first node depends
-	// on the second.
-	if firstExists {
-		return false
-	}
-	// If a path exists to the second to the first node, then
-	// the second node depends on the first.
-	if secondExists {
-		return true
-	}
-
-	// Otherwise, no paths exists and the two are equal.
-	// Only the implicit order determines the first one.
-	return firstImplicitOrder < secondImplicitOrder
 }

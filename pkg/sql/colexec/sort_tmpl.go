@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for sort.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -29,9 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
@@ -40,7 +36,7 @@ import (
 // Workaround for bazel auto-generated code. goimports does not automatically
 // pick up the right packages when run within the bazel sandbox.
 var (
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ tree.AggType
 )
 
@@ -135,47 +131,24 @@ func newSingleSorter(
 // {{range .WidthOverloads}}
 
 type sort_TYPE_DIR_HANDLES_NULLSOp struct {
-	sortCol _GOTYPESLICE
-	// {{if .CanAbbreviate}}
-	allocator          *colmem.Allocator
-	abbreviatedSortCol []uint64
-	// {{end}}
+	sortCol       _GOTYPESLICE
 	nulls         *coldata.Nulls
 	order         []int
 	cancelChecker colexecutils.CancelChecker
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.TemplateType()
-	// {{if .CanAbbreviate}}
-	s.allocator = allocator
-	s.allocator.AdjustMemoryUsage(memsize.Uint64 * int64(s.sortCol.Len()))
-	s.abbreviatedSortCol = s.sortCol.Abbreviated()
-	// {{end}}
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) reset() {
-	// {{if .CanAbbreviate}}
-	s.allocator.AdjustMemoryUsage(0 - memsize.Uint64*int64(s.sortCol.Len()))
-	s.allocator = nil
-	s.abbreviatedSortCol = nil
-	// {{end}}
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort() {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
+func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -189,19 +162,10 @@ func (s *sort_TYPE_DIR_HANDLES_NULLSOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-// {{/*
-// TODO(yuzefovich): think through how we can inline more implementations of
-// Less method - this has non-trivial performance improvements.
-// */}}
-// {{$isInt := or (eq .VecMethod "Int16") (eq .VecMethod "Int32")}}
-// {{$isInt = or ($isInt) (eq .VecMethod "Int64")}}
-// {{if and ($isInt) (not $nulls)}}
-//gcassert:inline
-// {{end}}
 func (s *sort_TYPE_DIR_HANDLES_NULLSOp) Less(i, j int) bool {
 	// {{if $nulls}}
 	n1 := s.nulls.MaybeHasNulls() && s.nulls.NullAt(s.order[i])
@@ -215,7 +179,7 @@ func (s *sort_TYPE_DIR_HANDLES_NULLSOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-	// {{else}}
+	// {{else if eq $dir "Desc"}}
 	// If descending, nulls always sort last, so we encode that logic here.
 	if n1 && n2 {
 		return false
@@ -226,22 +190,6 @@ func (s *sort_TYPE_DIR_HANDLES_NULLSOp) Less(i, j int) bool {
 	}
 	// {{end}}
 	// {{end}}
-
-	// {{if .CanAbbreviate}}
-	// If the type can be abbreviated as a uint64, compare the abbreviated
-	// values first. If they are not equal, we are done with the comparison. If
-	// they are equal, we must fallback to a full comparison of the datums.
-	abbr1 := s.abbreviatedSortCol[s.order[i]]
-	abbr2 := s.abbreviatedSortCol[s.order[j]]
-	if abbr1 != abbr2 {
-		// {{if eq $dir "Asc"}}
-		return abbr1 < abbr2
-		// {{else}}
-		return abbr1 > abbr2
-		// {{end}}
-	}
-	// {{end}}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])

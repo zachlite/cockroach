@@ -18,15 +18,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -84,7 +82,7 @@ func (t *truncateNode) startExec(params runParams) error {
 
 	for i := range n.Tables {
 		tn := &n.Tables[i]
-		_, tableDesc, err := p.ResolveMutableTableDescriptor(
+		tableDesc, err := p.ResolveMutableTableDescriptor(
 			ctx, tn, true /*required*/, tree.ResolveRequireTableDesc)
 		if err != nil {
 			return err
@@ -214,16 +212,6 @@ func (p *planner) truncateTable(
 
 	if err := checkTableForDisallowedMutationsWithTruncate(tableDesc); err != nil {
 		return err
-	}
-
-	// Exit early with an error if the table is undergoing a new-style schema
-	// change, before we try to get job IDs and update job statuses later. See
-	// createOrUpdateSchemaChangeJob.
-	if tableDesc.NewSchemaChangeJobID != 0 {
-		return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-			"cannot perform a schema change on table %q while it is undergoing a new-style schema change",
-			tableDesc.GetName(),
-		)
 	}
 
 	// Resolve all outstanding mutations. Make all new schema elements
@@ -397,14 +385,19 @@ func checkTableForDisallowedMutationsWithTruncate(desc *tabledesc.Mutable) error
 						"dropped which depends on another object", desc.GetName(), col.GetName())
 			}
 		} else if c := m.AsConstraint(); c != nil {
-			if c.IsCheck() || c.IsNotNull() || c.IsForeignKey() || c.IsUniqueWithoutIndex() {
+			switch ct := c.ConstraintToUpdateDesc().ConstraintType; ct {
+			case descpb.ConstraintToUpdate_CHECK,
+				descpb.ConstraintToUpdate_UNIQUE_WITHOUT_INDEX,
+				descpb.ConstraintToUpdate_NOT_NULL,
+				descpb.ConstraintToUpdate_FOREIGN_KEY:
 				return unimplemented.Newf(
 					"TRUNCATE concurrent with ongoing schema change",
 					"cannot perform TRUNCATE on %q which has an ongoing %s "+
-						"constraint change", desc.GetName(), c.ConstraintToUpdateDesc().ConstraintType)
+						"constraint change", desc.GetName(), ct)
+			default:
+				return errors.AssertionFailedf("cannot perform TRUNCATE due to "+
+					"unknown constraint type %v on mutation %d in %v", ct, i, desc)
 			}
-			return errors.AssertionFailedf("cannot perform TRUNCATE due to "+
-				"unknown constraint type %v on mutation %d in %v", c.ConstraintToUpdateDesc().ConstraintType, i, desc)
 		} else if s := m.AsPrimaryKeySwap(); s != nil {
 			return unimplemented.Newf(
 				"TRUNCATE concurrent with ongoing schema change",
@@ -451,7 +444,7 @@ func ClearTableDataInChunks(
 		if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			rd := row.MakeDeleter(codec, tableDesc, nil /* requestedCols */, sv, true /* internal */, nil /* metrics */)
 			td := tableDeleter{rd: rd, alloc: alloc}
-			if err := td.init(ctx, txn, nil /* *tree.EvalContext */, sv); err != nil {
+			if err := td.init(ctx, txn, nil /* *tree.EvalContext */); err != nil {
 				return err
 			}
 			var err error
@@ -594,7 +587,7 @@ func (p *planner) copySplitPointsToNewIndexes(
 	if step < 1 {
 		step = 1
 	}
-	expirationTime := kvserverbase.SplitByLoadMergeDelay.Get(p.execCfg.SV()).Nanoseconds()
+	expirationTime := kvserver.SplitByLoadMergeDelay.Get(p.execCfg.SV()).Nanoseconds()
 	for i := 0; i < nSplits; i++ {
 		// Evenly space out the ranges that we select from the ranges that are
 		// returned.
@@ -718,6 +711,6 @@ func (p *planner) reassignIndexComments(
 // key from a single span.
 // This determines whether an index is dropped during a schema change, or if
 // it is only deleted upon GC.
-func canClearRangeForDrop(index catalog.Index) bool {
+func canClearRangeForDrop(index *descpb.IndexDescriptor) bool {
 	return !index.IsInterleaved()
 }

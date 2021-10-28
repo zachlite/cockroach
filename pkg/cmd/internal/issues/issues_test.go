@@ -28,7 +28,7 @@ import (
 
 func TestPost(t *testing.T) {
 	const (
-		assignee    = "hodor" // fake GitHub handle we're returning as assignee
+		assignee    = "hodor" // fake Github handle we're returning as assignee
 		milestone   = 2       // fake milestone we're using here
 		issueID     = 1337    // issue ID returned in select test cases
 		issueNumber = 30      // issue # returned in select test cases
@@ -47,14 +47,13 @@ func TestPost(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name                 string
-		packageName          string
-		testName             string
-		message              string
-		artifacts            string
-		author               string
-		reproCmd             string
-		reproTitle, reproURL string
+		name        string
+		packageName string
+		testName    string
+		message     string
+		artifacts   string
+		author      string
+		reproCmd    string
 	}{
 		{
 			name:        "failure",
@@ -111,46 +110,6 @@ goroutine 13:
 			artifacts:   "/kv/splits/nodes=3/quiesce=true",
 			author:      "bran",
 			reproCmd:    "",
-		},
-		{
-			name:        "rsg-crash",
-			packageName: "github.com/cockroachdb/cockroach/pkg/sql/tests",
-			testName:    "TestRandomSyntaxSQLSmith",
-			message: `logging something
-    rsg_test.go:755: Crash detected: server panic: pq: internal error: something bad
-		SELECT
-			foo
-		FROM
-			bar
-		LIMIT
-			33:::INT8;
-        
-        Stack trace:
-    rsg_test.go:764: 266003 executions, 235459 successful
-    rsg_test.go:575: To reproduce, use schema:
-    rsg_test.go:577: 
-        	CREATE TABLE table1 (col1_0 BOOL);
-        ;
-    rsg_test.go:577: 
-        
-        CREATE TYPE greeting AS ENUM ('hello', 'howdy', 'hi', 'good day', 'morning');
-        ;
-    rsg_test.go:579: 
-    rsg_test.go:580: -- test log scope end --
-test logs left over in: /go/src/github.com/cockroachdb/cockroach/artifacts/logTestRandomSyntaxSQLSmith460792454
---- FAIL: TestRandomSyntaxSQLSmith (300.69s)
-`,
-			author:   "bran",
-			reproCmd: "make test TESTS=TestRandomSyntaxSQLSmith PKG=./pkg/sql/tests 2>&1",
-		},
-		{
-			name:        "failure-with-url",
-			packageName: "github.com/cockroachdb/cockroach/pkg/cmd/roachtest",
-			testName:    "some-roachtest",
-			message:     "boom",
-			author:      "bran",
-			reproURL:    "https://github.com/cockroachdb/cockroach",
-			reproTitle:  "FooBar README",
 		},
 	}
 
@@ -278,18 +237,14 @@ test logs left over in: /go/src/github.com/cockroachdb/cockroach/artifacts/logTe
 					}
 
 					ctx := context.Background()
-					repro := ReproductionCommandFromString(c.reproCmd)
-					if c.reproTitle != "" {
-						repro = HelpCommandAsLink(c.reproTitle, c.reproURL)
-					}
 					req := PostRequest{
-						PackageName: c.packageName,
-						TestName:    c.testName,
-						Message:     c.message,
-						Artifacts:   c.artifacts,
-						AuthorEmail: c.author,
-						HelpCommand: repro,
-						ExtraLabels: []string{"release-blocker"},
+						PackageName:         c.packageName,
+						TestName:            c.testName,
+						Message:             c.message,
+						Artifacts:           c.artifacts,
+						AuthorEmail:         c.author,
+						ReproductionCommand: c.reproCmd,
+						ExtraLabels:         []string{"release-blocker"},
 					}
 					require.NoError(t, p.post(ctx, UnitTestFormatter, req))
 					path := filepath.Join("testdata", "post", c.name+"-"+foundIssue+".txt")

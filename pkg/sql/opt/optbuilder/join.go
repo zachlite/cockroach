@@ -35,12 +35,14 @@ func (b *Builder) buildJoin(
 ) (outScope *scope) {
 	leftScope := b.buildDataSource(join.Left, nil /* indexFlags */, locking, inScope)
 
+	isLateral := false
 	inScopeRight := inScope
-	isLateral := b.exprIsLateral(join.Right)
-	if isLateral {
-		// If this is a lateral join, use leftScope as inScope for the right side.
-		// The right side scope of a LATERAL join includes the columns produced by
-		// the left side.
+	// If this is a lateral join, use leftScope as inScope for the right side.
+	// The right side scope of a LATERAL join includes the columns produced by
+	// the left side.
+	if t, ok := join.Right.(*tree.AliasedTableExpr); ok && t.Lateral {
+		telemetry.Inc(sqltelemetry.LateralJoinUseCounter)
+		isLateral = true
 		inScopeRight = leftScope
 		inScopeRight.context = exprKindLateralJoin
 	}
@@ -377,13 +379,13 @@ func (jb *usingJoinBuilder) buildNaturalJoin(natural tree.NaturalJoinCond) {
 			for j := 0; j < i; j++ {
 				col := &jb.leftScope.cols[j]
 				if col.id == leftCol.id && col.name == leftCol.name {
-					jb.raiseDuplicateColError(leftCol.name.ReferenceName(), "left table")
+					jb.raiseDuplicateColError(leftCol.name, "left table")
 				}
 			}
 		}
 		seenCols.Add(leftCol.id)
 
-		rightCol := jb.findUsingColumn(jb.rightScope.cols, leftCol.name.ReferenceName(), "right table")
+		rightCol := jb.findUsingColumn(jb.rightScope.cols, leftCol.name, "right table")
 		if rightCol != nil {
 			jb.b.trackReferencedColumnForViews(leftCol)
 			jb.b.trackReferencedColumnForViews(rightCol)
@@ -447,7 +449,7 @@ func (jb *usingJoinBuilder) findUsingColumn(
 	var foundCol *scopeColumn
 	for i := range cols {
 		col := &cols[i]
-		if col.visibility == visible && col.name.MatchesReferenceName(name) {
+		if col.visibility == visible && col.name == name {
 			if foundCol != nil {
 				jb.raiseDuplicateColError(name, context)
 			}
@@ -466,10 +468,9 @@ func (jb *usingJoinBuilder) addEqualityCondition(leftCol, rightCol *scopeColumn)
 	// First, check if the comparison would even be valid.
 	if !leftCol.typ.Equivalent(rightCol.typ) {
 		if _, found := tree.FindEqualComparisonFunction(leftCol.typ, rightCol.typ); !found {
-			name := leftCol.name.ReferenceName()
 			panic(pgerror.Newf(pgcode.DatatypeMismatch,
 				"JOIN/USING types %s for left and %s for right cannot be matched for column %q",
-				leftCol.typ, rightCol.typ, tree.ErrString(&name)))
+				leftCol.typ, rightCol.typ, tree.ErrString(&leftCol.name)))
 		}
 	}
 
@@ -491,7 +492,7 @@ func (jb *usingJoinBuilder) addEqualityCondition(leftCol, rightCol *scopeColumn)
 		col.table = tree.TableName{}
 		jb.outScope.cols = append(jb.outScope.cols, col)
 	} else if jb.joinType == descpb.RightOuterJoin &&
-		!colinfo.CanHaveCompositeKeyEncoding(leftCol.typ) {
+		!colinfo.HasCompositeKeyEncoding(leftCol.typ) {
 		// The merged column is the same as the corresponding column from the
 		// right side.
 		col := *rightCol
@@ -507,7 +508,7 @@ func (jb *usingJoinBuilder) addEqualityCondition(leftCol, rightCol *scopeColumn)
 		}
 		texpr := tree.NewTypedCoalesceExpr(tree.TypedExprs{leftCol, rightCol}, typ)
 		merged := jb.b.factory.ConstructCoalesce(memo.ScalarListExpr{leftVar, rightVar})
-		col := jb.b.synthesizeColumn(jb.outScope, leftCol.name, typ, texpr, merged)
+		col := jb.b.synthesizeColumn(jb.outScope, string(leftCol.name), typ, texpr, merged)
 		jb.ifNullCols.Add(col.id)
 	}
 }

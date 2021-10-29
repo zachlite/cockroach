@@ -18,9 +18,7 @@ go_library(
         "//pkg/sql/tests",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/sqlutils",
-        "//pkg/util/httputil",
         "//pkg/util/log",
-        "//pkg/util/protoutil",
         "@com_github_stretchr_testify//require",
     ],
 )

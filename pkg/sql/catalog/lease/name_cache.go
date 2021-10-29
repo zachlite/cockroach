@@ -21,7 +21,7 @@ import (
 )
 
 func makeNameCache() nameCache {
-	return nameCache{}
+	return nameCache{descriptors: nstree.MakeMap()}
 }
 
 // nameCache is a cache of descriptor name -> latest version mappings.

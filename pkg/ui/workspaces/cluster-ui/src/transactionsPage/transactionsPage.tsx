@@ -28,18 +28,24 @@ import {
 } from "../sortedtable";
 import { Pagination } from "../pagination";
 import { TableStatistics } from "../tableStatistics";
-import { statisticsClasses } from "./transactionsPageClasses";
+import {
+  baseHeadingClasses,
+  statisticsClasses,
+} from "./transactionsPageClasses";
 import {
   aggregateAcrossNodeIDs,
   generateRegionNode,
   getTrxAppFilterOptions,
   statementFingerprintIdsToText,
+} from "./utils";
+import {
   searchTransactionsData,
   filterTransactions,
   getStatementsByFingerprintIdAndTime,
 } from "./utils";
+import { forIn } from "lodash";
 import Long from "long";
-import { getSearchParams, unique, syncHistory } from "src/util";
+import { getSearchParams, unique } from "src/util";
 import { EmptyTransactionsPlaceholder } from "./emptyTransactionsPlaceholder";
 import { Loading } from "../loading";
 import { PageConfig, PageConfigItem } from "../pageConfig";
@@ -58,9 +64,6 @@ import {
   getLabel,
   StatisticTableColumnKeys,
 } from "../statsTableUtil/statsTableUtil";
-import ClearStats from "../sqlActivity/clearStats";
-import SQLActivityError from "../sqlActivity/errorComponent";
-import { commonStyles } from "../common";
 
 type IStatementsResponse = protos.cockroach.server.serverpb.IStatementsResponse;
 type TransactionStats = protos.cockroach.sql.ITransactionStatistics;
@@ -76,7 +79,6 @@ interface TState {
   statementFingerprintIds: Long[] | null;
   aggregatedTs: Timestamp | null;
   transactionStats: TransactionStats | null;
-  transactionFingerprintId: Long | null;
 }
 
 export interface TransactionsPageStateProps {
@@ -137,7 +139,6 @@ export class TransactionsPage extends React.Component<
     aggregatedTs: null,
     statementFingerprintIds: null,
     transactionStats: null,
-    transactionFingerprintId: null,
   };
 
   refreshData = (): void => {
@@ -152,17 +153,30 @@ export class TransactionsPage extends React.Component<
     this.refreshData();
   }
 
+  syncHistory = (params: Record<string, string | undefined>) => {
+    const { history } = this.props;
+    const currentSearchParams = new URLSearchParams(history.location.search);
+
+    forIn(params, (value, key) => {
+      if (!value) {
+        currentSearchParams.delete(key);
+      } else {
+        currentSearchParams.set(key, value);
+      }
+    });
+
+    history.location.search = currentSearchParams.toString();
+    history.replace(history.location);
+  };
+
   onChangeSortSetting = (ss: SortSetting): void => {
     this.setState({
       sortSetting: ss,
     });
-    syncHistory(
-      {
-        ascending: ss.ascending.toString(),
-        columnTitle: ss.columnTitle,
-      },
-      this.props.history,
-    );
+    this.syncHistory({
+      ascending: ss.ascending.toString(),
+      columnTitle: ss.columnTitle,
+    });
   };
 
   onChangePage = (current: number): void => {
@@ -183,23 +197,17 @@ export class TransactionsPage extends React.Component<
 
   onClearSearchField = (): void => {
     this.setState({ search: "" });
-    syncHistory(
-      {
-        q: undefined,
-      },
-      this.props.history,
-    );
+    this.syncHistory({
+      q: undefined,
+    });
   };
 
   onSubmitSearchField = (search: string): void => {
     this.setState({ search });
     this.resetPagination();
-    syncHistory(
-      {
-        q: search,
-      },
-      this.props.history,
-    );
+    this.syncHistory({
+      q: search,
+    });
   };
 
   onSubmitFilters = (filters: Filters): void => {
@@ -210,16 +218,13 @@ export class TransactionsPage extends React.Component<
       },
     });
     this.resetPagination();
-    syncHistory(
-      {
-        app: filters.app,
-        timeNumber: filters.timeNumber,
-        timeUnit: filters.timeUnit,
-        regions: filters.regions,
-        nodes: filters.nodes,
-      },
-      this.props.history,
-    );
+    this.syncHistory({
+      app: filters.app,
+      timeNumber: filters.timeNumber,
+      timeUnit: filters.timeUnit,
+      regions: filters.regions,
+      nodes: filters.nodes,
+    });
   };
 
   onClearFilters = (): void => {
@@ -229,16 +234,13 @@ export class TransactionsPage extends React.Component<
       },
     });
     this.resetPagination();
-    syncHistory(
-      {
-        app: undefined,
-        timeNumber: undefined,
-        timeUnit: undefined,
-        regions: undefined,
-        nodes: undefined,
-      },
-      this.props.history,
-    );
+    this.syncHistory({
+      app: undefined,
+      timeNumber: undefined,
+      timeUnit: undefined,
+      regions: undefined,
+      nodes: undefined,
+    });
   };
 
   handleDetails = (transaction?: TransactionInfo): void => {
@@ -247,8 +249,6 @@ export class TransactionsPage extends React.Component<
         transaction?.stats_data?.statement_fingerprint_ids,
       transactionStats: transaction?.stats_data?.stats,
       aggregatedTs: transaction?.stats_data?.aggregated_ts,
-      transactionFingerprintId:
-        transaction?.stats_data?.transaction_fingerprint_id,
     });
   };
 
@@ -270,9 +270,10 @@ export class TransactionsPage extends React.Component<
     );
   };
 
-  renderTransactionsList(): React.ReactElement {
+  renderTransactionsList() {
     return (
       <div className={cx("table-area")}>
+        <h3 className={baseHeadingClasses.tableName}>Transactions</h3>
         <Loading
           loading={!this.props?.data}
           error={this.props?.error}
@@ -412,12 +413,6 @@ export class TransactionsPage extends React.Component<
                       reset time
                     </button>
                   </PageConfigItem>
-                  <PageConfigItem className={commonStyles("separator")}>
-                    <ClearStats
-                      resetSQLStats={resetSQLStats}
-                      tooltipType="transaction"
-                    />
-                  </PageConfigItem>
                 </PageConfig>
                 <section className={statisticsClasses.tableContainerClass}>
                   <ColumnsSelector
@@ -426,11 +421,14 @@ export class TransactionsPage extends React.Component<
                   />
                   <TableStatistics
                     pagination={pagination}
+                    lastReset={this.lastReset()}
                     search={search}
                     totalCount={transactionsToDisplay.length}
                     arrayItemName="transactions"
+                    tooltipType="transaction"
                     activeFilters={activeFilters}
                     onClearFilters={this.onClearFilters}
+                    resetSQLStats={resetSQLStats}
                   />
                   <TransactionsTable
                     columns={displayColumns}
@@ -454,23 +452,17 @@ export class TransactionsPage extends React.Component<
               </>
             );
           }}
-          renderError={() =>
-            SQLActivityError({
-              statsType: "transactions",
-            })
-          }
         />
       </div>
     );
   }
 
-  renderTransactionDetails(): React.ReactElement {
+  renderTransactionDetails() {
     const { statements } = this.props.data;
     const {
       aggregatedTs,
       statementFingerprintIds,
       transactionStats,
-      transactionFingerprintId,
     } = this.state;
     const transactionDetails =
       statementFingerprintIds &&
@@ -494,12 +486,11 @@ export class TransactionsPage extends React.Component<
         error={this.props.error}
         resetSQLStats={this.props.resetSQLStats}
         isTenant={this.props.isTenant}
-        transactionFingerprintId={transactionFingerprintId}
       />
     );
   }
 
-  render(): React.ReactElement {
+  render() {
     const { statementFingerprintIds } = this.state;
     const renderTxDetailsView = !!statementFingerprintIds;
     return renderTxDetailsView

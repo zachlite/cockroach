@@ -118,7 +118,7 @@ func NewOrderedSynchronizer(
 		typs:                  typs,
 		canonicalTypeFamilies: typeconv.ToCanonicalTypeFamilies(typs),
 	}
-	os.accountingHelper.Init(allocator, typs)
+	os.accountingHelper.Init(allocator, typs, nil /* notNeededVecIdxs */)
 	return os
 }
 

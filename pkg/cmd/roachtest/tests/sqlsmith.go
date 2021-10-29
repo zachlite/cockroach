@@ -83,7 +83,7 @@ func registerSQLSmith(r registry.Registry) {
 			fmt.Fprint(smithLog, "\n\n")
 		}
 
-		rng, seed := randutil.NewTestRand()
+		rng, seed := randutil.NewPseudoRand()
 		t.L().Printf("seed: %d", seed)
 
 		c.Put(ctx, t.Cockroach(), "./cockroach")
@@ -211,11 +211,10 @@ func registerSQLSmith(r registry.Registry) {
 				es := err.Error()
 				if strings.Contains(es, "internal error") {
 					// TODO(yuzefovich): we temporarily ignore internal errors
-					// that are because of #40929 and #70831.
+					// that are because of #40929.
 					var expectedError bool
 					for _, exp := range []string{
 						"could not parse \"0E-2019\" as type decimal",
-						"no volatility for cast tuple",
 					} {
 						expectedError = expectedError || strings.Contains(es, exp)
 					}

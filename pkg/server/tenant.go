@@ -207,7 +207,7 @@ func StartTenant(
 
 	if err := args.stopper.RunAsyncTask(ctx, "serve-http", func(ctx context.Context) {
 		mux := http.NewServeMux()
-		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn(), s.execCfg.SQLStatusServer)
+		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn())
 		mux.Handle("/", debugServer)
 		mux.Handle("/_status/", gwMux)
 		mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
@@ -270,16 +270,14 @@ func StartTenant(
 	// The InstanceID subsystem is not available until `preStart`.
 	args.rpcContext.NodeID.Set(ctx, roachpb.NodeID(s.SQLInstanceID()))
 
-	if knobs, ok := baseCfg.TestingKnobs.TenantTestingKnobs.(*sql.TenantTestingKnobs); !ok || !knobs.DisableLogTags {
-		// Register the server's identifiers so that log events are
-		// decorated with the server's identity. This helps when gathering
-		// log events from multiple servers into the same log collector.
-		//
-		// We do this only here, as the identifiers may not be known before this point.
-		clusterID := args.rpcContext.ClusterID.Get().String()
-		log.SetNodeIDs(clusterID, 0 /* nodeID is not known for a SQL-only server. */)
-		log.SetTenantIDs(args.TenantID.String(), int32(s.SQLInstanceID()))
-	}
+	// Register the server's identifiers so that log events are
+	// decorated with the server's identity. This helps when gathering
+	// log events from multiple servers into the same log collector.
+	//
+	// We do this only here, as the identifiers may not be known before this point.
+	clusterID := args.rpcContext.ClusterID.Get().String()
+	log.SetNodeIDs(clusterID, 0 /* nodeID is not known for a SQL-only server. */)
+	log.SetTenantIDs(args.TenantID.String(), int32(s.SQLInstanceID()))
 
 	externalUsageFn := func(ctx context.Context) multitenant.ExternalUsage {
 		userTimeMillis, _, err := status.GetCPUTime(ctx)

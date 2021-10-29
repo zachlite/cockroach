@@ -83,7 +83,7 @@ func (tc *Collection) getDescriptorByIDMaybeSetTxnDeadline(
 			return vd, err
 		}
 
-		if found, sd := tc.synthetic.getByID(id); found && !flags.AvoidSynthetic {
+		if found, sd := tc.synthetic.getByID(id); found {
 			if flags.RequireMutable {
 				return nil, newMutableSyntheticDescriptorAssertionError(sd.GetID())
 			}

@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for ordered_synchronizer.eg.go. It's
 // formatted in a special way, so it's both valid Go and a valid text/template
@@ -138,7 +136,7 @@ func NewOrderedSynchronizer(
 		typs:                  typs,
 		canonicalTypeFamilies: typeconv.ToCanonicalTypeFamilies(typs),
 	}
-	os.accountingHelper.Init(allocator, typs)
+	os.accountingHelper.Init(allocator, typs, nil /* notNeededVecIdxs */)
 	return os
 }
 

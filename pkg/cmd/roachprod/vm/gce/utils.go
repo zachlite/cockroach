@@ -18,7 +18,6 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"strings"
 	"text/template"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachprod/vm"
@@ -38,68 +37,43 @@ var Subdomain = func() string {
 	return "roachprod.crdb.io"
 }()
 
-const gceDiskStartupScriptTemplate = `#!/usr/bin/env bash
+// Startup script used to find/format/mount all local SSDs and (non-boot)
+// persistent disks in GCE. Each disk is mounted to /mnt/data<disknum> and
+// chmoded to all users.
+//
+// This is a template because the instantiator needs to optionally configure the
+// mounting options. The script cannot take arguments since it is to be invoked
+// by the gcloud tool which cannot pass args.
+const gceLocalSSDStartupScriptTemplate = `#!/usr/bin/env bash
 # Script for setting up a GCE machine for roachprod use.
 
-if [ -e /mnt/data1/.roachprod-initialized ]; then
-  echo "Already initialized, exiting."
-  exit 0
-fi
+mount_opts="defaults"
+{{if .ExtraMountOpts}}mount_opts="${mount_opts},{{.ExtraMountOpts}}"{{end}}
 
-disknum=0
 # ignore the boot disk: /dev/disk/by-id/google-persistent-disk-0.
-{{if .Zfs}}
-  sudo apt-get update
-  sudo apt-get install -y zfsutils-linux
-
-  # For zfs, we use the device names under /dev instead of the device
-  # links under /dev/disk/by-id/google-local* for local ssds, because
-  # there is an issue where the links for the zfs partitions which are
-  # created under /dev/disk/by-id/ when we run "zpool create ..." are
-  # inaccurate.
-  for d in $(ls /dev/nvme?n? /dev/disk/by-id/google-persistent-disk-[1-9]); do
-    let "disknum++"
-    # skip if the zpool was already created.
-    zpool list -v -P | grep ${d} > /dev/null
-    if [ $? -ne 0 ]; then
-      echo "Disk ${disknum}: ${d} not mounted, creating..."
-      mountpoint="/mnt/data${disknum}"
-      sudo mkdir -p "${mountpoint}"
-      sudo zpool create -f data${disknum} -m ${mountpoint} ${d}
-      sudo chmod 777 ${mountpoint}
-    else
-      echo "Disk ${disknum}: ${d} already mounted, skipping..."
-    fi
-  done
-{{else}}
-  mount_opts="defaults"
-  {{if .ExtraMountOpts}}mount_opts="${mount_opts},{{.ExtraMountOpts}}"{{end}}
-  for d in $(ls /dev/disk/by-id/google-local-* /dev/disk/by-id/google-persistent-disk-[1-9]); do
-    let "disknum++"
-    grep -e "${d}" /etc/fstab > /dev/null
-    if [ $? -ne 0 ]; then
-      echo "Disk ${disknum}: ${d} not mounted, creating..."
-      mountpoint="/mnt/data${disknum}"
-      sudo mkdir -p "${mountpoint}"
-      sudo mkfs.ext4 -F ${d}
-      sudo mount -o ${mount_opts} ${d} ${mountpoint}
-      echo "${d} ${mountpoint} ext4 ${mount_opts} 1 1" | sudo tee -a /etc/fstab
-      sudo chmod 777 ${mountpoint}
-    else
-      echo "Disk ${disknum}: ${d} already mounted, skipping..."
-    fi
-  done
-{{end}}
-
+disknum=0
+for d in $(ls /dev/disk/by-id/google-local-* /dev/disk/by-id/google-persistent-disk-[1-9]); do
+  let "disknum++"
+  grep -e "${d}" /etc/fstab > /dev/null
+  if [ $? -ne 0 ]; then
+    echo "Disk ${disknum}: ${d} not mounted, creating..."
+    mountpoint="/mnt/data${disknum}"
+    sudo mkdir -p "${mountpoint}"
+    sudo mkfs.ext4 -F ${d}
+    sudo mount -o ${mount_opts} ${d} ${mountpoint}
+    echo "${d} ${mountpoint} ext4 ${mount_opts} 1 1" | sudo tee -a /etc/fstab
+  else
+    echo "Disk ${disknum}: ${d} already mounted, skipping..."
+  fi
+done
 if [ "${disknum}" -eq "0" ]; then
   echo "No disks mounted, creating /mnt/data1"
   sudo mkdir -p /mnt/data1
-  sudo chmod 777 /mnt/data1
 fi
 
+sudo chmod 777 /mnt/data1
 # sshguard can prevent frequent ssh connections to the same host. Disable it.
-systemctl stop sshguard
-systemctl mask sshguard
+sudo service sshguard stop
 # increase the number of concurrent unauthenticated connections to the sshd
 # daemon. See https://en.wikibooks.org/wiki/OpenSSH/Cookbook/Load_Balancing.
 # By default, only 10 unauthenticated connections are permitted before sshd
@@ -141,47 +115,6 @@ echo "kernel.core_pattern=$CORE_PATTERN" >> /etc/sysctl.conf
 
 sysctl --system  # reload sysctl settings
 
-sudo apt-get update -q
-sudo apt-get install -qy chrony
-
-# Uninstall some packages to prevent them running cronjobs and similar jobs in parallel
-systemctl stop unattended-upgrades
-apt-get purge -y unattended-upgrades
-
-systemctl stop cron
-systemctl mask cron
-
-# Override the chrony config. In particular,
-# log aggressively when clock is adjusted (0.01s)
-# and exclusively use google's time servers.
-sudo cat <<EOF > /etc/chrony/chrony.conf
-keyfile /etc/chrony/chrony.keys
-commandkey 1
-driftfile /var/lib/chrony/chrony.drift
-log tracking measurements statistics
-logdir /var/log/chrony
-maxupdateskew 100.0
-dumponexit
-dumpdir /var/lib/chrony
-logchange 0.01
-hwclockfile /etc/adjtime
-rtcsync
-server metadata.google.internal prefer iburst
-makestep 0.1 3
-EOF
-
-sudo /etc/init.d/chrony restart
-sudo chronyc -a waitsync 30 0.01 | sudo tee -a /root/chrony.log
-
-for timer in apt-daily-upgrade.timer apt-daily.timer e2scrub_all.timer fstrim.timer man-db.timer e2scrub_all.timer ; do
-  systemctl mask $timer
-done
-
-for service in apport.service atd.service; do
-  systemctl stop $service
-  systemctl mask $service
-done
-
 sudo touch /mnt/data1/.roachprod-initialized
 `
 
@@ -191,13 +124,12 @@ sudo touch /mnt/data1/.roachprod-initialized
 //
 // extraMountOpts, if not empty, is appended to the default mount options. It is
 // a comma-separated list of options for the "mount -o" flag.
-func writeStartupScript(extraMountOpts string, fileSystem string) (string, error) {
+func writeStartupScript(extraMountOpts string) (string, error) {
 	type tmplParams struct {
 		ExtraMountOpts string
-		Zfs            bool
 	}
 
-	args := tmplParams{ExtraMountOpts: extraMountOpts, Zfs: fileSystem == vm.Zfs}
+	args := tmplParams{ExtraMountOpts: extraMountOpts}
 
 	tmpfile, err := ioutil.TempFile("", "gce-startup-script")
 	if err != nil {
@@ -205,7 +137,7 @@ func writeStartupScript(extraMountOpts string, fileSystem string) (string, error
 	}
 	defer tmpfile.Close()
 
-	t := template.Must(template.New("start").Parse(gceDiskStartupScriptTemplate))
+	t := template.Must(template.New("start").Parse(gceLocalSSDStartupScriptTemplate))
 	if err := t.Execute(tmpfile, args); err != nil {
 		return "", err
 	}
@@ -228,17 +160,11 @@ func SyncDNS(vms vm.List) error {
 			fmt.Fprintf(os.Stderr, "removing %s failed: %v", f.Name(), err)
 		}
 	}()
-
-	var zoneBuilder strings.Builder
 	for _, vm := range vms {
-		entry, err := vm.ZoneEntry()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: skipping: %s\n", err)
-			continue
+		if len(vm.Name) < 60 {
+			fmt.Fprintf(f, "%s 60 IN A %s\n", vm.Name, vm.PublicIP)
 		}
-		zoneBuilder.WriteString(entry)
 	}
-	fmt.Fprint(f, zoneBuilder.String())
 	f.Close()
 
 	args := []string{"--project", dnsProject, "dns", "record-sets", "import",
@@ -246,10 +172,10 @@ func SyncDNS(vms vm.List) error {
 	cmd := exec.Command("gcloud", args...)
 	output, err := cmd.CombinedOutput()
 
-	return errors.Wrapf(err, "Command: %s\nOutput: %s\nZone file contents:\n%s", cmd, output, zoneBuilder.String())
+	return errors.Wrapf(err, "Command: gcloud %s\nOutput: %s", args, output)
 }
 
-// GetUserAuthorizedKeys retrieves reads a list of user public keys from the
+// GetUserAuthorizedKeys retreives reads a list of user public keys from the
 // gcloud cockroach-ephemeral project and returns them formatted for use in
 // an authorized_keys file.
 func GetUserAuthorizedKeys() (authorizedKeys []byte, err error) {

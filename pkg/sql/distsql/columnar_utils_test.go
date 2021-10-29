@@ -12,12 +12,10 @@ package distsql
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
-	"sort"
 	"strconv"
-	"strings"
-	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -26,9 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -51,6 +47,7 @@ type verifyColOperatorArgs struct {
 	colIdxsToCheckForEquality []int
 	inputTypes                [][]*types.T
 	inputs                    []rowenc.EncDatumRows
+	outputTypes               []*types.T
 	pspec                     *execinfrapb.ProcessorSpec
 	// forceDiskSpill, if set, will force the operator to spill to disk.
 	forceDiskSpill bool
@@ -71,11 +68,11 @@ type verifyColOperatorArgs struct {
 
 // verifyColOperator passes inputs through both the processor defined by pspec
 // and the corresponding columnar operator and verifies that the results match.
-func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
+func verifyColOperator(args verifyColOperatorArgs) error {
 	const floatPrecision = 0.0000001
 	rng := args.rng
 	if rng == nil {
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 	}
 	if rng.Float64() < 0.5 {
 		randomBatchSize := 1 + rng.Intn(3)
@@ -86,7 +83,7 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, tempFS, err := storage.NewTempEngine(ctx, storage.DefaultStorageEngine, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
 	if err != nil {
 		return err
 	}
@@ -101,8 +98,8 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 		Cfg: &execinfra.ServerConfig{
 			Settings:    st,
 			TempStorage: tempEngine,
+			DiskMonitor: diskMonitor,
 		},
-		DiskMonitor: diskMonitor,
 	}
 	flowCtx.Cfg.TestingKnobs.ForceDiskSpill = args.forceDiskSpill
 
@@ -128,20 +125,21 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	acc := evalCtx.Mon.MakeBoundAccount()
 	defer acc.Close(ctx)
 	testAllocator := colmem.NewAllocator(ctx, &acc, coldataext.NewExtendedColumnFactory(&evalCtx))
-	columnarizers := make([]colexecop.Operator, len(args.inputs))
+	columnarizers := make([]colexecbase.Operator, len(args.inputs))
 	for i, input := range inputsColOp {
-		columnarizers[i] = colexec.NewBufferingColumnarizer(testAllocator, flowCtx, int32(i)+1, input)
+		c, err := colexec.NewColumnarizer(ctx, testAllocator, flowCtx, int32(i)+1, input)
+		if err != nil {
+			return err
+		}
+		columnarizers[i] = c
 	}
 
-	constructorArgs := &colexecargs.NewColOperatorArgs{
+	constructorArgs := &colexec.NewColOperatorArgs{
 		Spec:                args.pspec,
-		Inputs:              colexectestutils.MakeInputs(columnarizers),
+		Inputs:              columnarizers,
 		StreamingMemAccount: &acc,
-		DiskQueueCfg: colcontainer.DiskQueueCfg{
-			FS:        tempFS,
-			GetPather: colcontainer.GetPatherFunc(func(context.Context) string { return "" }),
-		},
-		FDSemaphore: colexecop.NewTestingSemaphore(256),
+		DiskQueueCfg:        colcontainer.DiskQueueCfg{FS: tempFS},
+		FDSemaphore:         colexecbase.NewTestingSemaphore(256),
 
 		// TODO(yuzefovich): adjust expression generator to not produce
 		// mixed-type timestamp-related expressions and then disallow the
@@ -166,12 +164,20 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 		}
 	}()
 
-	outColOp := colexec.NewMaterializer(
+	outColOp, err := colexec.NewMaterializer(
 		flowCtx,
 		int32(len(args.inputs))+2,
-		result.OpWithMetaInfo,
-		args.pspec.ResultTypes,
+		result.Op,
+		args.outputTypes,
+		nil, /* output */
+		result.MetadataSources,
+		result.ToClose,
+		nil, /* outputStatsToTrace */
+		nil, /* cancelFlow */
 	)
+	if err != nil {
+		return err
+	}
 
 	outProc.Start(ctx)
 	outColOp.Start(ctx)
@@ -179,9 +185,9 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	defer outColOp.ConsumerClosed()
 
 	printRowForChecking := func(r rowenc.EncDatumRow) []string {
-		res := make([]string, len(args.pspec.ResultTypes))
+		res := make([]string, len(args.outputTypes))
 		for i, col := range r {
-			res[i] = col.String(args.pspec.ResultTypes[i])
+			res[i] = col.String(args.outputTypes[i])
 		}
 		return res
 	}
@@ -248,6 +254,14 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 			procRows, colOpRows, procMetas, colOpMetas)
 	}
 
+	printRowsOutput := func(rows [][]string) string {
+		res := ""
+		for i, row := range rows {
+			res = fmt.Sprintf("%s\n%d: %v", res, i, row)
+		}
+		return res
+	}
+
 	datumsMatch := func(expected, actual string, typ *types.T) (bool, error) {
 		switch typ.Family() {
 		case types.FloatFamily:
@@ -281,43 +295,59 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 
 	colIdxsToCheckForEquality := args.colIdxsToCheckForEquality
 	if len(colIdxsToCheckForEquality) == 0 {
-		colIdxsToCheckForEquality = make([]int, len(args.pspec.ResultTypes))
+		colIdxsToCheckForEquality = make([]int, len(args.outputTypes))
 		for i := range colIdxsToCheckForEquality {
 			colIdxsToCheckForEquality[i] = i
 		}
 	}
-
 	if args.anyOrder {
-		// The rows are allowed to be in any order, so in order to use the
-		// ordered comparison below we will sort rows from both the processor
-		// and the operator lexicographically.
-		getLessFn := func(rows [][]string) func(int, int) bool {
-			return func(i, j int) bool {
+		used := make([]bool, len(colOpRows))
+		for i, expStrRow := range procRows {
+			rowMatched := false
+			for j, retStrRow := range colOpRows {
+				if used[j] {
+					continue
+				}
+				foundDifference := false
 				for _, colIdx := range colIdxsToCheckForEquality {
-					if cmp := strings.Compare(rows[i][colIdx], rows[j][colIdx]); cmp != 0 {
-						return cmp < 0
+					match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.outputTypes[colIdx])
+					if err != nil {
+						return errors.Errorf("error while parsing datum in rows\n%v\n%v\n%s",
+							expStrRow, retStrRow, err.Error())
+					}
+					if !match {
+						foundDifference = true
+						break
 					}
 				}
-				return false
+				if !foundDifference {
+					rowMatched = true
+					used[j] = true
+					break
+				}
+			}
+			if !rowMatched {
+				return errors.Errorf("different results: no match found for row %d of processor output\n"+
+					"processor output:%s\n\ncolumnar operator output:%s",
+					i, printRowsOutput(procRows), printRowsOutput(colOpRows))
 			}
 		}
-		sort.Slice(procRows, getLessFn(procRows))
-		sort.Slice(colOpRows, getLessFn(colOpRows))
-	}
-
-	for i, expStrRow := range procRows {
-		retStrRow := colOpRows[i]
-		for _, colIdx := range colIdxsToCheckForEquality {
-			match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.pspec.ResultTypes[colIdx])
-			if err != nil {
-				return errors.Errorf("error while parsing datum in rows\n%v\n%v\n%s",
-					expStrRow, retStrRow, err.Error())
-			}
-			if !match {
-				return errors.Errorf(
-					"different results on row %d;\nexpected:\n%s\ngot:\n%s",
-					i, expStrRow, retStrRow,
-				)
+	} else {
+		for i, expStrRow := range procRows {
+			retStrRow := colOpRows[i]
+			// anyOrder is false, so the result rows must match in the same order.
+			for _, colIdx := range colIdxsToCheckForEquality {
+				match, err := datumsMatch(expStrRow[colIdx], retStrRow[colIdx], args.outputTypes[colIdx])
+				if err != nil {
+					return errors.Errorf("error while parsing datum in rows\n%v\n%v\n%s",
+						expStrRow, retStrRow, err.Error())
+				}
+				if !match {
+					return errors.Errorf(
+						"different results on row %d;\nexpected:\n%s\ngot:\n%s",
+						i, expStrRow, retStrRow,
+					)
+				}
 			}
 		}
 	}

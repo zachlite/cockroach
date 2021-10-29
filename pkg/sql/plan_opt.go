@@ -14,8 +14,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
@@ -30,7 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -46,22 +47,24 @@ var queryCacheEnabled = settings.RegisterBoolSetting(
 //  - AnonymizedStr
 //  - Memo (for reuse during exec, if appropriate).
 func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) {
-	stmt := &p.stmt
+	stmt := p.stmt
 
 	opc := &p.optPlanningCtx
 	opc.reset()
+
+	stmt.Prepared.AnonymizedStr = anonymizeStmt(stmt.AST)
 
 	switch stmt.AST.(type) {
 	case *tree.AlterIndex, *tree.AlterTable, *tree.AlterSequence,
 		*tree.Analyze,
 		*tree.BeginTransaction,
-		*tree.CommentOnColumn, *tree.CommentOnConstraint, *tree.CommentOnDatabase, *tree.CommentOnIndex, *tree.CommentOnTable, *tree.CommentOnSchema,
+		*tree.CommentOnColumn, *tree.CommentOnDatabase, *tree.CommentOnIndex, *tree.CommentOnTable,
 		*tree.CommitTransaction,
 		*tree.CopyFrom, *tree.CreateDatabase, *tree.CreateIndex, *tree.CreateView,
 		*tree.CreateSequence,
 		*tree.CreateStats,
 		*tree.Deallocate, *tree.Discard, *tree.DropDatabase, *tree.DropIndex,
-		*tree.DropTable, *tree.DropView, *tree.DropSequence, *tree.DropType,
+		*tree.DropTable, *tree.DropView, *tree.DropSequence,
 		*tree.Execute,
 		*tree.Grant, *tree.GrantRole,
 		*tree.Prepare,
@@ -79,13 +82,13 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 		// descriptors and such).
 		return opc.flags, nil
 
-	case *tree.ExplainAnalyze:
+	case *tree.ExplainAnalyzeDebug:
 		// This statement returns result columns but does not support placeholders,
 		// and we don't want to do anything during prepare.
 		if len(p.semaCtx.Placeholders.Types) != 0 {
 			return 0, errors.Errorf("%s does not support placeholders", stmt.AST.StatementTag())
 		}
-		stmt.Prepared.Columns = colinfo.ExplainPlanColumns
+		stmt.Prepared.Columns = colinfo.ExplainAnalyzeDebugColumns
 		return opc.flags, nil
 	}
 
@@ -104,7 +107,7 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 				if !isStale {
 					opc.log(ctx, "query cache hit (prepare)")
 					opc.flags.Set(planFlagOptCacheHit)
-					stmt.Prepared.StatementNoConstants = pm.StatementNoConstants
+					stmt.Prepared.AnonymizedStr = pm.AnonymizedStr
 					stmt.Prepared.Columns = pm.Columns
 					stmt.Prepared.Types = pm.Types
 					stmt.Prepared.Memo = cachedData.Memo
@@ -143,12 +146,12 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 			// Convert the metadata opt.ColumnID to its ordinal position in the table.
 			colOrdinal := colMeta.Table.ColumnOrdinal(col.ID)
 			// Use that ordinal position to retrieve the column's stable ID.
-			var column catalog.Column
+			var desc *descpb.ColumnDescriptor
 			if catTable, ok := tab.(optCatalogTableInterface); ok {
-				column = catTable.getCol(colOrdinal)
+				desc = catTable.getColDesc(colOrdinal)
 			}
-			if column != nil {
-				resultCols[i].PGAttributeNum = column.GetPGAttributeNum()
+			if desc != nil {
+				resultCols[i].PGAttributeNum = desc.GetPGAttributeNum()
 			} else {
 				resultCols[i].PGAttributeNum = uint32(tab.Column(colOrdinal).ColID())
 			}
@@ -186,8 +189,6 @@ func (p *planner) prepareUsingOptimizer(ctx context.Context) (planFlags, error) 
 // makeOptimizerPlan generates a plan using the cost-based optimizer.
 // On success, it populates p.curPlan.
 func (p *planner) makeOptimizerPlan(ctx context.Context) error {
-	p.curPlan.init(&p.stmt, &p.instrumentation)
-
 	opc := &p.optPlanningCtx
 	opc.reset()
 
@@ -197,7 +198,7 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 	}
 
 	// Build the plan tree.
-	if mode := p.SessionData().ExperimentalDistSQLPlanningMode; mode != sessiondatapb.ExperimentalDistSQLPlanningOff {
+	if mode := p.SessionData().ExperimentalDistSQLPlanningMode; mode != sessiondata.ExperimentalDistSQLPlanningOff {
 		planningMode := distSQLDefaultPlanning
 		// If this transaction has modified or created any types, it is not safe to
 		// distribute due to limitations around leasing descriptors modified in the
@@ -207,14 +208,15 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 		}
 		err := opc.runExecBuilder(
 			&p.curPlan,
-			&p.stmt,
+			p.stmt,
 			newDistSQLSpecExecFactory(p, planningMode),
 			execMemo,
 			p.EvalContext(),
+			p.ExecCfg().Codec,
 			p.autoCommit,
 		)
 		if err != nil {
-			if mode == sessiondatapb.ExperimentalDistSQLPlanningAlways &&
+			if mode == sessiondata.ExperimentalDistSQLPlanningAlways &&
 				!strings.Contains(p.stmt.AST.StatementTag(), "SET") {
 				// We do not fallback to the old path because experimental
 				// planning is set to 'always' and we don't have a SET
@@ -241,10 +243,11 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 				// execFactory.
 				err = opc.runExecBuilder(
 					&p.curPlan,
-					&p.stmt,
+					p.stmt,
 					newDistSQLSpecExecFactory(p, distSQLLocalOnlyPlanning),
 					execMemo,
 					p.EvalContext(),
+					p.ExecCfg().Codec,
 					p.autoCommit,
 				)
 			}
@@ -261,10 +264,11 @@ func (p *planner) makeOptimizerPlan(ctx context.Context) error {
 	// If we got here, we did not create a plan above.
 	return opc.runExecBuilder(
 		&p.curPlan,
-		&p.stmt,
+		p.stmt,
 		newExecFactory(p),
 		execMemo,
 		p.EvalContext(),
+		p.ExecCfg().Codec,
 		p.autoCommit,
 	)
 }
@@ -349,20 +353,20 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 
 	_, isCanned := opc.p.stmt.AST.(*tree.CannedOptPlan)
 	if isCanned {
-		if !p.EvalContext().SessionData().AllowPrepareAsOptPlan {
+		if !p.EvalContext().SessionData.AllowPrepareAsOptPlan {
 			return nil, pgerror.New(pgcode.InsufficientPrivilege,
 				"PREPARE AS OPT PLAN is a testing facility that should not be used directly",
 			)
 		}
 
-		if !p.SessionData().User().IsRootUser() {
+		if p.SessionData().User != security.RootUser {
 			return nil, pgerror.New(pgcode.InsufficientPrivilege,
 				"PREPARE AS OPT PLAN may only be used by root",
 			)
 		}
 	}
 
-	if p.SessionData().SaveTablesPrefix != "" && !p.SessionData().User().IsRootUser() {
+	if p.SessionData().SaveTablesPrefix != "" && p.SessionData().User != security.RootUser {
 		return nil, pgerror.New(pgcode.InsufficientPrivilege,
 			"sub-expression tables creation may only be used by root",
 		)
@@ -395,24 +399,12 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 			return nil, pgerror.Newf(pgcode.Syntax,
 				"placeholders are not supported with PREPARE AS OPT PLAN")
 		}
-		// With a canned plan, we don't want to optimize the memo.
-		return opc.optimizer.DetachMemo(), nil
-	}
-
-	if f.Memo().HasPlaceholders() {
-		// Try the placeholder fast path.
-		_, ok, err := opc.optimizer.TryPlaceholderFastPath()
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			opc.log(ctx, "placeholder fast path")
-		}
+		// With a canned plan, the memo is already optimized.
 	} else {
 		// If the memo doesn't have placeholders and did not encounter any stable
 		// operators that can be constant folded, then fully optimize it now - it
 		// can be reused without further changes to build the execution tree.
-		if !f.FoldingControl().PreventedStableFold() {
+		if !f.Memo().HasPlaceholders() && !f.FoldingControl().PreventedStableFold() {
 			opc.log(ctx, "optimizing (no placeholders)")
 			if _, err := opc.optimizer.Optimize(); err != nil {
 				return nil, err
@@ -436,8 +428,7 @@ func (opc *optPlanningCtx) buildReusableMemo(ctx context.Context) (_ *memo.Memo,
 func (opc *optPlanningCtx) reuseMemo(cachedMemo *memo.Memo) (*memo.Memo, error) {
 	if cachedMemo.IsOptimized() {
 		// The query could have been already fully optimized if there were no
-		// placeholders or the placeholder fast path succeeded (see
-		// buildReusableMemo).
+		// placeholders (see buildReusableMemo).
 		return cachedMemo, nil
 	}
 	f := opc.optimizer.Factory()
@@ -555,21 +546,25 @@ func (opc *optPlanningCtx) runExecBuilder(
 	f exec.Factory,
 	mem *memo.Memo,
 	evalCtx *tree.EvalContext,
+	codec keys.SQLCodec,
 	allowAutoCommit bool,
 ) error {
 	var result *planComponents
+	var explainPlan *explain.Plan
 	var isDDL bool
 	var containsFullTableScan bool
 	var containsFullIndexScan bool
-	var containsLargeFullTableScan bool
-	var containsLargeFullIndexScan bool
-	var containsMutation bool
-	var gf *explain.PlanGistFactory
-	if !opc.p.SessionData().DisablePlanGists {
-		gf = explain.NewPlanGistFactory(f)
-		f = gf
+	if planTop.appStats != nil {
+		// We do not set this flag upfront when initializing planTop because the
+		// planning process could in principle modify the AST, resulting in a
+		// different statement signature.
+		planTop.savePlanForStats = planTop.appStats.shouldSaveLogicalPlanDescription(
+			planTop.stmt,
+			allowAutoCommit,
+		)
 	}
-	if !planTop.instrumentation.ShouldBuildExplainPlan() {
+	if !planTop.savePlanString && !planTop.savePlanForStats {
+		// No instrumentation.
 		bld := execbuilder.New(f, &opc.optimizer, mem, &opc.catalog, mem.RootExpr(), evalCtx, allowAutoCommit)
 		plan, err := bld.Build()
 		if err != nil {
@@ -579,9 +574,6 @@ func (opc *optPlanningCtx) runExecBuilder(
 		isDDL = bld.IsDDL
 		containsFullTableScan = bld.ContainsFullTableScan
 		containsFullIndexScan = bld.ContainsFullIndexScan
-		containsLargeFullTableScan = bld.ContainsLargeFullTableScan
-		containsLargeFullIndexScan = bld.ContainsLargeFullIndexScan
-		containsMutation = bld.ContainsMutation
 	} else {
 		// Create an explain factory and record the explain.Plan.
 		explainFactory := explain.NewFactory(f)
@@ -592,19 +584,11 @@ func (opc *optPlanningCtx) runExecBuilder(
 		if err != nil {
 			return err
 		}
-		explainPlan := plan.(*explain.Plan)
+		explainPlan = plan.(*explain.Plan)
 		result = explainPlan.WrappedPlan.(*planComponents)
 		isDDL = bld.IsDDL
 		containsFullTableScan = bld.ContainsFullTableScan
 		containsFullIndexScan = bld.ContainsFullIndexScan
-		containsLargeFullTableScan = bld.ContainsLargeFullTableScan
-		containsLargeFullIndexScan = bld.ContainsLargeFullIndexScan
-		containsMutation = bld.ContainsMutation
-
-		planTop.instrumentation.RecordExplainPlan(explainPlan)
-	}
-	if gf != nil {
-		planTop.instrumentation.planGist = gf.PlanGist()
 	}
 
 	if stmt.ExpectedTypes != nil {
@@ -615,6 +599,8 @@ func (opc *optPlanningCtx) runExecBuilder(
 	}
 
 	planTop.planComponents = *result
+	planTop.explainPlan = explainPlan
+	planTop.codec = codec
 	planTop.stmt = stmt
 	planTop.flags = opc.flags
 	if isDDL {
@@ -626,24 +612,9 @@ func (opc *optPlanningCtx) runExecBuilder(
 	if containsFullIndexScan {
 		planTop.flags.Set(planFlagContainsFullIndexScan)
 	}
-	if containsLargeFullTableScan {
-		planTop.flags.Set(planFlagContainsLargeFullTableScan)
-	}
-	if containsLargeFullIndexScan {
-		planTop.flags.Set(planFlagContainsLargeFullIndexScan)
-	}
-	if containsMutation {
-		planTop.flags.Set(planFlagContainsMutation)
-	}
-	if planTop.instrumentation.ShouldSaveMemo() {
+	if planTop.savePlanString || planTop.savePlanForStats {
 		planTop.mem = mem
 		planTop.catalog = &opc.catalog
 	}
 	return nil
-}
-
-// DecodeGist Avoid an import cycle by keeping the cat out of the tree, RFC: is
-// there a better way?
-func (p *planner) DecodeGist(gist string) ([]string, error) {
-	return explain.DecodePlanGistToRows(gist, &p.optPlanningCtx.catalog)
 }

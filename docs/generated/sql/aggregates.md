@@ -27,21 +27,15 @@
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: <a href="uuid.html">uuid</a>) &rarr; <a href="uuid.html">uuid</a>[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
-<tr><td><a name="array_agg"></a><code>array_agg(arg1: anyenum) &rarr; anyenum[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
-</span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: box2d) &rarr; box2d[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: geography) &rarr; geography[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: geometry) &rarr; geometry[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
-<tr><td><a name="array_agg"></a><code>array_agg(arg1: jsonb) &rarr; jsonb[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
-</span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: oid) &rarr; oid[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: timetz) &rarr; timetz[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
-</span></td></tr>
-<tr><td><a name="array_agg"></a><code>array_agg(arg1: tuple) &rarr; tuple[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: varbit) &rarr; varbit[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
@@ -69,19 +63,9 @@
 </span></td></tr>
 <tr><td><a name="concat_agg"></a><code>concat_agg(arg1: <a href="string.html">string</a>) &rarr; <a href="string.html">string</a></code></td><td><span class="funcdesc"><p>Concatenates all selected values.</p>
 </span></td></tr>
-<tr><td><a name="corr"></a><code>corr(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="corr"></a><code>corr(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="corr"></a><code>corr(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="corr"></a><code>corr(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
-</span></td></tr>
 <tr><td><a name="corr"></a><code>corr(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="corr"></a><code>corr(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="corr"></a><code>corr(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="corr"></a><code>corr(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the correlation coefficient of the selected values.</p>
 </span></td></tr>
@@ -90,42 +74,6 @@
 <tr><td><a name="count"></a><code>count(arg1: anyelement) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates the number of selected elements.</p>
 </span></td></tr>
 <tr><td><a name="count_rows"></a><code>count_rows() &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates the number of rows.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_pop"></a><code>covar_pop(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
-</span></td></tr>
-<tr><td><a name="covar_samp"></a><code>covar_samp(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the sample covariance of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="every"></a><code>every(arg1: <a href="bool.html">bool</a>) &rarr; <a href="bool.html">bool</a></code></td><td><span class="funcdesc"><p>Calculates the boolean value of <code>AND</code>ing all selected values.</p>
 </span></td></tr>
@@ -236,168 +184,6 @@
 <tr><td><a name="percentile_disc"></a><code>percentile_disc(arg1: <a href="float.html">float</a>) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Discrete percentile: returns the first input value whose position in the ordering equals or exceeds the specified fraction.</p>
 </span></td></tr>
 <tr><td><a name="percentile_disc"></a><code>percentile_disc(arg1: <a href="float.html">float</a>[]) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Discrete percentile: returns input values whose position in the ordering equals or exceeds the specified fractions.</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgx"></a><code>regr_avgx(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the independent variable (sum(X)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_avgy"></a><code>regr_avgy(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the average of the dependent variable (sum(Y)/N).</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_count"></a><code>regr_count(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates number of input rows in which both expressions are nonnull.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_intercept"></a><code>regr_intercept(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates y-intercept of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_r2"></a><code>regr_r2(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates square of the correlation coefficient.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_slope"></a><code>regr_slope(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates slope of the least-squares-fit linear equation determined by the (X, Y) pairs.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxx"></a><code>regr_sxx(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the independent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_sxy"></a><code>regr_sxy(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of products of independent times dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="decimal.html">decimal</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="float.html">float</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="float.html">float</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="float.html">float</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="int.html">int</a>, arg2: <a href="decimal.html">decimal</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="int.html">int</a>, arg2: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
-</span></td></tr>
-<tr><td><a name="regr_syy"></a><code>regr_syy(arg1: <a href="int.html">int</a>, arg2: <a href="int.html">int</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates sum of squares of the dependent variable.</p>
 </span></td></tr>
 <tr><td><a name="sqrdiff"></a><code>sqrdiff(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the sum of squared differences from the mean of the selected values.</p>
 </span></td></tr>

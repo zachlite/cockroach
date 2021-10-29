@@ -19,6 +19,10 @@ type OpNode interface {
 	Child(nth int, verbose bool) OpNode
 }
 
-// OpChains describes a forest of OpNodes that represent a single physical plan.
-// Each entry in the slice is a root of a separate OpNode tree.
-type OpChains []OpNode
+// IOReader is an operator that performs IO reads.
+type IOReader interface {
+	// GetBytesRead returns the number of bytes read from disk by this operator.
+	GetBytesRead() int64
+	// GetRowsRead returns the number of rows read from disk by this operator.
+	GetRowsRead() int64
+}

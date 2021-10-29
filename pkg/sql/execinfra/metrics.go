@@ -19,22 +19,17 @@ import (
 // DistSQLMetrics contains pointers to the metrics for monitoring DistSQL
 // processing.
 type DistSQLMetrics struct {
-	QueriesActive         *metric.Gauge
-	QueriesTotal          *metric.Counter
-	ContendedQueriesCount *metric.Counter
-	FlowsActive           *metric.Gauge
-	FlowsTotal            *metric.Counter
-	FlowsQueued           *metric.Gauge
-	FlowsScheduled        *metric.Counter
-	QueueWaitHist         *metric.Histogram
-	MaxBytesHist          *metric.Histogram
-	CurBytesCount         *metric.Gauge
-	VecOpenFDs            *metric.Gauge
-	CurDiskBytesCount     *metric.Gauge
-	MaxDiskBytesHist      *metric.Histogram
-	QueriesSpilled        *metric.Counter
-	SpilledBytesWritten   *metric.Counter
-	SpilledBytesRead      *metric.Counter
+	QueriesActive     *metric.Gauge
+	QueriesTotal      *metric.Counter
+	FlowsActive       *metric.Gauge
+	FlowsTotal        *metric.Counter
+	FlowsQueued       *metric.Gauge
+	QueueWaitHist     *metric.Histogram
+	MaxBytesHist      *metric.Histogram
+	CurBytesCount     *metric.Gauge
+	VecOpenFDs        *metric.Gauge
+	CurDiskBytesCount *metric.Gauge
+	MaxDiskBytesHist  *metric.Histogram
 }
 
 // MetricStruct implements the metrics.Struct interface.
@@ -45,19 +40,13 @@ var _ metric.Struct = DistSQLMetrics{}
 var (
 	metaQueriesActive = metric.Metadata{
 		Name:        "sql.distsql.queries.active",
-		Help:        "Number of SQL queries currently active",
+		Help:        "Number of distributed SQL queries currently active",
 		Measurement: "Queries",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaQueriesTotal = metric.Metadata{
 		Name:        "sql.distsql.queries.total",
-		Help:        "Number of SQL queries executed",
-		Measurement: "Queries",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaContendedQueriesCount = metric.Metadata{
-		Name:        "sql.distsql.contended_queries.count",
-		Help:        "Number of SQL queries that experienced contention",
+		Help:        "Number of distributed SQL queries executed",
 		Measurement: "Queries",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -76,12 +65,6 @@ var (
 	metaFlowsQueued = metric.Metadata{
 		Name:        "sql.distsql.flows.queued",
 		Help:        "Number of distributed SQL flows currently queued",
-		Measurement: "Flows",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaFlowsScheduled = metric.Metadata{
-		Name:        "sql.distsql.flows.scheduled",
-		Help:        "Number of distributed SQL flows scheduled",
 		Measurement: "Flows",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -121,24 +104,6 @@ var (
 		Measurement: "Disk",
 		Unit:        metric.Unit_BYTES,
 	}
-	metaQueriesSpilled = metric.Metadata{
-		Name:        "sql.distsql.queries.spilled",
-		Help:        "Number of queries that have spilled to disk",
-		Measurement: "Queries",
-		Unit:        metric.Unit_COUNT,
-	}
-	metaSpilledBytesWritten = metric.Metadata{
-		Name:        "sql.disk.distsql.spilled.bytes.written",
-		Help:        "Number of bytes written to temporary disk storage as a result of spilling",
-		Measurement: "Disk",
-		Unit:        metric.Unit_BYTES,
-	}
-	metaSpilledBytesRead = metric.Metadata{
-		Name:        "sql.disk.distsql.spilled.bytes.read",
-		Help:        "Number of bytes read from temporary disk storage as a result of spilling",
-		Measurement: "Disk",
-		Unit:        metric.Unit_BYTES,
-	}
 )
 
 // See pkg/sql/mem_metrics.go
@@ -148,22 +113,17 @@ const log10int64times1000 = 19 * 1000
 // MakeDistSQLMetrics instantiates the metrics holder for DistSQL monitoring.
 func MakeDistSQLMetrics(histogramWindow time.Duration) DistSQLMetrics {
 	return DistSQLMetrics{
-		QueriesActive:         metric.NewGauge(metaQueriesActive),
-		QueriesTotal:          metric.NewCounter(metaQueriesTotal),
-		ContendedQueriesCount: metric.NewCounter(metaContendedQueriesCount),
-		FlowsActive:           metric.NewGauge(metaFlowsActive),
-		FlowsTotal:            metric.NewCounter(metaFlowsTotal),
-		FlowsQueued:           metric.NewGauge(metaFlowsQueued),
-		FlowsScheduled:        metric.NewCounter(metaFlowsScheduled),
-		QueueWaitHist:         metric.NewLatency(metaQueueWaitHist, histogramWindow),
-		MaxBytesHist:          metric.NewHistogram(metaMemMaxBytes, histogramWindow, log10int64times1000, 3),
-		CurBytesCount:         metric.NewGauge(metaMemCurBytes),
-		VecOpenFDs:            metric.NewGauge(metaVecOpenFDs),
-		CurDiskBytesCount:     metric.NewGauge(metaDiskCurBytes),
-		MaxDiskBytesHist:      metric.NewHistogram(metaDiskMaxBytes, histogramWindow, log10int64times1000, 3),
-		QueriesSpilled:        metric.NewCounter(metaQueriesSpilled),
-		SpilledBytesWritten:   metric.NewCounter(metaSpilledBytesWritten),
-		SpilledBytesRead:      metric.NewCounter(metaSpilledBytesRead),
+		QueriesActive:     metric.NewGauge(metaQueriesActive),
+		QueriesTotal:      metric.NewCounter(metaQueriesTotal),
+		FlowsActive:       metric.NewGauge(metaFlowsActive),
+		FlowsTotal:        metric.NewCounter(metaFlowsTotal),
+		FlowsQueued:       metric.NewGauge(metaFlowsQueued),
+		QueueWaitHist:     metric.NewLatency(metaQueueWaitHist, histogramWindow),
+		MaxBytesHist:      metric.NewHistogram(metaMemMaxBytes, histogramWindow, log10int64times1000, 3),
+		CurBytesCount:     metric.NewGauge(metaMemCurBytes),
+		VecOpenFDs:        metric.NewGauge(metaVecOpenFDs),
+		CurDiskBytesCount: metric.NewGauge(metaDiskCurBytes),
+		MaxDiskBytesHist:  metric.NewHistogram(metaDiskMaxBytes, histogramWindow, log10int64times1000, 3),
 	}
 }
 

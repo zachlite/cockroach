@@ -42,7 +42,7 @@ func (t *TypeName) Type() string {
 
 // Format implements the NodeFormatter interface.
 func (t *TypeName) Format(ctx *FmtCtx) {
-	ctx.FormatNode(&t.ObjectNamePrefix)
+	t.ObjectNamePrefix.Format(ctx)
 	if t.ExplicitSchema || ctx.alwaysFormatTablePrefix() {
 		ctx.WriteByte('.')
 	}
@@ -52,12 +52,6 @@ func (t *TypeName) Format(ctx *FmtCtx) {
 // String implements the Stringer interface.
 func (t *TypeName) String() string {
 	return AsString(t)
-}
-
-// SQLString implements the ResolvableTypeReference interface.
-func (t *TypeName) SQLString() string {
-	// FmtBareIdentifiers prevents the TypeName string from being wrapped in quotations.
-	return AsStringWithFlags(t, FmtBareIdentifiers)
 }
 
 // FQString renders the type name in full, not omitting the prefix
@@ -75,46 +69,30 @@ func (t *TypeName) FQString() string {
 func (t *TypeName) objectName() {}
 
 // NewUnqualifiedTypeName returns a new base type name.
-func NewUnqualifiedTypeName(typ string) *TypeName {
-	tn := MakeUnqualifiedTypeName(typ)
-	return &tn
-}
-
-// MakeUnqualifiedTypeName returns a new type name.
-func MakeUnqualifiedTypeName(typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{}, typ)
-}
-
-// MakeSchemaQualifiedTypeName returns a new type name.
-func MakeSchemaQualifiedTypeName(schema, typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{
-		ExplicitSchema: true,
-		SchemaName:     Name(schema),
-	}, typ)
-}
-
-// MakeTypeNameWithPrefix creates a type name with the provided prefix.
-func MakeTypeNameWithPrefix(prefix ObjectNamePrefix, typ string) TypeName {
-	return TypeName{objName{
-		ObjectNamePrefix: prefix,
-		ObjectName:       Name(typ),
+func NewUnqualifiedTypeName(typ Name) *TypeName {
+	return &TypeName{objName{
+		ObjectName: typ,
 	}}
 }
 
-// MakeQualifiedTypeName creates a fully qualified type name.
-func MakeQualifiedTypeName(db, schema, typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{
-		ExplicitCatalog: true,
-		CatalogName:     Name(db),
-		ExplicitSchema:  true,
-		SchemaName:      Name(schema),
-	}, typ)
+// MakeUnqualifiedTypeName returns a new type name.
+func MakeUnqualifiedTypeName(typ Name) TypeName {
+	return TypeName{objName{
+		ObjectName: typ,
+	}}
 }
 
-// NewQualifiedTypeName returns a fully qualified type name.
-func NewQualifiedTypeName(db, schema, typ string) *TypeName {
-	tn := MakeQualifiedTypeName(db, schema, typ)
-	return &tn
+// MakeNewQualifiedTypeName creates a fully qualified type name.
+func MakeNewQualifiedTypeName(db, schema, typ string) TypeName {
+	return TypeName{objName{
+		ObjectNamePrefix: ObjectNamePrefix{
+			ExplicitCatalog: true,
+			ExplicitSchema:  true,
+			CatalogName:     Name(db),
+			SchemaName:      Name(schema),
+		},
+		ObjectName: Name(typ),
+	}}
 }
 
 // TypeReferenceResolver is the interface that will provide the ability
@@ -164,7 +142,7 @@ func ResolveType(
 		return resolver.ResolveType(ctx, t)
 	case *OIDTypeReference:
 		if resolver == nil {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "type resolver unavailable to resolve type OID %d", t.OID)
+			return nil, pgerror.Newf(pgcode.UndefinedObject, "type OID %d does not exist", t.OID)
 		}
 		return resolver.ResolveTypeByOID(ctx, t.OID)
 	default:
@@ -256,8 +234,7 @@ func (node *ArrayTypeReference) SQLString() string {
 
 // SQLString implements the ResolvableTypeReference interface.
 func (name *UnresolvedObjectName) SQLString() string {
-	// FmtBareIdentifiers prevents the TypeName string from being wrapped in quotations.
-	return AsStringWithFlags(name, FmtBareIdentifiers)
+	return name.String()
 }
 
 // IsReferenceSerialType returns whether the input reference is a known

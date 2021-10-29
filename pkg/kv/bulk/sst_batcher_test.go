@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -23,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/bulk"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -42,7 +42,7 @@ import (
 func makeIntTableKVs(numKeys, valueSize, maxRevisions int) []storage.MVCCKeyValue {
 	prefix := keys.SystemSQLCodec.IndexPrefix(100, 1)
 	kvs := make([]storage.MVCCKeyValue, numKeys)
-	r, _ := randutil.NewTestRand()
+	r, _ := randutil.NewPseudoRand()
 
 	var k int
 	for i := 0; i < numKeys; {
@@ -65,9 +65,9 @@ func makeIntTableKVs(numKeys, valueSize, maxRevisions int) []storage.MVCCKeyValu
 	return kvs
 }
 
-func makePebbleSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
-	memFile := &storage.MemFile{}
-	w := storage.MakeIngestionSSTWriter(memFile)
+func makeRocksSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
+	w, err := storage.MakeRocksDBSstFileWriter()
+	require.NoError(t, err)
 	defer w.Close()
 
 	for i := range kvs {
@@ -75,8 +75,9 @@ func makePebbleSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
 			t.Fatal(err)
 		}
 	}
-	require.NoError(t, w.Finish())
-	return memFile.Data()
+	sst, err := w.Finish()
+	require.NoError(t, err)
+	return sst
 }
 
 func TestAddBatched(t *testing.T) {
@@ -162,14 +163,13 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 			// splits to exercise that codepath, but we also want to make sure we
 			// still handle an unexpected split, so we make our own range cache and
 			// only populate it with one of our two splits.
-			mockCache := rangecache.NewRangeCache(s.ClusterSettings(), nil,
-				func() int64 { return 2 << 10 }, s.Stopper(), s.TracerI().(*tracing.Tracer))
+			mockCache := kvcoord.NewRangeDescriptorCache(s.ClusterSettings(), nil, func() int64 { return 2 << 10 }, s.Stopper())
 			addr, err := keys.Addr(key(0))
 			if err != nil {
 				t.Fatal(err)
 			}
 			tok, err := s.DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache().LookupWithEvictionToken(
-				ctx, addr, rangecache.EvictionToken{}, false)
+				ctx, addr, kvcoord.EvictionToken{}, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -196,8 +196,8 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 			// However we log an event when forced to retry (in case we need to debug)
 			// slow requests or something, so we can inspect the trace in the test to
 			// determine if requests required the expected number of retries.
-			tr := s.TracerI().(*tracing.Tracer)
-			addCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "add")
+
+			addCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, "add")
 			defer cancel()
 			expectedSplitRetries := 0
 			for _, batch := range testCase {
@@ -224,8 +224,14 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 				}
 			}
 			var splitRetries int
-			for _, sp := range getRec() {
-				splitRetries += tracing.CountLogMessages(sp, "SSTable cannot be added spanning range bounds")
+			for _, rec := range getRec() {
+				for _, l := range rec.Logs {
+					for _, line := range l.Fields {
+						if strings.Contains(line.Value, "SSTable cannot be added spanning range bounds") {
+							splitRetries++
+						}
+					}
+				}
 			}
 			if splitRetries != expectedSplitRetries {
 				t.Fatalf("expected %d split-caused retries, got %d", expectedSplitRetries, splitRetries)
@@ -289,7 +295,7 @@ func TestAddBigSpanningSSTWithSplits(t *testing.T) {
 	kvs = kvs[:numKeys]
 
 	// Create a large SST.
-	sst := makePebbleSST(t, kvs)
+	sst := makeRocksSST(t, kvs)
 
 	var splits []roachpb.Key
 	for i := range kvs {

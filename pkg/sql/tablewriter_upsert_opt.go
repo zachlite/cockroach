@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -56,7 +55,7 @@ type optTableUpserter struct {
 	// A mapping of column IDs to the return index used to shape the resulting
 	// rows to those required by the returning clause. Only required if
 	// rowsNeeded is true.
-	colIDToReturnIndex catalog.TableColMap
+	colIDToReturnIndex map[descpb.ColumnID]int
 
 	// Do the result rows have a different order than insert rows. Only set if
 	// rowsNeeded is true.
@@ -65,13 +64,13 @@ type optTableUpserter struct {
 	// fetchCols indicate which columns need to be fetched from the target table,
 	// in order to detect whether a conflict has occurred, as well as to provide
 	// existing values for updates.
-	fetchCols []catalog.Column
+	fetchCols []descpb.ColumnDescriptor
 
 	// updateCols indicate which columns need an update during a conflict.
-	updateCols []catalog.Column
+	updateCols []descpb.ColumnDescriptor
 
 	// returnCols indicate which columns need to be returned by the Upsert.
-	returnCols []catalog.Column
+	returnCols []descpb.ColumnDescriptor
 
 	// canaryOrdinal is the ordinal position of the column within the input row
 	// that is used to decide whether to execute an insert or update operation.
@@ -98,29 +97,29 @@ var _ tableWriter = &optTableUpserter{}
 
 // init is part of the tableWriter interface.
 func (tu *optTableUpserter) init(
-	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext, sv *settings.Values,
+	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext,
 ) error {
-	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx, sv)
+	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx)
 
-	// rowsNeeded, set upon initialization, indicates pkg/sql/backfill.gowhether or not we want
+	// rowsNeeded, set upon initialization, indicates whether or not we want
 	// rows returned from the operation.
 	if tu.rowsNeeded {
 		tu.resultRow = make(tree.Datums, len(tu.returnCols))
 		tu.rows = rowcontainer.NewRowContainer(
 			evalCtx.Mon.MakeBoundAccount(),
-			colinfo.ColTypeInfoFromColumns(tu.returnCols),
+			colinfo.ColTypeInfoFromColDescs(tu.returnCols),
 		)
 
 		// Create the map from colIds to the expected columns.
 		// Note that this map will *not* contain any mutation columns - that's
 		// because even though we might insert values into mutation columns, we
 		// never return them back to the user.
-		tu.colIDToReturnIndex = catalog.ColumnIDToOrdinalMap(tu.tableDesc().PublicColumns())
-		if tu.ri.InsertColIDtoRowIndex.Len() == tu.colIDToReturnIndex.Len() {
-			for i := range tu.ri.InsertCols {
-				colID := tu.ri.InsertCols[i].GetID()
-				resultIndex, ok := tu.colIDToReturnIndex.Get(colID)
-				if !ok || resultIndex != tu.ri.InsertColIDtoRowIndex.GetDefault(colID) {
+		tu.colIDToReturnIndex = tu.tableDesc().ColumnIdxMapWithMutations(false /* includeMutations */)
+
+		if len(tu.ri.InsertColIDtoRowIndex) == len(tu.colIDToReturnIndex) {
+			for colID, insertIndex := range tu.ri.InsertColIDtoRowIndex {
+				resultIndex, ok := tu.colIDToReturnIndex[colID]
+				if !ok || resultIndex != insertIndex {
 					tu.insertReorderingRequired = true
 					break
 				}
@@ -140,11 +139,11 @@ func (tu *optTableUpserter) init(
 // 1) A row may not contain values for nullable columns, so insert those NULLs.
 // 2) Don't return values we wrote into non-public mutation columns.
 func (tu *optTableUpserter) makeResultFromRow(
-	row tree.Datums, colIDToRowIndex catalog.TableColMap,
+	row tree.Datums, colIDToRowIndex map[descpb.ColumnID]int,
 ) tree.Datums {
-	resultRow := make(tree.Datums, tu.colIDToReturnIndex.Len())
-	tu.colIDToReturnIndex.ForEach(func(colID descpb.ColumnID, returnIndex int) {
-		rowIndex, ok := colIDToRowIndex.Get(colID)
+	resultRow := make(tree.Datums, len(tu.colIDToReturnIndex))
+	for colID, returnIndex := range tu.colIDToReturnIndex {
+		rowIndex, ok := colIDToRowIndex[colID]
 		if ok {
 			resultRow[returnIndex] = row[rowIndex]
 		} else {
@@ -153,7 +152,7 @@ func (tu *optTableUpserter) makeResultFromRow(
 			// columns.
 			resultRow[returnIndex] = tree.DNull
 		}
-	})
+	}
 	return resultRow
 }
 
@@ -268,11 +267,7 @@ func (tu *optTableUpserter) updateConflictingRow(
 	//   via GenerateInsertRow().
 	// - for the fetched part, we assume that the data in the table is
 	//   correct already.
-	if err := enforceLocalColumnConstraints(
-		updateValues,
-		tu.updateCols,
-		true, /* isUpdate */
-	); err != nil {
+	if err := enforceLocalColumnConstraints(updateValues, tu.updateCols); err != nil {
 		return err
 	}
 
@@ -295,14 +290,14 @@ func (tu *optTableUpserter) updateConflictingRow(
 	tableRow := tu.makeResultFromRow(fetchRow, tu.ru.FetchColIDtoRowIndex)
 
 	// Make sure all the updated columns are present.
-	tu.colIDToReturnIndex.ForEach(func(colID descpb.ColumnID, returnIndex int) {
+	for colID, returnIndex := range tu.colIDToReturnIndex {
 		// If an update value for a given column exists, use that; else use the
 		// existing value of that column if it has been fetched.
-		rowIndex, ok := tu.ru.UpdateColIDtoRowIndex.Get(colID)
+		rowIndex, ok := tu.ru.UpdateColIDtoRowIndex[colID]
 		if ok {
 			tableRow[returnIndex] = updateValues[rowIndex]
 		}
-	})
+	}
 
 	// Map the upserted columns into the result row before adding it.
 	for tabIdx := range tableRow {

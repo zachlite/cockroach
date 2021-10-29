@@ -21,12 +21,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 	"github.com/kr/pretty"
+	"golang.org/x/time/rate"
 )
+
+var sentryIssue46720Limiter = rate.NewLimiter(0.1, 1) // 1 every 10s
 
 // optimizePuts searches for contiguous runs of Put & CPut commands in
 // the supplied request union. Any run which exceeds a minimum length
@@ -86,10 +89,7 @@ func optimizePuts(
 	if firstUnoptimizedIndex < optimizePutThreshold { // don't bother if below this threshold
 		return origReqs
 	}
-	// iter is being used to find the parts of the key range that is empty. We
-	// don't need to see intents for this purpose since intents also have
-	// provisional values that we will see.
-	iter := reader.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
+	iter := reader.NewIterator(storage.IterOptions{
 		// We want to include maxKey in our scan. Since UpperBound is exclusive, we
 		// need to set it to the key after maxKey.
 		UpperBound: maxKey.Next(),
@@ -147,7 +147,6 @@ func evaluateBatch(
 	rec batcheval.EvalContext,
 	ms *enginepb.MVCCStats,
 	ba *roachpb.BatchRequest,
-	lul hlc.Timestamp,
 	readOnly bool,
 ) (_ *roachpb.BatchResponse, _ result.Result, retErr *roachpb.Error) {
 
@@ -162,13 +161,7 @@ func evaluateBatch(
 
 	// NB: Don't mutate BatchRequest directly.
 	baReqs := ba.Requests
-
-	// baHeader is the header passed to evaluate each command in the batch.
-	// After each command, it is updated with the result and used again for
-	// the next batch. At the end of evaluation, it is used to populate the
-	// response header (timestamp, txn, etc).
 	baHeader := ba.Header
-
 	br := ba.CreateReply()
 
 	// Optimize any contiguous sequences of put and conditional put ops.
@@ -226,9 +219,6 @@ func evaluateBatch(
 		cantDeferWTOE bool
 	}
 
-	// TODO(tbg): if we introduced an "executor" helper here that could carry state
-	// across the slots in the batch while we execute them, this code could come
-	// out a lot less ad-hoc.
 	for index, union := range baReqs {
 		// Execute the command.
 		args := union.GetInner()
@@ -241,74 +231,43 @@ func evaluateBatch(
 			baHeader.Txn.Sequence = args.Header().Sequence
 		}
 
-		// If a unittest filter was installed, check for an injected error; otherwise, continue.
-		if filter := rec.EvalKnobs().TestingEvalFilter; filter != nil {
-			filterArgs := kvserverbase.FilterArgs{
-				Ctx:   ctx,
-				CmdID: idKey,
-				Index: index,
-				Sid:   rec.StoreID(),
-				Req:   args,
-				Hdr:   baHeader,
-			}
-			if pErr := filter(filterArgs); pErr != nil {
-				if pErr.GetTxn() == nil {
-					pErr.SetTxn(baHeader.Txn)
-				}
-				log.Infof(ctx, "test injecting error: %s", pErr)
-				return nil, result.Result{}, pErr
-			}
-		}
-
+		// Note that responses are populated even when an error is returned.
+		// TODO(tschottdorf): Change that. IIRC there is nontrivial use of it currently.
 		reply := br.Responses[index].GetInner()
 
-		// Note that `reply` is populated even when an error is returned: it
-		// may carry a response transaction and in the case of WriteTooOldError
-		// (which is sometimes deferred) it is fully populated.
-		curResult, err := evaluateCommand(
-			ctx, readWriter, rec, ms, baHeader, args, reply, lul)
+		var curResult result.Result
+		var pErr *roachpb.Error
 
-		if filter := rec.EvalKnobs().TestingPostEvalFilter; filter != nil {
-			filterArgs := kvserverbase.FilterArgs{
-				Ctx:   ctx,
-				CmdID: idKey,
-				Index: index,
-				Sid:   rec.StoreID(),
-				Req:   args,
-				Hdr:   baHeader,
-				Err:   err,
-			}
-			if pErr := filter(filterArgs); pErr != nil {
-				if pErr.GetTxn() == nil {
-					pErr.SetTxn(baHeader.Txn)
-				}
-				log.Infof(ctx, "test injecting error: %s", pErr)
-				return nil, result.Result{}, pErr
-			}
+		curResult, pErr = evaluateCommand(
+			ctx, idKey, index, readWriter, rec, ms, baHeader, args, reply)
+
+		// If an EndTxn wants to restart because of a write too old, we
+		// might have a better error to return to the client.
+		retErr, ok := pErr.GetDetail().(*roachpb.TransactionRetryError)
+		if ok && retErr.Reason == roachpb.RETRY_WRITE_TOO_OLD &&
+			args.Method() == roachpb.EndTxn && writeTooOldState.err != nil {
+			pErr.SetDetail(writeTooOldState.err)
+			// Don't defer this error. We could perhaps rely on the client observing
+			// the WriteTooOld flag and retry the batch, but we choose not too.
+			writeTooOldState.cantDeferWTOE = true
 		}
 
-		// If this request is transactional, we now have potentially two
-		// transactions floating around: the one on baHeader.Txn (always
-		// there in a txn) and possibly a newer version in `reply.Header().Txn`.
-		// Absorb the update into baHeader.Txn and write back a nil Transaction
-		// to the header to ensure that there is only one version going forward.
-		if headerCopy := reply.Header(); baHeader.Txn != nil && headerCopy.Txn != nil {
-			baHeader.Txn.Update(headerCopy.Txn)
-			headerCopy.Txn = nil
-			reply.SetHeader(headerCopy)
+		if err := mergedResult.MergeAndDestroy(curResult); err != nil {
+			// TODO(tschottdorf): see whether we really need to pass nontrivial
+			// Result up on error and if so, formalize that.
+			log.Fatalf(
+				ctx,
+				"unable to absorb Result: %s\ndiff(new, old): %s",
+				err, pretty.Diff(curResult, mergedResult),
+			)
 		}
 
-		if err != nil {
-			// If an EndTxn wants to restart because of a write too old, we
-			// might have a better error to return to the client.
-			if retErr := (*roachpb.TransactionRetryError)(nil); errors.As(err, &retErr) &&
-				retErr.Reason == roachpb.RETRY_WRITE_TOO_OLD &&
-				args.Method() == roachpb.EndTxn && writeTooOldState.err != nil {
-				err = writeTooOldState.err
-				// Don't defer this error. We could perhaps rely on the client observing
-				// the WriteTooOld flag and retry the batch, but we choose not too.
-				writeTooOldState.cantDeferWTOE = true
-			} else if wtoErr := (*roachpb.WriteTooOldError)(nil); errors.As(err, &wtoErr) {
+		if pErr != nil {
+			// Initialize the error index.
+			pErr.SetErrorIndex(int32(index))
+
+			switch tErr := pErr.GetDetail().(type) {
+			case *roachpb.WriteTooOldError:
 				// We got a WriteTooOldError. We continue on to run all
 				// commands in the batch in order to determine the highest
 				// timestamp for more efficient retries. If the batch is
@@ -318,9 +277,9 @@ func evaluateBatch(
 				// succeeding when it will be retried are increased.
 				if writeTooOldState.err != nil {
 					writeTooOldState.err.ActualTimestamp.Forward(
-						wtoErr.ActualTimestamp)
+						tErr.ActualTimestamp)
 				} else {
-					writeTooOldState.err = wtoErr
+					writeTooOldState.err = tErr
 				}
 
 				// For read-write requests that observe key-value state, we don't have
@@ -355,8 +314,8 @@ func evaluateBatch(
 
 				if baHeader.Txn != nil {
 					log.VEventf(ctx, 2, "setting WriteTooOld because of key: %s. wts: %s -> %s",
-						args.Header().Key, baHeader.Txn.WriteTimestamp, wtoErr.ActualTimestamp)
-					baHeader.Txn.WriteTimestamp.Forward(wtoErr.ActualTimestamp)
+						args.Header().Key, baHeader.Txn.WriteTimestamp, tErr.ActualTimestamp)
+					baHeader.Txn.WriteTimestamp.Forward(tErr.ActualTimestamp)
 					baHeader.Txn.WriteTooOld = true
 				} else {
 					// For non-transactional requests, there's nowhere to defer the error
@@ -365,43 +324,31 @@ func evaluateBatch(
 					writeTooOldState.cantDeferWTOE = true
 				}
 
-				// Clear error; we're done processing the WTOE for now and we'll return
+				// Clear pErr; we're done processing the WTOE for now and we'll return
 				// to considering it below after we've evaluated all requests.
-				err = nil
+				pErr = nil
+			default:
+				return nil, mergedResult, pErr
 			}
-		}
-
-		// Even on error, we need to propagate the result of evaluation.
-		//
-		// TODO(tbg): find out if that's true and why and improve the comment.
-		if err := mergedResult.MergeAndDestroy(curResult); err != nil {
-			log.Fatalf(
-				ctx,
-				"unable to absorb Result: %s\ndiff(new, old): %s",
-				err, pretty.Diff(curResult, mergedResult),
-			)
-		}
-
-		if err != nil {
-			pErr := roachpb.NewErrorWithTxn(err, baHeader.Txn)
-			// Initialize the error index.
-			pErr.SetErrorIndex(int32(index))
-
-			return nil, mergedResult, pErr
 		}
 
 		// If the last request was carried out with a limit, subtract the number
 		// of results from the limit going forward. Exhausting the limit results
 		// in a limit of -1. This makes sure that we still execute the rest of
 		// the batch, but with limit-aware operations returning no data.
-		h := reply.Header()
-		if limit, retResults := baHeader.MaxSpanRequestKeys, h.NumKeys; limit != 0 && retResults > 0 {
+		if limit, retResults := baHeader.MaxSpanRequestKeys, reply.Header().NumKeys; limit > 0 {
 			if retResults > limit {
 				index, retResults, limit := index, retResults, limit // don't alloc unless branch taken
-				return nil, mergedResult, roachpb.NewError(errors.AssertionFailedf(
+				err := errorutil.UnexpectedWithIssueErrorf(46652,
 					"received %d results, limit was %d (original limit: %d, batch=%s idx=%d)",
-					retResults, limit, ba.Header.MaxSpanRequestKeys,
-					redact.Safe(ba.Summary()), index))
+					errors.Safe(retResults), errors.Safe(limit),
+					errors.Safe(ba.Header.MaxSpanRequestKeys),
+					errors.Safe(ba.Summary()), errors.Safe(index))
+				if sentryIssue46720Limiter.Allow() {
+					log.Errorf(ctx, "%v", err)
+					errorutil.SendReport(ctx, &rec.ClusterSettings().SV, err)
+				}
+				return nil, mergedResult, roachpb.NewError(err)
 			} else if retResults < limit {
 				baHeader.MaxSpanRequestKeys -= retResults
 			} else {
@@ -409,37 +356,45 @@ func evaluateBatch(
 				// mean "no limit").
 				baHeader.MaxSpanRequestKeys = -1
 			}
+		} else if limit < 0 {
+			if retResults > 0 {
+				index, retResults := index, retResults // don't alloc unless branch taken
+				log.Fatalf(ctx,
+					"received %d results, limit was exhausted (original limit: %d, batch=%s idx=%d)",
+					errors.Safe(retResults), errors.Safe(ba.Header.MaxSpanRequestKeys),
+					errors.Safe(ba.Summary()), errors.Safe(index))
+			}
 		}
-		// Same as for MaxSpanRequestKeys above, keep track of the limit and make
-		// sure to fall through to -1 instead of hitting zero (which means no
-		// limit). We have to check the ResumeReason as well, since e.g. a Scan
-		// response may not include the value that pushed it across the limit.
+		// Same as for MaxSpanRequestKeys above, keep track of the limit and
+		// make sure to fall through to -1 instead of hitting zero (which
+		// means no limit).
 		if baHeader.TargetBytes > 0 {
-			if h.ResumeReason == roachpb.RESUME_BYTE_LIMIT {
-				baHeader.TargetBytes = -1
-			} else if baHeader.TargetBytes > h.NumBytes {
-				baHeader.TargetBytes -= h.NumBytes
+			retBytes := reply.Header().NumBytes
+			if baHeader.TargetBytes > retBytes {
+				baHeader.TargetBytes -= retBytes
 			} else {
 				baHeader.TargetBytes = -1
 			}
 		}
+
+		// If transactional, we use ba.Txn for each individual command and
+		// accumulate updates to it. Once accumulated, we then remove the Txn
+		// from each individual response.
+		// TODO(spencer,tschottdorf): need copy-on-write behavior for the
+		//   updated batch transaction / timestamp.
+		if baHeader.Txn != nil {
+			if header := reply.Header(); header.Txn != nil {
+				baHeader.Txn.Update(header.Txn)
+				header.Txn = nil
+				reply.SetHeader(header)
+			}
+		}
 	}
 
-	// If we made it here, there was no error during evaluation, with the exception of
-	// a deferred WTOE. If it can't be deferred - return it now; otherwise it is swallowed.
-	// Note that we don't attach an Index to the returned Error.
-	//
-	// TODO(tbg): we could attach the index of the first WriteTooOldError seen, but does
-	// that buy us anything?
+	// If there's a write too old error that we can't defer, return it.
 	if writeTooOldState.cantDeferWTOE {
-		// NB: we can't do any error wrapping here yet due to compatibility with 20.2 nodes;
-		// there needs to be an ErrorDetail here.
 		return nil, mergedResult, roachpb.NewErrorWithTxn(writeTooOldState.err, baHeader.Txn)
 	}
-
-	// The batch evaluation will not return an error (i.e. either everything went
-	// fine or we're deferring a WriteTooOldError by having bumped
-	// baHeader.Txn.WriteTimestamp).
 
 	// Update the batch response timestamp field to the timestamp at which the
 	// batch's reads were evaluated.
@@ -467,24 +422,43 @@ func evaluateBatch(
 // remaining for this batch (MaxInt64 for no limit).
 func evaluateCommand(
 	ctx context.Context,
+	raftCmdID kvserverbase.CmdIDKey,
+	index int,
 	readWriter storage.ReadWriter,
 	rec batcheval.EvalContext,
 	ms *enginepb.MVCCStats,
 	h roachpb.Header,
 	args roachpb.Request,
 	reply roachpb.Response,
-	lul hlc.Timestamp,
-) (result.Result, error) {
+) (result.Result, *roachpb.Error) {
+	// If a unittest filter was installed, check for an injected error; otherwise, continue.
+	if filter := rec.EvalKnobs().TestingEvalFilter; filter != nil {
+		filterArgs := kvserverbase.FilterArgs{
+			Ctx:   ctx,
+			CmdID: raftCmdID,
+			Index: index,
+			Sid:   rec.StoreID(),
+			Req:   args,
+			Hdr:   h,
+		}
+		if pErr := filter(filterArgs); pErr != nil {
+			if pErr.GetTxn() == nil {
+				pErr.SetTxn(h.Txn)
+			}
+			log.Infof(ctx, "test injecting error: %s", pErr)
+			return result.Result{}, pErr
+		}
+	}
+
 	var err error
 	var pd result.Result
 
 	if cmd, ok := batcheval.LookupCommand(args.Method()); ok {
 		cArgs := batcheval.CommandArgs{
-			EvalCtx:               rec,
-			Header:                h,
-			Args:                  args,
-			Stats:                 ms,
-			LocalUncertaintyLimit: lul,
+			EvalCtx: rec,
+			Header:  h,
+			Args:    args,
+			Stats:   ms,
 		}
 
 		if cmd.EvalRW != nil {
@@ -493,21 +467,53 @@ func evaluateCommand(
 			pd, err = cmd.EvalRO(ctx, readWriter, cArgs, reply)
 		}
 	} else {
-		return result.Result{}, errors.Errorf("unrecognized command %s", args.Method())
+		err = errors.Errorf("unrecognized command %s", args.Method())
 	}
 
-	if log.ExpensiveLogEnabled(ctx, 2) {
-		trunc := func(s string) string {
-			const maxLen = 256
-			if len(s) > maxLen {
-				return s[:maxLen-3] + "..."
-			}
-			return s
-		}
-		log.VEventf(ctx, 2, "evaluated %s command %s, txn=%v : resp=%s, err=%v",
-			args.Method(), trunc(args.String()), h.Txn, trunc(reply.String()), err)
+	// TODO(peter): We'd like to assert that the hlc clock is always updated
+	// correctly, but various tests insert versioned data without going through
+	// the proper channels. See TestPushTxnUpgradeExistingTxn for an example.
+	//
+	// if header.Txn != nil && h.Timestamp.LessEq(header.Txn.Timestamp) {
+	// 	if now := r.store.Clock().Now(); now.Less(header.Txn.Timestamp) {
+	// 		log.Fatalf(ctx, "hlc clock not updated: %s < %s", now, header.Txn.Timestamp)
+	// 	}
+	// }
+
+	if log.V(2) {
+		log.Infof(ctx, "evaluated %s command %+v: %+v, err=%v", args.Method(), args, reply, err)
 	}
-	return pd, err
+
+	if filter := rec.EvalKnobs().TestingPostEvalFilter; filter != nil {
+		filterArgs := kvserverbase.FilterArgs{
+			Ctx:   ctx,
+			CmdID: raftCmdID,
+			Index: index,
+			Sid:   rec.StoreID(),
+			Req:   args,
+			Hdr:   h,
+			Err:   err,
+		}
+		if pErr := filter(filterArgs); pErr != nil {
+			if pErr.GetTxn() == nil {
+				pErr.SetTxn(h.Txn)
+			}
+			log.Infof(ctx, "test injecting error: %s", pErr)
+			return result.Result{}, pErr
+		}
+	}
+
+	// Create a roachpb.Error by initializing txn from the request/response header.
+	var pErr *roachpb.Error
+	if err != nil {
+		txn := reply.Header().Txn
+		if txn == nil {
+			txn = h.Txn
+		}
+		pErr = roachpb.NewErrorWithTxn(err, txn)
+	}
+
+	return pd, pErr
 }
 
 // canDoServersideRetry looks at the error produced by evaluating ba (or the

@@ -13,7 +13,7 @@ package tree
 // AlterDatabaseOwner represents a ALTER DATABASE OWNER TO statement.
 type AlterDatabaseOwner struct {
 	Name  Name
-	Owner RoleSpec
+	Owner Name
 }
 
 // Format implements the NodeFormatter interface.
@@ -22,92 +22,4 @@ func (node *AlterDatabaseOwner) Format(ctx *FmtCtx) {
 	ctx.FormatNode(&node.Name)
 	ctx.WriteString(" OWNER TO ")
 	ctx.FormatNode(&node.Owner)
-}
-
-// AlterDatabaseAddRegion represents a ALTER DATABASE ADD REGION statement.
-type AlterDatabaseAddRegion struct {
-	Name        Name
-	Region      Name
-	IfNotExists bool
-}
-
-var _ Statement = &AlterDatabaseAddRegion{}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterDatabaseAddRegion) Format(ctx *FmtCtx) {
-	ctx.WriteString("ALTER DATABASE ")
-	ctx.FormatNode(&node.Name)
-	ctx.WriteString(" ADD REGION ")
-	if node.IfNotExists {
-		ctx.WriteString("IF NOT EXISTS ")
-	}
-	ctx.FormatNode(&node.Region)
-}
-
-// AlterDatabaseDropRegion represents a ALTER DATABASE DROP REGION statement.
-type AlterDatabaseDropRegion struct {
-	Name     Name
-	Region   Name
-	IfExists bool
-}
-
-var _ Statement = &AlterDatabaseDropRegion{}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterDatabaseDropRegion) Format(ctx *FmtCtx) {
-	ctx.WriteString("ALTER DATABASE ")
-	ctx.FormatNode(&node.Name)
-	ctx.WriteString(" DROP REGION ")
-	if node.IfExists {
-		ctx.WriteString("IF EXISTS ")
-	}
-	ctx.FormatNode(&node.Region)
-}
-
-// AlterDatabasePrimaryRegion represents a ALTER DATABASE PRIMARY REGION ... statement.
-type AlterDatabasePrimaryRegion struct {
-	Name          Name
-	PrimaryRegion Name
-}
-
-var _ Statement = &AlterDatabasePrimaryRegion{}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterDatabasePrimaryRegion) Format(ctx *FmtCtx) {
-	ctx.WriteString("ALTER DATABASE ")
-	ctx.FormatNode(&node.Name)
-	ctx.WriteString(" PRIMARY REGION ")
-	node.PrimaryRegion.Format(ctx)
-}
-
-// AlterDatabaseSurvivalGoal represents a ALTER DATABASE SURVIVE ... statement.
-type AlterDatabaseSurvivalGoal struct {
-	Name         Name
-	SurvivalGoal SurvivalGoal
-}
-
-var _ Statement = &AlterDatabaseSurvivalGoal{}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterDatabaseSurvivalGoal) Format(ctx *FmtCtx) {
-	ctx.WriteString("ALTER DATABASE ")
-	ctx.FormatNode(&node.Name)
-	ctx.WriteString(" ")
-	node.SurvivalGoal.Format(ctx)
-}
-
-// AlterDatabasePlacement represents a ALTER DATABASE PLACEMENT statement.
-type AlterDatabasePlacement struct {
-	Name      Name
-	Placement DataPlacement
-}
-
-var _ Statement = &AlterDatabasePlacement{}
-
-// Format implements the NodeFormatter interface.
-func (node *AlterDatabasePlacement) Format(ctx *FmtCtx) {
-	ctx.WriteString("ALTER DATABASE ")
-	ctx.FormatNode(&node.Name)
-	ctx.WriteString(" ")
-	node.Placement.Format(ctx)
 }

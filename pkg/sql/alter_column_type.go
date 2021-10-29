@@ -14,19 +14,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachange"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
@@ -58,33 +56,27 @@ var alterColTypeInCombinationNotSupportedErr = unimplemented.NewWithIssuef(
 func AlterColumnType(
 	ctx context.Context,
 	tableDesc *tabledesc.Mutable,
-	col catalog.Column,
+	col *descpb.ColumnDescriptor,
 	t *tree.AlterTableAlterColumnType,
 	params runParams,
 	cmds tree.AlterTableCmds,
 	tn *tree.TableName,
 ) error {
-	for _, tableRef := range tableDesc.DependedOnBy {
-		found := false
-		for _, colID := range tableRef.ColumnIDs {
-			if colID == col.GetID() {
-				found = true
-			}
-		}
-		if found {
-			return params.p.dependentViewError(
-				ctx, "column", col.GetName(), tableDesc.ParentID, tableRef.ID, "alter type of",
-			)
-		}
-	}
 
 	typ, err := tree.ResolveType(ctx, t.ToType, params.p.semaCtx.GetTypeResolver())
 	if err != nil {
 		return err
 	}
 
-	if err := checkTypeIsSupported(ctx, params.ExecCfg().Settings, typ); err != nil {
+	version := params.ExecCfg().Settings.Version.ActiveVersionOrEmpty(params.ctx)
+	if supported, err := isTypeSupportedInVersion(version, typ); err != nil {
 		return err
+	} else if !supported {
+		return pgerror.Newf(
+			pgcode.FeatureNotSupported,
+			"type %s is not supported until version upgrade is finalized",
+			typ.SQLString(),
+		)
 	}
 
 	// Special handling for STRING COLLATE xy to verify that we recognize the language.
@@ -93,14 +85,6 @@ func AlterColumnType(
 			typ = types.MakeCollatedString(typ, t.Collation)
 		} else {
 			return pgerror.New(pgcode.Syntax, "COLLATE can only be used with string types")
-		}
-	}
-
-	// Special handling for IDENTITY column to make sure it cannot be altered into
-	// a non-integer type.
-	if col.IsGeneratedAsIdentity() {
-		if typ.InternalType.Family != types.IntFamily {
-			return sqlerrors.NewIdentityColumnTypeError()
 		}
 	}
 
@@ -116,7 +100,7 @@ func AlterColumnType(
 		// using the expression.
 		kind = schemachange.ColumnConversionGeneral
 	} else {
-		kind, err = schemachange.ClassifyConversion(ctx, col.GetType(), typ)
+		kind, err = schemachange.ClassifyConversion(ctx, col.Type, typ)
 		if err != nil {
 			return err
 		}
@@ -129,9 +113,9 @@ func AlterColumnType(
 		// what they're going for.
 		return pgerror.Newf(pgcode.CannotCoerce,
 			"the requested type conversion (%s -> %s) requires an explicit USING expression",
-			col.GetType().SQLString(), typ.SQLString())
+			col.Type.SQLString(), typ.SQLString())
 	case schemachange.ColumnConversionTrivial:
-		col.ColumnDesc().Type = typ
+		col.Type = typ
 	case schemachange.ColumnConversionGeneral, schemachange.ColumnConversionValidate:
 		if err := alterColumnTypeGeneral(ctx, tableDesc, col, typ, t.Using, params, cmds, tn); err != nil {
 			return err
@@ -139,12 +123,12 @@ func AlterColumnType(
 		if err := params.p.createOrUpdateSchemaChangeJob(params.ctx, tableDesc, tree.AsStringWithFQNames(t, params.Ann()), tableDesc.ClusterVersion.NextMutationID); err != nil {
 			return err
 		}
-		params.p.BufferClientNotice(params.ctx, pgnotice.Newf("ALTER COLUMN TYPE changes are finalized asynchronously; "+
+		params.p.SendClientNotice(params.ctx, pgnotice.Newf("ALTER COLUMN TYPE changes are finalized asynchronously; "+
 			"further schema changes on this table may be restricted until the job completes; "+
 			"some writes to the altered column may be rejected until the schema change is finalized"))
 	default:
 		return errors.AssertionFailedf("unknown conversion for %s -> %s",
-			col.GetType().SQLString(), typ.SQLString())
+			col.Type.SQLString(), typ.SQLString())
 	}
 
 	return nil
@@ -153,35 +137,65 @@ func AlterColumnType(
 func alterColumnTypeGeneral(
 	ctx context.Context,
 	tableDesc *tabledesc.Mutable,
-	col catalog.Column,
+	col *descpb.ColumnDescriptor,
 	toType *types.T,
 	using tree.Expr,
 	params runParams,
 	cmds tree.AlterTableCmds,
 	tn *tree.TableName,
 ) error {
+	// alterColumnTypeGeneralOld is temporarily disabled until #54844 is disabled.
+	// This keeps static lint from failing.
+	_ = alterColumnTypeGeneralOld
+	return unimplemented.NewWithIssuef(
+		54844,
+		"ALTER COLUMN TYPE from %v to %v is prohibited until v21.1",
+		col.Type,
+		toType,
+	)
+}
+
+func alterColumnTypeGeneralOld(
+	ctx context.Context,
+	tableDesc *tabledesc.Mutable,
+	col *descpb.ColumnDescriptor,
+	toType *types.T,
+	using tree.Expr,
+	params runParams,
+	cmds tree.AlterTableCmds,
+	tn *tree.TableName,
+) error {
+	// Make sure that all nodes in the cluster are able to perform
+	// general alter column type conversions.
+	if !params.p.ExecCfg().Settings.Version.IsActive(
+		params.ctx,
+		clusterversion.VersionAlterColumnTypeGeneral,
+	) {
+		return pgerror.Newf(pgcode.FeatureNotSupported,
+			"version %v must be finalized to run this alter column type",
+			clusterversion.VersionAlterColumnTypeGeneral)
+	}
 	if !params.SessionData().AlterColumnTypeGeneralEnabled {
 		return pgerror.WithCandidateCode(
 			errors.WithHint(
 				errors.WithIssueLink(
 					errors.Newf("ALTER COLUMN TYPE from %v to %v is only "+
 						"supported experimentally",
-						col.GetType(), toType),
-					errors.IssueLink{IssueURL: build.MakeIssueURL(49329)}),
+						col.Type, toType),
+					errors.IssueLink{IssueURL: unimplemented.MakeURL(49329)}),
 				"you can enable alter column type general support by running "+
 					"`SET enable_experimental_alter_column_type_general = true`"),
 			pgcode.FeatureNotSupported)
 	}
 
 	// Disallow ALTER COLUMN TYPE general for columns that own sequences.
-	if col.NumOwnsSequences() != 0 {
+	if len(col.OwnsSequenceIds) != 0 {
 		return colOwnsSequenceNotSupportedErr
 	}
 
-	// Disallow ALTER COLUMN TYPE general for columns that have a check
-	// constraint.
+	// Disallow ALTER COLUMN TYPE general for columns that have a constraint.
 	for i := range tableDesc.Checks {
-		uses, err := tableDesc.CheckConstraintUsesColumn(tableDesc.Checks[i], col.GetID())
+		uses, err := tableDesc.CheckConstraintUsesColumn(tableDesc.Checks[i], col.ID)
 		if err != nil {
 			return err
 		}
@@ -190,29 +204,17 @@ func alterColumnTypeGeneral(
 		}
 	}
 
-	// Disallow ALTER COLUMN TYPE general for columns that have a
-	// UNIQUE WITHOUT INDEX constraint.
-	for _, uc := range tableDesc.AllActiveAndInactiveUniqueWithoutIndexConstraints() {
-		for _, id := range uc.ColumnIDs {
-			if col.GetID() == id {
-				return colWithConstraintNotSupportedErr
-			}
-		}
-	}
-
-	// Disallow ALTER COLUMN TYPE general for columns that have a foreign key
-	// constraint.
 	for _, fk := range tableDesc.AllActiveAndInactiveForeignKeys() {
 		if fk.OriginTableID == tableDesc.GetID() {
 			for _, id := range fk.OriginColumnIDs {
-				if col.GetID() == id {
+				if col.ID == id {
 					return colWithConstraintNotSupportedErr
 				}
 			}
 		}
 		if fk.ReferencedTableID == tableDesc.GetID() {
 			for _, id := range fk.ReferencedColumnIDs {
-				if col.GetID() == id {
+				if col.ID == id {
 					return colWithConstraintNotSupportedErr
 				}
 			}
@@ -221,14 +223,9 @@ func alterColumnTypeGeneral(
 
 	// Disallow ALTER COLUMN TYPE general for columns that are
 	// part of indexes.
-	for _, idx := range tableDesc.NonDropIndexes() {
-		for i := 0; i < idx.NumKeyColumns(); i++ {
-			if idx.GetKeyColumnID(i) == col.GetID() {
-				return colInIndexNotSupportedErr
-			}
-		}
-		for i := 0; i < idx.NumKeySuffixColumns(); i++ {
-			if idx.GetKeySuffixColumnID(i) == col.GetID() {
+	for _, idx := range tableDesc.AllNonDropIndexes() {
+		for _, id := range append(idx.ColumnIDs, idx.ExtraColumnIDs...) {
+			if col.ID == id {
 				return colInIndexNotSupportedErr
 			}
 		}
@@ -255,11 +252,11 @@ func alterColumnTypeGeneral(
 	}
 
 	nameExists := func(name string) bool {
-		_, err := tableDesc.FindColumnWithName(tree.Name(name))
+		_, _, err := tableDesc.FindColumnByName(tree.Name(name))
 		return err == nil
 	}
 
-	shadowColName := tabledesc.GenerateUniqueName(col.GetName(), nameExists)
+	shadowColName := tabledesc.GenerateUniqueConstraintName(col.Name, nameExists)
 
 	var newColComputeExpr *string
 	// oldCol still needs to have values written to it in case nodes read it from
@@ -273,7 +270,7 @@ func alterColumnTypeGeneral(
 	var inverseExpr string
 	if using != nil {
 		// Validate the provided using expr and ensure it has the correct type.
-		expr, _, _, err := schemaexpr.DequalifyAndValidateExpr(
+		expr, _, err := schemaexpr.DequalifyAndValidateExpr(
 			ctx,
 			tableDesc,
 			using,
@@ -290,7 +287,7 @@ func alterColumnTypeGeneral(
 		newColComputeExpr = &expr
 
 		insertedValToString := tree.CastExpr{
-			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.GetName())},
+			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.Name)},
 			Type:       types.String,
 			SyntaxMode: tree.CastShort,
 		}
@@ -308,9 +305,9 @@ func alterColumnTypeGeneral(
 			"'column %s is undergoing the ALTER COLUMN TYPE USING EXPRESSION "+
 				"schema change, inserts are not supported until the schema change is "+
 				"finalized, '",
-			col.GetName())
+			col.Name)
 		failedInsertMsg := fmt.Sprintf(
-			"'tried to insert ', %s, ' into %s'", insertedVal, col.GetName(),
+			"'tried to insert ', %s, ' into %s'", insertedVal, col.Name,
 		)
 		inverseExpr = fmt.Sprintf(
 			"crdb_internal.force_error('%s', concat(%s, %s))",
@@ -318,7 +315,7 @@ func alterColumnTypeGeneral(
 	} else {
 		// The default computed expression is casting the column to the new type.
 		newComputedExpr := tree.CastExpr{
-			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.GetName())},
+			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.Name)},
 			Type:       toType,
 			SyntaxMode: tree.CastShort,
 		}
@@ -326,8 +323,8 @@ func alterColumnTypeGeneral(
 		newColComputeExpr = &s
 
 		oldColComputeExpr := tree.CastExpr{
-			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.GetName())},
-			Type:       col.GetType(),
+			Expr:       &tree.ColumnItem{ColumnName: tree.Name(col.Name)},
+			Type:       col.Type,
 			SyntaxMode: tree.CastShort,
 		}
 		inverseExpr = tree.Serialize(&oldColComputeExpr)
@@ -337,13 +334,13 @@ func alterColumnTypeGeneral(
 	hasDefault := col.HasDefault()
 	var newColDefaultExpr *string
 	if hasDefault {
-		if col.ColumnDesc().HasNullDefault() {
+		if col.HasNullDefault() {
 			s := tree.Serialize(tree.DNull)
 			newColDefaultExpr = &s
 		} else {
 			// The default expression for the new column is applying the
 			// computed expression to the previous default expression.
-			expr, err := parser.ParseExpr(col.GetDefaultExpr())
+			expr, err := parser.ParseExpr(*col.DefaultExpr)
 			if err != nil {
 				return err
 			}
@@ -364,16 +361,16 @@ func alterColumnTypeGeneral(
 	newCol := descpb.ColumnDescriptor{
 		Name:            shadowColName,
 		Type:            toType,
-		Nullable:        col.IsNullable(),
+		Nullable:        col.Nullable,
 		DefaultExpr:     newColDefaultExpr,
-		UsesSequenceIds: col.ColumnDesc().UsesSequenceIds,
-		OwnsSequenceIds: col.ColumnDesc().OwnsSequenceIds,
+		UsesSequenceIds: col.UsesSequenceIds,
+		OwnsSequenceIds: col.OwnsSequenceIds,
 		ComputeExpr:     newColComputeExpr,
 	}
 
 	// Ensure new column is created in the same column family as the original
 	// so backfiller writes to the same column family.
-	family, err := tableDesc.GetFamilyOfColumn(col.GetID())
+	family, err := tableDesc.GetFamilyOfColumn(col.ID)
 	if err != nil {
 		return err
 	}
@@ -384,20 +381,13 @@ func alterColumnTypeGeneral(
 	}
 
 	tableDesc.AddColumnMutation(&newCol, descpb.DescriptorMutation_ADD)
-	if !newCol.Virtual {
-		// Add non-virtual column name and ID to primary index.
-		primaryIndex := tableDesc.GetPrimaryIndex().IndexDescDeepCopy()
-		primaryIndex.StoreColumnNames = append(primaryIndex.StoreColumnNames, newCol.Name)
-		primaryIndex.StoreColumnIDs = append(primaryIndex.StoreColumnIDs, newCol.ID)
-		tableDesc.SetPrimaryIndex(primaryIndex)
-	}
 
-	if err := tableDesc.AllocateIDs(ctx); err != nil {
+	if err := tableDesc.AllocateIDs(); err != nil {
 		return err
 	}
 
 	swapArgs := &descpb.ComputedColumnSwap{
-		OldColumnId: col.GetID(),
+		OldColumnId: col.ID,
 		NewColumnId: newCol.ID,
 		InverseExpr: inverseExpr,
 	}

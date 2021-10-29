@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for select_in.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -22,29 +20,17 @@
 package colexec
 
 import (
-	"github.com/cockroachdb/apd/v2"
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
-)
-
-// Workaround for bazel auto-generated code. goimports does not automatically
-// pick up the right packages when run within the bazel sandbox.
-var (
-	_ apd.Context
-	_ duration.Duration
-	_ = coldataext.CompareDatum
-	_ json.JSON
 )
 
 // Remove unused warnings.
@@ -80,16 +66,15 @@ const (
 )
 
 func GetInProjectionOperator(
-	evalCtx *tree.EvalContext,
 	allocator *colmem.Allocator,
 	t *types.T,
-	input colexecop.Operator,
+	input colexecbase.Operator,
 	colIdx int,
 	resultIdx int,
 	datumTuple *tree.DTuple,
 	negate bool,
-) (colexecop.Operator, error) {
-	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, resultIdx)
+) (colexecbase.Operator, error) {
+	input = newVectorTypeEnforcer(allocator, input, types.Bool, resultIdx)
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
@@ -97,13 +82,13 @@ func GetInProjectionOperator(
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
 			obj := &projectInOp_TYPE{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(t, datumTuple)
 			return obj, nil
 			// {{end}}
 		}
@@ -113,13 +98,8 @@ func GetInProjectionOperator(
 }
 
 func GetInOperator(
-	evalCtx *tree.EvalContext,
-	t *types.T,
-	input colexecop.Operator,
-	colIdx int,
-	datumTuple *tree.DTuple,
-	negate bool,
-) (colexecop.Operator, error) {
+	t *types.T, input colexecbase.Operator, colIdx int, datumTuple *tree.DTuple, negate bool,
+) (colexecbase.Operator, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
@@ -127,11 +107,11 @@ func GetInOperator(
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
 			obj := &selectInOp_TYPE{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRow_TYPE(t, datumTuple)
 			return obj, nil
 			// {{end}}
 		}
@@ -144,17 +124,17 @@ func GetInOperator(
 // {{range .WidthOverloads}}
 
 type selectInOp_TYPE struct {
-	colexecop.OneInputHelper
+	OneInputNode
 	colIdx    int
 	filterRow []_GOTYPE
 	hasNulls  bool
 	negate    bool
 }
 
-var _ colexecop.Operator = &selectInOp_TYPE{}
+var _ colexecbase.Operator = &selectInOp_TYPE{}
 
 type projectInOp_TYPE struct {
-	colexecop.OneInputHelper
+	OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -163,15 +143,10 @@ type projectInOp_TYPE struct {
 	negate    bool
 }
 
-var _ colexecop.Operator = &projectInOp_TYPE{}
+var _ colexecbase.Operator = &projectInOp_TYPE{}
 
-func fillDatumRow_TYPE(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]_GOTYPE, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
-	conv := colconv.GetDatumToPhysicalFn(t)
+func fillDatumRow_TYPE(t *types.T, datumTuple *tree.DTuple) ([]_GOTYPE, bool) {
+	conv := GetDatumToPhysicalFn(t)
 	var result []_GOTYPE
 	hasNulls := false
 	for _, d := range datumTuple.D {
@@ -189,8 +164,8 @@ func fillDatumRow_TYPE(
 func cmpIn_TYPE(
 	targetElem _GOTYPE, targetCol _GOTYPESLICE, filterRow []_GOTYPE, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRow_TYPE, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -213,9 +188,17 @@ func cmpIn_TYPE(
 	}
 }
 
-func (si *selectInOp_TYPE) Next() coldata.Batch {
+func (si *selectInOp_TYPE) Init() {
+	si.input.Init()
+}
+
+func (pi *projectInOp_TYPE) Init() {
+	pi.input.Init()
+}
+
+func (si *selectInOp_TYPE) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -246,9 +229,6 @@ func (si *selectInOp_TYPE) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					// {{if .Sliceable}}
-					//gcassert:bce
-					// {{end}}
 					v := col.Get(i)
 					if !nulls.NullAt(i) && cmpIn_TYPE(v, col, si.filterRow, si.hasNulls) == compVal {
 						sel[idx] = i
@@ -271,9 +251,6 @@ func (si *selectInOp_TYPE) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					// {{if .Sliceable}}
-					//gcassert:bce
-					// {{end}}
 					v := col.Get(i)
 					if cmpIn_TYPE(v, col, si.filterRow, si.hasNulls) == compVal {
 						sel[idx] = i
@@ -290,8 +267,8 @@ func (si *selectInOp_TYPE) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOp_TYPE) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOp_TYPE) Next(ctx context.Context) coldata.Batch {
+	batch := pi.input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -333,14 +310,11 @@ func (pi *projectInOp_TYPE) Next() coldata.Batch {
 				}
 			}
 		} else {
-			_ = col.Get(n - 1)
+			col = execgen.SLICE(col, 0, n)
 			for i := 0; i < n; i++ {
 				if nulls.NullAt(i) {
 					projNulls.SetNull(i)
 				} else {
-					// {{if .Sliceable}}
-					//gcassert:bce
-					// {{end}}
 					v := col.Get(i)
 					cmpRes := cmpIn_TYPE(v, col, pi.filterRow, pi.hasNulls)
 					if cmpRes == siNull {
@@ -364,11 +338,8 @@ func (pi *projectInOp_TYPE) Next() coldata.Batch {
 				}
 			}
 		} else {
-			_ = col.Get(n - 1)
+			col = execgen.SLICE(col, 0, n)
 			for i := 0; i < n; i++ {
-				// {{if .Sliceable}}
-				//gcassert:bce
-				// {{end}}
 				v := col.Get(i)
 				cmpRes := cmpIn_TYPE(v, col, pi.filterRow, pi.hasNulls)
 				if cmpRes == siNull {

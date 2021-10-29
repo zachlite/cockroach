@@ -30,9 +30,20 @@ import (
 // TODO(ajwerner): provide mechanism to collect metrics.
 
 // Resource is an interface that represents a quantity which is being
-// pooled and allocated. The Resource will be modified by a Request or
-// an a call to Update.
-type Resource interface{}
+// pooled and allocated. It is any quantity that can be subdivided and
+// combined.
+//
+// This library does not provide any concrete implementations of Resource but
+// internally the *IntAlloc is used as a resource.
+type Resource interface {
+
+	// Merge combines val into the current resource.
+	// After val is passed to Merge, the QuotaPool will never use
+	// that Resource again. This behavior allows clients to pool instances of
+	// Resources by creating Resource during Acquisition and destroying them in
+	// Merge.
+	Merge(val interface{}) (shouldNotify bool)
+}
 
 // Request is an interface used to acquire quota from the pool.
 // Request is responsible for subdividing a resource into the portion which is
@@ -68,11 +79,11 @@ func (ec *ErrClosed) Error() string {
 	return fmt.Sprintf("%s pool closed: %s", ec.poolName, ec.reason)
 }
 
-// AbstractPool is an abstract implementation of a pool that stores some unit of
+// QuotaPool is an abstract implementation of a pool that stores some unit of
 // Resource. The basic idea is that it allows requests to acquire a quantity of
 // Resource from the pool in FIFO order in a way that interacts well with
 // context cancelation.
-type AbstractPool struct {
+type QuotaPool struct {
 	config
 
 	// name is used for logging purposes and is passed to functions used to report
@@ -80,7 +91,7 @@ type AbstractPool struct {
 	name string
 
 	// Ongoing acquisitions listen on done which is closed when the quota
-	// pool is closed (see AbstractPool.Close).
+	// pool is closed (see QuotaPool.Close).
 	done chan struct{}
 
 	// closeErr is populated with a non-nil error when Close is called.
@@ -109,7 +120,7 @@ type AbstractPool struct {
 		numCanceled int
 
 		// closed is set to true when the quota pool is closed (see
-		// AbstractPool.Close).
+		// QuotaPool.Close).
 		closed bool
 	}
 }
@@ -117,8 +128,8 @@ type AbstractPool struct {
 // New returns a new quota pool initialized with a given quota. The quota
 // is capped at this amount, meaning that callers may return more quota than they
 // acquired without ever making more than the quota capacity available.
-func New(name string, initialResource Resource, options ...Option) *AbstractPool {
-	qp := &AbstractPool{
+func New(name string, initialResource Resource, options ...Option) *QuotaPool {
+	qp := &QuotaPool{
 		name: name,
 		done: make(chan struct{}),
 	}
@@ -128,13 +139,21 @@ func New(name string, initialResource Resource, options ...Option) *AbstractPool
 	return qp
 }
 
-// TimeSource returns the TimeSource associated with this AbstractPool.
-func (qp *AbstractPool) TimeSource() timeutil.TimeSource {
+// TimeSource returns the TimeSource associated with this QuotaPool.
+func (qp *QuotaPool) TimeSource() timeutil.TimeSource {
 	return qp.timeSource
 }
 
-// Len returns the current length of the queue for this AbstractPool.
-func (qp *AbstractPool) Len() int {
+// ApproximateQuota will report approximately the amount of quota available
+// in the pool to f. The provided Resource must not be mutated.
+func (qp *QuotaPool) ApproximateQuota(f func(Resource)) {
+	qp.mu.Lock()
+	defer qp.mu.Unlock()
+	f(qp.mu.quota)
+}
+
+// Len returns the current length of the queue for this QuotaPool.
+func (qp *QuotaPool) Len() int {
 	qp.mu.Lock()
 	defer qp.mu.Unlock()
 	return int(qp.mu.q.len) - qp.mu.numCanceled
@@ -145,7 +164,7 @@ func (qp *AbstractPool) Len() int {
 // contains this reason.
 //
 // Safe for concurrent use.
-func (qp *AbstractPool) Close(reason string) {
+func (qp *QuotaPool) Close(reason string) {
 	qp.mu.Lock()
 	defer qp.mu.Unlock()
 	if qp.mu.closed {
@@ -159,21 +178,18 @@ func (qp *AbstractPool) Close(reason string) {
 	close(qp.done)
 }
 
-// UpdateFunc is used to update a resource.
-type UpdateFunc func(resource Resource) (shouldNotify bool)
-
-// Update updates the underlying resource with the provided value, notifying the
-// head of the queue if the Resource indicates that it should.
+// Add adds the provided Alloc back to the pool. The value will be merged with
+// the existing resources in the QuotaPool if there are any.
 //
 // Safe for concurrent use.
-func (qp *AbstractPool) Update(f UpdateFunc) {
+func (qp *QuotaPool) Add(val interface{}) {
 	qp.mu.Lock()
 	defer qp.mu.Unlock()
-	qp.updateLocked(f)
+	qp.addLocked(val)
 }
 
-func (qp *AbstractPool) updateLocked(f UpdateFunc) {
-	if shouldNotify := f(qp.mu.quota); !shouldNotify {
+func (qp *QuotaPool) addLocked(val interface{}) {
+	if shouldNotify := qp.mu.quota.Merge(val); !shouldNotify {
 		return
 	}
 	// Notify the head of the queue if there is one waiting.
@@ -198,7 +214,7 @@ var chanSyncPool = sync.Pool{
 // canceled.
 //
 // Safe for concurrent use.
-func (qp *AbstractPool) Acquire(ctx context.Context, r Request) (err error) {
+func (qp *QuotaPool) Acquire(ctx context.Context, r Request) (err error) {
 
 	// Set up onAcquisition if we have one.
 	start := qp.timeSource.Now()
@@ -214,13 +230,6 @@ func (qp *AbstractPool) Acquire(ctx context.Context, r Request) (err error) {
 	fulfilled, n, tryAgainAfter, err := qp.acquireFastPath(ctx, r)
 	if fulfilled || err != nil {
 		return err
-	}
-
-	if qp.config.onWaitStart != nil {
-		qp.config.onWaitStart(ctx, qp.name, r)
-	}
-	if qp.config.onWaitFinish != nil {
-		defer qp.config.onWaitFinish(ctx, qp.name, r, start)
 	}
 
 	// Set up the infrastructure to report slow requests.
@@ -249,9 +258,6 @@ func (qp *AbstractPool) Acquire(ctx context.Context, r Request) (err error) {
 	resetTryAgainTimer := func() {
 		if tryAgainAfter <= 0 {
 			return
-		}
-		if tryAgainAfter < qp.minimumWait {
-			tryAgainAfter = qp.minimumWait
 		}
 		if tryAgainTimer == nil {
 			tryAgainTimer = qp.timeSource.NewTimer()
@@ -312,7 +318,7 @@ func (qp *AbstractPool) Acquire(ctx context.Context, r Request) (err error) {
 // tryAgainAfter will only be non-zero if the notifyee is at the front of the
 // queue. This property ensures that only one tryAgainTimer in acquire exists
 // at a time.
-func (qp *AbstractPool) acquireFastPath(
+func (qp *QuotaPool) acquireFastPath(
 	ctx context.Context, r Request,
 ) (fulfilled bool, _ *notifyee, tryAgainAfter time.Duration, _ error) {
 
@@ -333,7 +339,7 @@ func (qp *AbstractPool) acquireFastPath(
 	return false, qp.mu.q.enqueue(c), tryAgainAfter, nil
 }
 
-func (qp *AbstractPool) tryAcquireOnNotify(
+func (qp *QuotaPool) tryAcquireOnNotify(
 	ctx context.Context, r Request, n *notifyee,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
 	// Release the notify channel back into the sync pool if we're fulfilled.
@@ -359,7 +365,7 @@ func (qp *AbstractPool) tryAcquireOnNotify(
 	return fulfilled, tryAgainAfter
 }
 
-func (qp *AbstractPool) cleanupOnCancel(n *notifyee) {
+func (qp *QuotaPool) cleanupOnCancel(n *notifyee) {
 	// No matter what, we're going to want to put our notify channel back in to
 	// the sync pool. Note that this defer call evaluates n.c here and is not
 	// affected by later code that sets n.c to nil.
@@ -386,7 +392,7 @@ func (qp *AbstractPool) cleanupOnCancel(n *notifyee) {
 
 // notifyNextLocked notifies the waiting acquisition goroutine next in line (if
 // any). It requires that qp.mu.Mutex is held.
-func (qp *AbstractPool) notifyNextLocked() {
+func (qp *QuotaPool) notifyNextLocked() {
 	// Pop ourselves off the front of the queue.
 	qp.mu.q.dequeue()
 	// We traverse until we find a goroutine waiting to be notified, notify the

@@ -123,12 +123,10 @@ RowDescription
 ----
 {"Type":"RowDescription","Fields":[{"Name":"v1","TableOID":0,"TableAttributeNumber":1,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0},{"Name":"v2","TableOID":0,"TableAttributeNumber":2,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0}]}
 
-# TODO(yuzefovich): we should not be ignoring table OIDs here, but currently we
-# have a bug there (#71891).
-until crdb_only ignore_table_oids
+until crdb_only
 RowDescription
 ----
-{"Type":"RowDescription","Fields":[{"Name":"v1","TableOID":0,"TableAttributeNumber":0,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0},{"Name":"v2","TableOID":0,"TableAttributeNumber":0,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0}]}
+{"Type":"RowDescription","Fields":[{"Name":"v1","TableOID":52,"TableAttributeNumber":1,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0},{"Name":"v2","TableOID":53,"TableAttributeNumber":2,"DataTypeOID":20,"DataTypeSize":8,"TypeModifier":-1,"Format":0}]}
 
 until ignore_table_oids
 ReadyForQuery
@@ -182,11 +180,11 @@ ReadyForQuery
 {"Type":"CommandComplete","CommandTag":"SELECT 1"}
 {"Type":"ReadyForQuery","TxStatus":"I"}
 
-# 'P' for Portal
+# 80 = ASCII 'P' for Portal
 send
 Parse {"Name": "s", "Query": "SELECT b, 1 FROM tab3"}
 Bind {"DestinationPortal": "p", "PreparedStatement": "s"}
-Describe {"ObjectType": "P", "Name": "p"}
+Describe {"ObjectType": 80, "Name": "p"}
 Execute {"Portal": "p"}
 Sync
 ----
@@ -241,11 +239,11 @@ ReadyForQuery
 {"Type":"CommandComplete","CommandTag":"INSERT 0 1"}
 {"Type":"ReadyForQuery","TxStatus":"I"}
 
-# 'P' for Portal
+# 80 = ASCII 'P' for Portal
 send
 Parse {"Name": "s2", "Query": "SELECT b FROM tab4"}
 Bind {"DestinationPortal": "p2", "PreparedStatement": "s2"}
-Describe {"ObjectType": "P", "Name": "p2"}
+Describe {"ObjectType": 80, "Name": "p2"}
 Execute {"Portal": "p2"}
 Sync
 ----
@@ -295,70 +293,6 @@ until
 DataRow
 ----
 {"Type":"DataRow","Values":[{"text":"{hello,goodbye}"}]}
-
-until
-ReadyForQuery
-----
-{"Type":"CommandComplete","CommandTag":"SELECT 1"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-send crdb_only
-Query {"String": "SET enable_experimental_alter_column_type_general = true"}
-----
-
-until crdb_only
-ReadyForQuery
-----
-{"Type":"CommandComplete","CommandTag":"SET"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-send crdb_only
-Query {"String": "ALTER TABLE tab3 ALTER COLUMN b TYPE STRING"}
-----
-
-send noncrdb_only
-Query {"String": "ALTER TABLE tab3 ALTER COLUMN b TYPE TEXT"}
-----
-
-until
-ReadyForQuery
-----
-{"Type":"CommandComplete","CommandTag":"ALTER TABLE"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-# Ensure that after alter column type, the TableAttributeNumber stays consistent.
-# TableAttributeNumber of column b should stay as 2.
-
-# 'P' for Portal
-send
-Parse {"Name": "s3", "Query": "SELECT b FROM tab3"}
-Bind {"DestinationPortal": "p3", "PreparedStatement": "s3"}
-Describe {"ObjectType": "P", "Name": "p3"}
-Execute {"Portal": "p3"}
-Sync
-----
-
-until
-BindComplete
-----
-{"Type":"ParseComplete"}
-{"Type":"BindComplete"}
-
-until noncrdb_only ignore_table_oids
-RowDescription
-----
-{"Type":"RowDescription","Fields":[{"Name":"b","TableOID":0,"TableAttributeNumber":2,"DataTypeOID":25,"DataTypeSize":-1,"TypeModifier":-1,"Format":0}]}
-
-until crdb_only
-RowDescription
-----
-{"Type":"RowDescription","Fields":[{"Name":"b","TableOID":55,"TableAttributeNumber":2,"DataTypeOID":25,"DataTypeSize":-1,"TypeModifier":-1,"Format":0}]}
-
-
-until
-DataRow
-----
-{"Type":"DataRow","Values":[{"text":"hello"}]}
 
 until
 ReadyForQuery

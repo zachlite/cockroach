@@ -17,9 +17,9 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/cockroachdb/cockroach-go/v2/crdb"
+	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -68,7 +68,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		descID    = 53
 		tableName = "foo"
 	)
-	// This test will inject the table and demonstrate
+	// This test will inject the table an demonstrate
 	// that there are problems. It will then repair it by just dropping the
 	// descriptor and namespace entry. This would normally be unsafe because
 	// it would leave table data around.
@@ -78,7 +78,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
 			if _, err := tx.Exec(
-				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'), true);",
+				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'));",
 				descID, orphanedTable); err != nil {
 				return err
 			}
@@ -93,7 +93,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		_, err := db.Exec(
 			"SELECT count(*) FROM \"\".crdb_internal.tables WHERE table_id = $1",
 			descID)
-		require.Regexp(t, `pq: relation "foo" \(53\): referenced database ID 52: descriptor not found`, err)
+		require.Regexp(t, "internal error: parentID 52 does not exist", err)
 
 		// In this case, we're treating the injected descriptor as having no data
 		// so we can clean it up by just deleting the erroneous descriptor and
@@ -101,7 +101,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		// the dance of adding back a parent database in order to drop the table.
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
 			if _, err := tx.Exec(
-				"SELECT crdb_internal.unsafe_delete_descriptor($1, true);",
+				"SELECT crdb_internal.unsafe_delete_descriptor($1);",
 				descID); err != nil {
 				return err
 			}
@@ -120,14 +120,14 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 	})
 	// This test will inject the table an demonstrate that there are problems. It
 	// will then repair it by injecting a new database descriptor and namespace
-	// entry and then demonstrate the problem is resolved.
+	// entry and then demonstrate the the problem is resolved.
 	t.Run("orphaned table with data - 51782", func(t *testing.T) {
 		_, db, cleanup := setup(t)
 		defer cleanup()
 
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
 			if _, err := tx.Exec(
-				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'), true);",
+				"SELECT crdb_internal.unsafe_upsert_descriptor($1, decode($2, 'hex'));",
 				descID, orphanedTable); err != nil {
 				return err
 			}
@@ -142,7 +142,7 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
 		_, err := db.Exec(
 			"SELECT count(*) FROM \"\".crdb_internal.tables WHERE table_id = $1",
 			descID)
-		require.Regexp(t, `pq: relation "foo" \(53\): referenced database ID 52: descriptor not found`, err)
+		require.Regexp(t, "internal error: parentID 52 does not exist", err)
 
 		// In this case, we're going to inject a parent database
 		require.NoError(t, crdb.ExecuteTx(ctx, db, nil, func(tx *gosql.Tx) error {
@@ -153,15 +153,15 @@ func TestDescriptorRepairOrphanedDescriptors(t *testing.T) {
     "id": 52,
     "name": "to_drop",
     "privileges": {
-      "owner_proto": "root",
+      "owner": "root",
       "users": [
         {
           "privileges": 2,
-          "user_proto": "admin"
+          "user": "admin"
         },
         {
           "privileges": 2,
-          "user_proto": "root"
+          "user": "root"
         }
       ],
       "version": 1
@@ -204,8 +204,7 @@ SELECT crdb_internal.unsafe_upsert_descriptor(
                 ARRAY['table', 'columns', '0', 'usesSequenceIds'],
                 '[]'
             )
-        ),
-        true
+        )
        )
   FROM system.descriptor
  WHERE id = $1;`,
@@ -252,57 +251,66 @@ func TestDescriptorRepair(t *testing.T) {
 		typ  string
 		info string
 	}
-	for caseIdx, tc := range []struct {
+	for _, tc := range []struct {
 		before             []string
 		op                 string
 		expErrRE           string
 		expEventLogEntries []eventLogPattern
 		after              []string
 	}{
-		{ // 1
-			before: []string{
-				`CREATE DATABASE test`,
-				`CREATE TABLE test.foo ()`,
-			},
-			op: upsertRepairNoForce,
+		{
+			op: `
+SELECT crdb_internal.unsafe_upsert_descriptor(59, crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', 
+'{
+  "table": {
+    "columns": [ { "id": 1, "name": "i" } ],
+    "families": [
+      {
+        "columnIds": [ 1 ],
+        "columnNames": [ "i" ],
+        "defaultColumnId": 0,
+        "id": 0,
+        "name": "primary"
+      }
+    ],
+    "formatVersion": 3,
+    "id": 59,
+    "name": "foo",
+    "nextColumnId": 2,
+    "nextFamilyId": 1,
+    "nextIndexId": 2,
+    "nextMutationId": 1,
+    "parentId": 52,
+    "primaryIndex": {
+      "columnDirections": [ "ASC" ],
+      "columnIds": [ 1 ],
+      "columnNames": [ "i" ],
+      "id": 1,
+      "name": "primary",
+      "type": "FORWARD",
+      "unique": true,
+      "version": 1
+    },
+    "privileges": {
+      "owner": "root",
+      "users": [ { "privileges": 2, "user": "admin" }, { "privileges": 2, "user": "root" } ],
+      "version": 1
+    },
+    "state": "PUBLIC",
+    "unexposedParentSchemaId": 29,
+    "version": 1
+  }
+}
+'))
+`,
 			expEventLogEntries: []eventLogPattern{
 				{
 					typ:  "unsafe_upsert_descriptor",
-					info: `"DescriptorID":53`,
-				},
-				{
-					typ:  "change_table_privilege",
-					info: `"DescriptorID":53,"Grantee":"newuser1","GrantedPrivileges":\["ALL"\]`,
-				},
-				{
-					typ:  "change_table_privilege",
-					info: `"DescriptorID":53,"Grantee":"newuser2","GrantedPrivileges":\["ALL"\]`,
+					info: `"id":59`,
 				},
 			},
 		},
-		{ // 2
-			before: []string{
-				`CREATE DATABASE test`,
-				`SELECT crdb_internal.unsafe_upsert_namespace_entry(52, 29, 'foo', 53, true)`,
-				upsertRepairForce,
-			},
-			op: upsertUpdatePrivileges,
-			expEventLogEntries: []eventLogPattern{
-				{
-					typ:  "alter_table_owner",
-					info: `"DescriptorID":53,"TableName":"foo","Owner":"admin"`,
-				},
-				{
-					typ:  "change_table_privilege",
-					info: `"DescriptorID":53,"Grantee":"newuser1","GrantedPrivileges":\["DROP"\],"RevokedPrivileges":\["ALL"\]`,
-				},
-				{
-					typ:  "change_table_privilege",
-					info: `"DescriptorID":53,"Grantee":"newuser2","RevokedPrivileges":\["ALL"\]`,
-				},
-			},
-		},
-		{ // 3
+		{
 			before: []string{
 				`CREATE SCHEMA foo`,
 			},
@@ -312,76 +320,76 @@ SELECT crdb_internal.unsafe_delete_namespace_entry("parentID", 0, 'foo', id)
 `,
 			expErrRE: `crdb_internal.unsafe_delete_namespace_entry\(\): refusing to delete namespace entry for non-dropped descriptor`,
 		},
-		{ // 4
+		{
 			// Upsert a descriptor which is invalid, then try to upsert a namespace
 			// entry for it and show that it fails.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 			},
 			op:       `SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52);`,
-			expErrRE: `relation "foo" \(52\): duplicate column name: "i"`,
+			expErrRE: `failed to retrieve descriptor 52: duplicate column name: "i"`,
 		},
-		{ // 5
+		{
 			// Upsert a descriptor which is invalid, then try to upsert a namespace
 			// entry for it and show that it succeeds with the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 			},
 			op: `SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			expEventLogEntries: []eventLogPattern{
 				{
-					typ:  "unsafe_upsert_namespace_entry",
-					info: `"Force":true,"FailedValidation":true,"ValidationErrors":".*duplicate column name: \\"i\\""`,
+					typ:  string(sql.EventLogUnsafeUpsertNamespaceEntry),
+					info: `"force":true,"validation_errors":"failed to retrieve descriptor 52: duplicate column name: \\"i\\""`,
 				},
 			},
 		},
-		{ // 6
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that deleting the descriptor fails without the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op:       `SELECT crdb_internal.unsafe_delete_descriptor(52);`,
-			expErrRE: `pq: crdb_internal.unsafe_delete_descriptor\(\): relation "foo" \(52\): duplicate column name: "i"`,
+			expErrRE: `duplicate column name: "i"`,
 		},
-		{ // 7
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that deleting the descriptor succeeds with the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op: `SELECT crdb_internal.unsafe_delete_descriptor(52, true);`,
 			expEventLogEntries: []eventLogPattern{
 				{
-					typ:  "unsafe_delete_descriptor",
-					info: `"Force":true,"ForceNotice":".*duplicate column name: \\"i\\""`,
+					typ:  string(sql.EventLogUnsafeDeleteDescriptor),
+					info: `"force":true,"validation_errors":"[^"]*duplicate column name: \\"i\\""`,
 				},
 			},
 		},
-		{ // 8
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that updating the descriptor fails without the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op:       updateInvalidateDuplicateColumnDescriptorNoForce,
-			expErrRE: `pq: crdb_internal.unsafe_upsert_descriptor\(\): relation "foo" \(52\): duplicate column name: "i"`,
+			expErrRE: `duplicate column name: "i"`,
 		},
-		{ // 9
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that updating the descriptor succeeds the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op: updateInvalidateDuplicateColumnDescriptorForce,
 			expEventLogEntries: []eventLogPattern{
 				{
-					typ:  "unsafe_upsert_descriptor",
-					info: `"Force":true,"ForceNotice":".*duplicate column name: \\"i\\""`,
+					typ:  string(sql.EventLogUnsafeUpsertDescriptor),
+					info: `"force":true,"validation_errors":"[^"]*duplicate column name: \\"i\\""`,
 				},
 			},
 			after: []string{
@@ -389,55 +397,40 @@ SELECT crdb_internal.unsafe_delete_namespace_entry("parentID", 0, 'foo', id)
 				`INSERT INTO [52 as t] VALUES (1), (2)`,
 			},
 		},
-		{ // 10
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that deleting the namespace entry fails without the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op:       `SELECT crdb_internal.unsafe_delete_namespace_entry(50, 29, 'foo', 52);`,
-			expErrRE: `pq: crdb_internal.unsafe_delete_namespace_entry\(\): failed to retrieve descriptor 52: relation "foo" \(52\): duplicate column name: "i"`,
+			expErrRE: `duplicate column name: "i"`,
 		},
-		{ // 11
+		{
 			// Upsert a descriptor which is invalid, upsert a namespace entry for it,
 			// then show that deleting the namespace entry succeeds with the force flag.
 			before: []string{
-				upsertInvalidateDuplicateColumnDescriptorBefore,
+				upsertInvalidateDuplicateColumnDescriptor,
 				`SELECT crdb_internal.unsafe_upsert_namespace_entry(50, 29, 'foo', 52, true);`,
 			},
 			op: `SELECT crdb_internal.unsafe_delete_namespace_entry(50, 29, 'foo', 52, true);`,
 			expEventLogEntries: []eventLogPattern{
 				{
-					typ:  "unsafe_delete_namespace_entry",
-					info: `"Force":true,"ForceNotice":".*duplicate column name: \\"i\\""`,
+					typ:  string(sql.EventLogUnsafeDeleteNamespaceEntry),
+					info: `"force":true,"validation_errors":"[^"]*duplicate column name: \\"i\\""`,
 				},
 			},
 		},
-		{ // 12
-			// Upsert a descriptor with the force flag set to skip descriptor
-			// validation at txn commit time, then check that subsequently upserting
-			// an invalid descriptor with the force flag unset correctly triggers a
-			// validation error.
-			before: []string{
-				`CREATE DATABASE test`,
-				`CREATE TABLE test.foo ()`,
-				`SELECT crdb_internal.unsafe_upsert_descriptor(id, descriptor, true) FROM system.descriptor WHERE id = 'test.foo'::REGCLASS::OID`,
-			},
-			op:       upsertInvalidNameInTestFooNoForce,
-			expErrRE: `pq: crdb_internal.unsafe_upsert_descriptor\(\): relation \"\" \(53\): empty table name`,
-		},
 	} {
-		t.Run(fmt.Sprintf("case #%d: %s", caseIdx+1, tc.op), func(t *testing.T) {
+		t.Run(tc.op, func(t *testing.T) {
 			s, db, cleanup := setup(t)
 			now := s.Clock().Now().GoTime()
 			defer cleanup()
 			tdb := sqlutils.MakeSQLRunner(db)
-			descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, false)
 			for _, op := range tc.before {
 				tdb.Exec(t, op)
 			}
-			descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, true)
 			_, err := db.Exec(tc.op)
 			if tc.expErrRE == "" {
 				require.NoError(t, err)
@@ -460,7 +453,7 @@ SELECT crdb_internal.unsafe_delete_namespace_entry("parentID", 0, 'foo', id)
 						continue outer
 					}
 				}
-				t.Errorf("failed to find log entry matching %+v in:\n%s", exp, sqlutils.MatrixToStr(mat))
+				t.Errorf("failed to find log entry matching %s in %s", exp, sqlutils.MatrixToStr(mat))
 			}
 		})
 	}
@@ -507,34 +500,34 @@ const (
     "nextMutationId": 2,
     "parentId": 50,
     "primaryIndex": {
-      "keyColumnDirections": [
+      "columnDirections": [
         "ASC"
       ],
-      "keyColumnIds": [
+      "columnIds": [
         1
       ],
-      "keyColumnNames": [
+      "columnNames": [
         "i"
       ],
       "compositeColumnIds": [],
       "createdExplicitly": false,
-      "encodingType": 1,
+      "encodingType": 0,
       "id": 1,
       "name": "primary",
       "type": "FORWARD",
       "unique": true,
-      "version": 4
+      "version": 2
     },
     "privileges": {
-      "ownerProto": "root",
+      "owner": "root",
       "users": [
         {
           "privileges": 2,
-          "userProto": "admin"
+          "user": "admin"
         },
         {
           "privileges": 2,
-          "userProto": "root"
+          "user": "root"
         }
       ],
       "version": 1
@@ -547,10 +540,10 @@ const (
 
 	// This is a statement to insert the invalid descriptor above using
 	// crdb_internal.unsafe_upsert_descriptor.
-	upsertInvalidateDuplicateColumnDescriptorBefore = `
+	upsertInvalidateDuplicateColumnDescriptor = `
 SELECT crdb_internal.unsafe_upsert_descriptor(52,
     crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', ` +
-		invalidDuplicateColumnDescriptor + `), true)`
+		invalidDuplicateColumnDescriptor + `))`
 
 	// These are CTEs for the below statements to update the above descriptor
 	// and fix its validation problems.
@@ -594,222 +587,4 @@ SELECT crdb_internal.unsafe_upsert_descriptor(52, descriptor)
 SELECT crdb_internal.unsafe_upsert_descriptor(52, descriptor, true)
   FROM updated;
 `
-	// This is the descriptor definition used in the upsertRepair* statements.
-	repairedDescriptor = `'{
-  "table": {
-    "columns": [ { "id": 1, "name": "i", "type": { "family": "IntFamily", "oid": 20, "width": 64 } } ],
-    "families": [
-      {
-        "columnIds": [ 1 ],
-        "columnNames": [ "i" ],
-        "defaultColumnId": 0,
-        "id": 0,
-        "name": "primary"
-      }
-    ],
-    "formatVersion": 3,
-    "id": 53,
-    "name": "foo",
-    "nextColumnId": 2,
-    "nextFamilyId": 1,
-    "nextIndexId": 2,
-    "nextMutationId": 1,
-    "parentId": 52,
-    "primaryIndex": {
-      "encodingType": 1,
-      "keyColumnDirections": [ "ASC" ],
-      "keyColumnIds": [ 1 ],
-      "keyColumnNames": [ "i" ],
-      "id": 1,
-      "name": "primary",
-      "type": "FORWARD",
-      "unique": true,
-      "version": 4
-    },
-    "privileges": {
-      "owner_proto": "root",
-      "users": [
-        { "privileges": 2, "user_proto": "admin" },
-        { "privileges": 2, "user_proto": "newuser1" },
-        { "privileges": 2, "user_proto": "newuser2" },
-        { "privileges": 2, "user_proto": "root" }
-      ],
-      "version": 1
-    },
-    "state": "PUBLIC",
-    "unexposedParentSchemaId": 29,
-    "version": 1
-  }
-}'`
-
-	// This is a statement to repair an invalid descriptor using
-	// crdb_internal.unsafe_upsert_descriptor.
-	upsertRepairNoForce = `
-SELECT crdb_internal.unsafe_upsert_descriptor(53,
-	crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', ` +
-		repairedDescriptor + `), false)`
-
-	// This is a statement to force-repair an invalid descriptor using
-	// crdb_internal.unsafe_upsert_descriptor.
-	upsertRepairForce = `
-SELECT crdb_internal.unsafe_upsert_descriptor(53,
-	crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', ` +
-		repairedDescriptor + `), true)`
-
-	upsertInvalidNameInTestFooNoForce = `
-WITH
-	as_json
-		AS (
-			SELECT
-				id,
-				crdb_internal.pb_to_json(
-					'cockroach.sql.sqlbase.Descriptor',
-					descriptor,
-					false
-				)
-					AS d
-			FROM
-				system.descriptor
-			WHERE
-				id = 'test.foo'::REGCLASS::OID
-		),
-	updated
-		AS (
-			SELECT
-				id,
-				crdb_internal.json_to_pb(
-					'cockroach.sql.sqlbase.Descriptor',
-					json_set(
-						json_set(
-							json_set(
-								d,
-								ARRAY['table', 'name'],
-								'""'::JSONB
-							),
-							ARRAY['table', 'version'],
-							((d->'table'->>'version')::INT8 + 1)::STRING::JSONB
-						),
-						ARRAY['table', 'modificationTime'],
-						json_build_object(
-							'wallTime',
-							(
-								(extract('epoch', now()) * 1000000)::INT8
-								* 1000
-							)::STRING
-						)
-					)
-				)
-					AS descriptor
-			FROM
-				as_json
-		)
-SELECT
-	crdb_internal.unsafe_upsert_descriptor(id, descriptor, false)
-FROM
-	updated
-`
-
-	// This is a statement to update the above descriptor's privileges.
-	// It will change the table owner, add privileges for a new user,
-	// alter the privilege of an existing user, and revoke all privileges for an old user.
-	upsertUpdatePrivileges = `
-SELECT crdb_internal.unsafe_upsert_descriptor(53, crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor',
-'{
-  "table": {
-    "columns": [ { "id": 1, "name": "i", "type": { "family": "IntFamily", "oid": 20, "width": 64 } } ],
-    "families": [
-      {
-        "columnIds": [ 1 ],
-        "columnNames": [ "i" ],
-        "defaultColumnId": 0,
-        "id": 0,
-        "name": "primary"
-      }
-    ],
-    "formatVersion": 3,
-    "id": 53,
-    "name": "foo",
-    "nextColumnId": 2,
-    "nextFamilyId": 1,
-    "nextIndexId": 2,
-    "nextMutationId": 1,
-    "parentId": 52,
-    "primaryIndex": {
-      "encodingType": 1,
-      "keyColumnDirections": [ "ASC" ],
-      "keyColumnIds": [ 1 ],
-      "keyColumnNames": [ "i" ],
-      "id": 1,
-      "name": "primary",
-      "type": "FORWARD",
-      "unique": true,
-      "version": 4
-    },
-    "privileges": {
-      "owner_proto": "admin",
-      "users": [
-        { "privileges": 2, "user_proto": "admin" },
-        { "privileges": 2, "user_proto": "root" },
-        { "privileges": 8, "user_proto": "newuser1" }
-      ],
-      "version": 1
-    },
-    "state": "PUBLIC",
-    "unexposedParentSchemaId": 29,
-    "version": 1
-  }
-}
-'))
-`
 )
-
-// TestDescriptorRepairIdGeneration verifies that `unsafe_upsert_descriptor`
-// properly takes the descriptor ID sequence into account. Otherwise a CREATE
-// statement might eventually overwrite a descriptor inserted in this way.
-func TestDescriptorRepairIdGeneration(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-	tdb := sqlutils.MakeSQLRunner(db)
-
-	const q = `SELECT crdb_internal.unsafe_upsert_descriptor(123, crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', $2::JSONB), $1)`
-	const d = `{
-  "database": {
-    "id": 123,
-    "name": "foo",
-    "privileges": {
-      "ownerProto": "root",
-      "users": [
-        {
-          "privileges": 2,
-          "userProto": "admin"
-        },
-        {
-          "privileges": 2,
-          "userProto": "root"
-        }
-      ],
-      "version": 2
-    },
-    "version": "1"
-  }
-}`
-
-	// Required so test doesn't fail due to namespace validation failures.
-	descs.ValidateOnWriteEnabled.Override(ctx, &s.ClusterSettings().SV, false)
-
-	// Inserting a descriptor with an ID too high should fail.
-	tdb.ExpectErr(t, "descriptor ID 123 must be less than the descriptor ID sequence value", q, false /* force */, d)
-	tdb.CheckQueryResults(t, "SELECT count(*) FROM system.descriptor WHERE id >= 123", [][]string{{"0"}})
-
-	// Force the insertion.
-	tdb.Exec(t, q, true /* force */, d)
-	tdb.CheckQueryResults(t, "SELECT count(*) FROM system.descriptor WHERE id >= 123", [][]string{{"1"}})
-
-	// Subsequent new descriptors should have an even greater ID.
-	tdb.Exec(t, "CREATE DATABASE bar;")
-	tdb.CheckQueryResults(t, "SELECT count(*) FROM system.descriptor WHERE id >= 123", [][]string{{"2"}})
-}

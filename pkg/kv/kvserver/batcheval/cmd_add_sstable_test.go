@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -36,14 +35,27 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"github.com/stretchr/testify/require"
 )
+
+// createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
+// storage capacity.
+func createTestRocksDBEngine() storage.Engine {
+	return storage.NewInMem(context.Background(),
+		enginepb.EngineTypeRocksDB, roachpb.Attributes{}, 1<<20)
+}
+
+// createTestPebbleEngine returns a new in-memory Pebble storage engine.
+func createTestPebbleEngine() storage.Engine {
+	return storage.NewInMem(context.Background(),
+		enginepb.EngineTypePebble, roachpb.Attributes{}, 1<<20)
+}
 
 var engineImpls = []struct {
 	name   string
-	create func(...storage.ConfigOption) storage.Engine
+	create func() storage.Engine
 }{
-	{"pebble", storage.NewDefaultInMemForTesting},
+	{"rocksdb", createTestRocksDBEngine},
+	{"pebble", createTestPebbleEngine},
 }
 
 func singleKVSSTable(key storage.MVCCKey, value []byte) ([]byte, error) {
@@ -63,13 +75,10 @@ func TestDBAddSSTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	t.Run("store=in-memory", func(t *testing.T) {
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
-		s := si.(*server.TestServer)
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
-
-		tr := s.Tracer()
-		runTestDBAddSSTable(ctx, t, db, tr, nil)
+		runTestDBAddSSTable(ctx, t, db, nil)
 	})
 	t.Run("store=on-disk", func(t *testing.T) {
 		dir, dirCleanupFn := testutils.TempDir(t)
@@ -78,20 +87,17 @@ func TestDBAddSSTable(t *testing.T) {
 		storeSpec := base.DefaultTestStoreSpec
 		storeSpec.InMemory = false
 		storeSpec.Path = dir
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{
 			Insecure:   true,
 			StoreSpecs: []base.StoreSpec{storeSpec},
 		})
-		s := si.(*server.TestServer)
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 		store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		tr := s.TracerI().(*tracing.Tracer)
-		runTestDBAddSSTable(ctx, t, db, tr, store)
+		runTestDBAddSSTable(ctx, t, db, store)
 	})
 }
 
@@ -100,10 +106,7 @@ const ingestAsWrites, ingestAsSST = true, false
 var nilStats *enginepb.MVCCStats
 
 // if store != nil, assume it is on-disk and check ingestion semantics.
-func runTestDBAddSSTable(
-	ctx context.Context, t *testing.T, db *kv.DB, tr *tracing.Tracer, store *kvserver.Store,
-) {
-	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
+func runTestDBAddSSTable(ctx context.Context, t *testing.T, db *kv.DB, store *kvserver.Store) {
 	{
 		key := storage.MVCCKey{Key: []byte("bb"), Timestamp: hlc.Timestamp{WallTime: 2}}
 		data, err := singleKVSSTable(key, roachpb.MakeValueFromString("1").RawBytes)
@@ -125,7 +128,7 @@ func runTestDBAddSSTable(
 		}
 
 		// Do an initial ingest.
-		ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+		ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, "test-recording")
 		defer cancel()
 		if err := db.AddSSTable(
 			ingestCtx, "b", "c", data, false /* disallowShadowing */, nilStats, ingestAsSST, hlc.Timestamp{},
@@ -133,7 +136,7 @@ func runTestDBAddSSTable(
 			t.Fatalf("%+v", err)
 		}
 		formatted := collect().String()
-		if err := testutils.MatchEach(formatted,
+		if err := testutils.MatchInOrder(formatted,
 			"evaluating AddSSTable",
 			"sideloadable proposal detected",
 			"ingested SSTable at index",
@@ -204,7 +207,7 @@ func runTestDBAddSSTable(
 			before = metrics.AddSSTableApplicationCopies.Count()
 		}
 		for i := 0; i < 2; i++ {
-			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, "test-recording")
 			defer cancel()
 
 			if err := db.AddSSTable(
@@ -212,7 +215,7 @@ func runTestDBAddSSTable(
 			); err != nil {
 				t.Fatalf("%+v", err)
 			}
-			if err := testutils.MatchEach(collect().String(),
+			if err := testutils.MatchInOrder(collect().String(),
 				"evaluating AddSSTable",
 				"sideloadable proposal detected",
 				"ingested SSTable at index",
@@ -259,7 +262,7 @@ func runTestDBAddSSTable(
 			before = metrics.AddSSTableApplications.Count()
 		}
 		for i := 0; i < 2; i++ {
-			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, "test-recording")
 			defer cancel()
 
 			if err := db.AddSSTable(
@@ -267,7 +270,7 @@ func runTestDBAddSSTable(
 			); err != nil {
 				t.Fatalf("%+v", err)
 			}
-			if err := testutils.MatchEach(collect().String(),
+			if err := testutils.MatchInOrder(collect().String(),
 				"evaluating AddSSTable",
 				"via regular write batch",
 			); err != nil {
@@ -352,7 +355,7 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 				{"e", 1, "e"},
 				{"z", 2, "zzzzzz"},
 			}) {
-				if err := e.PutMVCC(kv.Key, kv.Value); err != nil {
+				if err := e.Put(kv.Key, kv.Value); err != nil {
 					t.Fatalf("%+v", err)
 				}
 			}
@@ -400,9 +403,9 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 			// stats. Make sure recomputing from scratch gets the same answer as
 			// applying the diff to the stats
 			beforeStats := func() enginepb.MVCCStats {
-				iter := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
+				iter := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
 				defer iter.Close()
-				beforeStats, err := storage.ComputeStatsForRange(iter, keys.LocalMax, roachpb.KeyMax, 10)
+				beforeStats, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 10)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
@@ -451,9 +454,9 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 			}
 
 			afterStats := func() enginepb.MVCCStats {
-				iter := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
+				iter := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
 				defer iter.Close()
-				afterStats, err := storage.ComputeStatsForRange(iter, keys.LocalMax, roachpb.KeyMax, 10)
+				afterStats, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 10)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
@@ -509,7 +512,7 @@ func TestAddSSTableDisallowShadowing(t *testing.T) {
 				{"y", 5, "yyy"},
 				{"z", 2, "zz"},
 			}) {
-				if err := e.PutMVCC(kv.Key, kv.Value); err != nil {
+				if err := e.Put(kv.Key, kv.Value); err != nil {
 					t.Fatalf("%+v", err)
 				}
 			}
@@ -536,7 +539,7 @@ func TestAddSSTableDisallowShadowing(t *testing.T) {
 				}
 				defer dataIter.Close()
 
-				stats, err := storage.ComputeStatsForRange(dataIter, startKey, endKey, 0)
+				stats, err := storage.ComputeStatsGo(dataIter, startKey, endKey, 0)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
@@ -984,7 +987,7 @@ func TestAddSSTableDisallowShadowing(t *testing.T) {
 				// ingesting the perfectly shadowing KVs (same ts and same value) in the
 				// second SST.
 				for _, kv := range sstKVs {
-					if err := e.PutMVCC(kv.Key, kv.Value); err != nil {
+					if err := e.Put(kv.Key, kv.Value); err != nil {
 						t.Fatalf("%+v", err)
 					}
 				}
@@ -1056,80 +1059,4 @@ func TestAddSSTableDisallowShadowing(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAddSSTableDisallowShadowingIntentResolution(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	s, _, db := serverutils.StartServer(t, base.TestServerArgs{})
-	defer s.Stopper().Stop(ctx)
-
-	// Start a transaction that writes an intent at b.
-	txn := db.NewTxn(ctx, "intent")
-	require.NoError(t, txn.Put(ctx, "b", "intent"))
-
-	// Generate an SSTable that covers keys a, b, and c, and submit it with high
-	// priority. This is going to abort the transaction above, encounter its
-	// intent, and resolve it.
-	sst := makeSST(t, s.Clock().Now(), map[string]string{
-		"a": "1",
-		"b": "2",
-		"c": "3",
-	})
-	stats := sstStats(t, sst)
-
-	ba := roachpb.BatchRequest{}
-	ba.Header.UserPriority = roachpb.MaxUserPriority
-	ba.Add(&roachpb.AddSSTableRequest{
-		RequestHeader:     roachpb.RequestHeader{Key: roachpb.Key("a"), EndKey: roachpb.Key("d")},
-		Data:              sst,
-		MVCCStats:         stats,
-		DisallowShadowing: true,
-	})
-	_, pErr := db.NonTransactionalSender().Send(ctx, ba)
-	require.Nil(t, pErr)
-
-	// The transaction should now be aborted.
-	err := txn.Commit(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "TransactionRetryWithProtoRefreshError: TransactionAbortedError")
-}
-
-func makeSST(t *testing.T, ts hlc.Timestamp, kvs map[string]string) []byte {
-	t.Helper()
-
-	sstFile := &storage.MemFile{}
-	writer := storage.MakeBackupSSTWriter(sstFile)
-	defer writer.Close()
-
-	keys := make([]string, 0, len(kvs))
-	for key := range kvs {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		key := storage.MVCCKey{Key: roachpb.Key(k), Timestamp: ts}
-		value := roachpb.Value{}
-		value.SetString(kvs[k])
-		value.InitChecksum(key.Key)
-		require.NoError(t, writer.Put(key, value.RawBytes))
-	}
-	require.NoError(t, writer.Finish())
-	writer.Close()
-	return sstFile.Data()
-}
-
-func sstStats(t *testing.T, sst []byte) *enginepb.MVCCStats {
-	t.Helper()
-
-	iter, err := storage.NewMemSSTIterator(sst, true)
-	require.NoError(t, err)
-	defer iter.Close()
-
-	stats, err := storage.ComputeStatsForRange(iter, keys.MinKey, keys.MaxKey, 0)
-	require.NoError(t, err)
-	return &stats
 }

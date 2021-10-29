@@ -13,7 +13,6 @@ package logictest
 import (
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -21,13 +20,12 @@ import (
 // CockroachDB features. The tests use a similar methodology to the SQLLite
 // Sqllogictests. All of these tests should only verify correctness of output,
 // and not how that output was derived. Therefore, these tests can be run
-// with multiple configs, or even run against Postgres to verify it returns the
-// same logical results.
+// using the heuristic planner, the cost-based optimizer, or even run against
+// Postgres to verify it returns the same logical results.
 //
 // See the comments in logic.go for more details.
 func TestLogic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.UnderDeadlock(t, "times out and/or hangs")
 	RunLogicTest(t, TestServerArgs{}, "testdata/logic_test/[^.]*")
 }
 
@@ -36,42 +34,4 @@ func TestLogic(t *testing.T) {
 func TestSqlLiteLogic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	RunSQLLiteLogicTest(t, "" /* configOverride */)
-}
-
-// TestFloatsMatch is a unit test for floatsMatch() and floatsMatchApprox()
-// functions.
-func TestFloatsMatch(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	for _, tc := range []struct {
-		f1, f2 string
-		match  bool
-	}{
-		{f1: "NaN", f2: "+Inf", match: false},
-		{f1: "+Inf", f2: "+Inf", match: true},
-		{f1: "NaN", f2: "NaN", match: true},
-		{f1: "+Inf", f2: "-Inf", match: false},
-		{f1: "-0.0", f2: "0.0", match: true},
-		{f1: "0.0", f2: "NaN", match: false},
-		{f1: "123.45", f2: "12.345", match: false},
-		{f1: "0.1234567890123456", f2: "0.1234567890123455", match: true},
-		{f1: "0.1234567890123456", f2: "0.1234567890123457", match: true},
-		{f1: "-0.1234567890123456", f2: "0.1234567890123456", match: false},
-		{f1: "-0.1234567890123456", f2: "-0.1234567890123455", match: true},
-	} {
-		match, err := floatsMatch(tc.f1, tc.f2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if match != tc.match {
-			t.Fatalf("floatsMatch: wrong result on %v", tc)
-		}
-
-		match, err = floatsMatchApprox(tc.f1, tc.f2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if match != tc.match {
-			t.Fatalf("floatsMatchApprox: wrong result on %v", tc)
-		}
-	}
 }

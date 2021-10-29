@@ -18,9 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 )
 
@@ -133,42 +131,23 @@ type Memo struct {
 
 	// The following are selected fields from SessionData which can affect
 	// planning. We need to cross-check these before reusing a cached memo.
-	// NOTE: If you add new fields here, be sure to add them to the relevant
-	//       fields in explain_bundle.go.
 	reorderJoinsLimit       int
 	zigzagJoinEnabled       bool
 	useHistograms           bool
 	useMultiColStats        bool
-	localityOptimizedSearch bool
 	safeUpdates             bool
 	preferLookupJoinsForFKs bool
 	saveTablesPrefix        string
-	dateStyleEnabled        bool
-	intervalStyleEnabled    bool
-	dateStyle               pgdate.DateStyle
-	intervalStyle           duration.IntervalStyle
-	propagateInputOrdering  bool
-	disallowFullTableScans  bool
-	largeFullScanRows       float64
-	nullOrderedLast         bool
 
-	// curRank is the highest currently in-use scalar expression rank.
-	curRank opt.ScalarRank
+	// curID is the highest currently in-use scalar expression ID.
+	curID opt.ScalarID
 
 	// curWithID is the highest currently in-use WITH ID.
 	curWithID opt.WithID
 
 	newGroupFn func(opt.Expr)
 
-	// disableCheckExpr disables expression validation performed by CheckExpr,
-	// if the crdb_test build tag is set. If the crdb_test build tag is not set,
-	// CheckExpr is always a no-op, so disableCheckExpr has no effect. This is
-	// set to true for the optsteps test command to prevent CheckExpr from
-	// erring with partially normalized expressions.
-	disableCheckExpr bool
-
-	// WARNING: if you add more members, add initialization code in Init (if
-	// reusing allocated data structures is desired).
+	// WARNING: if you add more members, add initialization code in Init.
 }
 
 // Init initializes a new empty memo instance, or resets existing state so it
@@ -177,29 +156,24 @@ type Memo struct {
 // argument. If any of that changes, then the memo must be invalidated (see the
 // IsStale method for more details).
 func (m *Memo) Init(evalCtx *tree.EvalContext) {
-	// This initialization pattern ensures that fields are not unwittingly
-	// reused. Field reuse must be explicit.
-	*m = Memo{
-		metadata:                m.metadata,
-		reorderJoinsLimit:       int(evalCtx.SessionData().ReorderJoinsLimit),
-		zigzagJoinEnabled:       evalCtx.SessionData().ZigzagJoinEnabled,
-		useHistograms:           evalCtx.SessionData().OptimizerUseHistograms,
-		useMultiColStats:        evalCtx.SessionData().OptimizerUseMultiColStats,
-		localityOptimizedSearch: evalCtx.SessionData().LocalityOptimizedSearch,
-		safeUpdates:             evalCtx.SessionData().SafeUpdates,
-		preferLookupJoinsForFKs: evalCtx.SessionData().PreferLookupJoinsForFKs,
-		saveTablesPrefix:        evalCtx.SessionData().SaveTablesPrefix,
-		intervalStyleEnabled:    evalCtx.SessionData().IntervalStyleEnabled,
-		dateStyleEnabled:        evalCtx.SessionData().DateStyleEnabled,
-		dateStyle:               evalCtx.SessionData().GetDateStyle(),
-		intervalStyle:           evalCtx.SessionData().GetIntervalStyle(),
-		propagateInputOrdering:  evalCtx.SessionData().PropagateInputOrdering,
-		disallowFullTableScans:  evalCtx.SessionData().DisallowFullTableScans,
-		largeFullScanRows:       evalCtx.SessionData().LargeFullScanRows,
-		nullOrderedLast:         evalCtx.SessionData().NullOrderedLast,
-	}
 	m.metadata.Init()
+	m.interner.Clear()
 	m.logPropsBuilder.init(evalCtx, m)
+
+	m.rootExpr = nil
+	m.rootProps = nil
+	m.memEstimate = 0
+
+	m.reorderJoinsLimit = evalCtx.SessionData.ReorderJoinsLimit
+	m.zigzagJoinEnabled = evalCtx.SessionData.ZigzagJoinEnabled
+	m.useHistograms = evalCtx.SessionData.OptimizerUseHistograms
+	m.useMultiColStats = evalCtx.SessionData.OptimizerUseMultiColStats
+	m.safeUpdates = evalCtx.SessionData.SafeUpdates
+	m.preferLookupJoinsForFKs = evalCtx.SessionData.PreferLookupJoinsForFKs
+	m.saveTablesPrefix = evalCtx.SessionData.SaveTablesPrefix
+
+	m.curID = 0
+	m.curWithID = 0
 }
 
 // NotifyOnNewGroup sets a callback function which is invoked each time we
@@ -253,7 +227,7 @@ func (m *Memo) SetRoot(e RelExpr, phys *physical.Required) {
 	// the memory used by the interner.
 	if m.IsOptimized() {
 		m.logPropsBuilder.clear()
-		m.interner = interner{}
+		m.interner.Clear()
 	}
 }
 
@@ -297,22 +271,13 @@ func (m *Memo) IsStale(
 ) (bool, error) {
 	// Memo is stale if fields from SessionData that can affect planning have
 	// changed.
-	if m.reorderJoinsLimit != int(evalCtx.SessionData().ReorderJoinsLimit) ||
-		m.zigzagJoinEnabled != evalCtx.SessionData().ZigzagJoinEnabled ||
-		m.useHistograms != evalCtx.SessionData().OptimizerUseHistograms ||
-		m.useMultiColStats != evalCtx.SessionData().OptimizerUseMultiColStats ||
-		m.localityOptimizedSearch != evalCtx.SessionData().LocalityOptimizedSearch ||
-		m.safeUpdates != evalCtx.SessionData().SafeUpdates ||
-		m.preferLookupJoinsForFKs != evalCtx.SessionData().PreferLookupJoinsForFKs ||
-		m.saveTablesPrefix != evalCtx.SessionData().SaveTablesPrefix ||
-		m.intervalStyleEnabled != evalCtx.SessionData().IntervalStyleEnabled ||
-		m.dateStyleEnabled != evalCtx.SessionData().DateStyleEnabled ||
-		m.dateStyle != evalCtx.SessionData().GetDateStyle() ||
-		m.intervalStyle != evalCtx.SessionData().GetIntervalStyle() ||
-		m.propagateInputOrdering != evalCtx.SessionData().PropagateInputOrdering ||
-		m.disallowFullTableScans != evalCtx.SessionData().DisallowFullTableScans ||
-		m.largeFullScanRows != evalCtx.SessionData().LargeFullScanRows ||
-		m.nullOrderedLast != evalCtx.SessionData().NullOrderedLast {
+	if m.reorderJoinsLimit != evalCtx.SessionData.ReorderJoinsLimit ||
+		m.zigzagJoinEnabled != evalCtx.SessionData.ZigzagJoinEnabled ||
+		m.useHistograms != evalCtx.SessionData.OptimizerUseHistograms ||
+		m.useMultiColStats != evalCtx.SessionData.OptimizerUseMultiColStats ||
+		m.safeUpdates != evalCtx.SessionData.SafeUpdates ||
+		m.preferLookupJoinsForFKs != evalCtx.SessionData.PreferLookupJoinsForFKs ||
+		m.saveTablesPrefix != evalCtx.SessionData.SaveTablesPrefix {
 		return true, nil
 	}
 
@@ -382,15 +347,10 @@ func (m *Memo) IsOptimized() bool {
 	return ok && rel.RequiredPhysical() != nil
 }
 
-// NextRank returns a new rank that can be assigned to a scalar expression.
-func (m *Memo) NextRank() opt.ScalarRank {
-	m.curRank++
-	return m.curRank
-}
-
-// CopyNextRankFrom copies the next ScalarRank from the other memo.
-func (m *Memo) CopyNextRankFrom(other *Memo) {
-	m.curRank = other.curRank
+// NextID returns a new unique ScalarID to number expressions with.
+func (m *Memo) NextID() opt.ScalarID {
+	m.curID++
+	return m.curID
 }
 
 // RequestColStat calculates and returns the column statistic calculated on the
@@ -448,11 +408,4 @@ func (m *Memo) Detach() {
 		}
 	}
 	clearColStats(m.RootExpr())
-}
-
-// DisableCheckExpr disables expression validation performed by CheckExpr,
-// if the crdb_test build tag is set. If the crdb_test build tag is not set,
-// CheckExpr is always a no-op, so DisableCheckExpr has no effect.
-func (m *Memo) DisableCheckExpr() {
-	m.disableCheckExpr = true
 }

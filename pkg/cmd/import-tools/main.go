@@ -11,7 +11,6 @@
 // import-tools adds a blank import to tools we use such that `go mod tidy`
 // doesn't clean up needed dependencies when running `go install`.
 
-//go:build tools
 // +build tools
 
 package main
@@ -19,15 +18,12 @@ package main
 import (
 	"fmt"
 
-	_ "github.com/aws/aws-sdk-go-v2"
-	_ "github.com/bufbuild/buf/cmd/buf"
 	_ "github.com/client9/misspell/cmd/misspell"
 	_ "github.com/cockroachdb/crlfmt"
 	_ "github.com/cockroachdb/go-test-teamcity"
 	_ "github.com/cockroachdb/gostdlib/cmd/gofmt"
 	_ "github.com/cockroachdb/gostdlib/x/tools/cmd/goimports"
 	_ "github.com/cockroachdb/stress"
-	_ "github.com/go-swagger/go-swagger/cmd/swagger"
 	_ "github.com/golang/mock/mockgen"
 	_ "github.com/goware/modvendor"
 	_ "github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway"

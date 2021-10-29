@@ -13,7 +13,6 @@ package telemetry
 import (
 	"fmt"
 	"math"
-	"strings"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -192,7 +191,7 @@ const (
 	ReadOnly ResetCounters = false
 )
 
-// GetRawFeatureCounts returns current raw, un-quantized feature counter values.
+// GetRawFeatureCounts returns current raw, un-quanitzed feature counter values.
 func GetRawFeatureCounts() map[string]int32 {
 	return GetFeatureCounts(Raw, ReadOnly)
 }
@@ -225,10 +224,6 @@ func GetFeatureCounts(quantize QuantizeCounts, reset ResetCounters) map[string]i
 	return m
 }
 
-// ValidationTelemetryKeyPrefix is the prefix of telemetry keys pertaining to
-// descriptor validation failures.
-const ValidationTelemetryKeyPrefix = "sql.schema.validation_errors."
-
 // RecordError takes an error and increments the corresponding count
 // for its error code, and, if it is an unimplemented or internal
 // error, the count for that feature or the internal error's shortened
@@ -252,13 +247,9 @@ func RecordError(err error) {
 		default:
 			prefix = "othererror." + code.String() + "."
 		}
+
 		for _, tk := range tkeys {
-			prefixedTelemetryKey := prefix + tk
-			if strings.HasPrefix(tk, ValidationTelemetryKeyPrefix) {
-				// Descriptor validation errors already have their own prefixing scheme.
-				prefixedTelemetryKey = tk
-			}
-			Count(prefixedTelemetryKey)
+			Count(prefix + tk)
 		}
 	}
 }

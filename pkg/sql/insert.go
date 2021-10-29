@@ -14,11 +14,12 @@ import (
 	"context"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 var insertNodePool = sync.Pool{
@@ -44,8 +45,6 @@ type insertNode struct {
 	run insertRun
 }
 
-var _ mutationPlanNode = &insertNode{}
-
 // insertRun contains the run-time state of insertNode during local execution.
 type insertRun struct {
 	ti         tableInserter
@@ -54,7 +53,7 @@ type insertRun struct {
 	checkOrds checkSet
 
 	// insertCols are the columns being inserted into.
-	insertCols []catalog.Column
+	insertCols []descpb.ColumnDescriptor
 
 	// done informs a new call to BatchedNext() that the previous call to
 	// BatchedNext() has completed the work already.
@@ -108,10 +107,10 @@ func (r *insertRun) initRowContainer(params runParams, columns colinfo.ResultCol
 		r.resultRowBuffer[i] = tree.DNull
 	}
 
-	colIDToRetIndex := catalog.ColumnIDToOrdinalMap(r.ti.tableDesc().PublicColumns())
+	colIDToRetIndex := r.ti.tableDesc().ColumnIdxMap()
 	r.rowIdxToTabColIdx = make([]int, len(r.insertCols))
 	for i, col := range r.insertCols {
-		if idx, ok := colIDToRetIndex.Get(col.GetID()); !ok {
+		if idx, ok := colIDToRetIndex[col.ID]; !ok {
 			// Column must be write only and not public.
 			r.rowIdxToTabColIdx[i] = -1
 		} else {
@@ -123,7 +122,7 @@ func (r *insertRun) initRowContainer(params runParams, columns colinfo.ResultCol
 // processSourceRow processes one row from the source for insertion and, if
 // result rows are needed, saves it in the result row container.
 func (r *insertRun) processSourceRow(params runParams, rowVals tree.Datums) error {
-	if err := enforceLocalColumnConstraints(rowVals, r.insertCols, false /* isUpdate */); err != nil {
+	if err := enforceLocalColumnConstraints(rowVals, r.insertCols); err != nil {
 		return err
 	}
 
@@ -131,7 +130,7 @@ func (r *insertRun) processSourceRow(params runParams, rowVals tree.Datums) erro
 	// written to when they are partial indexes and the row does not satisfy the
 	// predicate. This set is passed as a parameter to tableInserter.row below.
 	var pm row.PartialIndexUpdateHelper
-	if n := len(r.ti.tableDesc().PartialIndexes()); n > 0 {
+	if n := r.ti.tableDesc().PartialIndexOrds().Len(); n > 0 {
 		offset := len(r.insertCols) + r.checkOrds.Len()
 		partialIndexPutVals := rowVals[offset : offset+n]
 
@@ -188,7 +187,7 @@ func (n *insertNode) startExec(params runParams) error {
 
 	n.run.initRowContainer(params, n.columns)
 
-	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -206,6 +205,8 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 	if n.run.done {
 		return false, nil
 	}
+
+	tracing.AnnotateTrace()
 
 	// Advance one batch. First, clear the last batch.
 	n.run.ti.clearLastBatch(params.ctx)
@@ -256,7 +257,6 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	if lastBatch {
-		n.run.ti.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
 		if err := n.run.ti.finalize(params.ctx); err != nil {
 			return false, err
 		}
@@ -265,7 +265,7 @@ func (n *insertNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.tableDesc(), n.run.ti.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.tableDesc().GetID(), n.run.ti.lastBatchSize)
 
 	return n.run.ti.lastBatchSize > 0, nil
 }
@@ -286,8 +286,4 @@ func (n *insertNode) Close(ctx context.Context) {
 // See planner.autoCommit.
 func (n *insertNode) enableAutoCommit() {
 	n.run.ti.enableAutoCommit()
-}
-
-func (n *insertNode) rowsWritten() int64 {
-	return n.run.ti.rowsWritten
 }

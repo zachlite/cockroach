@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 )
 
 // SpecializedVectorizedBuiltin is used to map overloads
@@ -67,23 +66,8 @@ type Overload struct {
 
 	AggregateFunc func([]*types.T, *EvalContext, Datums) AggregateFunc
 	WindowFunc    func([]*types.T, *EvalContext) WindowFunc
-
-	// Only one of the following three attributes can be set.
-
-	// Fn is the normal builtin implementation function. It's for functions that
-	// take in Datums and return a Datum.
-	Fn func(*EvalContext, Datums) (Datum, error)
-
-	// FnWithExprs is for builtins that need access to their arguments as Exprs
-	// and not pre-evaluated Datums, but is otherwise identical to Fn.
-	FnWithExprs func(*EvalContext, Exprs) (Datum, error)
-
-	// Generator is for SRFs. SRFs take Datums and return multiple rows of Datums.
-	Generator GeneratorFactory
-
-	// GeneratorWithExprs is for SRFs that need access to their arguments as Exprs
-	// and not pre-evaluated Datums, but is otherwise identical to Generator.
-	GeneratorWithExprs GeneratorWithExprsFactory
+	Fn            func(*EvalContext, Datums) (Datum, error)
+	Generator     GeneratorFactory
 
 	// SQLFn must be set for overloads of type SQLClass. It should return a SQL
 	// statement which will be executed as a common table expression in the query.
@@ -101,15 +85,6 @@ type Overload struct {
 	// volatility against Postgres's volatility at test time.
 	// This should be used with caution.
 	IgnoreVolatilityCheck bool
-
-	// Oid is the cached oidHasher.BuiltinOid result for this Overload. It's
-	// populated at init-time.
-	Oid oid.Oid
-
-	// DistsqlBlocklist is set to true when a function cannot be evaluated in
-	// DistSQL. One example is when the type information for function arguments
-	// cannot be recovered.
-	DistsqlBlocklist bool
 }
 
 // params implements the overloadImpl interface.
@@ -155,11 +130,6 @@ func (b Overload) InferReturnTypeFromInputArgTypes(inputTypes []*types.T) *types
 	return retTyp
 }
 
-// IsGenerator returns true if the function is a set returning function (SRF).
-func (b Overload) IsGenerator() bool {
-	return b.Generator != nil || b.GeneratorWithExprs != nil
-}
-
 // Signature returns a human-readable signature.
 // If simplify is bool, tuple-returning functions with just
 // 1 tuple element unwrap the return type in the signature.
@@ -181,14 +151,13 @@ func (b Overload) Signature(simplify bool) string {
 type overloadImpl interface {
 	params() TypeList
 	returnType() ReturnTyper
-	// allows manually resolving preference between multiple compatible overloads.
+	// allows manually resolving preference between multiple compatible overloads
 	preferred() bool
 }
 
 var _ overloadImpl = &Overload{}
 var _ overloadImpl = &UnaryOp{}
 var _ overloadImpl = &BinOp{}
-var _ overloadImpl = &CmpOp{}
 
 // GetParamsAndReturnType gets the parameters and return type of an
 // overloadImpl.
@@ -608,8 +577,7 @@ func typeCheckOverloadedExprs(
 		return typedExprs, fns, err
 	}
 
-	// The first heuristic is to prefer candidates that return the desired type,
-	// if a desired type was provided.
+	// The first heuristic is to prefer candidates that return the desired type.
 	if desired.Family() != types.AnyFamily {
 		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
 			func(o overloadImpl) bool {
@@ -768,17 +736,7 @@ func typeCheckOverloadedExprs(
 		}
 	}
 
-	// The fifth heuristic is to defer to preferred candidates, if one has been
-	// specified in the overload list.
-	if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
-		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs, func(o overloadImpl) bool {
-			return o.preferred()
-		})
-	}); ok {
-		return typedExprs, fns, err
-	}
-
-	// The sixth heuristic is to prefer candidates where all placeholders can be
+	// The fifth heuristic is to prefer candidates where all placeholders can be
 	// given the same type as all constants and resolvable expressions. This is
 	// only possible if all constants and resolvable expressions were resolved
 	// homogeneously up to this point.
@@ -798,67 +756,6 @@ func typeCheckOverloadedExprs(
 		}
 		if ok, typedExprs, fns, err := checkReturn(ctx, semaCtx, &s); ok {
 			return typedExprs, fns, err
-		}
-	}
-
-	// This is a total hack for AnyEnum whilst we don't have postgres type resolution.
-	// This enables AnyEnum array ops to not need a cast, e.g. array['a']::enum[] = '{a}'.
-	// If we have one remaining candidate containing AnyEnum, cast all remaining
-	// arguments to a known enum and check that the rest match. This is a poor man's
-	// implicit cast / postgres "same argument" resolution clone.
-	if len(s.overloadIdxs) == 1 {
-		params := s.overloads[s.overloadIdxs[0]].params()
-		var knownEnum *types.T
-
-		// Check we have all "AnyEnum" (or "AnyEnum" array) arguments and that
-		// one argument is typed with an enum.
-		attemptAnyEnumCast := func() bool {
-			for i := 0; i < params.Length(); i++ {
-				typ := params.GetAt(i)
-				// Note we are deliberately looking at whether the built-in takes in
-				// AnyEnum as an argument, not the exprs given to the overload itself.
-				if !(typ.Identical(types.AnyEnum) || typ.Identical(types.MakeArray(types.AnyEnum))) {
-					return false
-				}
-				if s.typedExprs[i] != nil {
-					// Assign the known enum if it was previously unassigned.
-					// Otherwise, double check it matches a previously defined enum.
-					posEnum := s.typedExprs[i].ResolvedType()
-					if !posEnum.UserDefined() {
-						return false
-					}
-					if posEnum.Family() == types.ArrayFamily {
-						posEnum = posEnum.ArrayContents()
-					}
-					if knownEnum == nil {
-						knownEnum = posEnum
-					} else if !posEnum.Identical(knownEnum) {
-						return false
-					}
-				}
-			}
-			return knownEnum != nil
-		}()
-
-		// If we have all arguments as AnyEnum, and we know at least one of the
-		// enum's actual type, try type cast the rest.
-		if attemptAnyEnumCast {
-			// Copy exprs to prevent any overwrites of underlying s.exprs array later.
-			sCopy := s
-			sCopy.exprs = make([]Expr, len(s.exprs))
-			copy(sCopy.exprs, s.exprs)
-			if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &sCopy, func() {
-				for _, idx := range append(s.constIdxs, s.placeholderIdxs...) {
-					p := params.GetAt(idx)
-					typCast := knownEnum
-					if p.Family() == types.ArrayFamily {
-						typCast = types.MakeArray(knownEnum)
-					}
-					sCopy.exprs[idx] = &CastExpr{Expr: sCopy.exprs[idx], Type: typCast, SyntaxMode: CastShort}
-				}
-			}); ok {
-				return typedExprs, fns, err
-			}
 		}
 	}
 
@@ -906,47 +803,13 @@ func typeCheckOverloadedExprs(
 		}
 	}
 
-	// After the previous heuristic, in a binary expression, in the case of one of the arguments being untyped
-	// NULL, we prefer overloads where we infer the type of the NULL to be a STRING. This is used
-	// to choose INT || NULL::STRING over INT || NULL::INT[].
-	if inBinOp && len(s.exprs) == 2 {
-		if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
-			var err error
-			left := s.typedExprs[0]
-			if left == nil {
-				left, err = s.exprs[0].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			right := s.typedExprs[1]
-			if right == nil {
-				right, err = s.exprs[1].TypeCheck(ctx, semaCtx, types.Any)
-				if err != nil {
-					return
-				}
-			}
-			leftType := left.ResolvedType()
-			rightType := right.ResolvedType()
-			leftIsNull := leftType.Family() == types.UnknownFamily
-			rightIsNull := rightType.Family() == types.UnknownFamily
-			oneIsNull := (leftIsNull || rightIsNull) && !(leftIsNull && rightIsNull)
-			if oneIsNull {
-				if leftIsNull {
-					leftType = types.String
-				}
-				if rightIsNull {
-					rightType = types.String
-				}
-				s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs,
-					func(o overloadImpl) bool {
-						return o.params().GetAt(0).Equivalent(leftType) &&
-							o.params().GetAt(1).Equivalent(rightType)
-					})
-			}
-		}); ok {
-			return typedExprs, fns, err
-		}
+	// The final heuristic is to defer to preferred candidates, if available.
+	if ok, typedExprs, fns, err := filterAttempt(ctx, semaCtx, &s, func() {
+		s.overloadIdxs = filterOverloads(s.overloads, s.overloadIdxs, func(o overloadImpl) bool {
+			return o.preferred()
+		})
+	}); ok {
+		return typedExprs, fns, err
 	}
 
 	if err := defaultTypeCheck(ctx, semaCtx, &s, len(s.overloads) > 0); err != nil {

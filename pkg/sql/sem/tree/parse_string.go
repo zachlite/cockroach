@@ -11,14 +11,12 @@
 package tree
 
 import (
-	"strings"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
 
-// ParseAndRequireString parses s as type t for simple types. Collated
+// ParseAndRequireString parses s as type t for simple types. Arrays and collated
 // strings are not handled.
 //
 // The dependsOnContext return value indicates if we had to consult the
@@ -30,11 +28,7 @@ func ParseAndRequireString(
 	case types.ArrayFamily:
 		d, dependsOnContext, err = ParseDArrayFromString(ctx, s, t.ArrayContents())
 	case types.BitFamily:
-		r, err := ParseDBitArray(s)
-		if err != nil {
-			return nil, false, err
-		}
-		d = formatBitArrayToType(r, t)
+		d, err = ParseDBitArray(s)
 	case types.BoolFamily:
 		d, err = ParseDBool(s)
 	case types.BytesFamily:
@@ -42,19 +36,19 @@ func ParseAndRequireString(
 	case types.DateFamily:
 		d, dependsOnContext, err = ParseDDate(ctx, s)
 	case types.DecimalFamily:
-		d, err = ParseDDecimal(strings.TrimSpace(s))
+		d, err = ParseDDecimal(s)
 	case types.FloatFamily:
-		d, err = ParseDFloat(strings.TrimSpace(s))
+		d, err = ParseDFloat(s)
 	case types.INetFamily:
 		d, err = ParseDIPAddrFromINetString(s)
 	case types.IntFamily:
-		d, err = ParseDInt(strings.TrimSpace(s))
+		d, err = ParseDInt(s)
 	case types.IntervalFamily:
 		itm, typErr := t.IntervalTypeMetadata()
 		if typErr != nil {
 			return nil, false, typErr
 		}
-		d, err = ParseDIntervalWithTypeMetadata(intervalStyle(ctx), s, itm)
+		d, err = ParseDIntervalWithTypeMetadata(s, itm)
 	case types.Box2DFamily:
 		d, err = ParseDBox2D(s)
 	case types.GeographyFamily:
@@ -92,9 +86,5 @@ func ParseAndRequireString(
 	default:
 		return nil, false, errors.AssertionFailedf("unknown type %s (%T)", t, t)
 	}
-	if err != nil {
-		return d, dependsOnContext, err
-	}
-	d, err = AdjustValueToType(t, d)
 	return d, dependsOnContext, err
 }

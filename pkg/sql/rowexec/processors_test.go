@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -40,12 +39,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,9 +77,19 @@ func TestPostProcess(t *testing.T) {
 	}{
 		{
 			post:          execinfrapb.PostProcessSpec{},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
+		},
+
+		// Filter.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
+			},
+			outputTypes:   rowenc.ThreeIntCols,
+			expNeededCols: []int{0, 1, 2},
+			expected:      "[[1 2 3] [1 2 4] [1 3 4]]",
 		},
 
 		// Projection.
@@ -90,9 +98,33 @@ func TestPostProcess(t *testing.T) {
 				Projection:    true,
 				OutputColumns: []uint32{0, 2},
 			},
-			outputTypes:   types.TwoIntCols,
+			outputTypes:   rowenc.TwoIntCols,
 			expNeededCols: []int{0, 2},
 			expected:      "[[0 2] [0 3] [0 4] [0 3] [0 4] [0 4] [1 3] [1 4] [1 4] [2 4]]",
+		},
+
+		// Filter and projection; filter only refers to projected column.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter:        execinfrapb.Expression{Expr: "@1 = 1"},
+				Projection:    true,
+				OutputColumns: []uint32{0, 2},
+			},
+			outputTypes:   rowenc.TwoIntCols,
+			expNeededCols: []int{0, 2},
+			expected:      "[[1 3] [1 4] [1 4]]",
+		},
+
+		// Filter and projection; filter refers to non-projected column.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter:        execinfrapb.Expression{Expr: "@2 = 2"},
+				Projection:    true,
+				OutputColumns: []uint32{0, 2},
+			},
+			outputTypes:   rowenc.TwoIntCols,
+			expNeededCols: []int{0, 1, 2},
+			expected:      "[[0 3] [0 4] [1 3] [1 4]]",
 		},
 
 		// Rendering.
@@ -100,9 +132,31 @@ func TestPostProcess(t *testing.T) {
 			post: execinfrapb.PostProcessSpec{
 				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
 			},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1},
 			expected:      "[[0 1 1] [0 1 1] [0 1 1] [0 2 2] [0 2 2] [0 3 3] [1 2 3] [1 2 3] [1 3 4] [2 3 5]]",
+		},
+
+		// Rendering and filtering; filter refers to column used in rendering.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter:      execinfrapb.Expression{Expr: "@2 = 2"},
+				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
+			},
+			outputTypes:   rowenc.ThreeIntCols,
+			expNeededCols: []int{0, 1},
+			expected:      "[[0 2 2] [0 2 2] [1 2 3] [1 2 3]]",
+		},
+
+		// Rendering and filtering; filter refers to column not used in rendering.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter:      execinfrapb.Expression{Expr: "@3 = 4"},
+				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
+			},
+			outputTypes:   rowenc.ThreeIntCols,
+			expNeededCols: []int{0, 1, 2},
+			expected:      "[[0 1 1] [0 2 2] [0 3 3] [1 2 3] [1 3 4] [2 3 5]]",
 		},
 
 		// More complex rendering expressions.
@@ -136,7 +190,7 @@ func TestPostProcess(t *testing.T) {
 		// Offset.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -144,25 +198,25 @@ func TestPostProcess(t *testing.T) {
 		// Limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 3},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 9},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 10},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 11},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -170,40 +224,62 @@ func TestPostProcess(t *testing.T) {
 		// Offset + limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 2},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 6},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 7},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 8},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
+		},
+
+		// Filter + offset.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
+				Offset: 1,
+			},
+			outputTypes:   rowenc.ThreeIntCols,
+			expNeededCols: []int{0, 1, 2},
+			expected:      "[[1 2 4] [1 3 4]]",
+		},
+
+		// Filter + limit.
+		{
+			post: execinfrapb.PostProcessSpec{
+				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
+				Limit:  2,
+			},
+			outputTypes:   rowenc.ThreeIntCols,
+			expNeededCols: []int{0, 1, 2},
+			expected:      "[[1 2 3] [1 2 4]]",
 		},
 	}
 
 	for tcIdx, tc := range testCases {
 		t.Run(strconv.Itoa(tcIdx), func(t *testing.T) {
-			inBuf := distsqlutils.NewRowBuffer(types.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
+			inBuf := distsqlutils.NewRowBuffer(rowenc.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
 			outBuf := &distsqlutils.RowBuffer{}
 
 			var out execinfra.ProcOutputHelper
 			semaCtx := tree.MakeSemaContext()
 			evalCtx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 			defer evalCtx.Stop(context.Background())
-			if err := out.Init(&tc.post, inBuf.OutputTypes(), &semaCtx, evalCtx); err != nil {
+			if err := out.Init(&tc.post, inBuf.OutputTypes(), &semaCtx, evalCtx, outBuf); err != nil {
 				t.Fatal(err)
 			}
 
@@ -223,12 +299,12 @@ func TestPostProcess(t *testing.T) {
 			}
 			// Run the rows through the helper.
 			for i := range input {
-				status, err := out.EmitRow(context.Background(), input[i], outBuf)
+				status, err := out.EmitRow(context.Background(), input[i])
 				if err != nil {
 					t.Fatal(err)
 				}
 				if status != execinfra.NeedMoreRows {
-					outBuf.ProducerDone()
+					out.Close()
 					break
 				}
 			}
@@ -261,69 +337,69 @@ func TestAggregatorSpecAggregationEquals(t *testing.T) {
 	}{
 		// Func tests.
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.Avg},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_AVG},
 			expected: false,
 		},
 
 		// ColIdx tests.
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1, 2}},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1, 2}},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1, 2}},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1, 2}},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1}},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1, 3}},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1}},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1, 3}},
 			expected: false,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1, 2}},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, ColIdx: []uint32{1, 3}},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1, 2}},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, ColIdx: []uint32{1, 3}},
 			expected: false,
 		},
 
 		// FilterColIdx tests.
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, FilterColIdx: &colIdx1},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, FilterColIdx: &colIdx1},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, FilterColIdx: &colIdx1},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, FilterColIdx: &colIdx1},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, FilterColIdx: &colIdx1},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, FilterColIdx: &colIdx1},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
 			expected: false,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, FilterColIdx: &colIdx1},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, FilterColIdx: &colIdx2},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, FilterColIdx: &colIdx1},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, FilterColIdx: &colIdx2},
 			expected: false,
 		},
 
 		// Distinct tests.
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: true},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: true},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: true},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: true},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: false},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: false},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: false},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: false},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: false},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: false},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
 			expected: true,
 		},
 		{
-			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull, Distinct: true},
-			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AnyNotNull},
+			a:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL, Distinct: true},
+			b:        execinfrapb.AggregatorSpec_Aggregation{Func: execinfrapb.AggregatorSpec_ANY_NOT_NULL},
 			expected: false,
 		},
 	} {
@@ -352,7 +428,7 @@ func TestProcessorBaseContext(t *testing.T) {
 		}
 		defer flowCtx.EvalCtx.Stop(ctx)
 
-		input := execinfra.NewRepeatableRowSource(types.OneIntCol, randgen.MakeIntRows(10, 1))
+		input := execinfra.NewRepeatableRowSource(rowenc.OneIntCol, rowenc.MakeIntRows(10, 1))
 		noop, err := newNoopProcessor(flowCtx, 0 /* processorID */, input, &execinfrapb.PostProcessSpec{}, &rowDisposer{})
 		if err != nil {
 			t.Fatal(err)
@@ -415,17 +491,15 @@ func TestProcessorBaseContext(t *testing.T) {
 	})
 }
 
-func getPGXConnAndCleanupFunc(
-	ctx context.Context, t *testing.T, servingSQLAddr string,
-) (*pgx.Conn, func()) {
+func getPGXConnAndCleanupFunc(t *testing.T, servingSQLAddr string) (*pgx.Conn, func()) {
 	t.Helper()
 	pgURL, cleanup := sqlutils.PGUrl(t, servingSQLAddr, t.Name(), url.User(security.RootUser))
 	pgURL.Path = "test"
-	pgxConfig, err := pgx.ParseConfig(pgURL.String())
+	pgxConfig, err := pgx.ParseConnectionString(pgURL.String())
 	require.NoError(t, err)
-	defaultConn, err := pgx.ConnectConfig(ctx, pgxConfig)
+	defaultConn, err := pgx.Connect(pgxConfig)
 	require.NoError(t, err)
-	_, err = defaultConn.Exec(ctx, "set distsql='always'")
+	_, err = defaultConn.Exec("set distsql='always'; set vectorize_row_count_threshold=0")
 	require.NoError(t, err)
 	return defaultConn, cleanup
 }
@@ -505,7 +579,6 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 										roachpb.NewReadWithinUncertaintyIntervalError(
 											ba.Timestamp,           /* readTs */
 											ba.Timestamp.Add(1, 0), /* existingTs */
-											hlc.Timestamp{},        /* localUncertaintyLimit */
 											ba.Txn))
 								}
 								return nil
@@ -516,8 +589,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 				},
 			},
 		})
-	ctx := context.Background()
-	defer tc.Stopper().Stop(ctx)
+	defer tc.Stopper().Stop(context.Background())
 
 	origDB0 := tc.ServerConn(0)
 	sqlutils.CreateTable(t, origDB0, "t",
@@ -539,7 +611,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 	}
 
 	populateRangeCacheAndDisableBuffering(t, origDB0, "t")
-	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).ServingSQLAddr())
+	defaultConn, cleanup := getPGXConnAndCleanupFunc(t, tc.Server(0).ServingSQLAddr())
 	defer cleanup()
 
 	atomic.StoreInt64(&trapRead, 1)
@@ -557,7 +629,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 			blockedRead.Unlock()
 			// Force DistSQL to distribute the query. Otherwise, as of Nov 2018, it's hard
 			// to convince it to distribute a query that uses an index.
-			if _, err := defaultConn.Exec(ctx, "set distsql='always'"); err != nil {
+			if _, err := defaultConn.Exec("set distsql='always'"); err != nil {
 				t.Fatal(err)
 			}
 			vectorizeMode := "off"
@@ -565,7 +637,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 				vectorizeMode = "on"
 			}
 
-			if _, err := defaultConn.Exec(ctx, fmt.Sprintf("set vectorize='%s'", vectorizeMode)); err != nil {
+			if _, err := defaultConn.Exec(fmt.Sprintf("set vectorize='%s'; set vectorize_row_count_threshold=0", vectorizeMode)); err != nil {
 				t.Fatal(err)
 			}
 
@@ -576,7 +648,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 			query := fmt.Sprintf(
 				"select x from t where x <= 5 union all select x from t where x > 5 limit %d",
 				limit)
-			rows, err := defaultConn.Query(ctx, query)
+			rows, err := defaultConn.Query(query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -641,7 +713,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 				UseDatabase: "test",
 			},
 		}
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 	)
 
 	filters := make([]struct {
@@ -690,7 +762,6 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 								roachpb.NewReadWithinUncertaintyIntervalError(
 									ba.Timestamp,
 									ba.Timestamp.Add(1, 0),
-									hlc.Timestamp{},
 									ba.Txn,
 								),
 							)
@@ -702,9 +773,8 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 		}(nodeIdx)
 	}
 
-	ctx := context.Background()
 	tc := serverutils.StartNewTestCluster(t, numNodes, testClusterArgs)
-	defer tc.Stopper().Stop(ctx)
+	defer tc.Stopper().Stop(context.Background())
 
 	// Create a 30-row table, split and scatter evenly across the numNodes nodes.
 	dbConn := tc.ServerConn(0)
@@ -723,7 +793,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 	))
 	require.NoError(t, err)
 	populateRangeCacheAndDisableBuffering(t, dbConn, "t")
-	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).ServingSQLAddr())
+	defaultConn, cleanup := getPGXConnAndCleanupFunc(t, tc.Server(0).ServingSQLAddr())
 	defer cleanup()
 
 	// errorOriginSpec is a way for test cases to enable a request filter on the
@@ -746,17 +816,17 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 	}{
 		{
 			query:           "SELECT * FROM t AS t1 JOIN t AS t2 ON t1.x = t2.x",
-			expectedPlanURL: "Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lOFr4jAYxr_fXxFeOLYdcW1S52Zh0HHrse483engDkY_dDbTgmt6SQSH-L8fbQWvoolesd-MeX9vnifP2yxB_pmBCyO_5399Rkn6xtG34eAHevF_P_Xugj46vw9Gz6OfvQu0rvlSFih0N0KKoMdB0F8vKBr0kSKXC3SLFL1chOjXgz_0y6694LuPzu6TaCKid_fzGWBIecz60TuT4L4AAQwUMDgQYsgEHzMpuci3lkVhEC_AtTEkaTZX-d8hhjEXDNwlqETNGLjwHL3O2JBFMROWDRhipqJkVrRXXiaS90h8AIZRFqXSRS2L5EWDuXKRR7BHIVxh4HO1PmDT9_UDTSM5rXb0CISrEINU0YSBS1b4_4Q6DQule4Vu-sxTLmImWFzpFOakqWSH24dITh95kjJhdarSZuxNnXvk4lYkk2nxq-ITew722ltuN06cGk52yOzzFs-s7rblnUe3K0eTw9MmxrQtYrcserLJPEJru3mtdK_WBobz-nTDSQ-_dWq-dWq3TjUeRwi9algo3Su0gdm4aebh2iFiyGTGU8kOepfs3AaLJ6y8FsnnYsyeBB8Xx5TLQcEVX1fMpCp3abkI0nIrF3g43KkDd_UwOUI2PQ7u1IG7ephuw_a_sKP37GhhYldoe5tu1wlaDxuC1sOGoK_qBK2HDUHrYUPQnTpBX9eJSg8botLDhqhu6kSlhw1R6WFDVN2jogpXn_4GAAD__4WsRD0=",
+			expectedPlanURL: "https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lFFv2jAUhd_3K6z71E6miR1KS6RKqbZOo2LQER4mVXlIiQeR0jizHYkK8d-nJEgsCGyyiLxhfL_rc3xuvAH5JwEX_Kfx05c5ykWCvs2mP9Dr06-X8eNogq6-jvy5_3N8jXYln6sChR59pAh6no4muwVF0wlS5GaNHpCiN-sAMKQ8YpPwnUlwX4EABgoYHAgwZIIvmJRcFFubsnAUrcG1McRplqvi7wDDggsG7gZUrBIGLszDt4TNWBgxYdmAIWIqjJOyvfIyEb-H4gMw-FmYShf1LFIUTXPlIo9gj0KwxcBztTtg3_ftA61Cuap39AgE2wCDVOGSgUu2-P-EOh0LpSeF7vvkKRcREyyqdQoK0lRyxO33UK6eeZwyYQ3q0hL2W1155PpBxMtV-avmE3sO9voHbvdOnBZOjsic8B7PrOGh5aNH92tHk_PTJsa0LWL3LHqxyWygtd-9VnpSawfDeXe54aTn3zo13zq1e5cajwZCbzsWSk8K7WA27rt5uI6ImDGZ8VSys94lu7DBoiWrrkXyXCzYi-CL8phqOS258uuKmFTVLq0Wo7TaKgSeDw_awEM9TBrIps3gQRt4qIfpIWz_Czt6z44WJnaNtg_pfpug9bAhaD1sCPq2TdB62BC0HjYEPWgT9F2bqPSwISo9bIjqvk1UetgQlR42RDVsFFWw_fQ3AAD__1FvO7Y=",
 		},
 		{
 			query:           "SELECT * FROM t AS t1 INNER LOOKUP JOIN t AS t2 ON t1.x = t2.y",
-			expectedPlanURL: "Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lGGL2kAQhr_3VwwD5dqyntmNehoo5OilNHdpYtXSwhGO1GwlrWbTzQYU8b-XGOHU6pp64Mdk5vF93JnNEvM_U7Rw6HjOhxEk6U8BHwfBZ3h0vve9W9eHN3fucDT84r2FTc-7qkHB7RAUBdf3nQF4QfDwtQ_3getvKgwCHxS9nsN7UOx6EcK3T87AqSI898GBq7skmshoZr2-QoKpiLkfzXiO1iNSJMiQoIkhwUyKMc9zIcvSct3oxnO0DIJJmhWqfB0SHAvJ0VqiStSUo4Wj6MeUD3gUc9k0kGDMVZRM1z-v7Ewms0gukOAwi9LcgkaTlk1BoSywKbEZhiuColDPAbmKJhwtuiL1Je5Fkm4czH0H9bR4SuI5EvSE-F1k8EskKYi0FNhRIXaL2O2jQuxMoc7xQ_lHqLUn1Ca2eVTIPCr07FGkQsZc8nhHIlwdUPZFQ2TN3l7j4ejWTjStvyH05IY0qdFosrOW5ITH1kxal1mS-kI3l1kSVn9S7PSkmNE4Z0wnJLZOpX2ZMdUX6l7-Lh8QGvA8E2nOa11Vo7zrPJ7w6sOQi0KOeV-K8TqmegzW3PpFzHNVVWn14KZVqRTchqkWZnqYaWFzB6b7sKnXNvTRLS3d1sNtLdzRw52X_OkbLdzVJ3e1cE8P9_5LO1y9-hsAAP__cuHbAw==",
+			expectedPlanURL: "https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lFGLm0AQgN_7K5Z5asvmdFfNJULBo03Bq9U0plA45LBxOWw91-6ukBDy34sauCRNNjYHedyd-TJfdmZcg_xTgAvxJJh8nKNaFOjzLPqKHiY_psGdH6K3n_x4Hn8L3qFtyvsuQaG7GCmC_DCczFAQRV--T9F95IfbCEVRiBS5WaIPSNGbVQIYSp6xMH1mEtwHIICBAgYLEgyV4AsmJRdNaN0m-tkSXBNDXla1aq4TDAsuGLhrULkqGLgwT38WbMbSjAnDBAwZU2letD-vvErkz6lYAYa4SkvpooFBmqSoVi7yCPYoJBsMvFYvBaRKnxi4ZIP7S9zzvNw6WIcO6nH1mGdLwBBw_ruu0C-el4iXjcCeCvZs7DknheiFQsPTj_KPkH0g5GDPOilknRR68ahLLjImWLYnkWyOKId8wCtjfJB4vLS9V5r0nxBydkIMYg4MetGQnPHY6Yl9nSHpL3R7nSGh_TtFz3eKmoNL2nRGYudVnOu0qb_Q6Pq7fERoxmTFS8l6rarZ7DrLnlj3YZC8Fgs2FXzRlumOUcu1FxmTqouS7uCXXagR3IWJFqZ6mGphaw8mh7Cl1zb1pW0t7ehhRwsP9fDwNX_6VguP9JVHWnish8f_pZ1s3vwNAAD__wRp0nw=",
 		},
 		{
 			// This test reproduces 51458 and should be enabled once that issue is
 			// fixed.
 			query:           "SELECT * FROM t JOIN onerow ON t.x = onerow.x",
-			expectedPlanURL: "Diagram: https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lOFr2kAYxr_vrzheGG3H2eROW0egkLFmNJ3TToUNSj5czVsNaC67O5lF_N9HEsFF0kQJ-s3z3t97z_O8uVuD_jMHB0Zez_s6JlH8Ksm34eAHefZ-P_W--H1yee-PxqOfvSuyrfmUFxjyOPD7RMao5F8y6BNzvSJ32_X1KiC_Hryhl3fs-d89cnEfiakSC-fjBVCIZYh9sUANzjMwoMCBQhsCComSE9RaqnRrnRX64Qocm0IUJ0uT_h1QmEiF4KzBRGaO4MBYvMxxiCJEZdlAIUQjonnW3riJihZCvQGFUSJi7ZCWxdKiwdI4xGXU5RBsKMil2R6w6_vyRmZCz4odXQbBJqCgjZgiOGxD3xG667OMpQpRYVjoFKRkXUmJ2wehZ48yilFZnaK0Ob6aS5dd3aloOst-FXxSt71ndWej3cBGica-bMnE6u77LT26UziaHT5qVjtqi9kti59s2uy807450bT54ZHz-si53TpV3kcIbRfb5k9TyVuwk9pIJ39X5xm-i9szvAIlCoaoExlrPOiS26kHDKeYZ6LlUk3wSclJdky-HGRcdq1C1Cbf3S78ON9KBR4Od5rA3WqY7cP2_zCvhnkl_LkA2_twu0lg1XBNYNVwTWCdJoHdNPFcDdd4roZrPN8eIZsfB3eawN1quHvUqILNh38BAAD___TFXIc=",
+			expectedPlanURL: "https://cockroachdb.github.io/distsqlplan/decode.html#eJy8lFFvmzAUhd_3K6z71E5OwYY2E1Ilpq3TqDLokjxMqnig4S5BopjZRksV5b9PQKSMiEIilLzF8f2uzzkXewPqTwoOzB4mD1_mpJAp-TYNfpDnh19Pk8-eT66-erP57OfkmuxKPtYFmjwGnk9EhlL8JYFP9M2a3O_WN-sQKGQiRj96RQXOMzCgwIGCBSGFXIoFKiVkubWpCr14DY5JIcnyQpd_hxQWQiI4G9CJThEcmEcvKU4xilEaJlCIUUdJWrXXbi6T10i-AYVZHmXKISODlUVBoR3iMupyCLcURKF3B-z7vryRVaRWzY4ug3AbUlA6WiI4bEvfEbrvU2RCxigxbnQKS7KvpMXt90itHkWSoTTsprQUf-srl13fy2S5qn41fFLXOrC6t2ENsNGi0RcjkRvjQ7-tR9uNo9nxo2a9ozaYOTL42abNLjvt2zNNmx8fOe-PnJujc-V9glCr2bZ-flregr3UQTr5uzov8F3cXeAVaFEwRZWLTOFRl9wsPWC8xDoTJQq5wCcpFtUx9TKouOpaxah0vbtbeFm9VQo8HraHwONumB3C5v8w74Z5J_ypAZuHsDUksG64J7BuuCcwe0hgt0M8d8M9nrvhHs93J8jmp8H2EHjcDY9PGlW4_fAvAAD__5MOVAA=",
 			overrideErrorOrigin: []errorOriginSpec{
 				{
 					nodeIdx:    0,
@@ -768,8 +838,8 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 
 	// runQueryAndExhaust is a helper function to get an error that happens during
 	// the execution of a query.
-	runQueryAndExhaust := func(tx pgx.Tx, query string) error {
-		res, err := tx.Query(ctx, query)
+	runQueryAndExhaust := func(tx *pgx.Tx, query string) error {
+		res, err := tx.Query(query)
 		if err != nil {
 			return err
 		}
@@ -790,14 +860,11 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 					skip.IgnoreLint(t, testCase.skip)
 				}
 				func() {
-					_, err := defaultConn.Exec(ctx, fmt.Sprintf("set vectorize=%s", vectorizeOpt))
+					_, err := defaultConn.Exec(fmt.Sprintf("set vectorize=%s", vectorizeOpt))
 					require.NoError(t, err)
 					func() {
 						// Check distsql plan.
-						rows, err := defaultConn.Query(
-							ctx,
-							fmt.Sprintf("SELECT info FROM [EXPLAIN (DISTSQL) %s] WHERE info LIKE 'Diagram:%%'", testCase.query),
-						)
+						rows, err := defaultConn.Query(fmt.Sprintf("SELECT url FROM [EXPLAIN (DISTSQL) %s]", testCase.query))
 						require.NoError(t, err)
 						defer rows.Close()
 						rows.Next()
@@ -817,7 +884,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 						for _, tableName := range errorOriginSpec.tableNames {
 							filters[nodeIdx].tableIDsToFilter = append(
 								filters[nodeIdx].tableIDsToFilter,
-								int(catalogkv.TestingGetTableDescriptor(tc.Server(0).DB(), keys.SystemSQLCodec, "test", tableName).GetID()),
+								int(catalogkv.TestingGetTableDescriptor(tc.Server(0).DB(), keys.SystemSQLCodec, "test", tableName).ID),
 							)
 						}
 						filters[nodeIdx].Unlock()
@@ -834,9 +901,9 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 					// Begin a transaction to issue multiple statements. The first dummy
 					// statement is issued so that some results are returned and auto
 					// retries are therefore disabled for the rest of the transaction.
-					tx, err := defaultConn.Begin(ctx)
+					tx, err := defaultConn.Begin()
 					defer func() {
-						require.Error(t, tx.Commit(ctx))
+						require.Error(t, tx.Commit())
 					}()
 					require.NoError(t, err)
 					require.NoError(t, runQueryAndExhaust(tx, "SELECT count(*) FROM t"))

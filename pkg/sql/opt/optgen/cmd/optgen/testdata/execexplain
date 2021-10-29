@@ -33,13 +33,12 @@ package explain
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 func (f *Factory) ConstructScan(
@@ -54,7 +53,7 @@ func (f *Factory) ConstructScan(
 		Params:      params,
 		ReqOrdering: reqOrdering,
 	}
-	_n, err := newNode(scanOp, args, reqOrdering)
+	_n, err := f.newNode(scanOp, args, reqOrdering)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +82,7 @@ func (f *Factory) ConstructFilter(
 		Filter:      filter,
 		ReqOrdering: reqOrdering,
 	}
-	_n, err := newNode(filterOp, args, reqOrdering, inputNode)
+	_n, err := f.newNode(filterOp, args, reqOrdering, inputNode)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +121,7 @@ func (f *Factory) ConstructHashJoin(
 		RightEqColsAreKey: rightEqColsAreKey,
 		ExtraOnCond:       extraOnCond,
 	}
-	_n, err := newNode(hashJoinOp, args, nil /* ordering */, leftNode, rightNode)
+	_n, err := f.newNode(hashJoinOp, args, nil /* ordering */, leftNode, rightNode)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +150,6 @@ const (
 	scanOp
 	filterOp
 	hashJoinOp
-	numOperators
 )
 
 type scanArgs struct {

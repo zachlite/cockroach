@@ -29,7 +29,7 @@ import (
 // is the start timestamp, the sample duration, and the set of samples. As
 // opposed to the ToInternal() method, there are two key differences:
 //
-// 1. This method always produces a single InternalTimeSeriesData object with
+// 1. This method always procueds a single InternalTimeSeriesData object with
 // the provided startTimestamp, rather than breaking up the datapoints into
 // several slabs based on a slab duration.
 //
@@ -90,7 +90,7 @@ func makeInternalRowData(
 // timestamp, the sample duration, and the set of samples. As opposed to the
 // ToInternal() method, there are two key differences:
 //
-// 1. This method always produces a single InternalTimeSeriesData object with
+// 1. This method always procueds a single InternalTimeSeriesData object with
 // the provided startTimestamp, rather than breaking up the datapoints into
 // several slabs based on a slab duration.
 //
@@ -119,7 +119,7 @@ func makeInternalColumnData(
 	// sample period.
 	isRollup := false
 
-	// Variance computation must consider each value against the average.
+	// Variance computation must consider each value against the the average.
 	// Retain the component values of each column and compute a variance.
 	valuesForSample := make([]float64, 0, 1)
 	computeVariance := func() float64 {
@@ -711,7 +711,7 @@ func TestDownsampleSpans(t *testing.T) {
 				}},
 			},
 		},
-		// AVG downsampler. Should re-use original span data.
+		// AVG downsamper. Should re-use original span data.
 		{
 			inputDesc: []dataDesc{
 				{0, 10, []tspb.TimeSeriesDatapoint{
@@ -740,7 +740,7 @@ func TestDownsampleSpans(t *testing.T) {
 				}},
 			},
 		},
-		// MAX downsampler. Should re-use original span data; note that the sum and
+		// MAX downsamper. Should re-use original span data; note that the sum and
 		// count values are NOT overwritten.
 		{
 			inputDesc: []dataDesc{
@@ -770,7 +770,7 @@ func TestDownsampleSpans(t *testing.T) {
 				}},
 			},
 		},
-		// MIN downsampler. Should re-use original span data; note that the sum and
+		// MIN downsamper. Should re-use original span data; note that the sum and
 		// count values are NOT overwritten.
 		{
 			inputDesc: []dataDesc{

@@ -36,9 +36,8 @@ func (g *execExplainGen) generate(compiled *lang.CompiledExpr, w io.Writer) {
 	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/cat\"\n")
 	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint\"\n")
 	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/exec\"\n")
+	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr\"\n")
 	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/sem/tree\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/types\"\n")
-	g.w.writeIndent("\"github.com/cockroachdb/cockroach/pkg/sql/inverted\"\n")
 	g.w.unnest(")\n")
 
 	g.genExplainFactory()
@@ -87,7 +86,7 @@ func (g *execExplainGen) genExplainFactory() {
 				fmt.Fprintf(&nodesBuf, ", %sNode", n)
 			}
 		}
-		g.w.writeIndent("_n, err := newNode(%sOp, args, %s%s)\n", opName, ordering, nodesBuf.String())
+		g.w.writeIndent("_n, err := f.newNode(%sOp, args, %s%s)\n", opName, ordering, nodesBuf.String())
 		g.w.nestIndent("if err != nil {\n")
 		g.w.writeIndent("return nil, err\n")
 		g.w.unnest("}\n")
@@ -121,7 +120,6 @@ func (g *execExplainGen) genEnum() {
 	for _, define := range g.compiled.Defines {
 		g.w.writeIndent("%sOp\n", unTitle(string(define.Name)))
 	}
-	g.w.writeIndent("numOperators\n")
 	g.w.unnest(")\n")
 }
 

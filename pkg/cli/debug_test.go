@@ -43,10 +43,17 @@ import (
 
 func createStore(t *testing.T, path string) {
 	t.Helper()
-	db, err := storage.Open(
-		context.Background(),
-		storage.Filesystem(path),
-		storage.CacheSize(server.DefaultCacheSize))
+	cache := storage.NewRocksDBCache(server.DefaultCacheSize)
+	defer cache.Release()
+	db, err := storage.NewRocksDB(
+		storage.RocksDBConfig{
+			StorageConfig: base.StorageConfig{
+				Dir:       path,
+				MustExist: false,
+			},
+		},
+		cache,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,11 +125,10 @@ func TestOpenReadOnlyStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
 
-			key := roachpb.Key("key")
+			key := storage.MakeMVCCMetadataKey(roachpb.Key("key"))
 			val := []byte("value")
-			err = db.PutUnversioned(key, val)
+			err = db.Put(key, val)
 			if !testutils.IsError(err, test.expErr) {
 				t.Fatalf("wanted %s but got %v", test.expErr, err)
 			}

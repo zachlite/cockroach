@@ -100,15 +100,15 @@ func TestSSLEnforcement(t *testing.T) {
 	}
 
 	// HTTPS with client certs for security.RootUser.
-	rootCertsContext := newRPCContext(testutils.NewTestBaseContext(security.RootUserName()))
+	rootCertsContext := newRPCContext(testutils.NewTestBaseContext(security.RootUser))
 	// HTTPS with client certs for security.NodeUser.
 	nodeCertsContext := newRPCContext(testutils.NewNodeTestBaseContext())
 	// HTTPS with client certs for TestUser.
-	testCertsContext := newRPCContext(testutils.NewTestBaseContext(security.TestUserName()))
+	testCertsContext := newRPCContext(testutils.NewTestBaseContext(TestUser))
 	// HTTPS without client certs. The user does not matter.
 	noCertsContext := insecureCtx{}
 	// Plain http.
-	plainHTTPCfg := testutils.NewTestBaseContext(security.TestUserName())
+	plainHTTPCfg := testutils.NewTestBaseContext(TestUser)
 	plainHTTPCfg.Insecure = true
 	insecureContext := newRPCContext(plainHTTPCfg)
 
@@ -205,7 +205,7 @@ func TestVerifyPassword(t *testing.T) {
 	}
 
 	//location is used for timezone testing.
-	shanghaiLoc, err := timeutil.LoadLocation("Asia/Shanghai")
+	shanghaiLoc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,10 +231,9 @@ func TestVerifyPassword(t *testing.T) {
 		{"timelord", "12345", "", "VALID UNTIL $1",
 			[]interface{}{timeutil.Now().Add(59 * time.Minute).In(shanghaiLoc)}},
 	} {
-		username := security.MakeSQLUsernameFromPreNormalizedString(user.username)
 		cmd := fmt.Sprintf(
 			"CREATE USER %s WITH PASSWORD '%s' %s %s",
-			username.SQLIdentifier(), user.password, user.loginFlag, user.validUntilClause)
+			user.username, user.password, user.loginFlag, user.validUntilClause)
 
 		if _, err := db.Exec(cmd, user.qargs...); err != nil {
 			t.Fatalf("failed to create user: %s", err)
@@ -271,8 +270,7 @@ func TestVerifyPassword(t *testing.T) {
 		{"cthon98", "12345", true, ""},
 	} {
 		t.Run("", func(t *testing.T) {
-			username := security.MakeSQLUsernameFromPreNormalizedString(tc.username)
-			valid, expired, err := ts.authentication.verifyPassword(context.Background(), username, tc.password)
+			valid, expired, err := ts.authentication.verifyPassword(context.Background(), tc.username, tc.password)
 			if err != nil {
 				t.Errorf(
 					"credentials %s/%s failed with error %s, wanted no error",
@@ -301,7 +299,7 @@ func TestCreateSession(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	ts := s.(*TestServer)
 
-	username := security.TestUserName()
+	username := "testuser"
 
 	// Create an authentication, noting the time before and after creation. This
 	// lets us ensure that the timestamps created are accurate.
@@ -349,7 +347,7 @@ WHERE id = $1`
 	}
 
 	// Username.
-	if a, e := sessUsername, username.Normalized(); a != e {
+	if a, e := sessUsername, username; a != e {
 		t.Fatalf("session username got %s, wanted %s", a, e)
 	}
 
@@ -393,7 +391,7 @@ func TestVerifySession(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	ts := s.(*TestServer)
 
-	sessionUsername := security.TestUserName()
+	sessionUsername := "testuser"
 	id, origSecret, err := ts.authentication.newAuthSession(context.Background(), sessionUsername)
 	if err != nil {
 		t.Fatal(err)
@@ -456,7 +454,7 @@ func TestVerifySession(t *testing.T) {
 			if a, e := valid, tc.shouldVerify; a != e {
 				t.Fatalf("cookie %v verification = %t, wanted %t", tc.cookie, a, e)
 			}
-			if a, e := username, sessionUsername.Normalized(); tc.shouldVerify && a != e {
+			if a, e := username, sessionUsername; tc.shouldVerify && a != e {
 				t.Fatalf("cookie %v verification returned username %s, wanted %s", tc.cookie, a, e)
 			}
 		})
@@ -562,7 +560,7 @@ func TestLogout(t *testing.T) {
 	ts := s.(*TestServer)
 
 	// Log in.
-	authHTTPClient, cookie, err := ts.getAuthenticatedHTTPClientAndCookie(authenticatedUserName(), true)
+	authHTTPClient, cookie, err := ts.getAuthenticatedHTTPClientAndCookie(authenticatedUserName, true)
 	if err != nil {
 		t.Fatal("error opening HTTP client", err)
 	}
@@ -654,13 +652,9 @@ func TestAuthenticationMux(t *testing.T) {
 	}
 
 	runRequest := func(
-		client http.Client, method string, path string, body []byte, cookieHeader string, expected int,
+		client http.Client, method string, path string, body []byte, expected int,
 	) error {
 		req, err := http.NewRequest(method, tsrv.AdminURL()+path, bytes.NewBuffer(body))
-		if cookieHeader != "" {
-			// The client still attaches its own cookies to this one.
-			req.Header.Set("cookie", cookieHeader)
-		}
 		if err != nil {
 			return err
 		}
@@ -692,24 +686,22 @@ func TestAuthenticationMux(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		method       string
-		path         string
-		body         []byte
-		cookieHeader string
+		method string
+		path   string
+		body   []byte
 	}{
-		{"GET", adminPrefix + "users", nil, ""},
-		{"GET", adminPrefix + "users", nil, "session=badcookie"},
-		{"GET", statusPrefix + "sessions", nil, ""},
-		{"POST", ts.URLPrefix + "query", tsReqBuffer.Bytes(), ""},
+		{"GET", adminPrefix + "users", nil},
+		{"GET", statusPrefix + "sessions", nil},
+		{"POST", ts.URLPrefix + "query", tsReqBuffer.Bytes()},
 	} {
 		t.Run("path="+tc.path, func(t *testing.T) {
 			// Verify normal client returns 401 Unauthorized.
-			if err := runRequest(normalClient, tc.method, tc.path, tc.body, tc.cookieHeader, http.StatusUnauthorized); err != nil {
+			if err := runRequest(normalClient, tc.method, tc.path, tc.body, http.StatusUnauthorized); err != nil {
 				t.Fatalf("request %s failed when not authorized: %s", tc.path, err)
 			}
 
 			// Verify authenticated client returns 200 OK.
-			if err := runRequest(authClient, tc.method, tc.path, tc.body, tc.cookieHeader, http.StatusOK); err != nil {
+			if err := runRequest(authClient, tc.method, tc.path, tc.body, http.StatusOK); err != nil {
 				t.Fatalf("request %s failed when authorized: %s", tc.path, err)
 			}
 		})
@@ -759,20 +751,20 @@ func TestGRPCAuthentication(t *testing.T) {
 			return err
 		}},
 		{"closedTimestamp", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := ctpb.NewSideTransportClient(conn).PushUpdates(ctx)
+			stream, err := ctpb.NewClosedTimestampClient(conn).Get(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&ctpb.Update{})
+			_ = stream.Send(&ctpb.Reaction{})
 			_, err = stream.Recv()
 			return err
 		}},
 		{"distSQL", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := execinfrapb.NewDistSQLClient(conn).FlowStream(ctx)
+			stream, err := execinfrapb.NewDistSQLClient(conn).RunSyncFlow(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&execinfrapb.ProducerMessage{})
+			_ = stream.Send(&execinfrapb.ConsumerSignal{})
 			_, err = stream.Recv()
 			return err
 		}},
@@ -797,9 +789,7 @@ func TestGRPCAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close() // nolint:grpcconnclose
-	}(conn)
+	defer func(conn *grpc.ClientConn) { _ = conn.Close() }(conn)
 	for _, subsystem := range subsystems {
 		t.Run(fmt.Sprintf("no-cert/%s", subsystem.name), func(t *testing.T) {
 			err := subsystem.sendRPC(ctx, conn)
@@ -813,7 +803,7 @@ func TestGRPCAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsConfig, err := certManager.GetClientTLSConfig(security.TestUserName())
+	tlsConfig, err := certManager.GetClientTLSConfig("testuser")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,9 +812,7 @@ func TestGRPCAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(conn *grpc.ClientConn) {
-		_ = conn.Close() // nolint:grpcconnclose
-	}(conn)
+	defer func(conn *grpc.ClientConn) { _ = conn.Close() }(conn)
 	for _, subsystem := range subsystems {
 		t.Run(fmt.Sprintf("bad-user/%s", subsystem.name), func(t *testing.T) {
 			err := subsystem.sendRPC(ctx, conn)

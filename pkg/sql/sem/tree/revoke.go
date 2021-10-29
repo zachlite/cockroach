@@ -26,15 +26,12 @@ import "github.com/cockroachdb/cockroach/pkg/sql/privilege"
 type Revoke struct {
 	Privileges privilege.List
 	Targets    TargetList
-	Grantees   RoleSpecList
+	Grantees   NameList
 }
 
 // Format implements the NodeFormatter interface.
 func (node *Revoke) Format(ctx *FmtCtx) {
 	ctx.WriteString("REVOKE ")
-	// NB: we cannot use FormatNode() here because node.Privileges is
-	// not an AST node. This is OK, because a privilege list cannot
-	// contain sensitive information.
 	node.Privileges.Format(&ctx.Buffer)
 	ctx.WriteString(" ON ")
 	ctx.FormatNode(&node.Targets)
@@ -45,7 +42,7 @@ func (node *Revoke) Format(ctx *FmtCtx) {
 // RevokeRole represents a REVOKE <role> statement.
 type RevokeRole struct {
 	Roles       NameList
-	Members     RoleSpecList
+	Members     NameList
 	AdminOption bool
 }
 

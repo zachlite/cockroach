@@ -18,7 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/seqexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -28,7 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/sequence"
 	"github.com/cockroachdb/errors"
 )
 
@@ -42,14 +42,6 @@ type renameDatabaseNode struct {
 // Privileges: superuser + DROP or ownership + CREATEDB privileges
 //   Notes: mysql >= 5.1.23 does not allow database renames.
 func (p *planner) RenameDatabase(ctx context.Context, n *tree.RenameDatabase) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"ALTER DATABASE",
-	); err != nil {
-		return nil, err
-	}
-
 	if n.Name == "" || n.NewName == "" {
 		return nil, errEmptyDatabaseName
 	}
@@ -58,8 +50,7 @@ func (p *planner) RenameDatabase(ctx context.Context, n *tree.RenameDatabase) (p
 		return nil, pgerror.DangerousStatementf("RENAME DATABASE on current database")
 	}
 
-	dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
-		tree.DatabaseLookupFlags{Required: true})
+	dbDesc, err := p.ResolveMutableDatabaseDescriptor(ctx, string(n.Name), true /*required*/)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +114,7 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 	// Rather than trying to rewrite them with the changed DB name, we
 	// simply disallow such renames for now.
 	// See #34416.
+	phyAccessor := p.PhysicalSchemaAccessor()
 	lookupFlags := p.CommonLookupFlags(true /*required*/)
 	// DDL statements bypass the cache.
 	lookupFlags.AvoidCached = true
@@ -131,9 +123,10 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 		return err
 	}
 	for _, schema := range schemas {
-		tbNames, _, err := p.Descriptors().GetObjectNamesAndIDs(
+		tbNames, err := phyAccessor.GetObjectNames(
 			ctx,
 			p.txn,
+			p.ExecCfg().Codec,
 			dbDesc,
 			schema,
 			tree.DatabaseListFlags{
@@ -145,18 +138,27 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 			return err
 		}
 		lookupFlags.Required = false
-		// TODO(ajwerner): Make this do something better than one-at-a-time lookups
-		// followed by catalogkv reads on each dependency.
 		for i := range tbNames {
-			found, tbDesc, err := p.Descriptors().GetImmutableTableByName(
-				ctx, p.txn, &tbNames[i], tree.ObjectLookupFlags{CommonLookupFlags: lookupFlags},
+			objDesc, err := phyAccessor.GetObjectDesc(
+				ctx,
+				p.txn,
+				p.ExecCfg().Settings,
+				p.ExecCfg().Codec,
+				tbNames[i].Catalog(),
+				tbNames[i].Schema(),
+				tbNames[i].Table(),
+				tree.ObjectLookupFlags{
+					CommonLookupFlags: lookupFlags,
+					DesiredObjectKind: tree.TableObject,
+				},
 			)
 			if err != nil {
 				return err
 			}
-			if !found {
+			if objDesc == nil {
 				continue
 			}
+			tbDesc := objDesc.(catalog.TableDescriptor)
 
 			if err := tbDesc.ForeachDependedOnBy(func(dependedOn *descpb.TableDescriptor_Reference) error {
 				dependentDesc, err := catalogkv.MustGetTableDescByID(ctx, p.txn, p.ExecCfg().Codec, dependedOn.ID)
@@ -184,14 +186,14 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 					tree.Name(tbDesc.GetName()),
 				)
 				var dependentDescQualifiedString string
-				if dbDesc.GetID() != dependentDesc.GetParentID() || tbDesc.GetParentSchemaID() != dependentDesc.GetParentSchemaID() {
+				if dbDesc.GetID() != dependentDesc.ParentID || tbDesc.GetParentSchemaID() != dependentDesc.GetParentSchemaID() {
 					descFQName, err := p.getQualifiedTableName(ctx, dependentDesc)
 					if err != nil {
 						log.Warningf(
 							ctx,
 							"unable to retrieve fully-qualified name of %s (id: %d): %v",
 							tbTableName.String(),
-							dependentDesc.GetID(),
+							dependentDesc.ID,
 							err,
 						)
 						return sqlerrors.NewDependentObjectErrorf(
@@ -203,7 +205,7 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 					dependentDescTableName := tree.MakeTableNameWithSchema(
 						tree.Name(dbDesc.GetName()),
 						tree.Name(schema),
-						tree.Name(dependentDesc.GetName()),
+						tree.Name(dependentDesc.Name),
 					)
 					dependentDescQualifiedString = dependentDescTableName.String()
 				}
@@ -239,18 +241,7 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 		}
 	}
 
-	if err := p.renameDatabase(ctx, dbDesc, n.newName, tree.AsStringWithFQNames(n.n, params.Ann())); err != nil {
-		return err
-	}
-
-	// Log Rename Database event. This is an auditable log event and is recorded
-	// in the same transaction as the table descriptor update.
-	return p.logEvent(ctx,
-		n.dbDesc.GetID(),
-		&eventpb.RenameDatabase{
-			DatabaseName:    n.n.Name.String(),
-			NewDatabaseName: n.newName,
-		})
+	return p.renameDatabase(ctx, dbDesc, n.newName, tree.AsStringWithFQNames(n.n, params.Ann()))
 }
 
 // isAllowedDependentDescInRename determines when rename database is allowed with
@@ -262,7 +253,7 @@ func isAllowedDependentDescInRenameDatabase(
 	ctx context.Context,
 	dependedOn *descpb.TableDescriptor_Reference,
 	tbDesc catalog.TableDescriptor,
-	dependentDesc catalog.TableDescriptor,
+	dependentDesc *tabledesc.Immutable,
 	dbName string,
 ) (bool, string, error) {
 	// If it is a sequence, and it does not contain the database name, then we have
@@ -276,37 +267,34 @@ func isAllowedDependentDescInRenameDatabase(
 		colIDs.Add(int(colID))
 	}
 
-	for _, column := range dependentDesc.PublicColumns() {
-		if !colIDs.Contains(int(column.GetID())) {
+	for _, column := range dependentDesc.Columns {
+		if !colIDs.Contains(int(column.ID)) {
 			continue
 		}
-		colIDs.Remove(int(column.GetID()))
+		colIDs.Remove(int(column.ID))
 
-		if !column.HasDefault() {
+		if column.DefaultExpr == nil {
 			return false, "", errors.AssertionFailedf(
 				"rename_database: expected column id %d in table id %d to have a default expr",
 				dependedOn.ID,
-				dependentDesc.GetID(),
+				dependentDesc.ID,
 			)
 		}
 		// Try parse the default expression and find the table name direct reference.
-		parsedExpr, err := parser.ParseExpr(column.GetDefaultExpr())
+		parsedExpr, err := parser.ParseExpr(*column.DefaultExpr)
 		if err != nil {
 			return false, "", err
 		}
-		typedExpr, err := tree.TypeCheck(ctx, parsedExpr, nil, column.GetType())
+		typedExpr, err := tree.TypeCheck(ctx, parsedExpr, nil, column.Type)
 		if err != nil {
 			return false, "", err
 		}
-		seqIdentifiers, err := seqexpr.GetUsedSequences(typedExpr)
+		seqNames, err := sequence.GetUsedSequenceNames(typedExpr)
 		if err != nil {
 			return false, "", err
 		}
-		for _, seqIdentifier := range seqIdentifiers {
-			if seqIdentifier.IsByID() {
-				continue
-			}
-			parsedSeqName, err := parser.ParseTableName(seqIdentifier.SeqName)
+		for _, seqName := range seqNames {
+			parsedSeqName, err := parser.ParseTableName(seqName)
 			if err != nil {
 				return false, "", err
 			}
@@ -315,7 +303,7 @@ func isAllowedDependentDescInRenameDatabase(
 				// We only don't allow this if the database name is in there.
 				// This is always the last argument.
 				if tree.Name(parsedSeqName.Parts[parsedSeqName.NumParts-1]).Normalize() == tree.Name(dbName).Normalize() {
-					return false, column.GetName(), nil
+					return false, column.Name, nil
 				}
 			}
 		}
@@ -324,7 +312,7 @@ func isAllowedDependentDescInRenameDatabase(
 		return false, "", errors.AssertionFailedf(
 			"expected to find column ids %s in table id %d",
 			colIDs.String(),
-			dependentDesc.GetID(),
+			dependentDesc.ID,
 		)
 	}
 	return true, "", nil

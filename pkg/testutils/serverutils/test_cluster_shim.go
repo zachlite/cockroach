@@ -18,7 +18,6 @@
 package serverutils
 
 import (
-	"context"
 	gosql "database/sql"
 	"testing"
 
@@ -32,7 +31,7 @@ import (
 type TestClusterInterface interface {
 	// Start is used to start up the servers that were instantiated when
 	// creating this cluster.
-	Start(t testing.TB)
+	Start(t testing.TB, args base.TestClusterArgs)
 
 	// NumServers returns the number of servers this test cluster is configured
 	// with.
@@ -51,75 +50,36 @@ type TestClusterInterface interface {
 	// defer the Stop() method on this stopper after starting a test cluster.
 	Stopper() *stop.Stopper
 
-	// AddVoters adds voter replicas for a range on a set of stores.
+	// AddReplicas adds replicas for a range on a set of stores.
 	// It's illegal to have multiple replicas of the same range on stores of a single
 	// node.
 	// The method blocks until a snapshot of the range has been copied to all the
 	// new replicas and the new replicas become part of the Raft group.
-	AddVoters(
+	AddReplicas(
 		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) (roachpb.RangeDescriptor, error)
 
-	// AddVotersMulti is the same as AddVoters but will execute multiple jobs.
-	AddVotersMulti(
+	// AddReplicasMulti is the same as AddReplicas but will execute multiple jobs.
+	AddReplicasMulti(
 		kts ...KeyAndTargets,
 	) ([]roachpb.RangeDescriptor, []error)
 
-	// AddVotersOrFatal is the same as AddVoters but will Fatal the test on
+	// AddReplicasOrFatal is the same as AddReplicas but will Fatal the test on
 	// error.
-	AddVotersOrFatal(
+	AddReplicasOrFatal(
 		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) roachpb.RangeDescriptor
 
-	// RemoveVoters removes one or more voter replicas from a range.
-	RemoveVoters(
+	// RemoveReplicas removes one or more replicas from a range.
+	RemoveReplicas(
 		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) (roachpb.RangeDescriptor, error)
 
-	// RemoveVotersOrFatal is the same as RemoveVoters but will Fatal the test on
+	// RemoveReplicasOrFatal is the same as RemoveReplicas but will Fatal the test on
 	// error.
-	RemoveVotersOrFatal(
+	RemoveReplicasOrFatal(
 		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
 	) roachpb.RangeDescriptor
-
-	// AddNonVoters adds non-voting replicas for a range on a set of stores.
-	//
-	//This method blocks until the new replicas become a part of the Raft group.
-	AddNonVoters(
-		startKey roachpb.Key,
-		targets ...roachpb.ReplicationTarget,
-	) (roachpb.RangeDescriptor, error)
-
-	// AddNonVotersOrFatal is the same as AddNonVoters but will fatal if it fails.
-	AddNonVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// RemoveNonVoters removes one or more non-voters from a range.
-	RemoveNonVoters(
-		startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) (roachpb.RangeDescriptor, error)
-
-	// RemoveNonVotersOrFatal is the same as RemoveNonVoters but will fatal if it
-	// fails.
-	RemoveNonVotersOrFatal(
-		t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-	) roachpb.RangeDescriptor
-
-	// SwapVoterWithNonVoter atomically "swaps" the voting replica located on
-	// `voterTarget` with the non-voting replica located on `nonVoterTarget`. A
-	// sequence of ReplicationChanges is considered to have "swapped" a voter on
-	// s1 with a non-voter on s2 iff the resulting state after the execution of
-	// these changes is such that s1 has a non-voter and s2 has a voter.
-	SwapVoterWithNonVoter(
-		startKey roachpb.Key, voterTarget, nonVoterTarget roachpb.ReplicationTarget,
-	) (*roachpb.RangeDescriptor, error)
-
-	// SwapVoterWithNonVoterOrFatal is the same as SwapVoterWithNonVoter but will
-	// fatal if it fails.
-	SwapVoterWithNonVoterOrFatal(
-		t *testing.T, startKey roachpb.Key, voterTarget, nonVoterTarget roachpb.ReplicationTarget,
-	) *roachpb.RangeDescriptor
 
 	// FindRangeLeaseHolder returns the current lease holder for the given range.
 	// In particular, it returns one particular node's (the hint, if specified) view
@@ -156,17 +116,11 @@ type TestClusterInterface interface {
 	// advancing the manual clock. The target is then instructed to acquire the
 	// ownerless lease. Most tests should use the cooperative version of this
 	// method, TransferRangeLease.
-	//
-	// Returns the new lease.
-	//
-	// If the lease starts out on dest, this is a no-op and the current lease is
-	// returned.
 	MoveRangeLeaseNonCooperatively(
-		ctx context.Context,
 		rangeDesc roachpb.RangeDescriptor,
 		dest roachpb.ReplicationTarget,
 		manual *hlc.HybridManualClock,
-	) (*roachpb.Lease, error)
+	) error
 
 	// LookupRange returns the descriptor of the range containing key.
 	LookupRange(key roachpb.Key) (roachpb.RangeDescriptor, error)
@@ -186,10 +140,6 @@ type TestClusterInterface interface {
 	// as kv scratch space (it doesn't overlap system spans or SQL tables). The
 	// range is lazily split off on the first call to ScratchRange.
 	ScratchRange(t testing.TB) roachpb.Key
-
-	// WaitForFullReplication waits until all stores in the cluster
-	// have no ranges with replication pending.
-	WaitForFullReplication() error
 }
 
 // TestClusterFactory encompasses the actual implementation of the shim
@@ -215,7 +165,7 @@ func StartNewTestCluster(
 	t testing.TB, numNodes int, args base.TestClusterArgs,
 ) TestClusterInterface {
 	cluster := NewTestCluster(t, numNodes, args)
-	cluster.Start(t)
+	cluster.Start(t, args)
 	return cluster
 }
 

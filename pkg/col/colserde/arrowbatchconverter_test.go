@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/col/colserde"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -29,11 +29,11 @@ import (
 
 func randomBatch(allocator *colmem.Allocator) ([]*types.T, coldata.Batch) {
 	const maxTyps = 16
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := make([]*types.T, rng.Intn(maxTyps)+1)
 	for i := range typs {
-		typs[i] = randgen.RandType(rng)
+		typs[i] = rowenc.RandType(rng)
 	}
 
 	capacity := rng.Intn(coldata.BatchSize()) + 1
@@ -56,7 +56,7 @@ func TestArrowBatchConverterRandom(t *testing.T) {
 	arrowData, err := c.BatchToArrow(b)
 	require.NoError(t, err)
 	actual := testAllocator.NewMemBatchWithFixedCapacity(typs, b.Length())
-	require.NoError(t, c.ArrowToBatch(arrowData, b.Length(), actual))
+	require.NoError(t, c.ArrowToBatch(arrowData, actual))
 
 	coldata.AssertEquivalentBatches(t, expected, actual)
 }
@@ -71,33 +71,24 @@ func roundTripBatch(
 	if err != nil {
 		return err
 	}
-	_, _, err = r.Serialize(&buf, arrowDataIn, src.Length())
+	_, _, err = r.Serialize(&buf, arrowDataIn)
 	if err != nil {
 		return err
 	}
 
 	var arrowDataOut []*array.Data
-	batchLength, err := r.Deserialize(&arrowDataOut, buf.Bytes())
-	if err != nil {
+	if err := r.Deserialize(&arrowDataOut, buf.Bytes()); err != nil {
 		return err
 	}
-	return c.ArrowToBatch(arrowDataOut, batchLength, dest)
+	return c.ArrowToBatch(arrowDataOut, dest)
 }
 
 func TestRecordBatchRoundtripThroughBytes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	rng, _ := randutil.NewPseudoRand()
 
-	rng, _ := randutil.NewTestRand()
 	for run := 0; run < 10; run++ {
-		var typs []*types.T
-		var src coldata.Batch
-		if rng.Float64() < 0.1 {
-			// In 10% of cases we'll use a zero length schema.
-			src = testAllocator.NewMemBatchWithFixedCapacity(typs, rng.Intn(coldata.BatchSize())+1)
-			src.SetLength(src.Capacity())
-		} else {
-			typs, src = randomBatch(testAllocator)
-		}
+		typs, src := randomBatch(testAllocator)
 		dest := testAllocator.NewMemBatchWithMaxCapacity(typs)
 		c, err := colserde.NewArrowBatchConverter(typs)
 		require.NoError(t, err)
@@ -137,7 +128,7 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 	// to in order to reduce benchmark noise.
 	const fixedLen = 64
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := []*types.T{
 		types.Bool,
@@ -145,7 +136,6 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		types.Decimal,
 		types.Int,
 		types.Timestamp,
-		types.Interval,
 	}
 	// numBytes corresponds 1:1 to typs and specifies how many bytes we are
 	// converting on one iteration of the benchmark for the corresponding type in
@@ -155,7 +145,6 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		fixedLen * int64(coldata.BatchSize()),
 		0, // The number of bytes for decimals will be set below.
 		8 * int64(coldata.BatchSize()),
-		3 * 8 * int64(coldata.BatchSize()),
 		3 * 8 * int64(coldata.BatchSize()),
 	}
 	// Run a benchmark on every type we care about.
@@ -224,19 +213,15 @@ func BenchmarkArrowBatchConverter(b *testing.B) {
 		for _, nullFraction := range nullFractions {
 			setNullFraction(batch, nullFraction)
 			data, err := c.BatchToArrow(batch)
-			dataCopy := make([]*array.Data, len(data))
 			require.NoError(b, err)
 			testPrefix := fmt.Sprintf("%s/nullFraction=%0.2f", typ.String(), nullFraction)
 			result := testAllocator.NewMemBatchWithMaxCapacity([]*types.T{typ})
 			b.Run(testPrefix+"/ArrowToBatch", func(b *testing.B) {
 				b.SetBytes(numBytes[typIdx])
 				for i := 0; i < b.N; i++ {
-					// Since ArrowToBatch eagerly nils things out, we have to make a
-					// shallow copy each time.
-					copy(dataCopy, data)
 					// Using require.NoError here causes large enough allocations to
 					// affect the result.
-					if err := c.ArrowToBatch(dataCopy, batch.Length(), result); err != nil {
+					if err := c.ArrowToBatch(data, result); err != nil {
 						b.Fatal(err)
 					}
 					if result.Width() != 1 {

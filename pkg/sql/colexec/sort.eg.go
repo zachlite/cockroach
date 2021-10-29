@@ -17,24 +17,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
-// Workaround for bazel auto-generated code. goimports does not automatically
-// pick up the right packages when run within the bazel sandbox.
-var (
-	_ = coldataext.CompareDatum
-	_ tree.AggType
-)
-
-func newSingleSorterWithNulls(t *types.T, dir execinfrapb.Ordering_Column_Direction) colSorter {
+func isSorterSupported(t *types.T, dir execinfrapb.Ordering_Column_Direction) bool {
 	switch dir {
 	case execinfrapb.Ordering_Column_ASC:
 		switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
@@ -42,59 +32,53 @@ func newSingleSorterWithNulls(t *types.T, dir execinfrapb.Ordering_Column_Direct
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortBoolAscWithNullsOp{}
+				return true
 			}
 		case types.BytesFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortBytesAscWithNullsOp{}
+				return true
 			}
 		case types.DecimalFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortDecimalAscWithNullsOp{}
+				return true
 			}
 		case types.IntFamily:
 			switch t.Width() {
 			case 16:
-				return &sortInt16AscWithNullsOp{}
+				return true
 			case 32:
-				return &sortInt32AscWithNullsOp{}
+				return true
 			case -1:
 			default:
-				return &sortInt64AscWithNullsOp{}
+				return true
 			}
 		case types.FloatFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortFloat64AscWithNullsOp{}
+				return true
 			}
 		case types.TimestampTZFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortTimestampAscWithNullsOp{}
+				return true
 			}
 		case types.IntervalFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortIntervalAscWithNullsOp{}
-			}
-		case types.JsonFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortJSONAscWithNullsOp{}
+				return true
 			}
 		case typeconv.DatumVecCanonicalTypeFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortDatumAscWithNullsOp{}
+				return true
 			}
 		}
 	case execinfrapb.Ordering_Column_DESC:
@@ -103,193 +87,291 @@ func newSingleSorterWithNulls(t *types.T, dir execinfrapb.Ordering_Column_Direct
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortBoolDescWithNullsOp{}
+				return true
 			}
 		case types.BytesFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortBytesDescWithNullsOp{}
+				return true
 			}
 		case types.DecimalFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortDecimalDescWithNullsOp{}
+				return true
 			}
 		case types.IntFamily:
 			switch t.Width() {
 			case 16:
-				return &sortInt16DescWithNullsOp{}
+				return true
 			case 32:
-				return &sortInt32DescWithNullsOp{}
+				return true
 			case -1:
 			default:
-				return &sortInt64DescWithNullsOp{}
+				return true
 			}
 		case types.FloatFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortFloat64DescWithNullsOp{}
+				return true
 			}
 		case types.TimestampTZFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortTimestampDescWithNullsOp{}
+				return true
 			}
 		case types.IntervalFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortIntervalDescWithNullsOp{}
-			}
-		case types.JsonFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortJSONDescWithNullsOp{}
+				return true
 			}
 		case typeconv.DatumVecCanonicalTypeFamily:
 			switch t.Width() {
 			case -1:
 			default:
-				return &sortDatumDescWithNullsOp{}
+				return true
 			}
 		}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unsupported type %s", t))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
+	return false
 }
 
-func newSingleSorterWithoutNulls(t *types.T, dir execinfrapb.Ordering_Column_Direction) colSorter {
-	switch dir {
-	case execinfrapb.Ordering_Column_ASC:
-		switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
-		case types.BoolFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortBoolAscOp{}
+func newSingleSorter(
+	t *types.T, dir execinfrapb.Ordering_Column_Direction, hasNulls bool,
+) colSorter {
+	switch hasNulls {
+	case true:
+		switch dir {
+		case execinfrapb.Ordering_Column_ASC:
+			switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+			case types.BoolFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBoolAscWithNullsOp{}
+				}
+			case types.BytesFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBytesAscWithNullsOp{}
+				}
+			case types.DecimalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDecimalAscWithNullsOp{}
+				}
+			case types.IntFamily:
+				switch t.Width() {
+				case 16:
+					return &sortInt16AscWithNullsOp{}
+				case 32:
+					return &sortInt32AscWithNullsOp{}
+				case -1:
+				default:
+					return &sortInt64AscWithNullsOp{}
+				}
+			case types.FloatFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortFloat64AscWithNullsOp{}
+				}
+			case types.TimestampTZFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortTimestampAscWithNullsOp{}
+				}
+			case types.IntervalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortIntervalAscWithNullsOp{}
+				}
+			case typeconv.DatumVecCanonicalTypeFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDatumAscWithNullsOp{}
+				}
 			}
-		case types.BytesFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortBytesAscOp{}
-			}
-		case types.DecimalFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortDecimalAscOp{}
-			}
-		case types.IntFamily:
-			switch t.Width() {
-			case 16:
-				return &sortInt16AscOp{}
-			case 32:
-				return &sortInt32AscOp{}
-			case -1:
-			default:
-				return &sortInt64AscOp{}
-			}
-		case types.FloatFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortFloat64AscOp{}
-			}
-		case types.TimestampTZFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortTimestampAscOp{}
-			}
-		case types.IntervalFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortIntervalAscOp{}
-			}
-		case types.JsonFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortJSONAscOp{}
-			}
-		case typeconv.DatumVecCanonicalTypeFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortDatumAscOp{}
+		case execinfrapb.Ordering_Column_DESC:
+			switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+			case types.BoolFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBoolDescWithNullsOp{}
+				}
+			case types.BytesFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBytesDescWithNullsOp{}
+				}
+			case types.DecimalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDecimalDescWithNullsOp{}
+				}
+			case types.IntFamily:
+				switch t.Width() {
+				case 16:
+					return &sortInt16DescWithNullsOp{}
+				case 32:
+					return &sortInt32DescWithNullsOp{}
+				case -1:
+				default:
+					return &sortInt64DescWithNullsOp{}
+				}
+			case types.FloatFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortFloat64DescWithNullsOp{}
+				}
+			case types.TimestampTZFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortTimestampDescWithNullsOp{}
+				}
+			case types.IntervalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortIntervalDescWithNullsOp{}
+				}
+			case typeconv.DatumVecCanonicalTypeFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDatumDescWithNullsOp{}
+				}
 			}
 		}
-	case execinfrapb.Ordering_Column_DESC:
-		switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
-		case types.BoolFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortBoolDescOp{}
+	case false:
+		switch dir {
+		case execinfrapb.Ordering_Column_ASC:
+			switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+			case types.BoolFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBoolAscOp{}
+				}
+			case types.BytesFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBytesAscOp{}
+				}
+			case types.DecimalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDecimalAscOp{}
+				}
+			case types.IntFamily:
+				switch t.Width() {
+				case 16:
+					return &sortInt16AscOp{}
+				case 32:
+					return &sortInt32AscOp{}
+				case -1:
+				default:
+					return &sortInt64AscOp{}
+				}
+			case types.FloatFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortFloat64AscOp{}
+				}
+			case types.TimestampTZFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortTimestampAscOp{}
+				}
+			case types.IntervalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortIntervalAscOp{}
+				}
+			case typeconv.DatumVecCanonicalTypeFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDatumAscOp{}
+				}
 			}
-		case types.BytesFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortBytesDescOp{}
-			}
-		case types.DecimalFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortDecimalDescOp{}
-			}
-		case types.IntFamily:
-			switch t.Width() {
-			case 16:
-				return &sortInt16DescOp{}
-			case 32:
-				return &sortInt32DescOp{}
-			case -1:
-			default:
-				return &sortInt64DescOp{}
-			}
-		case types.FloatFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortFloat64DescOp{}
-			}
-		case types.TimestampTZFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortTimestampDescOp{}
-			}
-		case types.IntervalFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortIntervalDescOp{}
-			}
-		case types.JsonFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortJSONDescOp{}
-			}
-		case typeconv.DatumVecCanonicalTypeFamily:
-			switch t.Width() {
-			case -1:
-			default:
-				return &sortDatumDescOp{}
+		case execinfrapb.Ordering_Column_DESC:
+			switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+			case types.BoolFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBoolDescOp{}
+				}
+			case types.BytesFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortBytesDescOp{}
+				}
+			case types.DecimalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDecimalDescOp{}
+				}
+			case types.IntFamily:
+				switch t.Width() {
+				case 16:
+					return &sortInt16DescOp{}
+				case 32:
+					return &sortInt32DescOp{}
+				case -1:
+				default:
+					return &sortInt64DescOp{}
+				}
+			case types.FloatFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortFloat64DescOp{}
+				}
+			case types.TimestampTZFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortTimestampDescOp{}
+				}
+			case types.IntervalFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortIntervalDescOp{}
+				}
+			case typeconv.DatumVecCanonicalTypeFamily:
+				switch t.Width() {
+				case -1:
+				default:
+					return &sortDatumDescOp{}
+				}
 			}
 		}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unsupported type %s", t))
+	colexecerror.InternalError(errors.AssertionFailedf("isSorterSupported should have caught this"))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -298,30 +380,21 @@ type sortBoolAscWithNullsOp struct {
 	sortCol       coldata.Bools
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortBoolAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBoolAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bool()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBoolAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBoolAscWithNullsOp) sort() {
+func (s *sortBoolAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBoolAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortBoolAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -335,7 +408,7 @@ func (s *sortBoolAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -350,7 +423,6 @@ func (s *sortBoolAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -383,41 +455,24 @@ func (s *sortBoolAscWithNullsOp) Len() int {
 }
 
 type sortBytesAscWithNullsOp struct {
-	sortCol            *coldata.Bytes
-	allocator          *colmem.Allocator
-	abbreviatedSortCol []uint64
-	nulls              *coldata.Nulls
-	order              []int
-	cancelChecker      colexecutils.CancelChecker
+	sortCol       *coldata.Bytes
+	nulls         *coldata.Nulls
+	order         []int
+	cancelChecker CancelChecker
 }
 
-func (s *sortBytesAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBytesAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bytes()
-	s.allocator = allocator
-	s.allocator.AdjustMemoryUsage(memsize.Uint64 * int64(s.sortCol.Len()))
-	s.abbreviatedSortCol = s.sortCol.Abbreviated()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBytesAscWithNullsOp) reset() {
-	s.allocator.AdjustMemoryUsage(0 - memsize.Uint64*int64(s.sortCol.Len()))
-	s.allocator = nil
-	s.abbreviatedSortCol = nil
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBytesAscWithNullsOp) sort() {
+func (s *sortBytesAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBytesAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortBytesAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -431,7 +486,7 @@ func (s *sortBytesAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -446,16 +501,6 @@ func (s *sortBytesAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
-	// If the type can be abbreviated as a uint64, compare the abbreviated
-	// values first. If they are not equal, we are done with the comparison. If
-	// they are equal, we must fallback to a full comparison of the datums.
-	abbr1 := s.abbreviatedSortCol[s.order[i]]
-	abbr2 := s.abbreviatedSortCol[s.order[j]]
-	if abbr1 != abbr2 {
-		return abbr1 < abbr2
-	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -483,30 +528,21 @@ type sortDecimalAscWithNullsOp struct {
 	sortCol       coldata.Decimals
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDecimalAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDecimalAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Decimal()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDecimalAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDecimalAscWithNullsOp) sort() {
+func (s *sortDecimalAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDecimalAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortDecimalAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -520,7 +556,7 @@ func (s *sortDecimalAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -535,7 +571,6 @@ func (s *sortDecimalAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -563,30 +598,21 @@ type sortInt16AscWithNullsOp struct {
 	sortCol       coldata.Int16s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt16AscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt16AscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int16()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt16AscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt16AscWithNullsOp) sort() {
+func (s *sortInt16AscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt16AscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt16AscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -600,7 +626,7 @@ func (s *sortInt16AscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -615,7 +641,6 @@ func (s *sortInt16AscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -654,30 +679,21 @@ type sortInt32AscWithNullsOp struct {
 	sortCol       coldata.Int32s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt32AscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt32AscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int32()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt32AscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt32AscWithNullsOp) sort() {
+func (s *sortInt32AscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt32AscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt32AscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -691,7 +707,7 @@ func (s *sortInt32AscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -706,7 +722,6 @@ func (s *sortInt32AscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -745,30 +760,21 @@ type sortInt64AscWithNullsOp struct {
 	sortCol       coldata.Int64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt64AscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt64AscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt64AscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt64AscWithNullsOp) sort() {
+func (s *sortInt64AscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt64AscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt64AscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -782,7 +788,7 @@ func (s *sortInt64AscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -797,7 +803,6 @@ func (s *sortInt64AscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -836,30 +841,21 @@ type sortFloat64AscWithNullsOp struct {
 	sortCol       coldata.Float64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortFloat64AscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortFloat64AscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Float64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortFloat64AscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortFloat64AscWithNullsOp) sort() {
+func (s *sortFloat64AscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortFloat64AscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortFloat64AscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -873,7 +869,7 @@ func (s *sortFloat64AscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -888,7 +884,6 @@ func (s *sortFloat64AscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -935,30 +930,21 @@ type sortTimestampAscWithNullsOp struct {
 	sortCol       coldata.Times
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortTimestampAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortTimestampAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Timestamp()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortTimestampAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortTimestampAscWithNullsOp) sort() {
+func (s *sortTimestampAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortTimestampAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortTimestampAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -972,7 +958,7 @@ func (s *sortTimestampAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -987,7 +973,6 @@ func (s *sortTimestampAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1022,30 +1007,21 @@ type sortIntervalAscWithNullsOp struct {
 	sortCol       coldata.Durations
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortIntervalAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortIntervalAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Interval()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortIntervalAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortIntervalAscWithNullsOp) sort() {
+func (s *sortIntervalAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortIntervalAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortIntervalAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1059,7 +1035,7 @@ func (s *sortIntervalAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1074,7 +1050,6 @@ func (s *sortIntervalAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1098,120 +1073,25 @@ func (s *sortIntervalAscWithNullsOp) Len() int {
 	return len(s.order)
 }
 
-type sortJSONAscWithNullsOp struct {
-	sortCol       *coldata.JSONs
-	nulls         *coldata.Nulls
-	order         []int
-	cancelChecker colexecutils.CancelChecker
-}
-
-func (s *sortJSONAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
-	s.sortCol = col.JSON()
-	s.nulls = col.Nulls()
-	s.order = order
-	s.cancelChecker.Init(ctx)
-}
-
-func (s *sortJSONAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortJSONAscWithNullsOp) sort() {
-	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
-}
-
-func (s *sortJSONAscWithNullsOp) sortPartitions(partitions []int) {
-	if len(partitions) < 1 {
-		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
-	}
-	order := s.order
-	for i, partitionStart := range partitions {
-		var partitionEnd int
-		if i == len(partitions)-1 {
-			partitionEnd = len(order)
-		} else {
-			partitionEnd = partitions[i+1]
-		}
-		s.order = order[partitionStart:partitionEnd]
-		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
-	}
-}
-
-func (s *sortJSONAscWithNullsOp) Less(i, j int) bool {
-	n1 := s.nulls.MaybeHasNulls() && s.nulls.NullAt(s.order[i])
-	n2 := s.nulls.MaybeHasNulls() && s.nulls.NullAt(s.order[j])
-	// If ascending, nulls always sort first, so we encode that logic here.
-	if n1 && n2 {
-		return false
-	} else if n1 {
-		return true
-	} else if n2 {
-		return false
-	}
-
-	var lt bool
-	// We always indirect via the order vector.
-	arg1 := s.sortCol.Get(s.order[i])
-	arg2 := s.sortCol.Get(s.order[j])
-
-	{
-		var cmpResult int
-
-		var err error
-		cmpResult, err = arg1.Compare(arg2)
-		if err != nil {
-			colexecerror.ExpectedError(err)
-		}
-
-		lt = cmpResult < 0
-	}
-
-	return lt
-}
-
-func (s *sortJSONAscWithNullsOp) Swap(i, j int) {
-	// We don't physically swap the column - we merely edit the order vector.
-	s.order[i], s.order[j] = s.order[j], s.order[i]
-}
-
-func (s *sortJSONAscWithNullsOp) Len() int {
-	return len(s.order)
-}
-
 type sortDatumAscWithNullsOp struct {
 	sortCol       coldata.DatumVec
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDatumAscWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDatumAscWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Datum()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDatumAscWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDatumAscWithNullsOp) sort() {
+func (s *sortDatumAscWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDatumAscWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortDatumAscWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1225,7 +1105,7 @@ func (s *sortDatumAscWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1240,7 +1120,6 @@ func (s *sortDatumAscWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return false
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1249,7 +1128,7 @@ func (s *sortDatumAscWithNullsOp) Less(i, j int) bool {
 	{
 		var cmpResult int
 
-		cmpResult = coldataext.CompareDatum(arg1, s.sortCol, arg2)
+		cmpResult = arg1.(*coldataext.Datum).CompareDatum(s.sortCol, arg2)
 
 		lt = cmpResult < 0
 	}
@@ -1270,30 +1149,21 @@ type sortBoolDescWithNullsOp struct {
 	sortCol       coldata.Bools
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortBoolDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBoolDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bool()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBoolDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBoolDescWithNullsOp) sort() {
+func (s *sortBoolDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBoolDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortBoolDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1307,7 +1177,7 @@ func (s *sortBoolDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1322,7 +1192,6 @@ func (s *sortBoolDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1355,41 +1224,24 @@ func (s *sortBoolDescWithNullsOp) Len() int {
 }
 
 type sortBytesDescWithNullsOp struct {
-	sortCol            *coldata.Bytes
-	allocator          *colmem.Allocator
-	abbreviatedSortCol []uint64
-	nulls              *coldata.Nulls
-	order              []int
-	cancelChecker      colexecutils.CancelChecker
+	sortCol       *coldata.Bytes
+	nulls         *coldata.Nulls
+	order         []int
+	cancelChecker CancelChecker
 }
 
-func (s *sortBytesDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBytesDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bytes()
-	s.allocator = allocator
-	s.allocator.AdjustMemoryUsage(memsize.Uint64 * int64(s.sortCol.Len()))
-	s.abbreviatedSortCol = s.sortCol.Abbreviated()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBytesDescWithNullsOp) reset() {
-	s.allocator.AdjustMemoryUsage(0 - memsize.Uint64*int64(s.sortCol.Len()))
-	s.allocator = nil
-	s.abbreviatedSortCol = nil
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBytesDescWithNullsOp) sort() {
+func (s *sortBytesDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBytesDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortBytesDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1403,7 +1255,7 @@ func (s *sortBytesDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1418,16 +1270,6 @@ func (s *sortBytesDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
-	// If the type can be abbreviated as a uint64, compare the abbreviated
-	// values first. If they are not equal, we are done with the comparison. If
-	// they are equal, we must fallback to a full comparison of the datums.
-	abbr1 := s.abbreviatedSortCol[s.order[i]]
-	abbr2 := s.abbreviatedSortCol[s.order[j]]
-	if abbr1 != abbr2 {
-		return abbr1 > abbr2
-	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1455,30 +1297,21 @@ type sortDecimalDescWithNullsOp struct {
 	sortCol       coldata.Decimals
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDecimalDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDecimalDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Decimal()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDecimalDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDecimalDescWithNullsOp) sort() {
+func (s *sortDecimalDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDecimalDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortDecimalDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1492,7 +1325,7 @@ func (s *sortDecimalDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1507,7 +1340,6 @@ func (s *sortDecimalDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1535,30 +1367,21 @@ type sortInt16DescWithNullsOp struct {
 	sortCol       coldata.Int16s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt16DescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt16DescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int16()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt16DescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt16DescWithNullsOp) sort() {
+func (s *sortInt16DescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt16DescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt16DescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1572,7 +1395,7 @@ func (s *sortInt16DescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1587,7 +1410,6 @@ func (s *sortInt16DescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1626,30 +1448,21 @@ type sortInt32DescWithNullsOp struct {
 	sortCol       coldata.Int32s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt32DescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt32DescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int32()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt32DescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt32DescWithNullsOp) sort() {
+func (s *sortInt32DescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt32DescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt32DescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1663,7 +1476,7 @@ func (s *sortInt32DescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1678,7 +1491,6 @@ func (s *sortInt32DescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1717,30 +1529,21 @@ type sortInt64DescWithNullsOp struct {
 	sortCol       coldata.Int64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt64DescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt64DescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt64DescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt64DescWithNullsOp) sort() {
+func (s *sortInt64DescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt64DescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortInt64DescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1754,7 +1557,7 @@ func (s *sortInt64DescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1769,7 +1572,6 @@ func (s *sortInt64DescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1808,30 +1610,21 @@ type sortFloat64DescWithNullsOp struct {
 	sortCol       coldata.Float64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortFloat64DescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortFloat64DescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Float64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortFloat64DescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortFloat64DescWithNullsOp) sort() {
+func (s *sortFloat64DescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortFloat64DescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortFloat64DescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1845,7 +1638,7 @@ func (s *sortFloat64DescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1860,7 +1653,6 @@ func (s *sortFloat64DescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1907,30 +1699,21 @@ type sortTimestampDescWithNullsOp struct {
 	sortCol       coldata.Times
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortTimestampDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortTimestampDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Timestamp()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortTimestampDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortTimestampDescWithNullsOp) sort() {
+func (s *sortTimestampDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortTimestampDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortTimestampDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -1944,7 +1727,7 @@ func (s *sortTimestampDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -1959,7 +1742,6 @@ func (s *sortTimestampDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -1994,30 +1776,21 @@ type sortIntervalDescWithNullsOp struct {
 	sortCol       coldata.Durations
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortIntervalDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortIntervalDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Interval()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortIntervalDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortIntervalDescWithNullsOp) sort() {
+func (s *sortIntervalDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortIntervalDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortIntervalDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2031,7 +1804,7 @@ func (s *sortIntervalDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -2046,7 +1819,6 @@ func (s *sortIntervalDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2070,120 +1842,25 @@ func (s *sortIntervalDescWithNullsOp) Len() int {
 	return len(s.order)
 }
 
-type sortJSONDescWithNullsOp struct {
-	sortCol       *coldata.JSONs
-	nulls         *coldata.Nulls
-	order         []int
-	cancelChecker colexecutils.CancelChecker
-}
-
-func (s *sortJSONDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
-	s.sortCol = col.JSON()
-	s.nulls = col.Nulls()
-	s.order = order
-	s.cancelChecker.Init(ctx)
-}
-
-func (s *sortJSONDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortJSONDescWithNullsOp) sort() {
-	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
-}
-
-func (s *sortJSONDescWithNullsOp) sortPartitions(partitions []int) {
-	if len(partitions) < 1 {
-		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
-	}
-	order := s.order
-	for i, partitionStart := range partitions {
-		var partitionEnd int
-		if i == len(partitions)-1 {
-			partitionEnd = len(order)
-		} else {
-			partitionEnd = partitions[i+1]
-		}
-		s.order = order[partitionStart:partitionEnd]
-		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
-	}
-}
-
-func (s *sortJSONDescWithNullsOp) Less(i, j int) bool {
-	n1 := s.nulls.MaybeHasNulls() && s.nulls.NullAt(s.order[i])
-	n2 := s.nulls.MaybeHasNulls() && s.nulls.NullAt(s.order[j])
-	// If descending, nulls always sort last, so we encode that logic here.
-	if n1 && n2 {
-		return false
-	} else if n1 {
-		return false
-	} else if n2 {
-		return true
-	}
-
-	var lt bool
-	// We always indirect via the order vector.
-	arg1 := s.sortCol.Get(s.order[i])
-	arg2 := s.sortCol.Get(s.order[j])
-
-	{
-		var cmpResult int
-
-		var err error
-		cmpResult, err = arg1.Compare(arg2)
-		if err != nil {
-			colexecerror.ExpectedError(err)
-		}
-
-		lt = cmpResult > 0
-	}
-
-	return lt
-}
-
-func (s *sortJSONDescWithNullsOp) Swap(i, j int) {
-	// We don't physically swap the column - we merely edit the order vector.
-	s.order[i], s.order[j] = s.order[j], s.order[i]
-}
-
-func (s *sortJSONDescWithNullsOp) Len() int {
-	return len(s.order)
-}
-
 type sortDatumDescWithNullsOp struct {
 	sortCol       coldata.DatumVec
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDatumDescWithNullsOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDatumDescWithNullsOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Datum()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDatumDescWithNullsOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDatumDescWithNullsOp) sort() {
+func (s *sortDatumDescWithNullsOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDatumDescWithNullsOp) sortPartitions(partitions []int) {
+func (s *sortDatumDescWithNullsOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2197,7 +1874,7 @@ func (s *sortDatumDescWithNullsOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
@@ -2212,7 +1889,6 @@ func (s *sortDatumDescWithNullsOp) Less(i, j int) bool {
 	} else if n2 {
 		return true
 	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2221,7 +1897,7 @@ func (s *sortDatumDescWithNullsOp) Less(i, j int) bool {
 	{
 		var cmpResult int
 
-		cmpResult = coldataext.CompareDatum(arg1, s.sortCol, arg2)
+		cmpResult = arg1.(*coldataext.Datum).CompareDatum(s.sortCol, arg2)
 
 		lt = cmpResult > 0
 	}
@@ -2242,30 +1918,21 @@ type sortBoolAscOp struct {
 	sortCol       coldata.Bools
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortBoolAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBoolAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bool()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBoolAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBoolAscOp) sort() {
+func (s *sortBoolAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBoolAscOp) sortPartitions(partitions []int) {
+func (s *sortBoolAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2279,12 +1946,11 @@ func (s *sortBoolAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortBoolAscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2317,41 +1983,24 @@ func (s *sortBoolAscOp) Len() int {
 }
 
 type sortBytesAscOp struct {
-	sortCol            *coldata.Bytes
-	allocator          *colmem.Allocator
-	abbreviatedSortCol []uint64
-	nulls              *coldata.Nulls
-	order              []int
-	cancelChecker      colexecutils.CancelChecker
+	sortCol       *coldata.Bytes
+	nulls         *coldata.Nulls
+	order         []int
+	cancelChecker CancelChecker
 }
 
-func (s *sortBytesAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBytesAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bytes()
-	s.allocator = allocator
-	s.allocator.AdjustMemoryUsage(memsize.Uint64 * int64(s.sortCol.Len()))
-	s.abbreviatedSortCol = s.sortCol.Abbreviated()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBytesAscOp) reset() {
-	s.allocator.AdjustMemoryUsage(0 - memsize.Uint64*int64(s.sortCol.Len()))
-	s.allocator = nil
-	s.abbreviatedSortCol = nil
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBytesAscOp) sort() {
+func (s *sortBytesAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBytesAscOp) sortPartitions(partitions []int) {
+func (s *sortBytesAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2365,21 +2014,11 @@ func (s *sortBytesAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortBytesAscOp) Less(i, j int) bool {
-
-	// If the type can be abbreviated as a uint64, compare the abbreviated
-	// values first. If they are not equal, we are done with the comparison. If
-	// they are equal, we must fallback to a full comparison of the datums.
-	abbr1 := s.abbreviatedSortCol[s.order[i]]
-	abbr2 := s.abbreviatedSortCol[s.order[j]]
-	if abbr1 != abbr2 {
-		return abbr1 < abbr2
-	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2407,30 +2046,21 @@ type sortDecimalAscOp struct {
 	sortCol       coldata.Decimals
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDecimalAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDecimalAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Decimal()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDecimalAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDecimalAscOp) sort() {
+func (s *sortDecimalAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDecimalAscOp) sortPartitions(partitions []int) {
+func (s *sortDecimalAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2444,12 +2074,11 @@ func (s *sortDecimalAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortDecimalAscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2477,30 +2106,21 @@ type sortInt16AscOp struct {
 	sortCol       coldata.Int16s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt16AscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt16AscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int16()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt16AscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt16AscOp) sort() {
+func (s *sortInt16AscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt16AscOp) sortPartitions(partitions []int) {
+func (s *sortInt16AscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2514,13 +2134,11 @@ func (s *sortInt16AscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt16AscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2559,30 +2177,21 @@ type sortInt32AscOp struct {
 	sortCol       coldata.Int32s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt32AscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt32AscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int32()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt32AscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt32AscOp) sort() {
+func (s *sortInt32AscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt32AscOp) sortPartitions(partitions []int) {
+func (s *sortInt32AscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2596,13 +2205,11 @@ func (s *sortInt32AscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt32AscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2641,30 +2248,21 @@ type sortInt64AscOp struct {
 	sortCol       coldata.Int64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt64AscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt64AscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt64AscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt64AscOp) sort() {
+func (s *sortInt64AscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt64AscOp) sortPartitions(partitions []int) {
+func (s *sortInt64AscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2678,13 +2276,11 @@ func (s *sortInt64AscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt64AscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2723,30 +2319,21 @@ type sortFloat64AscOp struct {
 	sortCol       coldata.Float64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortFloat64AscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortFloat64AscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Float64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortFloat64AscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortFloat64AscOp) sort() {
+func (s *sortFloat64AscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortFloat64AscOp) sortPartitions(partitions []int) {
+func (s *sortFloat64AscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2760,12 +2347,11 @@ func (s *sortFloat64AscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortFloat64AscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2812,30 +2398,21 @@ type sortTimestampAscOp struct {
 	sortCol       coldata.Times
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortTimestampAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortTimestampAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Timestamp()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortTimestampAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortTimestampAscOp) sort() {
+func (s *sortTimestampAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortTimestampAscOp) sortPartitions(partitions []int) {
+func (s *sortTimestampAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2849,12 +2426,11 @@ func (s *sortTimestampAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortTimestampAscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2889,30 +2465,21 @@ type sortIntervalAscOp struct {
 	sortCol       coldata.Durations
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortIntervalAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortIntervalAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Interval()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortIntervalAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortIntervalAscOp) sort() {
+func (s *sortIntervalAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortIntervalAscOp) sortPartitions(partitions []int) {
+func (s *sortIntervalAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -2926,12 +2493,11 @@ func (s *sortIntervalAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortIntervalAscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -2955,110 +2521,25 @@ func (s *sortIntervalAscOp) Len() int {
 	return len(s.order)
 }
 
-type sortJSONAscOp struct {
-	sortCol       *coldata.JSONs
-	nulls         *coldata.Nulls
-	order         []int
-	cancelChecker colexecutils.CancelChecker
-}
-
-func (s *sortJSONAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
-	s.sortCol = col.JSON()
-	s.nulls = col.Nulls()
-	s.order = order
-	s.cancelChecker.Init(ctx)
-}
-
-func (s *sortJSONAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortJSONAscOp) sort() {
-	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
-}
-
-func (s *sortJSONAscOp) sortPartitions(partitions []int) {
-	if len(partitions) < 1 {
-		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
-	}
-	order := s.order
-	for i, partitionStart := range partitions {
-		var partitionEnd int
-		if i == len(partitions)-1 {
-			partitionEnd = len(order)
-		} else {
-			partitionEnd = partitions[i+1]
-		}
-		s.order = order[partitionStart:partitionEnd]
-		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
-	}
-}
-
-func (s *sortJSONAscOp) Less(i, j int) bool {
-
-	var lt bool
-	// We always indirect via the order vector.
-	arg1 := s.sortCol.Get(s.order[i])
-	arg2 := s.sortCol.Get(s.order[j])
-
-	{
-		var cmpResult int
-
-		var err error
-		cmpResult, err = arg1.Compare(arg2)
-		if err != nil {
-			colexecerror.ExpectedError(err)
-		}
-
-		lt = cmpResult < 0
-	}
-
-	return lt
-}
-
-func (s *sortJSONAscOp) Swap(i, j int) {
-	// We don't physically swap the column - we merely edit the order vector.
-	s.order[i], s.order[j] = s.order[j], s.order[i]
-}
-
-func (s *sortJSONAscOp) Len() int {
-	return len(s.order)
-}
-
 type sortDatumAscOp struct {
 	sortCol       coldata.DatumVec
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDatumAscOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDatumAscOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Datum()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDatumAscOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDatumAscOp) sort() {
+func (s *sortDatumAscOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDatumAscOp) sortPartitions(partitions []int) {
+func (s *sortDatumAscOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3072,12 +2553,11 @@ func (s *sortDatumAscOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortDatumAscOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3086,7 +2566,7 @@ func (s *sortDatumAscOp) Less(i, j int) bool {
 	{
 		var cmpResult int
 
-		cmpResult = coldataext.CompareDatum(arg1, s.sortCol, arg2)
+		cmpResult = arg1.(*coldataext.Datum).CompareDatum(s.sortCol, arg2)
 
 		lt = cmpResult < 0
 	}
@@ -3107,30 +2587,21 @@ type sortBoolDescOp struct {
 	sortCol       coldata.Bools
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortBoolDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBoolDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bool()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBoolDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBoolDescOp) sort() {
+func (s *sortBoolDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBoolDescOp) sortPartitions(partitions []int) {
+func (s *sortBoolDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3144,12 +2615,11 @@ func (s *sortBoolDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortBoolDescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3182,41 +2652,24 @@ func (s *sortBoolDescOp) Len() int {
 }
 
 type sortBytesDescOp struct {
-	sortCol            *coldata.Bytes
-	allocator          *colmem.Allocator
-	abbreviatedSortCol []uint64
-	nulls              *coldata.Nulls
-	order              []int
-	cancelChecker      colexecutils.CancelChecker
+	sortCol       *coldata.Bytes
+	nulls         *coldata.Nulls
+	order         []int
+	cancelChecker CancelChecker
 }
 
-func (s *sortBytesDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortBytesDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Bytes()
-	s.allocator = allocator
-	s.allocator.AdjustMemoryUsage(memsize.Uint64 * int64(s.sortCol.Len()))
-	s.abbreviatedSortCol = s.sortCol.Abbreviated()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortBytesDescOp) reset() {
-	s.allocator.AdjustMemoryUsage(0 - memsize.Uint64*int64(s.sortCol.Len()))
-	s.allocator = nil
-	s.abbreviatedSortCol = nil
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortBytesDescOp) sort() {
+func (s *sortBytesDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortBytesDescOp) sortPartitions(partitions []int) {
+func (s *sortBytesDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3230,21 +2683,11 @@ func (s *sortBytesDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortBytesDescOp) Less(i, j int) bool {
-
-	// If the type can be abbreviated as a uint64, compare the abbreviated
-	// values first. If they are not equal, we are done with the comparison. If
-	// they are equal, we must fallback to a full comparison of the datums.
-	abbr1 := s.abbreviatedSortCol[s.order[i]]
-	abbr2 := s.abbreviatedSortCol[s.order[j]]
-	if abbr1 != abbr2 {
-		return abbr1 > abbr2
-	}
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3272,30 +2715,21 @@ type sortDecimalDescOp struct {
 	sortCol       coldata.Decimals
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDecimalDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDecimalDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Decimal()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDecimalDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDecimalDescOp) sort() {
+func (s *sortDecimalDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDecimalDescOp) sortPartitions(partitions []int) {
+func (s *sortDecimalDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3309,12 +2743,11 @@ func (s *sortDecimalDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortDecimalDescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3342,30 +2775,21 @@ type sortInt16DescOp struct {
 	sortCol       coldata.Int16s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt16DescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt16DescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int16()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt16DescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt16DescOp) sort() {
+func (s *sortInt16DescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt16DescOp) sortPartitions(partitions []int) {
+func (s *sortInt16DescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3379,13 +2803,11 @@ func (s *sortInt16DescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt16DescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3424,30 +2846,21 @@ type sortInt32DescOp struct {
 	sortCol       coldata.Int32s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt32DescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt32DescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int32()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt32DescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt32DescOp) sort() {
+func (s *sortInt32DescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt32DescOp) sortPartitions(partitions []int) {
+func (s *sortInt32DescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3461,13 +2874,11 @@ func (s *sortInt32DescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt32DescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3506,30 +2917,21 @@ type sortInt64DescOp struct {
 	sortCol       coldata.Int64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortInt64DescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortInt64DescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Int64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortInt64DescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortInt64DescOp) sort() {
+func (s *sortInt64DescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortInt64DescOp) sortPartitions(partitions []int) {
+func (s *sortInt64DescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3543,13 +2945,11 @@ func (s *sortInt64DescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
-//gcassert:inline
 func (s *sortInt64DescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3588,30 +2988,21 @@ type sortFloat64DescOp struct {
 	sortCol       coldata.Float64s
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortFloat64DescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortFloat64DescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Float64()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortFloat64DescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortFloat64DescOp) sort() {
+func (s *sortFloat64DescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortFloat64DescOp) sortPartitions(partitions []int) {
+func (s *sortFloat64DescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3625,12 +3016,11 @@ func (s *sortFloat64DescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortFloat64DescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3677,30 +3067,21 @@ type sortTimestampDescOp struct {
 	sortCol       coldata.Times
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortTimestampDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortTimestampDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Timestamp()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortTimestampDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortTimestampDescOp) sort() {
+func (s *sortTimestampDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortTimestampDescOp) sortPartitions(partitions []int) {
+func (s *sortTimestampDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3714,12 +3095,11 @@ func (s *sortTimestampDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortTimestampDescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3754,30 +3134,21 @@ type sortIntervalDescOp struct {
 	sortCol       coldata.Durations
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortIntervalDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortIntervalDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Interval()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortIntervalDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortIntervalDescOp) sort() {
+func (s *sortIntervalDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortIntervalDescOp) sortPartitions(partitions []int) {
+func (s *sortIntervalDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3791,12 +3162,11 @@ func (s *sortIntervalDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortIntervalDescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3820,110 +3190,25 @@ func (s *sortIntervalDescOp) Len() int {
 	return len(s.order)
 }
 
-type sortJSONDescOp struct {
-	sortCol       *coldata.JSONs
-	nulls         *coldata.Nulls
-	order         []int
-	cancelChecker colexecutils.CancelChecker
-}
-
-func (s *sortJSONDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
-	s.sortCol = col.JSON()
-	s.nulls = col.Nulls()
-	s.order = order
-	s.cancelChecker.Init(ctx)
-}
-
-func (s *sortJSONDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortJSONDescOp) sort() {
-	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
-}
-
-func (s *sortJSONDescOp) sortPartitions(partitions []int) {
-	if len(partitions) < 1 {
-		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
-	}
-	order := s.order
-	for i, partitionStart := range partitions {
-		var partitionEnd int
-		if i == len(partitions)-1 {
-			partitionEnd = len(order)
-		} else {
-			partitionEnd = partitions[i+1]
-		}
-		s.order = order[partitionStart:partitionEnd]
-		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
-	}
-}
-
-func (s *sortJSONDescOp) Less(i, j int) bool {
-
-	var lt bool
-	// We always indirect via the order vector.
-	arg1 := s.sortCol.Get(s.order[i])
-	arg2 := s.sortCol.Get(s.order[j])
-
-	{
-		var cmpResult int
-
-		var err error
-		cmpResult, err = arg1.Compare(arg2)
-		if err != nil {
-			colexecerror.ExpectedError(err)
-		}
-
-		lt = cmpResult > 0
-	}
-
-	return lt
-}
-
-func (s *sortJSONDescOp) Swap(i, j int) {
-	// We don't physically swap the column - we merely edit the order vector.
-	s.order[i], s.order[j] = s.order[j], s.order[i]
-}
-
-func (s *sortJSONDescOp) Len() int {
-	return len(s.order)
-}
-
 type sortDatumDescOp struct {
 	sortCol       coldata.DatumVec
 	nulls         *coldata.Nulls
 	order         []int
-	cancelChecker colexecutils.CancelChecker
+	cancelChecker CancelChecker
 }
 
-func (s *sortDatumDescOp) init(
-	ctx context.Context, allocator *colmem.Allocator, col coldata.Vec, order []int,
-) {
+func (s *sortDatumDescOp) init(col coldata.Vec, order []int) {
 	s.sortCol = col.Datum()
 	s.nulls = col.Nulls()
 	s.order = order
-	s.cancelChecker.Init(ctx)
 }
 
-func (s *sortDatumDescOp) reset() {
-	s.sortCol = nil
-	s.nulls = nil
-	s.order = nil
-}
-
-func (s *sortDatumDescOp) sort() {
+func (s *sortDatumDescOp) sort(ctx context.Context) {
 	n := s.sortCol.Len()
-	s.quickSort(0, n, maxDepth(n))
+	s.quickSort(ctx, 0, n, maxDepth(n))
 }
 
-func (s *sortDatumDescOp) sortPartitions(partitions []int) {
+func (s *sortDatumDescOp) sortPartitions(ctx context.Context, partitions []int) {
 	if len(partitions) < 1 {
 		colexecerror.InternalError(errors.AssertionFailedf("invalid partitions list %v", partitions))
 	}
@@ -3937,12 +3222,11 @@ func (s *sortDatumDescOp) sortPartitions(partitions []int) {
 		}
 		s.order = order[partitionStart:partitionEnd]
 		n := partitionEnd - partitionStart
-		s.quickSort(0, n, maxDepth(n))
+		s.quickSort(ctx, 0, n, maxDepth(n))
 	}
 }
 
 func (s *sortDatumDescOp) Less(i, j int) bool {
-
 	var lt bool
 	// We always indirect via the order vector.
 	arg1 := s.sortCol.Get(s.order[i])
@@ -3951,7 +3235,7 @@ func (s *sortDatumDescOp) Less(i, j int) bool {
 	{
 		var cmpResult int
 
-		cmpResult = coldataext.CompareDatum(arg1, s.sortCol, arg2)
+		cmpResult = arg1.(*coldataext.Datum).CompareDatum(s.sortCol, arg2)
 
 		lt = cmpResult > 0
 	}

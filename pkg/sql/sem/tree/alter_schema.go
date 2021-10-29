@@ -12,7 +12,7 @@ package tree
 
 // AlterSchema represents an ALTER SCHEMA statement.
 type AlterSchema struct {
-	Schema ObjectNamePrefix
+	Schema Name
 	Cmd    AlterSchemaCmd
 }
 
@@ -48,7 +48,7 @@ func (*AlterSchemaOwner) alterSchemaCmd() {}
 
 // AlterSchemaOwner represents an ALTER SCHEMA OWNER TO command.
 type AlterSchemaOwner struct {
-	Owner RoleSpec
+	Owner Name
 }
 
 // Format implements the NodeFormatter interface.

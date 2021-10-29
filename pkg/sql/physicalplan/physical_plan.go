@@ -15,10 +15,12 @@
 package physicalplan
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -61,17 +63,11 @@ type Stream struct {
 	DestInput int
 }
 
-// PhysicalInfrastructure stores information about processors and streams.
-// Multiple PhysicalPlans can be associated with the same PhysicalInfrastructure
-// instance; this allows merging plans.
-type PhysicalInfrastructure struct {
-	// -- The following fields are immutable --
-
-	FlowID        uuid.UUID
-	GatewayNodeID roachpb.NodeID
-
-	// -- The following fields are mutable --
-
+// PhysicalPlan represents a network of processors and streams along with
+// information about the results output by this network. The results come from
+// unconnected output routers of a subset of processors; all these routers
+// output the same kind of data (same schema).
+type PhysicalPlan struct {
 	// Processors in the plan.
 	Processors []Processor
 
@@ -81,37 +77,16 @@ type PhysicalInfrastructure struct {
 	// wrapping had to happen.
 	LocalProcessors []execinfra.LocalProcessor
 
+	// LocalProcessorIndexes contains pointers to all of the RowSourceIdx fields
+	// of the LocalPlanNodeSpecs that were created. This list is in the same
+	// order as LocalProcessors, and is kept up-to-date so that LocalPlanNodeSpecs
+	// always have the correct index into the LocalProcessors slice.
+	LocalProcessorIndexes []*uint32
+
 	// Streams accumulates the streams in the plan - both local (intra-node) and
 	// remote (inter-node); when we have a final plan, the streams are used to
 	// generate processor input and output specs (see PopulateEndpoints).
 	Streams []Stream
-
-	// Used internally for numbering stages.
-	stageCounter int32
-}
-
-// AddProcessor adds a processor and returns the index that can be used to refer
-// to that processor.
-func (p *PhysicalInfrastructure) AddProcessor(proc Processor) ProcessorIdx {
-	idx := ProcessorIdx(len(p.Processors))
-	p.Processors = append(p.Processors, proc)
-	return idx
-}
-
-// AddLocalProcessor adds a local processor and returns the index that can be
-// used to refer to that processor.
-func (p *PhysicalInfrastructure) AddLocalProcessor(proc execinfra.LocalProcessor) int {
-	idx := len(p.LocalProcessors)
-	p.LocalProcessors = append(p.LocalProcessors, proc)
-	return idx
-}
-
-// PhysicalPlan represents a network of processors and streams along with
-// information about the results output by this network. The results come from
-// unconnected output routers of a subset of processors; all these routers
-// output the same kind of data (same schema).
-type PhysicalPlan struct {
-	*PhysicalInfrastructure
 
 	// ResultRouters identifies the output routers which output the results of the
 	// plan. These are the routers to which we have to connect new streams in
@@ -123,6 +98,13 @@ type PhysicalPlan struct {
 	// We assume all processors have a single output so we only need the processor
 	// index.
 	ResultRouters []ProcessorIdx
+
+	// ResultTypes is the schema (column types) of the rows produced by the
+	// ResultRouters.
+	//
+	// This is aliased with InputSyncSpec.ColumnTypes, so it must not be modified
+	// in-place during planning.
+	ResultTypes []*types.T
 
 	// ResultColumns is the schema (result columns) of the rows produced by the
 	// ResultRouters.
@@ -138,49 +120,31 @@ type PhysicalPlan struct {
 	// want to pay this cost if we don't have multiple streams to merge.
 	MergeOrdering execinfrapb.Ordering
 
+	// Used internally for numbering stages.
+	stageCounter int32
+
+	// Used internally to avoid creating flow IDs for local flows. This boolean
+	// specifies whether there is more than one node involved in a plan.
+	remotePlan bool
+
+	// MaxEstimatedRowCount tracks the maximum estimated row count that a table
+	// reader in this plan will output. This information is used to decide
+	// whether to use the vectorized execution engine.
+	MaxEstimatedRowCount uint64
 	// TotalEstimatedScannedRows is the sum of the row count estimate of all the
 	// table readers in the plan.
-	// TODO(radu): move this field to PlanInfrastructure.
 	TotalEstimatedScannedRows uint64
 
+	// GatewayNodeID is the gateway node of the physical plan.
+	GatewayNodeID roachpb.NodeID
 	// Distribution is the indicator of the distribution of the physical plan.
-	// TODO(radu): move this field to PlanInfrastructure?
 	Distribution PlanDistribution
-}
-
-// MakePhysicalInfrastructure initializes a PhysicalInfrastructure that can then
-// be used with MakePhysicalPlan.
-func MakePhysicalInfrastructure(
-	flowID uuid.UUID, gatewayNodeID roachpb.NodeID,
-) PhysicalInfrastructure {
-	return PhysicalInfrastructure{
-		FlowID:        flowID,
-		GatewayNodeID: gatewayNodeID,
-	}
-}
-
-// MakePhysicalPlan initializes a PhysicalPlan.
-func MakePhysicalPlan(infra *PhysicalInfrastructure) PhysicalPlan {
-	return PhysicalPlan{
-		PhysicalInfrastructure: infra,
-	}
-}
-
-// GetResultTypes returns the schema (column types) of the rows produced by the
-// ResultRouters which *must* contain at least one index into Processors slice.
-// This is aliased with ColumnTypes of the processor spec, so it must not be
-// modified in-place during planning.
-func (p *PhysicalPlan) GetResultTypes() []*types.T {
-	if len(p.ResultRouters) == 0 {
-		panic(errors.AssertionFailedf("unexpectedly no result routers in %v", *p))
-	}
-	return p.Processors[p.ResultRouters[0]].Spec.ResultTypes
 }
 
 // NewStage updates the distribution of the plan given the fact whether the new
 // stage contains at least one processor planned on a remote node and returns a
 // stage identifier of the new stage that can be used in processor specs.
-func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool, allowPartialDistribution bool) int32 {
+func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool) int32 {
 	newStageDistribution := LocalPlan
 	if containsRemoteProcessor {
 		newStageDistribution = FullyDistributedPlan
@@ -190,7 +154,7 @@ func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool, allowPartialDistri
 		// distribution as is.
 		p.Distribution = newStageDistribution
 	} else {
-		p.Distribution = p.Distribution.compose(newStageDistribution, allowPartialDistribution)
+		p.Distribution = p.Distribution.compose(newStageDistribution)
 	}
 	p.stageCounter++
 	return p.stageCounter
@@ -202,10 +166,15 @@ func (p *PhysicalPlan) NewStageOnNodes(nodes []roachpb.NodeID) int32 {
 	// We have a remote processor either when we have multiple nodes
 	// participating in the stage or the single processor is scheduled not on
 	// the gateway.
-	return p.NewStage(
-		len(nodes) > 1 || nodes[0] != p.GatewayNodeID, /* containsRemoteProcessor */
-		false, /* allowPartialDistribution */
-	)
+	return p.NewStage(len(nodes) > 1 || nodes[0] != p.GatewayNodeID /* containsRemoteProcessor */)
+}
+
+// AddProcessor adds a processor to a PhysicalPlan and returns the index that
+// can be used to refer to that processor.
+func (p *PhysicalPlan) AddProcessor(proc Processor) ProcessorIdx {
+	idx := ProcessorIdx(len(p.Processors))
+	p.Processors = append(p.Processors, proc)
+	return idx
 }
 
 // SetMergeOrdering sets p.MergeOrdering.
@@ -222,9 +191,6 @@ func (p *PhysicalPlan) SetMergeOrdering(o execinfrapb.Ordering) {
 type ProcessorCorePlacement struct {
 	NodeID roachpb.NodeID
 	Core   execinfrapb.ProcessorCoreUnion
-	// EstimatedRowCount, if set to non-zero, is the optimizer's guess of how
-	// many rows will be emitted from this processor.
-	EstimatedRowCount uint64
 }
 
 // AddNoInputStage creates a stage of processors that don't have any input from
@@ -237,18 +203,12 @@ func (p *PhysicalPlan) AddNoInputStage(
 	outputTypes []*types.T,
 	newOrdering execinfrapb.Ordering,
 ) {
-	// Note that in order to find out whether we have a remote processor it is
-	// not sufficient to have len(corePlacements) be greater than one - we might
-	// plan multiple table readers on the gateway if the plan is local.
-	containsRemoteProcessor := false
+	nodes := make([]roachpb.NodeID, len(corePlacements))
 	for i := range corePlacements {
-		if corePlacements[i].NodeID != p.GatewayNodeID {
-			containsRemoteProcessor = true
-			break
-		}
+		nodes[i] = corePlacements[i].NodeID
 	}
-	stageID := p.NewStage(containsRemoteProcessor, false /* allowPartialDistribution */)
-	p.ResultRouters = make([]ProcessorIdx, len(corePlacements))
+	stageID := p.NewStageOnNodes(nodes)
+	p.ResultRouters = make([]ProcessorIdx, len(nodes))
 	for i := range p.ResultRouters {
 		proc := Processor{
 			Node: corePlacements[i].NodeID,
@@ -258,15 +218,14 @@ func (p *PhysicalPlan) AddNoInputStage(
 				Output: []execinfrapb.OutputRouterSpec{{
 					Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
 				}},
-				StageID:           stageID,
-				ResultTypes:       outputTypes,
-				EstimatedRowCount: corePlacements[i].EstimatedRowCount,
+				StageID: stageID,
 			},
 		}
 
 		pIdx := p.AddProcessor(proc)
 		p.ResultRouters[i] = pIdx
 	}
+	p.ResultTypes = outputTypes
 	p.SetMergeOrdering(newOrdering)
 }
 
@@ -298,8 +257,7 @@ func (p *PhysicalPlan) AddNoGroupingStageWithCoreFunc(
 ) {
 	// New stage has the same distribution as the previous one, so we need to
 	// figure out whether the last stage contains a remote processor.
-	stageID := p.NewStage(p.IsLastStageDistributed(), false /* allowPartialDistribution */)
-	prevStageResultTypes := p.GetResultTypes()
+	stageID := p.NewStage(p.IsLastStageDistributed())
 	for i, resultProc := range p.ResultRouters {
 		prevProc := &p.Processors[resultProc]
 
@@ -307,16 +265,15 @@ func (p *PhysicalPlan) AddNoGroupingStageWithCoreFunc(
 			Node: prevProc.Node,
 			Spec: execinfrapb.ProcessorSpec{
 				Input: []execinfrapb.InputSyncSpec{{
-					Type:        execinfrapb.InputSyncSpec_PARALLEL_UNORDERED,
-					ColumnTypes: prevStageResultTypes,
+					Type:        execinfrapb.InputSyncSpec_UNORDERED,
+					ColumnTypes: p.ResultTypes,
 				}},
 				Core: coreFunc(int(resultProc), prevProc),
 				Post: post,
 				Output: []execinfrapb.OutputRouterSpec{{
 					Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
 				}},
-				StageID:     stageID,
-				ResultTypes: outputTypes,
+				StageID: stageID,
 			},
 		}
 
@@ -331,6 +288,7 @@ func (p *PhysicalPlan) AddNoGroupingStageWithCoreFunc(
 
 		p.ResultRouters[i] = pIdx
 	}
+	p.ResultTypes = outputTypes
 	p.SetMergeOrdering(newOrdering)
 }
 
@@ -347,17 +305,23 @@ func (p *PhysicalPlan) MergeResultStreams(
 	forceSerialization bool,
 ) {
 	proc := &p.Processors[destProcessor]
-	if len(ordering.Columns) > 0 && len(resultRouters) > 1 {
+	// We want to use unordered synchronizer if the ordering is empty and
+	// we're not being forced to serialize streams. Note that ordered
+	// synchronizers support the case of an empty ordering - they will be
+	// merging the result streams by fully consuming one stream at a time
+	// before moving on to the next one.
+	useUnorderedSync := len(ordering.Columns) == 0 && !forceSerialization
+	if len(resultRouters) == 1 {
+		// However, if we only have a single result router, then there is
+		// nothing to merge, and we unconditionally will use the unordered
+		// synchronizer since it is more efficient.
+		useUnorderedSync = true
+	}
+	if useUnorderedSync {
+		proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_UNORDERED
+	} else {
 		proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_ORDERED
 		proc.Spec.Input[destInput].Ordering = ordering
-	} else {
-		if forceSerialization && len(resultRouters) > 1 {
-			// If we're forced to serialize the streams and we have multiple
-			// result routers, we have to use a slower serial unordered sync.
-			proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_SERIAL_UNORDERED
-		} else {
-			proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_PARALLEL_UNORDERED
-		}
 	}
 
 	for _, resultProc := range resultRouters {
@@ -384,7 +348,7 @@ func (p *PhysicalPlan) AddSingleGroupStage(
 		Spec: execinfrapb.ProcessorSpec{
 			Input: []execinfrapb.InputSyncSpec{{
 				// The other fields will be filled in by mergeResultStreams.
-				ColumnTypes: p.GetResultTypes(),
+				ColumnTypes: p.ResultTypes,
 			}},
 			Core: core,
 			Post: post,
@@ -394,8 +358,7 @@ func (p *PhysicalPlan) AddSingleGroupStage(
 			// We're planning a single processor on the node nodeID, so we'll
 			// have a remote processor only when the node is different from the
 			// gateway.
-			StageID:     p.NewStage(nodeID != p.GatewayNodeID, false /* allowPartialDistribution */),
-			ResultTypes: outputTypes,
+			StageID: p.NewStage(nodeID != p.GatewayNodeID),
 		},
 	}
 
@@ -408,6 +371,7 @@ func (p *PhysicalPlan) AddSingleGroupStage(
 	p.ResultRouters = p.ResultRouters[:1]
 	p.ResultRouters[0] = pIdx
 
+	p.ResultTypes = outputTypes
 	p.MergeOrdering = execinfrapb.Ordering{}
 }
 
@@ -423,16 +387,12 @@ func (p *PhysicalPlan) EnsureSingleStreamOnGateway() {
 			p.GatewayNodeID,
 			execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
 			execinfrapb.PostProcessSpec{},
-			p.GetResultTypes(),
+			p.ResultTypes,
 		)
 		if len(p.ResultRouters) != 1 || p.Processors[p.ResultRouters[0]].Node != p.GatewayNodeID {
 			panic("ensuring a single stream on the gateway failed")
 		}
 	}
-	// We now must have a single stream in the whole physical plan, so there is no
-	// ordering to be maintained for the merge of multiple streams. This also
-	// adheres to the comment on p.MergeOrdering.
-	p.MergeOrdering = execinfrapb.Ordering{}
 }
 
 // CheckLastStagePost checks that the processors of the last stage of the
@@ -444,7 +404,8 @@ func (p *PhysicalPlan) CheckLastStagePost() error {
 	// verify this assumption.
 	for i := 1; i < len(p.ResultRouters); i++ {
 		pi := &p.Processors[p.ResultRouters[i]].Spec.Post
-		if pi.Projection != post.Projection ||
+		if pi.Filter != post.Filter ||
+			pi.Projection != post.Projection ||
 			len(pi.OutputColumns) != len(post.OutputColumns) ||
 			len(pi.RenderExprs) != len(post.RenderExprs) {
 			return errors.Errorf("inconsistent post-processing: %v vs %v", post, pi)
@@ -479,8 +440,8 @@ func (p *PhysicalPlan) GetLastStagePost() execinfrapb.PostProcessSpec {
 func (p *PhysicalPlan) SetLastStagePost(post execinfrapb.PostProcessSpec, outputTypes []*types.T) {
 	for _, pIdx := range p.ResultRouters {
 		p.Processors[pIdx].Spec.Post = post
-		p.Processors[pIdx].Spec.ResultTypes = outputTypes
 	}
+	p.ResultTypes = outputTypes
 }
 
 func isIdentityProjection(columns []uint32, numExistingCols int) bool {
@@ -496,27 +457,47 @@ func isIdentityProjection(columns []uint32, numExistingCols int) bool {
 }
 
 // AddProjection applies a projection to a plan. The new plan outputs the
-// columns of the old plan as listed in the slice. newMergeOrdering must refer
-// to the columns **after** the projection is applied.
+// columns of the old plan as listed in the slice. The Ordering is updated;
+// columns in the ordering are added to the projection as needed.
 //
 // The PostProcessSpec may not be updated if the resulting projection keeps all
 // the columns in their original order.
 //
 // Note: the columns slice is relinquished to this function, which can modify it
 // or use it directly in specs.
-func (p *PhysicalPlan) AddProjection(columns []uint32, newMergeOrdering execinfrapb.Ordering) {
-	// Set the merge ordering early since we might short-circuit.
-	p.SetMergeOrdering(newMergeOrdering)
-
+func (p *PhysicalPlan) AddProjection(columns []uint32) {
 	// If the projection we are trying to apply projects every column, don't
 	// update the spec.
-	if isIdentityProjection(columns, len(p.GetResultTypes())) {
+	if isIdentityProjection(columns, len(p.ResultTypes)) {
 		return
+	}
+
+	// Update the ordering.
+	if len(p.MergeOrdering.Columns) > 0 {
+		newOrdering := make([]execinfrapb.Ordering_Column, len(p.MergeOrdering.Columns))
+		for i, c := range p.MergeOrdering.Columns {
+			// Look for the column in the new projection.
+			found := -1
+			for j, projCol := range columns {
+				if projCol == c.ColIdx {
+					found = j
+				}
+			}
+			if found == -1 {
+				// We have a column that is not in the projection but will be necessary
+				// later when the streams are merged; add it.
+				found = len(columns)
+				columns = append(columns, c.ColIdx)
+			}
+			newOrdering[i].ColIdx = uint32(found)
+			newOrdering[i].Direction = c.Direction
+		}
+		p.MergeOrdering.Columns = newOrdering
 	}
 
 	newResultTypes := make([]*types.T, len(columns))
 	for i, c := range columns {
-		newResultTypes[i] = p.GetResultTypes()[c]
+		newResultTypes[i] = p.ResultTypes[c]
 	}
 
 	post := p.GetLastStagePost()
@@ -562,21 +543,17 @@ func exprColumn(expr tree.TypedExpr, indexVarMap []int) (int, bool) {
 // plan. The rendering is achieved either through an adjustment on the last
 // stage post-process spec, or via a new stage.
 //
-// newMergeOrdering must refer to the columns **after** the rendering is
-// applied.
+// The Ordering is updated; columns in the ordering are added to the render
+// expressions as necessary.
 //
 // See MakeExpression for a description of indexVarMap.
 func (p *PhysicalPlan) AddRendering(
-	exprs []tree.TypedExpr,
-	exprCtx ExprContext,
-	indexVarMap []int,
-	outTypes []*types.T,
-	newMergeOrdering execinfrapb.Ordering,
+	exprs []tree.TypedExpr, exprCtx ExprContext, indexVarMap []int, outTypes []*types.T,
 ) error {
 	// First check if we need an Evaluator, or we are just shuffling values. We
 	// also check if the rendering is a no-op ("identity").
 	needRendering := false
-	identity := len(exprs) == len(p.GetResultTypes())
+	identity := (len(exprs) == len(p.ResultTypes))
 
 	for exprIdx, e := range exprs {
 		varIdx, ok := exprColumn(e, indexVarMap)
@@ -602,7 +579,7 @@ func (p *PhysicalPlan) AddRendering(
 			}
 			cols[i] = uint32(streamCol)
 		}
-		p.AddProjection(cols, newMergeOrdering)
+		p.AddProjection(cols)
 		return nil
 	}
 
@@ -615,7 +592,7 @@ func (p *PhysicalPlan) AddRendering(
 		p.AddNoGroupingStage(
 			execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
 			post,
-			p.GetResultTypes(),
+			p.ResultTypes,
 			p.MergeOrdering,
 		)
 	}
@@ -632,7 +609,46 @@ func (p *PhysicalPlan) AddRendering(
 			return err
 		}
 	}
-	p.SetMergeOrdering(newMergeOrdering)
+
+	if len(p.MergeOrdering.Columns) > 0 {
+		outTypes = outTypes[:len(outTypes):len(outTypes)]
+		newOrdering := make([]execinfrapb.Ordering_Column, len(p.MergeOrdering.Columns))
+		for i, c := range p.MergeOrdering.Columns {
+			found := -1
+			// Look for the column in the new projection.
+			for exprIdx, e := range exprs {
+				if varIdx, ok := exprColumn(e, indexVarMap); ok && varIdx == int(c.ColIdx) {
+					found = exprIdx
+					break
+				}
+			}
+			if found == -1 {
+				// We have a column that is not being rendered but will be necessary
+				// later when the streams are merged; add it.
+
+				// The new expression refers to column post.OutputColumns[c.ColIdx].
+				internalColIdx := c.ColIdx
+				if post.Projection {
+					internalColIdx = post.OutputColumns[internalColIdx]
+				}
+				newExpr, err := MakeExpression(tree.NewTypedOrdinalReference(
+					int(internalColIdx),
+					p.ResultTypes[c.ColIdx]),
+					exprCtx, nil /* indexVarMap */)
+				if err != nil {
+					return err
+				}
+
+				found = len(post.RenderExprs)
+				post.RenderExprs = append(post.RenderExprs, newExpr)
+				outTypes = append(outTypes, p.ResultTypes[c.ColIdx])
+			}
+			newOrdering[i].ColIdx = uint32(found)
+			newOrdering[i].Direction = c.Direction
+		}
+		p.MergeOrdering.Columns = newOrdering
+	}
+
 	post.Projection = false
 	post.OutputColumns = nil
 	p.SetLastStagePost(post, outTypes)
@@ -707,19 +723,78 @@ func (p *PhysicalPlan) AddFilter(
 	if expr == nil {
 		return errors.Errorf("nil filter")
 	}
-	filter, err := MakeExpression(expr, exprCtx, indexVarMap)
+	post := p.GetLastStagePost()
+	if len(post.RenderExprs) > 0 || post.Offset != 0 || post.Limit != 0 {
+		// The last stage contains render expressions or a limit. The filter refers
+		// to the output as described by the existing spec, so we need to add
+		// another "no-op" stage to which to attach the filter.
+		//
+		// In general, we might be able to push the filter "through" the rendering;
+		// but the higher level planning code should figure this out when
+		// propagating filters.
+		post = execinfrapb.PostProcessSpec{}
+		p.AddNoGroupingStage(
+			execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
+			post,
+			p.ResultTypes,
+			p.MergeOrdering,
+		)
+	}
+
+	compositeMap := indexVarMap
+	if post.Projection {
+		compositeMap = reverseProjection(post.OutputColumns, indexVarMap)
+	}
+	filter, err := MakeExpression(expr, exprCtx, compositeMap)
 	if err != nil {
 		return err
 	}
-	p.AddNoGroupingStage(
-		execinfrapb.ProcessorCoreUnion{Filterer: &execinfrapb.FiltererSpec{
-			Filter: filter,
-		}},
-		execinfrapb.PostProcessSpec{},
-		p.GetResultTypes(),
-		p.MergeOrdering,
-	)
+	if !post.Filter.Empty() {
+		// LocalExpr is usually set, but it can be left nil in tests, so we
+		// need to perform the nil check.
+		if post.Filter.LocalExpr != nil && filter.LocalExpr != nil {
+			filter.LocalExpr = tree.NewTypedAndExpr(
+				post.Filter.LocalExpr,
+				filter.LocalExpr,
+			)
+		}
+		// Expr is set for all distributed plans (as well as in some tests).
+		if post.Filter.Expr != "" && filter.Expr != "" {
+			filter.Expr = fmt.Sprintf("(%s) AND (%s)", post.Filter.Expr, filter.Expr)
+		}
+	}
+	for _, pIdx := range p.ResultRouters {
+		p.Processors[pIdx].Spec.Post.Filter = filter
+	}
 	return nil
+}
+
+// emptyPlan updates p in-place with a plan consisting of a single processor on
+// the gateway that generates no rows; the output stream has the same types as
+// p produces.
+func (p *PhysicalPlan) emptyPlan() {
+	s := execinfrapb.ValuesCoreSpec{
+		Columns: make([]execinfrapb.DatumInfo, len(p.ResultTypes)),
+	}
+	for i, t := range p.ResultTypes {
+		s.Columns[i].Encoding = descpb.DatumEncoding_VALUE
+		s.Columns[i].Type = t
+	}
+
+	*p = PhysicalPlan{
+		Processors: []Processor{{
+			Node: p.GatewayNodeID,
+			Spec: execinfrapb.ProcessorSpec{
+				Core:   execinfrapb.ProcessorCoreUnion{Values: &s},
+				Output: make([]execinfrapb.OutputRouterSpec, 1),
+			},
+		}},
+		ResultRouters: []ProcessorIdx{0},
+		ResultTypes:   p.ResultTypes,
+		ResultColumns: p.ResultColumns,
+		GatewayNodeID: p.GatewayNodeID,
+		Distribution:  LocalPlan,
+	}
 }
 
 // AddLimit adds a limit and/or offset to the results of the current plan. If
@@ -743,6 +818,10 @@ func (p *PhysicalPlan) AddLimit(count int64, offset int64, exprCtx ExprContext) 
 	// instead of completely eliding the 0-limit plan.
 	limitZero := false
 	if count == 0 {
+		if len(p.LocalProcessors) == 0 {
+			p.emptyPlan()
+			return nil
+		}
 		count = 1
 		limitZero = true
 	}
@@ -753,42 +832,42 @@ func (p *PhysicalPlan) AddLimit(count int64, offset int64, exprCtx ExprContext) 
 		// SELECT OFFSET 10+5 LIMIT min(1000, 20).
 		post := p.GetLastStagePost()
 		if offset != 0 {
-			switch {
-			case post.Limit > 0 && post.Limit <= uint64(offset):
+			if post.Limit > 0 && post.Limit <= uint64(offset) {
 				// The previous limit is not enough to reach the offset; we know there
 				// will be no results. For example:
 				//   SELECT * FROM (SELECT * FROM .. LIMIT 5) OFFSET 10
-				count = 1
-				limitZero = true
-
-			case post.Offset > math.MaxUint64-uint64(offset):
-				// The sum of the offsets would overflow. There is no way we'll ever
-				// generate enough rows.
-				count = 1
-				limitZero = true
-
-			default:
-				// If we're collapsing an offset into a stage that already has a limit,
-				// we have to be careful, since offsets always are applied first, before
-				// limits. So, if the last stage already has a limit, we subtract the
-				// offset from that limit to preserve correctness.
-				//
-				// As an example, consider the requirement of applying an offset of 3 on
-				// top of a limit of 10. In this case, we need to emit 7 result rows. But
-				// just propagating the offset blindly would produce 10 result rows, an
-				// incorrect result.
-				post.Offset += uint64(offset)
-				if post.Limit > 0 {
-					// Note that this can't fall below 1 - we would have already caught this
-					// case above.
-					post.Limit -= uint64(offset)
+				// TODO(radu): perform this optimization while propagating filters
+				// instead of having to detect it here.
+				if len(p.LocalProcessors) == 0 {
+					// Even though we know there will be no results, we don't elide the
+					// plan if there are local processors. See comment above limitZero
+					// for why.
+					p.emptyPlan()
+					return nil
 				}
+				count = 1
+				limitZero = true
+			}
+			// If we're collapsing an offset into a stage that already has a limit,
+			// we have to be careful, since offsets always are applied first, before
+			// limits. So, if the last stage already has a limit, we subtract the
+			// offset from that limit to preserve correctness.
+			//
+			// As an example, consider the requirement of applying an offset of 3 on
+			// top of a limit of 10. In this case, we need to emit 7 result rows. But
+			// just propagating the offset blindly would produce 10 result rows, an
+			// incorrect result.
+			post.Offset += uint64(offset)
+			if post.Limit > 0 {
+				// Note that this can't fall below 0 - we would have already caught this
+				// case above and returned an empty plan.
+				post.Limit -= uint64(offset)
 			}
 		}
 		if count != math.MaxInt64 && (post.Limit == 0 || post.Limit > uint64(count)) {
 			post.Limit = uint64(count)
 		}
-		p.SetLastStagePost(post, p.GetResultTypes())
+		p.SetLastStagePost(post, p.ResultTypes)
 		if limitZero {
 			if err := p.AddFilter(tree.DBoolFalse, exprCtx, nil); err != nil {
 				return err
@@ -807,7 +886,7 @@ func (p *PhysicalPlan) AddLimit(count int64, offset int64, exprCtx ExprContext) 
 		localLimit := uint64(count + offset)
 		if post.Limit == 0 || post.Limit > localLimit {
 			post.Limit = localLimit
-			p.SetLastStagePost(post, p.GetResultTypes())
+			p.SetLastStagePost(post, p.ResultTypes)
 		}
 	}
 
@@ -821,7 +900,7 @@ func (p *PhysicalPlan) AddLimit(count int64, offset int64, exprCtx ExprContext) 
 		p.GatewayNodeID,
 		execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
 		post,
-		p.GetResultTypes(),
+		p.ResultTypes,
 	)
 	if limitZero {
 		if err := p.AddFilter(tree.DBoolFalse, exprCtx, nil); err != nil {
@@ -847,11 +926,13 @@ func (p *PhysicalPlan) PopulateEndpoints() {
 		} else {
 			endpoint.Type = execinfrapb.StreamEndpointSpec_REMOTE
 		}
+		p2.Spec.Input[s.DestInput].Streams = append(p2.Spec.Input[s.DestInput].Streams, endpoint)
 		if endpoint.Type == execinfrapb.StreamEndpointSpec_REMOTE {
-			endpoint.OriginNodeID = p1.Node
+			if !p.remotePlan {
+				p.remotePlan = true
+			}
 			endpoint.TargetNodeID = p2.Node
 		}
-		p2.Spec.Input[s.DestInput].Streams = append(p2.Spec.Input[s.DestInput].Streams, endpoint)
 
 		router := &p1.Spec.Output[0]
 		// We are about to put this stream on the len(router.Streams) position in
@@ -872,8 +953,12 @@ func (p *PhysicalPlan) PopulateEndpoints() {
 //
 // gateway is the current node's NodeID.
 func (p *PhysicalPlan) GenerateFlowSpecs() map[roachpb.NodeID]*execinfrapb.FlowSpec {
-	flowID := execinfrapb.FlowID{
-		UUID: p.FlowID,
+	// Only generate a flow ID for a remote plan because it will need to be
+	// referenced by remote nodes when connecting streams. This id generation is
+	// skipped for performance reasons on local flows.
+	flowID := execinfrapb.FlowID{}
+	if p.remotePlan {
+		flowID.UUID = uuid.MakeV4()
 	}
 	flows := make(map[roachpb.NodeID]*execinfrapb.FlowSpec, 1)
 
@@ -892,22 +977,89 @@ func (p *PhysicalPlan) GenerateFlowSpecs() map[roachpb.NodeID]*execinfrapb.FlowS
 // plans.
 func (p *PhysicalPlan) SetRowEstimates(left, right *PhysicalPlan) {
 	p.TotalEstimatedScannedRows = left.TotalEstimatedScannedRows + right.TotalEstimatedScannedRows
+	p.MaxEstimatedRowCount = left.MaxEstimatedRowCount
+	if right.MaxEstimatedRowCount > p.MaxEstimatedRowCount {
+		p.MaxEstimatedRowCount = right.MaxEstimatedRowCount
+	}
 }
 
-// MergePlans is used when merging two plans into a new plan. All plans must
-// share the same PlanInfrastructure.
+// MergePlans merges the processors and streams of two plans into a new plan.
+// The result routers for each side are returned (they point at processors in
+// the merged plan).
 func MergePlans(
 	mergedPlan *PhysicalPlan,
 	left, right *PhysicalPlan,
 	leftPlanDistribution, rightPlanDistribution PlanDistribution,
-	allowPartialDistribution bool,
-) {
-	if mergedPlan.PhysicalInfrastructure != left.PhysicalInfrastructure ||
-		mergedPlan.PhysicalInfrastructure != right.PhysicalInfrastructure {
-		panic(errors.AssertionFailedf("can only merge plans that share infrastructure"))
+) (leftRouters []ProcessorIdx, rightRouters []ProcessorIdx) {
+	mergedPlan.Processors = append(left.Processors, right.Processors...)
+	rightProcStart := ProcessorIdx(len(left.Processors))
+
+	mergedPlan.Streams = append(left.Streams, right.Streams...)
+
+	// Update the processor indices in the right streams.
+	for i := len(left.Streams); i < len(mergedPlan.Streams); i++ {
+		mergedPlan.Streams[i].SourceProcessor += rightProcStart
+		mergedPlan.Streams[i].DestProcessor += rightProcStart
 	}
+
+	// Renumber the stages from the right plan.
+	for i := rightProcStart; int(i) < len(mergedPlan.Processors); i++ {
+		s := &mergedPlan.Processors[i].Spec
+		if s.StageID != 0 {
+			s.StageID += left.stageCounter
+		}
+	}
+	mergedPlan.stageCounter = left.stageCounter + right.stageCounter
+
+	mergedPlan.LocalProcessors = append(left.LocalProcessors, right.LocalProcessors...)
+	mergedPlan.LocalProcessorIndexes = append(left.LocalProcessorIndexes, right.LocalProcessorIndexes...)
+	// Update the local processor indices in the right streams.
+	for i := len(left.LocalProcessorIndexes); i < len(mergedPlan.LocalProcessorIndexes); i++ {
+		*mergedPlan.LocalProcessorIndexes[i] += uint32(len(left.LocalProcessorIndexes))
+	}
+
+	leftRouters = left.ResultRouters
+	rightRouters = append([]ProcessorIdx(nil), right.ResultRouters...)
+	// Update the processor indices in the right routers.
+	for i := range rightRouters {
+		rightRouters[i] += rightProcStart
+	}
+
 	mergedPlan.SetRowEstimates(left, right)
-	mergedPlan.Distribution = leftPlanDistribution.compose(rightPlanDistribution, allowPartialDistribution)
+	mergedPlan.Distribution = leftPlanDistribution.compose(rightPlanDistribution)
+	return leftRouters, rightRouters
+}
+
+// MergeResultTypes reconciles the ResultTypes between two plans. It enforces
+// that each pair of ColumnTypes must either match or be null, in which case the
+// non-null type is used. This logic is necessary for cases like
+// SELECT NULL UNION SELECT 1.
+func MergeResultTypes(left, right []*types.T) ([]*types.T, error) {
+	if len(left) != len(right) {
+		return nil, errors.Errorf("ResultTypes length mismatch: %d and %d", len(left), len(right))
+	}
+	merged := make([]*types.T, len(left))
+	for i := range left {
+		leftType, rightType := left[i], right[i]
+		if rightType.Family() == types.UnknownFamily {
+			merged[i] = leftType
+		} else if leftType.Family() == types.UnknownFamily {
+			merged[i] = rightType
+		} else if equivalentTypes(leftType, rightType) {
+			merged[i] = leftType
+		} else {
+			return nil, errors.Errorf(
+				"conflicting ColumnTypes: %s and %s", leftType.DebugString(), rightType.DebugString())
+		}
+	}
+	return merged, nil
+}
+
+// equivalentType checks whether a column type is equivalent to another for the
+// purpose of UNION. Precision, Width, Oid, etc. do not affect the merging of
+// values.
+func equivalentTypes(c, other *types.T) bool {
+	return c.Equivalent(other)
 }
 
 // AddJoinStage adds join processors at each of the specified nodes, and wires
@@ -920,7 +1072,6 @@ func (p *PhysicalPlan) AddJoinStage(
 	leftTypes, rightTypes []*types.T,
 	leftMergeOrd, rightMergeOrd execinfrapb.Ordering,
 	leftRouters, rightRouters []ProcessorIdx,
-	resultTypes []*types.T,
 ) {
 	pIdxStart := ProcessorIdx(len(p.Processors))
 	stageID := p.NewStageOnNodes(nodes)
@@ -933,12 +1084,11 @@ func (p *PhysicalPlan) AddJoinStage(
 		proc := Processor{
 			Node: n,
 			Spec: execinfrapb.ProcessorSpec{
-				Input:       inputs,
-				Core:        core,
-				Post:        post,
-				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
-				StageID:     stageID,
-				ResultTypes: resultTypes,
+				Input:   inputs,
+				Core:    core,
+				Post:    post,
+				Output:  []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
+				StageID: stageID,
 			},
 		}
 		p.Processors = append(p.Processors, proc)
@@ -988,7 +1138,7 @@ func (p *PhysicalPlan) AddStageOnNodes(
 	core execinfrapb.ProcessorCoreUnion,
 	post execinfrapb.PostProcessSpec,
 	hashCols []uint32,
-	inputTypes, resultTypes []*types.T,
+	types []*types.T,
 	mergeOrd execinfrapb.Ordering,
 	routers []ProcessorIdx,
 ) {
@@ -1000,13 +1150,12 @@ func (p *PhysicalPlan) AddStageOnNodes(
 			Node: n,
 			Spec: execinfrapb.ProcessorSpec{
 				Input: []execinfrapb.InputSyncSpec{
-					{ColumnTypes: inputTypes},
+					{ColumnTypes: types},
 				},
-				Core:        core,
-				Post:        post,
-				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
-				StageID:     newStageID,
-				ResultTypes: resultTypes,
+				Core:    core,
+				Post:    post,
+				Output:  []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
+				StageID: newStageID,
 			},
 		}
 		p.AddProcessor(proc)
@@ -1049,7 +1198,6 @@ func (p *PhysicalPlan) AddDistinctSetOpStage(
 	leftTypes, rightTypes []*types.T,
 	leftMergeOrd, rightMergeOrd execinfrapb.Ordering,
 	leftRouters, rightRouters []ProcessorIdx,
-	resultTypes []*types.T,
 ) {
 	// Create distinct stages for the left and right sides, where left and right
 	// sources are sent by hash to the node which will contain the join processor.
@@ -1060,7 +1208,7 @@ func (p *PhysicalPlan) AddDistinctSetOpStage(
 	distinctProcs := make(map[roachpb.NodeID][]ProcessorIdx)
 	p.AddStageOnNodes(
 		nodes, distinctCores[0], execinfrapb.PostProcessSpec{}, eqCols,
-		leftTypes, leftTypes, leftMergeOrd, leftRouters,
+		leftTypes, leftMergeOrd, leftRouters,
 	)
 	for _, leftDistinctProcIdx := range p.ResultRouters {
 		node := p.Processors[leftDistinctProcIdx].Node
@@ -1068,7 +1216,7 @@ func (p *PhysicalPlan) AddDistinctSetOpStage(
 	}
 	p.AddStageOnNodes(
 		nodes, distinctCores[1], execinfrapb.PostProcessSpec{}, eqCols,
-		rightTypes, rightTypes, rightMergeOrd, rightRouters,
+		rightTypes, rightMergeOrd, rightRouters,
 	)
 	for _, rightDistinctProcIdx := range p.ResultRouters {
 		node := p.Processors[rightDistinctProcIdx].Node
@@ -1088,11 +1236,10 @@ func (p *PhysicalPlan) AddDistinctSetOpStage(
 					{ColumnTypes: leftTypes},
 					{ColumnTypes: rightTypes},
 				},
-				Core:        joinCore,
-				Post:        post,
-				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
-				StageID:     joinStageID,
-				ResultTypes: resultTypes,
+				Core:    joinCore,
+				Post:    post,
+				Output:  []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
+				StageID: joinStageID,
 			},
 		}
 		pIdx := p.AddProcessor(proc)
@@ -1118,9 +1265,7 @@ func (p *PhysicalPlan) AddDistinctSetOpStage(
 // TODO(radu): a no-op processor is not ideal if the next processor is on the
 // same node. A fix for that is much more complicated, requiring remembering
 // extra state in the PhysicalPlan.
-func (p *PhysicalPlan) EnsureSingleStreamPerNode(
-	forceSerialization bool, post execinfrapb.PostProcessSpec,
-) {
+func (p *PhysicalPlan) EnsureSingleStreamPerNode(forceSerialization bool) {
 	// Fast path - check if we need to do anything.
 	var nodes util.FastIntSet
 	var foundDuplicates bool
@@ -1163,12 +1308,10 @@ func (p *PhysicalPlan) EnsureSingleStreamPerNode(
 			Spec: execinfrapb.ProcessorSpec{
 				Input: []execinfrapb.InputSyncSpec{{
 					// The other fields will be filled in by MergeResultStreams.
-					ColumnTypes: p.GetResultTypes(),
+					ColumnTypes: p.ResultTypes,
 				}},
-				Post:        post,
-				Core:        execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
-				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
-				ResultTypes: p.GetResultTypes(),
+				Core:   execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
+				Output: []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
 			},
 		}
 		mergedProcIdx := p.AddProcessor(proc)
@@ -1181,12 +1324,10 @@ func (p *PhysicalPlan) EnsureSingleStreamPerNode(
 // Note that if the last stage consists of a single processor planned on a
 // remote node, such stage is considered distributed.
 func (p *PhysicalPlan) GetLastStageDistribution() PlanDistribution {
-	for i := range p.ResultRouters {
-		if p.Processors[p.ResultRouters[i]].Node != p.GatewayNodeID {
-			return FullyDistributedPlan
-		}
+	if len(p.ResultRouters) == 1 && p.Processors[p.ResultRouters[0]].Node == p.GatewayNodeID {
+		return LocalPlan
 	}
-	return LocalPlan
+	return FullyDistributedPlan
 }
 
 // IsLastStageDistributed returns whether the last stage of processors is
@@ -1239,18 +1380,9 @@ func (a PlanDistribution) String() string {
 
 // compose returns the distribution indicator of a plan given indicators for
 // two parts of it.
-func (a PlanDistribution) compose(
-	b PlanDistribution, allowPartialDistribution bool,
-) PlanDistribution {
-	if allowPartialDistribution && a != b {
+func (a PlanDistribution) compose(b PlanDistribution) PlanDistribution {
+	if a != b {
 		return PartiallyDistributedPlan
 	}
-	// TODO(yuzefovich): this is not quite correct - using
-	// PartiallyDistributedPlan would make more sense when a != b, but that
-	// would lead to confusing to users "distribution: partial" in the EXPLAIN
-	// output, so for now we have this hack.
-	if a != LocalPlan || b != LocalPlan {
-		return FullyDistributedPlan
-	}
-	return LocalPlan
+	return a
 }

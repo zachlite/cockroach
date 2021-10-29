@@ -17,14 +17,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -194,7 +193,7 @@ func (n FiltersExpr) IsFalse() bool {
 
 // OuterCols returns the set of outer columns needed by any of the filter
 // condition expressions.
-func (n FiltersExpr) OuterCols() opt.ColSet {
+func (n FiltersExpr) OuterCols(mem *Memo) opt.ColSet {
 	var colSet opt.ColSet
 	for i := range n {
 		colSet.UnionWith(n[i].ScalarProps().OuterCols)
@@ -202,10 +201,10 @@ func (n FiltersExpr) OuterCols() opt.ColSet {
 	return colSet
 }
 
-// Sort sorts the FilterItems in n by the ranks of the expressions.
+// Sort sorts the FilterItems in n by the IDs of the expression.
 func (n *FiltersExpr) Sort() {
 	sort.Slice(*n, func(i, j int) bool {
-		return (*n)[i].Condition.Rank() < (*n)[j].Condition.Rank()
+		return (*n)[i].Condition.(opt.ScalarExpr).ID() < (*n)[j].Condition.(opt.ScalarExpr).ID()
 	})
 }
 
@@ -247,26 +246,23 @@ func (n FiltersExpr) RemoveFiltersItem(search *FiltersItem) FiltersExpr {
 	panic(errors.AssertionFailedf("item to remove is not in the list: %v", search))
 }
 
-// Difference returns a new list of filters containing the filters of n that are
-// not in other. If other is empty, n is returned.
-func (n FiltersExpr) Difference(other FiltersExpr) FiltersExpr {
-	if len(other) == 0 {
-		return n
-	}
-	newFilters := make(FiltersExpr, 0, len(n))
-	for i := range n {
+// RemoveCommonFilters removes the filters found in other from n.
+func (n *FiltersExpr) RemoveCommonFilters(other FiltersExpr) {
+	// TODO(ridwanmsharif): Faster intersection using a map
+	common := (*n)[:0]
+	for _, filter := range *n {
 		found := false
-		for j := range other {
-			if n[i].Condition == other[j].Condition {
+		for _, otherFilter := range other {
+			if filter.Condition == otherFilter.Condition {
 				found = true
 				break
 			}
 		}
 		if !found {
-			newFilters = append(newFilters, n[i])
+			common = append(common, filter)
 		}
 	}
-	return newFilters
+	*n = common
 }
 
 // OutputCols returns the set of columns constructed by the Aggregations
@@ -350,27 +346,16 @@ type ScanFlags struct {
 	// this table.
 	NoIndexJoin bool
 
-	// NoZigzagJoin disallows use of a zigzag join for scanning this table.
-	NoZigzagJoin bool
-
-	// NoFullScan disallows use of a full scan for scanning this table.
-	NoFullScan bool
-
 	// ForceIndex forces the use of a specific index (specified in Index).
 	// ForceIndex and NoIndexJoin cannot both be set at the same time.
-	ForceIndex  bool
-	ForceZigzag bool
-	Direction   tree.Direction
-	Index       int
-
-	// ZigzagIndexes makes planner prefer a zigzag with particular indexes.
-	// ForceZigzag must also be true.
-	ZigzagIndexes util.FastIntSet
+	ForceIndex bool
+	Direction  tree.Direction
+	Index      int
 }
 
 // Empty returns true if there are no flags set.
 func (sf *ScanFlags) Empty() bool {
-	return *sf == ScanFlags{}
+	return !sf.NoIndexJoin && !sf.ForceIndex
 }
 
 // JoinFlags stores restrictions on the join execution method, derived from
@@ -380,7 +365,7 @@ func (sf *ScanFlags) Empty() bool {
 //
 // The zero value indicates that any join is allowed and there are no special
 // preferences.
-type JoinFlags uint16
+type JoinFlags uint8
 
 // Each flag indicates if a certain type of join is disallowed.
 const (
@@ -405,14 +390,6 @@ const (
 	// table is on the right side.
 	DisallowLookupJoinIntoRight
 
-	// DisallowInvertedJoinIntoLeft corresponds to an inverted join where the
-	// inverted index is on the left side.
-	DisallowInvertedJoinIntoLeft
-
-	// DisallowInvertedJoinIntoRight corresponds to an inverted join where the
-	// inverted index is on the right side.
-	DisallowInvertedJoinIntoRight
-
 	// PreferLookupJoinIntoLeft reduces the cost of a lookup join where the lookup
 	// table is on the left side.
 	PreferLookupJoinIntoLeft
@@ -427,9 +404,7 @@ const (
 		DisallowHashJoinStoreRight |
 		DisallowMergeJoin |
 		DisallowLookupJoinIntoLeft |
-		DisallowLookupJoinIntoRight |
-		DisallowInvertedJoinIntoLeft |
-		DisallowInvertedJoinIntoRight)
+		DisallowLookupJoinIntoRight)
 
 	// AllowOnlyHashJoinStoreRight has all "disallow" flags set except
 	// DisallowHashJoinStoreRight.
@@ -439,22 +414,16 @@ const (
 	// DisallowLookupJoinIntoRight.
 	AllowOnlyLookupJoinIntoRight JoinFlags = disallowAll ^ DisallowLookupJoinIntoRight
 
-	// AllowOnlyInvertedJoinIntoRight has all "disallow" flags set except
-	// DisallowInvertedJoinIntoRight.
-	AllowOnlyInvertedJoinIntoRight JoinFlags = disallowAll ^ DisallowInvertedJoinIntoRight
-
 	// AllowOnlyMergeJoin has all "disallow" flags set except DisallowMergeJoin.
 	AllowOnlyMergeJoin JoinFlags = disallowAll ^ DisallowMergeJoin
 )
 
 var joinFlagStr = map[JoinFlags]string{
-	DisallowHashJoinStoreLeft:     "hash join (store left side)",
-	DisallowHashJoinStoreRight:    "hash join (store right side)",
-	DisallowMergeJoin:             "merge join",
-	DisallowLookupJoinIntoLeft:    "lookup join (into left side)",
-	DisallowLookupJoinIntoRight:   "lookup join (into right side)",
-	DisallowInvertedJoinIntoLeft:  "inverted join (into left side)",
-	DisallowInvertedJoinIntoRight: "inverted join (into right side)",
+	DisallowHashJoinStoreLeft:   "hash join (store left side)",
+	DisallowHashJoinStoreRight:  "hash join (store right side)",
+	DisallowMergeJoin:           "merge join",
+	DisallowLookupJoinIntoLeft:  "lookup join (into left side)",
+	DisallowLookupJoinIntoRight: "lookup join (into right side)",
 
 	PreferLookupJoinIntoLeft:  "lookup join (into left side)",
 	PreferLookupJoinIntoRight: "lookup join (into right side)",
@@ -486,8 +455,6 @@ func (jf JoinFlags) String() string {
 		b.WriteString("force hash join (store right side)")
 	case AllowOnlyLookupJoinIntoRight:
 		b.WriteString("force lookup join (into right side)")
-	case AllowOnlyInvertedJoinIntoRight:
-		b.WriteString("force inverted join (into right side)")
 	case AllowOnlyMergeJoin:
 		b.WriteString("force merge join")
 
@@ -646,8 +613,7 @@ func (f *WindowFrame) String() string {
 func (s *ScanPrivate) IsCanonical() bool {
 	return s.Index == cat.PrimaryIndex &&
 		s.Constraint == nil &&
-		s.HardLimit == 0 &&
-		!s.LocalityOptimized
+		s.HardLimit == 0
 }
 
 // IsUnfiltered returns true if the ScanPrivate will produce all rows in the
@@ -657,14 +623,6 @@ func (s *ScanPrivate) IsUnfiltered(md *opt.Metadata) bool {
 		s.InvertedConstraint == nil &&
 		s.HardLimit == 0 &&
 		s.PartialIndexPredicate(md) == nil
-}
-
-// IsFullIndexScan returns true if the ScanPrivate will produce all rows in the
-// index.
-func (s *ScanPrivate) IsFullIndexScan(md *opt.Metadata) bool {
-	return (s.Constraint == nil || s.Constraint.IsUnconstrained()) &&
-		s.InvertedConstraint == nil &&
-		s.HardLimit == 0
 }
 
 // IsLocking returns true if the ScanPrivate is configured to use a row-level
@@ -680,27 +638,15 @@ func (s *ScanPrivate) IsLocking() bool {
 // index, nil is returned.
 func (s *ScanPrivate) PartialIndexPredicate(md *opt.Metadata) FiltersExpr {
 	tabMeta := md.TableMeta(s.Table)
-	p, ok := tabMeta.PartialIndexPredicate(s.Index)
+	pred, ok := PartialIndexPredicate(tabMeta, s.Index)
 	if !ok {
 		// The index is not a partial index.
 		return nil
 	}
-	return *p.(*FiltersExpr)
+	return pred
 }
 
-// SetConstraint sets the constraint in the ScanPrivate and caches the exact
-// prefix. This function should always be used instead of modifying the
-// constraint directly.
-func (s *ScanPrivate) SetConstraint(evalCtx *tree.EvalContext, c *constraint.Constraint) {
-	s.Constraint = c
-	if c == nil {
-		s.ExactPrefix = 0
-	} else {
-		s.ExactPrefix = c.ExactPrefix(evalCtx)
-	}
-}
-
-// UsesPartialIndex returns true if the LookupJoinPrivate looks-up via a
+// UsesPartialIndex returns true if the the LookupJoinPrivate looks-up via a
 // partial index.
 func (lj *LookupJoinPrivate) UsesPartialIndex(md *opt.Metadata) bool {
 	_, isPartialIndex := md.Table(lj.Table).Index(lj.Index).Predicate()
@@ -817,7 +763,20 @@ func (prj *ProjectExpr) initUnexportedFields(mem *Memo) {
 			// This does not necessarily hold for "composite" types like decimals or
 			// collated strings. For example if d is a decimal, d::TEXT can have
 			// different values for equal values of d, like 1 and 1.0.
-			if !CanBeCompositeSensitive(mem.Metadata(), item.Element) {
+			//
+			// We only add the FD if composite types are not involved.
+			//
+			// TODO(radu): add an allowlist of expressions/operators that are ok, like
+			// arithmetic.
+			composite := false
+			for i, ok := from.Next(0); ok; i, ok = from.Next(i + 1) {
+				typ := mem.Metadata().ColumnMeta(i).Type
+				if colinfo.HasCompositeKeyEncoding(typ) {
+					composite = true
+					break
+				}
+			}
+			if !composite {
 				prj.internalFuncDeps.AddSynthesizedCol(from, item.Col)
 			}
 		}
@@ -893,7 +852,7 @@ func ExprIsNeverNull(e opt.ScalarExpr, notNullCols opt.ColSet) bool {
 
 	case *AndExpr, *OrExpr, *GeExpr, *GtExpr, *NeExpr, *EqExpr, *LeExpr, *LtExpr, *LikeExpr,
 		*NotLikeExpr, *ILikeExpr, *NotILikeExpr, *SimilarToExpr, *NotSimilarToExpr, *RegMatchExpr,
-		*NotRegMatchExpr, *RegIMatchExpr, *NotRegIMatchExpr, *ContainsExpr, *ContainedByExpr, *JsonExistsExpr,
+		*NotRegMatchExpr, *RegIMatchExpr, *NotRegIMatchExpr, *ContainsExpr, *JsonExistsExpr,
 		*JsonAllExistsExpr, *JsonSomeExistsExpr, *AnyScalarExpr, *BitandExpr, *BitorExpr, *BitxorExpr,
 		*PlusExpr, *MinusExpr, *MultExpr, *DivExpr, *FloorDivExpr, *ModExpr, *PowExpr, *ConcatExpr,
 		*LShiftExpr, *RShiftExpr, *WhenExpr:
@@ -953,21 +912,21 @@ func OutputColumnIsAlwaysNull(e RelExpr, col opt.ColumnID) bool {
 	return false
 }
 
-// CollectContiguousOrExprs finds all OrExprs in 'e' that are connected via
-// a parent-child relationship, and returns them in an array of ScalarExprs.
-func CollectContiguousOrExprs(e opt.ScalarExpr) []opt.ScalarExpr {
-	var disjunctions = make([]opt.ScalarExpr, 0, 2)
-	var collectDisjunctions func(e opt.ScalarExpr)
-	collectDisjunctions = func(e opt.ScalarExpr) {
-		if or, ok := e.(*OrExpr); ok {
-			collectDisjunctions(or.Left)
-			collectDisjunctions(or.Right)
-		} else {
-			disjunctions = append(disjunctions, e)
-		}
+// PartialIndexPredicate returns the FiltersExpr representing the partial index
+// predicate at the given index ordinal. If the index at the ordinal is not a
+// partial index or the predicate expression was not built for the index,
+// ok=false is returned.
+//
+// Note that TableMeta.PartialIndexPredicates is not initialized for mutation
+// queries. This function will never return ok=true in the context of a mutation.
+func PartialIndexPredicate(
+	tabMeta *opt.TableMeta, ord cat.IndexOrdinal,
+) (pred FiltersExpr, ok bool) {
+	p, ok := tabMeta.PartialIndexPredicates[ord]
+	if !ok {
+		return nil, false
 	}
-	collectDisjunctions(e)
-	return disjunctions
+	return *p.(*FiltersExpr), true
 }
 
 // FKCascades stores metadata necessary for building cascading queries.
@@ -984,18 +943,17 @@ type FKCascade struct {
 	Builder CascadeBuilder
 
 	// WithID identifies the buffer for the mutation input in the original
-	// expression tree. 0 if the cascade does not require input.
+	// expression tree.
 	WithID opt.WithID
 
 	// OldValues are column IDs from the mutation input that correspond to the
 	// old values of the modified rows. The list maps 1-to-1 to foreign key
-	// columns. Empty if the cascade does not require input.
+	// columns.
 	OldValues opt.ColList
 
 	// NewValues are column IDs from the mutation input that correspond to the
 	// new values of the modified rows. The list maps 1-to-1 to foreign key columns.
-	// It is empty if the mutation is a deletion. Empty if the cascade does not
-	// require input.
+	// It is empty if the mutation is a deletion.
 	NewValues opt.ColList
 }
 
@@ -1015,9 +973,6 @@ type CascadeBuilder interface {
 	//
 	// The method does not mutate any captured state; it is ok to call Build
 	// concurrently (e.g. if the plan it originates from is cached and reused).
-	//
-	// Some cascades (delete fast path) don't require an input binding. In that
-	// case binding is 0, bindingProps is nil, and oldValues/newValues are empty.
 	//
 	// Note: factory is always *norm.Factory; it is an interface{} only to avoid
 	// circular package dependencies.

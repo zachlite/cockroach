@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -85,7 +86,7 @@ func TestTxnWaitQueueEnableDisable(t *testing.T) {
 	}
 
 	// Queue starts enabled.
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	if !q.IsEnabled() {
 		t.Errorf("expected push txn queue is enabled")
 	}
@@ -130,6 +131,12 @@ func TestTxnWaitQueueEnableDisable(t *testing.T) {
 
 	// Now disable the queue and make sure the waiter is returned.
 	q.Clear(true /* disable */)
+	if q.IsEnabled() {
+		t.Errorf("expected queue to be disabled")
+	}
+	if err := checkAllGaugesZero(tc); err != nil {
+		t.Fatal(err.Error())
+	}
 
 	respWithErr := <-retCh
 	if respWithErr.resp != nil {
@@ -139,12 +146,6 @@ func TestTxnWaitQueueEnableDisable(t *testing.T) {
 		t.Errorf("expected nil err; got %+v", respWithErr.pErr)
 	}
 
-	if q.IsEnabled() {
-		t.Errorf("expected queue to be disabled")
-	}
-	if err := checkAllGaugesZero(tc); err != nil {
-		t.Fatal(err.Error())
-	}
 	if deps := q.GetDependents(txn.ID); deps != nil {
 		t.Errorf("expected GetDependents to return nil as queue is disabled; got %+v", deps)
 	}
@@ -189,7 +190,7 @@ func TestTxnWaitQueueCancel(t *testing.T) {
 		PusheeTxn: txn.TxnMeta,
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 	if err := checkAllGaugesZero(tc); err != nil {
 		t.Fatal(err.Error())
@@ -256,7 +257,7 @@ func TestTxnWaitQueueUpdateTxn(t *testing.T) {
 	req2 := req1
 	req2.PusherTxn = *pusher2
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 	q.EnqueueTxn(txn)
 	m := tc.store.txnWaitMetrics
@@ -347,6 +348,14 @@ func TestTxnWaitQueueUpdateTxn(t *testing.T) {
 func TestTxnWaitQueueTxnSilentlyCompletes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	// This test relies on concurrently waiting for a value to change in the
+	// underlying engine(s). Since the teeing engine does not respond well to
+	// value mismatches, whether transient or permanent, skip this test if the
+	// teeing engine is being used. See
+	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
+	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
+		skip.IgnoreLint(t, "disabled on teeing engine")
+	}
 	tc := testContext{}
 	ctx := context.Background()
 	stopper := stop.NewStopper()
@@ -367,7 +376,7 @@ func TestTxnWaitQueueTxnSilentlyCompletes(t *testing.T) {
 		PusheeTxn: txn.TxnMeta,
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 	q.EnqueueTxn(txn)
 
@@ -408,7 +417,7 @@ func TestTxnWaitQueueTxnSilentlyCompletes(t *testing.T) {
 		t.Errorf("expected committed txn response; got %+v, err=%v", respWithErr.resp, respWithErr.pErr)
 	}
 	testutils.SucceedsSoon(t, func() error {
-		if act, exp := m.PusherWaiting.Value(), int64(0); act != exp {
+		if act, exp := m.PusherWaiting.Value(), int64(1); act != exp {
 			return errors.Errorf("%d pushers, but want %d", act, exp)
 		}
 		if act, exp := m.PusheeWaiting.Value(), int64(1); act != exp {
@@ -443,7 +452,7 @@ func TestTxnWaitQueueUpdateNotPushedTxn(t *testing.T) {
 		PusheeTxn: txn.TxnMeta,
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 	q.EnqueueTxn(txn)
 
@@ -477,8 +486,8 @@ func TestTxnWaitQueueUpdateNotPushedTxn(t *testing.T) {
 	})
 }
 
-// TestTxnWaitQueuePusheeExpires verifies that all pushers are returned when the
-// pushee's txn may have expired.
+// TestTxnWaitQueuePusheeExpires verifies that just one pusher is
+// returned when the pushee's txn may have expired.
 func TestTxnWaitQueuePusheeExpires(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -519,7 +528,7 @@ func TestTxnWaitQueuePusheeExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 	q.EnqueueTxn(txn)
 
@@ -528,10 +537,25 @@ func TestTxnWaitQueuePusheeExpires(t *testing.T) {
 		resp, pErr := q.MaybeWaitForPush(context.Background(), &req1)
 		retCh <- RespWithErr{resp, pErr}
 	}()
+	testutils.SucceedsSoon(t, func() error {
+		expDeps := []uuid.UUID{pusher1.ID}
+		if deps := q.GetDependents(txn.ID); !reflect.DeepEqual(deps, expDeps) {
+			return errors.Errorf("expected GetDependents %+v; got %+v", expDeps, deps)
+		}
+		return nil
+	})
+
 	go func() {
 		resp, pErr := q.MaybeWaitForPush(context.Background(), &req2)
 		retCh <- RespWithErr{resp, pErr}
 	}()
+	testutils.SucceedsSoon(t, func() error {
+		expDeps := []uuid.UUID{pusher1.ID, pusher2.ID}
+		if deps := q.GetDependents(txn.ID); !reflect.DeepEqual(deps, expDeps) {
+			return errors.Errorf("expected GetDependents %+v; got %+v", expDeps, deps)
+		}
+		return nil
+	})
 
 	for i := 0; i < 2; i++ {
 		respWithErr := <-retCh
@@ -545,7 +569,7 @@ func TestTxnWaitQueuePusheeExpires(t *testing.T) {
 
 	m := tc.store.txnWaitMetrics
 	testutils.SucceedsSoon(t, func() error {
-		if act, exp := m.PusherWaiting.Value(), int64(0); act != exp {
+		if act, exp := m.PusherWaiting.Value(), int64(2); act != exp {
 			return errors.Errorf("%d pushers, but want %d", act, exp)
 		}
 		if act, exp := m.PusheeWaiting.Value(), int64(1); act != exp {
@@ -608,7 +632,7 @@ func TestTxnWaitQueuePusherUpdate(t *testing.T) {
 					PusheeTxn: txn.TxnMeta,
 				}
 
-				q := tc.repl.concMgr.TestingTxnWaitQueue()
+				q := tc.repl.concMgr.TxnWaitQueue()
 				q.Enable(1 /* leaseSeq */)
 				q.EnqueueTxn(txn)
 
@@ -652,7 +676,7 @@ func TestTxnWaitQueuePusherUpdate(t *testing.T) {
 
 				m := tc.store.txnWaitMetrics
 				testutils.SucceedsSoon(t, func() error {
-					if act, exp := m.PusherWaiting.Value(), int64(0); act != exp {
+					if act, exp := m.PusherWaiting.Value(), int64(1); act != exp {
 						return errors.Errorf("%d pushers, but want %d", act, exp)
 					}
 					if act, exp := m.PusheeWaiting.Value(), int64(1); act != exp {
@@ -723,7 +747,7 @@ func TestTxnWaitQueueDependencyCycle(t *testing.T) {
 		PusheeTxn: txnA.TxnMeta,
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -815,7 +839,7 @@ func TestTxnWaitQueueDependencyCycleWithPriorityInversion(t *testing.T) {
 		PusheeTxn: updatedTxnA.TxnMeta,
 	}
 
-	q := tc.repl.concMgr.TestingTxnWaitQueue()
+	q := tc.repl.concMgr.TxnWaitQueue()
 	q.Enable(1 /* leaseSeq */)
 
 	for _, txn := range []*roachpb.Transaction{txnA, txnB} {

@@ -13,15 +13,12 @@ package tree
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // FmtFlags carries options for the pretty-printer.
@@ -38,8 +35,8 @@ func (f FmtFlags) HasAnyFlags(subset FmtFlags) bool {
 }
 
 // EncodeFlags returns the subset of the flags that are also lex encode flags.
-func (f FmtFlags) EncodeFlags() lexbase.EncodeFlags {
-	return lexbase.EncodeFlags(f) & (lexbase.EncFirstFreeFlagBit - 1)
+func (f FmtFlags) EncodeFlags() lex.EncodeFlags {
+	return lex.EncodeFlags(f) & (lex.EncFirstFreeFlagBit - 1)
 }
 
 // Basic bit definitions for the FmtFlags bitmask.
@@ -55,15 +52,15 @@ const (
 	// string will be escaped and enclosed in e'...' regardless of
 	// whether FmtBareStrings is specified. See FmtRawStrings below for
 	// an alternative.
-	FmtBareStrings FmtFlags = FmtFlags(lexbase.EncBareStrings)
+	FmtBareStrings FmtFlags = FmtFlags(lex.EncBareStrings)
 
 	// FmtBareIdentifiers instructs the pretty-printer to print
 	// identifiers without wrapping quotes in any case.
-	FmtBareIdentifiers FmtFlags = FmtFlags(lexbase.EncBareIdentifiers)
+	FmtBareIdentifiers FmtFlags = FmtFlags(lex.EncBareIdentifiers)
 
 	// FmtShowPasswords instructs the pretty-printer to not suppress passwords.
 	// If not set, passwords are replaced by *****.
-	FmtShowPasswords FmtFlags = FmtFlags(lexbase.EncFirstFreeFlagBit) << iota
+	FmtShowPasswords FmtFlags = FmtFlags(lex.EncFirstFreeFlagBit) << iota
 
 	// FmtShowTypes instructs the pretty-printer to
 	// annotate expressions with their resolved types.
@@ -139,48 +136,14 @@ const (
 	// rather than string literals. For example, the bytes \x40ab will be formatted
 	// as x'40ab' rather than '\x40ab'.
 	fmtFormatByteLiterals
-
-	// FmtMarkRedactionNode instructs the pretty printer to redact datums,
-	// constants, and simples names (i.e. Name, UnrestrictedName) from statements.
-	FmtMarkRedactionNode
-
-	// FmtSummary instructs the pretty printer to produced a summarized version
-	// of the query, to pass to the frontend.
-	//
-	// Here are the following formats we support:
-	// SELECT: SELECT {columns} FROM {tables}
-	// - Show columns up to 15 characters.
-	// - Show tables up to 30 characters.
-	// - Hide column names in nested select queries.
-	// INSERT/UPSERT: INSERT/UPSERT INTO {table} {columns}
-	// - Show table up to 30 characters.
-	// - Show columns up to 15 characters.
-	// INSERT SELECT: INSERT INTO {table} SELECT {columns} FROM {table}
-	// - Show table up to 30 characters.
-	// - Show columns up to 15 characters.
-	// UPDATE: UPDATE {table} SET {columns} WHERE {condition}
-	// - Show table up to 30 characters.
-	// - Show columns up to 15 characters.
-	// - Show condition up to 15 characters.
-	FmtSummary
 )
-
-// PasswordSubstitution is the string that replaces
-// passwords unless FmtShowPasswords is specified.
-const PasswordSubstitution = "'*****'"
-
-// ColumnLimit is the max character limit for columns in summarized queries
-const ColumnLimit = 15
-
-// TableLimit is the max character limit for tables in summarized queries
-const TableLimit = 30
 
 // Composite/derived flag definitions follow.
 const (
 	// FmtPgwireText instructs the pretty-printer to use
 	// a pg-compatible conversion to strings. See comments
 	// in pgwire_encode.go.
-	FmtPgwireText FmtFlags = fmtPgwireFormat | FmtFlags(lexbase.EncBareStrings)
+	FmtPgwireText FmtFlags = fmtPgwireFormat | FmtFlags(lex.EncBareStrings)
 
 	// FmtParsable instructs the pretty-printer to produce a representation that
 	// can be parsed into an equivalent expression. If there is a chance that the
@@ -249,8 +212,6 @@ type FmtCtx struct {
 
 	bytes.Buffer
 
-	dataConversionConfig sessiondatapb.DataConversionConfig
-
 	// NOTE: if you add more flags to this structure, make sure to add
 	// corresponding cleanup code in FmtCtx.Close().
 
@@ -273,78 +234,27 @@ type FmtCtx struct {
 	indexedTypeFormatter func(*FmtCtx, *OIDTypeReference)
 }
 
-// FmtCtxOption is an option to pass into NewFmtCtx.
-type FmtCtxOption func(*FmtCtx)
-
-// FmtAnnotations adds annotations to the FmtCtx.
-func FmtAnnotations(ann *Annotations) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.ann = ann
-	}
-}
-
-// FmtIndexedVarFormat modifies FmtCtx to customize the printing of
-// IndexedVars using the provided function.
-func FmtIndexedVarFormat(fn func(ctx *FmtCtx, idx int)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.indexedVarFormat = fn
-	}
-}
-
-// FmtPlaceholderFormat modifies FmtCtx to customize the printing of
-// StarDatums using the provided function.
-func FmtPlaceholderFormat(placeholderFn func(_ *FmtCtx, _ *Placeholder)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.placeholderFormat = placeholderFn
-	}
-}
-
-// FmtReformatTableNames modifies FmtCtx to to substitute the printing of table
-// naFmtParsable using the provided function.
-func FmtReformatTableNames(tableNameFmt func(*FmtCtx, *TableName)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.tableNameFormatter = tableNameFmt
-	}
-}
-
-// FmtIndexedTypeFormat modifies FmtCtx to customize the printing of
-// IDTypeReferences using the provided function.
-func FmtIndexedTypeFormat(fn func(*FmtCtx, *OIDTypeReference)) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.indexedTypeFormatter = fn
-	}
-}
-
-// FmtDataConversionConfig modifies FmtCtx to contain items relevant for the
-// given DataConversionConfig.
-func FmtDataConversionConfig(dcc sessiondatapb.DataConversionConfig) FmtCtxOption {
-	return func(ctx *FmtCtx) {
-		ctx.dataConversionConfig = dcc
-	}
-}
-
 // NewFmtCtx creates a FmtCtx; only flags that don't require Annotations
 // can be used.
-func NewFmtCtx(f FmtFlags, opts ...FmtCtxOption) *FmtCtx {
-	ctx := fmtCtxPool.Get().(*FmtCtx)
-	ctx.flags = f
-	for _, opts := range opts {
-		opts(ctx)
-	}
-	if ctx.ann == nil && f&flagsRequiringAnnotations != 0 {
+func NewFmtCtx(f FmtFlags) *FmtCtx {
+	return NewFmtCtxEx(f, nil)
+}
+
+// NewFmtCtxEx creates a FmtCtx.
+func NewFmtCtxEx(f FmtFlags, ann *Annotations) *FmtCtx {
+	if ann == nil && f&flagsRequiringAnnotations != 0 {
 		panic(errors.AssertionFailedf("no Annotations provided"))
 	}
+	ctx := fmtCtxPool.Get().(*FmtCtx)
+	ctx.flags = f
+	ctx.ann = ann
 	return ctx
 }
 
-// SetDataConversionConfig sets the DataConversionConfig on ctx and returns the
-// old one.
-func (ctx *FmtCtx) SetDataConversionConfig(
-	dcc sessiondatapb.DataConversionConfig,
-) sessiondatapb.DataConversionConfig {
-	old := ctx.dataConversionConfig
-	ctx.dataConversionConfig = dcc
-	return old
+// SetReformatTableNames modifies FmtCtx to to substitute the printing of table
+// names using the provided function.
+func (ctx *FmtCtx) SetReformatTableNames(tableNameFmt func(*FmtCtx, *TableName)) {
+	ctx.tableNameFormatter = tableNameFmt
 }
 
 // WithReformatTableNames modifies FmtCtx to to substitute the printing of table
@@ -387,6 +297,24 @@ func (ctx *FmtCtx) Printf(f string, args ...interface{}) {
 	fmt.Fprintf(&ctx.Buffer, f, args...)
 }
 
+// SetIndexedVarFormat modifies FmtCtx to customize the printing of
+// IndexedVars using the provided function.
+func (ctx *FmtCtx) SetIndexedVarFormat(fn func(ctx *FmtCtx, idx int)) {
+	ctx.indexedVarFormat = fn
+}
+
+// SetPlaceholderFormat modifies FmtCtx to customize the printing of
+// StarDatums using the provided function.
+func (ctx *FmtCtx) SetPlaceholderFormat(placeholderFn func(_ *FmtCtx, _ *Placeholder)) {
+	ctx.placeholderFormat = placeholderFn
+}
+
+// SetIndexedTypeFormat modifies FmtCtx to customize the printing of
+// IDTypeReferences using the provided function.
+func (ctx *FmtCtx) SetIndexedTypeFormat(fn func(*FmtCtx, *OIDTypeReference)) {
+	ctx.indexedTypeFormatter = fn
+}
+
 // NodeFormatter is implemented by nodes that can be pretty-printed.
 type NodeFormatter interface {
 	// Format performs pretty-printing towards a bytes buffer. The flags member
@@ -414,13 +342,7 @@ func (ctx *FmtCtx) FormatNode(n NodeFormatter) {
 	if f.HasFlags(FmtShowTypes) {
 		if te, ok := n.(TypedExpr); ok {
 			ctx.WriteByte('(')
-
-			if f.HasFlags(FmtMarkRedactionNode) {
-				ctx.formatNodeMaybeMarkRedaction(n)
-			} else {
-				ctx.formatNodeOrHideConstants(n)
-			}
-
+			ctx.formatNodeOrHideConstants(n)
 			ctx.WriteString(")[")
 			if rt := te.ResolvedType(); rt == nil {
 				// An attempt is made to pretty-print an expression that was
@@ -440,13 +362,7 @@ func (ctx *FmtCtx) FormatNode(n NodeFormatter) {
 			ctx.WriteByte('(')
 		}
 	}
-
-	if f.HasFlags(FmtMarkRedactionNode) {
-		ctx.formatNodeMaybeMarkRedaction(n)
-	} else {
-		ctx.formatNodeOrHideConstants(n)
-	}
-
+	ctx.formatNodeOrHideConstants(n)
 	if f.HasFlags(FmtAlwaysGroupExprs) {
 		if _, ok := n.(Expr); ok {
 			ctx.WriteByte(')')
@@ -459,8 +375,6 @@ func (ctx *FmtCtx) FormatNode(n NodeFormatter) {
 				// p.typ will be nil if the placeholder has not been type-checked yet.
 				typ = p.typ
 			} else if d.AmbiguousFormat() {
-				typ = d.ResolvedType()
-			} else if _, isArray := d.(*DArray); isArray && f.HasFlags(FmtPGCatalog) {
 				typ = d.ResolvedType()
 			}
 		}
@@ -476,121 +390,18 @@ func (ctx *FmtCtx) FormatNode(n NodeFormatter) {
 	}
 }
 
-// formatLimitLength recurses into a node for pretty-printing, but limits the
-// number of characters to be printed.
-func (ctx *FmtCtx) formatLimitLength(n NodeFormatter, maxLength int) {
-	temp := NewFmtCtx(ctx.flags)
-	temp.FormatNodeSummary(n)
-	s := temp.CloseAndGetString()
-	if len(s) > maxLength {
-		truncated := s[:maxLength] + "..."
-		// close all open parentheses.
-		if strings.Count(truncated, "(") > strings.Count(truncated, ")") {
-			remaining := s[maxLength:]
-			for i, c := range remaining {
-				if c == ')' {
-					truncated += ")"
-					// add ellipses if there was more text after the parenthesis in
-					// the original string.
-					if i < len(remaining)-1 && string(remaining[i+1]) != ")" {
-						truncated += "..."
-					}
-					if strings.Count(truncated, "(") <= strings.Count(truncated, ")") {
-						break
-					}
-				}
-			}
-		}
-		s = truncated
-	}
-	ctx.WriteString(s)
-}
-
-// formatSummarySelect pretty-prints a summarized select statement.
-// See FmtSummary for supported formats.
-func (ctx *FmtCtx) formatSummarySelect(node *Select) {
-	if node.With == nil {
-		s := node.Select
-		if s, ok := s.(*SelectClause); ok {
-			ctx.WriteString("SELECT ")
-			ctx.formatLimitLength(&s.Exprs, ColumnLimit)
-			if len(s.From.Tables) > 0 {
-				ctx.WriteByte(' ')
-				ctx.formatLimitLength(&s.From, TableLimit+len("FROM "))
-			}
-		}
-	}
-}
-
-// formatSummaryInsert pretty-prints a summarized insert/upsert statement.
-// See FmtSummary for supported formats.
-func (ctx *FmtCtx) formatSummaryInsert(node *Insert) {
-	if node.OnConflict.IsUpsertAlias() {
-		ctx.WriteString("UPSERT")
-	} else {
-		ctx.WriteString("INSERT")
-	}
-	ctx.WriteString(" INTO ")
-	ctx.formatLimitLength(node.Table, TableLimit)
-	rows := node.Rows
-	expr := rows.Select
-	if _, ok := expr.(*SelectClause); ok {
-		ctx.WriteByte(' ')
-		ctx.FormatNodeSummary(rows)
-	} else if node.Columns != nil {
-		ctx.WriteByte('(')
-		ctx.formatLimitLength(&node.Columns, ColumnLimit)
-		ctx.WriteByte(')')
-	}
-}
-
-// formatSummaryUpdate pretty-prints a summarized update statement.
-// See FmtSummary for supported formats.
-func (ctx *FmtCtx) formatSummaryUpdate(node *Update) {
-	if node.With == nil {
-		ctx.WriteString("UPDATE ")
-		ctx.formatLimitLength(node.Table, TableLimit)
-		ctx.WriteString(" SET ")
-		ctx.formatLimitLength(&node.Exprs, ColumnLimit)
-		if node.Where != nil {
-			ctx.WriteByte(' ')
-			ctx.formatLimitLength(node.Where, ColumnLimit+len("WHERE "))
-		}
-	}
-}
-
-// FormatNodeSummary recurses into a node for pretty-printing a summarized version.
-func (ctx *FmtCtx) FormatNodeSummary(n NodeFormatter) {
-	switch node := n.(type) {
-	case *Insert:
-		ctx.formatSummaryInsert(node)
-		return
-	case *Select:
-		ctx.formatSummarySelect(node)
-		return
-	case *Update:
-		ctx.formatSummaryUpdate(node)
-		return
-	}
-	ctx.FormatNode(n)
-}
-
 // AsStringWithFlags pretty prints a node to a string given specific flags; only
 // flags that don't require Annotations can be used.
-func AsStringWithFlags(n NodeFormatter, fl FmtFlags, opts ...FmtCtxOption) string {
-	ctx := NewFmtCtx(fl, opts...)
-	if fl.HasFlags(FmtSummary) {
-		ctx.FormatNodeSummary(n)
-	} else {
-		ctx.FormatNode(n)
-	}
+func AsStringWithFlags(n NodeFormatter, fl FmtFlags) string {
+	ctx := NewFmtCtx(fl)
+	ctx.FormatNode(n)
 	return ctx.CloseAndGetString()
 }
 
 // AsStringWithFQNames pretty prints a node to a string with the
 // FmtAlwaysQualifyTableNames flag (which requires annotations).
 func AsStringWithFQNames(n NodeFormatter, ann *Annotations) string {
-	ctx := NewFmtCtx(FmtAlwaysQualifyTableNames, FmtAnnotations(ann))
+	ctx := NewFmtCtxEx(FmtAlwaysQualifyTableNames, ann)
 	ctx.FormatNode(n)
 	return ctx.CloseAndGetString()
 }
@@ -629,11 +440,9 @@ var fmtCtxPool = sync.Pool{
 func (ctx *FmtCtx) Close() {
 	ctx.Buffer.Reset()
 	ctx.flags = 0
-	ctx.ann = nil
 	ctx.indexedVarFormat = nil
 	ctx.tableNameFormatter = nil
 	ctx.placeholderFormat = nil
-	ctx.dataConversionConfig = sessiondatapb.DataConversionConfig{}
 	fmtCtxPool.Put(ctx)
 }
 
@@ -646,23 +455,4 @@ func (ctx *FmtCtx) CloseAndGetString() string {
 
 func (ctx *FmtCtx) alwaysFormatTablePrefix() bool {
 	return ctx.flags.HasFlags(FmtAlwaysQualifyTableNames) || ctx.tableNameFormatter != nil
-}
-
-// formatNodeMaybeMarkRedaction marks sensitive information from statements
-// with redaction markers. Redaction markers are placed around datums,
-// constants, and simple names (i.e. Name, UnrestrictedName).
-func (ctx *FmtCtx) formatNodeMaybeMarkRedaction(n NodeFormatter) {
-	if ctx.flags.HasFlags(FmtMarkRedactionNode) {
-		switch v := n.(type) {
-		case *Placeholder:
-			// Placeholders should be printed as placeholder markers.
-			// Deliberately empty so we format as normal.
-		case Datum, Constant, *Name, *UnrestrictedName:
-			ctx.WriteString(string(redact.StartMarker()))
-			v.Format(ctx)
-			ctx.WriteString(string(redact.EndMarker()))
-			return
-		}
-		n.Format(ctx)
-	}
 }

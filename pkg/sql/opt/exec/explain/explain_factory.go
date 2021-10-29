@@ -30,6 +30,7 @@ var _ exec.ExplainFactory = &Factory{}
 // factory method and provides access to the corresponding exec.Node (produced
 // by the wrapped factory).
 type Node struct {
+	f        *Factory
 	op       execOperator
 	args     interface{}
 	columns  colinfo.ResultColumns
@@ -71,15 +72,7 @@ func (n *Node) WrappedNode() exec.Node {
 	return n.wrappedNode
 }
 
-// Annotate annotates the node with extra information.
-func (n *Node) Annotate(id exec.ExplainAnnotationID, value interface{}) {
-	if n.annotations == nil {
-		n.annotations = make(map[exec.ExplainAnnotationID]interface{})
-	}
-	n.annotations[id] = value
-}
-
-func newNode(
+func (f *Factory) newNode(
 	op execOperator, args interface{}, ordering exec.OutputOrdering, children ...*Node,
 ) (*Node, error) {
 	inputNodeCols := make([]colinfo.ResultColumns, len(children))
@@ -91,6 +84,7 @@ func newNode(
 		return nil, err
 	}
 	return &Node{
+		f:        f,
 		op:       op,
 		args:     args,
 		columns:  columns,
@@ -107,7 +101,6 @@ type Plan struct {
 	Cascades    []exec.Cascade
 	Checks      []*Node
 	WrappedPlan exec.Plan
-	Gist        PlanGist
 }
 
 var _ exec.Plan = &Plan{}
@@ -121,16 +114,16 @@ func NewFactory(wrappedFactory exec.Factory) *Factory {
 
 // AnnotateNode is part of the exec.ExplainFactory interface.
 func (f *Factory) AnnotateNode(execNode exec.Node, id exec.ExplainAnnotationID, value interface{}) {
-	execNode.(*Node).Annotate(id, value)
+	n := execNode.(*Node)
+	if n.annotations == nil {
+		n.annotations = make(map[exec.ExplainAnnotationID]interface{})
+	}
+	n.annotations[id] = value
 }
 
 // ConstructPlan is part of the exec.Factory interface.
 func (f *Factory) ConstructPlan(
-	root exec.Node,
-	subqueries []exec.Subquery,
-	cascades []exec.Cascade,
-	checks []exec.Node,
-	rootRowCount int64,
+	root exec.Node, subqueries []exec.Subquery, cascades []exec.Cascade, checks []exec.Node,
 ) (exec.Plan, error) {
 	p := &Plan{
 		Root:       root.(*Node),
@@ -148,9 +141,7 @@ func (f *Factory) ConstructPlan(
 	}
 	wrappedCascades := append([]exec.Cascade(nil), cascades...)
 	for i := range wrappedCascades {
-		if wrappedCascades[i].Buffer != nil {
-			wrappedCascades[i].Buffer = wrappedCascades[i].Buffer.(*Node).WrappedNode()
-		}
+		wrappedCascades[i].Buffer = wrappedCascades[i].Buffer.(*Node).WrappedNode()
 	}
 	wrappedChecks := make([]exec.Node, len(checks))
 	for i := range wrappedChecks {
@@ -158,7 +149,7 @@ func (f *Factory) ConstructPlan(
 	}
 	var err error
 	p.WrappedPlan, err = f.wrappedFactory.ConstructPlan(
-		p.Root.WrappedNode(), wrappedSubqueries, wrappedCascades, wrappedChecks, rootRowCount,
+		p.Root.WrappedNode(), wrappedSubqueries, wrappedCascades, wrappedChecks,
 	)
 	if err != nil {
 		return nil, err

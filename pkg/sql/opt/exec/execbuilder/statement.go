@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -67,7 +66,6 @@ func (b *Builder) buildCreateView(cv *memo.CreateViewExpr) (execPlan, error) {
 		cv.ViewQuery,
 		cols,
 		cv.Deps,
-		cv.TypeDeps,
 	)
 	return execPlan{root: root}, err
 }
@@ -120,40 +118,40 @@ func (b *Builder) buildExplainOpt(explain *memo.ExplainExpr) (execPlan, error) {
 	return planWithColumns(node, explain.ColList), nil
 }
 
-func (b *Builder) buildExplain(explainExpr *memo.ExplainExpr) (execPlan, error) {
-	if explainExpr.Options.Mode == tree.ExplainOpt {
-		return b.buildExplainOpt(explainExpr)
+func (b *Builder) buildExplain(explain *memo.ExplainExpr) (execPlan, error) {
+	if explain.Options.Mode == tree.ExplainOpt {
+		return b.buildExplainOpt(explain)
 	}
 
-	node, err := b.factory.ConstructExplain(
-		&explainExpr.Options,
-		explainExpr.StmtType,
-		func(f exec.Factory) (exec.Plan, error) {
-			// Create a separate builder for the explain query.	buildRelational
-			// annotates nodes with extra information when the factory is an
-			// exec.ExplainFactory so it must be the outer factory and the gist
-			// factory must be the inner factory.
-			gf := explain.NewPlanGistFactory(f)
-			ef := explain.NewFactory(gf)
+	if explain.Options.Mode == tree.ExplainPlan {
+		node, err := b.factory.ConstructExplainPlan(
+			&explain.Options,
+			func(ef exec.ExplainFactory) (exec.Plan, error) {
+				// Create a separate builder for the explain query.
+				explainBld := New(ef, b.optimizer, b.mem, b.catalog, explain.Input, b.evalCtx, b.initialAllowAutoCommit)
+				explainBld.disableTelemetry = true
+				return explainBld.Build()
+			},
+		)
+		if err != nil {
+			return execPlan{}, err
+		}
+		return planWithColumns(node, explain.ColList), nil
+	}
 
-			explainBld := New(
-				ef, b.optimizer, b.mem, b.catalog, explainExpr.Input, b.evalCtx, b.initialAllowAutoCommit,
-			)
-			explainBld.disableTelemetry = true
-			plan, err := explainBld.Build()
-			if err != nil {
-				return nil, err
-			}
-			explainPlan := plan.(*explain.Plan)
-			explainPlan.Gist = gf.PlanGist()
-			return plan, nil
-		},
-	)
+	// Create a separate builder for the explain query.
+	explainBld := New(b.factory, b.optimizer, b.mem, b.catalog, explain.Input, b.evalCtx, b.initialAllowAutoCommit)
+	explainBld.disableTelemetry = true
+	plan, err := explainBld.Build()
+	if err != nil {
+		return execPlan{}, err
+	}
+	node, err := b.factory.ConstructExplain(&explain.Options, explain.StmtType, plan)
 	if err != nil {
 		return execPlan{}, err
 	}
 
-	return planWithColumns(node, explainExpr.ColList), nil
+	return planWithColumns(node, explain.ColList), nil
 }
 
 func (b *Builder) buildShowTrace(show *memo.ShowTraceForSessionExpr) (execPlan, error) {
@@ -223,7 +221,6 @@ func (b *Builder) buildAlterTableRelocate(relocate *memo.AlterTableRelocateExpr)
 		table.Index(relocate.Index),
 		input.root,
 		relocate.RelocateLease,
-		relocate.RelocateNonVoters,
 	)
 	if err != nil {
 		return execPlan{}, err
@@ -236,17 +233,9 @@ func (b *Builder) buildControlJobs(ctl *memo.ControlJobsExpr) (execPlan, error) 
 	if err != nil {
 		return execPlan{}, err
 	}
-
-	scalarCtx := buildScalarCtx{}
-	reason, err := b.buildScalar(&scalarCtx, ctl.Reason)
-	if err != nil {
-		return execPlan{}, err
-	}
-
 	node, err := b.factory.ConstructControlJobs(
 		ctl.Command,
 		input.root,
-		reason,
 	)
 	if err != nil {
 		return execPlan{}, err
@@ -300,15 +289,6 @@ func (b *Builder) buildCancelSessions(cancel *memo.CancelSessionsExpr) (execPlan
 		telemetry.Inc(sqltelemetry.CancelSessionsUseCounter)
 	}
 	// CancelSessions returns no columns.
-	return execPlan{root: node}, nil
-}
-
-func (b *Builder) buildCreateStatistics(c *memo.CreateStatisticsExpr) (execPlan, error) {
-	node, err := b.factory.ConstructCreateStatistics(c.Syntax)
-	if err != nil {
-		return execPlan{}, err
-	}
-	// CreateStatistics returns no columns.
 	return execPlan{root: node}, nil
 }
 

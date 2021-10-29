@@ -16,21 +16,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/cockroachdb/cockroach/pkg/cmd/internal/issues"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestListFailures(t *testing.T) {
 	type issue struct {
-		testName   string
-		title      string
-		message    string
-		author     string
-		expRepro   string
-		mention    []string
-		hasProject bool
+		testName string
+		title    string
+		message  string
+		author   string
 	}
 	// Each test case expects a number of issues.
 	testCases := []struct {
@@ -38,49 +31,39 @@ func TestListFailures(t *testing.T) {
 		fileName  string
 		expPkg    string
 		expIssues []issue
-		formatter formatter
 	}{
 		{
 			pkgEnv:   "",
 			fileName: "implicit-pkg.json",
 			expPkg:   "github.com/cockroachdb/cockroach/pkg/util/stop",
 			expIssues: []issue{{
-				testName:   "TestStopperWithCancelConcurrent",
-				title:      "util/stop: TestStopperWithCancelConcurrent failed",
-				message:    "this is just a testing issue",
-				author:     "nvanbenschoten@gmail.com",
-				mention:    []string{"@cockroachdb/server"},
-				hasProject: true,
+				testName: "TestStopperWithCancelConcurrent",
+				title:    "util/stop: TestStopperWithCancelConcurrent failed",
+				message:  "this is just a testing issue",
+				author:   "nvanbenschoten@gmail.com",
 			}},
-			formatter: defaultFormatter,
 		},
 		{
 			pkgEnv:   "github.com/cockroachdb/cockroach/pkg/kv/kvserver",
 			fileName: "stress-failure.json",
 			expPkg:   "github.com/cockroachdb/cockroach/pkg/kv/kvserver",
 			expIssues: []issue{{
-				testName:   "TestReplicateQueueRebalance",
-				title:      "kv/kvserver: TestReplicateQueueRebalance failed",
-				message:    "replicate_queue_test.go:88: condition failed to evaluate within 45s: not balanced: [10 1 10 1 8]",
-				author:     "petermattis@gmail.com",
-				mention:    []string{"@cockroachdb/kv"},
-				hasProject: true,
+				testName: "TestReplicateQueueRebalance",
+				title:    "kv/kvserver: TestReplicateQueueRebalance failed",
+				message:  "replicate_queue_test.go:88: condition failed to evaluate within 45s: not balanced: [10 1 10 1 8]",
+				author:   "petermattis@gmail.com",
 			}},
-			formatter: defaultFormatter,
 		},
 		{
 			pkgEnv:   "github.com/cockroachdb/cockroach/pkg/kv/kvserver",
 			fileName: "stress-fatal.json",
 			expPkg:   "github.com/cockroachdb/cockroach/pkg/kv/kvserver",
 			expIssues: []issue{{
-				testName:   "TestGossipHandlesReplacedNode",
-				title:      "kv/kvserver: TestGossipHandlesReplacedNode failed",
-				message:    "F180711 20:13:15.826193 83 storage/replica.go:1877  [n?,s1,r1/1:/M{in-ax}] on-disk and in-memory state diverged:",
-				author:     "alexdwanerobinson@gmail.com",
-				mention:    []string{"@cockroachdb/kv"},
-				hasProject: true,
+				testName: "TestGossipHandlesReplacedNode",
+				title:    "kv/kvserver: TestGossipHandlesReplacedNode failed",
+				message:  "F180711 20:13:15.826193 83 storage/replica.go:1877  [n?,s1,r1/1:/M{in-ax}] on-disk and in-memory state diverged:",
+				author:   "alexdwanerobinson@gmail.com",
 			}},
-			formatter: defaultFormatter,
 		},
 		{
 			pkgEnv:   "github.com/cockroachdb/cockroach/pkg/storage",
@@ -92,7 +75,6 @@ func TestListFailures(t *testing.T) {
 				message:  "make: *** [bin/.submodules-initialized] Error 1",
 				author:   "",
 			}},
-			formatter: defaultFormatter,
 		},
 		{
 			pkgEnv:   "github.com/cockroachdb/cockroach/pkg/util/json",
@@ -104,10 +86,8 @@ func TestListFailures(t *testing.T) {
 				message: `=== RUN   TestPretty/["hello",_["world"]]
     --- FAIL: TestPretty/["hello",_["world"]] (0.00s)
     	json_test.go:1656: injected failure`,
-				author:  "justin@cockroachlabs.com",
-				mention: []string{"@cockroachdb/unowned"},
+				author: "justin@cockroachlabs.com",
 			}},
-			formatter: defaultFormatter,
 		},
 		{
 			// A test run where there's a timeout, and the timed out test was the
@@ -118,12 +98,10 @@ func TestListFailures(t *testing.T) {
 			expPkg:   "github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord",
 			expIssues: []issue{
 				{
-					testName:   "TestTxnCoordSenderPipelining",
-					title:      "kv/kvclient/kvcoord: TestTxnCoordSenderPipelining failed",
-					message:    `injected failure`,
-					author:     "nikhil.benesch@gmail.com",
-					mention:    []string{"@cockroachdb/kv"},
-					hasProject: true,
+					testName: "TestTxnCoordSenderPipelining",
+					title:    "kv/kvclient/kvcoord: TestTxnCoordSenderPipelining failed",
+					message:  `injected failure`,
+					author:   "nikhil.benesch@gmail.com",
 				},
 				{
 					testName: "TestAbortReadOnlyTransaction",
@@ -135,12 +113,9 @@ TestTxnCoordSenderPipelining - 1.00s
 Slow passing tests:
 TestAnchorKey - 1.01s
 `,
-					author:     "andrei@cockroachlabs.com",
-					mention:    []string{"@cockroachdb/kv"},
-					hasProject: true,
+					author: "andrei@cockroachlabs.com",
 				},
 			},
-			formatter: defaultFormatter,
 		},
 		{
 			// A test run where there's a timeout, but the test that happened to be
@@ -162,7 +137,6 @@ TestXXA - 1.00s
 					author: "",
 				},
 			},
-			formatter: defaultFormatter,
 		},
 		{
 			// Like the above, except this time the output comes from a stress run,
@@ -184,7 +158,6 @@ TestXXA - 1.00s
 					author: "",
 				},
 			},
-			formatter: defaultFormatter,
 		},
 		{
 			// A stress timeout where the test running when the timeout is hit is the
@@ -206,7 +179,6 @@ TestXXA - 1.00s
 					author: "",
 				},
 			},
-			formatter: defaultFormatter,
 		},
 		{
 			// A panic in a test.
@@ -221,7 +193,6 @@ TestXXA - 1.00s
 					author:   "",
 				},
 			},
-			formatter: defaultFormatter,
 		},
 		{
 			// A panic outside of a test (in this case, in a package init function).
@@ -236,22 +207,6 @@ TestXXA - 1.00s
 					author:   "",
 				},
 			},
-			formatter: defaultFormatter,
-		},
-		{
-			// The Pebble metamorphic issue formatter.
-			pkgEnv:   "internal/metamorphic",
-			fileName: "pebble-metamorphic-panic.json",
-			expPkg:   "internal/metamorphic",
-			expIssues: []issue{
-				{
-					testName: "TestMeta",
-					title:    "internal/metamorphic: TestMeta failed",
-					message:  "panic: induced panic",
-					expRepro: "go test -mod=vendor -tags 'invariants' -exec 'stress -p 1' -timeout 0 -test.v -run TestMeta$ ./internal/metamorphic -seed 1600209371838097000",
-				},
-			},
-			formatter: formatPebbleMetamorphicIssue,
 		},
 	}
 	for _, c := range testCases {
@@ -267,48 +222,28 @@ TestXXA - 1.00s
 			defer file.Close()
 			curIssue := 0
 
-			f := func(ctx context.Context, f failure) error {
+			f := func(_ context.Context, title, packageName, testName, testMessage, author string) error {
 				if t.Failed() {
 					return nil
 				}
-				_, req := c.formatter(ctx, f)
-
 				if curIssue >= len(c.expIssues) {
-					t.Errorf("unexpected issue filed. title: %s", f.title)
+					t.Errorf("unexpected issue filed. title: %s", title)
 				}
-				if exp := c.expPkg; exp != f.packageName {
-					t.Errorf("expected package %s, but got %s", exp, f.packageName)
+				if exp := c.expPkg; exp != packageName {
+					t.Errorf("expected package %s, but got %s", exp, packageName)
 				}
-				if exp := c.expIssues[curIssue].testName; exp != f.testName {
-					t.Errorf("expected test name %s, but got %s", exp, f.testName)
+				if exp := c.expIssues[curIssue].testName; exp != testName {
+					t.Errorf("expected test name %s, but got %s", exp, testName)
 				}
-				if exp := c.expIssues[curIssue].author; exp != "" && exp != req.AuthorEmail {
-					t.Errorf("expected author %s, but got %s", exp, req.AuthorEmail)
+				if exp := c.expIssues[curIssue].author; exp != "" && exp != author {
+					t.Errorf("expected author %s, but got %s", exp, author)
 				}
-				if exp := c.expIssues[curIssue].title; exp != f.title {
-					t.Errorf("expected title %s, but got %s", exp, f.title)
+				if exp := c.expIssues[curIssue].title; exp != title {
+					t.Errorf("expected title %s, but got %s", exp, title)
 				}
-				if exp := c.expIssues[curIssue].message; !strings.Contains(f.testMessage, exp) {
-					t.Errorf("expected message containing %s, but got:\n%s", exp, f.testMessage)
+				if exp := c.expIssues[curIssue].message; !strings.Contains(testMessage, exp) {
+					t.Errorf("expected message containing %s, but got:\n%s", exp, testMessage)
 				}
-				// NB: all test cases here emit a repro, but we only check it when the expectation
-				// is set.
-				if c.expIssues[curIssue].expRepro != "" {
-					var actRepro, expRepro string
-					{
-						r := &issues.Renderer{}
-						req.HelpCommand(r)
-						actRepro = r.String()
-					}
-					{
-						r := &issues.Renderer{}
-						issues.ReproductionCommandFromString(c.expIssues[curIssue].expRepro)(r)
-						expRepro = r.String()
-					}
-					require.Equal(t, expRepro, actRepro)
-				}
-				assert.Equal(t, c.expIssues[curIssue].mention, req.Mention)
-				assert.Equal(t, c.expIssues[curIssue].hasProject, req.ProjectColumnID != 0)
 				// On next invocation, we'll check the next expected issue.
 				curIssue++
 				return nil

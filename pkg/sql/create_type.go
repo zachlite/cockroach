@@ -14,8 +14,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
@@ -24,87 +26,30 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/enum"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
 type createTypeNode struct {
-	n        *tree.CreateType
-	typeName *tree.TypeName
-	dbDesc   catalog.DatabaseDescriptor
+	n *tree.CreateType
 }
-
-// EnumType is the type of an enum.
-type EnumType int
-
-const (
-	// EnumTypeUserDefined is a user defined enum.
-	EnumTypeUserDefined = iota
-	// EnumTypeMultiRegion is a multi-region related enum.
-	EnumTypeMultiRegion
-)
 
 // Use to satisfy the linter.
 var _ planNode = &createTypeNode{n: nil}
 
 func (p *planner) CreateType(ctx context.Context, n *tree.CreateType) (planNode, error) {
-	if err := checkSchemaChangeEnabled(
-		ctx,
-		p.ExecCfg(),
-		"CREATE TYPE",
-	); err != nil {
-		return nil, err
-	}
-
-	// Resolve the desired new type name.
-	typeName, db, err := resolveNewTypeName(p.RunParams(ctx), n.TypeName)
-	if err != nil {
-		return nil, err
-	}
-	n.TypeName.SetAnnotation(&p.semaCtx.Annotations, typeName)
-	return &createTypeNode{
-		n:        n,
-		typeName: typeName,
-		dbDesc:   db,
-	}, nil
+	return &createTypeNode{n: n}, nil
 }
 
 func (n *createTypeNode) startExec(params runParams) error {
-	// Check if a type with the same name exists already.
-	flags := tree.ObjectLookupFlags{CommonLookupFlags: tree.CommonLookupFlags{
-		Required:    false,
-		AvoidCached: true,
-	}}
-	found, _, err := params.p.Descriptors().GetImmutableTypeByName(params.ctx, params.p.Txn(), n.typeName, flags)
-	if err != nil {
-		return err
-	}
-
-	// If we found a descriptor and have IfNotExists = true, then buffer a notice
-	// and exit without doing anything. Ideally, we would do this below by
-	// inspecting the type of error returned by getCreateTypeParams, but it
-	// doesn't return enough information for us to do so. For comparison, we
-	// handle this case in CREATE TABLE IF NOT EXISTS by checking the return code
-	// (pgcode.DuplicateRelation) of getCreateTableParams. However, there isn't
-	// a pgcode for duplicate types, only the more general pgcode.DuplicateObject.
-	if found && n.n.IfNotExists {
-		params.p.BufferClientNotice(
-			params.ctx,
-			pgnotice.Newf("type %q already exists, skipping", n.typeName),
-		)
-		return nil
-	}
-
 	switch n.n.Variety {
 	case tree.Enum:
-		return params.p.createUserDefinedEnum(params, n)
+		return params.p.createEnum(params, n.n)
 	default:
 		return unimplemented.NewWithIssue(25123, "CREATE TYPE")
 	}
@@ -114,7 +59,7 @@ func resolveNewTypeName(
 	params runParams, name *tree.UnresolvedObjectName,
 ) (*tree.TypeName, catalog.DatabaseDescriptor, error) {
 	// Resolve the target schema and database.
-	db, _, prefix, err := params.p.ResolveTargetObject(params.ctx, name)
+	db, prefix, err := params.p.ResolveTargetObject(params.ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -128,54 +73,57 @@ func resolveNewTypeName(
 		return nil, nil, errors.New("cannot create a type in the system database")
 	}
 
-	typename := tree.NewUnqualifiedTypeName(name.Object())
+	typename := tree.NewUnqualifiedTypeName(tree.Name(name.Object()))
 	typename.ObjectNamePrefix = prefix
 	return typename, db, nil
 }
 
 // getCreateTypeParams performs some initial validation on the input new
-// TypeName and returns the ID of the parent schema.
+// TypeName and returns the key for the new type descriptor, and the ID of
+// the parent schema.
 func getCreateTypeParams(
 	params runParams, name *tree.TypeName, db catalog.DatabaseDescriptor,
-) (schema catalog.SchemaDescriptor, err error) {
+) (typeKey catalogkeys.DescriptorKey, schemaID descpb.ID, err error) {
 	// Check we are not creating a type which conflicts with an alias available
 	// as a built-in type in CockroachDB but an extension type on the public
 	// schema for PostgreSQL.
 	if name.Schema() == tree.PublicSchema {
 		if _, ok := types.PublicSchemaAliases[name.Object()]; ok {
-			return nil, sqlerrors.NewTypeAlreadyExistsError(name.String())
+			return nil, 0, sqlerrors.NewTypeAlreadyExistsError(name.String())
 		}
 	}
 	// Get the ID of the schema the type is being created in.
 	dbID := db.GetID()
-	schema, err = params.p.getNonTemporarySchemaForCreate(params.ctx, db, name.Schema())
+	schemaID, err = params.p.getSchemaIDForCreate(params.ctx, params.ExecCfg().Codec, dbID, name.Schema())
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Check permissions on the schema.
 	if err := params.p.canCreateOnSchema(
-		params.ctx, schema.GetID(), dbID, params.p.User(), skipCheckPublicSchema); err != nil {
-		return nil, err
+		params.ctx, schemaID, dbID, params.p.User(), skipCheckPublicSchema); err != nil {
+		return nil, 0, err
 	}
 
-	if schema.SchemaKind() == catalog.SchemaUserDefined {
+	if schemaID != keys.PublicSchemaID {
 		sqltelemetry.IncrementUserDefinedSchemaCounter(sqltelemetry.UserDefinedSchemaUsedByObject)
 	}
 
-	err = catalogkv.CheckObjectCollision(
-		params.ctx,
-		params.p.txn,
-		params.ExecCfg().Codec,
-		db.GetID(),
-		schema.GetID(),
-		name,
-	)
-	if err != nil {
-		return nil, err
+	typeKey = catalogkv.MakeObjectNameKey(params.ctx, params.ExecCfg().Settings, db.GetID(), schemaID, name.Type())
+	exists, collided, err := catalogkv.LookupObjectID(
+		params.ctx, params.p.txn, params.ExecCfg().Codec, db.GetID(), schemaID, name.Type())
+	if err == nil && exists {
+		// Try and see what kind of object we collided with.
+		desc, err := catalogkv.GetAnyDescriptorByID(params.ctx, params.p.txn, params.ExecCfg().Codec, collided, catalogkv.Immutable)
+		if err != nil {
+			return nil, 0, sqlerrors.WrapErrorWhileConstructingObjectAlreadyExistsErr(err)
+		}
+		return nil, 0, sqlerrors.MakeObjectAlreadyExistsError(desc.DescriptorProto(), name.String())
 	}
-
-	return schema, nil
+	if err != nil {
+		return nil, 0, err
+	}
+	return typeKey, schemaID, nil
 }
 
 // Postgres starts off trying to create the type as _<typename>. It then
@@ -209,39 +157,6 @@ func findFreeArrayTypeName(
 	return arrayName, nil
 }
 
-// CreateEnumArrayTypeDesc creates a type descriptor for the array of the
-// given enum.
-func CreateEnumArrayTypeDesc(
-	params runParams,
-	typDesc *typedesc.Mutable,
-	db catalog.DatabaseDescriptor,
-	schemaID descpb.ID,
-	id descpb.ID,
-	arrayTypeName string,
-) (*typedesc.Mutable, error) {
-	// Create the element type for the array. Note that it must know about the
-	// ID of the array type in order for the array type to correctly created.
-	var elemTyp *types.T
-	switch t := typDesc.Kind; t {
-	case descpb.TypeDescriptor_ENUM, descpb.TypeDescriptor_MULTIREGION_ENUM:
-		elemTyp = types.MakeEnum(typedesc.TypeIDToOID(typDesc.GetID()), typedesc.TypeIDToOID(id))
-	default:
-		return nil, errors.AssertionFailedf("cannot make array type for kind %s", t.String())
-	}
-
-	// Construct the descriptor for the array type.
-	return typedesc.NewBuilder(&descpb.TypeDescriptor{
-		Name:           arrayTypeName,
-		ID:             id,
-		ParentID:       db.GetID(),
-		ParentSchemaID: schemaID,
-		Kind:           descpb.TypeDescriptor_ALIAS,
-		Alias:          types.MakeArray(elemTyp),
-		Version:        1,
-		Privileges:     typDesc.Privileges,
-	}).BuildCreatedMutableType(), nil
-}
-
 // createArrayType performs the implicit array type creation logic of Postgres.
 // When a type is created in Postgres, Postgres will implicitly create an array
 // type of that user defined type. This array type tracks changes to the
@@ -250,6 +165,7 @@ func CreateEnumArrayTypeDesc(
 // and returns the ID of the created type.
 func (p *planner) createArrayType(
 	params runParams,
+	n *tree.CreateType,
 	typ *tree.TypeName,
 	typDesc *typedesc.Mutable,
 	db catalog.DatabaseDescriptor,
@@ -266,7 +182,7 @@ func (p *planner) createArrayType(
 	if err != nil {
 		return 0, err
 	}
-	arrayTypeKey := catalogkeys.MakeObjectNameKey(params.ExecCfg().Codec, db.GetID(), schemaID, arrayTypeName)
+	arrayTypeKey := catalogkv.MakeObjectNameKey(params.ctx, params.ExecCfg().Settings, db.GetID(), schemaID, arrayTypeName)
 
 	// Generate the stable ID for the array type.
 	id, err := catalogkv.GenerateUniqueDescID(params.ctx, params.ExecCfg().DB, params.ExecCfg().Codec)
@@ -274,22 +190,34 @@ func (p *planner) createArrayType(
 		return 0, err
 	}
 
-	arrayTypDesc, err := CreateEnumArrayTypeDesc(
-		params,
-		typDesc,
-		db,
-		schemaID,
-		id,
-		arrayTypeName,
-	)
-	if err != nil {
-		return 0, err
+	// Create the element type for the array. Note that it must know about the
+	// ID of the array type in order for the array type to correctly created.
+	var elemTyp *types.T
+	switch t := typDesc.Kind; t {
+	case descpb.TypeDescriptor_ENUM:
+		elemTyp = types.MakeEnum(typedesc.TypeIDToOID(typDesc.GetID()), typedesc.TypeIDToOID(id))
+	default:
+		return 0, errors.AssertionFailedf("cannot make array type for kind %s", t.String())
 	}
 
-	jobStr := fmt.Sprintf("implicit array type creation for %s", typ)
+	// Construct the descriptor for the array type.
+	// TODO(ajwerner): This is getting fixed up in a later commit to deal with
+	// meta, just hold on.
+	arrayTypDesc := typedesc.NewCreatedMutable(descpb.TypeDescriptor{
+		Name:           arrayTypeName,
+		ID:             id,
+		ParentID:       db.GetID(),
+		ParentSchemaID: schemaID,
+		Kind:           descpb.TypeDescriptor_ALIAS,
+		Alias:          types.MakeArray(elemTyp),
+		Version:        1,
+		Privileges:     typDesc.Privileges,
+	})
+
+	jobStr := fmt.Sprintf("implicit array type creation for %s", tree.AsStringWithFQNames(n, params.Ann()))
 	if err := p.createDescriptorWithID(
 		params.ctx,
-		arrayTypeKey,
+		arrayTypeKey.Key(params.ExecCfg().Codec),
 		id,
 		arrayTypDesc,
 		params.EvalContext().Settings,
@@ -300,109 +228,87 @@ func (p *planner) createArrayType(
 	return id, nil
 }
 
-func (p *planner) createUserDefinedEnum(params runParams, n *createTypeNode) error {
-	// Generate a stable ID for the new type.
-	id, err := catalogkv.GenerateUniqueDescID(
-		params.ctx, params.ExecCfg().DB, params.ExecCfg().Codec,
-	)
-	if err != nil {
-		return err
+func (p *planner) createEnum(params runParams, n *tree.CreateType) error {
+	// Make sure that all nodes in the cluster are able to recognize ENUM types.
+	if !p.ExecCfg().Settings.Version.IsActive(params.ctx, clusterversion.VersionEnums) {
+		return pgerror.Newf(pgcode.FeatureNotSupported,
+			"not all nodes are the correct version for ENUM type creation")
 	}
-	return params.p.createEnumWithID(
-		params, id, n.n.EnumLabels, n.dbDesc, n.typeName, EnumTypeUserDefined,
-	)
-}
 
-// CreateEnumTypeDesc creates a new enum type descriptor.
-func CreateEnumTypeDesc(
-	params runParams,
-	id descpb.ID,
-	enumLabels tree.EnumValueList,
-	dbDesc catalog.DatabaseDescriptor,
-	schema catalog.SchemaDescriptor,
-	typeName *tree.TypeName,
-	enumType EnumType,
-) (*typedesc.Mutable, error) {
+	sqltelemetry.IncrementEnumCounter(sqltelemetry.EnumCreate)
+
 	// Ensure there are no duplicates in the input enum values.
 	seenVals := make(map[tree.EnumValue]struct{})
-	for _, value := range enumLabels {
+	for _, value := range n.EnumLabels {
 		_, ok := seenVals[value]
 		if ok {
-			return nil, pgerror.Newf(pgcode.InvalidObjectDefinition,
+			return pgerror.Newf(pgcode.InvalidObjectDefinition,
 				"enum definition contains duplicate value %q", value)
 		}
 		seenVals[value] = struct{}{}
 	}
 
-	members := make([]descpb.TypeDescriptor_EnumMember, len(enumLabels))
-	physReps := enum.GenerateNEvenlySpacedBytes(len(enumLabels))
-	for i := range enumLabels {
+	// Resolve the desired new type name.
+	typeName, db, err := resolveNewTypeName(params, n.TypeName)
+	if err != nil {
+		return err
+	}
+	n.TypeName.SetAnnotation(&p.semaCtx.Annotations, typeName)
+
+	// Generate a key in the namespace table and a new id for this type.
+	typeKey, schemaID, err := getCreateTypeParams(params, typeName, db)
+	if err != nil {
+		return err
+	}
+
+	members := make([]descpb.TypeDescriptor_EnumMember, len(n.EnumLabels))
+	physReps := enum.GenerateNEvenlySpacedBytes(len(n.EnumLabels))
+	for i := range n.EnumLabels {
 		members[i] = descpb.TypeDescriptor_EnumMember{
-			LogicalRepresentation:  string(enumLabels[i]),
+			LogicalRepresentation:  string(n.EnumLabels[i]),
 			PhysicalRepresentation: physReps[i],
 			Capability:             descpb.TypeDescriptor_EnumMember_ALL,
 		}
 	}
 
-	privs := dbDesc.GetDefaultPrivilegeDescriptor().CreatePrivilegesFromDefaultPrivileges(
-		dbDesc.GetID(),
-		params.p.User(), tree.Types, dbDesc.GetPrivileges(),
-	)
-
-	enumKind := descpb.TypeDescriptor_ENUM
-	var regionConfig *descpb.TypeDescriptor_RegionConfig
-	if enumType == EnumTypeMultiRegion {
-		enumKind = descpb.TypeDescriptor_MULTIREGION_ENUM
-		primaryRegion, err := dbDesc.PrimaryRegionName()
-		if err != nil {
-			return nil, err
-		}
-		regionConfig = &descpb.TypeDescriptor_RegionConfig{
-			PrimaryRegion: primaryRegion,
-		}
+	// Generate a stable ID for the new type.
+	id, err := catalogkv.GenerateUniqueDescID(params.ctx, params.ExecCfg().DB, params.ExecCfg().Codec)
+	if err != nil {
+		return err
 	}
+
+	// Database privileges and Type privileges do not overlap so there is nothing
+	// to inherit.
+	// However having USAGE on a parent schema of the type
+	// gives USAGE privilege to the type.
+	privs := descpb.NewDefaultPrivilegeDescriptor(params.p.User())
+	resolvedSchema, err := p.Descriptors().ResolveSchemaByID(params.ctx, p.Txn(), schemaID)
+	if err != nil {
+		return err
+	}
+
+	inheritUsagePrivilegeFromSchema(resolvedSchema, privs)
+	privs.Grant(params.p.User(), privilege.List{privilege.ALL})
 
 	// TODO (rohany): OID's are computed using an offset of
 	//  oidext.CockroachPredefinedOIDMax from the descriptor ID. Once we have
 	//  a free list of descriptor ID's (#48438), we should allocate an ID from
 	//  there if id + oidext.CockroachPredefinedOIDMax overflows past the
 	//  maximum uint32 value.
-	return typedesc.NewBuilder(&descpb.TypeDescriptor{
-		Name:           typeName.Type(),
-		ID:             id,
-		ParentID:       dbDesc.GetID(),
-		ParentSchemaID: schema.GetID(),
-		Kind:           enumKind,
-		EnumMembers:    members,
-		Version:        1,
-		Privileges:     privs,
-		RegionConfig:   regionConfig,
-	}).BuildCreatedMutableType(), nil
-}
-
-func (p *planner) createEnumWithID(
-	params runParams,
-	id descpb.ID,
-	enumLabels tree.EnumValueList,
-	dbDesc catalog.DatabaseDescriptor,
-	typeName *tree.TypeName,
-	enumType EnumType,
-) error {
-	sqltelemetry.IncrementEnumCounter(sqltelemetry.EnumCreate)
-
-	// Generate a key in the namespace table and a new id for this type.
-	schema, err := getCreateTypeParams(params, typeName, dbDesc)
-	if err != nil {
-		return err
-	}
-
-	typeDesc, err := CreateEnumTypeDesc(params, id, enumLabels, dbDesc, schema, typeName, enumType)
-	if err != nil {
-		return err
-	}
+	typeDesc := typedesc.NewCreatedMutable(
+		descpb.TypeDescriptor{
+			Name:           typeName.Type(),
+			ID:             id,
+			ParentID:       db.GetID(),
+			ParentSchemaID: schemaID,
+			Kind:           descpb.TypeDescriptor_ENUM,
+			EnumMembers:    members,
+			Version:        1,
+			Privileges:     privs,
+		})
 
 	// Create the implicit array type for this type before finishing the type.
-	arrayTypeID, err := p.createArrayType(params, typeName, typeDesc, dbDesc, schema.GetID())
+	arrayTypeID, err := p.createArrayType(params, n, typeName, typeDesc, db, schemaID)
 	if err != nil {
 		return err
 	}
@@ -413,24 +319,64 @@ func (p *planner) createEnumWithID(
 	// Now create the type after the implicit array type as been created.
 	if err := p.createDescriptorWithID(
 		params.ctx,
-		catalogkeys.MakeObjectNameKey(params.ExecCfg().Codec, dbDesc.GetID(), schema.GetID(), typeName.Type()),
+		typeKey.Key(params.ExecCfg().Codec),
 		id,
 		typeDesc,
 		params.EvalContext().Settings,
-		typeName.String(),
+		tree.AsStringWithFQNames(n, params.Ann()),
 	); err != nil {
 		return err
 	}
 
 	// Log the event.
-	return p.logEvent(params.ctx,
-		typeDesc.GetID(),
-		&eventpb.CreateType{
-			TypeName: typeName.FQString(),
-		})
+	return MakeEventLogger(p.ExecCfg()).InsertEventRecord(
+		params.ctx,
+		p.txn,
+		EventLogCreateType,
+		int32(typeDesc.GetID()),
+		int32(p.ExtendedEvalContext().NodeID.SQLInstanceID()),
+		struct {
+			TypeName  string
+			Statement string
+			User      string
+		}{typeName.FQString(), tree.AsStringWithFQNames(n, params.Ann()), p.User()},
+	)
 }
 
 func (n *createTypeNode) Next(params runParams) (bool, error) { return false, nil }
 func (n *createTypeNode) Values() tree.Datums                 { return tree.Datums{} }
 func (n *createTypeNode) Close(ctx context.Context)           {}
 func (n *createTypeNode) ReadingOwnWrites()                   {}
+
+// TODO(richardjcai): Instead of inheriting the privilege when creating the
+// descriptor, we can check the parent of type for usage privilege as well,
+// this seems to be how Postgres does it.
+// Add a test for this when we support granting privileges to schemas #50879.
+func inheritUsagePrivilegeFromSchema(
+	resolvedSchema catalog.ResolvedSchema, privs *descpb.PrivilegeDescriptor,
+) {
+
+	switch resolvedSchema.Kind {
+	case catalog.SchemaPublic:
+		// If the type is in the public schema, the public role has USAGE on it.
+		privs.Grant(security.PublicRole, privilege.List{privilege.USAGE})
+	case catalog.SchemaTemporary, catalog.SchemaVirtual:
+		// No types should be created in a temporary schema or a virtual schema.
+		panic(errors.AssertionFailedf(
+			"type being created in schema kind %d with id %d",
+			resolvedSchema.Kind, resolvedSchema.ID))
+	case catalog.SchemaUserDefined:
+		schemaDesc := resolvedSchema.Desc
+		schemaPrivs := schemaDesc.GetPrivileges()
+
+		// Look for all users that have USAGE on the schema and add it to the
+		// privilege descriptor.
+		for _, u := range schemaPrivs.Users {
+			if u.Privileges&privilege.USAGE.Mask() == 1 {
+				privs.Grant(u.User, privilege.List{privilege.USAGE})
+			}
+		}
+	default:
+		panic(errors.AssertionFailedf("unknown schema kind %d", resolvedSchema.Kind))
+	}
+}

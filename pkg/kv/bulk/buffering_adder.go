@@ -15,7 +15,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangecache"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -60,7 +60,7 @@ type BufferingAdder struct {
 	bulkMon *mon.BytesMonitor
 	memAcc  mon.BoundAccount
 
-	onFlush func(summary roachpb.BulkOpSummary)
+	onFlush func()
 }
 
 var _ kvserverbase.BulkAdder = &BufferingAdder{}
@@ -72,7 +72,7 @@ var _ kvserverbase.BulkAdder = &BufferingAdder{}
 func MakeBulkAdder(
 	ctx context.Context,
 	db SSTSender,
-	rangeCache *rangecache.RangeCache,
+	rangeCache *kvcoord.RangeDescriptorCache,
 	settings *cluster.Settings,
 	timestamp hlc.Timestamp,
 	opts kvserverbase.BulkAdderOptions,
@@ -94,8 +94,6 @@ func MakeBulkAdder(
 		// splitting _before_ hitting max reduces chance of auto-splitting after the
 		// range is full and is more expensive to split/move.
 		opts.SplitAndScatterAfter = func() int64 { return 48 << 20 }
-	} else if opts.SplitAndScatterAfter() == kvserverbase.DisableExplicitSplits {
-		opts.SplitAndScatterAfter = nil
 	}
 
 	b := &BufferingAdder{
@@ -140,7 +138,7 @@ func MakeBulkAdder(
 }
 
 // SetOnFlush sets a callback to run after the buffering adder flushes.
-func (b *BufferingAdder) SetOnFlush(fn func(summary roachpb.BulkOpSummary)) {
+func (b *BufferingAdder) SetOnFlush(fn func()) {
 	b.onFlush = fn
 }
 
@@ -208,7 +206,7 @@ func (b *BufferingAdder) IsEmpty() bool {
 func (b *BufferingAdder) Flush(ctx context.Context) error {
 	if b.curBuf.Len() == 0 {
 		if b.onFlush != nil {
-			b.onFlush(b.sink.GetBatchSummary())
+			b.onFlush()
 		}
 		return nil
 	}
@@ -266,7 +264,7 @@ func (b *BufferingAdder) Flush(ctx context.Context) error {
 		)
 	}
 	if b.onFlush != nil {
-		b.onFlush(b.sink.GetBatchSummary())
+		b.onFlush()
 	}
 	b.curBuf.Reset()
 	return nil

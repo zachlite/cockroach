@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -32,10 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/uint128"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors/oserror"
-	"github.com/stretchr/testify/require"
 )
 
 // Note: most benchmarks in this package have an engine-specific Benchmark
@@ -45,7 +41,6 @@ import (
 
 func BenchmarkMVCCGarbageCollect(b *testing.B) {
 	skip.UnderShort(b)
-	defer log.Scope(b).Close(b)
 
 	// NB: To debug #16068, test only 128-128-15000-6.
 	keySizes := []int{128}
@@ -62,6 +57,7 @@ func BenchmarkMVCCGarbageCollect(b *testing.B) {
 		name   string
 		create engineMaker
 	}{
+		{"rocksdb", setupMVCCInMemRocksDB},
 		{"pebble", setupMVCCInMemPebble},
 	}
 
@@ -103,16 +99,14 @@ func BenchmarkMVCCGarbageCollect(b *testing.B) {
 }
 
 func BenchmarkExportToSst(b *testing.B) {
-	defer log.Scope(b).Close(b)
-
 	numKeys := []int{64, 512, 1024, 8192, 65536}
 	numRevisions := []int{1, 10, 100}
 	exportAllRevisions := []bool{false, true}
-	useTBI := []bool{false, true}
 	engineMakers := []struct {
 		name   string
 		create engineMaker
 	}{
+		{"rocksdb", setupMVCCRocksDB},
 		{"pebble", setupMVCCPebble},
 	}
 
@@ -124,452 +118,7 @@ func BenchmarkExportToSst(b *testing.B) {
 						b.Run(fmt.Sprintf("numRevisions=%d", numRevision), func(b *testing.B) {
 							for _, exportAllRevisionsVal := range exportAllRevisions {
 								b.Run(fmt.Sprintf("exportAllRevisions=%t", exportAllRevisionsVal), func(b *testing.B) {
-									for _, useTBIVal := range useTBI {
-										b.Run(fmt.Sprintf("useTBI=%t", useTBIVal), func(b *testing.B) {
-											runExportToSst(b, engineImpl.create, numKey, numRevision,
-												exportAllRevisionsVal, useTBIVal)
-										})
-									}
-								})
-							}
-						})
-					}
-				})
-			}
-		})
-	}
-}
-
-const numIntentKeys = 1000
-
-// setupKeysWithIntent writes keys using transactions to eng. The number of
-// different keys is equal to numIntentKeys and each key has numVersions
-// versions written to it. The number of versions that are resolved is either
-// numVersions-1 or numVersions, which is controlled by the resolveAll
-// parameter (when true, numVersions are resolved). The latest version for a
-// key is generated using one of possibly two transactions. One of these is
-// what is returned in the LockUpdate so that the caller can resolve intents
-// for it (if any). This distinguished transaction writes the latest version
-// with a stride equal to lockUpdateTxnHasLatestVersionStride. A stride of k
-// means it writes every k-th latest version. Strides longer than 1 are for
-// use in tests with ranged intent resolution for this distinguished
-// transaction, where some of the intents encountered should not be resolved.
-// The latest intents written by the non-distinguished transaction may also be
-// resolved, if resolveIntentForLatestVersionWhenNonLockUpdateTxn is true.
-// This causes ranged intent resolution to not encounter intents owned by
-// other transactions, but may have to skip through keys that have no intents
-// at all. numFlushedVersions is a parameter that controls how many versions
-// are flushed out from the memtable to sstables -- when less is flushed out,
-// and we are using separated intents, the SingleDeletes, Sets corresponding
-// to resolved intents still exist in the memtable, and can result in more
-// work during intent resolution. In a production setting numFlushedVersions
-// should be close to all the versions.
-func setupKeysWithIntent(
-	b testing.TB,
-	eng Engine,
-	numVersions int,
-	numFlushedVersions int,
-	resolveAll bool,
-	lockUpdateTxnHasLatestVersionStride int,
-	resolveIntentForLatestVersionWhenNonLockUpdateTxn bool,
-) roachpb.LockUpdate {
-	txnIDCount := 2 * numVersions
-	adjustTxnID := func(txnID int) int {
-		// Assign txn IDs in a deterministic way that will mimic the end result of
-		// random assignment -- the live intent is centered between dead intents,
-		// when we have separated intents.
-		if txnID%2 == 0 {
-			txnID = txnIDCount - txnID
-		}
-		return txnID
-	}
-	txnIDWithLatestVersion := adjustTxnID(numVersions)
-	otherTxnWithLatestVersion := txnIDCount + 2
-	otherTxnUUID := uuid.FromUint128(uint128.FromInts(0, uint64(otherTxnWithLatestVersion)))
-	val := []byte("value")
-	var rvLockUpdate roachpb.LockUpdate
-	for i := 1; i <= numVersions; i++ {
-		// Assign txn IDs in a deterministic way that will mimic the end result of
-		// random assignment -- the live intent is centered between dead intents,
-		// when we have separated intents.
-		txnID := adjustTxnID(i)
-		txnUUID := uuid.FromUint128(uint128.FromInts(0, uint64(txnID)))
-		ts := hlc.Timestamp{WallTime: int64(i)}
-		txn := roachpb.Transaction{
-			TxnMeta: enginepb.TxnMeta{
-				ID:             txnUUID,
-				Key:            []byte("foo"),
-				WriteTimestamp: ts,
-				MinTimestamp:   ts,
-			},
-			Status:                 roachpb.PENDING,
-			ReadTimestamp:          ts,
-			GlobalUncertaintyLimit: ts,
-		}
-		lockUpdate := roachpb.LockUpdate{
-			Txn:    txn.TxnMeta,
-			Status: roachpb.COMMITTED,
-		}
-		var otherTxn roachpb.Transaction
-		var otherLockUpdate roachpb.LockUpdate
-		if txnID == txnIDWithLatestVersion {
-			rvLockUpdate = lockUpdate
-			if lockUpdateTxnHasLatestVersionStride != 1 {
-				otherTxn = roachpb.Transaction{
-					TxnMeta: enginepb.TxnMeta{
-						ID:             otherTxnUUID,
-						Key:            []byte("foo"),
-						WriteTimestamp: ts,
-						MinTimestamp:   ts,
-					},
-					Status:                 roachpb.PENDING,
-					ReadTimestamp:          ts,
-					GlobalUncertaintyLimit: ts,
-				}
-				otherLockUpdate = roachpb.LockUpdate{
-					Txn:    otherTxn.TxnMeta,
-					Status: roachpb.COMMITTED,
-				}
-			}
-		}
-		value := roachpb.Value{RawBytes: val}
-		batch := eng.NewBatch()
-		for j := 0; j < numIntentKeys; j++ {
-			putTxn := &txn
-			if txnID == txnIDWithLatestVersion && j%lockUpdateTxnHasLatestVersionStride != 0 {
-				putTxn = &otherTxn
-			}
-			key := makeKey(nil, j)
-			require.NoError(b, MVCCPut(context.Background(), batch, nil, key, ts, value, putTxn))
-		}
-		require.NoError(b, batch.Commit(true))
-		batch.Close()
-		if i < numVersions || resolveAll || resolveIntentForLatestVersionWhenNonLockUpdateTxn {
-			batch := eng.NewBatch()
-			for j := 0; j < numIntentKeys; j++ {
-				key := makeKey(nil, j)
-				lu := lockUpdate
-				latestVersionNonLockUpdateTxn := false
-				if txnID == txnIDWithLatestVersion && j%lockUpdateTxnHasLatestVersionStride != 0 {
-					lu = otherLockUpdate
-					latestVersionNonLockUpdateTxn = true
-				}
-				lu.Key = key
-				if i == numVersions && !resolveAll && !latestVersionNonLockUpdateTxn {
-					// Only here because of
-					// resolveIntentForLatestVersionWhenNonLockUpdateTxn, and this key
-					// is not one that should be resolved.
-					continue
-				}
-				found, err := MVCCResolveWriteIntent(context.Background(), batch, nil, lu)
-				require.Equal(b, true, found)
-				require.NoError(b, err)
-			}
-			require.NoError(b, batch.Commit(true))
-			batch.Close()
-		}
-		if i == numFlushedVersions {
-			require.NoError(b, eng.Flush())
-		}
-	}
-	return rvLockUpdate
-}
-
-// BenchmarkIntentScan compares separated and interleaved intents, when
-// reading the intent and latest version for a range of keys.
-func BenchmarkIntentScan(b *testing.B) {
-	skip.UnderShort(b, "setting up unflushed data takes too long")
-	defer log.Scope(b).Close(b)
-
-	for _, sep := range []bool{false, true} {
-		b.Run(fmt.Sprintf("separated=%t", sep), func(b *testing.B) {
-			for _, numVersions := range []int{10, 100, 200, 400} {
-				b.Run(fmt.Sprintf("versions=%d", numVersions), func(b *testing.B) {
-					for _, percentFlushed := range []int{0, 50, 80, 90, 100} {
-						b.Run(fmt.Sprintf("percent-flushed=%d", percentFlushed), func(b *testing.B) {
-							eng := setupMVCCInMemPebbleWithSeparatedIntents(b, !sep)
-							numFlushedVersions := (percentFlushed * numVersions) / 100
-							setupKeysWithIntent(b, eng, numVersions, numFlushedVersions, false, /* resolveAll */
-								1, false /* resolveIntentForLatestVersionWhenNotLockUpdate */)
-							lower := makeKey(nil, 0)
-							iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
-								LowerBound: lower,
-								UpperBound: makeKey(nil, numIntentKeys),
-							})
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								valid, err := iter.Valid()
-								if err != nil {
-									b.Fatal(err)
-								}
-								if !valid {
-									iter.SeekGE(MVCCKey{Key: lower})
-								} else {
-									// Read intent.
-									k := iter.UnsafeKey()
-									if k.IsValue() {
-										b.Fatalf("expected intent %s", k.String())
-									}
-									// Read latest version.
-									//
-									// This Next dominates the cost of the benchmark when
-									// percent-flushed is < 100, since the pebble.Iterator has
-									// to iterate over all the Deletes/SingleDeletes/Sets
-									// corresponding to resolved intents.
-									iter.Next()
-									valid, err = iter.Valid()
-									if !valid || err != nil {
-										b.Fatalf("valid: %t, err: %s", valid, err)
-									}
-									k = iter.UnsafeKey()
-									if !k.IsValue() {
-										b.Fatalf("expected value")
-									}
-									// Skip to next key. This dominates the cost of the benchmark,
-									// when percent-flushed=100.
-									iter.NextKey()
-								}
-							}
-						})
-					}
-				})
-			}
-		})
-	}
-}
-
-// BenchmarkScanAllIntentsResolved compares separated and interleaved intents,
-// when reading the latest version for a range of keys, when all the intents
-// have been resolved.
-func BenchmarkScanAllIntentsResolved(b *testing.B) {
-	skip.UnderShort(b, "setting up unflushed data takes too long")
-	defer log.Scope(b).Close(b)
-
-	for _, sep := range []bool{false, true} {
-		b.Run(fmt.Sprintf("separated=%t", sep), func(b *testing.B) {
-			for _, numVersions := range []int{200} {
-				b.Run(fmt.Sprintf("versions=%d", numVersions), func(b *testing.B) {
-					for _, percentFlushed := range []int{0, 50, 90, 100} {
-						b.Run(fmt.Sprintf("percent-flushed=%d", percentFlushed), func(b *testing.B) {
-							eng := setupMVCCInMemPebbleWithSeparatedIntents(b, !sep)
-							numFlushedVersions := (percentFlushed * numVersions) / 100
-							setupKeysWithIntent(b, eng, numVersions, numFlushedVersions, true, /* resolveAll */
-								1, false /* resolveIntentForLatestVersionWhenNotLockUpdate */)
-							lower := makeKey(nil, 0)
-							var iter MVCCIterator
-							var buf []byte
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								var valid bool
-								var err error
-								if iter != nil {
-									valid, err = iter.Valid()
-								}
-								if err != nil {
-									b.Fatal(err)
-								}
-								if !valid {
-									// Create a new MVCCIterator. Simply seeking to the earlier
-									// key is not representative of a real workload where
-									// iterator reuse always seeks to a later key (because of
-									// the sorting in a BatchRequest). Seeking to an earlier key
-									// allows for an optimization in lock table iteration when
-									// not using the *WithLimit() operations on the underlying
-									// pebble.Iterator, where the SeekGE can be turned into a
-									// noop since the original SeekGE is what was remembered
-									// (and this seek is to the same position as the original
-									// seek). This optimization won't fire in this manner in
-									// practice, so we don't want it to happen in this Benchmark
-									// either.
-									b.StopTimer()
-									iter = eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
-										LowerBound: lower,
-										UpperBound: makeKey(nil, numIntentKeys),
-									})
-									b.StartTimer()
-									iter.SeekGE(MVCCKey{Key: lower})
-								} else {
-									// Read latest version.
-									k := iter.UnsafeKey()
-									if !k.IsValue() {
-										b.Fatalf("expected value %s", k.String())
-									}
-									// Skip to next key.
-									buf = append(buf[:0], k.Key...)
-									buf = roachpb.BytesNext(buf)
-									iter.SeekGE(MVCCKey{Key: buf})
-								}
-							}
-						})
-					}
-				})
-			}
-		})
-	}
-}
-
-// BenchmarkScanOneAllIntentsResolved compares separated and interleaved
-// intents, when reading the latest version for a range of keys, when all the
-// intents have been resolved. Unlike the previous benchmark, each scan reads
-// one key.
-func BenchmarkScanOneAllIntentsResolved(b *testing.B) {
-	skip.UnderShort(b, "setting up unflushed data takes too long")
-	defer log.Scope(b).Close(b)
-
-	for _, sep := range []bool{false, true} {
-		b.Run(fmt.Sprintf("separated=%t", sep), func(b *testing.B) {
-			for _, numVersions := range []int{200} {
-				b.Run(fmt.Sprintf("versions=%d", numVersions), func(b *testing.B) {
-					for _, percentFlushed := range []int{0, 50, 90, 100} {
-						b.Run(fmt.Sprintf("percent-flushed=%d", percentFlushed), func(b *testing.B) {
-							eng := setupMVCCInMemPebbleWithSeparatedIntents(b, !sep)
-							numFlushedVersions := (percentFlushed * numVersions) / 100
-							setupKeysWithIntent(b, eng, numVersions, numFlushedVersions, true, /* resolveAll */
-								1, false /* resolveIntentForLatestVersionWhenNotLockUpdate */)
-							lower := makeKey(nil, 0)
-							upper := makeKey(nil, numIntentKeys)
-							buf := append([]byte(nil), lower...)
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
-									LowerBound: buf,
-									UpperBound: upper,
-								})
-								iter.SeekGE(MVCCKey{Key: buf})
-								valid, err := iter.Valid()
-								if err != nil {
-									b.Fatal(err)
-								}
-								if !valid {
-									buf = append(buf[:0], lower...)
-								} else {
-									// Read latest version.
-									k := iter.UnsafeKey()
-									if !k.IsValue() {
-										b.Fatalf("expected value %s", k.String())
-									}
-									// Skip to next key.
-									buf = append(buf[:0], k.Key...)
-									buf = roachpb.BytesNext(buf)
-									iter.Close()
-								}
-							}
-						})
-					}
-				})
-			}
-		})
-	}
-}
-
-// BenchmarkIntentResolution compares separated and interleaved intents, when
-// doing intent resolution for individual intents.
-func BenchmarkIntentResolution(b *testing.B) {
-	skip.UnderShort(b, "setting up unflushed data takes too long")
-	defer log.Scope(b).Close(b)
-
-	for _, sep := range []bool{false, true} {
-		b.Run(fmt.Sprintf("separated=%t", sep), func(b *testing.B) {
-			for _, numVersions := range []int{10, 100, 200, 400} {
-				b.Run(fmt.Sprintf("versions=%d", numVersions), func(b *testing.B) {
-					for _, percentFlushed := range []int{0, 50, 80, 90, 100} {
-						b.Run(fmt.Sprintf("percent-flushed=%d", percentFlushed), func(b *testing.B) {
-							eng := setupMVCCInMemPebbleWithSeparatedIntents(b, !sep)
-							numFlushedVersions := (percentFlushed * numVersions) / 100
-							lockUpdate := setupKeysWithIntent(b, eng, numVersions, numFlushedVersions,
-								false /* resolveAll */, 1,
-								false /* resolveIntentForLatestVersionWhenNotLockUpdate */)
-							keys := make([]roachpb.Key, numIntentKeys)
-							for i := range keys {
-								keys[i] = makeKey(nil, i)
-							}
-							batch := eng.NewBatch()
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								if i > 0 && i%numIntentKeys == 0 {
-									// Wrapped around.
-									b.StopTimer()
-									batch.Close()
-									batch = eng.NewBatch()
-									b.StartTimer()
-								}
-								lockUpdate.Key = keys[i%numIntentKeys]
-								found, err := MVCCResolveWriteIntent(context.Background(), batch, nil, lockUpdate)
-								if !found || err != nil {
-									b.Fatalf("intent not found or err %s", err)
-								}
-							}
-						})
-					}
-				})
-			}
-		})
-	}
-}
-
-// BenchmarkIntentRangeResolution compares separated and interleaved intents,
-// when doing ranged intent resolution.
-func BenchmarkIntentRangeResolution(b *testing.B) {
-	skip.UnderShort(b, "setting up unflushed data takes too long")
-	defer log.Scope(b).Close(b)
-
-	for _, sep := range []bool{false, true} {
-		b.Run(fmt.Sprintf("separated=%t", sep), func(b *testing.B) {
-			for _, numVersions := range []int{10, 100, 400} {
-				b.Run(fmt.Sprintf("versions=%d", numVersions), func(b *testing.B) {
-					for _, sparseness := range []int{1, 100, 1000} {
-						b.Run(fmt.Sprintf("sparseness=%d", sparseness), func(b *testing.B) {
-							otherTxnUnresolvedIntentsCases := []bool{false, true}
-							if sparseness == 1 {
-								// Every intent is owned by the main txn.
-								otherTxnUnresolvedIntentsCases = []bool{false}
-							}
-							for _, haveOtherTxnUnresolvedIntents := range otherTxnUnresolvedIntentsCases {
-								b.Run(fmt.Sprintf("other-txn-intents=%t", haveOtherTxnUnresolvedIntents), func(b *testing.B) {
-									for _, percentFlushed := range []int{0, 50, 100} {
-										b.Run(fmt.Sprintf("percent-flushed=%d", percentFlushed), func(b *testing.B) {
-											eng := setupMVCCInMemPebbleWithSeparatedIntents(b, !sep)
-											numFlushedVersions := (percentFlushed * numVersions) / 100
-											lockUpdate := setupKeysWithIntent(b, eng, numVersions, numFlushedVersions,
-												false /* resolveAll */, sparseness, !haveOtherTxnUnresolvedIntents)
-											keys := make([]roachpb.Key, numIntentKeys+1)
-											for i := range keys {
-												keys[i] = makeKey(nil, i)
-											}
-											batch := eng.NewBatch()
-											numKeysPerRange := 100
-											numRanges := numIntentKeys / numKeysPerRange
-											var resolvedCount int64
-											expectedResolvedCount := int64(numIntentKeys / sparseness)
-											b.ResetTimer()
-											for i := 0; i < b.N; i++ {
-												if i > 0 && i%numRanges == 0 {
-													// Wrapped around.
-													b.StopTimer()
-													if resolvedCount != expectedResolvedCount {
-														b.Fatalf("expected to resolve %d, actual %d",
-															expectedResolvedCount, resolvedCount)
-													}
-													resolvedCount = 0
-													batch.Close()
-													batch = eng.NewBatch()
-													b.StartTimer()
-												}
-												rangeNum := i % numRanges
-												lockUpdate.Key = keys[rangeNum*numKeysPerRange]
-												lockUpdate.EndKey = keys[(rangeNum+1)*numKeysPerRange]
-												resolved, span, err := MVCCResolveWriteIntentRange(
-													context.Background(), batch, nil, lockUpdate, 1000 /* max */, sep)
-												if err != nil {
-													b.Fatal(err)
-												}
-												resolvedCount += resolved
-												if span != nil {
-													b.Fatal("unexpected resume span")
-												}
-											}
-										})
-									}
+									runExportToSst(b, engineImpl.create, numKey, numRevision, exportAllRevisionsVal)
 								})
 							}
 						})
@@ -619,14 +168,19 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 	ctx := context.Background()
 
 	exists := true
-	if _, err := os.Stat(dir); oserror.IsNotExist(err) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		exists = false
 	}
 
-	eng, err := Open(
-		context.Background(),
-		Filesystem(dir),
-		Settings(cluster.MakeTestingClusterSettings()))
+	eng, err := NewRocksDB(
+		RocksDBConfig{
+			StorageConfig: base.StorageConfig{
+				Settings: cluster.MakeTestingClusterSettings(),
+				Dir:      dir,
+			},
+		},
+		RocksDBCache{},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -653,11 +207,10 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 
 	var batch Batch
 	var minWallTime int64
-	batchSize := len(keys) / numBatches
 	for i, key := range keys {
-		if (i % batchSize) == 0 {
+		if scaled := len(keys) / numBatches; (i % scaled) == 0 {
 			if i > 0 {
-				log.Infof(ctx, "committing (%d/~%d)", i/batchSize, numBatches)
+				log.Infof(ctx, "committing (%d/~%d)", i/scaled, numBatches)
 				if err := batch.Commit(false /* sync */); err != nil {
 					return nil, err
 				}
@@ -667,7 +220,7 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 				}
 			}
 			batch = eng.NewBatch()
-			minWallTime = sstTimestamps[i/batchSize]
+			minWallTime = sstTimestamps[i/scaled]
 		}
 		timestamp := hlc.Timestamp{WallTime: minWallTime + rand.Int63n(int64(batchTimeSpan))}
 		value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueBytes))
@@ -711,7 +264,7 @@ func setupMVCCData(
 	}
 
 	exists := true
-	if _, err := os.Stat(loc); oserror.IsNotExist(err) {
+	if _, err := os.Stat(loc); os.IsNotExist(err) {
 		exists = false
 	} else if err != nil {
 		b.Fatal(err)
@@ -857,8 +410,8 @@ func runMVCCScan(ctx context.Context, b *testing.B, emk engineMaker, opts benchS
 		// Pull all of the sstables into the RocksDB cache in order to make the
 		// timings more stable. Otherwise, the first run will be penalized pulling
 		// data into the cache while later runs will not.
-		iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
-		_, _ = iter.ComputeStats(keys.LocalMax, roachpb.KeyMax, 0)
+		iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+		_, _ = iter.ComputeStats(roachpb.KeyMin, roachpb.KeyMax, 0)
 		iter.Close()
 	}
 
@@ -930,7 +483,7 @@ func runMVCCGet(ctx context.Context, b *testing.B, emk engineMaker, opts benchDa
 }
 
 func runMVCCPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -952,7 +505,7 @@ func runMVCCPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize in
 }
 
 func runMVCCBlindPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -976,7 +529,7 @@ func runMVCCBlindPut(ctx context.Context, b *testing.B, emk engineMaker, valueSi
 func runMVCCConditionalPut(
 	ctx context.Context, b *testing.B, emk engineMaker, valueSize int, createFirst bool,
 ) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1010,7 +563,7 @@ func runMVCCConditionalPut(
 }
 
 func runMVCCBlindConditionalPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1032,7 +585,7 @@ func runMVCCBlindConditionalPut(ctx context.Context, b *testing.B, emk engineMak
 }
 
 func runMVCCInitPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1054,7 +607,7 @@ func runMVCCInitPut(ctx context.Context, b *testing.B, emk engineMaker, valueSiz
 }
 
 func runMVCCBlindInitPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1076,7 +629,7 @@ func runMVCCBlindInitPut(ctx context.Context, b *testing.B, emk engineMaker, val
 }
 
 func runMVCCBatchPut(ctx context.Context, b *testing.B, emk engineMaker, valueSize, batchSize int) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1162,6 +715,46 @@ func runMVCCBatchTimeSeries(ctx context.Context, b *testing.B, emk engineMaker, 
 	b.StopTimer()
 }
 
+// runMVCCMerge merges value into numKeys separate keys.
+func runMVCCMerge(
+	ctx context.Context, b *testing.B, emk engineMaker, value *roachpb.Value, numKeys int,
+) {
+	eng := emk(b, fmt.Sprintf("merge_%d", numKeys))
+	defer eng.Close()
+
+	// Precompute keys so we don't waste time formatting them at each iteration.
+	keys := make([]roachpb.Key, numKeys)
+	for i := 0; i < numKeys; i++ {
+		keys[i] = roachpb.Key(fmt.Sprintf("key-%d", i))
+	}
+
+	b.ResetTimer()
+
+	ts := hlc.Timestamp{}
+	// Use parallelism if specified when test is run.
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			ms := enginepb.MVCCStats{}
+			ts.Logical++
+			err := MVCCMerge(ctx, eng, &ms, keys[rand.Intn(numKeys)], ts, *value)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.StopTimer()
+
+	// Read values out to force merge.
+	for _, key := range keys {
+		val, _, err := MVCCGet(ctx, eng, key, hlc.Timestamp{}, MVCCGetOptions{})
+		if err != nil {
+			b.Fatal(err)
+		} else if val == nil {
+			continue
+		}
+	}
+}
+
 // runMVCCGetMergedValue reads merged values for numKeys separate keys and mergesPerKey
 // operands per key.
 func runMVCCGetMergedValue(
@@ -1242,7 +835,7 @@ func runMVCCDeleteRange(ctx context.Context, b *testing.B, emk engineMaker, valu
 				ctx,
 				eng,
 				&enginepb.MVCCStats{},
-				keys.LocalMax,
+				roachpb.KeyMin,
 				roachpb.KeyMax,
 				math.MaxInt64,
 				hlc.MaxTimestamp,
@@ -1278,12 +871,9 @@ func runClearRange(
 	//
 	// TODO(benesch): when those hacks are removed, don't bother computing the
 	// first key and simply ClearRange(NilKey, MVCCKeyMax).
-	//
-	// TODO(sumeer): we are now seeking starting at LocalMax, so the
-	// aforementioned issue is probably resolved. Clean this up.
-	iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
+	iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
 	defer iter.Close()
-	iter.SeekGE(MVCCKey{Key: keys.LocalMax})
+	iter.SeekGE(NilKey)
 	if ok, err := iter.Valid(); !ok {
 		b.Fatalf("unable to find first key (err: %v)", err)
 	}
@@ -1293,7 +883,7 @@ func runClearRange(
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		batch := eng.NewUnindexedBatch(true /* writeOnly */)
+		batch := eng.NewWriteOnlyBatch()
 		if err := clearRange(eng, batch, firstKey, MVCCKeyMax); err != nil {
 			b.Fatal(err)
 		}
@@ -1324,8 +914,8 @@ func runMVCCComputeStats(ctx context.Context, b *testing.B, emk engineMaker, val
 	var stats enginepb.MVCCStats
 	var err error
 	for i := 0; i < b.N; i++ {
-		iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
-		stats, err = iter.ComputeStats(keys.LocalMax, roachpb.KeyMax, 0)
+		iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+		stats, err = iter.ComputeStats(roachpb.KeyMin, roachpb.KeyMax, 0)
 		iter.Close()
 		if err != nil {
 			b.Fatal(err)
@@ -1371,7 +961,7 @@ type benchGarbageCollectOptions struct {
 func runMVCCGarbageCollect(
 	ctx context.Context, b *testing.B, emk engineMaker, opts benchGarbageCollectOptions,
 ) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	eng := emk(b, "mvcc_gc")
 	defer eng.Close()
 
@@ -1433,7 +1023,7 @@ func runBatchApplyBatchRepr(
 	indexed, sequential bool,
 	valueSize, batchSize int,
 ) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueSize))
 	keyBuf := append(make([]byte, 0, 64), []byte("key-")...)
 
@@ -1452,7 +1042,7 @@ func runBatchApplyBatchRepr(
 			})
 		}
 
-		batch := eng.NewUnindexedBatch(true /* writeOnly */)
+		batch := eng.NewWriteOnlyBatch()
 		defer batch.Close() // NB: hold open so batch.Repr() doesn't get reused
 
 		for i := 0; i < batchSize; i++ {
@@ -1471,12 +1061,16 @@ func runBatchApplyBatchRepr(
 	for i := 0; i < b.N; i++ {
 		var batch Batch
 		if !indexed {
-			batch = eng.NewUnindexedBatch(true /* writeOnly */)
+			batch = eng.NewWriteOnlyBatch()
 		} else {
 			batch = eng.NewBatch()
 		}
 		if err := batch.ApplyBatchRepr(repr, false /* sync */); err != nil {
 			b.Fatal(err)
+		}
+		if r, ok := batch.(*rocksDBBatch); ok {
+			// Ensure mutations are flushed for RocksDB indexed batches.
+			r.flushMutations()
 		}
 		batch.Close()
 	}
@@ -1485,26 +1079,21 @@ func runBatchApplyBatchRepr(
 }
 
 func runExportToSst(
-	b *testing.B,
-	emk engineMaker,
-	numKeys int,
-	numRevisions int,
-	exportAllRevisions bool,
-	useTBI bool,
+	b *testing.B, emk engineMaker, numKeys int, numRevisions int, exportAllRevisions bool,
 ) {
 	dir, cleanup := testutils.TempDir(b)
 	defer cleanup()
 	engine := emk(b, dir)
 	defer engine.Close()
 
-	batch := engine.NewUnindexedBatch(true /* writeOnly */)
+	batch := engine.NewWriteOnlyBatch()
 	for i := 0; i < numKeys; i++ {
 		key := make([]byte, 16)
 		key = append(key, 'a', 'a', 'a')
 		key = encoding.EncodeUint32Ascending(key, uint32(i))
 
 		for j := 0; j < numRevisions; j++ {
-			err := batch.PutMVCC(MVCCKey{Key: key, Timestamp: hlc.Timestamp{WallTime: int64(j + 1), Logical: 0}}, []byte("foobar"))
+			err := batch.Put(MVCCKey{Key: key, Timestamp: hlc.Timestamp{WallTime: int64(j + 1), Logical: 0}}, []byte("foobar"))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -1522,25 +1111,13 @@ func runExportToSst(
 	for i := 0; i < b.N; i++ {
 		startTS := hlc.Timestamp{WallTime: int64(numRevisions / 2)}
 		endTS := hlc.Timestamp{WallTime: int64(numRevisions + 2)}
-		_, _, _, err := engine.ExportMVCCToSst(context.Background(), ExportOptions{
-			StartKey:           MVCCKey{Key: keys.LocalMax},
-			EndKey:             roachpb.KeyMax,
-			StartTS:            startTS,
-			EndTS:              endTS,
-			ExportAllRevisions: exportAllRevisions,
-			TargetSize:         0,
-			MaxSize:            0,
-			StopMidKey:         false,
-			UseTBI:             useTBI,
-		}, noopWriter{})
+		_, _, _, err := engine.ExportToSst(roachpb.KeyMin, roachpb.KeyMax, startTS, endTS, exportAllRevisions, 0 /* targetSize */, 0 /* maxSize */, IterOptions{
+			LowerBound: roachpb.KeyMin,
+			UpperBound: roachpb.KeyMax,
+		})
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
 	b.StopTimer()
 }
-
-type noopWriter struct{}
-
-func (noopWriter) Close() error                { return nil }
-func (noopWriter) Write(p []byte) (int, error) { return len(p), nil }

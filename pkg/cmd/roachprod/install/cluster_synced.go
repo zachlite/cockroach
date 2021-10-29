@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
+	crdberrors "github.com/cockroachdb/errors"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -46,7 +47,7 @@ import (
 type ClusterImpl interface {
 	Start(c *SyncedCluster, extraArgs []string)
 	CertsDir(c *SyncedCluster, index int) string
-	NodeDir(c *SyncedCluster, index, storeIndex int) string
+	NodeDir(c *SyncedCluster, index int) string
 	LogDir(c *SyncedCluster, index int) string
 	NodeURL(c *SyncedCluster, host string, port int) string
 	NodePort(c *SyncedCluster, index int) int
@@ -68,8 +69,7 @@ type SyncedCluster struct {
 	// all other fields are populated in newCluster.
 	Nodes          []int
 	Secure         bool
-	CertsDir       string
-	Env            []string
+	Env            string
 	Args           []string
 	Tag            string
 	Impl           ClusterImpl
@@ -157,13 +157,7 @@ func (c *SyncedCluster) newSession(i int) (session, error) {
 	return newRemoteSession(c.user(i), c.host(i), c.DebugDir)
 }
 
-// Stop is used to stop cockroach on all nodes in the cluster.
-//
-// It sends a signal to all processes that have been started with ROACHPROD env
-// var and optionally waits until the processes stop.
-//
-// When running roachprod stop without other flags, the signal is 9 (SIGKILL)
-// and wait is true.
+// Stop TODO(peter): document
 func (c *SyncedCluster) Stop(sig int, wait bool) {
 	display := fmt.Sprintf("%s: stopping", c.Name)
 	if wait {
@@ -188,15 +182,14 @@ func (c *SyncedCluster) Stop(sig int, wait bool) {
       sleep 1
     done
     echo "${pid}: dead" >> %[1]s/roachprod.log
-  done`,
-				c.Impl.LogDir(c, c.Nodes[i]), // [1]
-			)
+  done
+`, c.Impl.LogDir(c, c.Nodes[i]))
 		}
 
 		// NB: the awkward-looking `awk` invocation serves to avoid having the
 		// awk process match its own output from `ps`.
 		cmd := fmt.Sprintf(`
-mkdir -p %[1]s
+mkdir -p logs
 echo ">>> roachprod stop: $(date)" >> %[1]s/roachprod.log
 ps axeww -o pid -o command >> %[1]s/roachprod.log
 pids=$(ps axeww -o pid -o command | \
@@ -205,13 +198,8 @@ pids=$(ps axeww -o pid -o command | \
 if [ -n "${pids}" ]; then
   kill -%[4]d ${pids}
 %[5]s
-fi`,
-			c.Impl.LogDir(c, c.Nodes[i]), // [1]
-			c.Nodes[i],                   // [2]
-			c.escapedTag(),               // [3]
-			sig,                          // [4]
-			waitCmd,                      // [5]
-		)
+fi
+`, c.Impl.LogDir(c, c.Nodes[i]), c.Nodes[i], c.escapedTag(), sig, waitCmd)
 		return sess.CombinedOutput(cmd)
 	})
 }
@@ -344,77 +332,53 @@ func (c *SyncedCluster) Monitor(ignoreEmptyNodes bool, oneShot bool) chan NodeMo
 				return
 			}
 
-			// On each monitored node, we loop looking for a cockroach process.
+			// On each monitored node, we loop looking for a cockroach process. In
+			// order to avoid polling with lsof, if we find a live process we use nc
+			// (netcat) to connect to the rpc port which will block until the server
+			// either decides to kill the connection or the process is killed.
+			// In one-shot we don't use nc and return after the first assessment
+			// of the process' health.
 			data := struct {
 				OneShot     bool
 				IgnoreEmpty bool
 				Store       string
 				Port        int
-				Local       bool
 			}{
 				OneShot:     oneShot,
 				IgnoreEmpty: ignoreEmptyNodes,
-				Store:       Cockroach{}.NodeDir(c, nodes[i], 1 /* storeIndex */),
+				Store:       Cockroach{}.NodeDir(c, nodes[i]),
 				Port:        Cockroach{}.NodePort(c, nodes[i]),
-				Local:       c.IsLocal(),
 			}
 
 			snippet := `
-{{ if .IgnoreEmpty }}
+lastpid=0
+{{ if .IgnoreEmpty}}
 if [ ! -f "{{.Store}}/CURRENT" ]; then
   echo "skipped"
   exit 0
 fi
 {{- end}}
-
-# Init with -1 so that when cockroach is initially dead, we print
-# a dead event for it.
-lastpid=-1
 while :; do
-{{ if .Local }}
   pid=$(lsof -i :{{.Port}} -sTCP:LISTEN | awk '!/COMMAND/ {print $2}')
-	pid=${pid:-0} # default to 0
-	status="unknown"
-{{- else }}
-  # When CRDB is not running, this is zero.
-	pid=$(systemctl show cockroach --property MainPID --value)
-	status=$(systemctl show cockroach --property ExecMainStatus --value)
-{{- end }}
-
-  if [[ "${lastpid}" == -1 && "${pid}" != 0 ]]; then
-    # On the first iteration through the loop, if the process is running,
-    # don't register a PID change (which would trigger an erroneous dead
-    # event).
-    lastpid=0
-  fi
-  # Output a dead event whenever the PID changes from a nonzero value to
-  # any other value. In particular, we emit a dead event when the node stops
-  # (lastpid is nonzero, pid is zero), but not when the process then starts
-  # again (lastpid is zero, pid is nonzero).
   if [ "${pid}" != "${lastpid}" ]; then
-    if [ "${lastpid}" != 0 ]; then
-      if [ "${pid}" != 0 ]; then
-        # If the PID changed but neither is zero, then the status refers to
-        # the new incarnation. We lost the actual exit status of the old PID.
-        status="unknown"
-      fi
-    	echo "dead (exit status ${status})"
-    fi
-		if [ "${pid}" != 0 ]; then
-			echo "${pid}"
+    if [ -n "${lastpid}" -a -z "${pid}" ]; then
+      echo dead
     fi
     lastpid=${pid}
+    if [ -n "${pid}" ]; then
+      echo ${pid}
+    fi
   fi
-
-{{ if .OneShot }}
+{{if .OneShot }}
   exit 0
-{{- end }}
-
-  sleep 1
-  if [ "${pid}" != 0 ]; then
-    while kill -0 "${pid}"; do
+{{- end}}
+  if [ -n "${lastpid}" ]; then
+    while kill -0 "${lastpid}"; do
       sleep 1
     done
+    echo "kill exited nonzero"
+  else
+    sleep 1
   fi
 done
 `
@@ -426,12 +390,22 @@ done
 				return
 			}
 
-			// Request a PTY so that the script will receive a SIGPIPE when the
-			// session is closed.
+			// Request a PTY so that the script will receive will receive a SIGPIPE
+			// when the session is closed.
 			if err := sess.RequestPty(); err != nil {
 				ch <- NodeMonitorInfo{Index: nodes[i], Err: err}
 				return
 			}
+			// Give the session a valid stdin pipe so that nc won't exit immediately.
+			// When nc does exit, we write to stdout, which has a side effect of
+			// checking whether the stdout pipe has broken. This allows us to detect
+			// when the roachprod process is killed.
+			inPipe, err := sess.StdinPipe()
+			if err != nil {
+				ch <- NodeMonitorInfo{Index: nodes[i], Err: err}
+				return
+			}
+			defer inPipe.Close()
 
 			var readerWg sync.WaitGroup
 			readerWg.Add(1)
@@ -489,12 +463,12 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		display = fmt.Sprintf("%s: %s", c.Name, title)
 	}
 
-	errs := make([]error, len(nodes))
+	errors := make([]error, len(nodes))
 	results := make([]string, len(nodes))
 	c.Parallel(display, len(nodes), 0, func(i int) ([]byte, error) {
 		sess, err := c.newSession(nodes[i])
 		if err != nil {
-			errs[i] = err
+			errors[i] = err
 			results[i] = err.Error()
 			return nil, nil
 		}
@@ -526,12 +500,12 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		if stream {
 			sess.SetStdout(stdout)
 			sess.SetStderr(stderr)
-			errs[i] = sess.Run(nodeCmd)
-			if errs[i] != nil {
+			errors[i] = sess.Run(nodeCmd)
+			if errors[i] != nil {
 				detailMsg := fmt.Sprintf("Node %d. Command with error:\n```\n%s\n```\n", nodes[i], cmd)
-				err = errors.WithDetail(errs[i], detailMsg)
+				err = crdberrors.WithDetail(errors[i], detailMsg)
 				err = rperrors.ClassifyCmdError(err)
-				errs[i] = err
+				errors[i] = err
 			}
 			return nil, nil
 		}
@@ -540,9 +514,9 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		msg := strings.TrimSpace(string(out))
 		if err != nil {
 			detailMsg := fmt.Sprintf("Node %d. Command with error:\n```\n%s\n```\n", nodes[i], cmd)
-			err = errors.WithDetail(err, detailMsg)
+			err = crdberrors.WithDetail(err, detailMsg)
 			err = rperrors.ClassifyCmdError(err)
-			errs[i] = err
+			errors[i] = err
 			msg += fmt.Sprintf("\n%v", err)
 		}
 		results[i] = msg
@@ -555,7 +529,7 @@ func (c *SyncedCluster) Run(stdout, stderr io.Writer, nodes []int, title, cmd st
 		}
 	}
 
-	return rperrors.SelectPriorityError(errs)
+	return rperrors.SelectPriorityError(errors)
 }
 
 // Wait TODO(peter): document
@@ -598,7 +572,7 @@ func (c *SyncedCluster) Wait() error {
 // SetupSSH configures the cluster for use with SSH. This is generally run after
 // the cloud.Cluster has been synced which resets the SSH credentials on the
 // machines and sets them up for the current user. This method enables the
-// hosts to talk to eachother and optionally configures additional keys to be
+// hosts to talk to eachother and optionally confiures additional keys to be
 // added to the hosts via the c.AuthorizedKeys field. It does so in the following
 // steps:
 //
@@ -652,7 +626,7 @@ tar cf - .ssh/id_rsa .ssh/id_rsa.pub .ssh/authorized_keys
 		return nil, nil
 	})
 
-	// Skip the first node which is where we generated the key.
+	// Skip the the first node which is where we generated the key.
 	nodes := c.Nodes[1:]
 	c.Parallel("distributing ssh key", len(nodes), 0, func(i int) ([]byte, error) {
 		sess, err := c.newSession(nodes[i])
@@ -895,7 +869,6 @@ rm -fr certs
 mkdir -p certs
 %[1]s cert create-ca --certs-dir=certs --ca-key=certs/ca.key
 %[1]s cert create-client root --certs-dir=certs --ca-key=certs/ca.key
-%[1]s cert create-client testuser --certs-dir=certs --ca-key=certs/ca.key
 %[1]s cert create-node localhost %[2]s --certs-dir=certs --ca-key=certs/ca.key
 tar cvf certs.tar certs
 `, cockroachNodeBinary(c, 1), strings.Join(nodeNames, " "))
@@ -943,7 +916,7 @@ tar cvf certs.tar certs
 		os.Exit(1)
 	}
 
-	// Skip the first node which is where we generated the certs.
+	// Skip the the first node which is where we generated the certs.
 	display = c.Name + ": distributing certs"
 	nodes = nodes[1:]
 	c.Parallel(display, len(nodes), 0, func(i int) ([]byte, error) {
@@ -1246,8 +1219,7 @@ func (c *SyncedCluster) Logs(
 				"-o ControlMaster=auto "+
 				"-o ControlPath=~/.ssh/%r@%h:%p "+
 				"-o UserKnownHostsFile=/dev/null "+
-				"-o ControlPersist=2m "+
-				strings.Join(sshAuthArgs(), " "))
+				"-o ControlPersist=2m")
 			// Use rsync-path flag to sudo into user if different from sshUser.
 			if user != "" && user != sshUser {
 				rsyncArgs = append(rsyncArgs, "--rsync-path",
@@ -1580,7 +1552,7 @@ func (c *SyncedCluster) pghosts(nodes []int) map[int]string {
 // SSH TODO(peter): document
 func (c *SyncedCluster) SSH(sshArgs, args []string) error {
 	if len(c.Nodes) != 1 && len(args) == 0 {
-		// If trying to ssh to more than 1 node and the ssh session is interactive,
+		// If trying to ssh to more than 1 node and the ssh session is interative,
 		// try sshing with an iTerm2 split screen configuration.
 		sshed, err := maybeSplitScreenSSHITerm2(c)
 		if sshed {
@@ -1652,53 +1624,23 @@ func (c *SyncedCluster) scp(src, dest string) error {
 	return nil
 }
 
-// ParallelResult captures the result of a user-defined function
-// passed to Parallel or ParallelE.
-type ParallelResult struct {
-	Index int
-	Out   []byte
-	Err   error
-}
-
-// Parallel runs a user-defined function across the nodes in the
-// cluster. If any of the commands fail, Parallel will log an error
-// and exit the program.
-//
-// See ParallelE for more information.
+// Parallel TODO(peter): document
 func (c *SyncedCluster) Parallel(
 	display string, count, concurrency int, fn func(i int) ([]byte, error),
 ) {
-	failed, err := c.ParallelE(display, count, concurrency, fn)
-	if err != nil {
-		sort.Slice(failed, func(i, j int) bool { return failed[i].Index < failed[j].Index })
-		for _, f := range failed {
-			fmt.Fprintf(os.Stderr, "%d: %+v: %s\n", f.Index, f.Err, f.Out)
-		}
-		log.Fatal("command failed")
-	}
-}
-
-// ParallelE runs the given function in parallel across the given
-// nodes, returning an error if function returns an error.
-//
-// ParallelE runs the user-defined functions on the first `count`
-// nodes in the cluster. It runs at most `concurrency` (or
-// `c.MaxConcurrency` if it is lower) in parallel. If `concurrency` is
-// 0, then it defaults to `count`.
-//
-// If err is non-nil, the slice of ParallelResults will contain the
-// results from any of the failed invocations.
-func (c *SyncedCluster) ParallelE(
-	display string, count, concurrency int, fn func(i int) ([]byte, error),
-) ([]ParallelResult, error) {
 	if concurrency == 0 || concurrency > count {
 		concurrency = count
 	}
 	if c.MaxConcurrency > 0 && concurrency > c.MaxConcurrency {
 		concurrency = c.MaxConcurrency
 	}
+	type result struct {
+		index int
+		out   []byte
+		err   error
+	}
 
-	results := make(chan ParallelResult, count)
+	results := make(chan result, count)
 	var wg sync.WaitGroup
 	wg.Add(count)
 
@@ -1707,7 +1649,7 @@ func (c *SyncedCluster) ParallelE(
 		go func(i int) {
 			defer wg.Done()
 			out, err := fn(i)
-			results <- ParallelResult{i, out, err}
+			results <- result{i, out, err}
 		}(index)
 		index++
 	}
@@ -1734,9 +1676,10 @@ func (c *SyncedCluster) ParallelE(
 		ticker = time.NewTicker(1000 * time.Millisecond)
 		fmt.Fprintf(out, "%s", display)
 	}
+
 	defer ticker.Stop()
 	complete := make([]bool, count)
-	var failed []ParallelResult
+	var failed []result
 
 	var spinner = []string{"|", "/", "-", "\\"}
 	spinnerIdx := 0
@@ -1748,12 +1691,12 @@ func (c *SyncedCluster) ParallelE(
 				fmt.Fprintf(out, ".")
 			}
 		case r, ok := <-results:
-			if r.Err != nil {
+			if r.err != nil {
 				failed = append(failed, r)
 			}
 			done = !ok
 			if ok {
-				complete[r.Index] = true
+				complete[r.index] = true
 			}
 			if index < count {
 				startNext()
@@ -1783,9 +1726,12 @@ func (c *SyncedCluster) ParallelE(
 	}
 
 	if len(failed) > 0 {
-		return failed, errors.New("one or more parallel execution failure")
+		sort.Slice(failed, func(i, j int) bool { return failed[i].index < failed[j].index })
+		for _, f := range failed {
+			fmt.Fprintf(os.Stderr, "%d: %+v: %s\n", f.index, f.err, f.out)
+		}
+		log.Fatal("command failed")
 	}
-	return nil, nil
 }
 
 func (c *SyncedCluster) escapedTag() string {

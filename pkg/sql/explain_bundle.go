@@ -11,11 +11,11 @@
 package sql
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -25,57 +25,64 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/memzipper"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/gogo/protobuf/jsonpb"
 )
 
-// setExplainBundleResult sets the result of an EXPLAIN ANALYZE (DEBUG)
-// statement.
-//
-// Note: bundle.insert() must have been called.
+// setExplainBundleResult creates the diagnostics and returns the bundle
+// information for an EXPLAIN ANALYZE (DEBUG) statement.
 //
 // Returns an error if information rows couldn't be added to the result.
 func setExplainBundleResult(
 	ctx context.Context,
 	res RestrictedCommandResult,
-	bundle diagnosticsBundle,
+	ast tree.Statement,
+	trace tracing.Recording,
+	plan *planTop,
+	placeholders *tree.PlaceholderInfo,
+	ie *InternalExecutor,
 	execCfg *ExecutorConfig,
 ) error {
-	res.ResetStmtType(&tree.ExplainAnalyze{})
-	res.SetColumns(ctx, colinfo.ExplainPlanColumns)
+	res.ResetStmtType(&tree.ExplainAnalyzeDebug{})
+	res.SetColumns(ctx, colinfo.ExplainAnalyzeDebugColumns)
 
 	var text []string
-	if bundle.collectionErr != nil {
-		// TODO(radu): we cannot simply set an error on the result here without
-		// changing the executor logic (e.g. an implicit transaction could have
-		// committed already). Just show the error in the result.
-		text = []string{fmt.Sprintf("Error generating bundle: %v", bundle.collectionErr)}
-	} else if execCfg.Codec.ForSystemTenant() {
+	func() {
+		bundle, err := buildStatementBundle(ctx, execCfg.DB, ie, plan, trace, placeholders)
+		if err != nil {
+			// TODO(radu): we cannot simply set an error on the result here without
+			// changing the executor logic (e.g. an implicit transaction could have
+			// committed already). Just show the error in the result.
+			text = []string{fmt.Sprintf("Error generating bundle: %v", err)}
+			return
+		}
+
+		fingerprint := tree.AsStringWithFlags(ast, tree.FmtHideConstants)
+		stmtStr := tree.AsString(ast)
+
+		diagID, err := execCfg.StmtDiagnosticsRecorder.InsertStatementDiagnostics(
+			ctx,
+			fingerprint,
+			stmtStr,
+			bundle.trace,
+			bundle.zip,
+		)
+		if err != nil {
+			text = []string{fmt.Sprintf("Error recording bundle: %v", err)}
+			return
+		}
+
 		text = []string{
 			"Statement diagnostics bundle generated. Download from the Admin UI (Advanced",
 			"Debug -> Statement Diagnostics History), via the direct link below, or using",
-			"the SQL shell or command line.",
+			"the command line.",
 			fmt.Sprintf("Admin UI: %s", execCfg.AdminURL()),
-			fmt.Sprintf("Direct link: %s/_admin/v1/stmtbundle/%d", execCfg.AdminURL(), bundle.diagID),
-			fmt.Sprintf("SQL shell: \\statement-diag download %d", bundle.diagID),
-			fmt.Sprintf("Command line: cockroach statement-diag download %d", bundle.diagID),
+			fmt.Sprintf("Direct link: %s/_admin/v1/stmtbundle/%d", execCfg.AdminURL(), diagID),
+			"Command line: cockroach statement-diag list / download",
 		}
-	} else {
-		// Non-system tenants can't directly access the AdminUI.
-		// TODO(radu): update the message when Serverless provides a way to download
-		// the bundle (preferably using a more general mechanism so as not to bake
-		// in Serverless specifics).
-		text = []string{
-			"Statement diagnostics bundle generated. Download using the SQL shell or command",
-			"line.",
-			fmt.Sprintf("SQL shell: \\statement-diag download %d", bundle.diagID),
-			fmt.Sprintf("Command line: cockroach statement-diag download %d", bundle.diagID),
-		}
-	}
+	}()
 
 	if err := res.Err(); err != nil {
 		// Add the bundle information as a detail to the query error.
@@ -97,77 +104,81 @@ func setExplainBundleResult(
 	return nil
 }
 
-// diagnosticsBundle contains diagnostics information collected for a statement.
-type diagnosticsBundle struct {
-	// Zip file binary data.
-	zip []byte
-
-	// Stores any error in the collection, building, or insertion of the bundle.
-	collectionErr error
-
-	// diagID is the diagnostics instance ID, populated by insert().
-	diagID stmtdiagnostics.CollectedInstanceID
+// traceToJSON converts a trace to a JSON datum suitable for the
+// system.statement_diagnostics.trace column. In case of error, the returned
+// datum is DNull. Also returns the string representation of the trace.
+//
+// traceToJSON assumes that the first span in the recording contains all the
+// other spans.
+func traceToJSON(trace tracing.Recording) (tree.Datum, string, error) {
+	root := normalizeSpan(trace[0], trace)
+	marshaller := jsonpb.Marshaler{
+		Indent: "\t",
+	}
+	str, err := marshaller.MarshalToString(&root)
+	if err != nil {
+		return tree.DNull, "", err
+	}
+	d, err := tree.ParseDJSON(str)
+	if err != nil {
+		return tree.DNull, "", err
+	}
+	return d, str, nil
 }
 
-// buildStatementBundle collects metadata related to the planning and execution
-// of the statement. It generates a bundle for storage in
+func normalizeSpan(s tracing.RecordedSpan, trace tracing.Recording) tracing.NormalizedSpan {
+	var n tracing.NormalizedSpan
+	n.Operation = s.Operation
+	n.StartTime = s.StartTime
+	n.Duration = s.Duration
+	n.Tags = s.Tags
+	n.Logs = s.Logs
+
+	for _, ss := range trace {
+		if ss.ParentSpanID != s.SpanID {
+			continue
+		}
+		n.Children = append(n.Children, normalizeSpan(ss, trace))
+	}
+	return n
+}
+
+// diagnosticsBundle contains diagnostics information collected for a statement.
+type diagnosticsBundle struct {
+	zip   []byte
+	trace tree.Datum
+}
+
+// buildStatementBundle collects metadata related the planning and execution of
+// the statement. It generates a bundle for storage in
 // system.statement_diagnostics.
 func buildStatementBundle(
 	ctx context.Context,
 	db *kv.DB,
 	ie *InternalExecutor,
 	plan *planTop,
-	planString string,
 	trace tracing.Recording,
 	placeholders *tree.PlaceholderInfo,
-) diagnosticsBundle {
+) (diagnosticsBundle, error) {
 	if plan == nil {
-		return diagnosticsBundle{collectionErr: errors.AssertionFailedf("execution terminated early")}
+		return diagnosticsBundle{}, errors.AssertionFailedf("execution terminated early")
 	}
 	b := makeStmtBundleBuilder(db, ie, plan, trace, placeholders)
 
 	b.addStatement()
 	b.addOptPlans()
-	b.addExecPlan(planString)
+	b.addExecPlan()
+	// TODO(yuzefovich): consider adding some variant of EXPLAIN (VEC) output
+	// of the query to the bundle.
 	b.addDistSQLDiagrams()
-	b.addExplainVec()
-	b.addTrace()
+	traceJSON := b.addTrace()
 	b.addEnv(ctx)
 
 	buf, err := b.finalize()
 	if err != nil {
-		return diagnosticsBundle{collectionErr: err}
+		return diagnosticsBundle{}, err
 	}
-	return diagnosticsBundle{zip: buf.Bytes()}
-}
-
-// insert the bundle in statement diagnostics. Sets bundle.diagID and (in error
-// cases) bundle.collectionErr.
-//
-// diagRequestID should be the ID returned by ShouldCollectDiagnostics, or zero
-// if diagnostics were triggered by EXPLAIN ANALYZE (DEBUG).
-func (bundle *diagnosticsBundle) insert(
-	ctx context.Context,
-	fingerprint string,
-	ast tree.Statement,
-	stmtDiagRecorder *stmtdiagnostics.Registry,
-	diagRequestID stmtdiagnostics.RequestID,
-) {
-	var err error
-	bundle.diagID, err = stmtDiagRecorder.InsertStatementDiagnostics(
-		ctx,
-		diagRequestID,
-		fingerprint,
-		tree.AsString(ast),
-		bundle.zip,
-		bundle.collectionErr,
-	)
-	if err != nil {
-		log.Warningf(ctx, "failed to report statement diagnostics: %s", err)
-		if bundle.collectionErr != nil {
-			bundle.collectionErr = err
-		}
-	}
+	return diagnosticsBundle{trace: traceJSON, zip: buf.Bytes()}, nil
 }
 
 // stmtBundleBuilder is a helper for building a statement bundle.
@@ -179,7 +190,7 @@ type stmtBundleBuilder struct {
 	trace        tracing.Recording
 	placeholders *tree.PlaceholderInfo
 
-	z memzipper.Zipper
+	z memZipper
 }
 
 func makeStmtBundleBuilder(
@@ -207,9 +218,9 @@ func (b *stmtBundleBuilder) addStatement() {
 	// If we hit an early error, stmt or stmt.AST might not be initialized yet.
 	switch {
 	case b.plan.stmt == nil:
-		output = "-- No Statement."
+		output = "No Statement."
 	case b.plan.stmt.AST == nil:
-		output = "-- No AST."
+		output = "No AST."
 	default:
 		output = cfg.Pretty(b.plan.stmt.AST)
 	}
@@ -217,14 +228,14 @@ func (b *stmtBundleBuilder) addStatement() {
 	if b.placeholders != nil && len(b.placeholders.Values) != 0 {
 		var buf bytes.Buffer
 		buf.WriteString(output)
-		buf.WriteString("\n\n-- Arguments:\n")
+		buf.WriteString("\n\nArguments:\n")
 		for i, v := range b.placeholders.Values {
-			fmt.Fprintf(&buf, "--  %s: %v\n", tree.PlaceholderIdx(i), v)
+			fmt.Fprintf(&buf, "  %s: %v\n", tree.PlaceholderIdx(i), v)
 		}
 		output = buf.String()
 	}
 
-	b.z.AddFile("statement.sql", output)
+	b.z.AddFile("statement.txt", output)
 }
 
 // addOptPlans adds the EXPLAIN (OPT) variants as files opt.txt, opt-v.txt,
@@ -249,16 +260,16 @@ func (b *stmtBundleBuilder) addOptPlans() {
 }
 
 // addExecPlan adds the EXPLAIN (VERBOSE) plan as file plan.txt.
-func (b *stmtBundleBuilder) addExecPlan(plan string) {
-	if plan != "" {
+func (b *stmtBundleBuilder) addExecPlan() {
+	if plan := b.plan.planString; plan != "" {
 		b.z.AddFile("plan.txt", plan)
 	}
 }
 
 func (b *stmtBundleBuilder) addDistSQLDiagrams() {
-	for i, d := range b.plan.distSQLFlowInfos {
-		d.diagram.AddSpans(b.trace)
-		_, url, err := d.diagram.ToURL()
+	for i, d := range b.plan.distSQLDiagrams {
+		d.AddSpans(b.trace)
+		_, url, err := d.ToURL()
 
 		var contents string
 		if err != nil {
@@ -268,37 +279,21 @@ func (b *stmtBundleBuilder) addDistSQLDiagrams() {
 		}
 
 		var filename string
-		if len(b.plan.distSQLFlowInfos) == 1 {
+		if len(b.plan.distSQLDiagrams) == 1 {
 			filename = "distsql.html"
 		} else {
-			filename = fmt.Sprintf("distsql-%d-%s.html", i+1, d.typ)
+			// TODO(radu): it would be great if we could distinguish between
+			// subqueries/main query/postqueries here.
+			filename = fmt.Sprintf("distsql-%d.html", i+1)
 		}
 		b.z.AddFile(filename, contents)
 	}
 }
 
-func (b *stmtBundleBuilder) addExplainVec() {
-	for i, d := range b.plan.distSQLFlowInfos {
-		if len(d.explainVec) > 0 || len(d.explainVecVerbose) > 0 {
-			extra := ""
-			if len(b.plan.distSQLFlowInfos) > 1 {
-				extra = fmt.Sprintf("-%d-%s", i+1, d.typ)
-			}
-			if len(d.explainVec) > 0 {
-				b.z.AddFile(fmt.Sprintf("vec%s.txt", extra), strings.Join(d.explainVec, "\n"))
-			}
-			if len(d.explainVecVerbose) > 0 {
-				b.z.AddFile(fmt.Sprintf("vec%s-v.txt", extra), strings.Join(d.explainVecVerbose, "\n"))
-			}
-		}
-	}
-}
-
-// addTrace adds three files to the bundle: two are a json representation of the
-// trace (the default and the jaeger formats), the third one is a human-readable
-// representation.
-func (b *stmtBundleBuilder) addTrace() {
-	traceJSONStr, err := tracing.TraceToJSON(b.trace)
+// addTrace adds two files to the bundle: one is a json representation of the
+// trace, the other one is a human-readable representation.
+func (b *stmtBundleBuilder) addTrace() tree.Datum {
+	traceJSON, traceJSONStr, err := traceToJSON(b.trace)
 	if err != nil {
 		b.z.AddFile("trace.json", err.Error())
 	} else {
@@ -319,16 +314,14 @@ func (b *stmtBundleBuilder) addTrace() {
 
 	// Note that we're going to include the non-anonymized statement in the trace.
 	// But then again, nothing in the trace is anonymized.
-	comment := fmt.Sprintf(`This is a trace for SQL statement: %s
-This trace can be imported into Jaeger for visualization. From the Jaeger Search screen, select the JSON File.
-Jaeger can be started using docker with: docker run -d --name jaeger -p 16686:16686 jaegertracing/all-in-one:1.17
-The UI can then be accessed at http://localhost:16686/search`, stmt)
-	jaegerJSON, err := b.trace.ToJaegerJSON(stmt, comment, "")
+	jaegerJSON, err := b.trace.ToJaegerJSON(stmt)
 	if err != nil {
 		b.z.AddFile("trace-jaeger.txt", err.Error())
 	} else {
 		b.z.AddFile("trace-jaeger.json", jaegerJSON)
 	}
+
+	return traceJSON
 }
 
 func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
@@ -340,17 +333,11 @@ func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
 	}
 	fmt.Fprintf(&buf, "\n")
 
-	// Show the values of session variables that can impact planning decisions.
-	if err := c.PrintSessionSettings(&buf); err != nil {
-		fmt.Fprintf(&buf, "-- error getting session settings: %v\n", err)
+	// Show the values of any non-default session variables that can impact
+	// planning decisions.
+	if err := c.PrintSettings(&buf); err != nil {
+		fmt.Fprintf(&buf, "-- error getting settings: %v\n", err)
 	}
-
-	fmt.Fprintf(&buf, "\n")
-
-	if err := c.PrintClusterSettings(&buf); err != nil {
-		fmt.Fprintf(&buf, "-- error getting cluster settings: %v\n", err)
-	}
-
 	b.z.AddFile("env.sql", buf.String())
 
 	mem := b.plan.mem
@@ -417,6 +404,46 @@ func (b *stmtBundleBuilder) addEnv(ctx context.Context) {
 // finalize generates the zipped bundle and returns it as a buffer.
 func (b *stmtBundleBuilder) finalize() (*bytes.Buffer, error) {
 	return b.z.Finalize()
+}
+
+// memZipper builds a zip file into an in-memory buffer.
+type memZipper struct {
+	buf *bytes.Buffer
+	z   *zip.Writer
+	err error
+}
+
+func (z *memZipper) Init() {
+	z.buf = &bytes.Buffer{}
+	z.z = zip.NewWriter(z.buf)
+}
+
+func (z *memZipper) AddFile(name string, contents string) {
+	if z.err != nil {
+		return
+	}
+	w, err := z.z.CreateHeader(&zip.FileHeader{
+		Name:     name,
+		Method:   zip.Deflate,
+		Modified: timeutil.Now(),
+	})
+	if err != nil {
+		z.err = err
+		return
+	}
+	_, z.err = w.Write([]byte(contents))
+}
+
+func (z *memZipper) Finalize() (*bytes.Buffer, error) {
+	if z.err != nil {
+		return nil, z.err
+	}
+	if err := z.z.Close(); err != nil {
+		return nil, err
+	}
+	buf := z.buf
+	*z = memZipper{}
+	return buf, nil
 }
 
 // stmtEnvCollector helps with gathering information about the "environment" in
@@ -488,57 +515,17 @@ func (c *stmtEnvCollector) PrintVersion(w io.Writer) error {
 	return err
 }
 
-// PrintSessionSettings appends information about session settings that can
-// impact planning decisions.
-func (c *stmtEnvCollector) PrintSessionSettings(w io.Writer) error {
-	// Cluster setting encoded default value to session setting value conversion
-	// functions.
-	boolToOnOff := func(boolStr string) string {
-		switch boolStr {
-		case "true":
-			return "on"
-		case "false":
-			return "off"
-		}
-		return boolStr
-	}
-
-	distsqlConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil {
-			return enumVal
-		}
-		return sessiondatapb.DistSQLExecMode(n).String()
-	}
-
-	vectorizeConv := func(enumVal string) string {
-		n, err := strconv.ParseInt(enumVal, 10, 32)
-		if err != nil {
-			return enumVal
-		}
-		return sessiondatapb.VectorizeExecMode(n).String()
-	}
-
-	// TODO(rytaft): Keeping this list up to date is a challenge. Consider just
-	// printing all session settings.
+// PrintSettings appends information about session settings that can impact
+// planning decisions.
+func (c *stmtEnvCollector) PrintSettings(w io.Writer) error {
 	relevantSettings := []struct {
 		sessionSetting string
 		clusterSetting settings.WritableSetting
-		convFunc       func(string) string
 	}{
 		{sessionSetting: "reorder_joins_limit", clusterSetting: ReorderJoinsLimitClusterValue},
-		{sessionSetting: "enable_zigzag_join", clusterSetting: zigzagJoinClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "optimizer_use_histograms", clusterSetting: optUseHistogramsClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "optimizer_use_multicol_stats", clusterSetting: optUseMultiColStatsClusterMode, convFunc: boolToOnOff},
-		{sessionSetting: "locality_optimized_partitioned_index_scan", clusterSetting: localityOptimizedSearchMode, convFunc: boolToOnOff},
-		{sessionSetting: "propagate_input_ordering", clusterSetting: propagateInputOrdering, convFunc: boolToOnOff},
-		{sessionSetting: "prefer_lookup_joins_for_fks", clusterSetting: preferLookupJoinsForFKs, convFunc: boolToOnOff},
-		{sessionSetting: "intervalstyle_enabled", clusterSetting: intervalStyleEnabled, convFunc: boolToOnOff},
-		{sessionSetting: "datestyle_enabled", clusterSetting: dateStyleEnabled, convFunc: boolToOnOff},
-		{sessionSetting: "disallow_full_table_scans", clusterSetting: disallowFullTableScans, convFunc: boolToOnOff},
-		{sessionSetting: "large_full_scan_rows", clusterSetting: largeFullScanRows},
-		{sessionSetting: "distsql", clusterSetting: DistSQLClusterExecMode, convFunc: distsqlConv},
-		{sessionSetting: "vectorize", clusterSetting: VectorizeClusterMode, convFunc: vectorizeConv},
+		{sessionSetting: "enable_zigzag_join", clusterSetting: zigzagJoinClusterMode},
+		{sessionSetting: "optimizer_use_histograms", clusterSetting: optUseHistogramsClusterMode},
+		{sessionSetting: "optimizer_use_multicol_stats", clusterSetting: optUseMultiColStatsClusterMode},
 	}
 
 	for _, s := range relevantSettings {
@@ -548,40 +535,18 @@ func (c *stmtEnvCollector) PrintSessionSettings(w io.Writer) error {
 		}
 		// Get the default value for the cluster setting.
 		def := s.clusterSetting.EncodedDefault()
-		if s.convFunc != nil {
-			// If necessary, convert the encoded cluster setting to a session setting
-			// value (e.g.  "true"->"on"), depending on the setting.
-			def = s.convFunc(def)
+		// Convert true/false to on/off to match what SHOW returns.
+		switch def {
+		case "true":
+			def = "on"
+		case "false":
+			def = "off"
 		}
 
 		if value == def {
 			fmt.Fprintf(w, "-- %s has the default value: %s\n", s.sessionSetting, value)
 		} else {
 			fmt.Fprintf(w, "SET %s = %s;  -- default value: %s\n", s.sessionSetting, value, def)
-		}
-	}
-	return nil
-}
-
-func (c *stmtEnvCollector) PrintClusterSettings(w io.Writer) error {
-	rows, err := c.ie.QueryBufferedEx(
-		c.ctx,
-		"stmtEnvCollector",
-		nil, /* txn */
-		sessiondata.NoSessionDataOverride,
-		"SELECT variable, value, description FROM [ SHOW ALL CLUSTER SETTINGS ]",
-	)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "-- Cluster settings:\n")
-	for _, r := range rows {
-		// The datums should always be DString, but we should be defensive.
-		variable, ok1 := r[0].(*tree.DString)
-		value, ok2 := r[1].(*tree.DString)
-		description, ok3 := r[2].(*tree.DString)
-		if ok1 && ok2 && ok3 {
-			fmt.Fprintf(w, "--   %s = %s  (%s)\n", *variable, *value, *description)
 		}
 	}
 	return nil
@@ -641,11 +606,6 @@ func (c *stmtEnvCollector) PrintTableStats(
 	}
 
 	stats = strings.Replace(stats, "'", "''", -1)
-	// Don't display the catalog during the `ALTER TABLE` since the schema file
-	// doesn't specify the catalog for its create table statements.
-	explicitCatalog := tn.ExplicitCatalog
-	tn.ExplicitCatalog = false
 	fmt.Fprintf(w, "ALTER TABLE %s INJECT STATISTICS '%s';\n", tn.String(), stats)
-	tn.ExplicitCatalog = explicitCatalog
 	return nil
 }

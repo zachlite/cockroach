@@ -159,7 +159,7 @@ func Project(g geo.Geography, distance float64, azimuth s1.Angle) (geo.Geography
 	return geo.MakeGeographyFromGeomT(ret)
 }
 
-// length returns the sum of the lengths and perimeters in the shapes of the Geography.
+// length returns the sum of the lengtsh and perimeters in the shapes of the Geography.
 // In OGC parlance, length returns both LineString lengths _and_ Polygon perimeters.
 func length(
 	regions []s2.Region, spheroid *geographiclib.Spheroid, useSphereOrSpheroid UseSphereOrSpheroid,
@@ -172,7 +172,7 @@ func length(
 			if useSphereOrSpheroid == UseSpheroid {
 				totalLength += spheroid.InverseBatch((*region))
 			} else {
-				for edgeIdx, regionNumEdges := 0, region.NumEdges(); edgeIdx < regionNumEdges; edgeIdx++ {
+				for edgeIdx := 0; edgeIdx < region.NumEdges(); edgeIdx++ {
 					edge := region.Edge(edgeIdx)
 					totalLength += s2.ChordAngleBetweenPoints(edge.V0, edge.V1).Angle().Radians()
 				}
@@ -182,7 +182,7 @@ func length(
 				if useSphereOrSpheroid == UseSpheroid {
 					totalLength += spheroid.InverseBatch(loop.Vertices())
 				} else {
-					for edgeIdx, loopNumEdges := 0, loop.NumEdges(); edgeIdx < loopNumEdges; edgeIdx++ {
+					for edgeIdx := 0; edgeIdx < loop.NumEdges(); edgeIdx++ {
 						edge := loop.Edge(edgeIdx)
 						totalLength += s2.ChordAngleBetweenPoints(edge.V0, edge.V1).Angle().Radians()
 					}

@@ -98,13 +98,13 @@ limit
  │    ├── cardinality: [0 - 10]
  │    ├── ordering: +2
  │    ├── limit hint: 5.00
- │    ├── scan def@def_d_e_f_idx
+ │    ├── scan def@secondary
  │    │    ├── columns: e:8 f:9
  │    │    ├── constraint: /7/8/9/10: [/1 - /1]
  │    │    ├── limit: 5
  │    │    ├── ordering: +8
  │    │    └── limit hint: 5.00
- │    └── scan def@def_d_e_f_idx
+ │    └── scan def@secondary
  │         ├── columns: e:14 f:15
  │         ├── constraint: /13/14/15/16: [/3 - /3]
  │         ├── limit: 5
@@ -1711,7 +1711,7 @@ except-all
  │    ├── key: (1)
  │    ├── fd: (1)-->(2,3)
  │    └── ordering: +1
- └── scan t69497_abc@t69497_abc_a_b_c_idx
+ └── scan t69497_abc@secondary
       ├── columns: a:6 b:7 c:8
       └── ordering: +6,+7,-8
 
@@ -1743,7 +1743,7 @@ except-all
  └── sort (segmented)
       ├── columns: a:7 b:8 c:9 d:10
       ├── ordering: +7,+8,-9,+10
-      └── scan t69497_abcd@t69497_abcd_a_b_c_idx
+      └── scan t69497_abcd@secondary
            ├── columns: a:7 b:8 c:9 d:10
            └── ordering: +7,+8,-9
 
@@ -1775,15 +1775,20 @@ sort
       │    ├── cardinality: [0 - 2]
       │    ├── volatile, mutations
       │    ├── key: (1-3)
-      │    └── top-k
+      │    └── limit
       │         ├── columns: x:6!null y:7!null z:8!null
       │         ├── internal-ordering: +7,+8
-      │         ├── k: 2
       │         ├── cardinality: [0 - 2]
       │         ├── key: (6-8)
-      │         └── scan xyz
-      │              ├── columns: x:6!null y:7!null z:8!null
-      │              └── key: (6-8)
+      │         ├── sort
+      │         │    ├── columns: x:6!null y:7!null z:8!null
+      │         │    ├── key: (6-8)
+      │         │    ├── ordering: +7,+8
+      │         │    ├── limit hint: 2.00
+      │         │    └── scan xyz
+      │         │         ├── columns: x:6!null y:7!null z:8!null
+      │         │         └── key: (6-8)
+      │         └── 2
       └── with-scan &1
            ├── columns: a:11!null b:12!null c:13!null
            ├── mapping:
@@ -2086,7 +2091,7 @@ sort
       ├── volatile, mutations
       ├── upsert abc
       │    ├── columns: abc.a:1!null abc.b:2!null abc.c:3!null
-      │    ├── arbiter indexes: abc_pkey
+      │    ├── arbiter indexes: primary
       │    ├── canary column: abc.a:11
       │    ├── fetch columns: abc.a:11 abc.b:12 abc.c:13
       │    ├── insert-mapping:
@@ -2119,15 +2124,20 @@ sort
       │         │    │    ├── error: "UPSERT or INSERT...ON CONFLICT command cannot affect row a second time"
       │         │    │    ├── cardinality: [0 - 2]
       │         │    │    ├── key: (6-8)
-      │         │    │    └── top-k
+      │         │    │    └── limit
       │         │    │         ├── columns: x:6!null y:7!null z:8!null
       │         │    │         ├── internal-ordering: +7,+8
-      │         │    │         ├── k: 2
       │         │    │         ├── cardinality: [0 - 2]
       │         │    │         ├── key: (6-8)
-      │         │    │         └── scan xyz
-      │         │    │              ├── columns: x:6!null y:7!null z:8!null
-      │         │    │              └── key: (6-8)
+      │         │    │         ├── sort
+      │         │    │         │    ├── columns: x:6!null y:7!null z:8!null
+      │         │    │         │    ├── key: (6-8)
+      │         │    │         │    ├── ordering: +7,+8
+      │         │    │         │    ├── limit hint: 2.00
+      │         │    │         │    └── scan xyz
+      │         │    │         │         ├── columns: x:6!null y:7!null z:8!null
+      │         │    │         │         └── key: (6-8)
+      │         │    │         └── 2
       │         │    └── filters (true)
       │         └── projections
       │              ├── CASE WHEN abc.a:11 IS NULL THEN x:6 ELSE 10 END [as=upsert_a:17, outer=(6,11)]
@@ -2267,63 +2277,6 @@ sort
            └── filters
                 └── b:16 = c:17 [outer=(16,17), fd=(16)==(17), (17)==(16)]
 
-# --------------------------------------------------
-# With operator.
-# --------------------------------------------------
-
-# Verify that we can pass through the ordering requirement through the With
-# operator.
-opt
-WITH cte AS MATERIALIZED (SELECT x FROM xyz)
-SELECT * FROM abc ORDER BY a,b,c
-----
-with &1 (cte)
- ├── columns: a:6!null b:7!null c:8!null
- ├── materialized
- ├── key: (6-8)
- ├── ordering: +6,+7,+8
- ├── scan xyz
- │    └── columns: x:1!null
- └── scan abc
-      ├── columns: a:6!null b:7!null c:8!null
-      ├── key: (6-8)
-      └── ordering: +6,+7,+8
-
-opt
-WITH cte AS MATERIALIZED (SELECT x FROM xyz)
-SELECT * FROM abc INNER MERGE JOIN cte ON a = x ORDER BY a
-----
-with &1 (cte)
- ├── columns: a:6!null b:7!null c:8!null x:11!null
- ├── materialized
- ├── fd: (6)==(11), (11)==(6)
- ├── ordering: +(6|11) [actual: +6]
- ├── scan xyz
- │    └── columns: xyz.x:1!null
- └── inner-join (merge)
-      ├── columns: a:6!null b:7!null c:8!null x:11!null
-      ├── flags: force merge join
-      ├── left ordering: +6
-      ├── right ordering: +11
-      ├── fd: (6)==(11), (11)==(6)
-      ├── ordering: +(6|11) [actual: +6]
-      ├── scan abc
-      │    ├── columns: a:6!null b:7!null c:8!null
-      │    ├── key: (6-8)
-      │    └── ordering: +6
-      ├── sort
-      │    ├── columns: x:11!null
-      │    ├── ordering: +11
-      │    └── with-scan &1 (cte)
-      │         ├── columns: x:11!null
-      │         └── mapping:
-      │              └──  xyz.x:1 => x:11
-      └── filters (true)
-
-
-# --------------------------------------------------
-# Misc tests.
-# --------------------------------------------------
 
 # Regression test for #36219: lookup join with ON condition that imposes an
 # equality on two input columns (which isn't pushed down).
@@ -2389,7 +2342,7 @@ distinct-on
  ├── grouping columns: b:5!null
  ├── key: (5)
  ├── ordering: +5
- └── inner-join (lookup t44469_cd@t44469_cd_c_d_idx)
+ └── inner-join (lookup t44469_cd@secondary)
       ├── columns: a:1!null b:5!null c:9!null d:10!null
       ├── flags: force lookup join (into right side)
       ├── key columns: [14 1] = [9 10]
@@ -2399,13 +2352,13 @@ distinct-on
       │    ├── columns: "lookup_join_const_col_@9":14!null a:1!null b:5!null
       │    ├── fd: ()-->(14), (1)==(5), (5)==(1)
       │    ├── ordering: +(1|5) [actual: +1]
-      │    ├── inner-join (lookup t44469_b@t44469_b_b_idx)
+      │    ├── inner-join (lookup t44469_b@secondary)
       │    │    ├── columns: a:1!null b:5!null
       │    │    ├── flags: force lookup join (into right side)
       │    │    ├── key columns: [1] = [5]
       │    │    ├── fd: (1)==(5), (5)==(1)
       │    │    ├── ordering: +(1|5) [actual: +1]
-      │    │    ├── scan t44469_a@t44469_a_a_idx
+      │    │    ├── scan t44469_a@secondary
       │    │    │    ├── columns: a:1
       │    │    │    └── ordering: +1
       │    │    └── filters (true)

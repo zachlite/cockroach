@@ -15,12 +15,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
+	"github.com/cockroachdb/errors"
 )
 
 // dropSequenceDesc builds targets and transformations using a descriptor.
@@ -28,15 +28,18 @@ func (b *buildContext) dropSequenceDesc(
 	ctx context.Context, seq catalog.TableDescriptor, cascade tree.DropBehavior,
 ) {
 	// Check if there are dependencies.
-	_ = seq.ForeachDependedOnBy(func(dep *descpb.TableDescriptor_Reference) error {
+	err := seq.ForeachDependedOnBy(func(dep *descpb.TableDescriptor_Reference) error {
 		if cascade != tree.DropCascade {
-			panic(pgerror.Newf(
+			return pgerror.Newf(
 				pgcode.DependentObjectsStillExist,
 				"cannot drop sequence %s because other objects depend on it",
 				seq.GetName(),
-			))
+			)
 		}
-		desc := mustReadTable(ctx, b, dep.ID)
+		desc, err := b.Descs.GetImmutableTableByID(ctx, b.EvalCtx.Txn, dep.ID, tree.ObjectLookupFlagsWithRequired())
+		if err != nil {
+			return err
+		}
 		for _, col := range desc.PublicColumns() {
 			for _, id := range dep.ColumnIDs {
 				if col.GetID() != id {
@@ -55,6 +58,9 @@ func (b *buildContext) dropSequenceDesc(
 		}
 		return nil
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	// Add a node to drop the sequence
 	sequenceNode := &scpb.Sequence{SequenceID: seq.GetID()}
@@ -76,17 +82,22 @@ func (b *buildContext) dropSequenceDesc(
 func (b *buildContext) dropSequence(ctx context.Context, n *tree.DropSequence) {
 	// Find the sequence first.
 	for _, name := range n.Names {
-		_, table := b.CatalogReader().MayResolveTable(ctx, *name.ToUnresolvedObjectName())
-		if table == nil {
-			if n.IfExists {
+		_, table, err := resolver.ResolveExistingTableObject(ctx, b.Res, &name,
+			tree.ObjectLookupFlagsWithRequired())
+		if err != nil {
+			if pgerror.GetPGCode(err) == pgcode.UndefinedTable && n.IfExists {
 				continue
 			}
-			panic(sqlerrors.NewUndefinedRelationError(&name))
+			panic(err)
 		}
-		if !table.IsSequence() {
-			panic(pgerror.Newf(pgcode.WrongObjectType, "%q is not a sequence", table.GetName()))
+		if table == nil {
+			panic(errors.AssertionFailedf("unable to resolve sequence %s",
+				name.FQString()))
 		}
-		onErrPanic(b.AuthorizationAccessor().CheckPrivilege(ctx, table, privilege.DROP))
+
+		if table.Dropped() {
+			return
+		}
 		b.dropSequenceDesc(ctx, table, n.DropBehavior)
 	}
 }

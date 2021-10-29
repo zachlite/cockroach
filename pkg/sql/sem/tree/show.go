@@ -442,25 +442,20 @@ func (node *ShowTransactions) Format(ctx *FmtCtx) {
 
 // ShowConstraints represents a SHOW CONSTRAINTS statement.
 type ShowConstraints struct {
-	Table       *UnresolvedObjectName
-	WithComment bool
+	Table *UnresolvedObjectName
 }
 
 // Format implements the NodeFormatter interface.
 func (node *ShowConstraints) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW CONSTRAINTS FROM ")
 	ctx.FormatNode(node.Table)
-
-	if node.WithComment {
-		ctx.WriteString(" WITH COMMENT")
-	}
 }
 
 // ShowGrants represents a SHOW GRANTS statement.
 // TargetList is defined in grant.go.
 type ShowGrants struct {
 	Targets  *TargetList
-	Grantees RoleSpecList
+	Grantees NameList
 }
 
 // Format implements the NodeFormatter interface.
@@ -478,8 +473,8 @@ func (node *ShowGrants) Format(ctx *FmtCtx) {
 
 // ShowRoleGrants represents a SHOW GRANTS ON ROLE statement.
 type ShowRoleGrants struct {
-	Roles    RoleSpecList
-	Grantees RoleSpecList
+	Roles    NameList
+	Grantees NameList
 }
 
 // Format implements the NodeFormatter interface.
@@ -524,14 +519,6 @@ func (node *ShowCreate) Format(ctx *FmtCtx) {
 		ctx.WriteString("DATABASE ")
 	}
 	ctx.FormatNode(node.Name)
-}
-
-// ShowCreateAllSchemas represents a SHOW CREATE ALL SCHEMAS statement.
-type ShowCreateAllSchemas struct{}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowCreateAllSchemas) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CREATE ALL SCHEMAS")
 }
 
 // ShowCreateAllTables represents a SHOW CREATE ALL TABLES statement.
@@ -855,7 +842,7 @@ func (n *ShowSchedules) Format(ctx *FmtCtx) {
 
 // ShowDefaultPrivileges represents a SHOW DEFAULT PRIVILEGES statement.
 type ShowDefaultPrivileges struct {
-	Roles       RoleSpecList
+	Roles       NameList
 	ForAllRoles bool
 }
 

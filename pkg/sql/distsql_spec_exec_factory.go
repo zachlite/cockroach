@@ -129,7 +129,7 @@ func (e *distSQLSpecExecFactory) ConstructValues(
 			specifiedInQuery: true,
 		}
 		planNodesToClose = []planNode{v}
-		physPlan, err = e.dsp.wrapPlan(planCtx, v, e.planningMode != distSQLLocalOnlyPlanning)
+		physPlan, err = e.dsp.wrapPlan(planCtx, v)
 	} else {
 		// We can create a spec for the values processor, so we don't create a
 		// valuesNode.
@@ -158,7 +158,7 @@ func (e *distSQLSpecExecFactory) ConstructScan(
 		return constructVirtualScan(
 			e, e.planner, table, index, params, reqOrdering,
 			func(d *delayedNode) (exec.Node, error) {
-				physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), d, e.planningMode != distSQLLocalOnlyPlanning)
+				physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), d)
 				if err != nil {
 					return nil, err
 				}
@@ -206,7 +206,7 @@ func (e *distSQLSpecExecFactory) ConstructScan(
 
 	var spans roachpb.Spans
 	if params.InvertedConstraint != nil {
-		spans, err = sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint, nil /* scratch */)
+		spans, err = sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint)
 	} else {
 		spans, err = sb.SpansFromConstraint(params.IndexConstraint, params.NeededCols, false /* forDelete */)
 	}
@@ -231,15 +231,17 @@ func (e *distSQLSpecExecFactory) ConstructScan(
 	colsToTableOrdinalMap := toTableOrdinals(cols, tabDesc, colCfg.visibility)
 	trSpec := physicalplan.NewTableReaderSpec()
 	*trSpec = execinfrapb.TableReaderSpec{
-		Table:            *tabDesc.TableDesc(),
-		Reverse:          params.Reverse,
-		IsCheck:          false,
-		Visibility:       colCfg.visibility,
+		Table:      *tabDesc.TableDesc(),
+		Reverse:    params.Reverse,
+		IsCheck:    false,
+		Visibility: colCfg.visibility,
+		// Retain the capacity of the spans slice.
+		Spans:            trSpec.Spans[:0],
 		HasSystemColumns: scanContainsSystemColumns(&colCfg),
 		NeededColumns:    colCfg.wantedColumnsOrdinals,
 	}
-	if vc := getInvertedColumn(colCfg.invertedColumn, cols); vc != nil {
-		trSpec.InvertedColumn = vc.ColumnDesc()
+	if vc := getVirtualColumn(colCfg.virtualColumn, cols); vc != nil {
+		trSpec.VirtualColumn = vc.ColumnDesc()
 	}
 
 	trSpec.IndexIdx, err = getIndexIdx(idx, tabDesc)
@@ -623,7 +625,7 @@ func (e *distSQLSpecExecFactory) ConstructSort(
 	input exec.Node, ordering exec.OutputOrdering, alreadyOrderedPrefix int,
 ) (exec.Node, error) {
 	physPlan, plan := getPhysPlan(input)
-	e.dsp.addSorters(physPlan, colinfo.ColumnOrdering(ordering), alreadyOrderedPrefix, 0 /* limit */)
+	e.dsp.addSorters(physPlan, colinfo.ColumnOrdering(ordering), alreadyOrderedPrefix)
 	// Since addition of sorters doesn't change any properties of the physical
 	// plan, we don't need to update any of those.
 	return plan, nil
@@ -716,20 +718,6 @@ func (e *distSQLSpecExecFactory) ConstructLimit(
 	return plan, nil
 }
 
-func (e *distSQLSpecExecFactory) ConstructTopK(
-	input exec.Node, k int64, ordering exec.OutputOrdering, alreadyOrderedPrefix int,
-) (exec.Node, error) {
-	physPlan, plan := getPhysPlan(input)
-	if k <= 0 {
-		return nil, errors.New("negative or zero value for LIMIT")
-	}
-	// No already ordered prefix.
-	e.dsp.addSorters(physPlan, colinfo.ColumnOrdering(ordering), alreadyOrderedPrefix, k)
-	// Since addition of topk doesn't change any properties of
-	// the physical plan, we don't need to update any of those.
-	return plan, nil
-}
-
 func (e *distSQLSpecExecFactory) ConstructMax1Row(
 	input exec.Node, errorText string,
 ) (exec.Node, error) {
@@ -768,11 +756,7 @@ func (e *distSQLSpecExecFactory) ConstructWindow(
 }
 
 func (e *distSQLSpecExecFactory) ConstructPlan(
-	root exec.Node,
-	subqueries []exec.Subquery,
-	cascades []exec.Cascade,
-	checks []exec.Node,
-	rootRowCount int64,
+	root exec.Node, subqueries []exec.Subquery, cascades []exec.Cascade, checks []exec.Node,
 ) (exec.Plan, error) {
 	if len(subqueries) != 0 {
 		return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: subqueries")
@@ -783,7 +767,7 @@ func (e *distSQLSpecExecFactory) ConstructPlan(
 	if len(checks) != 0 {
 		return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: checks")
 	}
-	return constructPlan(e.planner, root, subqueries, cascades, checks, rootRowCount)
+	return constructPlan(e.planner, root, subqueries, cascades, checks)
 }
 
 func (e *distSQLSpecExecFactory) ConstructExplainOpt(
@@ -804,7 +788,8 @@ func (e *distSQLSpecExecFactory) ConstructExplain(
 	// We cannot create the explained plan in the same PlanInfrastructure with the
 	// "outer" plan. Create a separate factory.
 	newFactory := newDistSQLSpecExecFactory(e.planner, e.planningMode)
-	plan, err := buildFn(newFactory)
+	explainFactory := explain.NewFactory(newFactory)
+	plan, err := buildFn(explainFactory)
 	// Release the resources acquired during the physical planning right away.
 	newFactory.(*distSQLSpecExecFactory).planCtx.getCleanupFunc()()
 	if err != nil {
@@ -831,7 +816,7 @@ func (e *distSQLSpecExecFactory) ConstructExplain(
 		}
 	}
 
-	physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), explainNode, e.planningMode != distSQLLocalOnlyPlanning)
+	physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), explainNode)
 	if err != nil {
 		return nil, err
 	}
@@ -918,6 +903,7 @@ func (e *distSQLSpecExecFactory) ConstructDeleteRange(
 	table cat.Table,
 	needed exec.TableColumnOrdinalSet,
 	indexConstraint *constraint.Constraint,
+	interleavedTables []cat.Table,
 	autoCommit bool,
 ) (exec.Node, error) {
 	return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: delete range")
@@ -971,7 +957,7 @@ func (e *distSQLSpecExecFactory) ConstructOpaque(metadata opt.OpaqueMetadata) (e
 	if err != nil {
 		return nil, err
 	}
-	physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), plan, e.planningMode != distSQLLocalOnlyPlanning)
+	physPlan, err := e.dsp.wrapPlan(e.getPlanCtx(cannotDistribute), plan)
 	if err != nil {
 		return nil, err
 	}
@@ -1012,7 +998,7 @@ func (e *distSQLSpecExecFactory) ConstructScanBuffer(
 }
 
 func (e *distSQLSpecExecFactory) ConstructRecursiveCTE(
-	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string, deduplicate bool,
+	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string,
 ) (exec.Node, error) {
 	return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: recursive CTE")
 }
@@ -1090,22 +1076,21 @@ func (e *distSQLSpecExecFactory) constructHashOrMergeJoin(
 	leftEqColsRemapped := eqCols(leftEqCols, leftMap)
 	rightEqColsRemapped := eqCols(rightEqCols, rightMap)
 	info := joinPlanningInfo{
-		leftPlan:                 leftPhysPlan,
-		rightPlan:                rightPhysPlan,
-		joinType:                 joinType,
-		joinResultTypes:          getTypesFromResultColumns(resultColumns),
-		onExpr:                   onExpr,
-		post:                     post,
-		joinToStreamColMap:       joinToStreamColMap,
-		leftEqCols:               leftEqColsRemapped,
-		rightEqCols:              rightEqColsRemapped,
-		leftEqColsAreKey:         leftEqColsAreKey,
-		rightEqColsAreKey:        rightEqColsAreKey,
-		leftMergeOrd:             distsqlOrdering(mergeJoinOrdering, leftEqColsRemapped),
-		rightMergeOrd:            distsqlOrdering(mergeJoinOrdering, rightEqColsRemapped),
-		leftPlanDistribution:     leftPhysPlan.Distribution,
-		rightPlanDistribution:    rightPhysPlan.Distribution,
-		allowPartialDistribution: e.planningMode != distSQLLocalOnlyPlanning,
+		leftPlan:              leftPhysPlan,
+		rightPlan:             rightPhysPlan,
+		joinType:              joinType,
+		joinResultTypes:       getTypesFromResultColumns(resultColumns),
+		onExpr:                onExpr,
+		post:                  post,
+		joinToStreamColMap:    joinToStreamColMap,
+		leftEqCols:            leftEqColsRemapped,
+		rightEqCols:           rightEqColsRemapped,
+		leftEqColsAreKey:      leftEqColsAreKey,
+		rightEqColsAreKey:     rightEqColsAreKey,
+		leftMergeOrd:          distsqlOrdering(mergeJoinOrdering, leftEqColsRemapped),
+		rightMergeOrd:         distsqlOrdering(mergeJoinOrdering, rightEqColsRemapped),
+		leftPlanDistribution:  leftPhysPlan.Distribution,
+		rightPlanDistribution: rightPhysPlan.Distribution,
 	}
 	p := e.dsp.planJoiners(planCtx, &info, ReqOrdering(reqOrdering))
 	p.ResultColumns = resultColumns

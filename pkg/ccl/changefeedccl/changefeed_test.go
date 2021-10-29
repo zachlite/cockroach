@@ -276,23 +276,6 @@ func TestChangefeedTenants(t *testing.T) {
 	})
 }
 
-func TestMissingTableErr(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	_, kvSQLdb, cleanup := startTestServer(t, feedTestOptions{argsFn: func(args *base.TestServerArgs) {
-		args.ExternalIODirConfig.DisableOutbound = true
-	}})
-	defer cleanup()
-
-	t.Run("changefeed on non existing table fails", func(t *testing.T) {
-		kvSQL := sqlutils.MakeSQLRunner(kvSQLdb)
-		kvSQL.ExpectErr(t, `^pq: failed to resolve targets in the CHANGEFEED stmt: table "foo" does not exist$`,
-			`CREATE CHANGEFEED FOR foo`,
-		)
-	})
-}
-
 func TestChangefeedTenantsExternalIOEnabled(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -748,7 +731,6 @@ func TestChangefeedExternalIODisabled(t *testing.T) {
 		})
 		defer s.Stopper().Stop(ctx)
 		sqlDB := sqlutils.MakeSQLRunner(db)
-		sqlDB.Exec(t, serverSetupStatements)
 		sqlDB.Exec(t, "CREATE TABLE target_table (pk INT PRIMARY KEY)")
 		for _, proto := range disallowedSinkProtos {
 			sqlDB.ExpectErr(t, "Outbound IO is disabled by configuration, cannot create changefeed",
@@ -1315,7 +1297,6 @@ func TestChangefeedAfterSchemaChangeBackfill(t *testing.T) {
 
 func TestChangefeedColumnFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, 71796, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {
@@ -1464,7 +1445,6 @@ func requireErrorSoon(
 func TestChangefeedFailOnTableOffline(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.UnderDeadlock(t, "timeout")
 
 	dataSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
@@ -2083,13 +2063,6 @@ func TestChangefeedTruncateOrDrop(t *testing.T) {
 		registry := f.Server().JobRegistry().(*jobs.Registry)
 		metrics := registry.MetricsStruct().Changefeed.(*Metrics)
 
-		drainUntilErr := func(f cdctest.TestFeed) (err error) {
-			var msg *cdctest.TestFeedMessage
-			for msg, err = f.Next(); msg != nil; {
-			}
-			return err
-		}
-
 		sqlDB.Exec(t, `CREATE TABLE truncate (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `CREATE TABLE truncate_cascade (b INT PRIMARY KEY REFERENCES truncate (a))`)
 		sqlDB.Exec(t,
@@ -2101,10 +2074,10 @@ func TestChangefeedTruncateOrDrop(t *testing.T) {
 		assertPayloads(t, truncate, []string{`truncate: [1]->{"after": {"a": 1}}`})
 		assertPayloads(t, truncateCascade, []string{`truncate_cascade: [1]->{"after": {"b": 1}}`})
 		sqlDB.Exec(t, `TRUNCATE TABLE truncate CASCADE`)
-		if err := drainUntilErr(truncate); !testutils.IsError(err, `"truncate" was truncated`) {
+		if _, err := truncate.Next(); !testutils.IsError(err, `"truncate" was truncated`) {
 			t.Fatalf(`expected ""truncate" was truncated" error got: %+v`, err)
 		}
-		if err := drainUntilErr(truncateCascade); !testutils.IsError(
+		if _, err := truncateCascade.Next(); !testutils.IsError(
 			err, `"truncate_cascade" was truncated`,
 		) {
 			t.Fatalf(`expected ""truncate_cascade" was truncated" error got: %+v`, err)
@@ -2117,7 +2090,7 @@ func TestChangefeedTruncateOrDrop(t *testing.T) {
 		defer closeFeed(t, drop)
 		assertPayloads(t, drop, []string{`drop: [1]->{"after": {"a": 1}}`})
 		sqlDB.Exec(t, `DROP TABLE drop`)
-		if err := drainUntilErr(drop); !testutils.IsError(err, `"drop" was dropped`) {
+		if _, err := drop.Next(); !testutils.IsError(err, `"drop" was dropped`) {
 			t.Errorf(`expected ""drop" was dropped" error got: %+v`, err)
 		}
 		assertFailuresCounter(t, metrics, 3)
@@ -2134,6 +2107,15 @@ func TestChangefeedMonitoring(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {
+		beforeEmitRowCh := make(chan struct{}, 2)
+		knobs := f.Server().TestingKnobs().
+			DistSQL.(*execinfra.TestingKnobs).
+			Changefeed.(*TestingKnobs)
+		knobs.BeforeEmitRow = func(_ context.Context) error {
+			<-beforeEmitRowCh
+			return nil
+		}
+
 		sqlDB := sqlutils.MakeSQLRunner(db)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1)`)
@@ -2167,6 +2149,7 @@ func TestChangefeedMonitoring(t *testing.T) {
 			t.Errorf(`expected 0 got %d`, c)
 		}
 
+		beforeEmitRowCh <- struct{}{}
 		foo := feed(t, f, `CREATE CHANGEFEED FOR foo`)
 		_, _ = foo.Next()
 		testutils.SucceedsSoon(t, func() error {
@@ -2200,7 +2183,37 @@ func TestChangefeedMonitoring(t *testing.T) {
 			return nil
 		})
 
+		// Not reading from foo will backpressure it and max_behind_nanos will grow.
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (2)`)
+		const expectedLatency = 5 * time.Second
+		sqlDB.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.target_duration = $1`,
+			(expectedLatency / 3).String())
+		sqlDB.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '50ms'`)
+
+		testutils.SucceedsSoon(t, func() error {
+			waitForBehindNanos := 2 * expectedLatency.Nanoseconds()
+			if c := s.MustGetSQLCounter(`changefeed.max_behind_nanos`); c < waitForBehindNanos {
+				return errors.Errorf(
+					`waiting for the feed to be > %d nanos behind got %d`, waitForBehindNanos, c)
+			}
+			return nil
+		})
+
+		// Unblocking the emit should bring the max_behind_nanos back down.
+		// Unfortunately, this is sensitive to how many closed timestamp updates are
+		// received. If we get them too fast, it takes longer to process them then
+		// they come in and we fall continually further behind. The target_duration
+		// and close_fraction settings above are tuned to try to avoid this.
+		close(beforeEmitRowCh)
+		_, _ = foo.Next()
+		testutils.SucceedsSoon(t, func() error {
+			waitForBehindNanos := expectedLatency.Nanoseconds()
+			if c := s.MustGetSQLCounter(`changefeed.max_behind_nanos`); c > waitForBehindNanos {
+				return errors.Errorf(
+					`waiting for the feed to be < %d nanos behind got %d`, waitForBehindNanos, c)
+			}
+			return nil
+		})
 
 		// Check that two changefeeds add correctly.
 		// Set cluster settings back so we don't interfere with schema changes.
@@ -2236,6 +2249,10 @@ func TestChangefeedMonitoring(t *testing.T) {
 	}
 	// TODO(ssd): tenant tests skipped because of f.Server() use
 	t.Run(`sinkless`, sinklessTest(testFn, feedTestNoTenants))
+	t.Run(`enterprise`, func(t *testing.T) {
+		skip.WithIssue(t, 38443)
+		enterpriseTest(testFn, feedTestNoTenants)
+	})
 }
 
 func TestChangefeedRetryableError(t *testing.T) {
@@ -2578,17 +2595,13 @@ func TestChangefeedSchemaTTL(t *testing.T) {
 		resume <- struct{}{}
 
 		// Verify that the third call to Next() returns an error (the first is the
-		// initial row, the second is the first change.
-		// Note: rows, and the error message may arrive in any order, so we just loop
-		// until we see an error.
-		for {
-			_, err := dataExpiredRows.Next()
-			if err != nil {
-				require.Regexp(t, `GC threshold`, err)
-				break
-			}
+		// initial row, the second is the first change. The third should detect the
+		// GC interval mismatch).
+		_, _ = dataExpiredRows.Next()
+		_, _ = dataExpiredRows.Next()
+		if _, err := dataExpiredRows.Next(); !testutils.IsError(err, `GC threshold`) {
+			t.Errorf(`expected "GC threshold" error got: %+v`, err)
 		}
-
 	}
 	// TODO(ssd): tenant tests skipped because of f.Server() use
 	// in forceTableGC
@@ -2596,7 +2609,10 @@ func TestChangefeedSchemaTTL(t *testing.T) {
 	t.Run("enterprise", enterpriseTest(testFn, feedTestNoTenants))
 	t.Run("cloudstorage", cloudStorageTest(testFn, feedTestNoTenants))
 	t.Run("kafka", kafkaTest(testFn, feedTestNoTenants))
-	t.Run(`webhook`, webhookTest(testFn, feedTestNoTenants))
+	t.Run(`webhook`, func(t *testing.T) {
+		skip.WithIssue(t, 66991, "flaky test")
+		webhookTest(testFn, feedTestNoTenants)(t)
+	})
 }
 
 func TestChangefeedErrors(t *testing.T) {
@@ -3544,7 +3560,10 @@ func TestManyChangefeedsOneTable(t *testing.T) {
 	t.Run(`enterprise`, enterpriseTest(testFn))
 	t.Run(`cloudstorage`, cloudStorageTest(testFn))
 	t.Run(`kafka`, kafkaTest(testFn))
-	t.Run(`webhook`, webhookTest(testFn))
+	t.Run(`webhook`, func(t *testing.T) {
+		skip.WithIssue(t, 67034, "flakey test")
+		webhookTest(testFn)(t)
+	})
 }
 
 func TestUnspecifiedPrimaryKey(t *testing.T) {
@@ -4225,7 +4244,7 @@ func TestChangefeedBackfillCheckpoint(t *testing.T) {
 	skip.UnderRace(t)
 	skip.UnderShort(t)
 
-	rnd, _ := randutil.NewTestRand()
+	rnd, _ := randutil.NewPseudoRand()
 
 	var maxCheckpointSize int64
 	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {

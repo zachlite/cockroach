@@ -467,7 +467,6 @@ var (
 		types.Decimal,
 		types.Date,
 		types.StringArray,
-		types.BytesArray,
 		types.IntArray,
 		types.FloatArray,
 		types.DecimalArray,
@@ -492,7 +491,6 @@ var (
 		types.Jsonb,
 		types.VarBit,
 		types.AnyEnum,
-		types.AnyEnumArray,
 		types.INetArray,
 		types.VarBitArray,
 	}

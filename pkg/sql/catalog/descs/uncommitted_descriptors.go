@@ -12,11 +12,9 @@ package descs
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
@@ -25,14 +23,8 @@ import (
 // uncommittedDescriptor is a descriptor that has been modified in the current
 // transaction.
 type uncommittedDescriptor struct {
+	mutable   catalog.MutableDescriptor
 	immutable catalog.Descriptor
-
-	// mutable generally holds the descriptor as it was read from the database.
-	// In the rare case that this struct corresponds to a singleton which is
-	// added to optimize for special cases of system descriptors.
-	// It should be accessed through getMutable() which will construct a new
-	// value in cases where it is nil.
-	mutable catalog.MutableDescriptor
 }
 
 // GetName implements the catalog.NameEntry interface.
@@ -53,16 +45,6 @@ func (u uncommittedDescriptor) GetParentSchemaID() descpb.ID {
 // GetID implements the catalog.NameEntry interface.
 func (u uncommittedDescriptor) GetID() descpb.ID {
 	return u.immutable.GetID()
-}
-
-// getMutable is how the mutable descriptor should be accessed. It constructs
-// a new descriptor in the case that this descriptor is a cached, in-memory
-// singleton for a system descriptor.
-func (u *uncommittedDescriptor) getMutable() catalog.MutableDescriptor {
-	if u.mutable != nil {
-		return u.mutable
-	}
-	return u.immutable.NewBuilder().BuildExistingMutable()
 }
 
 var _ catalog.NameEntry = (*uncommittedDescriptor)(nil)
@@ -100,6 +82,15 @@ type uncommittedDescriptors struct {
 	descNames nstree.Set
 }
 
+func makeUncommittedDescriptors() uncommittedDescriptors {
+	ud := uncommittedDescriptors{
+		descs:     nstree.MakeMap(),
+		descNames: nstree.MakeSet(),
+	}
+	ud.reset()
+	return ud
+}
+
 func (ud *uncommittedDescriptors) reset() {
 	ud.descs.Clear()
 	ud.descNames.Clear()
@@ -122,7 +113,6 @@ func (ud *uncommittedDescriptors) add(mut catalog.MutableDescriptor) (catalog.De
 // checkOut checks out an uncommitted mutable descriptor for use in the
 // transaction. This descriptor should later be checked in again.
 func (ud *uncommittedDescriptors) checkOut(id descpb.ID) (catalog.MutableDescriptor, error) {
-	ud.maybeInitialize()
 	entry := ud.descs.GetByID(id)
 	if entry == nil {
 		return nil, errors.NewAssertionErrorWithWrappedErrf(
@@ -132,7 +122,7 @@ func (ud *uncommittedDescriptors) checkOut(id descpb.ID) (catalog.MutableDescrip
 
 	}
 	u := entry.(*uncommittedDescriptor)
-	return u.getMutable(), nil
+	return u.mutable, nil
 }
 
 // checkIn checks in an uncommitted mutable descriptor that was previously
@@ -180,7 +170,6 @@ func maybeRefreshCachedFieldsOnTypeDescriptor(
 
 // getByID looks up an uncommitted descriptor by ID.
 func (ud *uncommittedDescriptors) getByID(id descpb.ID) catalog.Descriptor {
-	ud.maybeInitialize()
 	entry := ud.descs.GetByID(id)
 	if entry == nil {
 		return nil
@@ -198,7 +187,6 @@ func (ud *uncommittedDescriptors) getByID(id descpb.ID) catalog.Descriptor {
 func (ud *uncommittedDescriptors) getByName(
 	dbID descpb.ID, schemaID descpb.ID, name string,
 ) (hasKnownRename bool, desc catalog.Descriptor) {
-	ud.maybeInitialize()
 	// Walk latest to earliest so that a DROP followed by a CREATE with the same
 	// name will result in the CREATE being seen.
 	if got := ud.descs.GetByName(dbID, schemaID, name); got != nil {
@@ -214,10 +202,9 @@ func (ud *uncommittedDescriptors) getByName(
 func (ud *uncommittedDescriptors) iterateNewVersionByID(
 	fn func(entry catalog.NameEntry, originalVersion lease.IDVersion) error,
 ) error {
-	ud.maybeInitialize()
 	return ud.descs.IterateByID(func(entry catalog.NameEntry) error {
 		mut := entry.(*uncommittedDescriptor).mutable
-		if mut == nil || mut.IsNew() || !mut.IsUncommittedVersion() {
+		if mut.IsNew() || !mut.IsUncommittedVersion() {
 			return nil
 		}
 		return fn(entry, lease.NewIDVersionPrev(mut.OriginalName(), mut.OriginalID(), mut.OriginalVersion()))
@@ -227,7 +214,6 @@ func (ud *uncommittedDescriptors) iterateNewVersionByID(
 func (ud *uncommittedDescriptors) iterateImmutableByID(
 	fn func(imm catalog.Descriptor) error,
 ) error {
-	ud.maybeInitialize()
 	return ud.descs.IterateByID(func(entry catalog.NameEntry) error {
 		return fn(entry.(*uncommittedDescriptor).immutable)
 	})
@@ -275,17 +261,4 @@ func (ud *uncommittedDescriptors) hasUncommittedTypes() (has bool) {
 		return nil
 	})
 	return has
-}
-
-var systemUncommittedDatabase = &uncommittedDescriptor{
-	immutable: dbdesc.NewBuilder(systemschema.SystemDB.DatabaseDesc()).
-		BuildImmutableDatabase(),
-	// Note that the mutable field is left as nil. We'll generate a new
-	// value lazily when this is needed, which ought to be exceedingly rare.
-}
-
-func (ud *uncommittedDescriptors) maybeInitialize() {
-	if ud.descs.Len() == 0 {
-		ud.descs.Upsert(systemUncommittedDatabase)
-	}
 }

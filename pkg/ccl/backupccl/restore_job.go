@@ -290,40 +290,6 @@ rangeLoop:
 	return requestEntries, maxEndTime, nil
 }
 
-func processTableForMultiRegion(
-	ctx context.Context, txn *kv.Txn, descsCol *descs.Collection, table catalog.TableDescriptor,
-) error {
-	_, dbDesc, err := descsCol.GetImmutableDatabaseByID(
-		ctx, txn, table.GetParentID(), tree.DatabaseLookupFlags{
-			Required:       true,
-			AvoidCached:    true,
-			IncludeOffline: true,
-		})
-	if err != nil {
-		return err
-	}
-	// If the table descriptor is being written to a multi-region database and
-	// the table does not have a locality config setup, set one up here. The
-	// table's locality config will be set to the default locality - REGIONAL
-	// BY TABLE IN PRIMARY REGION.
-	if dbDesc.IsMultiRegion() {
-		if table.GetLocalityConfig() == nil {
-			table.(*tabledesc.Mutable).SetTableLocalityRegionalByTable(tree.PrimaryRegionNotSpecifiedName)
-		}
-	} else {
-		// If the database is not multi-region enabled, ensure that we don't
-		// write any multi-region table descriptors into it.
-		if table.GetLocalityConfig() != nil {
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"cannot restore or create multi-region table %s into non-multi-region database %s",
-				table.GetName(),
-				dbDesc.GetName(),
-			)
-		}
-	}
-	return nil
-}
-
 // WriteDescriptors writes all the new descriptors: First the ID ->
 // TableDescriptor for the new table, then flip (or initialize) the name -> ID
 // entry so any new queries will use the new one. The tables are assigned the
@@ -340,6 +306,7 @@ func WriteDescriptors(
 	tables []catalog.TableDescriptor,
 	types []catalog.TypeDescriptor,
 	descCoverage tree.DescriptorCoverage,
+	settings *cluster.Settings,
 	extra []roachpb.KeyValue,
 ) error {
 	ctx, span := tracing.ChildSpan(ctx, "WriteDescriptors")
@@ -411,9 +378,33 @@ func WriteDescriptors(
 			}
 			privilegeDesc := table.GetPrivileges()
 			catprivilege.MaybeFixUsagePrivForTablesAndDBs(&privilegeDesc)
-
-			if err := processTableForMultiRegion(ctx, txn, descsCol, table); err != nil {
+			// If the table descriptor is being written to a multi-region database and
+			// the table does not have a locality config setup, set one up here. The
+			// table's locality config will be set to the default locality - REGIONAL
+			// BY TABLE IN PRIMARY REGION.
+			_, dbDesc, err := descsCol.GetImmutableDatabaseByID(
+				ctx, txn, table.GetParentID(), tree.DatabaseLookupFlags{
+					Required:       true,
+					AvoidCached:    true,
+					IncludeOffline: true,
+				})
+			if err != nil {
 				return err
+			}
+			if dbDesc.IsMultiRegion() {
+				if table.GetLocalityConfig() == nil {
+					table.(*tabledesc.Mutable).SetTableLocalityRegionalByTable(tree.PrimaryRegionNotSpecifiedName)
+				}
+			} else {
+				// If the database is not multi-region enabled, ensure that we don't
+				// write any multi-region table descriptors into it.
+				if table.GetLocalityConfig() != nil {
+					return pgerror.Newf(pgcode.FeatureNotSupported,
+						"cannot write descriptor for multi-region table %s into non-multi-region database %s",
+						table.GetName(),
+						dbDesc.GetName(),
+					)
+				}
 			}
 
 			if err := descsCol.WriteDescToBatch(
@@ -1286,7 +1277,7 @@ func createImportingDescriptors(
 			// Write the new descriptors which are set in the OFFLINE state.
 			if err := WriteDescriptors(
 				ctx, p.ExecCfg().Codec, txn, p.User(), descsCol, databases, writtenSchemas, tables, writtenTypes,
-				details.DescriptorCoverage, nil, /* extra */
+				details.DescriptorCoverage, r.settings, nil, /* extra */
 			); err != nil {
 				return errors.Wrapf(err, "restoring %d TableDescriptors from %d databases", len(tables), len(databases))
 			}
@@ -1621,8 +1612,9 @@ func (r *restoreResumer) doResume(ctx context.Context, execCtx interface{}) erro
 		if err := sql.DescsTxn(ctx, r.execCfg, publishDescriptors); err != nil {
 			return err
 		}
-
-		p.ExecCfg().JobRegistry.NotifyToAdoptJobs(ctx)
+		if err := p.ExecCfg().JobRegistry.NotifyToAdoptJobs(ctx); err != nil {
+			return err
+		}
 		if fn := r.testingKnobs.afterPublishingDescriptors; fn != nil {
 			if err := fn(); err != nil {
 				return err
@@ -1727,7 +1719,9 @@ func (r *restoreResumer) doResume(ctx context.Context, execCtx interface{}) erro
 	}
 	// Reload the details as we may have updated the job.
 	details = r.job.Details().(jobspb.RestoreDetails)
-	p.ExecCfg().JobRegistry.NotifyToAdoptJobs(ctx)
+	if err := p.ExecCfg().JobRegistry.NotifyToAdoptJobs(ctx); err != nil {
+		return err
+	}
 
 	if details.DescriptorCoverage == tree.AllDescriptors {
 		// We restore the system tables from the main data bundle so late because it
@@ -2264,36 +2258,24 @@ func (r *restoreResumer) dropDescriptors(
 
 	// Delete any schema descriptors that this restore created. Also collect the
 	// descriptors so we can update their parent databases later.
-	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.Descriptor)
+	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.SchemaDescriptor)
 	for _, schemaDesc := range details.SchemaDescs {
+		sc := schemadesc.NewBuilder(schemaDesc).BuildImmutableSchema()
 		// We need to ignore descriptors we just added since we haven't committed the txn that deletes these.
-		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, schemaDesc.GetID(), allDescs, ignoredChildDescIDs)
+		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, sc.GetID(), allDescs, ignoredChildDescIDs)
 		if err != nil {
-			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", schemaDesc.GetName())
+			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", sc.GetName())
 		}
 
 		if !isSchemaEmpty {
-			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", schemaDesc.GetName())
+			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", sc.GetName())
 			continue
 		}
 
-		mutSchema, err := descsCol.GetMutableDescriptorByID(ctx, schemaDesc.GetID(), txn)
-		if err != nil {
-			return err
-		}
-
-		// Mark schema as dropped and add uncommitted version to pass pre-txn
-		// descriptor validation.
-		mutSchema.SetDropped()
-		mutSchema.MaybeIncrementVersion()
-		if err := descsCol.AddUncommittedDescriptor(mutSchema); err != nil {
-			return err
-		}
-
-		b.Del(catalogkeys.EncodeNameKey(codec, mutSchema))
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, mutSchema.GetID()))
-		descsCol.AddDeletedDescriptor(mutSchema)
-		dbsWithDeletedSchemas[mutSchema.GetParentID()] = append(dbsWithDeletedSchemas[mutSchema.GetParentID()], mutSchema)
+		b.Del(catalogkeys.EncodeNameKey(codec, sc))
+		b.Del(catalogkeys.MakeDescMetadataKey(codec, sc.GetID()))
+		descsCol.AddDeletedDescriptor(sc)
+		dbsWithDeletedSchemas[sc.GetParentID()] = append(dbsWithDeletedSchemas[sc.GetParentID()], sc)
 	}
 
 	// Delete the database descriptors.

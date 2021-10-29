@@ -113,8 +113,7 @@ func TestExportImportBank(t *testing.T) {
 				fmt.Sprintf(`SELECT * FROM bank AS OF SYSTEM TIME %s ORDER BY id`, asOf), db.QueryStr(t, `SELECT * FROM bank2 ORDER BY id`),
 			)
 			db.CheckQueryResults(t,
-				`SELECT fingerprint FROM [SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank2]`,
-				db.QueryStr(t, `SELECT fingerprint FROM [SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank]`),
+				`SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank2`, db.QueryStr(t, `SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE bank`),
 			)
 			db.Exec(t, "DROP TABLE bank2")
 		})
@@ -196,11 +195,8 @@ func TestMultiNodeExportStmt(t *testing.T) {
 			totalBytes += bytes
 			nodesSeen[strings.SplitN(filename, ".", 2)[0]] = true
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatalf("unexpected error during export: %s", err.Error())
-		}
 		if totalRows != exportRows {
-			t.Fatalf("expected %d rows, got %d", exportRows, totalRows)
+			t.Fatalf("Expected %d rows, got %d", exportRows, totalRows)
 		}
 		if expected := exportRows / chunkSize; files < expected {
 			t.Fatalf("expected at least %d files, got %d", expected, files)
@@ -409,6 +405,7 @@ func TestExportVectorized(t *testing.T) {
 	sqlDB := sqlutils.MakeSQLRunner(db)
 
 	sqlDB.Exec(t, `CREATE TABLE t(a INT PRIMARY KEY)`)
+	sqlDB.Exec(t, `SET vectorize_row_count_threshold=0`)
 	sqlDB.Exec(t, `EXPORT INTO CSV 'http://0.1:37957/exp_1' FROM TABLE t`)
 }
 

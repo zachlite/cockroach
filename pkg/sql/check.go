@@ -48,7 +48,7 @@ func validateCheckExpr(
 	if err != nil {
 		return err
 	}
-	colSelectors := tabledesc.ColumnsSelectors(tableDesc.AccessibleColumns())
+	colSelectors := tabledesc.ColumnsSelectors(tableDesc.PublicColumns())
 	columns := tree.AsStringWithFlags(&colSelectors, tree.FmtSerializable)
 	queryStr := fmt.Sprintf(`SELECT %s FROM [%d AS t] WHERE NOT (%s) LIMIT 1`, columns, tableDesc.GetID(), exprStr)
 	log.Infof(ctx, "validating check constraint %q with query %q", expr, queryStr)
@@ -60,7 +60,7 @@ func validateCheckExpr(
 	if rows.Len() > 0 {
 		return pgerror.Newf(pgcode.CheckViolation,
 			"validation of CHECK %q failed on row: %s",
-			expr, labeledRowValues(tableDesc.AccessibleColumns(), rows))
+			expr, labeledRowValues(tableDesc.PublicColumns(), rows))
 	}
 	return nil
 }
@@ -96,8 +96,8 @@ func matchFullUnacceptableKeyQuery(
 		srcNotNullExistsClause[i] = fmt.Sprintf("%s IS NOT NULL", srcCols[i])
 	}
 
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		id := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < srcTbl.GetPrimaryIndex().NumColumns(); i++ {
+		id := srcTbl.GetPrimaryIndex().GetColumnID(i)
 		alreadyPresent := false
 		for _, otherID := range fk.OriginColumnIDs {
 			if id == otherID {
@@ -161,8 +161,8 @@ func nonMatchingRowQuery(
 		return "", nil, err
 	}
 	// Get primary key columns not included in the FK
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		pkColID := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < srcTbl.GetPrimaryIndex().NumColumns(); i++ {
+		pkColID := srcTbl.GetPrimaryIndex().GetColumnID(i)
 		found := false
 		for _, id := range fk.OriginColumnIDs {
 			if pkColID == id {

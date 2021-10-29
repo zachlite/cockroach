@@ -17,6 +17,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
@@ -173,13 +174,13 @@ func LivenessStatus(
 		}
 		return livenesspb.NodeLivenessStatus_DEAD
 	}
+	if !l.Membership.Active() {
+		return livenesspb.NodeLivenessStatus_DECOMMISSIONING
+	}
+	if l.Draining {
+		return livenesspb.NodeLivenessStatus_DRAINING
+	}
 	if l.IsLive(now) {
-		if !l.Membership.Active() {
-			return livenesspb.NodeLivenessStatus_DECOMMISSIONING
-		}
-		if l.Draining {
-			return livenesspb.NodeLivenessStatus_DRAINING
-		}
 		return livenesspb.NodeLivenessStatus_LIVE
 	}
 	return livenesspb.NodeLivenessStatus_UNAVAILABLE
@@ -603,34 +604,6 @@ func (sp *StorePool) ClusterNodeCount() int {
 	return sp.nodeCountFn()
 }
 
-// IsDead determines if a store is dead. It will return an error if the store is
-// not found in the store pool or the status is unknown. If the store is not dead,
-// it returns the time to death.
-func (sp *StorePool) IsDead(storeID roachpb.StoreID) (bool, time.Duration, error) {
-	sp.detailsMu.Lock()
-	defer sp.detailsMu.Unlock()
-
-	sd, ok := sp.detailsMu.storeDetails[storeID]
-	if !ok {
-		return false, 0, errors.Errorf("store %d was not found", storeID)
-	}
-	// NB: We use clock.Now().GoTime() instead of clock.PhysicalTime() is order to
-	// take clock signals from remote nodes into consideration.
-	now := sp.clock.Now().GoTime()
-	timeUntilStoreDead := TimeUntilStoreDead.Get(&sp.st.SV)
-
-	deadAsOf := sd.lastUpdatedTime.Add(timeUntilStoreDead)
-	if now.After(deadAsOf) {
-		return true, 0, nil
-	}
-	// If there's no descriptor (meaning no gossip ever arrived for this
-	// store), return unavailable.
-	if sd.desc == nil {
-		return false, 0, errors.Errorf("store %d status unknown, cant tell if it's dead or alive", storeID)
-	}
-	return false, deadAsOf.Sub(now), nil
-}
-
 // IsUnknown returns true if the given store's status is `storeStatusUnknown`
 // (i.e. it just failed a liveness heartbeat and we cannot ascertain its
 // liveness or deadness at the moment) or an error if the store is not found in
@@ -793,16 +766,15 @@ func (sl StoreList) String() string {
 	return buf.String()
 }
 
-// excludeInvalid takes a store list and removes stores that would be explicitly invalid
-// under the given set of constraints. It maintains the original order of the
-// passed in store list.
-func (sl StoreList) excludeInvalid(constraints []roachpb.ConstraintsConjunction) StoreList {
+// filter takes a store list and filters it using the passed in constraints. It
+// maintains the original order of the passed in store list.
+func (sl StoreList) filter(constraints []zonepb.ConstraintsConjunction) StoreList {
 	if len(constraints) == 0 {
 		return sl
 	}
 	var filteredDescs []roachpb.StoreDescriptor
 	for _, store := range sl.stores {
-		if ok := isStoreValid(store, constraints); ok {
+		if ok := constraintsCheck(store, constraints); ok {
 			filteredDescs = append(filteredDescs, store)
 		}
 	}

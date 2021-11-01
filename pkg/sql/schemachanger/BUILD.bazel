@@ -20,6 +20,7 @@ go_test(
         "//pkg/sql/catalog/descpb",
         "//pkg/sql/schemachanger/scexec",
         "//pkg/sql/schemachanger/scop",
+        "//pkg/sql/schemachanger/scplan",
         "//pkg/sql/tests",
         "//pkg/testutils",
         "//pkg/testutils/serverutils",

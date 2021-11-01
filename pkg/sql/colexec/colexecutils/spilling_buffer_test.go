@@ -37,7 +37,7 @@ func TestSpillingBuffer(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	for _, memoryLimit := range []int64{
 		10 << 10,                        /* 10 KiB */

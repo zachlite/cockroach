@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
+	"github.com/cockroachdb/cockroach/pkg/geo/wkt"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 	"github.com/pierrre/geohash"
@@ -25,7 +26,6 @@ import (
 	"github.com/twpayne/go-geom/encoding/geojson"
 	"github.com/twpayne/go-geom/encoding/wkb"
 	"github.com/twpayne/go-geom/encoding/wkbcommon"
-	"github.com/twpayne/go-geom/encoding/wkt"
 )
 
 // parseEWKBRaw creates a geopb.SpatialObject from an EWKB
@@ -115,9 +115,6 @@ func parseGeoJSON(
 	if err := geojson.Unmarshal(b, &t); err != nil {
 		return geopb.SpatialObject{}, err
 	}
-	if t == nil {
-		return geopb.SpatialObject{}, errors.Newf("invalid GeoJSON input")
-	}
 	if defaultSRID != 0 && t.SRID() == 0 {
 		AdjustGeomTSRID(t, defaultSRID)
 	}
@@ -171,12 +168,16 @@ func parseEWKT(
 		}
 	}
 
-	g, wktUnmarshalErr := wkt.Unmarshal(string(str))
+	geom, wktUnmarshalErr := wkt.Unmarshal(string(str))
 	if wktUnmarshalErr != nil {
 		return geopb.SpatialObject{}, wktUnmarshalErr
 	}
-	AdjustGeomTSRID(g, srid)
-	return spatialObjectFromGeomT(g, soType)
+	AdjustGeomTSRID(geom, srid)
+	ewkb, ewkbMarshalErr := ewkb.Marshal(geom, DefaultEWKBEncodingFormat)
+	if ewkbMarshalErr != nil {
+		return geopb.SpatialObject{}, ewkbMarshalErr
+	}
+	return parseEWKBRaw(soType, ewkb)
 }
 
 // hasPrefixIgnoreCase returns whether a given str begins with a prefix, ignoring case.

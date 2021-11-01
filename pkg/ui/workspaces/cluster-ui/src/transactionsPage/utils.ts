@@ -11,6 +11,7 @@
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
 import {
   Filters,
+  SelectOptions,
   getTimeValueInSeconds,
   calculateActiveFilters,
 } from "../queryFilter";
@@ -22,12 +23,10 @@ import {
   aggregateNumericStats,
   FixLong,
   longToInt,
+  statementKey,
   TimestampToNumber,
   addStatementStats,
   flattenStatementStats,
-  DurationToNumber,
-  computeOrUseStmtSummary,
-  transactionScopedStatementKey,
 } from "../util";
 
 type Statement = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -38,15 +37,20 @@ type Timestamp = protos.google.protobuf.ITimestamp;
 export const getTrxAppFilterOptions = (
   transactions: Transaction[],
   prefix: string,
-): string[] => {
-  const defaultAppFilters = [prefix];
+): SelectOptions[] => {
+  const defaultAppFilters = ["All", prefix];
   const uniqueAppNames = new Set(
     transactions
       .filter(t => !t.stats_data.app.startsWith(prefix))
-      .map(t => (t.stats_data.app ? t.stats_data.app : "(unset)")),
+      .map(t => t.stats_data.app),
   );
 
-  return defaultAppFilters.concat(Array.from(uniqueAppNames));
+  return defaultAppFilters
+    .concat(Array.from(uniqueAppNames))
+    .map(filterValue => ({
+      label: filterValue,
+      value: filterValue,
+    }));
 };
 
 export const collectStatementsText = (statements: Statement[]): string =>
@@ -75,21 +79,6 @@ export const statementFingerprintIdsToText = (
     .join("\n");
 };
 
-// Combine all statement summaries into a string.
-export const statementFingerprintIdsToSummarizedText = (
-  statementFingerprintIds: Long[],
-  statements: Statement[],
-): string => {
-  return statementFingerprintIds
-    .map(s => {
-      const query = statements.find(stmt => stmt.id.eq(s))?.key.key_data.query;
-      const querySummary = statements.find(stmt => stmt.id.eq(s))?.key.key_data
-        .query_summary;
-      return computeOrUseStmtSummary(query, querySummary);
-    })
-    .join("\n");
-};
-
 // Aggregate transaction statements from different nodes.
 export const aggregateStatements = (
   statements: Statement[],
@@ -97,13 +86,11 @@ export const aggregateStatements = (
   const statsKey: { [key: string]: AggregateStatistics } = {};
 
   flattenStatementStats(statements).forEach(s => {
-    const key = transactionScopedStatementKey(s);
+    const key = statementKey(s);
     if (!(key in statsKey)) {
       statsKey[key] = {
         label: s.statement,
-        summary: s.statement_summary,
         aggregatedTs: s.aggregated_ts,
-        aggregationInterval: s.aggregation_interval,
         implicitTxn: s.implicit_txn,
         database: s.database,
         fullScan: s.full_scan,
@@ -157,33 +144,15 @@ export const filterTransactions = (
 
   // Return transactions filtered by the values selected on the filter. A
   // transaction must match all selected filters.
-  // We don't want to show statements that are internal or with unset App names by default.
   // Current filters: app, service latency, nodes and regions.
   const filteredTransactions = data
-    .filter((t: Transaction) => {
-      const isInternal = (t: Transaction) =>
-        t.stats_data.app.startsWith(internalAppNamePrefix);
-
-      if (filters.app && filters.app != "All") {
-        const apps = filters.app.split(",");
-        let showInternal = false;
-        if (apps.includes(internalAppNamePrefix)) {
-          showInternal = true;
-        }
-        if (apps.includes("(unset)")) {
-          apps.push("");
-        }
-
-        return (
-          (showInternal && isInternal(t)) ||
-          t.stats_data.app === filters.app ||
-          apps.includes(t.stats_data.app)
-        );
-      } else {
-        // We don't want to show internal transactions by default.
-        return !isInternal(t);
-      }
-    })
+    .filter(
+      (t: Transaction) =>
+        filters.app === "All" ||
+        t.stats_data.app === filters.app ||
+        (filters.app === internalAppNamePrefix &&
+          t.stats_data.app.includes(filters.app)),
+    )
     .filter(
       (t: Transaction) =>
         t.stats_data.stats.service_lat.mean >= timeValue ||
@@ -295,7 +264,7 @@ const withFingerprint = function(
 };
 
 // addTransactionStats adds together two stat objects into one using their counts to compute a new
-// average for the numeric statistics. It's modeled after the similar `addStatementStats` function
+// average for the numeric statistics. It's modeled after the similar `addStatementStats` functionj
 function addTransactionStats(
   a: TransactionStats,
   b: TransactionStats,
@@ -322,12 +291,6 @@ function addTransactionStats(
       countB,
     ),
     rows_read: aggregateNumericStats(a.rows_read, b.rows_read, countA, countB),
-    rows_written: aggregateNumericStats(
-      a.rows_written,
-      b.rows_written,
-      countA,
-      countB,
-    ),
     bytes_read: aggregateNumericStats(
       a.bytes_read,
       b.bytes_read,
@@ -378,8 +341,7 @@ export const aggregateAcrossNodeIDs = function(
       t =>
         t.fingerprint +
         t.stats_data.app +
-        TimestampToNumber(t.stats_data.aggregated_ts) +
-        DurationToNumber(t.stats_data.aggregation_interval),
+        TimestampToNumber(t.stats_data.aggregated_ts),
     )
     .mapValues(mergeTransactionStats)
     .values()

@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -73,8 +74,9 @@ func RunBenchmarkExpectationTests(t *testing.T) {
 		}
 	}()
 
-	for _, b := range benchmarks {
-		t.Run(b, func(t *testing.T) {
+	var g sync.WaitGroup
+	run := func(b string) {
+		tf := func(t *testing.T) {
 			flags := []string{
 				"--test.run=^$",
 				"--test.bench=" + b,
@@ -99,8 +101,17 @@ func RunBenchmarkExpectationTests(t *testing.T) {
 						r.name, exp.min, exp.max, r.result)
 				}
 			}
-		})
+		}
+		g.Add(1)
+		go func() {
+			defer g.Done()
+			t.Run(b, tf)
+		}()
 	}
+	for _, b := range benchmarks {
+		run(b)
+	}
+	g.Wait()
 }
 
 func getBenchmarks(t *testing.T) (benchmarks []string) {

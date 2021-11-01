@@ -10,7 +10,6 @@
 // linux-gnu targets (i.e., not musl). Since go doesn't have a builtin way
 // to do that, we have to set this in the top-level Makefile.
 
-//go:build gss
 // +build gss
 
 package gssapiccl

@@ -165,7 +165,7 @@ func TestRedactedDecodeFile(t *testing.T) {
 
 			// Prepare reading the entries from the file.
 			infoName := filepath.Base(info.file.Name())
-			reader, err := GetLogReader(infoName)
+			reader, err := GetLogReader(infoName, true /* restricted */)
 			if err != nil {
 				t.Fatal(err)
 			}

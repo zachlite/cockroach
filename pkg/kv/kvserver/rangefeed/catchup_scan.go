@@ -117,7 +117,6 @@ func (i *CatchUpIterator) CatchUpScan(
 			if err := outputFn(&e); err != nil {
 				return err
 			}
-			reorderBuf[i] = roachpb.RangeFeedEvent{} // Drop references to values to allow GC
 		}
 		reorderBuf = reorderBuf[:0]
 		return nil

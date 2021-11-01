@@ -62,7 +62,6 @@
   .rows,
   .rows-read,
   .bytes-read,
-  .rows-written,
   .max-mem-usage,
   .network-bytes {
     background-color: $colors--neutral-4;
@@ -72,7 +71,6 @@
   .rows-dev,
   .rows-read-dev,
   .bytes-read-dev,
-  .rows-written-dev,
   .contention-dev,
   .max-mem-usage-dev,
   .network-bytes-dev {

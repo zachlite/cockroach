@@ -27,10 +27,10 @@ import {
   databaseAttr,
   aggregatedTsAttr,
   propsToQueryString,
+  summarize,
   TimestampToMoment,
-  aggregationIntervalAttr,
-  computeOrUseStmtSummary,
 } from "src/util";
+import { shortStatement } from "./statementsTable";
 import styles from "./statementsTableContent.module.scss";
 import { cockroach } from "@cockroachlabs/crdb-protobuf-client";
 import { Download } from "@cockroachlabs/icons";
@@ -45,12 +45,10 @@ export const StatementTableCell = {
     search?: string,
     selectedApp?: string,
     onStatementClick?: (statement: string) => void,
-  ) => (stmt: AggregateStatistics): React.ReactElement => (
+  ) => (stmt: any) => (
     <StatementLink
       statement={stmt.label}
-      statementSummary={stmt.summary}
       aggregatedTs={stmt.aggregatedTs}
-      aggregationInterval={stmt.aggregationInterval}
       database={stmt.database}
       implicitTxn={stmt.implicitTxn}
       search={search}
@@ -61,7 +59,7 @@ export const StatementTableCell = {
   diagnostics: (
     activateDiagnosticsRef: React.RefObject<ActivateDiagnosticsModalRef>,
     onDiagnosticsDownload: (report: IStatementDiagnosticsReport) => void = noop,
-  ) => (stmt: AggregateStatistics): React.ReactElement => {
+  ) => (stmt: AggregateStatistics) => {
     /*
      * Diagnostics cell might display different components depending
      * on following states:
@@ -126,9 +124,7 @@ export const StatementTableCell = {
       </div>
     );
   },
-  nodeLink: (nodeNames: NodeNames) => (
-    stmt: AggregateStatistics,
-  ): React.ReactElement => (
+  nodeLink: (nodeNames: NodeNames) => (stmt: any) => (
     <NodeLink nodeId={stmt.label} nodeNames={nodeNames} />
   ),
 };
@@ -136,7 +132,6 @@ export const StatementTableCell = {
 type StatementLinkTargetProps = {
   statement: string;
   aggregatedTs?: number;
-  aggregationInterval?: number;
   app: string;
   implicitTxn: boolean;
   statementNoConstants?: string;
@@ -155,7 +150,6 @@ export const StatementLinkTarget = (
     [databaseAttr]: props.database,
     [appAttr]: props.app,
     [aggregatedTsAttr]: props.aggregatedTs,
-    [aggregationIntervalAttr]: props.aggregationInterval,
   });
 
   return `${base}/${encodeURIComponent(linkStatement)}?${searchParams}`;
@@ -163,9 +157,7 @@ export const StatementLinkTarget = (
 
 interface StatementLinkProps {
   aggregatedTs?: number;
-  aggregationInterval?: number;
   statement: string;
-  statementSummary: string;
   app: string;
   implicitTxn: boolean;
   search: string;
@@ -176,9 +168,7 @@ interface StatementLinkProps {
 
 export const StatementLink = ({
   aggregatedTs,
-  aggregationInterval,
   statement,
-  statementSummary,
   app,
   implicitTxn,
   search,
@@ -186,6 +176,7 @@ export const StatementLink = ({
   database,
   onClick,
 }: StatementLinkProps): React.ReactElement => {
+  const summary = summarize(statement);
   const onStatementClick = React.useCallback(() => {
     if (onClick) {
       onClick(statement);
@@ -194,15 +185,12 @@ export const StatementLink = ({
 
   const linkProps = {
     aggregatedTs,
-    aggregationInterval,
     statement,
     app,
     implicitTxn,
     statementNoConstants,
     database,
   };
-
-  const summary = computeOrUseStmtSummary(statement, statementSummary);
 
   return (
     <Link to={StatementLinkTarget(linkProps)} onClick={onStatementClick}>
@@ -216,7 +204,12 @@ export const StatementLink = ({
           }
         >
           <div className="cl-table-link__tooltip-hover-area">
-            {getHighlightedText(summary, search, false, true)}
+            {getHighlightedText(
+              shortStatement(summary, statement),
+              search,
+              false,
+              true,
+            )}
           </div>
         </Tooltip>
       </div>
@@ -224,10 +217,7 @@ export const StatementLink = ({
   );
 };
 
-export const NodeLink = (props: {
-  nodeId: string;
-  nodeNames?: NodeNames;
-}): React.ReactElement => (
+export const NodeLink = (props: { nodeId: string; nodeNames?: NodeNames }) => (
   <Link to={`/node/${props.nodeId}`}>
     <div className={cx("node-name-tooltip__info-icon")}>
       {props.nodeNames ? props.nodeNames[props.nodeId] : "N" + props.nodeId}

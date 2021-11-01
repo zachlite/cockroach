@@ -640,7 +640,7 @@ var cachedHostsCmd = &cobra.Command{
 				continue
 			}
 			fmt.Print(c.Name)
-			// when invoked by bash-completion, cachedHostsCluster is what the user
+			// when invokved by bash-completion, cachedHostsCluster is what the user
 			// has currently typed -- if this cluster matches that, expand its hosts.
 			if strings.HasPrefix(cachedHostsCluster, c.Name) {
 				for i := range c.VMs {
@@ -923,8 +923,8 @@ func syncCloud(quiet bool) (*cld.Cloud, error) {
 
 var gcCmd = &cobra.Command{
 	Use:   "gc",
-	Short: "GC expired clusters and unused AWS keypairs\n",
-	Long: `Garbage collect expired clusters and unused SSH keypairs in AWS.
+	Short: "GC expired clusters\n",
+	Long: `Garbage collect expired clusters.
 
 Destroys expired clusters, sending email if properly configured. Usually run
 hourly by a cronjob so it is not necessary to run manually.
@@ -932,12 +932,10 @@ hourly by a cronjob so it is not necessary to run manually.
 	Args: cobra.NoArgs,
 	Run: wrap(func(cmd *cobra.Command, args []string) error {
 		cloud, err := cld.ListCloud()
-		if err == nil {
-			// GCClusters depends on ListCloud so only call it if ListCloud runs without errors
-			err = cld.GCClusters(cloud, dryrun)
+		if err != nil {
+			return err
 		}
-		otherErr := cld.GCAWSKeyPairs(dryrun)
-		return errors.CombineErrors(err, otherErr)
+		return cld.GCClusters(cloud, dryrun)
 	}),
 }
 
@@ -1364,42 +1362,6 @@ var downloadCmd = &cobra.Command{
 	}),
 }
 
-var stageURLCmd = &cobra.Command{
-	Use:   "stageurl <application> [<sha/version>]",
-	Short: "print URL to cockroach binaries",
-	Long: `Prints URL for release and edge binaries.
-
-Currently available application options are:
-  cockroach - Cockroach Unofficial. Can provide an optional SHA, otherwise
-              latest build version is used.
-  workload  - Cockroach workload application.
-  release   - Official CockroachDB Release. Must provide a specific release
-              version.
-`,
-	Args: cobra.RangeArgs(1, 2),
-	Run: wrap(func(cmd *cobra.Command, args []string) error {
-		applicationName := args[0]
-		versionArg := ""
-		if len(args) == 2 {
-			versionArg = args[1]
-		}
-
-		os := runtime.GOOS
-		if stageOS != "" {
-			os = stageOS
-		}
-
-		urls, err := install.URLsForApplication(applicationName, versionArg, os)
-		if err != nil {
-			return err
-		}
-		for _, u := range urls {
-			fmt.Println(u)
-		}
-		return nil
-	}),
-}
-
 var stageCmd = &cobra.Command{
 	Use:   "stage <cluster> <application> [<sha/version>]",
 	Short: "stage cockroach binaries",
@@ -1435,6 +1397,17 @@ Some examples of usage:
 		} else if c.IsLocal() {
 			os = runtime.GOOS
 		}
+		var debugArch, releaseArch, libExt string
+		switch os {
+		case "linux":
+			debugArch, releaseArch, libExt = "linux-gnu-amd64", "linux-amd64", ".so"
+		case "darwin":
+			debugArch, releaseArch, libExt = "darwin-amd64", "darwin-10.9-amd64", ".dylib"
+		case "windows":
+			debugArch, releaseArch, libExt = "windows-amd64", "windows-6.2-amd64", ".dll"
+		default:
+			return errors.Errorf("cannot stage binary on %s", os)
+		}
 
 		dir := "."
 		if stageDir != "" {
@@ -1446,7 +1419,40 @@ Some examples of usage:
 		if len(args) == 3 {
 			versionArg = args[2]
 		}
-		return install.StageApplication(c, applicationName, versionArg, os, dir)
+		switch applicationName {
+		case "cockroach":
+			sha, err := install.StageRemoteBinary(
+				c, applicationName, "cockroach/cockroach", versionArg, debugArch, dir,
+			)
+			if err != nil {
+				return err
+			}
+			// NOTE: libraries may not be present in older versions.
+			// Use the sha for the binary to download the same remote library.
+			for _, library := range []string{"libgeos", "libgeos_c"} {
+				if err := install.StageOptionalRemoteLibrary(
+					c,
+					library,
+					fmt.Sprintf("cockroach/lib/%s", library),
+					sha,
+					debugArch,
+					libExt,
+					dir,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		case "workload":
+			_, err := install.StageRemoteBinary(
+				c, applicationName, "cockroach/workload", versionArg, "" /* arch */, dir,
+			)
+			return err
+		case "release":
+			return install.StageCockroachRelease(c, versionArg, releaseArch, dir)
+		default:
+			return fmt.Errorf("unknown application %s", applicationName)
+		}
 	}),
 }
 
@@ -1835,7 +1841,6 @@ func main() {
 		putCmd,
 		getCmd,
 		stageCmd,
-		stageURLCmd,
 		downloadCmd,
 		sqlCmd,
 		ipCmd,
@@ -1999,8 +2004,6 @@ func main() {
 
 	stageCmd.Flags().StringVar(&stageOS, "os", "", "operating system override for staged binaries")
 	stageCmd.Flags().StringVar(&stageDir, "dir", "", "destination for staged binaries")
-
-	stageURLCmd.Flags().StringVar(&stageOS, "os", "", "operating system override for staged binaries")
 
 	logsCmd.Flags().StringVar(
 		&logsFilter, "filter", "", "re to filter log messages")

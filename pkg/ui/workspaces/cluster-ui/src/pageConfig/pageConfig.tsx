@@ -19,7 +19,7 @@ export interface PageConfigProps {
 
 const cx = classnames.bind(styles);
 
-export function PageConfig(props: PageConfigProps): React.ReactElement {
+export function PageConfig(props: PageConfigProps) {
   const classes = cx({
     "page-config__list": props.layout !== "spread",
     "page-config__spread": props.layout === "spread",
@@ -34,13 +34,8 @@ export function PageConfig(props: PageConfigProps): React.ReactElement {
 
 export interface PageConfigItemProps {
   children?: React.ReactNode;
-  className?: string;
 }
 
-export function PageConfigItem(props: PageConfigItemProps): React.ReactElement {
-  return (
-    <li className={`${cx("page-config__item")} ${props.className}`}>
-      {props.children}
-    </li>
-  );
+export function PageConfigItem(props: PageConfigItemProps) {
+  return <li className={cx("page-config__item")}>{props.children}</li>;
 }

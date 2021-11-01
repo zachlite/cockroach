@@ -19,7 +19,6 @@ import {
   statementsSql,
   statementsTimeInterval,
   readFromDisk,
-  writtenToDisk,
   planningExecutionTime,
   contentionTime,
   readsAndWrites,
@@ -35,13 +34,12 @@ export const statisticsColumnLabels = {
   database: "Database",
   diagnostics: "Diagnostics",
   executionCount: "Execution Count",
-  aggregationInterval: "Aggregation Interval (UTC)",
+  intervalStartTime: "Interval Start Time (UTC)",
   maxMemUsage: "Max Memory",
   networkBytes: "Network",
   regionNodes: "Regions/Nodes",
   retries: "Retries",
   rowsRead: "Rows Read",
-  rowsWritten: "Rows Written",
   statements: "Statements",
   statementsCount: "Statements",
   time: "Time",
@@ -140,7 +138,7 @@ export const statisticsTableTitles: StatisticTableTitleType = {
       </Tooltip>
     );
   },
-  aggregationInterval: () => {
+  intervalStartTime: () => {
     return (
       <Tooltip
         placement="bottom"
@@ -148,8 +146,9 @@ export const statisticsTableTitles: StatisticTableTitleType = {
         content={
           <div>
             <p>
-              The time interval of the statement execution. By default,
-              statements are configured to aggregate over an hour interval.
+              The time that the statement execution interval started. By
+              default, statements are configured to aggregate over an hour
+              interval.
               <br />
               For example, if a statement is executed at 1:23PM it will fall in
               the 1:00PM - 2:00PM time interval.
@@ -157,7 +156,7 @@ export const statisticsTableTitles: StatisticTableTitleType = {
           </div>
         }
       >
-        {getLabel("aggregationInterval")}
+        {getLabel("intervalStartTime")}
       </Tooltip>
     );
   },
@@ -313,51 +312,6 @@ export const statisticsTableTitles: StatisticTableTitleType = {
         }
       >
         {getLabel("bytesRead")}
-      </Tooltip>
-    );
-  },
-  rowsWritten: (statType: StatisticType) => {
-    let contentModifier = "";
-    let fingerprintModifier = "";
-    switch (statType) {
-      case "transaction":
-        contentModifier = contentModifiers.transaction;
-        break;
-      case "statement":
-        contentModifier = contentModifiers.statements;
-        break;
-      case "transactionDetails":
-        contentModifier = contentModifiers.statements;
-        fingerprintModifier =
-          " for this " + contentModifiers.transactionFingerprint;
-        break;
-    }
-
-    return (
-      <Tooltip
-        placement="bottom"
-        style="tableTitle"
-        content={
-          <>
-            <p>
-              {"Aggregation of all rows "}
-              <Anchor href={writtenToDisk} target="_blank">
-                written to disk
-              </Anchor>
-              {` across all operators for ${contentModifier} with this fingerprint${fingerprintModifier} within the last hour or specified `}
-              <Anchor href={statementsTimeInterval} target="_blank">
-                time interval
-              </Anchor>
-              .&nbsp;
-            </p>
-            <p>
-              The gray bar indicates the mean number of rows written to disk.
-              The blue bar indicates one standard deviation from the mean.
-            </p>
-          </>
-        }
-      >
-        {getLabel("rowsWritten")}
       </Tooltip>
     );
   },
@@ -675,17 +629,9 @@ export const statisticsTableTitles: StatisticTableTitleType = {
   },
 };
 
-export function formatAggregationIntervalColumn(
-  aggregatedTs: number,
-  interval: number,
-): string {
-  const formatStr = "MMM D, h:mm A";
-  const formatStrWithoutDay = "h:mm A";
-  const start = moment.unix(aggregatedTs).utc();
-  const end = moment.unix(aggregatedTs + interval).utc();
-  const isSameDay = start.isSame(end, "day");
-
-  return `${start.format(formatStr)} - ${end.format(
-    isSameDay ? formatStrWithoutDay : formatStr,
-  )}`;
+export function formatStartIntervalColumn(aggregatedTs: number) {
+  return moment
+    .unix(aggregatedTs)
+    .utc()
+    .format("MMM D, h:mm A");
 }

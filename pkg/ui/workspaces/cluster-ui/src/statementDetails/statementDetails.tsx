@@ -35,7 +35,6 @@ import {
   unique,
   queryByName,
   aggregatedTsAttr,
-  aggregationIntervalAttr,
 } from "src/util";
 import { Loading } from "src/loading";
 import { Button } from "src/button";
@@ -60,12 +59,10 @@ import { DiagnosticsView } from "./diagnostics/diagnosticsView";
 import sortedTableStyles from "src/sortedtable/sortedtable.module.scss";
 import summaryCardStyles from "src/summaryCard/summaryCard.module.scss";
 import styles from "./statementDetails.module.scss";
-import { commonStyles } from "src/common";
 import { NodeSummaryStats } from "../nodes";
 import { UIConfigState } from "../store";
 import moment, { Moment } from "moment";
 import { StatementsRequest } from "src/api/statementsApi";
-import SQLActivityError from "../sqlActivity/errorComponent";
 
 const { TabPane } = Tabs;
 
@@ -80,6 +77,7 @@ interface SingleStatementStatistics {
   database: string;
   distSQL: Fraction;
   vec: Fraction;
+  opt: Fraction;
   implicit_txn: Fraction;
   failed: Fraction;
   node_id: number[];
@@ -176,15 +174,13 @@ function statementsRequestFromProps(
 
 function AppLink(props: { app: string }) {
   if (!props.app) {
-    return <Text className={cx("app-name", "app-name__unset")}>(unset)</Text>;
+    return <span className={cx("app-name", "app-name__unset")}>(unset)</span>;
   }
-
-  const searchParams = new URLSearchParams({ [appAttr]: props.app });
 
   return (
     <Link
       className={cx("app-name")}
-      to={`/sql-activity?tab=statements&${searchParams.toString()}`}
+      to={`/statements/${encodeURIComponent(props.app)}`}
     >
       {props.app}
     </Link>
@@ -387,7 +383,7 @@ export class StatementDetails extends React.Component<
   };
 
   backToStatementsClick = (): void => {
-    this.props.history.push("/sql-activity?tab=statements");
+    this.props.history.push("/statements");
     if (this.props.onBackToStatementsClick) {
       this.props.onBackToStatementsClick();
     }
@@ -409,7 +405,7 @@ export class StatementDetails extends React.Component<
           >
             Statements
           </Button>
-          <h3 className={commonStyles("base-heading", "no-margin-bottom")}>
+          <h3 className={cx("base-heading", "no-margin-bottom")}>
             Statement Details
           </h3>
         </div>
@@ -418,11 +414,6 @@ export class StatementDetails extends React.Component<
             loading={_.isNil(this.props.statement)}
             error={this.props.statementsError}
             render={this.renderContent}
-            renderError={() =>
-              SQLActivityError({
-                statsType: "statements",
-              })
-            }
           />
         </section>
       </div>
@@ -449,6 +440,7 @@ export class StatementDetails extends React.Component<
       app,
       distSQL,
       vec,
+      opt,
       failed,
       implicit_txn,
       database,
@@ -456,9 +448,7 @@ export class StatementDetails extends React.Component<
 
     if (!stats) {
       const sourceApp = queryByName(this.props.location, appAttr);
-      const listUrl =
-        "/sql-activity?tab=statements" +
-        (sourceApp ? "&" + appAttr + "=" + sourceApp : "");
+      const listUrl = "/statements" + (sourceApp ? "/" + sourceApp : "");
 
       return (
         <React.Fragment>
@@ -532,28 +522,14 @@ export class StatementDetails extends React.Component<
 
     // If the aggregatedTs is unset, we are aggregating over the whole date range.
     const aggregatedTs = queryByName(this.props.location, aggregatedTsAttr);
-    const aggregationInterval =
-      queryByName(this.props.location, aggregationIntervalAttr) || 0;
     const intervalStartTime = aggregatedTs
       ? moment.unix(parseInt(aggregatedTs)).utc()
       : this.props.dateRange[0];
-    const intervalEndTime =
-      aggregatedTs && aggregationInterval
-        ? moment
-            .unix(parseInt(aggregatedTs) + parseInt(aggregationInterval))
-            .utc()
-        : this.props.dateRange[1];
-
-    const db = database ? (
-      <Text>{database}</Text>
-    ) : (
-      <Text className={cx("app-name", "app-name__unset")}>(unset)</Text>
-    );
 
     return (
       <Tabs
         defaultActiveKey="1"
-        className={commonStyles("cockroach--tabs")}
+        className={cx("cockroach--tabs")}
         onChange={this.onTabChange}
         activeKey={currentTab}
       >
@@ -619,15 +595,6 @@ export class StatementDetails extends React.Component<
                       {unavailableTooltip}
                     </div>
                     <div className={summaryCardStylesCx("summary--card__item")}>
-                      <Text>Mean rows written</Text>
-                      <Text>
-                        {formatNumberForDisplay(
-                          stats.rows_written?.mean,
-                          formatTwoPlaces,
-                        )}
-                      </Text>
-                    </div>
-                    <div className={summaryCardStylesCx("summary--card__item")}>
                       <Text>Max memory usage</Text>
                       {statementSampled && (
                         <Text>
@@ -671,17 +638,8 @@ export class StatementDetails extends React.Component<
               <SummaryCard className={cx("summary-card")}>
                 <Heading type="h5">Statement details</Heading>
                 <div className={summaryCardStylesCx("summary--card__item")}>
-                  <Text>Aggregation Interval (UTC)</Text>
-                  <Text>
-                    {intervalStartTime.format("MMM D, h:mm A")} -{" "}
-                    {intervalEndTime.format(
-                      `${
-                        intervalStartTime.isSame(intervalEndTime, "day")
-                          ? ""
-                          : "MMM D,"
-                      }h:mm A`,
-                    )}
-                  </Text>
+                  <Text>Interval start time</Text>
+                  <Text>{intervalStartTime.format("MMM D, h:mm A (UTC)")}</Text>
                 </div>
 
                 {!isTenant && (
@@ -704,7 +662,7 @@ export class StatementDetails extends React.Component<
 
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Database</Text>
-                  {db}
+                  <Text>{database}</Text>
                 </div>
                 <p
                   className={summaryCardStylesCx(
@@ -723,6 +681,10 @@ export class StatementDetails extends React.Component<
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Failed?</Text>
                   <Text>{renderBools(failed)}</Text>
+                </div>
+                <div className={summaryCardStylesCx("summary--card__item")}>
+                  <Text>Used cost-based optimizer?</Text>
+                  <Text>{renderBools(opt)}</Text>
                 </div>
                 <div className={summaryCardStylesCx("summary--card__item")}>
                   <Text>Distributed execution?</Text>
@@ -823,7 +785,7 @@ export class StatementDetails extends React.Component<
           <SummaryCard>
             <h3
               className={classNames(
-                commonStyles("base-heading"),
+                cx("base-heading"),
                 summaryCardStylesCx("summary--card__title"),
               )}
             >
@@ -866,7 +828,7 @@ export class StatementDetails extends React.Component<
           <SummaryCard>
             <h3
               className={classNames(
-                commonStyles("base-heading"),
+                cx("base-heading"),
                 summaryCardStylesCx("summary--card__title"),
               )}
             >
@@ -888,11 +850,6 @@ export class StatementDetails extends React.Component<
                   value: stats.bytes_read,
                   bar: genericBarChart(stats.bytes_read, stats.count, Bytes),
                   format: Bytes,
-                },
-                {
-                  name: "Rows Written",
-                  value: stats.rows_written,
-                  bar: genericBarChart(stats.rows_written, stats.count),
                 },
                 {
                   name: "Network Bytes Sent",
@@ -921,7 +878,7 @@ export class StatementDetails extends React.Component<
             <SummaryCard className={cx("fit-content-width")}>
               <h3
                 className={classNames(
-                  commonStyles("base-heading"),
+                  cx("base-heading"),
                   summaryCardStylesCx("summary--card__title"),
                 )}
               >

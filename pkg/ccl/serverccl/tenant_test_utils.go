@@ -11,7 +11,6 @@ package serverccl
 import (
 	"context"
 	gosql "database/sql"
-	"net/http"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -23,9 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -150,14 +147,6 @@ func (c tenantCluster) tenantConn(idx int) *sqlutils.SQLRunner {
 	return c[idx].tenantDB
 }
 
-func (c tenantCluster) tenantHTTPJSONClient(idx int) (*httpJSONClient, error) {
-	client, err := c[idx].tenant.RPCContext().GetHTTPClient()
-	if err != nil {
-		return nil, err
-	}
-	return &httpJSONClient{client: client, baseURL: "https://" + c[idx].tenant.HTTPAddr()}, nil
-}
-
 func (c tenantCluster) tenantSQLStats(idx int) *persistedsqlstats.PersistedSQLStats {
 	return c[idx].tenantSQLStats
 }
@@ -170,23 +159,4 @@ func (c tenantCluster) cleanup(t *testing.T) {
 	for _, tenant := range c {
 		tenant.cleanup(t)
 	}
-}
-
-type httpJSONClient struct {
-	client  http.Client
-	baseURL string
-}
-
-func (c *httpJSONClient) GetJSON(path string, response protoutil.Message) error {
-	return httputil.GetJSON(c.client, c.baseURL+path, response)
-}
-
-func (c *httpJSONClient) PostJSON(
-	path string, request protoutil.Message, response protoutil.Message,
-) error {
-	return httputil.PostJSON(c.client, c.baseURL+path, request, response)
-}
-
-func (c *httpJSONClient) Close() {
-	c.client.CloseIdleConnections()
 }

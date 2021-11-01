@@ -231,7 +231,7 @@ func createTestStoreWithoutStart(
 	cfg.TestingKnobs.DisableMergeQueue = true
 	eng := storage.NewDefaultInMemForTesting()
 	stopper.AddCloser(eng)
-	cfg.Transport = NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	cfg.Transport = NewDummyRaftTransport(cfg.Settings)
 	factory := &testSenderFactory{}
 	cfg.DB = kv.NewDB(cfg.AmbientCtx, factory, cfg.Clock, stopper)
 	store := NewStore(context.Background(), *cfg, eng, &roachpb.NodeDescriptor{NodeID: 1})
@@ -313,7 +313,8 @@ func TestIterateIDPrefixKeys(t *testing.T) {
 	rng := rand.New(rand.NewSource(seed))
 
 	ops := []func(rangeID roachpb.RangeID) roachpb.Key{
-		keys.RaftHardStateKey, // unreplicated; sorts after tombstone
+		keys.RaftAppliedIndexLegacyKey, // replicated; sorts before tombstone
+		keys.RaftHardStateKey,          // unreplicated; sorts after tombstone
 		// Replicated key-anchored local key (i.e. not one we should care about).
 		// Will be written at zero timestamp, but that's ok.
 		func(rangeID roachpb.RangeID) roachpb.Key {
@@ -435,7 +436,7 @@ func TestStoreInitAndBootstrap(t *testing.T) {
 	defer stopper.Stop(ctx)
 	eng := storage.NewDefaultInMemForTesting()
 	stopper.AddCloser(eng)
-	cfg.Transport = NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	cfg.Transport = NewDummyRaftTransport(cfg.Settings)
 	factory := &testSenderFactory{}
 	cfg.DB = kv.NewDB(cfg.AmbientCtx, factory, cfg.Clock, stopper)
 	{
@@ -523,7 +524,7 @@ func TestInitializeEngineErrors(t *testing.T) {
 	require.NoError(t, eng.PutUnversioned(roachpb.Key("foo"), []byte("bar")))
 
 	cfg := TestStoreConfig(nil)
-	cfg.Transport = NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	cfg.Transport = NewDummyRaftTransport(cfg.Settings)
 	store := NewStore(ctx, cfg, eng, &roachpb.NodeDescriptor{NodeID: 1})
 
 	// Can't init as haven't bootstrapped.
@@ -2692,11 +2693,11 @@ func TestStoreRangePlaceholders(t *testing.T) {
 	checkRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFilled))
 	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFailed))
 	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderDropped))
-	checkErr(`attempting to fill tainted placeholder`)(s.removePlaceholderLocked(
+	checkErr(`attempt to remove already removed placeholder`)(s.removePlaceholderLocked(
 		ctx, placeholder1, removePlaceholderFilled,
 	))
 	placeholder1.tainted = 0 // pretend it wasn't already deleted
-	checkErr(`expected placeholder .* to exist`)(s.removePlaceholderLocked(
+	checkErr(`expected placeholder to exist: true but found in store: false`)(s.removePlaceholderLocked(
 		ctx, placeholder1, removePlaceholderDropped,
 	))
 
@@ -2722,7 +2723,7 @@ func TestStoreRangePlaceholders(t *testing.T) {
 
 	// Test that Placeholder deletion doesn't delete replicas.
 	placeholder1.tainted = 0
-	checkErr(`expected placeholder .* to exist`)(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFilled))
+	checkErr(`expected placeholder to exist: true`)(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFilled))
 	checkNotRemoved(s.removePlaceholderLocked(ctx, placeholder1, removePlaceholderFailed))
 	check(`
 [] - [99] (/Min - "c")
@@ -3136,8 +3137,8 @@ func TestSnapshotRateLimit(t *testing.T) {
 		expectedErr   string
 	}{
 		{SnapshotRequest_UNKNOWN, 0, "unknown snapshot priority"},
-		{SnapshotRequest_RECOVERY, 32 << 20, ""},
-		{SnapshotRequest_REBALANCE, 32 << 20, ""},
+		{SnapshotRequest_RECOVERY, 8 << 20, ""},
+		{SnapshotRequest_REBALANCE, 8 << 20, ""},
 	}
 	for _, c := range testCases {
 		t.Run(c.priority.String(), func(t *testing.T) {

@@ -21,7 +21,7 @@ export const SessionTableTitle = {
     <Tooltip
       style="tableTitle"
       placement="bottom"
-      content={"Currently active statement."}
+      content={"Most recent or currently active statement."}
     >
       Statement
     </Tooltip>

@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/util/cgroups"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
@@ -98,11 +97,6 @@ func NewActiveQueryProfiler(
 func (o *ActiveQueryProfiler) MaybeDumpQueries(
 	ctx context.Context, registry *sql.SessionRegistry, st *cluster.Settings,
 ) {
-	defer func() {
-		if p := recover(); p != nil {
-			logcrash.ReportPanic(ctx, &st.SV, p, 1)
-		}
-	}()
 	shouldDump, memUsage := o.shouldDump(ctx, st)
 	now := o.now()
 	if shouldDump && o.takeQueryProfile(ctx, registry, now, memUsage) {

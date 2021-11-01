@@ -22,10 +22,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -72,8 +73,8 @@ func TestColBatchScanMeta(t *testing.T) {
 	spec := execinfrapb.ProcessorSpec{
 		Core: execinfrapb.ProcessorCoreUnion{
 			TableReader: &execinfrapb.TableReaderSpec{
-				Spans: []roachpb.Span{
-					td.PrimaryIndexSpan(keys.SystemSQLCodec),
+				Spans: []execinfrapb.TableReaderSpan{
+					{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)},
 				},
 				NeededColumns: []uint32{0},
 				Table:         *td.TableDesc(),
@@ -89,10 +90,10 @@ func TestColBatchScanMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.TestCleanupNoError(t)
+	defer res.TestCleanup()
 	tr := res.Root
 	tr.Init(ctx)
-	meta := res.MetadataSources[0].DrainMeta()
+	meta := tr.(*colexecutils.CancelChecker).Input.(colexecop.DrainableOperator).DrainMeta()
 	var txnFinalStateSeen bool
 	for _, m := range meta {
 		if m.LeafTxnFinalState != nil {
@@ -129,8 +130,8 @@ func BenchmarkColBatchScan(b *testing.B) {
 				Core: execinfrapb.ProcessorCoreUnion{
 					TableReader: &execinfrapb.TableReaderSpec{
 						Table: *tableDesc.TableDesc(),
-						Spans: []roachpb.Span{
-							tableDesc.PrimaryIndexSpan(keys.SystemSQLCodec),
+						Spans: []execinfrapb.TableReaderSpan{
+							{Span: tableDesc.PrimaryIndexSpan(keys.SystemSQLCodec)},
 						},
 						NeededColumns: []uint32{0, 1},
 					}},
@@ -168,7 +169,7 @@ func BenchmarkColBatchScan(b *testing.B) {
 					}
 				}
 				b.StopTimer()
-				res.TestCleanupNoError(b)
+				res.TestCleanup()
 			}
 		})
 	}

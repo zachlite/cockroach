@@ -55,7 +55,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -614,6 +613,9 @@ func TestReplicaContains(t *testing.T) {
 	r.mu.state.Desc = desc
 	r.rangeStr.store(0, desc)
 
+	if statsKey := keys.RangeStatsLegacyKey(desc.RangeID); !r.ContainsKey(statsKey) {
+		t.Errorf("expected range to contain range stats key %q", statsKey)
+	}
 	if !r.ContainsKey(roachpb.Key("aa")) {
 		t.Errorf("expected range to contain key \"aa\"")
 	}
@@ -8235,7 +8237,7 @@ func TestReplicaRefreshPendingCommandsTicks(t *testing.T) {
 		ba.Timestamp = tc.Clock().Now()
 		ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: roachpb.Key(id)}})
 		st := r.CurrentLeaseStatus(ctx)
-		cmd, pErr := r.requestToProposal(ctx, kvserverbase.CmdIDKey(id), &ba, st, hlc.Timestamp{}, allSpans())
+		cmd, pErr := r.requestToProposal(ctx, kvserverbase.CmdIDKey(id), &ba, st, hlc.Timestamp{}, allSpans(), allSpans())
 		if pErr != nil {
 			t.Fatal(pErr)
 		}
@@ -8357,7 +8359,7 @@ func TestReplicaRefreshMultiple(t *testing.T) {
 
 	incCmdID = makeIDKey()
 	atomic.StoreInt32(&filterActive, 1)
-	proposal, pErr := repl.requestToProposal(ctx, incCmdID, &ba, repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans())
+	proposal, pErr := repl.requestToProposal(ctx, incCmdID, &ba, repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans(), allSpans())
 	if pErr != nil {
 		t.Fatal(pErr)
 	}
@@ -8623,7 +8625,7 @@ func TestFailureToProcessCommandClearsLocalResult(t *testing.T) {
 	}
 	r.mu.Unlock()
 
-	tr := tc.store.cfg.AmbientCtx.Tracer
+	tr := tc.store.ClusterSettings().Tracer
 	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
 	opCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
 	defer cancel()
@@ -8818,7 +8820,7 @@ func TestReplicaEvaluationNotTxnMutation(t *testing.T) {
 	assignSeqNumsForReqs(txn, &txnPut, &txnPut2)
 	origTxn := txn.Clone()
 
-	batch, _, _, _, pErr := tc.repl.evaluateWriteBatch(ctx, makeIDKey(), &ba, hlc.Timestamp{}, allSpans())
+	batch, _, _, _, pErr := tc.repl.evaluateWriteBatch(ctx, makeIDKey(), &ba, hlc.Timestamp{}, allSpans(), allSpans())
 	defer batch.Close()
 	if pErr != nil {
 		t.Fatal(pErr)
@@ -12187,7 +12189,7 @@ func TestTxnRecordLifecycleTransitions(t *testing.T) {
 				et.Require1PC = true
 				return sendWrappedWithErr(etH, &et)
 			},
-			expError: "could not commit in one phase as requested",
+			expError: "TransactionStatusError: could not commit in one phase as requested",
 			expTxn:   txnWithoutChanges,
 		},
 		{
@@ -12733,7 +12735,6 @@ func TestSplitSnapshotWarningStr(t *testing.T) {
 func TestProposalNotAcknowledgedOrReproposedAfterApplication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.WithIssue(t, 71148, "the test is fooling itself")
 
 	// Set the trace infrastructure to log if a span is used after being finished.
 	defer enableTraceDebugUseAfterFree()()
@@ -12870,6 +12871,105 @@ func TestProposalNotAcknowledgedOrReproposedAfterApplication(t *testing.T) {
 	}
 }
 
+// TestLaterReproposalsDoNotReuseContext ensures that when commands are
+// reproposed more than once at the same MaxLeaseIndex and the first command
+// applies that the later reproposals do not log into the proposal's context
+// as its underlying trace span may already be finished.
+func TestLaterReproposalsDoNotReuseContext(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Set the trace infrastructure to log if a span is used after being finished.
+	defer enableTraceDebugUseAfterFree()()
+
+	tc := testContext{}
+	ctx := context.Background()
+
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	cfg := TestStoreConfig(hlc.NewClock(hlc.UnixNano, time.Nanosecond))
+	// Set up tracing.
+	tracer := tracing.NewTracer()
+	tracer.Configure(ctx, &cfg.Settings.SV)
+	tracer.AlwaysTrace()
+	cfg.AmbientCtx.Tracer = tracer
+	tc.StartWithStoreConfig(t, stopper, cfg)
+	key := roachpb.Key("a")
+	st := tc.repl.CurrentLeaseStatus(ctx)
+	txn := newTransaction("test", key, roachpb.NormalUserPriority, tc.Clock())
+	ba := roachpb.BatchRequest{
+		Header: roachpb.Header{
+			RangeID: tc.repl.RangeID,
+			Txn:     txn,
+		},
+	}
+	ba.Timestamp = txn.ReadTimestamp
+	ba.Add(&roachpb.PutRequest{
+		RequestHeader: roachpb.RequestHeader{
+			Key: key,
+		},
+		Value: roachpb.MakeValueFromBytes([]byte("val")),
+	})
+
+	_, tok := tc.repl.mu.proposalBuf.TrackEvaluatingRequest(ctx, hlc.MinTimestamp)
+	// Hold the RaftLock to encourage the reproposals to occur in the same batch.
+	tc.repl.RaftLock()
+	tracedCtx, sp := tracer.StartSpanCtx(ctx, "replica send", tracing.WithForceRealSpan())
+	// Go out of our way to enable recording so that expensive logging is enabled
+	// for this context.
+	sp.SetVerbose(true)
+	ch, _, _, pErr := tc.repl.evalAndPropose(tracedCtx, &ba, allSpansGuard(), st, hlc.Timestamp{}, tok.Move(ctx))
+	if pErr != nil {
+		t.Fatal(pErr)
+	}
+	// Launch a goroutine to finish the span as soon as a result has been sent.
+	errCh := make(chan *roachpb.Error)
+	go func() {
+		res := <-ch
+		sp.Finish()
+		errCh <- res.Err
+	}()
+
+	// Flush the proposal and then repropose it twice.
+	// This test verifies that these later reproposals don't record into the
+	// tracedCtx after its span has been finished.
+	func() {
+		tc.repl.mu.Lock()
+		defer tc.repl.mu.Unlock()
+		if err := tc.repl.mu.proposalBuf.flushLocked(ctx); err != nil {
+			t.Fatal(err)
+		}
+		tc.repl.refreshProposalsLocked(ctx, 0 /* refreshAtDelta */, reasonNewLeaderOrConfigChange)
+		if err := tc.repl.mu.proposalBuf.flushLocked(ctx); err != nil {
+			t.Fatal(err)
+		}
+		tc.repl.refreshProposalsLocked(ctx, 0 /* refreshAtDelta */, reasonNewLeaderOrConfigChange)
+	}()
+	tc.repl.RaftUnlock()
+
+	if pErr = <-errCh; pErr != nil {
+		t.Fatal(pErr)
+	}
+	// Round trip another proposal through the replica to ensure that previously
+	// committed entries have been applied.
+	_, pErr = tc.repl.sendWithRangeID(ctx, tc.repl.RangeID, &ba)
+	if pErr != nil {
+		t.Fatal(pErr)
+	}
+
+	stopper.Quiesce(ctx)
+	// Check and see if the trace package logged an error.
+	log.Flush()
+	entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 1,
+		regexp.MustCompile("net/trace"), log.WithFlattenedSensitiveData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 0 {
+		t.Fatalf("reused span after free: %v", entries)
+	}
+}
+
 // This test ensures that pushes due to closed timestamps are properly recorded
 // into the associated telemetry counter.
 func TestReplicaTelemetryCounterForPushesDueToClosedTimestamp(t *testing.T) {
@@ -12987,7 +13087,7 @@ func TestContainsEstimatesClampProposal(t *testing.T) {
 		ba.Timestamp = tc.Clock().Now()
 		req := putArgs(roachpb.Key("some-key"), []byte("some-value"))
 		ba.Add(&req)
-		proposal, err := tc.repl.requestToProposal(ctx, cmdIDKey, &ba, tc.repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans())
+		proposal, err := tc.repl.requestToProposal(ctx, cmdIDKey, &ba, tc.repl.CurrentLeaseStatus(ctx), hlc.Timestamp{}, allSpans(), allSpans())
 		if err != nil {
 			t.Error(err)
 		}

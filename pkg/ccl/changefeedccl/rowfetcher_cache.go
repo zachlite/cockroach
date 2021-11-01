@@ -146,7 +146,7 @@ func (c *rowFetcherCache) RowFetcherForTableDesc(
 	// guaranteed that the tables have the same version. Additionally, these
 	// fetchers are always initialized with a single tabledesc.Immutable.
 	if rf, ok := c.fetchers[idVer]; ok &&
-		catalog.UserDefinedTypeColsHaveSameVersion(tableDesc, rf.GetTable().(catalog.TableDescriptor)) {
+		catalog.UserDefinedTypeColsHaveSameVersion(tableDesc, rf.GetTables()[0].(catalog.TableDescriptor)) {
 		return rf, nil
 	}
 	// TODO(dan): Allow for decoding a subset of the columns.
@@ -159,6 +159,7 @@ func (c *rowFetcherCache) RowFetcherForTableDesc(
 
 	var rf row.Fetcher
 	rfArgs := row.FetcherTableArgs{
+		Spans:            tableDesc.AllIndexSpans(c.codec),
 		Desc:             tableDesc,
 		Index:            tableDesc.GetPrimaryIndex(),
 		ColIdxMap:        colIdxMap,

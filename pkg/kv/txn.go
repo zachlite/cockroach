@@ -15,9 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -216,31 +214,20 @@ func (txn *Txn) Epoch() enginepb.TxnEpoch {
 	return txn.mu.sender.Epoch()
 }
 
-// statusLocked returns the txn proto status field.
-func (txn *Txn) statusLocked() roachpb.TransactionStatus {
+// status returns the txn proto status field.
+func (txn *Txn) status() roachpb.TransactionStatus {
 	return txn.mu.sender.TxnStatus()
 }
 
 // IsCommitted returns true iff the transaction has the committed status.
 func (txn *Txn) IsCommitted() bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.COMMITTED
-}
-
-// IsAborted returns true iff the transaction has the aborted status.
-func (txn *Txn) IsAborted() bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.ABORTED
+	return txn.status() == roachpb.COMMITTED
 }
 
 // IsOpen returns true iff the transaction is in the open state where
 // it can accept further commands.
 func (txn *Txn) IsOpen() bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.statusLocked() == roachpb.PENDING
+	return txn.status() == roachpb.PENDING
 }
 
 // SetUserPriority sets the transaction's user priority. Transactions default to
@@ -629,18 +616,14 @@ func (txn *Txn) Del(ctx context.Context, keys ...interface{}) error {
 
 // DelRange deletes the rows between begin (inclusive) and end (exclusive).
 //
-// The returned []roachpb.Key will contain the keys deleted if the returnKeys
-// parameter is true, or will be nil if the parameter is false, and Result.Err
-// will indicate success or failure.
+// The returned Result will contain 0 rows and Result.Err will indicate success
+// or failure.
 //
 // key can be either a byte slice or a string.
-func (txn *Txn) DelRange(
-	ctx context.Context, begin, end interface{}, returnKeys bool,
-) ([]roachpb.Key, error) {
+func (txn *Txn) DelRange(ctx context.Context, begin, end interface{}) error {
 	b := txn.NewBatch()
-	b.DelRange(begin, end, returnKeys)
-	r, err := getOneResult(txn.Run(ctx, b), b)
-	return r.Keys, err
+	b.DelRange(begin, end, false)
+	return getOneErr(txn.Run(ctx, b), b)
 }
 
 // Run executes the operations queued up within a batch. Before executing any
@@ -687,7 +670,7 @@ func (txn *Txn) CleanupOnError(ctx context.Context, err error) {
 		panic(errors.WithContextTags(errors.AssertionFailedf("CleanupOnError() called with nil error"), ctx))
 	}
 	if replyErr := txn.rollback(ctx); replyErr != nil {
-		if _, ok := replyErr.GetDetail().(*roachpb.TransactionStatusError); ok || txn.IsAborted() {
+		if _, ok := replyErr.GetDetail().(*roachpb.TransactionStatusError); ok || txn.status() == roachpb.ABORTED {
 			log.Eventf(ctx, "failure aborting transaction: %s; abort caused by: %s", replyErr, err)
 		} else {
 			log.Warningf(ctx, "failure aborting transaction: %s; abort caused by: %s", replyErr, err)
@@ -765,53 +748,6 @@ func (txn *Txn) UpdateDeadline(ctx context.Context, deadline hlc.Timestamp) erro
 	txn.mu.deadline = new(hlc.Timestamp)
 	*txn.mu.deadline = deadline
 	return nil
-}
-
-// DeadlineLikelySufficient returns true if there currently is a deadline and
-// that deadline is earlier than either the ProvisionalCommitTimestamp or
-// the current reading of the node's HLC clock. The second condition is a
-// conservative optimization to deal with the fact that the provisional
-// commit timestamp may not represent  the true commit timestamp; the
-// transaction may have been pushed but not yet discovered that fact.
-// Transactions that write from now on can still get pushed, versus
-// transactions which are done writing where it will be less clear
-// how those get pushed.
-// Deadlines, in general, should not commonly be at risk of expiring near
-// the current time, except in extraordinary circumstances. In cases where
-// considering it helps, it helps a lot. In cases where considering it
-// does not help, it does not hurt much.
-func (txn *Txn) DeadlineLikelySufficient(sv *settings.Values) bool {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	// Instead of using the current HLC clock we will
-	// use the current time with a fudge factor because:
-	// 1) The clocks are desynchronized, so we may have
-	//		been pushed above the current time.
-	// 2) There is a potential to race against concurrent pushes,
-	//    which a future timestamp will help against.
-	// 3) If we are writing to non-blocking ranges than any
-	//    push will be into the future.
-	getTargetTS := func() hlc.Timestamp {
-		now := txn.db.Clock().NowAsClockTimestamp()
-		maxClockOffset := txn.db.Clock().MaxOffset()
-		lagTargetDuration := closedts.TargetDuration.Get(sv)
-		leadTargetOverride := closedts.LeadForGlobalReadsOverride.Get(sv)
-		sideTransportCloseInterval := closedts.SideTransportCloseInterval.Get(sv)
-		return closedts.TargetForPolicy(now, maxClockOffset,
-			lagTargetDuration, leadTargetOverride, sideTransportCloseInterval,
-			roachpb.LEAD_FOR_GLOBAL_READS).Add(int64(time.Second), 0)
-	}
-
-	return txn.mu.deadline != nil &&
-		!txn.mu.deadline.IsEmpty() &&
-		// Avoid trying to get get the txn mutex again by directly
-		// invoking ProvisionalCommitTimestamp versus calling
-		// ProvisionalCommitTimestampLocked on the Txn.
-		(txn.mu.deadline.Less(txn.mu.sender.ProvisionalCommitTimestamp()) ||
-			// In case the transaction gets pushed and the push is not observed,
-			// we cautiously also indicate that the deadline maybe expired if
-			// the current HLC clock (with a fudge factor) exceeds the deadline.
-			txn.mu.deadline.Less(getTargetTS()))
 }
 
 // resetDeadlineLocked resets the deadline.
@@ -945,7 +881,7 @@ func (txn *Txn) exec(ctx context.Context, fn func(context.Context, *Txn) error) 
 		// Commit on success, unless the txn has already been committed by the
 		// closure. We allow that, as closure might want to run 1PC transactions.
 		if err == nil {
-			if !txn.IsCommitted() {
+			if txn.status() != roachpb.COMMITTED {
 				err = txn.Commit(ctx)
 				log.Eventf(ctx, "client.Txn did AutoCommit. err: %v\n", err)
 				if err != nil {
@@ -1636,14 +1572,4 @@ func (txn *Txn) AdmissionHeader() roachpb.AdmissionHeader {
 		h.Priority = int32(admission.HighPri)
 	}
 	return h
-}
-
-// OnePCNotAllowedError signifies that a request had the Require1PC flag set,
-// but 1PC evaluation was not possible for one reason or another.
-type OnePCNotAllowedError struct{}
-
-var _ error = OnePCNotAllowedError{}
-
-func (OnePCNotAllowedError) Error() string {
-	return "could not commit in one phase as requested"
 }

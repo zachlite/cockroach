@@ -35,7 +35,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -242,14 +241,14 @@ func createPostgresSchemas(
 	parentID descpb.ID,
 	schemasToCreate map[string]*tree.CreateSchema,
 	execCfg *sql.ExecutorConfig,
-	sessionData *sessiondata.SessionData,
+	user security.SQLUsername,
 ) ([]*schemadesc.Mutable, error) {
 	createSchema := func(
 		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
 		dbDesc catalog.DatabaseDescriptor, schema *tree.CreateSchema,
 	) (*schemadesc.Mutable, error) {
 		desc, _, err := sql.CreateUserDefinedSchemaDescriptor(
-			ctx, sessionData, schema, txn, descriptors, execCfg, dbDesc, false, /* allocateID */
+			ctx, user, schema, txn, descriptors, execCfg, dbDesc, false, /* allocateID */
 		)
 		if err != nil {
 			return nil, err
@@ -495,7 +494,7 @@ func readPostgresCreateTable(
 	tables := make([]*tabledesc.Mutable, 0, len(schemaObjects.createTbl))
 	schemaNameToDesc := make(map[string]*schemadesc.Mutable)
 	schemaDescs, err := createPostgresSchemas(ctx, parentDB.GetID(), schemaObjects.createSchema,
-		p.ExecCfg(), p.SessionData())
+		p.ExecCfg(), p.User())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -615,7 +614,6 @@ func readPostgresStmt(
 			Inverted:         stmt.Inverted,
 			Interleave:       stmt.Interleave,
 			PartitionByIndex: stmt.PartitionByIndex,
-			StorageParams:    stmt.StorageParams,
 		}
 		if stmt.Unique {
 			idx = &tree.UniqueConstraintTableDef{IndexTableDef: *idx.(*tree.IndexTableDef)}
@@ -864,7 +862,7 @@ func readPostgresStmt(
 	case *tree.Insert, *tree.CopyFrom, *tree.Delete, copyData:
 		// handled during the data ingestion pass.
 	case *tree.CreateExtension, *tree.CommentOnDatabase, *tree.CommentOnTable,
-		*tree.CommentOnIndex, *tree.CommentOnConstraint, *tree.CommentOnColumn, *tree.SetVar, *tree.Analyze,
+		*tree.CommentOnIndex, *tree.CommentOnColumn, *tree.SetVar, *tree.Analyze,
 		*tree.CommentOnSchema:
 		// These are the statements that can be parsed by CRDB but are not
 		// supported, or are not required to be processed, during an IMPORT.
@@ -1360,7 +1358,7 @@ func (m *pgDumpReader) readFile(
 				return wrapErrorWithUnsupportedHint(err)
 			}
 		case *tree.CreateExtension, *tree.CommentOnDatabase, *tree.CommentOnTable,
-			*tree.CommentOnIndex, *tree.CommentOnConstraint, *tree.CommentOnColumn, *tree.AlterSequence,
+			*tree.CommentOnIndex, *tree.CommentOnColumn, *tree.AlterSequence,
 			*tree.CommentOnSchema:
 			// handled during schema extraction.
 		case *tree.SetVar, *tree.BeginTransaction, *tree.CommitTransaction, *tree.Analyze:

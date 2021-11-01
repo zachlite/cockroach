@@ -73,6 +73,20 @@ func (p *planner) GetSerialSequenceNameFromColumn(
 	return nil, colinfo.NewUndefinedColumnError(string(columnName))
 }
 
+// IncrementSequence implements the tree.SequenceOperators interface.
+func (p *planner) IncrementSequence(ctx context.Context, seqName *tree.TableName) (int64, error) {
+	if p.EvalContext().TxnReadOnly {
+		return 0, readOnlyError("nextval()")
+	}
+
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return 0, err
+	}
+	return incrementSequenceHelper(ctx, p, descriptor)
+}
+
 // IncrementSequenceByID implements the tree.SequenceOperators interface.
 func (p *planner) IncrementSequenceByID(ctx context.Context, seqID int64) (int64, error) {
 	if p.EvalContext().TxnReadOnly {
@@ -116,7 +130,7 @@ func incrementSequenceHelper(
 		return 0, err
 	}
 
-	p.sessionDataMutatorIterator.applyOnEachMutator(
+	p.ExtendedEvalContext().SessionMutatorIterator.applyForEachMutator(
 		func(m sessionDataMutator) {
 			m.RecordLatestSequenceVal(uint32(descriptor.GetID()), val)
 		},
@@ -139,11 +153,8 @@ func (p *planner) incrementSequenceUsingCache(
 	fetchNextValues := func() (currentValue, incrementAmount, sizeOfCache int64, err error) {
 		seqValueKey := p.ExecCfg().Codec.SequenceKey(uint32(descriptor.GetID()))
 
-		// We *do not* use the planner txn here, since nextval does not respect
-		// transaction boundaries. This matches the specification at
-		// https://www.postgresql.org/docs/14/functions-sequence.html
 		endValue, err := kv.IncrementValRetryable(
-			ctx, p.ExecCfg().DB, seqValueKey, seqOpts.Increment*cacheSize)
+			ctx, p.txn.DB(), seqValueKey, seqOpts.Increment*cacheSize)
 
 		if err != nil {
 			if errors.HasType(err, (*roachpb.IntegerOverflowError)(nil)) {
@@ -215,6 +226,18 @@ func boundsExceededError(descriptor catalog.TableDescriptor) error {
 		tree.ErrString((*tree.Name)(&name)), value)
 }
 
+// GetLatestValueInSessionForSequence implements the tree.SequenceOperators interface.
+func (p *planner) GetLatestValueInSessionForSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return 0, err
+	}
+	return getLatestValueInSessionForSequenceHelper(p, descriptor, seqName)
+}
+
 // GetLatestValueInSessionForSequenceByID implements the tree.SequenceOperators interface.
 func (p *planner) GetLatestValueInSessionForSequenceByID(
 	ctx context.Context, seqID int64,
@@ -250,9 +273,25 @@ func getLatestValueInSessionForSequenceHelper(
 	return val, nil
 }
 
+// SetSequenceValue implements the tree.SequenceOperators interface.
+func (p *planner) SetSequenceValue(
+	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
+) error {
+	if p.EvalContext().TxnReadOnly {
+		return readOnlyError("setval()")
+	}
+
+	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireSequenceDesc)
+	_, descriptor, err := resolver.ResolveExistingTableObject(ctx, p, seqName, flags)
+	if err != nil {
+		return err
+	}
+	return setSequenceValueHelper(ctx, p, descriptor, newVal, isCalled, seqName)
+}
+
 // SetSequenceValueByID implements the tree.SequenceOperators interface.
 func (p *planner) SetSequenceValueByID(
-	ctx context.Context, seqID uint32, newVal int64, isCalled bool,
+	ctx context.Context, seqID int64, newVal int64, isCalled bool,
 ) error {
 	if p.EvalContext().TxnReadOnly {
 		return readOnlyError("setval()")
@@ -270,18 +309,7 @@ func (p *planner) SetSequenceValueByID(
 	if !descriptor.IsSequence() {
 		return sqlerrors.NewWrongObjectTypeError(seqName, "sequence")
 	}
-	if err := setSequenceValueHelper(ctx, p, descriptor, newVal, isCalled, seqName); err != nil {
-		return err
-	}
-
-	// Clear out the cache and update the last value if needed.
-	p.sessionDataMutatorIterator.applyOnEachMutator(func(m sessionDataMutator) {
-		m.initSequenceCache()
-		if isCalled {
-			m.RecordLatestSequenceVal(seqID, newVal)
-		}
-	})
-	return nil
+	return setSequenceValueHelper(ctx, p, descriptor, newVal, isCalled, seqName)
 }
 
 // setSequenceValueHelper is shared by SetSequenceValue and SetSequenceValueByID
@@ -313,13 +341,10 @@ func setSequenceValueHelper(
 		return err
 	}
 
-	// We *do not* use the planner txn here, since setval does not respect
-	// transaction boundaries. This matches the specification at
-	// https://www.postgresql.org/docs/14/functions-sequence.html
 	// TODO(vilterp): not supposed to mix usage of Inc and Put on a key,
 	// according to comments on Inc operation. Switch to Inc if `desired-current`
 	// overflows correctly.
-	return p.ExecCfg().DB.Put(ctx, seqValueKey, newVal)
+	return p.txn.Put(ctx, seqValueKey, newVal)
 }
 
 // MakeSequenceKeyVal returns the key and value of a sequence being set
@@ -417,11 +442,15 @@ func assignSequenceOptions(
 		case tree.SeqOptNoCycle:
 			// Do nothing; this is the default.
 		case tree.SeqOptCache:
-			if v := *option.IntVal; v >= 1 {
-				opts.CacheSize = v
-			} else {
+			v := *option.IntVal
+			switch {
+			case v < 1:
 				return pgerror.Newf(pgcode.InvalidParameterValue,
 					"CACHE (%d) must be greater than zero", v)
+			case v == 1:
+				// Do nothing; this is the default.
+			case v > 1:
+				opts.CacheSize = *option.IntVal
 			}
 		case tree.SeqOptIncrement:
 			// Do nothing; this has already been set.
@@ -623,17 +652,6 @@ func maybeAddSequenceDependencies(
 		seqDesc, err := GetSequenceDescFromIdentifier(ctx, sc, seqIdentifier)
 		if err != nil {
 			return nil, err
-		}
-		// Check if this reference is cross DB.
-		if seqDesc.GetParentID() != tableDesc.GetParentID() &&
-			!allowCrossDatabaseSeqReferences.Get(&st.SV) {
-			return nil, errors.WithHintf(
-				pgerror.Newf(pgcode.FeatureNotSupported,
-					"sequence references cannot come from other databases; (see the '%s' cluster setting)",
-					allowCrossDatabaseSeqReferencesSetting),
-				crossDBReferenceDeprecationHint(),
-			)
-
 		}
 		seqNameToID[seqIdentifier.SeqName] = int64(seqDesc.ID)
 

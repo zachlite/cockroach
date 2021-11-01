@@ -7,7 +7,6 @@ go_library(
         "context.go",
         "doc.go",
         "sql.go",
-        "statement_diag.go",
         "statements_value.go",
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/cli/clisqlshell",

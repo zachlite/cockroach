@@ -281,8 +281,7 @@ var varGen = map[string]sessionVar{
 							pgcode.FeatureNotSupported,
 							"setting DateStyle is not enabled",
 						),
-						"You can enable DateStyle customization for all sessions with the cluster setting %s, or per session using SET datestyle_enabled = true.",
-						dateStyleEnabledClusterSetting,
+						"You can enable DateStyle customization for all sessions with the cluster setting sql.defaults.datestyle_enabled, or per session using SET datestyle_enabled = true.",
 					),
 					"Setting DateStyle changes the volatility of timestamp/timestamptz/date::string "+
 						"and string::timestamp/timestamptz/date/time/timetz casts from immutable to stable. "+
@@ -340,7 +339,7 @@ var varGen = map[string]sessionVar{
 		Set: func(ctx context.Context, m sessionDataMutator, val string) error {
 			i, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "default_int_size", val)
+				return wrapSetVarError("default_int_size", val, "%v", err)
 			}
 			if i != 4 && i != 8 {
 				return pgerror.New(pgcode.InvalidParameterValue,
@@ -450,23 +449,6 @@ var varGen = map[string]sessionVar{
 		},
 		Get: func(evalCtx *extendedEvalContext) string {
 			return formatBoolAsPostgresSetting(evalCtx.SessionData().DefaultTxnUseFollowerReads)
-		},
-		GlobalDefault: globalFalse,
-	},
-
-	// CockroachDB extension.
-	`disable_plan_gists`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`disable_plan_gists`),
-		Set: func(_ context.Context, m sessionDataMutator, s string) error {
-			b, err := paramparse.ParseBoolVar("disable_plan_gists", s)
-			if err != nil {
-				return err
-			}
-			m.SetDisablePlanGists(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData().DisablePlanGists)
 		},
 		GlobalDefault: globalFalse,
 	},
@@ -831,7 +813,7 @@ var varGen = map[string]sessionVar{
 		) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "extra_float_digits", s)
+				return wrapSetVarError("extra_float_digits", s, "%v", err)
 			}
 			// Note: this is the range allowed by PostgreSQL.
 			// See also the documentation around (DataConversionConfig).GetFloatPrec()
@@ -893,8 +875,7 @@ var varGen = map[string]sessionVar{
 							pgcode.FeatureNotSupported,
 							"setting IntervalStyle is not enabled",
 						),
-						"You can enable IntervalStyle customization for all sessions with the cluster setting %s, or per session using SET intervalstyle_enabled = true.",
-						intervalStyleEnabledClusterSetting,
+						"You can enable IntervalStyle customization for all sessions with the cluster setting sql.defaults.intervalstyle_enabled, or per session using SET intervalstyle_enabled = true.",
 					),
 					"Setting IntervalStyle changes the volatility of string::interval or interval::string "+
 						"casts from immutable to stable. No computed columns, partial indexes, partitions "+
@@ -1132,7 +1113,7 @@ var varGen = map[string]sessionVar{
 		Set: func(_ context.Context, _ sessionDataMutator, s string) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "ssl_renegotiation_limit", s)
+				return wrapSetVarError("ssl_renegotiation_limit", s, "%v", err)
 			}
 			if i != 0 {
 				// See pg src/backend/utils/misc/guc.c: non-zero values are not to be supported.
@@ -1429,19 +1410,21 @@ var varGen = map[string]sessionVar{
 	},
 
 	// CockroachDB extension.
-	// This is only kept for backwards compatibility and no longer has any effect.
 	`enable_drop_enum_value`: {
-		Hidden:       true,
 		GetStringVal: makePostgresBoolGetStringValFn(`enable_drop_enum_value`),
 		Set: func(_ context.Context, m sessionDataMutator, s string) error {
-			_, err := paramparse.ParseBoolVar("enable_drop_enum_value", s)
-			return err
+			b, err := paramparse.ParseBoolVar("enable_drop_enum_value", s)
+			if err != nil {
+				return err
+			}
+			m.SetDropEnumValueEnabled(b)
+			return nil
 		},
 		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(true)
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().DropEnumValueEnabled)
 		},
 		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(true)
+			return formatBoolAsPostgresSetting(dropEnumValueEnabledClusterMode.Get(sv))
 		},
 	},
 
@@ -1617,24 +1600,6 @@ var varGen = map[string]sessionVar{
 		},
 	},
 
-	`null_ordered_last`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`null_ordered_last`),
-		Set: func(_ context.Context, m sessionDataMutator, s string) error {
-			b, err := paramparse.ParseBoolVar(`null_ordered_last`, s)
-			if err != nil {
-				return err
-			}
-			m.SetNullOrderedLast(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData().NullOrderedLast)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(false)
-		},
-	},
-
 	`propagate_input_ordering`: {
 		GetStringVal: makePostgresBoolGetStringValFn(`propagate_input_ordering`),
 		Set: func(_ context.Context, m sessionDataMutator, s string) error {
@@ -1744,24 +1709,6 @@ var varGen = map[string]sessionVar{
 			return strconv.FormatInt(txnRowsReadErr.Get(sv), 10)
 		},
 	},
-
-	// CockroachDB extension. Allows for testing of transaction retry logic
-	// using the cockroach_restart savepoint.
-	`inject_retry_errors_enabled`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`retry_errors_enabled`),
-		Set: func(_ context.Context, m sessionDataMutator, s string) error {
-			b, err := paramparse.ParseBoolVar("inject_retry_errors_enabled", s)
-			if err != nil {
-				return err
-			}
-			m.SetInjectRetryErrorsEnabled(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData().InjectRetryErrorsEnabled)
-		},
-		GlobalDefault: globalFalse,
-	},
 }
 
 const compatErrMsg = "this parameter is currently recognized only for compatibility and has no effect in CockroachDB."
@@ -1859,7 +1806,7 @@ var globalFalse = displayPgBool(false)
 // specified by the user.
 func sessionDataTimeZoneFormat(loc *time.Location) string {
 	locStr := loc.String()
-	_, origRepr, parsed := timeutil.ParseTimeZoneOffset(locStr, timeutil.TimeZoneStringToLocationISO8601Standard)
+	_, origRepr, parsed := timeutil.ParseFixedOffsetTimeZone(locStr)
 	if parsed {
 		return origRepr
 	}

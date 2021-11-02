@@ -38,7 +38,6 @@ import "etcd/raft/v3/raftpb/raft.proto";
 import "gogoproto/gogo.proto";
 import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
-import "google/protobuf/duration.proto";
 
 message CertificatesRequest {
   // node_id is a string so that "local" can be used to specify that no
@@ -532,10 +531,6 @@ message LogFilesListRequest {
 }
 
 message LogFilesListResponse {
-  // files is the list of log files under this node's configured logging
-  // directories. Note that the response does not contain detail about
-  // which directory contains which file. The location of each file
-  // is known to the server based on its name and the logging configuration.
   repeated cockroach.util.log.FileInfo files = 1
       [ (gogoproto.nullable) = false ];
 }
@@ -544,10 +539,6 @@ message LogFileRequest {
   // node_id is a string so that "local" can be used to specify that no
   // forwarding is necessary.
   string node_id = 1;
-  // file is the name of the log file to retrieve. Note that it
-  // must not be prefixed by a directory name. The full path to
-  // the file is computed by the server based on the base name
-  // and the logging configuration.
   string file = 2;
   // redact, if true, requests redaction of sensitive data away
   // from the retrieved log entries.
@@ -610,18 +601,12 @@ message ProfileRequest {
 
   enum Type {
       HEAP = 0;
-      CPU = 1; // with labels on by default
-      GOROUTINE = 2;
-      THREADCREATE = 3;
-      ALLOCS = 4;
-      BLOCK = 5;
-      MUTEX = 6;
+      CPU = 1; // with labels on
   }
   // The type of profile to retrieve.
   Type type = 5;
 
   int32 seconds = 6; // applies only to Type=CPU, defaults to 30
-  bool labels = 7; // applies only to Type=CPU, defaults to false
 }
 
 message MetricsRequest {
@@ -747,9 +732,6 @@ message ActiveQuery {
 
   // The SQL statement fingerprint, compatible with StatementStatisticsKey.
   string sql_no_constants = 8;
-
-  // A summarized version of the sql query.
-  string sql_summary = 9;
 }
 
 // Request object for ListSessions and ListLocalSessions.
@@ -853,7 +835,7 @@ message CancelSessionRequest {
   bytes session_id = 2 [(gogoproto.customname) = "SessionID"];
   // Username of the user making this cancellation request. This may be omitted
   // if the user is the same as the one issuing the CancelSessionRequest.
-  // The caller is responsible for case-folding and NFC normalization.
+  // The caller is responsiblef or case-folding and NFC normalization.
   string username = 3;
 }
 
@@ -1024,7 +1006,7 @@ message ProblemRangesResponse {
 // API: PUBLIC ALPHA
 message HotRangesRequest {
   // NodeID indicates which node to query for a hot range report.
-  // It is possible to populate any node ID; if the node receiving
+  // It is posssible to populate any node ID; if the node receiving
   // the request is not the target node, it will forward the
   // request to the target node.
   //
@@ -1202,9 +1184,6 @@ message StatementsResponse {
     int32 node_id = 2 [(gogoproto.customname) = "NodeID",
       (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
     google.protobuf.Timestamp aggregated_ts = 3 [(gogoproto.nullable) = false,  (gogoproto.stdtime) = true];
-    // The aggregation duration.
-    google.protobuf.Duration aggregation_interval = 4 [(gogoproto.nullable) = false,
-      (gogoproto.stdduration) = true];
   }
 
   message CollectedStatementStatistics {
@@ -1324,17 +1303,6 @@ message IndexUsageStatisticsRequest {
 // Response object returned by IndexUsageStatistics.
 message IndexUsageStatisticsResponse {
   repeated cockroach.sql.CollectedIndexUsageStatistics statistics = 1 [(gogoproto.nullable) = false];
-  // Timestamp of the last index usage stats reset.
-  google.protobuf.Timestamp last_reset = 3 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-}
-
-// Request object for issuing a index usage stats reset request.
-message ResetIndexUsageStatsRequest {
-  string node_id = 1 [(gogoproto.customname) = "NodeID"];
-}
-
-// Response object returned by ResetIndexUsageStatsRequest.
-message ResetIndexUsageStatsResponse {
 }
 
 service Status {
@@ -1455,14 +1423,6 @@ service Status {
     };
   }
 
-  // CancelLocalQuery cancels a SQL query running on this node given its ID.
-  rpc CancelLocalQuery(CancelQueryRequest) returns (CancelQueryResponse) {
-    option (google.api.http) = {
-      post : "/_status/cancel_local_query"
-      body: "*"
-    };
-  }
-
   // ListContentionEvents retrieves the contention events across the entire
   // cluster.
   //
@@ -1540,14 +1500,6 @@ service Status {
     option (google.api.http) = {
       post : "/_status/cancel_session/{node_id}"
 			body: "*"
-    };
-  }
-
-  // CancelLocalSession forcefully terminates a SQL session running on this node given its ID.
-  rpc CancelLocalSession(CancelSessionRequest) returns (CancelSessionResponse) {
-    option (google.api.http) = {
-      post : "/_status/cancel_local_session"
-      body: "*"
     };
   }
 
@@ -1693,13 +1645,6 @@ service Status {
   rpc IndexUsageStatistics(IndexUsageStatisticsRequest) returns (IndexUsageStatisticsResponse) {
     option (google.api.http) = {
       get: "/_status/indexusagestatistics"
-    };
-  }
-
-  rpc ResetIndexUsageStats(ResetIndexUsageStatsRequest) returns (ResetIndexUsageStatsResponse) {
-    option (google.api.http) = {
-      post: "/_status/resetindexusagestats"
-      body: "*"
     };
   }
 }

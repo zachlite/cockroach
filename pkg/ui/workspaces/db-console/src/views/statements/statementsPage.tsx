@@ -34,7 +34,7 @@ import { PrintTime } from "src/views/reports/containers/range/print";
 import { selectDiagnosticsReportsPerStatement } from "src/redux/statements/statementsSelectors";
 import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
 import { statementsDateRangeLocalSetting } from "src/redux/statementsDateRange";
-import { queryByName } from "src/util/query";
+import { getMatchParamByName } from "src/util/query";
 
 import { StatementsPage, AggregateStatistics } from "@cockroachlabs/cluster-ui";
 import {
@@ -57,9 +57,7 @@ type IStatementDiagnosticsReport = protos.cockroach.server.serverpb.IStatementDi
 
 interface StatementsSummaryData {
   statement: string;
-  statementSummary: string;
   aggregatedTs: number;
-  aggregationInterval: number;
   implicitTxn: boolean;
   fullScan: boolean;
   database: string;
@@ -81,29 +79,22 @@ export const selectStatements = createSelector(
       return null;
     }
     let statements = flattenStatementStats(state.data.statements);
-    const app = queryByName(props.location, appAttr);
+    const app = getMatchParamByName(props.match, appAttr);
     const isInternal = (statement: ExecutionStatistics) =>
       statement.app.startsWith(state.data.internal_app_name_prefix);
 
     if (app && app !== "All") {
-      const criteria = decodeURIComponent(app).split(",");
+      let criteria = decodeURIComponent(app);
       let showInternal = false;
-      if (criteria.includes(state.data.internal_app_name_prefix)) {
+      if (criteria === "(unset)") {
+        criteria = "";
+      } else if (criteria === "(internal)") {
         showInternal = true;
-      }
-      if (criteria.includes("(unset)")) {
-        criteria.push("");
       }
 
       statements = statements.filter(
         (statement: ExecutionStatistics) =>
-          (showInternal && isInternal(statement)) ||
-          criteria.includes(statement.app),
-      );
-    } else {
-      // We don't want to show internal statements by default.
-      statements = statements.filter(
-        (statement: ExecutionStatistics) => !isInternal(statement),
+          (showInternal && isInternal(statement)) || statement.app === criteria,
       );
     }
 
@@ -115,9 +106,7 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statement: stmt.statement,
-          statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
-          aggregationInterval: stmt.aggregation_interval,
           implicitTxn: stmt.implicit_txn,
           fullScan: stmt.full_scan,
           database: stmt.database,
@@ -131,9 +120,7 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         label: stmt.statement,
-        summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
-        aggregationInterval: stmt.aggregationInterval,
         implicitTxn: stmt.implicitTxn,
         fullScan: stmt.fullScan,
         database: stmt.database,
@@ -173,7 +160,7 @@ export const selectApps = createSelector(
       },
     );
     return []
-      .concat(sawInternal ? [state.data.internal_app_name_prefix] : [])
+      .concat(sawInternal ? ["(internal)"] : [])
       .concat(sawBlank ? ["(unset)"] : [])
       .concat(Object.keys(apps));
   },
@@ -188,11 +175,7 @@ export const selectDatabases = createSelector(
       return [];
     }
     return Array.from(
-      new Set(
-        state.data.statements.map(s =>
-          s.key.key_data.database ? s.key.key_data.database : "(unset)",
-        ),
-      ),
+      new Set(state.data.statements.map(s => s.key.key_data.database)),
     ).filter((dbName: string) => dbName !== null && dbName.length > 0);
   },
 );

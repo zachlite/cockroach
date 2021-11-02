@@ -58,7 +58,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	})
 
 	t.Run("ReadAt", func(t *testing.T) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewTestPseudoRand()
 
 		encryptionChunkSizeV2 = 32
 
@@ -151,7 +151,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	})
 
 	t.Run("Random", func(t *testing.T) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewTestPseudoRand()
 		t.Run("DecryptFile", func(t *testing.T) {
 			// For some number of randomly chosen chunk-sizes, generate a number
 			// of random length plaintexts of random bytes and ensure they each

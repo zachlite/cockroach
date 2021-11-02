@@ -85,7 +85,6 @@ go_test(
         "//pkg/cloud/impl:cloudimpl",
         "//pkg/col/coldata",
         "//pkg/col/coldataext",
-        "//pkg/col/coldatatestutils",
         "//pkg/security",
         "//pkg/security/securitytest",
         "//pkg/server",

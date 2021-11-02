@@ -943,15 +943,10 @@ func (r *testRunner) maybePostGithubIssue(
 		Message:         msg,
 		Artifacts:       artifacts,
 		ExtraLabels:     labels,
-		HelpCommand: func(renderer *issues.Renderer) {
-			issues.HelpCommandAsLink(
+		ReproductionCommand: func(renderer *issues.Renderer) {
+			issues.ReproductionAsLink(
 				"roachtest README",
 				"https://github.com/cockroachdb/cockroach/blob/master/pkg/cmd/roachtest/README.md",
-			)(renderer)
-			renderer.Escaped(" | ")
-			issues.HelpCommandAsLink(
-				"How To Investigate (internal)",
-				"https://cockroachlabs.atlassian.net/l/c/SSSBr8c7",
 			)(renderer)
 		},
 	}
@@ -1114,7 +1109,7 @@ func (r *testRunner) addWorker(ctx context.Context, name string) *workerStatus {
 	return w
 }
 
-// removeWorker deletes the bookkeeping for a worker that has finished running.
+// removeWorker deletes the bookkepping for a worker that has finished running.
 func (r *testRunner) removeWorker(ctx context.Context, name string) {
 	r.workersMu.Lock()
 	delete(r.workersMu.workers, name)

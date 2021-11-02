@@ -86,7 +86,7 @@ func init() {
 	if CrdbTestBuild {
 		disabled := envutil.EnvOrDefaultBool(DisableMetamorphicEnvVar, false)
 		if !disabled {
-			rng, _ = randutil.NewTestRand()
+			rng, _ = randutil.NewPseudoRand()
 			metamorphicBuild = rng.Float64() < metamorphicBuildProbability
 		}
 	}

@@ -1627,7 +1627,6 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 	usedSlots = metric.Metadata{
-		// Note: we append a WorkKind string to this name.
 		Name:        "admission.granter.used_slots.",
 		Help:        "Used slots",
 		Measurement: "Slots",

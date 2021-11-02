@@ -643,8 +643,9 @@ func TestRaftLogSizeAfterTruncation(t *testing.T) {
 	assert.NoError(t, assertCorrectRaftLogSize())
 }
 
-// TestSnapshotAfterTruncation tests that Raft will properly send a snapshot
-// when a node is brought up and the log has been truncated.
+// TestSnapshotAfterTruncation tests that Raft will properly send a
+// non-preemptive snapshot when a node is brought up and the log has been
+// truncated.
 func TestSnapshotAfterTruncation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -707,8 +708,8 @@ func TestSnapshotAfterTruncation(t *testing.T) {
 			tc.WaitForValues(t, key, []int64{incA, incA, incA})
 
 			// Now kill one store, increment the key on the other stores and truncate
-			// their logs to make sure that when store 1 comes back up it will require
-			// a snapshot from Raft.
+			// their logs to make sure that when store 1 comes back up it will require a
+			// non-preemptive snapshot from Raft.
 			tc.StopServer(stoppedStore)
 
 			incArgs = incrementArgs(key, incB)
@@ -1326,8 +1327,9 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 	rep2Desc, found := desc.GetReplicaDescriptor(2)
 	require.True(t, found)
 	header := kvserver.SnapshotRequest_Header{
-		RangeSize: 100,
-		State:     kvserverpb.ReplicaState{Desc: desc},
+		CanDecline: true,
+		RangeSize:  100,
+		State:      kvserverpb.ReplicaState{Desc: desc},
 		RaftMessageRequest: kvserver.RaftMessageRequest{
 			RangeID:     rep.RangeID,
 			FromReplica: repDesc,
@@ -1349,8 +1351,8 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 }
 
 // TestConcurrentRaftSnapshots tests that snapshots still work correctly when
-// Raft requests multiple snapshots at the same time. This situation occurs when
-// two replicas need snapshots at the same time.
+// Raft requests multiple non-preemptive snapshots at the same time. This
+// situation occurs when two replicas need snapshots at the same time.
 func TestConcurrentRaftSnapshots(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1408,7 +1410,7 @@ func TestConcurrentRaftSnapshots(t *testing.T) {
 
 	// Now kill stores 1 + 2, increment the key on the other stores and
 	// truncate their logs to make sure that when store 1 + 2 comes back up
-	// they will require a snapshot from Raft.
+	// they will require a non-preemptive snapshot from Raft.
 	tc.StopServer(1)
 	tc.StopServer(2)
 
@@ -2497,7 +2499,7 @@ func TestReportUnreachableRemoveRace(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewTestPseudoRand()
 	t.Logf("seed is %d", seed)
 
 	ctx := context.Background()
@@ -2799,11 +2801,13 @@ func TestRaftRemoveRace(t *testing.T) {
 
 	numServers := 10
 	if util.RaceEnabled {
-		// In race builds, running 10 nodes needs more than 1 full CPU (due to
-		// background gossip and heartbeat overhead), so it can't keep up when run
-		// under stress with one process per CPU. Run a reduced version of this test
-		// in race builds. This isn't as likely to reproduce the races but will
-		// still have a chance to do so.
+		// In race builds, running 10 nodes needs more than 1 full CPU
+		// (due to background gossip and heartbeat overhead), so it can't
+		// keep up when run under stress with one process per CPU. Run a
+		// reduced version of this test in race builds. This isn't as
+		// likely to reproduce the preemptive-snapshot race described in
+		// the previous comment, but will still have a chance to do so, or
+		// to find other races.
 		numServers = 3
 	}
 
@@ -2816,9 +2820,10 @@ func TestRaftRemoveRace(t *testing.T) {
 
 	key := tc.ScratchRange(t)
 	desc := tc.LookupRangeOrFatal(t, key)
-	// Cyclically up-replicate to a bunch of nodes which stresses a condition
-	// where replicas receive messages for a previous or later incarnation of the
-	// replica.
+	// Up-replicate to a bunch of nodes which stresses a condition where a
+	// replica created via a preemptive snapshot receives a message for a
+	// previous incarnation of the replica (i.e. has a smaller replica ID) that
+	// existed on the same store.
 	targets := make([]roachpb.ReplicationTarget, len(tc.Servers)-1)
 	for i := 1; i < len(tc.Servers); i++ {
 		targets[i-1] = tc.Target(i)

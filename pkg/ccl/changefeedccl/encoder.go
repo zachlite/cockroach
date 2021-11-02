@@ -81,12 +81,14 @@ type Encoder interface {
 	EncodeResolvedTimestamp(context.Context, string, hlc.Timestamp) ([]byte, error)
 }
 
-func getEncoder(opts map[string]string, targets jobspb.ChangefeedTargets) (Encoder, error) {
+func getEncoder(
+	ctx context.Context, opts map[string]string, targets jobspb.ChangefeedTargets,
+) (Encoder, error) {
 	switch changefeedbase.FormatType(opts[changefeedbase.OptFormat]) {
 	case ``, changefeedbase.OptFormatJSON:
 		return makeJSONEncoder(opts, targets)
 	case changefeedbase.OptFormatAvro, changefeedbase.DeprecatedOptFormatAvro:
-		return newConfluentAvroEncoder(opts, targets)
+		return newConfluentAvroEncoder(ctx, opts, targets)
 	case changefeedbase.OptFormatNative:
 		return &nativeEncoder{}, nil
 	default:
@@ -161,6 +163,7 @@ func (e *jsonEncoder) encodeKeyRaw(row encodeRow) ([]interface{}, error) {
 		if !ok {
 			return nil, errors.Errorf(`unknown column id: %d`, colID)
 		}
+		datum := row.datums[idx]
 		datum, col := row.datums[idx], row.tableDesc.PublicColumns()[idx]
 		if err := datum.EnsureDecoded(col.GetType(), &e.alloc); err != nil {
 			return nil, err
@@ -346,7 +349,7 @@ type confluentRegisteredEnvelopeSchema struct {
 var _ Encoder = &confluentAvroEncoder{}
 
 func newConfluentAvroEncoder(
-	opts map[string]string, targets jobspb.ChangefeedTargets,
+	ctx context.Context, opts map[string]string, targets jobspb.ChangefeedTargets,
 ) (*confluentAvroEncoder, error) {
 	e := &confluentAvroEncoder{
 		schemaPrefix: opts[changefeedbase.OptAvroSchemaPrefix],
@@ -389,8 +392,12 @@ func newConfluentAvroEncoder(
 	if err != nil {
 		return nil, err
 	}
-
 	e.schemaRegistry = reg
+
+	if err := reg.Ping(ctx); err != nil {
+		return nil, errors.Wrap(err, "schema registry unavailable")
+	}
+
 	e.keyCache = make(map[tableIDAndVersion]confluentRegisteredKeySchema)
 	e.valueCache = make(map[tableIDAndVersionPair]confluentRegisteredEnvelopeSchema)
 	e.resolvedCache = make(map[string]confluentRegisteredEnvelopeSchema)

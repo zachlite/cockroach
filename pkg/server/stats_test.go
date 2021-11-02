@@ -75,7 +75,7 @@ CREATE TABLE t.test (x INT PRIMARY KEY);
 	sqlServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
 
 	// Run some queries mixed with diagnostics, and ensure that the statistics
-	// are unaffected by the calls to report diagnostics.
+	// are unnaffected by the calls to report diagnostics.
 	if _, err := sqlDB.Exec(`INSERT INTO t.test VALUES ($1)`, 1); err != nil {
 		t.Fatal(err)
 	}

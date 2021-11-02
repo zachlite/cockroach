@@ -177,7 +177,7 @@ var tpccMeta = workload.Meta{
 			`conns`:              {RuntimeOnly: true},
 			`idle-conns`:         {RuntimeOnly: true},
 			`expensive-checks`:   {RuntimeOnly: true, CheckConsistencyOnly: true},
-			`local-warehouses`:   {RuntimeOnly: true},
+			`region-local`:       {RuntimeOnly: true},
 		}
 
 		g.flags.Uint64Var(&g.seed, `seed`, 1, `Random number generator seed`)
@@ -228,31 +228,6 @@ var tpccMeta = workload.Meta{
 		g.nowString = []byte(`2006-01-02 15:04:05`)
 		return g
 	},
-}
-
-func queryDatabaseRegions(db *gosql.DB) (map[string]struct{}, error) {
-	regions := make(map[string]struct{})
-	rows, err := db.Query(`SELECT region FROM [SHOW REGIONS FROM DATABASE]`)
-	if err != nil {
-		return regions, err
-	}
-	defer func() {
-		_ = rows.Close()
-	}()
-	for rows.Next() {
-		if rows.Err() != nil {
-			return regions, err
-		}
-		var region string
-		if err := rows.Scan(&region); err != nil {
-			return regions, err
-		}
-		regions[region] = struct{}{}
-	}
-	if rows.Err() != nil {
-		return regions, err
-	}
-	return regions, nil
 }
 
 // Meta implements the Generator interface.
@@ -379,8 +354,25 @@ func (w *tpcc) Hooks() workload.Hooks {
 				return nil
 			}
 
-			regions, err := queryDatabaseRegions(db)
+			regions := make(map[string]struct{})
+			rows, err := db.Query(`SELECT region FROM [SHOW REGIONS FROM DATABASE]`)
 			if err != nil {
+				return err
+			}
+			defer func() {
+				_ = rows.Close()
+			}()
+			for rows.Next() {
+				if rows.Err() != nil {
+					return err
+				}
+				var region string
+				if err := rows.Scan(&region); err != nil {
+					return err
+				}
+				regions[region] = struct{}{}
+			}
+			if rows.Err() != nil {
 				return err
 			}
 
@@ -798,7 +790,7 @@ func (w *tpcc) Ops(
 	}
 	var partitionDBs [][]*workload.MultiConnPool
 	if w.clientPartitions > 0 {
-		// Client partitions simply emulates the behavior of data partitions
+		// Client partitons simply emulates the behavior of data partitions
 		// w/r/t database connections, though all of the connections will
 		// be for the same partition.
 		partitionDBs = make([][]*workload.MultiConnPool, w.clientPartitions)

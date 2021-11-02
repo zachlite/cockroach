@@ -58,7 +58,7 @@ func TestExternalDistinct(t *testing.T) {
 		accounts []*mon.BoundAccount
 		monitors []*mon.BytesMonitor
 	)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	numForcedRepartitions := rng.Intn(5)
 	// Test the case in which the default memory is used as well as the case in
 	// which the distinct spills to disk.
@@ -139,7 +139,7 @@ func TestExternalDistinctSpilling(t *testing.T) {
 		monitors []*mon.BytesMonitor
 	)
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	nCols := 1 + rng.Intn(3)
 	typs := make([]*types.T, nCols)
 	distinctCols := make([]uint32, nCols)
@@ -221,11 +221,7 @@ func TestExternalDistinctSpilling(t *testing.T) {
 		require.Equal(t, 0, sem.GetCount(), "sem still reports open FDs at index %d", i)
 	}
 	if !spillingMightNotHappen {
-		// The "randomNullsInjection" subtest might not spill to disk when a
-		// large portion of rows is made NULL, so we allow two cases:
-		// - numSpills == numRuns
-		// - numSpills == numRuns - 1.
-		require.GreaterOrEqual(t, numSpills, numRuns-1, "the spilling didn't occur in all cases")
+		require.Equal(t, numRuns, numSpills, "the spilling didn't occur in all cases")
 	}
 
 	for _, acc := range accounts {

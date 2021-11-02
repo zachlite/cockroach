@@ -41,12 +41,12 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
 
 		expectedMetadataStrTemplate := `
 {
-  "stmtTyp":      "{{.String}}",
-  "query":        "{{.String}}",
-  "querySummary": "{{.String}}",
-  "db":           "{{.String}}",
+  "stmtTyp": "{{.String}}",
+  "query":   "{{.String}}",
+  "db":      "{{.String}}",
   "distsql": {{.Bool}},
   "failed":  {{.Bool}},
+  "opt":     {{.Bool}},
   "implicitTxn": {{.Bool}},
   "vec":         {{.Bool}},
   "fullScan":    {{.Bool}}
@@ -89,10 +89,6 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
            "sqDiff": {{.Float}}
          },
          "rowsRead": {
-           "mean": {{.Float}},
-           "sqDiff": {{.Float}}
-         },
-         "rowsWritten": {
            "mean": {{.Float}},
            "sqDiff": {{.Float}}
          },
@@ -156,10 +152,9 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
 
 		expectedMetadataStrTemplate := `
 			{
-				"stmtTyp":      "{{.String}}",
-				"query":        "{{.String}}",
-				"querySummary": "{{.String}}",
-				"db":           "{{.String}}",
+				"stmtTyp": "{{.String}}",
+				"query":   "{{.String}}",
+				"db":      "{{.String}}",
 				"distsql": {{.Bool}},
 				"failed":  {{.Bool}},
 				"implicitTxn": {{.Bool}},
@@ -308,10 +303,6 @@ func TestSQLStatsJsonEncoding(t *testing.T) {
       "sqDiff": {{.Float}}
     },
     "rowsRead": {
-      "mean": {{.Float}},
-      "sqDiff": {{.Float}}
-    },
-    "rowsWritten": {
       "mean": {{.Float}},
       "sqDiff": {{.Float}}
     }

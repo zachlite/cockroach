@@ -168,14 +168,6 @@ var allowCrossDatabaseSeqOwner = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
-const allowCrossDatabaseSeqReferencesSetting = "sql.cross_db_sequence_references.enabled"
-
-var allowCrossDatabaseSeqReferences = settings.RegisterBoolSetting(
-	allowCrossDatabaseSeqReferencesSetting,
-	"if true, sequences referenced by tables from other databases are allowed",
-	false,
-).WithPublic()
-
 const secondaryTenantsZoneConfigsEnabledSettingName = "sql.zone_configs.experimental_allow_for_secondary_tenant.enabled"
 
 // secondaryTenantZoneConfigsEnabled controls if secondary tenants are allowed
@@ -287,6 +279,12 @@ var implicitColumnPartitioningEnabledClusterMode = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
+var dropEnumValueEnabledClusterMode = settings.RegisterBoolSetting(
+	"sql.defaults.drop_enum_value.enabled",
+	"default value for enable_drop_enum_value; allows for dropping enum values",
+	false,
+).WithPublic()
+
 var overrideMultiRegionZoneConfigClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.override_multi_region_zone_config.enabled",
 	"default value for override_multi_region_zone_config; "+
@@ -316,6 +314,14 @@ var optDrivenFKCascadesClusterLimit = settings.RegisterIntSetting(
 var preferLookupJoinsForFKs = settings.RegisterBoolSetting(
 	"sql.defaults.prefer_lookup_joins_for_fks.enabled",
 	"default value for prefer_lookup_joins_for_fks session setting; causes foreign key operations to use lookup joins when possible",
+	false,
+).WithPublic()
+
+// InterleavedTablesEnabled is the setting that controls whether it's possible
+// to create interleaved indexes or tables.
+var InterleavedTablesEnabled = settings.RegisterBoolSetting(
+	"sql.defaults.interleaved_tables.enabled",
+	"allows creation of interleaved tables or indexes",
 	false,
 ).WithPublic()
 
@@ -520,10 +526,9 @@ var DistSQLClusterExecMode = settings.RegisterEnumSetting(
 	"default distributed SQL execution mode",
 	"auto",
 	map[int64]string{
-		int64(sessiondatapb.DistSQLOff):    "off",
-		int64(sessiondatapb.DistSQLAuto):   "auto",
-		int64(sessiondatapb.DistSQLOn):     "on",
-		int64(sessiondatapb.DistSQLAlways): "always",
+		int64(sessiondatapb.DistSQLOff):  "off",
+		int64(sessiondatapb.DistSQLAuto): "auto",
+		int64(sessiondatapb.DistSQLOn):   "on",
 	},
 ).WithPublic()
 
@@ -535,7 +540,6 @@ var SerialNormalizationMode = settings.RegisterEnumSetting(
 	"rowid",
 	map[int64]string{
 		int64(sessiondatapb.SerialUsesRowID):              "rowid",
-		int64(sessiondatapb.SerialUsesUnorderedRowID):     "unordered_rowid",
 		int64(sessiondatapb.SerialUsesVirtualSequences):   "virtual_sequence",
 		int64(sessiondatapb.SerialUsesSQLSequences):       "sql_sequence",
 		int64(sessiondatapb.SerialUsesCachedSQLSequences): "sql_sequence_cached",
@@ -576,24 +580,20 @@ var dateStyle = settings.RegisterEnumSetting(
 	dateStyleEnumMap,
 ).WithPublic()
 
-const intervalStyleEnabledClusterSetting = "sql.defaults.intervalstyle.enabled"
-
 // intervalStyleEnabled controls intervals representation.
 // TODO(#sql-experience): remove session setting in v22.1 and have this
 // always enabled.
 var intervalStyleEnabled = settings.RegisterBoolSetting(
-	intervalStyleEnabledClusterSetting,
+	"sql.defaults.intervalstyle.enabled",
 	"default value for intervalstyle_enabled session setting",
 	false,
 ).WithPublic()
-
-const dateStyleEnabledClusterSetting = "sql.defaults.datestyle.enabled"
 
 // dateStyleEnabled controls dates representation.
 // TODO(#sql-experience): remove session setting in v22.1 and have this
 // always enabled.
 var dateStyleEnabled = settings.RegisterBoolSetting(
-	dateStyleEnabledClusterSetting,
+	"sql.defaults.datestyle.enabled",
 	"default value for datestyle_enabled session setting",
 	false,
 ).WithPublic()
@@ -1302,6 +1302,11 @@ type ExecutorTestingKnobs struct {
 
 	// OnTxnRetry, if set, will be called if there is a transaction retry.
 	OnTxnRetry func(autoRetryReason error, evalCtx *tree.EvalContext)
+
+	// AllowDeclarativeSchemaChanger is used to allow enabling the new,
+	// declarative schema changer. It cannot be enabled without this testing knob
+	// in 21.2.
+	AllowDeclarativeSchemaChanger bool
 }
 
 // PGWireTestingKnobs contains knobs for the pgwire module.
@@ -1314,10 +1319,6 @@ type PGWireTestingKnobs struct {
 	// AuthHook is used to override the normal authentication handling on new
 	// connections.
 	AuthHook func(context.Context) error
-
-	// AfterReadMsgTestingKnob is called after reading a message from the
-	// pgwire read buffer.
-	AfterReadMsgTestingKnob func(context.Context) error
 }
 
 var _ base.ModuleTestingKnobs = &PGWireTestingKnobs{}
@@ -1339,10 +1340,6 @@ type TenantTestingKnobs struct {
 	// OverrideTokenBucketProvider allows a test-only TokenBucketProvider (which
 	// can optionally forward requests to the real provider).
 	OverrideTokenBucketProvider func(origProvider kvtenant.TokenBucketProvider) kvtenant.TokenBucketProvider
-
-	// DisableLogTags can be set to true to cause the tenant server to avoid
-	// setting any global log tags for cluster id or node id.
-	DisableLogTags bool
 }
 
 var _ base.ModuleTestingKnobs = &TenantTestingKnobs{}
@@ -1352,6 +1349,10 @@ func (*TenantTestingKnobs) ModuleTestingKnobs() {}
 
 // BackupRestoreTestingKnobs contains knobs for backup and restore behavior.
 type BackupRestoreTestingKnobs struct {
+	// AllowImplicitAccess allows implicit access to data sources for non-admin
+	// users. This enables using nodelocal for testing BACKUP/RESTORE permissions.
+	AllowImplicitAccess bool
+
 	// CaptureResolvedTableDescSpans allows for intercepting the spans which are
 	// resolved during backup planning, and will eventually be backed up during
 	// execution.
@@ -1402,15 +1403,6 @@ func shouldDistributeGivenRecAndMode(
 // is reused, but if plan has logical representation (i.e. it is a planNode
 // tree), then we traverse that tree in order to determine the distribution of
 // the plan.
-// WARNING: in some cases when this method returns
-// physicalplan.FullyDistributedPlan, the plan might actually run locally. This
-// is the case when
-// - the plan ends up with a single flow on the gateway, or
-// - during the plan finalization (in DistSQLPlanner.finalizePlanWithRowCount)
-// we decide that it is beneficial to move the single flow of the plan from the
-// remote node to the gateway.
-// TODO(yuzefovich): this will be easy to solve once the DistSQL spec factory is
-// completed but is quite annoying to do at the moment.
 func getPlanDistribution(
 	ctx context.Context,
 	p *planner,
@@ -1441,7 +1433,7 @@ func getPlanDistribution(
 		return physicalplan.LocalPlan
 	}
 
-	rec, err := checkSupportForPlanNode(plan.planNode)
+	rec, err := checkSupportForPlanNode(plan.planNode, false /* outputNodeHasLimit */)
 	if err != nil {
 		// Don't use distSQL for this request.
 		log.VEventf(ctx, 1, "query not supported for distSQL: %s", err)
@@ -2293,7 +2285,7 @@ func generateSessionTraceVTable(spans []tracingpb.RecordedSpan) ([]traceRow, err
 	var allLogs []logRecordRow
 
 	// NOTE: The spans are recorded in the order in which they are started.
-	seenSpans := make(map[tracingpb.SpanID]struct{})
+	seenSpans := make(map[uint64]struct{})
 	for spanIdx, span := range spans {
 		if _, ok := seenSpans[span.SpanID]; ok {
 			continue
@@ -2393,9 +2385,7 @@ func generateSessionTraceVTable(spans []tracingpb.RecordedSpan) ([]traceRow, err
 // getOrderedChildSpans returns all the spans in allSpans that are children of
 // spanID. It assumes the input is ordered by start time, in which case the
 // output is also ordered.
-func getOrderedChildSpans(
-	spanID tracingpb.SpanID, allSpans []tracingpb.RecordedSpan,
-) []spanWithIndex {
+func getOrderedChildSpans(spanID uint64, allSpans []tracingpb.RecordedSpan) []spanWithIndex {
 	children := make([]spanWithIndex, 0)
 	for i := range allSpans {
 		if allSpans[i].ParentSpanID == spanID {
@@ -2417,7 +2407,7 @@ func getOrderedChildSpans(
 // seenSpans is modified to record all the spans that are part of the subtrace
 // rooted at span.
 func getMessagesForSubtrace(
-	span spanWithIndex, allSpans []tracingpb.RecordedSpan, seenSpans map[tracingpb.SpanID]struct{},
+	span spanWithIndex, allSpans []tracingpb.RecordedSpan, seenSpans map[uint64]struct{},
 ) ([]logRecordRow, error) {
 	if _, ok := seenSpans[span.SpanID]; ok {
 		return nil, errors.Errorf("duplicate span %d", span.SpanID)
@@ -2473,7 +2463,7 @@ func getMessagesForSubtrace(
 			allLogs = append(allLogs,
 				logRecordRow{
 					timestamp: logTime,
-					msg:       span.Logs[i].Msg().StripMarkers(),
+					msg:       span.Logs[i].Msg(),
 					span:      span,
 					// Add 1 to the index to account for the first dummy message in a
 					// span.
@@ -2602,7 +2592,7 @@ func (it *sessionDataMutatorIterator) mutator(
 // SetSessionDefaultIntSize sets the default int size for the session.
 // It is exported for use in import which is a CCL package.
 func (it *sessionDataMutatorIterator) SetSessionDefaultIntSize(size int32) {
-	it.applyOnEachMutator(func(m sessionDataMutator) {
+	it.applyForEachMutator(func(m sessionDataMutator) {
 		m.SetDefaultIntSize(size)
 	})
 }
@@ -2615,17 +2605,17 @@ func (it *sessionDataMutatorIterator) applyOnTopMutator(
 	return applyFunc(it.mutator(true /* applyCallbacks */, it.sds.Top()))
 }
 
-// applyOnEachMutator iterates over each mutator over all SessionData elements
+// applyForEachMutator iterates over each mutator over all SessionData elements
 // in the stack and applies the given function to them.
 // It is the equivalent of SET SESSION x = y.
-func (it *sessionDataMutatorIterator) applyOnEachMutator(applyFunc func(m sessionDataMutator)) {
+func (it *sessionDataMutatorIterator) applyForEachMutator(applyFunc func(m sessionDataMutator)) {
 	elems := it.sds.Elems()
 	for i, sd := range elems {
 		applyFunc(it.mutator(i == 0, sd))
 	}
 }
 
-// applyOnEachMutatorError is the same as applyOnEachMutator, but takes in a function
+// applyOnEachMutatorError is the same as applyForEachMutator, but takes in a function
 // that can return an error, erroring if any of applications error.
 func (it *sessionDataMutatorIterator) applyOnEachMutatorError(
 	applyFunc func(m sessionDataMutator) error,
@@ -2714,10 +2704,6 @@ func (m *sessionDataMutator) SetEnableSeqScan(val bool) {
 
 func (m *sessionDataMutator) SetSynchronousCommit(val bool) {
 	m.data.SynchronousCommit = val
-}
-
-func (m *sessionDataMutator) SetDisablePlanGists(val bool) {
-	m.data.DisablePlanGists = val
 }
 
 func (m *sessionDataMutator) SetDistSQLMode(val sessiondatapb.DistSQLExecMode) {
@@ -2863,6 +2849,10 @@ func (m *sessionDataMutator) SetImplicitColumnPartitioningEnabled(val bool) {
 	m.data.ImplicitColumnPartitioningEnabled = val
 }
 
+func (m *sessionDataMutator) SetDropEnumValueEnabled(val bool) {
+	m.data.DropEnumValueEnabled = val
+}
+
 func (m *sessionDataMutator) SetOverrideMultiRegionZoneConfigEnabled(val bool) {
 	m.data.OverrideMultiRegionZoneConfigEnabled = val
 }
@@ -2893,7 +2883,7 @@ func (m *sessionDataMutator) SetStreamReplicationEnabled(val bool) {
 	m.data.EnableStreamReplication = val
 }
 
-// RecordLatestSequenceVal records that value to which the session incremented
+// RecordLatestSequenceValue records that value to which the session incremented
 // a sequence.
 func (m *sessionDataMutator) RecordLatestSequenceVal(seqID uint32, val int64) {
 	m.data.SequenceState.RecordValue(seqID, val)
@@ -2946,10 +2936,6 @@ func (m *sessionDataMutator) SetExperimentalComputedColumnRewrites(val string) {
 	m.data.ExperimentalComputedColumnRewrites = val
 }
 
-func (m *sessionDataMutator) SetNullOrderedLast(b bool) {
-	m.data.NullOrderedLast = b
-}
-
 func (m *sessionDataMutator) SetPropagateInputOrdering(b bool) {
 	m.data.PropagateInputOrdering = b
 }
@@ -2972,10 +2958,6 @@ func (m *sessionDataMutator) SetTxnRowsReadErr(val int64) {
 
 func (m *sessionDataMutator) SetLargeFullScanRows(val float64) {
 	m.data.LargeFullScanRows = val
-}
-
-func (m *sessionDataMutator) SetInjectRetryErrorsEnabled(val bool) {
-	m.data.InjectRetryErrorsEnabled = val
 }
 
 // Utility functions related to scrubbing sensitive information on SQL Stats.
@@ -3061,18 +3043,6 @@ func formatStatementHideConstants(ast tree.Statement) string {
 		return ""
 	}
 	return tree.AsStringWithFlags(ast, tree.FmtHideConstants)
-}
-
-// formatStatementSummary formats the statement using tree.FmtSummary
-// and tree.FmtHideConstants. This returns a summarized version of the
-// query. It does *not* anonymize the statement, since the result will
-// still contain names and identifiers.
-func formatStatementSummary(ast tree.Statement) string {
-	if ast == nil {
-		return ""
-	}
-	fmtFlags := tree.FmtSummary | tree.FmtHideConstants
-	return tree.AsStringWithFlags(ast, fmtFlags)
 }
 
 // DescsTxn is a convenient method for running a transaction on descriptors

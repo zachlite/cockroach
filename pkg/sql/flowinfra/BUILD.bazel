@@ -17,7 +17,6 @@ go_library(
     deps = [
         "//pkg/kv",
         "//pkg/roachpb:with-mocks",
-        "//pkg/server/telemetry",
         "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/sql/catalog/colinfo",
@@ -27,7 +26,6 @@ go_library(
         "//pkg/sql/pgwire/pgcode",
         "//pkg/sql/pgwire/pgerror",
         "//pkg/sql/rowenc",
-        "//pkg/sql/sqltelemetry",
         "//pkg/sql/types",
         "//pkg/util/admission",
         "//pkg/util/cancelchecker",
@@ -41,7 +39,6 @@ go_library(
         "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_redact//:redact",
-        "@io_opentelemetry_go_otel//attribute",
     ],
 )
 

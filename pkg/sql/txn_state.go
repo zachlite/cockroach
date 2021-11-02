@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -27,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // txnState contains state associated with an ongoing SQL txn; it constitutes
@@ -94,9 +92,6 @@ type txnState struct {
 	// through the use of AS OF SYSTEM TIME.
 	isHistorical bool
 
-	// lastEpoch is the last observed epoch in the current txn.
-	lastEpoch enginepb.TxnEpoch
-
 	// mon tracks txn-bound objects like the running state of
 	// planNode in the midst of performing a computation.
 	mon *mon.BytesMonitor
@@ -160,7 +155,6 @@ func (ts *txnState) resetForNewSQLTxn(
 	// Reset state vars to defaults.
 	ts.sqlTimestamp = sqlTimestamp
 	ts.isHistorical = false
-	ts.lastEpoch = 0
 
 	// Create a context for this transaction. It will include a root span that
 	// will contain everything executed as part of the upcoming SQL txn, including
@@ -180,7 +174,7 @@ func (ts *txnState) resetForNewSQLTxn(
 		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer)
 	}
 	if txnType == implicitTxn {
-		sp.SetTag("implicit", attribute.StringValue("true"))
+		sp.SetTag("implicit", "true")
 	}
 
 	if !alreadyRecording && (duration > 0) {

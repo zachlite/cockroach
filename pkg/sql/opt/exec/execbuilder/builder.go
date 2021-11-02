@@ -92,8 +92,8 @@ type Builder struct {
 	ContainsFullTableScan bool
 
 	// ContainsFullIndexScan is set to true if the statement contains an
-	// unconstrained non-partial secondary index scan. This could be a full scan
-	// of any cardinality.
+	// unconstrained secondary index scan. This could be a full scan of any
+	// cardinality.
 	ContainsFullIndexScan bool
 
 	// ContainsLargeFullTableScan is set to true if the statement contains an
@@ -102,7 +102,7 @@ type Builder struct {
 	ContainsLargeFullTableScan bool
 
 	// ContainsLargeFullIndexScan is set to true if the statement contains an
-	// unconstrained non-partial secondary index scan estimated to read more than
+	// unconstrained secondary index scan estimated to read more than
 	// large_full_scan_rows (or without without available stats).
 	ContainsLargeFullIndexScan bool
 
@@ -172,9 +172,7 @@ func (b *Builder) Build() (_ exec.Plan, err error) {
 	if err != nil {
 		return nil, err
 	}
-
-	rootRowCount := int64(b.e.(memo.RelExpr).Relational().Stats.RowCountIfAvailable())
-	return b.factory.ConstructPlan(plan.root, b.subqueries, b.cascades, b.checks, rootRowCount)
+	return b.factory.ConstructPlan(plan.root, b.subqueries, b.cascades, b.checks)
 }
 
 func (b *Builder) build(e opt.Expr) (_ execPlan, err error) {

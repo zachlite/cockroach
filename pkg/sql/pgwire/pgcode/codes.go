@@ -380,10 +380,10 @@ var (
 	// internally on a connection between different Cockroach nodes.
 	InternalConnectionFailure = MakeCode("58C01")
 
-	// Class XC - cockroach extension.
+	// Class CDB - cockroach extension.
 	// CockroachDB distributed system related errors.
 
 	// UnsatisfiableBoundedStaleness signals that the bounded staleness query
 	// cannot be satisfied.
-	UnsatisfiableBoundedStaleness = MakeCode("XCUBS")
+	UnsatisfiableBoundedStaleness = MakeCode("CDB00")
 )

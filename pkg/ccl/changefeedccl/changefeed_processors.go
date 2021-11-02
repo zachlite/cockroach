@@ -159,7 +159,7 @@ func newChangeAggregatorProcessor(
 	}
 
 	var err error
-	if ca.encoder, err = getEncoder(ca.spec.Feed.Opts, ca.spec.Feed.Targets); err != nil {
+	if ca.encoder, err = getEncoder(ctx, ca.spec.Feed.Opts, ca.spec.Feed.Targets); err != nil {
 		return nil, err
 	}
 
@@ -281,7 +281,7 @@ func (ca *changeAggregator) startKVFeed(
 	cfg := ca.flowCtx.Cfg
 	buf := kvevent.NewThrottlingBuffer(
 		kvevent.NewMemBuffer(ca.kvFeedMemMon.MakeBoundAccount(), &cfg.Settings.SV, &ca.metrics.KVFeedMetrics),
-		cdcutils.NodeLevelThrottler(&cfg.Settings.SV, &ca.metrics.ThrottleMetrics))
+		cdcutils.NodeLevelThrottler(&cfg.Settings.SV))
 
 	// KVFeed takes ownership of the kvevent.Writer portion of the buffer, while
 	// we return the kvevent.Reader part to the caller.
@@ -1040,7 +1040,7 @@ func newChangeFrontierProcessor(
 		cf.freqEmitResolved = emitNoResolved
 	}
 
-	if cf.encoder, err = getEncoder(spec.Feed.Opts, spec.Feed.Targets); err != nil {
+	if cf.encoder, err = getEncoder(ctx, spec.Feed.Opts, spec.Feed.Targets); err != nil {
 		return nil, err
 	}
 

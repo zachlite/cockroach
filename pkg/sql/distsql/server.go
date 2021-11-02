@@ -300,10 +300,8 @@ func (ds *ServerImpl) setupFlow(
 		// the whole evalContext, but that isn't free, so we choose to restore
 		// the original state in order to avoid performance regressions.
 		origMon := evalCtx.Mon
-		origTxn := evalCtx.Txn
 		onFlowCleanup = func() {
 			evalCtx.Mon = origMon
-			evalCtx.Txn = origTxn
 		}
 		evalCtx.Mon = monitor
 		if localState.HasConcurrency {
@@ -312,9 +310,6 @@ func (ds *ServerImpl) setupFlow(
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			// Update the Txn field early (before f.SetTxn() below) since some
-			// processors capture the field in their constructor (see #41992).
-			evalCtx.Txn = leafTxn
 		}
 	} else {
 		if localState.IsLocal {
@@ -349,22 +344,20 @@ func (ds *ServerImpl) setupFlow(
 			ReCache:          ds.regexpCache,
 			Mon:              monitor,
 			Locality:         ds.ServerConfig.Locality,
-			Tracer:           ds.ServerConfig.Tracer,
 			// Most processors will override this Context with their own context in
 			// ProcessorBase. StartInternal().
-			Context:                   ctx,
-			Planner:                   &faketreeeval.DummyEvalPlanner{},
-			PrivilegedAccessor:        &faketreeeval.DummyPrivilegedAccessor{},
-			SessionAccessor:           &faketreeeval.DummySessionAccessor{},
-			ClientNoticeSender:        &faketreeeval.DummyClientNoticeSender{},
-			Sequence:                  &faketreeeval.DummySequenceOperators{},
-			Tenant:                    &faketreeeval.DummyTenantOperator{},
-			Regions:                   &faketreeeval.DummyRegionOperator{},
-			InternalExecutor:          ie,
-			Txn:                       leafTxn,
-			SQLLivenessReader:         ds.ServerConfig.SQLLivenessReader,
-			SQLStatsController:        ds.ServerConfig.SQLStatsController,
-			IndexUsageStatsController: ds.ServerConfig.IndexUsageStatsController,
+			Context:            ctx,
+			Planner:            &faketreeeval.DummyEvalPlanner{},
+			PrivilegedAccessor: &faketreeeval.DummyPrivilegedAccessor{},
+			SessionAccessor:    &faketreeeval.DummySessionAccessor{},
+			ClientNoticeSender: &faketreeeval.DummyClientNoticeSender{},
+			Sequence:           &faketreeeval.DummySequenceOperators{},
+			Tenant:             &faketreeeval.DummyTenantOperator{},
+			Regions:            &faketreeeval.DummyRegionOperator{},
+			InternalExecutor:   ie,
+			Txn:                leafTxn,
+			SQLLivenessReader:  ds.ServerConfig.SQLLivenessReader,
+			SQLStatsController: ds.ServerConfig.SQLStatsController,
 		}
 		evalCtx.SetStmtTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.StmtTimestampNanos))
 		evalCtx.SetTxnTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.TxnTimestampNanos))
@@ -466,7 +459,6 @@ func (ds *ServerImpl) newFlowContext(
 		DiskMonitor: execinfra.NewMonitor(
 			ctx, ds.ParentDiskMonitor, "flow-disk-monitor",
 		),
-		PreserveFlowSpecs: localState.PreserveFlowSpecs,
 	}
 
 	if localState.IsLocal && localState.Collection != nil {
@@ -534,10 +526,6 @@ type LocalState struct {
 	// LocalProcs is an array of planNodeToRowSource processors. It's in order and
 	// will be indexed into by the RowSourceIdx field in LocalPlanNodeSpec.
 	LocalProcs []execinfra.LocalProcessor
-
-	// PreserveFlowSpecs is true when the flow setup code needs to be careful
-	// when modifying the specifications of processors.
-	PreserveFlowSpecs bool
 }
 
 // MustUseLeafTxn returns true if a LeafTxn must be used. It is valid to call

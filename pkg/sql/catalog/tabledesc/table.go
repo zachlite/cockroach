@@ -227,12 +227,13 @@ func GetShardColumnName(colNames []string, buckets int32) string {
 	)
 }
 
-// GetConstraintInfo implements the TableDescriptor interface.
+// GetConstraintInfo returns a summary of all constraints on the table.
 func (desc *wrapper) GetConstraintInfo() (map[string]descpb.ConstraintDetail, error) {
 	return desc.collectConstraintInfo(nil)
 }
 
-// GetConstraintInfoWithLookup implements the TableDescriptor interface.
+// GetConstraintInfoWithLookup returns a summary of all constraints on the
+// table using the provided function to fetch a TableDescriptor from an ID.
 func (desc *wrapper) GetConstraintInfoWithLookup(
 	tableLookup catalog.TableLookupFn,
 ) (map[string]descpb.ConstraintDetail, error) {
@@ -495,48 +496,19 @@ func FindPublicColumnWithID(
 	return col, nil
 }
 
-// FindInvertedColumn returns a catalog.Column matching the inverted column
+// FindVirtualColumn returns a catalog.Column matching the virtual column
 // descriptor in `spec` if not nil, nil otherwise.
-func FindInvertedColumn(
-	desc catalog.TableDescriptor, invertedColDesc *descpb.ColumnDescriptor,
+func FindVirtualColumn(
+	desc catalog.TableDescriptor, virtualColDesc *descpb.ColumnDescriptor,
 ) catalog.Column {
-	if invertedColDesc == nil {
+	if virtualColDesc == nil {
 		return nil
 	}
-	found, err := desc.FindColumnWithID(invertedColDesc.ID)
+	found, err := desc.FindColumnWithID(virtualColDesc.ID)
 	if err != nil {
 		panic(errors.HandleAsAssertionFailure(err))
 	}
-	invertedColumn := found.DeepCopy()
-	*invertedColumn.ColumnDesc() = *invertedColDesc
-	return invertedColumn
-}
-
-// PrimaryKeyString returns the pretty-printed primary key declaration for a
-// table descriptor.
-func PrimaryKeyString(desc catalog.TableDescriptor) string {
-	primaryIdx := desc.GetPrimaryIndex()
-	f := tree.NewFmtCtx(tree.FmtSimple)
-	f.WriteString("PRIMARY KEY (")
-	startIdx := primaryIdx.ExplicitColumnStartIdx()
-	for i, n := startIdx, primaryIdx.NumKeyColumns(); i < n; i++ {
-		if i > startIdx {
-			f.WriteString(", ")
-		}
-		// Primary key columns cannot be inaccessible computed columns, so it is
-		// safe to always print the column name. For secondary indexes, we have
-		// to print inaccessible computed column expressions. See
-		// catformat.FormatIndexElements.
-		name := primaryIdx.GetKeyColumnName(i)
-		f.FormatNameP(&name)
-		f.WriteByte(' ')
-		f.WriteString(primaryIdx.GetKeyColumnDirection(i).String())
-	}
-	f.WriteByte(')')
-	if primaryIdx.IsSharded() {
-		f.WriteString(
-			fmt.Sprintf(" USING HASH WITH BUCKET_COUNT = %v", primaryIdx.GetSharded().ShardBuckets),
-		)
-	}
-	return f.CloseAndGetString()
+	virtualColumn := found.DeepCopy()
+	*virtualColumn.ColumnDesc() = *virtualColDesc
+	return virtualColumn
 }

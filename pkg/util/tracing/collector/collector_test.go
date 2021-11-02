@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/collector"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/require"
 )
@@ -64,7 +63,7 @@ func newTestStructured(i string) *testStructuredImpl {
 // root.child.remotechilddone		<-- traceID1
 // root2												<-- traceID2
 // 		root2.child								<-- traceID2
-func setupTraces(t1, t2 *tracing.Tracer) (tracingpb.TraceID, tracingpb.TraceID, func()) {
+func setupTraces(t1, t2 *tracing.Tracer) (uint64, uint64, func()) {
 	// Start a root span on "node 1".
 	root := t1.StartSpan("root", tracing.WithForceRealSpan())
 	root.SetVerbose(true)
@@ -121,8 +120,8 @@ func TestTracingCollectorGetSpanRecordings(t *testing.T) {
 	tc := testcluster.StartTestCluster(t, 2 /* nodes */, args)
 	defer tc.Stopper().Stop(ctx)
 
-	localTracer := tc.Server(0).TracerI().(*tracing.Tracer)
-	remoteTracer := tc.Server(1).TracerI().(*tracing.Tracer)
+	localTracer := tc.Server(0).Tracer().(*tracing.Tracer)
+	remoteTracer := tc.Server(1).Tracer().(*tracing.Tracer)
 
 	traceCollector := collector.New(
 		tc.Server(0).NodeDialer().(*nodedialer.Dialer),
@@ -130,7 +129,7 @@ func TestTracingCollectorGetSpanRecordings(t *testing.T) {
 	localTraceID, remoteTraceID, cleanup := setupTraces(localTracer, remoteTracer)
 	defer cleanup()
 
-	getSpansFromAllNodes := func(traceID tracingpb.TraceID) map[roachpb.NodeID][]tracing.Recording {
+	getSpansFromAllNodes := func(traceID uint64) map[roachpb.NodeID][]tracing.Recording {
 		res := make(map[roachpb.NodeID][]tracing.Recording)
 
 		var iter *collector.Iterator
@@ -148,7 +147,7 @@ func TestTracingCollectorGetSpanRecordings(t *testing.T) {
 		nodeRecordings := getSpansFromAllNodes(localTraceID)
 		node1Recordings := nodeRecordings[roachpb.NodeID(1)]
 		require.Equal(t, 1, len(node1Recordings))
-		require.NoError(t, tracing.CheckRecordedSpans(node1Recordings[0], `
+		require.NoError(t, tracing.TestingCheckRecordedSpans(node1Recordings[0], `
 				span: root
 					tags: _unfinished=1 _verbose=1
 					event: structured=root
@@ -159,7 +158,7 @@ func TestTracingCollectorGetSpanRecordings(t *testing.T) {
 	`))
 		node2Recordings := nodeRecordings[roachpb.NodeID(2)]
 		require.Equal(t, 1, len(node2Recordings))
-		require.NoError(t, tracing.CheckRecordedSpans(node2Recordings[0], `
+		require.NoError(t, tracing.TestingCheckRecordedSpans(node2Recordings[0], `
 				span: root.child.remotechild
 					tags: _unfinished=1 _verbose=1
 					event: structured=root.child.remotechild
@@ -172,18 +171,18 @@ func TestTracingCollectorGetSpanRecordings(t *testing.T) {
 		nodeRecordings := getSpansFromAllNodes(remoteTraceID)
 		node1Recordings := nodeRecordings[roachpb.NodeID(1)]
 		require.Equal(t, 2, len(node1Recordings))
-		require.NoError(t, tracing.CheckRecordedSpans(node1Recordings[0], `
+		require.NoError(t, tracing.TestingCheckRecordedSpans(node1Recordings[0], `
 				span: root2.child.remotechild
 					tags: _unfinished=1 _verbose=1
 	`))
-		require.NoError(t, tracing.CheckRecordedSpans(node1Recordings[1], `
+		require.NoError(t, tracing.TestingCheckRecordedSpans(node1Recordings[1], `
 				span: root2.child.remotechild2
 					tags: _unfinished=1 _verbose=1
 	`))
 
 		node2Recordings := nodeRecordings[roachpb.NodeID(2)]
 		require.Equal(t, 1, len(node2Recordings))
-		require.NoError(t, tracing.CheckRecordedSpans(node2Recordings[0], `
+		require.NoError(t, tracing.TestingCheckRecordedSpans(node2Recordings[0], `
 				span: root2
 					tags: _unfinished=1 _verbose=1
 					event: structured=root2

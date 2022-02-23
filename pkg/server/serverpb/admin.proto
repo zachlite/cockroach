@@ -475,6 +475,7 @@ message DrainResponse {
 message DecommissionStatusRequest {
   repeated int32 node_ids = 1 [(gogoproto.customname) = "NodeIDs",
                                (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
+  bool verbose = 2;
 }
 
 // DecommissionRequest requests the server to set the membership status on
@@ -498,6 +499,9 @@ message DecommissionStatusResponse {
     // The membership status of the given node.
     kv.kvserver.liveness.livenesspb.MembershipStatus membership = 4;
     bool draining = 5;
+    repeated int64 rangeIDs = 6 [ (gogoproto.customname) = "RangeIDs",
+                                     (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.RangeID",
+                                     (gogoproto.nullable) = true];
   }
   // Status of all affected nodes.
   repeated Status status = 2 [(gogoproto.nullable) = false];

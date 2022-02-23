@@ -12,6 +12,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -493,6 +494,10 @@ func runDecommissionNodeImpl(
 		for _, status := range resp.Status {
 			anyActive = anyActive || status.Membership.Active()
 			replicaCount += status.ReplicaCount
+
+			// print all range ids that are on this node.
+			ids, _ := json.Marshal(status.RangeIDs)
+			fmt.Fprintf(stderr, "Ranges on node: %s\n", string(ids))
 		}
 
 		if !anyActive && replicaCount == 0 {

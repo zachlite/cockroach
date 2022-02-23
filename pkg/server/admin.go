@@ -2307,11 +2307,14 @@ func (s *adminServer) decommissionStatusHelper(
 	// Compute the replica counts for the target nodes only. This map doubles as
 	// a lookup table to check whether we care about a given node.
 	var replicaCounts map[roachpb.NodeID]int64
+	var replicasRemaining map[roachpb.NodeID][]roachpb.RangeID
 	if err := s.server.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		const pageSize = 10000
 		replicaCounts = make(map[roachpb.NodeID]int64)
+		replicasRemaining = make(map[roachpb.NodeID][]roachpb.RangeID)
 		for _, nodeID := range nodeIDs {
 			replicaCounts[nodeID] = 0
+			replicasRemaining[nodeID] = make([]roachpb.RangeID, 0)
 		}
 		return txn.Iterate(ctx, keys.Meta2Prefix, keys.MetaMax, pageSize,
 			func(rows []kv.KeyValue) error {
@@ -2323,6 +2326,7 @@ func (s *adminServer) decommissionStatusHelper(
 					for _, r := range rangeDesc.Replicas().Descriptors() {
 						if _, ok := replicaCounts[r.NodeID]; ok {
 							replicaCounts[r.NodeID]++
+							replicasRemaining[r.NodeID] = append(replicasRemaining[r.NodeID], rangeDesc.GetRangeID())
 						}
 					}
 				}
@@ -2357,11 +2361,18 @@ func (s *adminServer) decommissionStatusHelper(
 		if !ok {
 			return nil, errors.Newf("unable to get liveness for %d", nodeID)
 		}
+
+		var rangeIDs []roachpb.RangeID
+		if req.Verbose {
+			rangeIDs = replicasRemaining[l.NodeID]
+		}
+
 		nodeResp := serverpb.DecommissionStatusResponse_Status{
 			NodeID:       l.NodeID,
 			ReplicaCount: replicaCounts[l.NodeID],
 			Membership:   l.Membership,
 			Draining:     l.Draining,
+			RangeIDs: rangeIDs,
 		}
 		if l.IsLive(s.server.clock.Now().GoTime()) {
 			nodeResp.IsLive = true
@@ -2405,7 +2416,7 @@ func (s *adminServer) Decommission(
 		return &serverpb.DecommissionStatusResponse{}, nil
 	}
 
-	return s.DecommissionStatus(ctx, &serverpb.DecommissionStatusRequest{NodeIDs: nodeIDs})
+	return s.DecommissionStatus(ctx, &serverpb.DecommissionStatusRequest{NodeIDs: nodeIDs, Verbose: true})
 }
 
 // DataDistribution returns a count of replicas on each node for each table.

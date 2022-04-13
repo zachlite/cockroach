@@ -117,6 +117,11 @@ export const refreshDatabaseDetails = databaseDetailsReducerObj.refresh;
 
 export const refreshHotRanges = hotRangesReducerObj.refresh;
 
+export const historicalHotRangesReducerObj = new CachedDataReducer(
+  api.getHistoricalHotRanges,
+  "historicalHotRanges",
+);
+
 // NOTE: We encode the db and table name so we can combine them as a string.
 // TODO(maxlang): there's probably a nicer way to do this
 export function generateTableID(db: string, table: string) {
@@ -414,6 +419,9 @@ export interface APIReducersState {
   >;
   userSQLRoles: CachedDataReducerState<api.UserSQLRolesResponseMessage>;
   hotRanges: PaginatedCachedDataReducerState<api.HotRangesV2ResponseMessage>;
+  historicalHotRanges: CachedDataReducerState<
+    api.HistoricalHotRangeResponseMessage
+  >;
 }
 
 export const apiReducersReducer = combineReducers<APIReducersState>({
@@ -453,6 +461,8 @@ export const apiReducersReducer = combineReducers<APIReducersState>({
     statementDiagnosticsReportsReducerObj.reducer,
   [userSQLRolesReducerObj.actionNamespace]: userSQLRolesReducerObj.reducer,
   [hotRangesReducerObj.actionNamespace]: hotRangesReducerObj.reducer,
+  [historicalHotRangesReducerObj.actionNamespace]:
+    historicalHotRangesReducerObj.reducer,
 });
 
 export { CachedDataReducerState, KeyedCachedDataReducerState };

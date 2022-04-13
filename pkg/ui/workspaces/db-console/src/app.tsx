@@ -78,6 +78,7 @@ import ActiveStatementDetails from "./views/statements/activeStatementDetailsCon
 import ActiveTransactionDetails from "./views/transactions/activeTransactionDetailsConnected";
 import "styl/app.styl";
 import { Tracez } from "src/views/tracez/tracez";
+import { ConnectedHistoricalHotRangeContainer } from "oss/src/views/historicalHotRanges";
 
 // NOTE: If you are adding a new path to the router, and that path contains any
 // components that are personally identifying information, you MUST update the
@@ -290,6 +291,11 @@ export const App: React.FC<AppProps> = (props: AppProps) => {
                 <Route exact path="/debug/tracez" component={Tracez} />
                 <Route exact path="/debug/redux" component={ReduxDebug} />
                 <Route exact path="/debug/chart" component={CustomChart} />
+                <Route
+                  exact
+                  path="/debug/hhr"
+                  component={ConnectedHistoricalHotRangeContainer}
+                />
                 <Route
                   exact
                   path="/debug/enqueue_range"

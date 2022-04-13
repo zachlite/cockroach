@@ -154,6 +154,10 @@ export type UserSQLRolesResponseMessage = protos.cockroach.server.serverpb.UserS
 
 export type HotRangesRequestMessage = protos.cockroach.server.serverpb.HotRangesRequest;
 export type HotRangesV2ResponseMessage = protos.cockroach.server.serverpb.HotRangesResponseV2;
+
+export type HistoricalHotRangeRequestMessage = protos.cockroach.server.serverpb.HHRRequest;
+export type HistoricalHotRangeResponseMessage = protos.cockroach.server.serverpb.HHRResponse;
+
 export type ListTracingSnapshotsRequestMessage = protos.cockroach.server.serverpb.ListTracingSnapshotsRequest;
 export type ListTracingSnapshotsResponseMessage = protos.cockroach.server.serverpb.ListTracingSnapshotsResponse;
 
@@ -870,6 +874,18 @@ export function getHotRanges(
   return timeoutFetch(
     serverpb.HotRangesResponseV2,
     `${STATUS_PREFIX}/v2/hotranges`,
+    req as any,
+    timeout,
+  );
+}
+
+export function getHistoricalHotRanges(
+  req: HistoricalHotRangeRequestMessage,
+  timeout?: moment.Duration,
+): Promise<HistoricalHotRangeResponseMessage> {
+  return timeoutFetch(
+    serverpb.HHRResponse,
+    `${STATUS_PREFIX}/hhr`,
     req as any,
     timeout,
   );

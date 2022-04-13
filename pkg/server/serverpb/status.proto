@@ -1291,6 +1291,14 @@ message HotRangesResponse {
   ];
 }
 
+message HHRRequest {
+  int32 foo = 1;
+}
+
+message HHRResponse {
+  int32 foo = 1;
+}
+
 // HotRangesResponseV2 is a response payload returned by `HotRangesV2` service.
 message HotRangesResponseV2 {
   // HotRange message describes a single hot range, ie its QPS, node ID it belongs to, etc.
@@ -2045,6 +2053,12 @@ service Status {
     option (google.api.http) = {
       post : "/_status/v2/hotranges"
       body : "*"
+    };
+  }
+
+  rpc RequestHHR(HHRRequest) returns (HHRResponse) {
+    option (google.api.http) = {
+      get: "/_status/hhr"
     };
   }
 

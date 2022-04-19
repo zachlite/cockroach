@@ -689,7 +689,7 @@ select * from crdb_internal.node_inflight_trace_spans
 query T
 select regexp_replace(crdb_internal.node_executable_version()::string, '(-\d+)?$', '');
 ----
-21.2
+22.1
 
 user root
 

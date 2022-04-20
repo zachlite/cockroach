@@ -18,7 +18,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -2460,6 +2462,56 @@ func (s *statusServer) localHotRanges(ctx context.Context) serverpb.HotRangesRes
 	}
 	return resp
 }
+
+
+func fakeKey() string {
+
+	keyLength := 16
+	alphabet := "ab" // limit key entropy to 2 ^ 16 = 65536
+	var strBuilder strings.Builder
+
+	for i := 0; i < keyLength; i++ {
+		char := alphabet[rand.Intn(len(alphabet))]
+		strBuilder.WriteString(string(char))
+	}
+
+	return strBuilder.String()
+}
+
+func (s *statusServer) RequestHHR(ctx context.Context, req *serverpb.HHRRequest) (*serverpb.HHRResponse, error) {
+	// fake response
+
+	response := &serverpb.HHRResponse{}
+	nSamples := 1344
+	nRanges := 1000
+
+	for i := 0; i < nSamples; i++ {
+
+		keys := make([]string, nRanges)
+		values := make([]float32, nRanges)
+
+
+		for r := 0; r < nRanges; r++ {
+			keys[r] = fakeKey()
+			values[r] = rand.Float32()
+		}
+
+		sample := serverpb.HHRResponse_HHRSample{
+			Timestamp: &hlc.Timestamp{
+				WallTime:  0,
+				Logical:   0,
+				Synthetic: false,
+			},
+			StartKey:  keys,
+			Qps:       values,
+		}
+
+		response.Samples = append(response.Samples, &sample)
+	}
+
+	return response, nil
+}
+
 
 // Range returns rangeInfos for all nodes in the cluster about a specific
 // range. It also returns the range history for that range as well.

@@ -1,8 +1,16 @@
-import React, { createRef } from "react";
+import React from "react";
 import { connect } from "react-redux";
+import { Dispatch } from "redux";
 import { AdminUIState } from "oss/src/redux/state";
-import { HistoricalHotRangeResponseMessage } from "oss/src/util/api";
-import _, { isEqual, sample, sampleSize } from "lodash";
+import {
+  getHistoricalHotRanges,
+  HistoricalHotRangeResponseMessage,
+} from "oss/src/util/api";
+import _, { isEqual } from "lodash";
+import { refreshHHR } from "oss/src/redux/apiReducers";
+import { cockroach } from "src/js/protos";
+const HHRRequest = cockroach.server.serverpb.HHRRequest;
+const Timestamp = cockroach.util.hlc.Timestamp;
 
 // a few things to implement:
 // 1) a connected container
@@ -19,22 +27,14 @@ import _, { isEqual, sample, sampleSize } from "lodash";
 // in the future, we might have metrics per key.
 // this would then become a "key visualizer"
 interface RangeVisualizerProps {
-  samples: {
-    timestamp: number;
-
-    // keys are sorted in ascending order.
-    keys: string[];
-    values: number[];
-    // ranges: { startKey: string; qps: number }[];
-  }[];
+  samples: HistoricalHotRangeResponseMessage["samples"];
 }
 
 // for now, hardcode canvas width and height
 // TODO: these values will not accomodate 2 weeks worth of samples (x)
 // and 1000 ranges (y). Cell widths and heights respectively will be less than 1px.
 const CanvasWidth = 1344;
-const CanvasHeight = 729;
-
+const CanvasHeight = 4096;
 
 const ColorCold = 0;
 
@@ -73,6 +73,29 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
     }
   }
 
+  drawSample(
+    i: number,
+    buffer: Uint8ClampedArray,
+    keyspace: any,
+    keysForSample: any,
+    bucketWidth: number,
+    hottestValue: number
+  ) {
+    let keyIdx = 0;
+    let bucketIdx = 0;
+
+    for (let key of keyspace) {
+      if (keysForSample[i].has(key)) {
+        const colorValue = this.props.samples[i].qps[bucketIdx] / hottestValue;
+        this.drawCell(buffer, i, keyIdx, colorValue, bucketWidth);
+        bucketIdx++;
+      } else {
+        this.drawCell(buffer, i, keyIdx, ColorCold, bucketWidth);
+      }
+      keyIdx++;
+    }
+  }
+
   draw() {
     const start = window.performance.now();
     const keyspace = new Set<string>();
@@ -81,22 +104,22 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
 
     for (let i = 0; i < this.props.samples.length; i++) {
       const sample = this.props.samples[i];
-      for (const key of sample.keys) {
+      for (const key of sample.start_key) {
         keyspace.add(key);
       }
 
       // convert list of keys into a set for later O(1) lookups.
-      keysForSample[i] = new Set(sample.keys);
+      keysForSample[i] = new Set(sample.start_key);
 
       // find hottest value
-      hottestValue = Math.max(hottestValue, ...sample.values);
+      hottestValue = Math.max(hottestValue, ...sample.qps);
     }
 
     console.log(keyspace);
     console.log("hottest value: ", hottestValue);
 
     const bucketWidth = Math.floor(CanvasWidth / this.props.samples.length);
-
+    console.log("bucket width: ", bucketWidth);
 
     const canvasBuffer = this.drawContext.getImageData(
       0,
@@ -108,24 +131,19 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
     const canvasBufferData = canvasBuffer.data;
 
     for (let i = 0; i < this.props.samples.length; i++) {
-      let keyIdx = 0;
-      let bucketIdx = 0;
-
-      for (let key of keyspace) {
-        if (keysForSample[i].has(key)) {
-          const colorValue = this.props.samples[i].values[bucketIdx] / hottestValue
-          this.drawCell(canvasBufferData, i, keyIdx, colorValue, bucketWidth);
-          bucketIdx++;
-        } else {
-          this.drawCell(canvasBufferData, i, keyIdx, ColorCold, bucketWidth);
-        }
-        keyIdx++;
-      }
+      this.drawSample(
+        i,
+        canvasBufferData,
+        keyspace,
+        keysForSample,
+        bucketWidth,
+        hottestValue
+      );
     }
 
     this.drawContext.putImageData(canvasBuffer, 0, 0);
     const end = window.performance.now();
-    alert(end-start)
+    console.log("Draw time: ", end - start);
   }
 
   componentDidMount() {
@@ -140,48 +158,46 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
     this.draw();
   }
 
-  componentDidUpdate(prevProps: RangeVisualizerProps) {
-    const previousTimestamps = prevProps.samples.map(
-      (sample) => sample.timestamp
-    );
-    const currentTimestamps = this.props.samples.map(
-      (sample) => sample.timestamp
-    );
-
-    if (!isEqual(previousTimestamps, currentTimestamps)) {
-      this.draw();
-    }
+  componentDidUpdate() {
+    this.drawContext.clearRect(0, 0, CanvasWidth, CanvasHeight);
+    this.draw();
   }
 
-  shouldComponentUpdate() {
-    return false;
-  }
+  // shouldComponentUpdate(nextProps: RangeVisualizerProps) {
+  //   const currentTimestamps = this.props.samples.map(
+  //     (sample) => sample.timestamp
+  //   );
+
+  //   const nextTimestamps = nextProps.samples.map((sample) => sample.timestamp);
+
+  //   if (!isEqual(nextTimestamps, currentTimestamps)) {
+  //     this.draw();
+  //   }
+
+  //   return false;
+  // }
 
   render() {
     console.warn("range visualizer render");
 
     return (
-      <canvas
-        width={CanvasWidth}
-        height={CanvasHeight}
-        ref={this.canvasRef}
-      />
+      <canvas width={CanvasWidth} height={CanvasHeight} ref={this.canvasRef} />
     );
   }
 }
 
 const alphabet = "abcdefghijklmnopqrstuvwxyz";
 
-function randn_bm():number {
-  let u = 0, v = 0;
-  while(u === 0) u = Math.random(); //Converting [0,1) to (0,1)
-  while(v === 0) v = Math.random();
-  let num = Math.sqrt( -2.0 * Math.log( u ) ) * Math.cos( 2.0 * Math.PI * v );
+function randn_bm(): number {
+  let u = 0,
+    v = 0;
+  while (u === 0) u = Math.random(); //Converting [0,1) to (0,1)
+  while (v === 0) v = Math.random();
+  let num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
   num = num / 10.0 + 0.5; // Translate to 0 -> 1
-  if (num > 1 || num < 0) return randn_bm() // resample between 0 and 1
-  return num
+  if (num > 1 || num < 0) return randn_bm(); // resample between 0 and 1
+  return num;
 }
-
 
 function getFakeKey() {
   let key = "";
@@ -191,9 +207,25 @@ function getFakeKey() {
   }
   return key;
 }
-class HistoricalHotRangesContainer extends React.Component<{
+
+interface HistoricalHotRangesContainerProps {
   hhrData: HistoricalHotRangeResponseMessage;
-}> {
+  fetchHHR: () => void;
+}
+
+interface HistoricalHotRangesContainerState {
+  hhrData: HistoricalHotRangeResponseMessage["samples"];
+}
+
+class HistoricalHotRangesContainer extends React.Component<
+  HistoricalHotRangesContainerProps,
+  HistoricalHotRangesContainerState
+> {
+  constructor(props: HistoricalHotRangesContainerProps) {
+    super(props);
+    this.state = { hhrData: [] };
+  }
+
   componentDidMount() {
     // request HHR for initial time window
     // the initial state dictates the initial time window.
@@ -205,10 +237,10 @@ class HistoricalHotRangesContainer extends React.Component<{
     // all the way to 1344 samples (2 weeks)
     const Hour = 4;
     const Day = Hour * 24;
-    const Week = Day * 7
+    const Week = Day * 7;
     const Full = Week * 2;
-    
-    const NSamples = Full;
+
+    const NSamples = Hour;
 
     const samples = [];
 
@@ -239,10 +271,66 @@ class HistoricalHotRangesContainer extends React.Component<{
   }
 
   render() {
-    console.log("hhr", this.props.hhrData);
-    return <RangeVisualizer samples={this.makeFakeHHRData()} />;
+    console.log("HHR Container ReRender");
+
+    return (
+      <>
+        <button
+          onClick={async () => {
+            // test 1:
+            // do this 56 times synchronously, where each samples represents 6 hours
+            // (24 samples per response)
+
+            // test 2:
+            // do this 2 times synchronously, where each sample represents 168 hours (1 week)
+            // 672 samples per response -> will need to update fake response
+
+            let hhr = [] as any[];
+            const start = window.performance.now();
+            for (let i = 0; i < 1; i++) {
+              const res = await getHistoricalHotRanges(
+                HHRRequest.create({
+                  tMin: Timestamp.create(),
+                  tMax: Timestamp.create(),
+                })
+              );
+
+              console.log("done with request ", i);
+              for (const sample of res.samples) {
+                hhr.push(sample);
+              }
+            }
+
+            const end = window.performance.now();
+            console.log("network time: ", end - start);
+
+            // update state to trigger a re-render.
+            this.setState({ hhrData: hhr });
+          }}
+        >
+          Fetch stuff
+        </button>
+        <RangeVisualizer samples={this.state.hhrData} />
+      </>
+    );
   }
 }
+
+// historical data is requested in batches
+// a request is constructed to ask the server for samples within a timeframe
+// because of this, it is the client's responsibility to request a responsible amount of data at once.
+// long term, is this a bad idea? should the API provide bandwidth safeguard?
+
+// AdminUIState will hold HHR data keyed by timestamp.
+// at most 1344 keys for full 2 week sample.
+// this isn't too big to filter.
+
+// A use case I want to optimize for:
+// If I expand the time window from 1 hour to 6 hours, I should only need to download 5 hours worth of new data.
+
+// a cached data reducer is only going to invalidate the cache after a certain time period
+// So, I need to deal with data expiry later.
+// the thing I need to do right now is send 56 requests for data, with each window being 6 hours.
 
 export const ConnectedHistoricalHotRangeContainer = connect(
   (state: AdminUIState) => {
@@ -250,5 +338,17 @@ export const ConnectedHistoricalHotRangeContainer = connect(
       hhrData: state.cachedData.historicalHotRanges.data,
     };
   },
-  {}
+  (dispatch: Dispatch) => {
+    return {
+      fetchHHR: () =>
+        dispatch(
+          refreshHHR(
+            HHRRequest.create({
+              tMin: Timestamp.create(),
+              tMax: Timestamp.create(),
+            })
+          ) as any
+        ),
+    };
+  }
 )(HistoricalHotRangesContainer);

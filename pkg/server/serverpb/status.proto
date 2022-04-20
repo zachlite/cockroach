@@ -1291,12 +1291,23 @@ message HotRangesResponse {
   ];
 }
 
+
+// (tMin, tMax]
 message HHRRequest {
-  int32 foo = 1;
+  // start of the time window
+  util.hlc.Timestamp tMin = 1;
+
+  // end of the time window, inclusive.
+  util.hlc.Timestamp tMax = 2;
 }
 
 message HHRResponse {
-  int32 foo = 1;
+  message HHRSample {
+    util.hlc.Timestamp timestamp = 1;
+    repeated string start_key = 2;
+    repeated float qps = 3;
+  }
+  repeated HHRSample samples = 1;
 }
 
 // HotRangesResponseV2 is a response payload returned by `HotRangesV2` service.
@@ -2058,7 +2069,8 @@ service Status {
 
   rpc RequestHHR(HHRRequest) returns (HHRResponse) {
     option (google.api.http) = {
-      get: "/_status/hhr"
+      post: "/_status/hhr"
+      body : "*"
     };
   }
 

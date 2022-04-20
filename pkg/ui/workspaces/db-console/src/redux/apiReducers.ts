@@ -122,6 +122,8 @@ export const historicalHotRangesReducerObj = new CachedDataReducer(
   "historicalHotRanges",
 );
 
+export const refreshHHR = historicalHotRangesReducerObj.refresh;
+
 // NOTE: We encode the db and table name so we can combine them as a string.
 // TODO(maxlang): there's probably a nicer way to do this
 export function generateTableID(db: string, table: string) {

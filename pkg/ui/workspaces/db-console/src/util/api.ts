@@ -883,6 +883,7 @@ export function getHistoricalHotRanges(
   req: HistoricalHotRangeRequestMessage,
   timeout?: moment.Duration,
 ): Promise<HistoricalHotRangeResponseMessage> {
+  console.log("invoking timeout fetch")
   return timeoutFetch(
     serverpb.HHRResponse,
     `${STATUS_PREFIX}/hhr`,

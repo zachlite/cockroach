@@ -27,6 +27,7 @@ const Timestamp = cockroach.util.hlc.Timestamp;
 // in the future, we might have metrics per key.
 // this would then become a "key visualizer"
 interface RangeVisualizerProps {
+  keyspace: Set<string>;
   samples: HistoricalHotRangeResponseMessage["samples"];
 }
 
@@ -34,7 +35,7 @@ interface RangeVisualizerProps {
 // TODO: these values will not accomodate 2 weeks worth of samples (x)
 // and 1000 ranges (y). Cell widths and heights respectively will be less than 1px.
 const CanvasWidth = 1344;
-const CanvasHeight = 4096;
+const CanvasHeight = 1024;
 
 const ColorCold = 0;
 
@@ -98,15 +99,11 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
 
   draw() {
     const start = window.performance.now();
-    const keyspace = new Set<string>();
     const keysForSample = {} as Record<number, Set<string>>;
     let hottestValue = 0.0;
 
     for (let i = 0; i < this.props.samples.length; i++) {
       const sample = this.props.samples[i];
-      for (const key of sample.start_key) {
-        keyspace.add(key);
-      }
 
       // convert list of keys into a set for later O(1) lookups.
       keysForSample[i] = new Set(sample.start_key);
@@ -115,7 +112,6 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
       hottestValue = Math.max(hottestValue, ...sample.qps);
     }
 
-    console.log(keyspace);
     console.log("hottest value: ", hottestValue);
 
     const bucketWidth = Math.floor(CanvasWidth / this.props.samples.length);
@@ -134,7 +130,7 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
       this.drawSample(
         i,
         canvasBufferData,
-        keyspace,
+        this.props.keyspace,
         keysForSample,
         bucketWidth,
         hottestValue
@@ -162,20 +158,6 @@ class RangeVisualizer extends React.Component<RangeVisualizerProps> {
     this.drawContext.clearRect(0, 0, CanvasWidth, CanvasHeight);
     this.draw();
   }
-
-  // shouldComponentUpdate(nextProps: RangeVisualizerProps) {
-  //   const currentTimestamps = this.props.samples.map(
-  //     (sample) => sample.timestamp
-  //   );
-
-  //   const nextTimestamps = nextProps.samples.map((sample) => sample.timestamp);
-
-  //   if (!isEqual(nextTimestamps, currentTimestamps)) {
-  //     this.draw();
-  //   }
-
-  //   return false;
-  // }
 
   render() {
     console.warn("range visualizer render");
@@ -217,6 +199,54 @@ interface HistoricalHotRangesContainerState {
   hhrData: HistoricalHotRangeResponseMessage["samples"];
 }
 
+class TimeAxis extends React.Component<{ timestamps: number[] }> {
+  render() {
+    const width = CanvasWidth / this.props.timestamps.length;
+    return (
+      <div style={{ display: "flex", marginLeft: "100px" }}>
+        {this.props.timestamps.map((timestamp, i) => (
+          <div
+            style={{
+              writingMode: "vertical-lr",
+              width: `${width}px`,
+            }}
+            key={i}
+          >
+            {new Date(timestamp / 1e6).toString()}
+          </div>
+        ))}
+      </div>
+    );
+  }
+}
+
+class KeyspaceAxis extends React.Component<{ keyspace: Set<string> }> {
+  render() {
+    const N = 32; // show 32 keys
+    let n = 0;
+    const keys = [];
+
+    for (let k of this.props.keyspace) {
+      if (n % N === 0) {
+        keys.push(k);
+      }
+      n++;
+    }
+
+    keys.sort();
+
+    return (
+      <div>
+        {keys.map((key) => (
+          <div style={{ height: "32px" }} key={key}>
+            {key}
+          </div>
+        ))}
+      </div>
+    );
+  }
+}
+
 class HistoricalHotRangesContainer extends React.Component<
   HistoricalHotRangesContainerProps,
   HistoricalHotRangesContainerState
@@ -226,91 +256,57 @@ class HistoricalHotRangesContainer extends React.Component<
     this.state = { hhrData: [] };
   }
 
-  componentDidMount() {
-    // request HHR for initial time window
-    // the initial state dictates the initial time window.
-  }
+  async componentDidMount() {
+    let hhr = [] as any[];
+    const start = window.performance.now();
+    for (let i = 0; i < 1; i++) {
+      const res = await getHistoricalHotRanges(
+        HHRRequest.create({
+          tMin: Timestamp.create(),
+          tMax: Timestamp.create(),
+        })
+      ); 
 
-  makeFakeHHRData() {
-    // used to fake 4 samples (1 hour)
-    // 672 - 1 week.
-    // all the way to 1344 samples (2 weeks)
-    const Hour = 4;
-    const Day = Hour * 24;
-    const Week = Day * 7;
-    const Full = Week * 2;
-
-    const NSamples = Hour;
-
-    const samples = [];
-
-    for (let i = 0; i < NSamples; i++) {
-      // get 80 fake keys and values
-      const keys = [];
-      const values = [];
-
-      const NRanges = randn_bm() * 1000;
-
-      for (let k = 0; k < NRanges; k++) {
-        keys.push(getFakeKey());
-        values.push(randn_bm() * 100);
+      console.log("done with request ", i);
+      for (const sample of res.samples) {
+        hhr.push(sample);
       }
-
-      keys.sort();
-
-      const sample = {
-        timestamp: i,
-        keys,
-        values,
-      };
-
-      samples.push(sample);
     }
 
-    return samples;
+    const end = window.performance.now();
+    console.log("network time: ", end - start);
+
+    // update state to trigger a re-render.
+    this.setState({ hhrData: hhr });
+  }
+
+  buildKeyspace() {
+    const keyspace = new Set<string>();
+    for (let i = 0; i < this.state.hhrData.length; i++) {
+      const sample = this.state.hhrData[i];
+      for (const key of sample.start_key) {
+        keyspace.add(key);
+      }
+    }
+    return keyspace;
   }
 
   render() {
     console.log("HHR Container ReRender");
 
+    const keyspace = this.buildKeyspace();
+
     return (
       <>
-        <button
-          onClick={async () => {
-            // test 1:
-            // do this 56 times synchronously, where each samples represents 6 hours
-            // (24 samples per response)
-
-            // test 2:
-            // do this 2 times synchronously, where each sample represents 168 hours (1 week)
-            // 672 samples per response -> will need to update fake response
-
-            let hhr = [] as any[];
-            const start = window.performance.now();
-            for (let i = 0; i < 1; i++) {
-              const res = await getHistoricalHotRanges(
-                HHRRequest.create({
-                  tMin: Timestamp.create(),
-                  tMax: Timestamp.create(),
-                })
-              );
-
-              console.log("done with request ", i);
-              for (const sample of res.samples) {
-                hhr.push(sample);
-              }
-            }
-
-            const end = window.performance.now();
-            console.log("network time: ", end - start);
-
-            // update state to trigger a re-render.
-            this.setState({ hhrData: hhr });
-          }}
-        >
-          Fetch stuff
-        </button>
-        <RangeVisualizer samples={this.state.hhrData} />
+        <div style={{ display: "flex" }}>
+          <KeyspaceAxis keyspace={keyspace} />
+          <RangeVisualizer samples={this.state.hhrData} keyspace={keyspace} />
+        </div>
+        {/* <TimeAxis
+          timestamps={this.state.hhrData.map((sample) =>
+            sample.timestamp.wall_time.toNumber()
+          )}
+        /> */}
       </>
     );
   }

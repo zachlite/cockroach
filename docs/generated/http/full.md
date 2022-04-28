@@ -3538,6 +3538,66 @@ HotRange message describes a single hot range, ie its QPS, node ID it belongs to
 
 
 
+## RequestHHR
+
+`POST /_status/hhr`
+
+
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+(tMin, tMax]
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| tMin | [cockroach.util.hlc.Timestamp](#cockroach.server.serverpb.HHRRequest-cockroach.util.hlc.Timestamp) |  | start of the time window | [reserved](#support-status) |
+| tMax | [cockroach.util.hlc.Timestamp](#cockroach.server.serverpb.HHRRequest-cockroach.util.hlc.Timestamp) |  | end of the time window, inclusive. | [reserved](#support-status) |
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| samples | [HHRResponse.HHRSample](#cockroach.server.serverpb.HHRResponse-cockroach.server.serverpb.HHRResponse.HHRSample) | repeated |  | [reserved](#support-status) |
+
+
+
+
+
+
+<a name="cockroach.server.serverpb.HHRResponse-cockroach.server.serverpb.HHRResponse.HHRSample"></a>
+#### HHRResponse.HHRSample
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| timestamp | [cockroach.util.hlc.Timestamp](#cockroach.server.serverpb.HHRResponse-cockroach.util.hlc.Timestamp) |  |  | [reserved](#support-status) |
+| start_key | [string](#cockroach.server.serverpb.HHRResponse-string) | repeated |  | [reserved](#support-status) |
+| qps | [float](#cockroach.server.serverpb.HHRResponse-float) | repeated |  | [reserved](#support-status) |
+
+
+
+
+
+
 ## Range
 
 `GET /_status/range/{range_id}`

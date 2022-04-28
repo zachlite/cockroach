@@ -13,6 +13,11 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"math/rand"
+	"strings"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -48,6 +53,11 @@ func runInitialSQL(
 		}
 		log.Ops.Infof(ctx, "Replication was disabled for this cluster.\n"+
 			"When/if adding nodes in the future, update zone configurations to increase the replication factor.")
+
+		err := seedHHR(ctx, s)
+		if err != nil {
+			return err
+		}
 	}
 
 	if adminUser != "" && !s.Insecure() {
@@ -57,6 +67,72 @@ func runInitialSQL(
 	}
 
 	return nil
+}
+
+func seedHHR(ctx context.Context, s *server.Server) error {
+
+	fakeKey := func() string {
+		keyLength := 10
+		alphabet := "ab" // limit key entropy to 2 ^ 16 = 65536
+		var strBuilder strings.Builder
+
+		for i := 0; i < keyLength; i++ {
+			char := alphabet[rand.Intn(len(alphabet))]
+			strBuilder.WriteString(string(char))
+		}
+
+		return strBuilder.String()
+	}
+
+	return s.RunLocalSQL(ctx,
+		func(ctx context.Context, ie *sql.InternalExecutor) error {
+			_, err := ie.Exec(ctx, "clear system.hot_ranges", nil, fmt.Sprintf("DELETE FROM system.hot_ranges"))
+			if err != nil {
+				return err
+			}
+
+			nSamples := 4 * 24 * 14 // 6 hours
+			nRanges := 1000
+
+			now := time.Now()
+			startTime := now.UnixNano()
+			intervalTimeNanos := int64(15 * 60 * 1000000000)
+
+			for i := 0; i < nSamples; i++ {
+
+				keys := make([]string, nRanges)
+				values := make([]float32, nRanges)
+
+				for r := 0; r < nRanges; r++ {
+					keys[r] = fakeKey()
+					values[r] = rand.Float32()
+				}
+
+				sample := serverpb.HHRResponse_HHRSample{
+					Timestamp: &hlc.Timestamp{
+						WallTime:  startTime + (int64(i) * intervalTimeNanos),
+						Logical:   0,
+						Synthetic: false,
+					},
+					StartKey: keys,
+					Qps:      values,
+				}
+
+				serialized, serializationError := sample.Marshal()
+				if serializationError != nil {
+					return err
+				}
+
+				// insert into db
+				_, err := ie.Exec(ctx, "seed system.hot_ranges", nil, "INSERT INTO system.hot_ranges (tenant_id, info) VALUES (1, $1);", serialized)
+
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
 }
 
 // createAdminUser creates an admin user with the given name.

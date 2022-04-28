@@ -18,9 +18,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"io"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -2464,54 +2464,35 @@ func (s *statusServer) localHotRanges(ctx context.Context) serverpb.HotRangesRes
 }
 
 
-func fakeKey() string {
-
-	keyLength := 16
-	alphabet := "ab" // limit key entropy to 2 ^ 16 = 65536
-	var strBuilder strings.Builder
-
-	for i := 0; i < keyLength; i++ {
-		char := alphabet[rand.Intn(len(alphabet))]
-		strBuilder.WriteString(string(char))
-	}
-
-	return strBuilder.String()
-}
 
 func (s *statusServer) RequestHHR(ctx context.Context, req *serverpb.HHRRequest) (*serverpb.HHRResponse, error) {
-	// fake response
+	// TODO: figure out tenant ID
+	// TODO: issue request with real time windows, and pass this to sql query
+	// TODO: when seeding data, timestamps are in wrong chronological order.
 
-	response := &serverpb.HHRResponse{}
-	nSamples := 1344
-	nRanges := 1000
+	// then read
+	response := serverpb.HHRResponse{}
+	statement := "SELECT * FROM system.hot_ranges;"
+	rows, err := s.sqlServer.internalExecutor.QueryBufferedEx(ctx, "query-hhr", nil, sessiondata.InternalExecutorOverride{User: security.RootUserName()}, statement)
 
-	for i := 0; i < nSamples; i++ {
+	if err != nil {
+		panic(err)
+	}
 
-		keys := make([]string, nRanges)
-		values := make([]float32, nRanges)
+	for row, _ := range rows {
+		serialized := rows[row][2]
+		sample := serverpb.HHRResponse_HHRSample{}
+		dBytes, _ := tree.AsDBytes(serialized)
+		unmarshalErr := sample.Unmarshal([]byte(dBytes))
 
-
-		for r := 0; r < nRanges; r++ {
-			keys[r] = fakeKey()
-			values[r] = rand.Float32()
+		if unmarshalErr != nil {
+			panic(unmarshalErr)
 		}
-
-		sample := serverpb.HHRResponse_HHRSample{
-			Timestamp: &hlc.Timestamp{
-				WallTime:  0,
-				Logical:   0,
-				Synthetic: false,
-			},
-			StartKey:  keys,
-			Qps:       values,
-		}
-
 		response.Samples = append(response.Samples, &sample)
 	}
 
-	return response, nil
+	return &response, nil
 }
-
 
 // Range returns rangeInfos for all nodes in the cluster about a specific
 // range. It also returns the range history for that range as well.

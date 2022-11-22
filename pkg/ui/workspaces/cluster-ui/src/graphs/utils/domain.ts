@@ -79,6 +79,13 @@ export class AxisDomain {
     let max = extent[1];
     if (alignMinMax) {
       min = min - (min % increment);
+      // A negative minimum requires subtracting an additional increment
+      // from the truncated value. e.g. If the Minimum value is -5, and the increment is 10,
+      // the aligned minimum should be -10.
+      if (extent[0] < 0) {
+        min -= increment;
+      }
+
       if (max % increment !== 0) {
         max = max - (max % increment) + increment;
       }

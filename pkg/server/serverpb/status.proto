@@ -2172,6 +2172,13 @@ service Status {
     };
   }
 
+  rpc CriticalLocalities(roachpb.SpanConfigConformanceRequest) returns (roachpb.SpanConfigConformanceResponse) {
+    option (google.api.http) = {
+      post: "/_status/critical_localities"
+      body: "*"
+    };
+  }
+
   // Stacks retrieves the stack traces of all goroutines on a given node.
   rpc Stacks(StacksRequest) returns (JSONResponse) {
     option (google.api.http) = {

@@ -16,6 +16,7 @@ import _ from "lodash";
 import moment from "moment";
 
 import * as protos from "src/js/protos";
+import { cockroach } from "src/js/protos";
 import { FixLong } from "src/util/fixLong";
 import { propsToQueryString } from "src/util/query";
 
@@ -214,6 +215,11 @@ export type ListTracingSnapshotsRequestMessage =
   protos.cockroach.server.serverpb.ListTracingSnapshotsRequest;
 export type ListTracingSnapshotsResponseMessage =
   protos.cockroach.server.serverpb.ListTracingSnapshotsResponse;
+
+export type ConformanceRequestMessage =
+  protos.cockroach.roachpb.SpanConfigConformanceRequest;
+export type ConformanceResponseMessage =
+  protos.cockroach.roachpb.SpanConfigConformanceResponse;
 
 // API constants
 
@@ -902,6 +908,34 @@ export function getKeyVisualizerSamples(
     timeout,
   );
 }
+
+export function getCriticalLocalities(
+  req: ConformanceRequestMessage,
+  timeout?: moment.Duration,
+): Promise<ConformanceResponseMessage> {
+  return timeoutFetch(
+    protos.cockroach.roachpb.SpanConfigConformanceResponse,
+    `${STATUS_PREFIX}/critical_localities`,
+    req as any,
+    timeout,
+  );
+}
+const fromHexString = (hexString) =>
+  Uint8Array.from(hexString.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
+
+(window as any).getCriticalLocalities = async () => {
+  const critical = await getCriticalLocalities(
+    cockroach.roachpb.SpanConfigConformanceRequest.create({
+      spans: [
+        protos.cockroach.roachpb.Span.create({
+          key: fromHexString("fe8a"),
+          end_key: fromHexString("fe8b"),
+        }
+      )],
+    }),
+  );
+  console.log(critical);
+};
 
 export function IsValidateUriName(...args: string[]): Promise<any> {
   for (const name of args) {

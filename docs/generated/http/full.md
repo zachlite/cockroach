@@ -2934,6 +2934,22 @@ Support status: [reserved](#support-status)
 
 
 
+## CriticalLocalities
+
+`POST /_status/critical_localities`
+
+
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+#### Response Parameters
+
+
+
 ## Stacks
 
 `GET /_status/stacks/{node_id}`

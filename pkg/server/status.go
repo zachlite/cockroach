@@ -503,6 +503,7 @@ type systemStatusServer struct {
 	spanConfigReporter spanconfig.Reporter
 	distSender         *kvcoord.DistSender
 	rangeStatsFetcher  *rangestats.Fetcher
+	node               *Node
 }
 
 // StmtDiagnosticsRequester is the interface into *stmtdiagnostics.Registry
@@ -612,6 +613,7 @@ func newSystemStatusServer(
 	clock *hlc.Clock,
 	distSender *kvcoord.DistSender,
 	rangeStatsFetcher *rangestats.Fetcher,
+	node *Node,
 ) *systemStatusServer {
 	server := newStatusServer(
 		ambient,
@@ -639,6 +641,7 @@ func newSystemStatusServer(
 		spanConfigReporter: spanConfigReporter,
 		distSender:         distSender,
 		rangeStatsFetcher:  rangeStatsFetcher,
+		node:               node,
 	}
 }
 
@@ -848,6 +851,29 @@ func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.Trac
 		}
 	}
 	return output
+}
+
+func (s *statusServer) CriticalLocalities(
+	ctx context.Context, req *roachpb.SpanConfigConformanceRequest,
+) (*roachpb.SpanConfigConformanceResponse, error) {
+	ctx = forwardSQLIdentityThroughRPCCalls(ctx)
+	ctx = s.AnnotateCtx(ctx)
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
+		return nil, err
+	}
+	report, err := s.sqlServer.tenantConnect.SpanConfigConformance(ctx, req.Spans)
+	return &roachpb.SpanConfigConformanceResponse{Report: report}, err
+}
+
+func (s *systemStatusServer) CriticalLocalities(
+	ctx context.Context, req *roachpb.SpanConfigConformanceRequest,
+) (*roachpb.SpanConfigConformanceResponse, error) {
+	ctx = forwardSQLIdentityThroughRPCCalls(ctx)
+	ctx = s.AnnotateCtx(ctx)
+	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
+		return nil, err
+	}
+	return s.node.SpanConfigConformance(ctx, req)
 }
 
 // AllocatorRange returns simulated allocator info for the requested range.

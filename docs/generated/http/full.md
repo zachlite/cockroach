@@ -2938,7 +2938,7 @@ Support status: [reserved](#support-status)
 
 `POST /_status/critical_localities`
 
-
+CriticalLocalities
 
 Support status: [reserved](#support-status)
 
@@ -2946,7 +2946,35 @@ Support status: [reserved](#support-status)
 
 
 
+
+CriticalLocalitiesRequest is used to do stuff.
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| spans | [cockroach.roachpb.Span](#cockroach.server.serverpb.CriticalLocalitiesRequest-cockroach.roachpb.Span) | repeated |  | [reserved](#support-status) |
+
+
+
+
+
+
+
 #### Response Parameters
+
+
+
+
+CriticalLocalitiesResponse is also used to do stuff.
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| report | [cockroach.roachpb.SpanConfigConformanceReport](#cockroach.server.serverpb.CriticalLocalitiesResponse-cockroach.roachpb.SpanConfigConformanceReport) |  |  | [reserved](#support-status) |
+
+
+
+
 
 
 

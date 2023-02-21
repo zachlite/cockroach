@@ -1930,6 +1930,16 @@ message ListExecutionInsightsResponse {
   ];
 }
 
+
+// CriticalLocalitiesRequest is used to do stuff.
+message CriticalNodesRequest {}
+
+// CriticalLocalitiesResponse is also used to do stuff.
+message CriticalNodesResponse {
+  repeated server.status.statuspb.NodeStatus critical_nodes = 1 [(gogoproto.nullable) = false];
+  roachpb.SpanConfigConformanceReport report = 2 [(gogoproto.nullable) = false];
+}
+
 service Status {
   // Certificates retrieves a copy of the TLS certificates.
   rpc Certificates(CertificatesRequest) returns (CertificatesResponse) {
@@ -2172,9 +2182,10 @@ service Status {
     };
   }
 
-  rpc CriticalLocalities(roachpb.SpanConfigConformanceRequest) returns (roachpb.SpanConfigConformanceResponse) {
+  // CriticalNodes
+  rpc CriticalNodes(CriticalNodesRequest) returns (CriticalNodesResponse) {
     option (google.api.http) = {
-      post: "/_status/critical_localities"
+      post: "/_status/critical_nodes"
       body: "*"
     };
   }

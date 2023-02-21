@@ -853,27 +853,58 @@ func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.Trac
 	return output
 }
 
-func (s *statusServer) CriticalLocalities(
-	ctx context.Context, req *roachpb.SpanConfigConformanceRequest,
-) (*roachpb.SpanConfigConformanceResponse, error) {
+// CriticalNodes
+func (s *systemStatusServer) CriticalNodes(
+	ctx context.Context, req *serverpb.CriticalNodesRequest,
+) (*serverpb.CriticalNodesResponse, error) {
 	ctx = forwardSQLIdentityThroughRPCCalls(ctx)
 	ctx = s.AnnotateCtx(ctx)
 	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
 		return nil, err
 	}
-	report, err := s.sqlServer.tenantConnect.SpanConfigConformance(ctx, req.Spans)
-	return &roachpb.SpanConfigConformanceResponse{Report: report}, err
-}
 
-func (s *systemStatusServer) CriticalLocalities(
-	ctx context.Context, req *roachpb.SpanConfigConformanceRequest,
-) (*roachpb.SpanConfigConformanceResponse, error) {
-	ctx = forwardSQLIdentityThroughRPCCalls(ctx)
-	ctx = s.AnnotateCtx(ctx)
-	if _, err := s.privilegeChecker.requireAdminUser(ctx); err != nil {
+	conformance, err := s.node.SpanConfigConformance(
+		ctx, &roachpb.SpanConfigConformanceRequest{
+			Spans: []roachpb.Span{keys.EverythingSpan},
+		})
+	if err != nil {
 		return nil, err
 	}
-	return s.node.SpanConfigConformance(ctx, req)
+
+	critical := make(map[roachpb.NodeID]bool)
+	for _, r := range conformance.Report.OverReplicated {
+		for _, desc := range r.RangeDescriptor.Replicas().Descriptors() {
+			critical[desc.NodeID] = true
+		}
+	}
+	for _, r := range conformance.Report.UnderReplicated {
+		for _, desc := range r.RangeDescriptor.Replicas().Descriptors() {
+			critical[desc.NodeID] = true
+		}
+	}
+	for _, r := range conformance.Report.ViolatingConstraints {
+		for _, desc := range r.RangeDescriptor.Replicas().Descriptors() {
+			critical[desc.NodeID] = true
+		}
+	}
+	for _, r := range conformance.Report.Unavailable {
+		for _, desc := range r.RangeDescriptor.Replicas().Descriptors() {
+			critical[desc.NodeID] = true
+		}
+	}
+
+	res := &serverpb.CriticalNodesResponse{
+		CriticalNodes: nil,
+		Report:        conformance.Report,
+	}
+	for nodeID, _ := range critical {
+		ns, err := s.nodeStatus(ctx, &serverpb.NodeRequest{NodeId: nodeID.String()})
+		if err != nil {
+			return nil, err
+		}
+		res.CriticalNodes = append(res.CriticalNodes, *ns)
+	}
+	return res, nil
 }
 
 // AllocatorRange returns simulated allocator info for the requested range.

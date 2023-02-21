@@ -727,7 +727,6 @@ CREATE TABLE system.tenant_settings (
 
 	SpanCountTableSchema = `
 CREATE TABLE system.span_count (
-	singleton  BOOL DEFAULT TRUE,
 	span_count INT NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (singleton),
 	CONSTRAINT single_row CHECK (singleton),
@@ -3032,9 +3031,17 @@ var (
 				KeyColumnNames: []string{"id"},
 				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
 					catenumpb.IndexColumn_ASC,
-					//catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1},
+			},
+			descpb.IndexDescriptor{
+				Name:                "unique_keys_key_bytes_idx",
+				ID:                  2,
+				Unique:              true,
+				KeyColumnNames:      []string{"key_bytes"},
+				KeyColumnDirections: singleASC,
+				KeyColumnIDs:        []descpb.ColumnID{2},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 			},
 		),
 	)

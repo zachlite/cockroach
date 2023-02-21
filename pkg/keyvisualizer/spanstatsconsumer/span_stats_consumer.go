@@ -12,9 +12,10 @@ package spanstatsconsumer
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"math"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/keyvisualizer/keyvissettings"
 	"github.com/cockroachdb/cockroach/pkg/keyvisualizer/keyvisstorage"
 	"github.com/cockroachdb/cockroach/pkg/keyvisualizer/spanstatskvaccessor"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
@@ -24,6 +25,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
+
+const maxBoundaries = 512
 
 // SpanStatsConsumer interacts with the key visualizer subsystem in KV and persists
 // collected statistics to the tenant's system tables.
@@ -49,6 +52,35 @@ func New(
 	}
 }
 
+// boundaries must be contiguous, and lexicographically sorted.
+func maybeCombineBoundaries(boundaries []roachpb.Span, max int) []roachpb.Span {
+	if len(boundaries) <= max {
+		return boundaries
+	}
+
+	combineFactor := int(math.Ceil(float64(len(boundaries)) / float64(max)))
+	combinedLength := int(math.Ceil(float64(len(boundaries)) / float64(combineFactor)))
+	combined := make([]roachpb.Span, combinedLength)
+
+	log.Infof(context.Background(), "boundary length: %d", len(boundaries))
+	log.Infof(context.Background(), "combine factor: %d", combineFactor)
+	log.Infof(context.Background(), "combined length: %d", combinedLength)
+
+	// iterate through boundaries, incrementing by combineFactor
+	for i := 0; i < combinedLength; i++ {
+		startSpan := boundaries[i*combineFactor]
+
+		endIndex := i*combineFactor + combineFactor - 1
+		if endIndex >= len(boundaries) {
+			combined[i] = startSpan
+		} else {
+			combined[i] = startSpan.Combine(boundaries[endIndex])
+		}
+	}
+
+	return combined
+}
+
 // UpdateBoundaries is part of the keyvisualizer.SpanStatsConsumer interface.
 func (s *SpanStatsConsumer) UpdateBoundaries(ctx context.Context) error {
 	boundaries, err := s.decideBoundaries(ctx)
@@ -56,7 +88,7 @@ func (s *SpanStatsConsumer) UpdateBoundaries(ctx context.Context) error {
 		return err
 	}
 	updateTime := timeutil.Now().Add(10 * time.Second) // Arbitrary, but long enough for the payload to propagate to all nodes.
-	_, err = s.kvAccessor.UpdateBoundaries(ctx, boundaries, updateTime)
+	_, err = s.kvAccessor.UpdateBoundaries(ctx, maybeCombineBoundaries(boundaries, maxBoundaries), updateTime)
 	return err
 }
 
@@ -73,10 +105,10 @@ func (s *SpanStatsConsumer) GetSamples(ctx context.Context) error {
 		return err
 	}
 
-	maxBuckets := keyvissettings.MaxBuckets.Get(&s.settings.SV)
-	for i, sample := range samplesRes.Samples {
-		samplesRes.Samples[i].SpanStats = downsample(sample.SpanStats, int(maxBuckets))
-	}
+	//maxBuckets := keyvissettings.MaxBuckets.Get(&s.settings.SV)
+	//for i, sample := range samplesRes.Samples {
+	//	samplesRes.Samples[i].SpanStats = downsample(sample.SpanStats, int(maxBuckets))
+	//}
 
 	if err := keyvisstorage.WriteSamples(ctx, s.ie, samplesRes.Samples); err != nil {
 		panic(errors.NewAssertionErrorWithWrappedErrf(

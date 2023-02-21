@@ -1,5 +1,5 @@
 load("//build/bazelutil/unused_checker:unused.bzl", "get_x_data")
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "spanstatsconsumer",
@@ -11,15 +11,26 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/keyvisualizer/keyvispb",
-        "//pkg/keyvisualizer/keyvissettings",
         "//pkg/keyvisualizer/keyvisstorage",
         "//pkg/keyvisualizer/spanstatskvaccessor",
         "//pkg/kv/kvclient/kvcoord",
         "//pkg/roachpb",
         "//pkg/settings/cluster",
         "//pkg/sql",
+        "//pkg/util/log",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
+    ],
+)
+
+go_test(
+    name = "spanstatsconsumer_test",
+    srcs = ["span_stats_consumer_test.go"],
+    args = ["-test.timeout=295s"],
+    embed = [":spanstatsconsumer"],
+    deps = [
+        "//pkg/roachpb",
+        "@com_github_stretchr_testify//require",
     ],
 )
 

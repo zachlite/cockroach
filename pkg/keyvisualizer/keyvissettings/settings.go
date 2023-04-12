@@ -28,8 +28,8 @@ var SampleInterval = settings.RegisterDurationSetting(
 	settings.SystemOnly,
 	"keyvisualizer.sample_interval",
 	"the frequency at which the key visualizer samples are collected",
-	5*time.Minute,
-	settings.NonNegativeDurationWithMinimum(1*time.Minute),
+	5*time.Second,
+	settings.NonNegativeDurationWithMinimum(1*time.Second),
 )
 
 // MaxBuckets defines the maximum buckets allowed in a sample.

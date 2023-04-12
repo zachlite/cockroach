@@ -2738,15 +2738,78 @@ func (s *statusServer) KeyVisSamples(
 
 	prettyForKeyString := make(map[string]string)
 	prettyForUUID := make(map[string]string)
-	sorted := make([]string, 0)
-	sortedPretty := make([]string, 0)
+	sorted := make([]string, 0, len(uniqueKeys))
+	sortedPretty := make([]string, 0, len(uniqueKeys))
 
-	for keyUUID, keyBytes := range uniqueKeys {
-		s := string(keyBytes)
-		pretty := keyBytes.String()
-		prettyForKeyString[s] = pretty
-		sorted = append(sorted, s)
-		prettyForUUID[keyUUID] = pretty
+	//_, tableID, err := s.sqlServer.execCfg.Codec.DecodeTablePrefix(keys.MinKey)
+	//if err != nil {
+	//	return nil, err
+	//}
+
+	type KeySQLNames struct {
+		Database string
+		Table    string
+		Index    string
+	}
+
+	getKeySQLNames := func(ctx context.Context, txn descs.Txn, key roachpb.Key) KeySQLNames {
+
+		_, tableID, err := s.sqlServer.execCfg.Codec.DecodeTablePrefix(key)
+		if err != nil {
+			// If we can't decode the tableID, we can't do anything else.
+			// warn
+			return KeySQLNames{}
+		}
+
+		col := txn.Descriptors()
+		g := col.ByID(txn.KV()).WithoutNonPublic().Get()
+
+		tableDesc, err := g.Table(ctx, descpb.ID(tableID))
+		if err != nil {
+			// If we can't get the table descriptor, we can't do anything else.
+			return KeySQLNames{}
+		}
+
+		ret := KeySQLNames{}
+		ret.Table = tableDesc.GetName()
+
+		dbDesc, err := g.Database(ctx, tableDesc.GetParentID())
+		if err == nil {
+			ret.Database = dbDesc.GetName()
+		}
+
+		_, _, idxID, err := s.sqlServer.execCfg.Codec.DecodeIndexPrefix(key)
+		if err != nil {
+			return ret
+		}
+
+		index := catalog.FindIndexByID(tableDesc, descpb.IndexID(idxID))
+		if index == nil {
+			return ret
+		}
+
+		ret.Index = index.GetName()
+		return ret
+	}
+
+	if err = s.sqlServer.distSQLServer.DB.DescsTxn(ctx, func(ctx context.Context, txn descs.Txn) error {
+
+		for keyUUID, keyBytes := range uniqueKeys {
+
+			keyString := string(keyBytes)
+			pretty := keyBytes.String()
+			prettyForKeyString[keyString] = pretty
+			sorted = append(sorted, keyString)
+			prettyForUUID[keyUUID] = pretty
+
+			sqlNames := getKeySQLNames(ctx, txn, keyBytes)
+			log.Warningf(ctx, "key %v has metadata: %v", keyBytes.String(), sqlNames)
+		}
+
+		return nil
+
+	}); err != nil {
+		panic(err)
 	}
 
 	sort.Strings(sorted)

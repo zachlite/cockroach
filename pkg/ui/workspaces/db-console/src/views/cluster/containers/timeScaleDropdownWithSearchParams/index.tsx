@@ -97,7 +97,9 @@ const TimeScaleDropdownWithSearchParams = (
     props.setTimeScale(timeScale);
   };
 
+  console.log("Render")
   useEffect(() => {
+    console.log("updating!!!")
     // When history or props change, this effect will
     // convert the start and end of the current time scale and
     // write them to the URL as query params.
@@ -114,7 +116,7 @@ const TimeScaleDropdownWithSearchParams = (
       pathname,
       search: urlParams.toString(),
     });
-  }, [history, props]);
+  }, [props]);
 
   return <TimeScaleDropdown {...props} setTimeScale={onTimeScaleChange} />;
 };

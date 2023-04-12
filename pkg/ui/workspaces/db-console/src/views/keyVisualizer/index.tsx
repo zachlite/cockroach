@@ -165,6 +165,7 @@ class KeyVisualizerContainer extends React.Component<
       return <div>Waiting for samples...</div>;
     }
 
+    console.log("render key vsi", this.props, this.state)
     return (
       <div style={{ position: "relative" }}>
         <KeyVisualizerTimeWindow />

@@ -66,7 +66,12 @@ func TestTenantStatusAPI(t *testing.T) {
 		StoreDisableCoalesceAdjacent: true,
 	}
 
-	testHelper := serverccl.NewTestTenantHelper(t, 3 /* tenantClusterSize */, knobs)
+	testHelper := serverccl.NewTestTenantHelper(
+		t,
+		3, /* tenantClusterSize */
+		1, /* numNodes */
+		knobs,
+	)
 	defer testHelper.Cleanup(ctx, t)
 
 	// Speed up propagation of tenant capability changes.
@@ -131,14 +136,36 @@ func TestTenantStatusAPI(t *testing.T) {
 		testTenantHotRanges(ctx, t, testHelper)
 	})
 
-	t.Run("tenant_span_stats", func(t *testing.T) {
-		skip.UnderDeadlockWithIssue(t, 99770)
-		testTenantSpanStats(ctx, t, testHelper)
-	})
-
 	t.Run("tenant_nodes_capability", func(t *testing.T) {
 		testTenantNodesCapability(ctx, t, testHelper)
 	})
+}
+
+func TestTenantSpanStats(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s := log.ScopeWithoutShowLogs(t)
+	defer s.Close(t)
+	defer s.SetupSingleFileLogging()()
+
+	// The liveness session might expire before the stress race can finish.
+	skip.UnderStressRace(t, "expensive tests")
+
+	ctx := context.Background()
+
+	knobs := tests.CreateTestingKnobs()
+	knobs.SpanConfig = &spanconfig.TestingKnobs{
+		// Some of these subtests expect multiple (uncoalesced) tenant ranges.
+		StoreDisableCoalesceAdjacent: true,
+	}
+
+	testHelper := serverccl.NewTestTenantHelper(
+		t,
+		3, /* tenantClusterSize */
+		3, /* numNodes */
+		knobs,
+	)
+	defer testHelper.Cleanup(ctx, t)
+	testTenantSpanStats(ctx, t, testHelper)
 }
 
 func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.TenantTestHelper) {
@@ -201,6 +228,8 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 	})
 
 	t.Run("test KV node fan-out", func(t *testing.T) {
+		skip.UnderDeadlockWithIssue(t, 99770)
+		numNodes := len(helper.HostCluster().NodeIDs())
 		_, tID, err := keys.DecodeTenantPrefix(aSpan.Key)
 		require.NoError(t, err)
 		tPrefix := keys.MakeTenantPrefix(tID)
@@ -208,13 +237,6 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 		makeKey := func(keys ...[]byte) roachpb.Key {
 			return bytes.Join(keys, nil)
 		}
-
-		controlStats, err := tenantA.TenantStatusSrv().(serverpb.TenantStatusServer).SpanStats(ctx,
-			&roachpb.SpanStatsRequest{
-				NodeID: "0", // 0 indicates we want stats from all nodes.
-				Spans:  []roachpb.Span{aSpan},
-			})
-		require.NoError(t, err)
 
 		// Create a new range in this tenant.
 		_, _, err = helper.HostCluster().Server(0).SplitRange(makeKey(tPrefix, roachpb.Key("c")))
@@ -234,19 +256,6 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 			}
 		}
 
-		stats, err := tenantA.TenantStatusSrv().(serverpb.TenantStatusServer).SpanStats(ctx,
-			&roachpb.SpanStatsRequest{
-				NodeID: "0", // 0 indicates we want stats from all nodes.
-				Spans:  []roachpb.Span{aSpan},
-			})
-
-		require.NoError(t, err)
-
-		controlSpanStats := controlStats.SpanToStats[aSpan.String()]
-		testSpanStats := stats.SpanToStats[aSpan.String()]
-		require.Equal(t, controlSpanStats.RangeCount+1, testSpanStats.RangeCount)
-		require.Equal(t, controlSpanStats.TotalStats.LiveCount+int64(len(incKeys)), testSpanStats.TotalStats.LiveCount)
-
 		// Make a multi-span call
 		type spanCase struct {
 			span               roachpb.Span
@@ -261,7 +270,7 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 					EndKey: makeKey(keys.MakeTenantPrefix(tID), []byte(incKeys[1])),
 				},
 				expectedRangeCount: 1,
-				expectedLiveCount:  1,
+				expectedLiveCount:  int64(1 * numNodes),
 			},
 			{
 				// "d", "f" - single range, multiple keys
@@ -270,7 +279,7 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 					EndKey: makeKey(keys.MakeTenantPrefix(tID), []byte(incKeys[5])),
 				},
 				expectedRangeCount: 1,
-				expectedLiveCount:  2,
+				expectedLiveCount:  int64(2 * numNodes),
 			},
 			{
 				// "bb", "e" - multiple ranges, multiple keys
@@ -279,7 +288,7 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 					EndKey: makeKey(keys.MakeTenantPrefix(tID), []byte(incKeys[4])),
 				},
 				expectedRangeCount: 2,
-				expectedLiveCount:  2,
+				expectedLiveCount:  int64(2 * numNodes),
 			},
 
 			{
@@ -289,7 +298,7 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 					EndKey: makeKey(keys.MakeTenantPrefix(tID), []byte(incKeys[3])),
 				},
 				expectedRangeCount: 2,
-				expectedLiveCount:  3,
+				expectedLiveCount:  int64(3 * numNodes),
 			},
 		}
 
@@ -298,7 +307,7 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 			spans = append(spans, sc.span)
 		}
 
-		stats, err = tenantA.TenantStatusSrv().(serverpb.TenantStatusServer).SpanStats(ctx,
+		stats, err := tenantA.TenantStatusSrv().(serverpb.TenantStatusServer).SpanStats(ctx,
 			&roachpb.SpanStatsRequest{
 				NodeID: "0", // 0 indicates we want stats from all nodes.
 				Spans:  spans,
@@ -308,8 +317,8 @@ func testTenantSpanStats(ctx context.Context, t *testing.T, helper serverccl.Ten
 		// Check each span has their expected values.
 		for _, sc := range spanCases {
 			spanStats := stats.SpanToStats[sc.span.String()]
-			require.Equal(t, spanStats.RangeCount, sc.expectedRangeCount, fmt.Sprintf("mismatch on expected range count for span case with span %v", sc.span.String()))
-			require.Equal(t, spanStats.TotalStats.LiveCount, sc.expectedLiveCount, fmt.Sprintf("mismatch on expected live count for span case with span %v", sc.span.String()))
+			require.Equal(t, sc.expectedRangeCount, spanStats.RangeCount, fmt.Sprintf("mismatch on expected range count for span case with span %v", sc.span.String()))
+			require.Equal(t, sc.expectedLiveCount, spanStats.TotalStats.LiveCount, fmt.Sprintf("mismatch on expected live count for span case with span %v", sc.span.String()))
 		}
 	})
 

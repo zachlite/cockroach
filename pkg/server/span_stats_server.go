@@ -86,7 +86,6 @@ func (s *systemStatusServer) spanStatsFanOut(
 			} else {
 				res.SpanToStats[spanStr].ApproximateDiskBytes += spanStats.ApproximateDiskBytes
 				res.SpanToStats[spanStr].TotalStats.Add(spanStats.TotalStats)
-				res.SpanToStats[spanStr].RangeCount += spanStats.RangeCount
 			}
 		}
 	}
@@ -115,7 +114,6 @@ func (s *systemStatusServer) getLocalStats(
 ) (*roachpb.SpanStatsResponse, error) {
 	var res = &roachpb.SpanStatsResponse{SpanToStats: make(map[string]*roachpb.SpanStats)}
 	ri := kvcoord.MakeRangeIterator(s.distSender)
-
 	// For each span
 	for _, span := range req.Spans {
 		rSpan, err := keys.SpanAddr(span)
@@ -123,7 +121,6 @@ func (s *systemStatusServer) getLocalStats(
 			return nil, err
 		}
 		// Seek to the span's start key.
-		ri.Seek(ctx, rSpan.Key, kvcoord.Ascending)
 		spanStats, err := s.statsForSpan(ctx, ri, rSpan)
 		if err != nil {
 			return nil, err

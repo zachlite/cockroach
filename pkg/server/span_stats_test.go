@@ -8,41 +8,40 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package server
+package server_test
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"strconv"
-	"testing"
-
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
+	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
+	"strconv"
+	"testing"
+	"time"
 )
 
-func TestLocalSpanStats(t *testing.T) {
+func TestSpanStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			Store: &kvserver.StoreTestingKnobs{DisableCanAckBeforeApplication: true},
-		},
-	})
-	s := serv.(*TestServer)
-	defer s.Stopper().Stop(ctx)
+	numNodes := 3
+	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{ReplicationMode: base.ReplicationAuto})
+	defer tc.Stopper().Stop(ctx)
+	s := tc.Server(0).(*server.TestServer)
+
 	store, err := s.Stores().GetStore(s.GetFirstStoreID())
 	require.NoError(t, err)
 	// Create a number of ranges using splits.
@@ -52,14 +51,7 @@ func TestLocalSpanStats(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Wait for splits to finish.
-	testutils.SucceedsSoon(t, func() error {
-		repl := store.LookupReplica(roachpb.RKey("z"))
-		if actualRSpan := repl.Desc().RSpan(); !actualRSpan.Key.Equal(roachpb.RKey("i")) {
-			return errors.Errorf("expected range %s to begin at key 'i'", repl)
-		}
-		return nil
-	})
+	require.NoError(t, tc.WaitForFullReplication())
 
 	// Create some keys across the ranges.
 	incKeys := []string{"b", "bb", "bbb", "d", "dd", "h"}
@@ -104,34 +96,65 @@ func TestLocalSpanStats(t *testing.T) {
 	}
 
 	testCases := []testCase{
-		{spans[0], 4, 6},
-		{spans[1], 1, 3},
-		{spans[2], 2, 5},
-		{spans[3], 2, 1},
-		{spans[4], 2, 3},
-		{spans[5], 1, 2},
+		{spans[0], 4, int64(6 * numNodes)},
+		{spans[1], 1, int64(3 * numNodes)},
+		{spans[2], 2, int64(5 * numNodes)},
+		{spans[3], 2, int64(1 * numNodes)},
+		{spans[4], 2, int64(3 * numNodes)},
+		{spans[5], 1, int64(2 * numNodes)},
 	}
-	// Multi-span request
-	multiResult, err := s.status.getLocalStats(ctx,
-		&roachpb.SpanStatsRequest{
+
+	attempt := 0
+	testutils.SucceedsWithin(t, func() (testErr error) {
+		defer func() {
+			// If distSender's rangeCache is stale, the ranges iterated
+			// could be different on each node. All RangeCount values will eventually
+			// be consistent. For testing purposes, we'll proactively clear the cache if there's a failure.
+			if testErr != nil {
+				s.DistSender().RangeDescriptorCache().Clear()
+			}
+		}()
+		log.Infof(ctx, "ATTEMPT: %v", attempt)
+		attempt++
+		multiResult, err := s.StatusServer().(serverpb.StatusServer).SpanStats(ctx, &roachpb.SpanStatsRequest{
 			NodeID: "0",
 			Spans:  spans,
-		},
-	)
-	require.NoError(t, err)
+		})
+		if err != nil {
+			return err
+		}
 
-	// Verify stats across different spans.
-	for _, tcase := range testCases {
-		rSpan, err := keys.SpanAddr(tcase.span)
-		require.NoError(t, err)
+		// Verify stats across different spans.
+		for _, tcase := range testCases {
+			rSpan, err := keys.SpanAddr(tcase.span)
+			if err != nil {
+				return err
+			}
 
-		// Assert expected values from multi-span request
-		spanStats := multiResult.SpanToStats[tcase.span.String()]
-		require.Equal(t, spanStats.RangeCount, tcase.expectedRanges, fmt.Sprintf(
-			"Multi-span: expected %d ranges in span [%s - %s], found %d", tcase.expectedRanges, rSpan.Key.String(), rSpan.EndKey.String(), spanStats.RangeCount))
-		require.Equal(t, spanStats.TotalStats.LiveCount, tcase.expectedKeys, fmt.Sprintf(
-			"Multi-span: expected %d keys in span [%s - %s], found %d", tcase.expectedKeys, rSpan.Key.String(), rSpan.EndKey.String(), spanStats.TotalStats.LiveCount))
-	}
+			spanStats := multiResult.SpanToStats[tcase.span.String()]
+			if tcase.expectedRanges != spanStats.RangeCount {
+				return errors.Newf(
+					"Multi-span: expected %d ranges in span [%s - %s], found %d",
+					tcase.expectedRanges,
+					rSpan.Key.String(),
+					rSpan.EndKey.String(),
+					spanStats.RangeCount,
+				)
+			}
+			if tcase.expectedKeys != spanStats.TotalStats.LiveCount {
+				return errors.Newf(
+					"Multi-span: expected %d keys in span [%s - %s], found %d",
+					tcase.expectedKeys,
+					rSpan.Key.String(),
+					rSpan.EndKey.String(),
+					spanStats.TotalStats.LiveCount,
+				)
+			}
+		}
+
+		return nil
+	}, time.Minute*5)
+
 }
 
 // BenchmarkSpanStats measures the cost of collecting span statistics.

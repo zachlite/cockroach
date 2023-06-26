@@ -14,21 +14,23 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"testing"
-
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
+	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
+	"testing"
+	"time"
 )
 
 func TestSpanStatsMetaScan(t *testing.T) {
@@ -190,6 +192,70 @@ func TestLocalSpanStats(t *testing.T) {
 			),
 		)
 	}
+}
+
+// What am I testing?
+// The returned response has keys for each of the original span.
+// This is separate from benchmarking
+func TestFoo(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	numNodes := 3
+	args := base.TestClusterArgs{}
+	args.ServerArgs.Knobs.SpanConfig = &spanconfig.TestingKnobs{
+		// Need multiple (uncoalesced) tenant ranges.
+		StoreDisableCoalesceAdjacent: true,
+	}
+
+	tc := testcluster.StartTestCluster(t, numNodes, args)
+	defer tc.Stopper().Stop(ctx)
+
+	s := tc.Server(0).(*server.TestServer)
+	_ = s
+	sqlDB := sqlutils.MakeSQLRunner(tc.Conns[0])
+	sqlDB.Exec(t, "SET CLUSTER SETTING sql.stats.automatic_collection.enabled=false")
+	sqlDB.Exec(t, `SET CLUSTER SETTING spanconfig.storage_coalesce_adjacent.enabled = false`)
+	sqlDB.Exec(t, "SELECT crdb_internal.generate_test_objects('test', 10)")
+
+	// Wait until the span config reconciler runs.
+	time.Sleep(time.Second * 10)
+	res := sqlDB.QueryStr(t, "SHOW RANGES WITH TABLES, KEYS")
+
+	for _, row := range res {
+		log.Infof(ctx, "row: %v", row)
+	}
+
+	log.Infof(ctx, "Tenant id: %v", sqlDB.QueryStr(t, "SHOW TENANTS"))
+
+	// create lots of ranges
+	// get the ranges, and pass them to span stats
+	// 1) does it work?
+	// 2) start benchmarking with different configs.
+
+	//
+	//var spans []roachpb.Span
+	//for i := 0; i < 100; i++ {
+	//	startKey := make(roachpb.Key, 4)
+	//	endKey := make(roachpb.Key, 4)
+	//	binary.LittleEndian.PutUint32(startKey, uint32(i))
+	//	binary.LittleEndian.PutUint32(endKey, uint32(i+1))
+	//	sp := roachpb.Span{
+	//		Key:    startKey,
+	//		EndKey: endKey,
+	//	}
+	//	spans = append(spans, sp)
+	//}
+	//
+	//stats, err := s.StatusServer().(serverpb.StatusServer).SpanStats(ctx,
+	//	&roachpb.SpanStatsRequest{
+	//		NodeID: "0",
+	//		Spans:  spans,
+	//	},
+	//)
+	//require.NoError(t, err)
+	//_ = stats
+
 }
 
 // BenchmarkSpanStats measures the cost of collecting span statistics.

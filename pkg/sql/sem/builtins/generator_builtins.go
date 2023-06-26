@@ -3042,9 +3042,9 @@ func (tssi *tableSpanStatsIterator) fetchSpanStats(ctx context.Context) (bool, e
 
 		// Exit the loop if we're reached our limit of spans
 		// for the span stats request.
-		if len(tssi.spanStatsDetails) >= tssi.spanStatsBatchLimit {
-			break
-		}
+		//if len(tssi.spanStatsDetails) >= tssi.spanStatsBatchLimit {
+		//	break
+		//}
 	}
 
 	// If we encounter an error while iterating over rows,
@@ -3134,9 +3134,9 @@ func makeTableSpanStatsGenerator(
 		}
 	}
 
-	spanBatchLimit := roachpb.SpanStatsBatchLimit.Get(&evalCtx.Settings.SV)
-	return newTableSpanStatsIterator(evalCtx, dbId, tableId,
-		int(spanBatchLimit)), nil
+	//spanBatchLimit := roachpb.SpanStatsBatchLimit.Get(&evalCtx.Settings.SV)
+	// TODO: fix me
+	return newTableSpanStatsIterator(evalCtx, dbId, tableId, 0), nil
 }
 
 var spanStatsGeneratorType = types.MakeLabeledTuple(

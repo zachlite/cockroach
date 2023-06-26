@@ -18,18 +18,25 @@ import (
 
 // Put span statistics cluster settings here to avoid import cycle.
 
-const DefaultSpanStatsSpanLimit = 500
+const DefaultSpanStatsSpanLimit = 1000
 
-// SpanStatsBatchLimit registers the maximum number of spans allowed in a
-// span stats request payload.
-var SpanStatsBatchLimit = settings.RegisterIntSetting(
+var SpanStatsBatchSize = settings.RegisterIntSetting(
 	settings.TenantWritable,
-	"server.span_stats.span_batch_limit",
-	"the maximum number of spans allowed in a request payload for span statistics",
+	"server.span_stats.span_batch_size",
+	"batch size",
 	DefaultSpanStatsSpanLimit,
 	settings.PositiveInt,
 )
 
+var SpanStatsConcurrentBatches = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"server.span_stats.concurrent_batches",
+	"concurrent_batches",
+	1,
+	settings.PositiveInt,
+)
+
+// I might change this and just have this be the batch size.
 const defaultRangeStatsBatchLimit = 100
 
 // RangeStatsBatchLimit registers the maximum number of ranges to be batched
@@ -42,6 +49,7 @@ var RangeStatsBatchLimit = settings.RegisterIntSetting(
 	settings.PositiveInt,
 )
 
+// I might get rid of this and just have this be the batch size.
 // RangeDescPageSize controls the page size when iterating through range
 // descriptors.
 var RangeDescPageSize = settings.RegisterIntSetting(

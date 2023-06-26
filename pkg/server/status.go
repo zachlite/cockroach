@@ -18,6 +18,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"io"
 	"net/http"
 	"os"
@@ -3544,6 +3545,29 @@ func (s *statusServer) ListExecutionInsights(
 	return &response, nil
 }
 
+func verifySpanStatsRequest(
+	ctx context.Context,
+	req *roachpb.SpanStatsRequest,
+	version clusterversion.Handle,
+) error {
+	// If the cluster's active version is less than 23.1 return a mixed version error.
+	if !version.IsActive(ctx, clusterversion.V23_1) {
+		return errors.New(MixedVersionErr)
+	}
+
+	// Check for a legacy request.
+	if req.StartKey != nil || req.EndKey != nil {
+		// We want to force 23.1 callers to use the new format (e.g. Spans field).
+		if req.NodeID == "0" {
+			return errors.New(UnexpectedLegacyRequest)
+		}
+		// We want to error if we receive a legacy request from a 22.2
+		// node (e.g. during a mixed-version fanout).
+		return errors.New(MixedVersionErr)
+	}
+	return nil
+}
+
 // SpanStats requests the total statistics stored on a node for a given key
 // span, which may include multiple ranges.
 func (s *statusServer) SpanStats(
@@ -3555,6 +3579,19 @@ func (s *statusServer) SpanStats(
 		// already returns a proper gRPC error status.
 		return nil, err
 	}
+
+	// Verify request format
+	if err := verifySpanStatsRequest(ctx, req, s.st.Version); err != nil {
+		return nil, err
+	}
+
+	// break into batches!
+	// If I have too many batches executing in parallel,
+	// that could be bad.
+	// How many batches should execute in parallel?
+	//
+
+	// Check batch limit and batch if needed.
 	return s.sqlServer.tenantConnect.SpanStats(ctx, req)
 }
 
@@ -3569,26 +3606,78 @@ func (s *systemStatusServer) SpanStats(
 		return nil, err
 	}
 
-	// If the cluster's active version is less than 23.1 return a mixed version error.
-	if !s.st.Version.IsActive(ctx, clusterversion.V23_1) {
-		return nil, errors.New(MixedVersionErr)
+	// Verify request format
+	if err := verifySpanStatsRequest(ctx, req, s.st.Version); err != nil {
+		return nil, err
 	}
 
-	// If we receive a request using the old format.
-	if isLegacyRequest(req) {
-		// We want to force 23.1 callers to use the new format (e.g. Spans field).
-		if req.NodeID == "0" {
-			return nil, errors.New(UnexpectedLegacyRequest)
+	// break into batches!
+
+	//if len(req.Spans) > int(roachpb.SpanStatsBatchLimit.Get(&s.st.SV)) {
+	//	return nil, errors.Newf(exceedSpanLimitPlaceholder, len(req.Spans), int(roachpb.SpanStatsBatchLimit.Get(&s.st.SV)))
+	//}
+
+	// create a mutex to synchronize access to the response object.
+	var mu syncutil.Mutex
+	res := &roachpb.SpanStatsResponse{
+		SpanToStats: make(map[string]*roachpb.SpanStats),
+	}
+
+	// New Cluster settings:
+
+	batchSize := int(roachpb.SpanStatsBatchSize.Get(&s.st.SV))
+	concurrentBatches := int(roachpb.SpanStatsConcurrentBatches.Get(&s.st.SV))
+
+	// Create batches:
+	// per Slice Tricks: Batching with minimal allocations.
+	// There might be a big problem trying to do this with gRPC.
+	// Locally should be fine.
+	batches := make([]roachpb.Spans, 0, (len(req.Spans)+batchSize-1)/batchSize)
+	for batchSize < len(req.Spans) {
+		req.Spans, batches = req.Spans[batchSize:], append(batches, req.Spans[0:batchSize:batchSize])
+	}
+	batches = append(batches, req.Spans)
+
+	log.Infof(ctx, "batches: %v", batches)
+
+	pool := quotapool.NewIntPool("span-stats-pool", uint64(concurrentBatches))
+	grp := ctxgroup.WithContext(ctx)
+
+	for _, batch := range batches {
+		_batch := batch // Avoid batch variable
+		alloc, err := pool.Acquire(ctx, 1)
+		if err != nil {
+			return nil, err
 		}
-		// We want to error if we receive a legacy request from a 22.2
-		// node (e.g. during a mixed-version fanout).
-		return nil, errors.New(MixedVersionErr)
-	}
-	if len(req.Spans) > int(roachpb.SpanStatsBatchLimit.Get(&s.st.SV)) {
-		return nil, errors.Newf(exceedSpanLimitPlaceholder, len(req.Spans), int(roachpb.SpanStatsBatchLimit.Get(&s.st.SV)))
+
+		grp.GoCtx(func(ctx context.Context) error {
+			defer alloc.Release()
+
+			// TODO: define this
+			batchRequest := &roachpb.SpanStatsRequest{
+				NodeID: req.NodeID,
+				Spans:  _batch,
+			}
+			batchResponse, err := s.getSpanStatsInternal(ctx, batchRequest)
+			if err != nil {
+				return err
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			// join res.SpanToStats with existing values in res.
+			for k, v := range batchResponse.SpanToStats {
+				res.SpanToStats[k] = v
+			}
+			return nil
+		})
 	}
 
-	return s.getSpanStatsInternal(ctx, req)
+	if err := grp.Wait(); err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 // Diagnostics returns an anonymized diagnostics report.

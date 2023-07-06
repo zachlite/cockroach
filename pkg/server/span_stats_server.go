@@ -12,6 +12,7 @@ package server
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -37,8 +38,6 @@ func (s *systemStatusServer) spanStatsFanOut(
 	res := &roachpb.SpanStatsResponse{
 		SpanToStats: make(map[string]*roachpb.SpanStats),
 	}
-	// Response level error
-	var respErr error
 
 	spansPerNode, err := s.getSpansPerNode(ctx, req)
 	if err != nil {
@@ -64,6 +63,7 @@ func (s *systemStatusServer) spanStatsFanOut(
 			return nil, nil
 		}
 
+		// As a testing knob, I could provide a function that returns an error here.
 		resp, err := client.(serverpb.StatusClient).SpanStats(ctx,
 			&roachpb.SpanStatsRequest{
 				NodeID: nodeID.String(),
@@ -91,9 +91,17 @@ func (s *systemStatusServer) spanStatsFanOut(
 		}
 	}
 
+	var nonClosedConnectionErr error = nil
 	errorFn := func(nodeID roachpb.NodeID, err error) {
 		log.Errorf(ctx, nodeErrorMsgPlaceholder, nodeID, err)
-		respErr = err
+
+		// We want to tolerate grpc closed connection errors,
+		// so we distinguish here between that and all other error types.
+		if !grpcutil.IsClosedConnection(err) {
+			// The error is explicitly _not_
+			// a grpc closed connection error.
+			nonClosedConnectionErr = err
+		}
 	}
 
 	if err := s.statusServer.iterateNodes(
@@ -107,7 +115,11 @@ func (s *systemStatusServer) spanStatsFanOut(
 		return nil, err
 	}
 
-	return res, respErr
+	// SpanStats must be tolerant to offline nodes. If a span stats
+	// request can not be executed because of a closed grpc connection, the span
+	// stats fan-out should not return that error to the initiator. In that case,
+	// nonClosedConnectionErr will be nil.
+	return res, nonClosedConnectionErr
 }
 
 func (s *systemStatusServer) getLocalStats(

@@ -3686,7 +3686,17 @@ func (s *systemStatusServer) SpanStats(
 		return nil, errors.Newf(exceedSpanLimitPlaceholder, len(req.Spans), int(roachpb.SpanStatsBatchLimit.Get(&s.st.SV)))
 	}
 
-	return s.getSpanStatsInternal(ctx, req)
+	res, err := s.getSpanStatsInternal(ctx, req)
+
+	if err != nil {
+		if grpcutil.IsClosedConnection(err) {
+			return res, nil
+		} else {
+			return nil, err
+		}
+	}
+
+	return res, nil
 }
 
 // Diagnostics returns an anonymized diagnostics report.

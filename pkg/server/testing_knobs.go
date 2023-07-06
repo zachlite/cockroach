@@ -142,6 +142,10 @@ type TestingKnobs struct {
 	// DrainReportCh, if set, is a channel that will be notified when
 	// the SQL service shuts down.
 	DrainReportCh chan struct{}
+
+	// SpanStatsFn, if set, can be used to force a span stats fan-out
+	// to fail with a given error for a particular node of interest.
+	SpanStatsFn func(nodeID roachpb.NodeID) error
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

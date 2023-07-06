@@ -192,6 +192,90 @@ func TestLocalSpanStats(t *testing.T) {
 	}
 }
 
+func TestSpanStatsFanoutWithDeadNode(t *testing.T) {
+	// Figure out how to detect a closed connection
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	const nodeCount = 3
+
+	serverArgs := base.TestServerArgs{}
+	serverArgs.Knobs.Server = &server.TestingKnobs{SpanStatsFn: func(nodeID roachpb.NodeID) error {
+		return nil
+	}}
+
+	tc := testcluster.StartTestCluster(t, nodeCount, base.TestClusterArgs{
+		ServerArgs: serverArgs,
+	})
+
+	defer tc.Stopper().Stop(ctx)
+
+	//s := tc.Server(0).(*server.TestServer)
+	require.NoError(t, tc.WaitForFullReplication())
+
+	// IsClosedConnection?
+	require.Equal(t, 3, tc.NumServers())
+
+	// Kill node 3
+	tc.StopServer(2)
+
+	// Ask for span stats. This should fail
+	s := tc.Server(0).(*server.TestServer)
+	res, err := s.StatusServer().(serverpb.StatusServer).SpanStats(ctx,
+		&roachpb.SpanStatsRequest{
+			NodeID: "0",
+			Spans: roachpb.Spans{
+				keys.EverythingSpan,
+			},
+		},
+	)
+
+	require.NoError(t, err)
+
+	// Note: The response from a fan-out that encountered dead nodes should not be nil.
+	// It should be a "partial response" that includes values from the nodes that were reachable.
+	require.NotNil(t, res)
+
+	// TODO:
+	// expect the response is nil when _any_ node experiences a non-grpc connection failed error.
+
+}
+
+func TestSpanStatsDialDeadNode(t *testing.T) {
+	// Figure out how to detect a closed connection
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+	const nodeCount = 3
+	tc := testcluster.StartTestCluster(t, nodeCount, base.TestClusterArgs{})
+	defer tc.Stopper().Stop(ctx)
+
+	require.NoError(t, tc.WaitForFullReplication())
+	require.Equal(t, 3, tc.NumServers())
+
+	// Kill node 3
+	tc.StopServer(2)
+
+	// Ask for span stats. This should fail
+	s := tc.Server(0).(*server.TestServer)
+	res, err := s.StatusServer().(serverpb.StatusServer).SpanStats(ctx,
+		&roachpb.SpanStatsRequest{
+			NodeID: "3",
+			Spans: roachpb.Spans{
+				keys.EverythingSpan,
+			},
+		},
+	)
+
+	require.NoError(t, err)
+
+	// Note: The response from a node that can not be reached, should be nil.
+	require.Nil(t, res)
+}
+
+func TestSpanStatsFoo(t *testing.T) {
+}
+
 // BenchmarkSpanStats measures the cost of collecting span statistics.
 func BenchmarkSpanStats(b *testing.B) {
 	skip.UnderShort(b)

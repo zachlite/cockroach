@@ -15,6 +15,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
+	"github.com/cockroachdb/cockroach/pkg/keyvisualizer/keyvispb"
 	"net"
 	"net/http"
 	"os"
@@ -1834,6 +1835,10 @@ func (ts *TestServer) BinaryVersionOverride() roachpb.Version {
 		return roachpb.Version{}
 	}
 	return knobs.(*TestingKnobs).BinaryVersionOverride
+}
+
+func (ts *TestServer) KeyVisServer() keyvispb.KeyVisualizerServer {
+	return ts.Server.keyVisualizerServer
 }
 
 type testServerFactoryImpl struct{}

@@ -12,6 +12,7 @@ package server
 
 import (
 	"context"
+	"github.com/cockroachdb/errors"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,20 @@ func (s *KeyVisualizerServer) saveBoundaries(
 	if err != nil {
 		return err
 	}
+
+	// Verify the number of boundaries honors the MaxBuckets cluster setting.
+	maxBuckets := keyvissettings.MaxBuckets.Get(&s.settings.SV)
+	if int64(len(req.Boundaries)) > maxBuckets {
+		return errors.Newf("expected less than or equal to %d boundaries, received %d", maxBuckets, len(req.Boundaries))
+	}
+
+	// Verify each boundary.
+	for _, b := range req.Boundaries {
+		if !b.Valid() {
+			return errors.Newf("can not set boundary to invalid span: %v", b)
+		}
+	}
+
 	// Nodes are notified about boundary changes via the keyvissubscriber.BoundarySubscriber.
 	_, err = s.ie.ExecEx(
 		ctx,

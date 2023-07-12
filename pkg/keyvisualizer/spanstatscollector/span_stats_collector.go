@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
 )
 
 // statsBucket implements the interval.Interface interface.
@@ -121,11 +120,7 @@ func newTreeWithBoundaries(spans []roachpb.Span) interval.Tree {
 			sp: sp,
 			id: uintptr(i),
 		}
-		err := t.Insert(&bucket, false /* fast */)
-		if err != nil {
-			panic(errors.NewAssertionErrorWithWrappedErrf(
-				err, "insert into interval tree failed"))
-		}
+		_ = t.Insert(&bucket, false /* fast */)
 	}
 
 	return t

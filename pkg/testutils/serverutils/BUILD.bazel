@@ -14,6 +14,7 @@ go_library(
         "//pkg/base",
         "//pkg/config",
         "//pkg/keys",
+        "//pkg/keyvisualizer/keyvispb",
         "//pkg/kv",
         "//pkg/kv/kvserver/liveness/livenesspb",
         "//pkg/multitenant/tenantcapabilities",

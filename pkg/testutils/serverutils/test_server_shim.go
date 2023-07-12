@@ -20,6 +20,7 @@ package serverutils
 import (
 	"context"
 	gosql "database/sql"
+	"github.com/cockroachdb/cockroach/pkg/keyvisualizer/keyvispb"
 	"net/url"
 	"strconv"
 	"testing"
@@ -302,6 +303,8 @@ type TestServerInterface interface {
 	// BinaryVersionOverride returns the value of an override if set using
 	// TestingKnobs.
 	BinaryVersionOverride() roachpb.Version
+
+	KeyVisServer() keyvispb.KeyVisualizerServer
 }
 
 // TestServerFactory encompasses the actual implementation of the shim

@@ -251,6 +251,10 @@ func (b *baseStatusServer) getLocalSessions(
 		return userSessions[i].Start.Before(userSessions[j].Start)
 	})
 
+	for i := 0; i < len(userSessions); i++ {
+		userSessions[i].AllocBytes = 0
+	}
+
 	return userSessions, nil
 }
 

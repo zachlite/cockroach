@@ -326,9 +326,14 @@ function timeoutFetch<
         throw new RequestError(res.statusText, res.status, respError.error);
       });
     }
-    return res
-      .arrayBuffer()
-      .then(buffer => builder.decode(new Uint8Array(buffer)));
+    return res.arrayBuffer().then(buffer => {
+      if (url.includes("_status/sessions")) {
+        debugger;
+      }
+      const x = builder.decode(new Uint8Array(buffer));
+
+      return x;
+    });
   });
 }
 
